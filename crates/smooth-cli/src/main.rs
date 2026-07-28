@@ -9,6 +9,7 @@ mod auth;
 mod boot_ui;
 mod claude;
 mod config;
+mod daemon_health;
 mod daemon_launcher;
 mod ext;
 mod gradient;
@@ -1864,7 +1865,7 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
         const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
 
         let probe = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
-        let probe_url = format!("http://localhost:{port}/health");
+        let probe_url = daemon_health::health_url(port);
 
         // Step 1: TCP listener on :{port}.
         let vm_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
@@ -1990,101 +1991,68 @@ async fn cmd_down() -> Result<()> {
 }
 
 async fn cmd_status() -> Result<()> {
-    let url = "http://localhost:4400/health";
-    match reqwest::get(url).await {
-        Ok(resp) => {
-            let body: serde_json::Value = resp.json().await?;
+    // `/health` answers with the plain string `ok` (smooth-operator's
+    // LocalServer), so the daemon reports liveness and nothing else. Only
+    // subsystems we actually checked get a line — the old panel printed
+    // "healthy" for the Dolt store, operatives and Tailscale off JSON fields
+    // that no daemon has ever sent, which is worse than saying nothing.
+    let port = daemon_health::DEFAULT_PORT;
+    let health = daemon_health::probe(port).await;
+    println!();
 
-            // Version
-            let version = body["version"].as_str().unwrap_or("unknown");
-            println!();
-            println!(
-                "  {} {} {} {}",
-                gradient::smooth(),
-                format!("v{version}").bold().green(),
-                "\u{2014}".dimmed(),
-                "http://localhost:4400".cyan().bold()
-            );
+    if let Some([what, fix]) = health.failure_lines(port) {
+        println!(
+            "  {} {} {}",
+            gradient::paint("\u{2717}", |s| s.red().bold().to_string()),
+            gradient::smooth_auto(),
+            what
+        );
+        println!("  {fix}");
+        println!();
+        return Ok(());
+    }
 
-            // Uptime
-            if let Some(uptime_secs) = body["uptime_seconds"].as_u64().or_else(|| body["uptime"].as_u64()) {
-                let formatted = if uptime_secs >= 3600 {
-                    format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
-                } else if uptime_secs >= 60 {
-                    format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
-                } else {
-                    format!("{uptime_secs}s")
-                };
-                println!("  {}: {}", "Uptime".dimmed(), formatted);
-            }
-            println!();
+    println!(
+        "  {} {} {} {}",
+        gradient::paint("\u{2713}", |s| s.green().bold().to_string()),
+        gradient::smooth_auto(),
+        gradient::paint("running", |s| s.green().to_string()),
+        gradient::paint(&format!("http://localhost:{port}"), |s| s.cyan().to_string()),
+    );
 
-            // Align every label to 16 chars so "Smooth operatives" fits cleanly.
-            // The gradient wordmark carries ANSI escapes that inflate byte
-            // length, so we hand-pad off the visible width ("Big Smooth" = 10,
-            // "Smooth operatives" = 17) instead of using `{:<16}`.
-            // Big Smooth
-            let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
-            let (icon, label) = status_indicator(leader_status);
-            println!("  {icon} Big {}{} {label}", gradient::smooth(), " ".repeat(6));
-
-            // Dolt store (backs pearls, sessions, memories, config)
-            let db_status = body["database"].as_str().unwrap_or("healthy");
-            let (icon, label) = status_indicator(db_status);
-            println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
-
-            // Smooth operatives (in-process agent turns; bash under the kernel sandbox)
-            let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
-            let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
-            let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
-            let (icon, label) = status_indicator(sandbox_status);
-            println!(
-                "  {icon} {} operatives {} {}",
-                gradient::smooth(),
-                label,
-                format!("({active}/{max} active)").dimmed()
-            );
-
-            // Tailscale
-            if let Some(ts) = body.get("tailscale") {
-                let ts_status = ts.as_str().unwrap_or("unknown");
-                let hostname = body["tailscale_hostname"].as_str().unwrap_or("");
-                let (icon, label) = status_indicator(ts_status);
-                let suffix = if hostname.is_empty() { String::new() } else { format!(" ({})", hostname) };
-                println!("  {icon} {:<16} {label}{}", "Tailscale", suffix.dimmed());
-            }
-
-            // Pearls
-            if let Ok(store) = open_pearl_store() {
-                if let Ok(stats) = store.stats() {
-                    println!(
-                        "  {} {:<16} {} open, {} active, {} closed",
-                        "\u{2713}".green().bold(),
-                        "Pearls",
-                        stats.open.to_string().bold(),
-                        stats.in_progress.to_string().bold(),
-                        stats.closed.to_string().dimmed()
-                    );
-                }
-            }
-            println!();
+    // A daemon that grows a richer JSON `/health` lights these up; the current
+    // one doesn't send them, so they stay quiet rather than guess.
+    if let daemon_health::Health::Up { details: Some(details) } = &health {
+        if let Some(version) = details["version"].as_str() {
+            println!("  {} {version}", gradient::paint("version", |s| s.dimmed().to_string()));
         }
-        Err(_) => {
-            println!();
-            println!("  {} {}", gradient::smooth(), "is not running.".yellow());
-            println!("  Start with: {}", "th up".bold());
-            println!();
+        if let Some(secs) = details["uptime_seconds"].as_u64().or_else(|| details["uptime"].as_u64()) {
+            println!("  {} {}", gradient::paint("uptime ", |s| s.dimmed().to_string()), format_uptime(secs));
         }
     }
+
+    match open_pearl_store().and_then(|store| store.stats()) {
+        Ok(stats) => println!(
+            "  {} {} open, {} active, {} closed",
+            gradient::paint("pearls ", |s| s.dimmed().to_string()),
+            stats.open,
+            stats.in_progress,
+            stats.closed
+        ),
+        Err(e) => println!("  {} unreadable ({e})", gradient::paint("pearls ", |s| s.dimmed().to_string())),
+    }
+    println!();
     Ok(())
 }
 
-/// Return a colored status indicator (icon, colored label) for health status strings.
-fn status_indicator(status: &str) -> (String, String) {
-    match status {
-        "healthy" | "running" | "connected" | "ok" => ("\u{2713}".green().bold().to_string(), "healthy".green().to_string()),
-        "degraded" | "warning" => ("\u{26a0}".yellow().bold().to_string(), "degraded".yellow().to_string()),
-        _ => ("\u{2717}".red().bold().to_string(), status.red().to_string()),
+/// Human-readable uptime: `45s`, `12m 3s`, `4h 12m`.
+fn format_uptime(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -2294,7 +2262,10 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 }
             }
 
-            let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
+            // Shared probe: a 404 from something else squatting :4400 used to
+            // read as "running" here, because `reqwest::get(..).is_ok()` only
+            // means "a response came back".
+            let leader_up = daemon_health::probe(daemon_health::DEFAULT_PORT).await.is_up();
             // "Big Smooth" visible width = 10; the original `{:<12} ` formatter
             // added two trailing spaces + one literal separator (= 3 spaces).
             // Reproduce that by hand since the gradient escapes inflate byte
@@ -3182,9 +3153,8 @@ async fn cmd_code(
     // daemon always comes up with the same env, log file, and pid file
     // regardless of which command triggered it.
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
-    let health = client.get("http://localhost:4400/health").send().await;
 
-    if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
+    if !daemon_health::probe(daemon_health::DEFAULT_PORT).await.is_up() {
         // Pearl th-7840d8 — animated boot indicator (was a bare
         // `Starting Smooth...`). Daemonization happens in the
         // background via `th up`; the parent polls `/health` and
@@ -3267,7 +3237,7 @@ async fn cmd_code(
         let cast_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
         let mut listener_up = false;
         while std::time::Instant::now() < cast_deadline {
-            if client.get("http://localhost:4400/health").send().await.is_ok() {
+            if client.get(daemon_health::health_url(daemon_health::DEFAULT_PORT)).send().await.is_ok() {
                 listener_up = true;
                 break;
             }
@@ -3288,7 +3258,12 @@ async fn cmd_code(
         let health_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
         let mut ready = false;
         while std::time::Instant::now() < health_deadline {
-            if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
+            if client
+                .get(daemon_health::health_url(daemon_health::DEFAULT_PORT))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
                 ready = true;
                 break;
             }
@@ -3346,28 +3321,13 @@ async fn cmd_doctor() -> Result<()> {
 
     let mut issues = 0;
 
-    // 1. Check Big Smooth API
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
-    match client.get("http://localhost:4400/health").send().await {
-        Ok(r) if r.status().is_success() => {
-            println!("  {} Big {} API: {}", "✓".green().bold(), gradient::smooth(), "healthy".green());
-        }
-        Ok(r) => {
-            println!(
-                "  {} Big {} API: {}",
-                "✗".red().bold(),
-                gradient::smooth(),
-                format!("unhealthy (status {})", r.status()).red()
-            );
-            issues += 1;
-        }
-        Err(_) => {
-            println!(
-                "  {} Big {} API: {}",
-                "✗".red().bold(),
-                gradient::smooth(),
-                "not running (start with: th up)".red()
-            );
+    // 1. Check Big Smooth API — same probe and same wording as `th status`.
+    let port = daemon_health::DEFAULT_PORT;
+    match daemon_health::probe(port).await.failure_lines(port) {
+        None => println!("  {} Big {} API: {}", "✓".green().bold(), gradient::smooth(), "healthy".green()),
+        Some([what, fix]) => {
+            println!("  {} Big {} API: {}", "✗".red().bold(), gradient::smooth(), what.red());
+            println!("    {fix}");
             issues += 1;
         }
     }
