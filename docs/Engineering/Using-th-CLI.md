@@ -88,6 +88,17 @@ th auth whoami
 
 If you see `super_admin` in `Admin roles` you have *cross-org* powers — every `th api` call will succeed against any org you target with `--org <id>`. Treat that token with the same care as a root AWS key.
 
+### Refreshing a session (headless)
+
+Every `th api *` call already refreshes an expired token silently in the request path, so you rarely need this. When you want to freshen the stored token **now** — before handing it to a script, or to confirm the session still resolves — use:
+
+```bash
+th auth refresh          # refresh the user session
+th auth refresh --m2m    # refresh the M2M service-account session
+```
+
+It reuses the same silent-refresh path `th api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret *is* the durable credential.
+
 ### Switching orgs
 
 ```bash
