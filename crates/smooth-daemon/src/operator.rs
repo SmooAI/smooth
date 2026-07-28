@@ -368,31 +368,48 @@ fn fast_mode_enabled() -> bool {
     matches!(std::env::var("SMOOTH_FAST_MODE"), Ok(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
 }
 
-/// Read the `smooth` provider (the llm.smoo.ai gateway) from
-/// `~/.smooth/providers.json` — the credentials `th auth login smooth` writes.
-/// Returns `(api_url, api_key, model)`; `None` if the file/provider/key is
-/// absent. The model is taken from the given `route` slot (`coding`/`fast`/…),
-/// else the provider default.
+/// Read the LLM provider that `~/.smooth/providers.json` routes the given slot
+/// to — the credentials `th model login` writes. Returns `(api_url, api_key,
+/// model)`; `None` if the file/provider/key is absent. The model is taken from
+/// the given `route` slot (`coding`/`fast`/…), else the provider default.
 fn gateway_from_providers(route: &str) -> Option<(String, String, String)> {
     gateway_from_providers_at(&dirs_next::home_dir()?.join(".smooth").join("providers.json"), route)
+}
+
+/// Find the provider entry with the given id.
+fn provider_by_id<'a>(providers: &'a [serde_json::Value], id: Option<&str>) -> Option<&'a serde_json::Value> {
+    let id = id?;
+    providers.iter().find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some(id))
 }
 
 /// [`gateway_from_providers`] against an explicit path — the testable core.
 fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let smooth = v
-        .get("providers")?
-        .as_array()?
-        .iter()
-        .find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some("smooth"))?;
-    let url = smooth.get("api_url")?.as_str()?.to_owned();
-    let key = smooth.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
+    let providers = v.get("providers")?.as_array()?;
+    // Resolve the provider BY the routing slot's own `provider` id rather than a
+    // hardcoded one: every writer of providers.json stamps a different id
+    // (`smooai-gateway`, `ollama`, `openai`, the legacy `smooth`…), so matching a
+    // literal silently resolved `None` for everyone but legacy installs and the
+    // daemon fell through to the engine defaults (pearl th-6062ea). Falls back to
+    // the `coding` slot's provider, then the sole provider when there's only one.
+    let slot_provider = |r: &str| {
+        v.pointer(&format!("/routing/{r}/provider"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let route_id = slot_provider(route);
+    let coding_id = slot_provider("coding");
+    let provider = provider_by_id(providers, route_id.as_deref())
+        .or_else(|| provider_by_id(providers, coding_id.as_deref()))
+        .or_else(|| if providers.len() == 1 { providers.first() } else { None })?;
+    let url = provider.get("api_url")?.as_str()?.to_owned();
+    let key = provider.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
     let model = v
         .pointer(&format!("/routing/{route}/model"))
         .and_then(serde_json::Value::as_str)
         // Fall back to the `coding` slot, then the provider default, then a sane const.
         .or_else(|| v.pointer("/routing/coding/model").and_then(serde_json::Value::as_str))
-        .or_else(|| smooth.get("default_model").and_then(serde_json::Value::as_str))
+        .or_else(|| provider.get("default_model").and_then(serde_json::Value::as_str))
         .unwrap_or("claude-haiku-4-5")
         .to_owned();
     Some((url, key, model))
@@ -400,7 +417,7 @@ fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String
 
 /// The LLM gateway config for the local flavor: the operator's env-based config
 /// first (`SMOOAI_GATEWAY_*`), and when no key is set, the user's
-/// `th auth login smooth` credentials from `providers.json` — so `th code` works
+/// `th model login` credentials from `providers.json` — so `th code` works
 /// in a plain terminal with no env exports. (Proper JWT→org-session: th-f7b20f.)
 fn resolve_gateway_config() -> ServerConfig {
     let mut config = smooth_operator_server::local::local_config();
@@ -655,7 +672,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
-        // `th auth login smooth` creds from providers.json — so `th code` works
+        // `th model login` creds from providers.json — so `th code` works
         // in a plain terminal without exporting a key.
         .config(resolve_gateway_config())
         .storage(storage)
@@ -1033,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_from_providers_reads_smooth_provider() {
+    fn gateway_from_providers_reads_legacy_smooth_provider() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("providers.json");
         std::fs::write(
@@ -1054,6 +1071,97 @@ mod tests {
         // An unknown route falls back to the coding slot, then default.
         let (_, _, fallback) = gateway_from_providers_at(&path, "nonexistent").expect("falls back");
         assert_eq!(fallback, "m-coding", "unknown route falls back to coding");
+    }
+
+    /// The id every current writer of providers.json stamps. Matching a
+    /// hardcoded `"smooth"` made this resolve `None` for every new user —
+    /// the daemon then ran on engine defaults with no key (pearl th-6062ea).
+    #[test]
+    fn gateway_from_providers_reads_smooai_gateway_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[
+                {"id":"smooai-gateway","api_url":"https://llm.smoo.ai/v1","api_key":"sg-key","default_model":"m-default"}
+            ],"routing":{"coding":{"provider":"smooai-gateway","model":"m-coding"},"fast":{"provider":"smooai-gateway","model":"m-fast"}}}"#,
+        )
+        .unwrap();
+        let (url, key, model) = gateway_from_providers_at(&path, "coding").expect("smooai-gateway resolves");
+        assert_eq!(url, "https://llm.smoo.ai/v1");
+        assert_eq!(key, "sg-key");
+        assert_eq!(model, "m-coding");
+    }
+
+    /// BYO providers route through the same path — the slot's `provider` id is
+    /// the lookup key, so a self-hosted ollama/vllm/openai works too.
+    #[test]
+    fn gateway_from_providers_resolves_byo_and_per_slot_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[
+                {"id":"ollama","api_url":"http://localhost:11434/v1","api_key":"ollama","default_model":"llama3.3"},
+                {"id":"openai","api_url":"https://api.openai.com/v1","api_key":"sk-oai"}
+            ],"routing":{"coding":{"provider":"ollama","model":"qwen3"},"fast":{"provider":"openai","model":"gpt-4o-mini"}}}"#,
+        )
+        .unwrap();
+        let (url, key, model) = gateway_from_providers_at(&path, "coding").expect("ollama resolves");
+        assert_eq!((url.as_str(), key.as_str(), model.as_str()), ("http://localhost:11434/v1", "ollama", "qwen3"));
+        // Per-slot providers differ: the `fast` slot picks openai, not coding's ollama.
+        let (url, key, model) = gateway_from_providers_at(&path, "fast").expect("fast slot resolves its own provider");
+        assert_eq!(
+            (url.as_str(), key.as_str(), model.as_str()),
+            ("https://api.openai.com/v1", "sk-oai", "gpt-4o-mini")
+        );
+    }
+
+    /// A slot naming a provider that isn't registered falls back to the
+    /// `coding` slot's provider rather than giving up.
+    #[test]
+    fn gateway_from_providers_falls_back_when_slot_provider_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[{"id":"openai","api_url":"https://api.openai.com/v1","api_key":"sk-oai"}],
+                "routing":{"coding":{"provider":"openai","model":"gpt-4o"},"fast":{"provider":"ghost","model":"gpt-4o-mini"}}}"#,
+        )
+        .unwrap();
+        let (url, key, model) = gateway_from_providers_at(&path, "fast").expect("falls back to coding's provider");
+        assert_eq!(
+            (url.as_str(), key.as_str(), model.as_str()),
+            ("https://api.openai.com/v1", "sk-oai", "gpt-4o-mini")
+        );
+    }
+
+    /// No routing at all (or routing that names nothing registered) still works
+    /// when there's exactly one provider to pick.
+    #[test]
+    fn gateway_from_providers_uses_sole_provider_without_routing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[{"id":"anything","api_url":"https://x/v1","api_key":"k","default_model":"m-default"}]}"#,
+        )
+        .unwrap();
+        let (url, key, model) = gateway_from_providers_at(&path, "coding").expect("sole provider resolves");
+        assert_eq!((url.as_str(), key.as_str(), model.as_str()), ("https://x/v1", "k", "m-default"));
+    }
+
+    /// Ambiguity is NOT guessed: several providers with no usable routing → None.
+    #[test]
+    fn gateway_from_providers_none_when_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[{"id":"a","api_url":"https://a","api_key":"ka"},{"id":"b","api_url":"https://b","api_key":"kb"}]}"#,
+        )
+        .unwrap();
+        assert!(gateway_from_providers_at(&path, "coding").is_none());
     }
 
     #[test]
@@ -1108,14 +1216,32 @@ mod tests {
     #[test]
     fn gateway_from_providers_none_when_no_key_or_provider() {
         let dir = tempfile::tempdir().unwrap();
-        // No `smooth` provider.
+        // Routed to a provider that isn't registered, and more than one to
+        // choose from — nothing to resolve.
         let p1 = dir.path().join("a.json");
-        std::fs::write(&p1, r#"{"providers":[{"id":"anthropic","api_url":"x","api_key":"k"}]}"#).unwrap();
+        std::fs::write(
+            &p1,
+            r#"{"providers":[{"id":"anthropic","api_url":"x","api_key":"k"},{"id":"openai","api_url":"y","api_key":"k"}],
+                "routing":{"coding":{"provider":"ghost","model":"m"}}}"#,
+        )
+        .unwrap();
         assert!(gateway_from_providers_at(&p1, "coding").is_none());
-        // `smooth` present but key empty.
+        // Provider resolves but the key is blank — a keyless entry is not usable
+        // credentials, so the daemon must NOT adopt it.
         let p2 = dir.path().join("b.json");
-        std::fs::write(&p2, r#"{"providers":[{"id":"smooth","api_url":"x","api_key":""}]}"#).unwrap();
+        std::fs::write(&p2, r#"{"providers":[{"id":"smooai-gateway","api_url":"x","api_key":"   "}]}"#).unwrap();
         assert!(gateway_from_providers_at(&p2, "coding").is_none());
+        // No providers at all.
+        let p3 = dir.path().join("c.json");
+        std::fs::write(&p3, r#"{"providers":[]}"#).unwrap();
+        assert!(gateway_from_providers_at(&p3, "coding").is_none());
+        // Garbage / wrong shape.
+        let p4 = dir.path().join("d.json");
+        std::fs::write(&p4, "not json at all").unwrap();
+        assert!(gateway_from_providers_at(&p4, "coding").is_none());
+        let p5 = dir.path().join("e.json");
+        std::fs::write(&p5, r#"{"providers":{"id":"smooai-gateway"}}"#).unwrap();
+        assert!(gateway_from_providers_at(&p5, "coding").is_none());
         // Missing file.
         assert!(gateway_from_providers_at(&dir.path().join("nope.json"), "coding").is_none());
     }
