@@ -603,28 +603,8 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         })
         .unwrap_or_default();
 
-    // Display the model the runner is *actually* using rather than
-    // the stale `state.model_name` default ("claude-sonnet-4"). When
-    // a turn is in flight the runner emits PhaseStart with both the
-    // routing alias (e.g. "smooth-reasoning") and the resolved
-    // upstream model (e.g. "claude-opus-4-5"); show alias plus
-    // upstream when known. When idle we don't have the upstream
-    // name yet, so we synthesize the alias from the active role's
-    // slot ("smooth-{slot lowercase}") which matches the convention
-    // in `~/.smooth/providers.json`.
-    let model_label = if let Some(alias) = state.current_phase_alias.as_deref().filter(|s| !s.is_empty()) {
-        match state.current_phase_upstream.as_deref() {
-            Some(upstream) if !upstream.is_empty() => format!("{alias} → {upstream}"),
-            _ => alias.to_string(),
-        }
-    } else {
-        // Idle: derive from the active role's slot. Fall back to the
-        // role name if we can't resolve a slot (unknown role).
-        smooth_cast::cast::builtin()
-            .get(&state.agent_name)
-            .map(|role| format!("smooth-{:?}", role.slot).to_ascii_lowercase())
-            .unwrap_or_else(|| state.agent_name.clone())
-    };
+    // Name only a model we actually know about — see `AppState::model_label`.
+    let model_label = state.model_label();
 
     // Presence leads. The health glyph is Big Smooth's "I'm awake" signal, so
     // it opens the line instead of sitting buried mid-row between pipes.
@@ -635,14 +615,13 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
     // Join only the segments that exist, so an absent phase/branch can't leave
     // a double space gaping after the presence glyph.
     let status_left = format!(
-        " {}{}{}{} · {} · {} tok · {}",
+        " {}{}{}{} · {}{}",
         phase_prefix,
         if phase_prefix.is_empty() { "" } else { " " },
         branch_indicator,
         state.agent_name,
         model_label,
-        state.total_tokens,
-        format_spend(state.total_cost_usd),
+        usage_segment(state.total_tokens, state.total_cost_usd),
     );
     let status_right = "Ctrl+B chats · Ctrl+C quit ";
 
@@ -883,6 +862,19 @@ fn render_models_view(frame: &mut Frame, picker: &crate::model_picker::ModelPick
 }
 
 /// Format a spend total for the status bar.
+/// The ` · N tok · $X` tail of the status bar, or nothing at all.
+///
+/// Pearl th-d49538: the bar used to render `0 tok · $0` unconditionally, and it
+/// stayed that way for the whole session because the client hardcoded the
+/// terminal event's cost and never read the wire's `usage`. Blank until real
+/// numbers arrive is the honest rendering — nothing is what we know.
+fn usage_segment(tokens: u32, cost_usd: f64) -> String {
+    if tokens == 0 && cost_usd <= 0.0 {
+        return String::new();
+    }
+    format!(" · {tokens} tok · {}", format_spend(cost_usd))
+}
+
 pub fn format_spend(usd: f64) -> String {
     if usd <= 0.0 {
         "$0".to_string()
@@ -890,6 +882,30 @@ pub fn format_spend(usd: f64) -> String {
         format!("${usd:.3}")
     } else {
         format!("${usd:.2}")
+    }
+}
+
+#[cfg(test)]
+mod usage_segment_tests {
+    use super::usage_segment;
+
+    /// **The th-d49538 regression test (cost display).**
+    ///
+    /// Nothing reported yet means nothing on screen. The bar used to print a
+    /// permanent `0 tok · $0` — a confident claim about a number the client
+    /// had never once read off the wire.
+    #[test]
+    fn nothing_known_renders_nothing() {
+        assert_eq!(usage_segment(0, 0.0), "");
+        assert_eq!(usage_segment(0, -0.0), "");
+    }
+
+    #[test]
+    fn real_numbers_render() {
+        assert_eq!(usage_segment(12_900, 0.0421), " · 12900 tok · $0.042");
+        // Cost without tokens (or the reverse) still counts as knowing something.
+        assert_eq!(usage_segment(0, 0.5), " · 0 tok · $0.500");
+        assert_eq!(usage_segment(42, 0.0), " · 42 tok · $0");
     }
 }
 

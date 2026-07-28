@@ -65,6 +65,20 @@ pub enum ClientEvent {
     Ping,
 }
 
+/// Per-turn token accounting and cost.
+///
+/// Read off the canonical `eventual_response`'s optional `data.data.usage`
+/// object (`{costUsd, promptTokens, completionTokens}`). The server omits it
+/// entirely when the engine reported no usage, which is why every consumer
+/// takes it as an `Option` — a turn we know nothing about must render nothing,
+/// not a confident `0 tok · $0` (pearl th-d49538).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    pub cost_usd: f64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
 /// Events received from Big Smooth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -91,12 +105,22 @@ pub enum ServerEvent {
         tool_name: String,
         result: String,
         is_error: bool,
-        duration_ms: u64,
+        /// How long the tool ran, when the *server* says so. `None` is the
+        /// normal case today: the engine measures a duration but the canonical
+        /// `toolResult` frame doesn't carry it, so the client falls back to its
+        /// own measurement. Optional rather than `0` because "no timing" and
+        /// "took no time" are different claims (pearl th-d49538).
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
     TaskComplete {
         task_id: String,
+        /// Agent-loop iterations. The canonical protocol carries no iteration
+        /// count on `eventual_response`, so this is 0 on the WS path.
         iterations: u32,
-        cost_usd: f64,
+        /// `None` when the server reported no usage for the turn.
+        #[serde(default)]
+        usage: Option<TurnUsage>,
     },
     TaskError {
         task_id: String,
@@ -238,13 +262,23 @@ fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
                 tool_name: res.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
                 result: stringify(res.get("result")),
                 is_error: res.get("isError").and_then(serde_json::Value::as_bool).unwrap_or(false),
-                duration_ms: 0,
+                // The server doesn't forward the engine's `duration_ms` today;
+                // read it if that ever changes, and report "unknown" — never a
+                // hardcoded 0 — when it doesn't (th-d49538).
+                duration_ms: res.get("durationMs").or_else(|| res.get("duration_ms")).and_then(serde_json::Value::as_u64),
             })
         }
+        // Token accounting + cost ride the terminal event's optional
+        // `data.data.usage`. Absent for e.g. offline mock turns, in which case
+        // the client must show nothing rather than claim a $0 turn.
         "eventual_response" => Some(ServerEvent::TaskComplete {
             task_id: TURN_ID.to_string(),
             iterations: 0,
-            cost_usd: 0.0,
+            usage: v.get("data").and_then(|d| d.get("data")).and_then(|d| d.get("usage")).map(|u| TurnUsage {
+                cost_usd: u.get("costUsd").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                prompt_tokens: u.get("promptTokens").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                completion_tokens: u.get("completionTokens").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            }),
         }),
         "error" => Some(ServerEvent::Error {
             message: smooth_cast::wire::error_message(v),
@@ -1133,6 +1167,84 @@ mod canonical_protocol_tests {
                 assert!(!is_error);
             }
             other => panic!("expected ToolCallComplete, got {other:?}"),
+        }
+    }
+
+    /// **th-d49538 regression test (durations).**
+    ///
+    /// The `toolResult` frame carries no timing, so the event must say so —
+    /// `None`. It used to hardcode `duration_ms: 0`, and the TUI dutifully
+    /// rendered `0.0s` for every tool in the transcript; the agent then read
+    /// its own screen and invented hangs to explain the zeros.
+    #[test]
+    fn tool_result_without_timing_reports_unknown_not_zero() {
+        let done = translate_frame(&json!({
+            "type": "stream_chunk",
+            "data": {"state": {"rawResponse": {"toolResult": {"name":"bash","result":"ok","isError":false}}}}
+        }));
+        match done {
+            Some(ServerEvent::ToolCallComplete { duration_ms, .. }) => {
+                assert_eq!(duration_ms, None, "absent timing must be None, never Some(0)");
+            }
+            other => panic!("expected ToolCallComplete, got {other:?}"),
+        }
+    }
+
+    /// …and a server that *does* send timing must be believed over the
+    /// client's own measurement.
+    #[test]
+    fn tool_result_timing_is_read_when_present() {
+        let done = translate_frame(&json!({
+            "type": "stream_chunk",
+            "data": {"state": {"rawResponse": {"toolResult": {"name":"bash","result":"ok","durationMs": 1234}}}}
+        }));
+        match done {
+            Some(ServerEvent::ToolCallComplete { duration_ms, .. }) => assert_eq!(duration_ms, Some(1234)),
+            other => panic!("expected ToolCallComplete, got {other:?}"),
+        }
+    }
+
+    /// **th-d49538 regression test (cost + tokens).**
+    ///
+    /// Usage rides `data.data.usage` on the terminal event. The client used to
+    /// hardcode `cost_usd: 0.0` and never look, so the status bar read
+    /// `0 tok · $0` for the life of the session no matter what was spent.
+    #[test]
+    fn eventual_response_usage_is_read_off_the_wire() {
+        let ev = translate_frame(&json!({
+            "type": "eventual_response",
+            "status": 200,
+            "data": {
+                "status": 200,
+                "data": {
+                    "messageId": "m-1",
+                    "response": "hi",
+                    "usage": { "costUsd": 0.0421, "promptTokens": 12_000, "completionTokens": 900 }
+                }
+            }
+        }));
+        match ev {
+            Some(ServerEvent::TaskComplete { usage: Some(u), .. }) => {
+                assert!((u.cost_usd - 0.0421).abs() < f64::EPSILON, "cost must come from the wire: {u:?}");
+                assert_eq!(u.prompt_tokens, 12_000);
+                assert_eq!(u.completion_tokens, 900);
+            }
+            other => panic!("expected TaskComplete with usage, got {other:?}"),
+        }
+    }
+
+    /// A turn the engine didn't account for reports *nothing*, so the UI can
+    /// stay silent instead of claiming a free turn.
+    #[test]
+    fn eventual_response_without_usage_reports_none() {
+        let ev = translate_frame(&json!({
+            "type": "eventual_response",
+            "status": 200,
+            "data": { "status": 200, "data": { "messageId": "m-1", "response": "hi" } }
+        }));
+        match ev {
+            Some(ServerEvent::TaskComplete { usage, .. }) => assert_eq!(usage, None),
+            other => panic!("expected TaskComplete, got {other:?}"),
         }
     }
 
