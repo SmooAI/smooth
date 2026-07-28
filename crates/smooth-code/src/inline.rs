@@ -417,15 +417,31 @@ pub struct InlineRegions {
     pub input: Rect,
 }
 
-/// Compute regions inside the viewport. `preview_h` is the desired
-/// preview height (0 = no preview). The input box gets a fixed 3
-/// rows; status gets 1; preview takes whatever is left up to
-/// `preview_h`.
+/// Rows the input box needs to show `text_rows` rows of text, plus its border.
 #[must_use]
-pub fn compute_regions(area: Rect, preview_h: u16) -> InlineRegions {
-    const INPUT_H: u16 = 3;
+pub fn input_height(text_rows: u16) -> u16 {
+    text_rows.clamp(1, crate::composer::MAX_TEXT_ROWS) + 2
+}
+
+/// Compute regions inside the viewport. `preview_h` is the desired
+/// preview height (0 = no preview); `input_h` is the input box's total
+/// height including its border (see [`input_height`]). Status gets 1 row;
+/// preview takes whatever is left up to `preview_h`.
+///
+/// The input grows by borrowing from the preview, because the inline viewport
+/// height is fixed at startup and cannot be renegotiated. It is clamped so at
+/// least one preview row survives when a preview is wanted — a draft must
+/// never hide the streaming answer entirely (pearl th-958e2e).
+#[must_use]
+pub fn compute_regions(area: Rect, preview_h: u16, input_h: u16) -> InlineRegions {
     const STATUS_H: u16 = 1;
-    let bottom_h = INPUT_H + STATUS_H;
+    const MIN_INPUT_H: u16 = 3;
+
+    // Never let the box push the status bar (or itself) out of the viewport.
+    let ceiling = area.height.saturating_sub(STATUS_H + if preview_h > 0 { 1 } else { 0 });
+    let input_h = input_h.clamp(MIN_INPUT_H, ceiling.max(MIN_INPUT_H));
+
+    let bottom_h = input_h + STATUS_H;
     let available_top = area.height.saturating_sub(bottom_h);
     let actual_preview = preview_h.min(available_top);
 
@@ -449,7 +465,7 @@ pub fn compute_regions(area: Rect, preview_h: u16) -> InlineRegions {
         x: area.x,
         y: area.y + actual_preview + STATUS_H,
         width: area.width,
-        height: INPUT_H,
+        height: input_h,
     };
     InlineRegions { preview, status, input }
 }
@@ -514,7 +530,7 @@ mod tests {
     #[test]
     fn compute_regions_no_preview_when_zero() {
         let area = Rect::new(0, 0, 80, 8);
-        let r = compute_regions(area, 0);
+        let r = compute_regions(area, 0, input_height(1));
         assert!(r.preview.is_none());
         assert_eq!(r.status.height, 1);
         assert_eq!(r.input.height, 3);
@@ -525,7 +541,7 @@ mod tests {
     #[test]
     fn compute_regions_with_preview() {
         let area = Rect::new(0, 0, 80, 12);
-        let r = compute_regions(area, 4);
+        let r = compute_regions(area, 4, input_height(1));
         let preview = r.preview.expect("preview should be present");
         assert_eq!(preview.height, 4);
         assert_eq!(preview.y, 0);
@@ -538,8 +554,67 @@ mod tests {
         // Tiny viewport — preview gets squeezed to 0 if input+status
         // already fill it.
         let area = Rect::new(0, 0, 80, 4);
-        let r = compute_regions(area, 8);
+        let r = compute_regions(area, 8, input_height(1));
         assert!(r.preview.is_none());
+    }
+
+    /// One text row + two border rows, capped at `MAX_TEXT_ROWS`.
+    #[test]
+    fn input_height_adds_the_border_and_caps_growth() {
+        assert_eq!(input_height(1), 3, "the historical fixed height");
+        assert_eq!(input_height(4), 6);
+        assert_eq!(input_height(0), 3, "never smaller than one text row");
+        assert_eq!(input_height(99), crate::composer::MAX_TEXT_ROWS + 2);
+    }
+
+    /// A growing draft borrows rows from the preview — the viewport height is
+    /// fixed at startup, so there is nowhere else for them to come from.
+    #[test]
+    fn a_taller_input_takes_rows_from_the_preview() {
+        let area = Rect::new(0, 0, 80, 14);
+        let short = compute_regions(area, 10, input_height(1));
+        let tall = compute_regions(area, 10, input_height(5));
+
+        assert_eq!(short.input.height, 3);
+        assert_eq!(tall.input.height, 7);
+        assert_eq!(short.preview.expect("preview").height, 10);
+        assert_eq!(tall.preview.expect("preview").height, 6, "preview yields exactly what input took");
+
+        // Whatever the split, the three regions still tile the viewport
+        // exactly — an overlap is the out-of-buffer panic (th-paste-crash).
+        for r in [short, tall] {
+            let preview_h = r.preview.map_or(0, |p| p.height);
+            assert_eq!(preview_h + r.status.height + r.input.height, area.height);
+            assert_eq!(r.status.y, area.y + preview_h);
+            assert_eq!(r.input.y, r.status.y + r.status.height);
+        }
+    }
+
+    /// A tall draft must never squeeze the streaming answer out entirely, or
+    /// the user can't see what they're replying to.
+    #[test]
+    fn input_growth_leaves_a_preview_row_when_one_is_wanted() {
+        let area = Rect::new(0, 0, 80, 8);
+        let r = compute_regions(area, 4, input_height(crate::composer::MAX_TEXT_ROWS));
+        let preview = r.preview.expect("preview must survive");
+        assert!(preview.height >= 1);
+        assert_eq!(preview.height + r.status.height + r.input.height, area.height);
+    }
+
+    /// Regions must stay inside the viewport even when it is absurdly short.
+    #[test]
+    fn regions_never_escape_a_tiny_viewport() {
+        for height in 1..=16u16 {
+            for text_rows in 1..=crate::composer::MAX_TEXT_ROWS {
+                let area = Rect::new(0, 0, 40, height);
+                let r = compute_regions(area, height, input_height(text_rows));
+                let bottom = r.input.y + r.input.height;
+                assert!(
+                    bottom <= area.y + area.height.max(4),
+                    "height {height}, rows {text_rows}: input bottom {bottom} escapes viewport {height}"
+                );
+            }
+        }
     }
 
     #[test]

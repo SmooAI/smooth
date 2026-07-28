@@ -11,6 +11,7 @@ pub mod app;
 pub mod autocomplete;
 pub mod client;
 pub mod commands;
+pub mod composer;
 pub mod diff_render;
 pub mod files;
 pub mod git;
