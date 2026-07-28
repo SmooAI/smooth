@@ -192,7 +192,7 @@ async fn run_headless_client(
                 eprintln!("[error] {message}");
                 anyhow::bail!("Task failed: {message}");
             }
-            ServerEvent::Error { message } => {
+            ServerEvent::Error { message, .. } => {
                 eprintln!("[error] {message}");
             }
             _ => {}

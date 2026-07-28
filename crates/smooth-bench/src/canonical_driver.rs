@@ -144,13 +144,7 @@ fn classify(v: &Value) -> Event {
             None => Event::Other, // send_message processing ack — no session id
         },
         Some("eventual_response") => Event::TurnComplete,
-        Some("error") => Event::Error(
-            v.pointer("/data/message")
-                .and_then(Value::as_str)
-                .or_else(|| v.get("message").and_then(Value::as_str))
-                .unwrap_or("unknown operator error")
-                .to_string(),
-        ),
+        Some("error") => Event::Error(smooth_cast::wire::error_message(v)),
         // The answer streams as top-level `token` (see the web client's
         // `operator.ts`); a couple of engines nest it under `data`.
         // `stream_reasoning` deliberately falls through to `Other` —
@@ -296,9 +290,25 @@ mod tests {
         assert!(matches!(classify(&v), Event::TurnComplete));
     }
 
+    /// The shape `smooth-operator-server`'s `protocol::error` actually emits:
+    /// `error` is an OBJECT, at the top level and nested under `data`.
+    ///
+    /// This test used to assert `{"type":"error","data":{"code","message"}}`,
+    /// a shape the server never sends — so it passed while the driver reported
+    /// every real error as "unknown operator error" (pearl th-472012).
     #[test]
-    fn classify_error_pulls_message() {
-        let v = json!({"type":"error","data":{"code":"BOOM","message":"it broke"}});
+    fn classify_error_reads_the_real_server_frame() {
+        let v = json!({
+            "type": "error",
+            "error": { "code": "VALIDATION_ERROR", "message": "missing 'action' field" },
+            "data": { "error": { "code": "VALIDATION_ERROR", "message": "missing 'action' field" } },
+        });
+        assert!(matches!(classify(&v), Event::Error(m) if m == "VALIDATION_ERROR: missing 'action' field"));
+    }
+
+    #[test]
+    fn classify_error_still_reads_the_legacy_data_message_shape() {
+        let v = json!({"type":"error","data":{"message":"it broke"}});
         assert!(matches!(classify(&v), Event::Error(m) if m == "it broke"));
     }
 

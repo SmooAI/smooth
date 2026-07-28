@@ -144,8 +144,7 @@ pub async fn operator_turn(org: &str, message: &str, conversation_id: Option<&st
                 ));
             }
             Some("error") => {
-                let msg = ev.get("message").and_then(Value::as_str).unwrap_or("unknown operator error");
-                return Err(anyhow!("smooth-operator error: {msg}"));
+                return Err(anyhow!("smooth-operator error: {}", smooth_cast::wire::error_message(&ev)));
             }
             // stream_preamble / stream_chunk / the send ack — ignore.
             _ => {}
@@ -177,8 +176,7 @@ async fn recv_until(ws: &mut Ws, ty: &str) -> Result<Value> {
         match ev.get("type").and_then(Value::as_str) {
             Some(t) if t == ty => return Ok(ev),
             Some("error") => {
-                let msg = ev.get("message").and_then(Value::as_str).unwrap_or("unknown");
-                return Err(anyhow!("smooth-operator error: {msg}"));
+                return Err(anyhow!("smooth-operator error: {}", smooth_cast::wire::error_message(&ev)));
             }
             _ => {}
         }

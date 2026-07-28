@@ -21,9 +21,12 @@
 //! - [`providers`] — field-preserving `providers.json` editing (raw
 //!   `serde_json::Value`) so `th providers add/remove` and per-provider
 //!   `max_tokens` survive the published registry's lossy serializer.
+//! - [`wire`] — canonical-protocol frame helpers shared by every Smooth
+//!   WebSocket client, so the `error` frame is parsed in exactly one place.
 
 pub mod cast;
 pub mod coding_workflow;
 pub mod provider_migration;
 pub mod providers;
 pub mod skills;
+pub mod wire;

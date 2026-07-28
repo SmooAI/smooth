@@ -1451,9 +1451,20 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 }
                 None
             }
-            ServerEvent::Error { message } => {
-                let _ = tx.send(AgentEvent::Error { message });
-                break;
+            // Only an error attributed to THIS turn ends it. An unattributed
+            // one (rejected heartbeat, late error for an abandoned turn)
+            // becomes an inline breadcrumb — same treatment as a `warn`
+            // severity above — so the turn keeps streaming. th-472012: a
+            // rejected ping used to kill turns whose answers the daemon had
+            // already finished.
+            ServerEvent::Error { message, request_id } => {
+                if request_id.is_some() {
+                    let _ = tx.send(AgentEvent::Error { message });
+                    break;
+                }
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                s.add_message(crate::state::ChatMessage::system(format!("⚠ {message}")));
+                None
             }
             _ => None,
         };
