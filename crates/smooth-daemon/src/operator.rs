@@ -1120,8 +1120,18 @@ mod tests {
         assert!(gateway_from_providers_at(&dir.path().join("nope.json"), "coding").is_none());
     }
 
+    /// Serializes the tests that mutate the process-global `SMOOTH_LOCAL_TOKEN`
+    /// (and `HOME`) vars, same reason as `GATEWAY_ENV_LOCK`: cargo runs tests in
+    /// parallel threads of ONE process, so without this `provision_prefers_env_token`'s
+    /// `set_var` can leak into `provision_generates_and_persists_when_unset`, which
+    /// then takes the env branch and never writes the token file — failing its
+    /// `.exists()` assertion. This is the flake that reddened Release CI (th-d9dbd7);
+    /// it only showed there because the release job's scheduling exposed the race.
+    static TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn provision_prefers_env_token() {
+        let _guard = TOKEN_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("SMOOTH_LOCAL_TOKEN", "  env-tok-123  ");
         assert_eq!(provision_local_token().unwrap(), "env-tok-123", "env token wins, trimmed");
         std::env::remove_var("SMOOTH_LOCAL_TOKEN");
@@ -1129,6 +1139,7 @@ mod tests {
 
     #[test]
     fn provision_generates_and_persists_when_unset() {
+        let _guard = TOKEN_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Isolate HOME so we read/write a temp ~/.smooth/operator-token.
         std::env::remove_var("SMOOTH_LOCAL_TOKEN");
         let home = tempfile::tempdir().unwrap();
