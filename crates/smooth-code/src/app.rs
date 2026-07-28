@@ -149,7 +149,15 @@ pub async fn run_with_session(
     // preview). Finalized chat messages flow into the terminal's
     // own scrollback via `Frame::insert_before`, so the user gets
     // native wheel-scroll, drag-select, copy, and search for free.
-    // No alt-screen, no mouse capture — both would break those.
+    // No alt-screen, and no mouse capture *by default* — both would
+    // break those.
+    //
+    // Pearl th-958e2e: capture is now toggled on ONLY while the draft is
+    // taller than the input box, so the wheel can scroll it, and off the
+    // instant it fits again. That keeps native scrollback and drag-select
+    // for the ~99% case where the draft is a line or two, at the cost of
+    // the wheel scrolling your draft (and drag-select needing Shift /
+    // Option) while a long one is open. See `sync_mouse_capture`.
     //
     // The legacy `SMOOTH_TUI_NO_ALT_SCREEN` escape hatch is now a
     // no-op (we never enter alt-screen). Kept readable for one
@@ -357,6 +365,11 @@ pub async fn run_with_session(
     // whole time. Also disable bracketed paste so subsequent shell
     // sessions in the same terminal don't inherit the mode.
     let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+    // Unconditionally release mouse capture. It is only ever on while a long
+    // draft is open (see `sync_mouse_capture`), but exiting with it left on
+    // would strip the user's shell of wheel-scroll and drag-select — and
+    // disabling when it was never enabled is harmless.
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
     disable_raw_mode()?;
     terminal.show_cursor()?;
     // Move the cursor below the viewport so the user's next shell
@@ -379,6 +392,8 @@ fn event_loop(
     let command_registry = CommandRegistry::new();
     let mut last_save = std::time::Instant::now();
     let auto_save_interval = Duration::from_secs(30);
+    // Tracks whether mouse capture is currently on; see `sync_mouse_capture`.
+    let mut mouse_captured = false;
 
     loop {
         // Auto-save every 30s if there are messages
@@ -412,6 +427,7 @@ fn event_loop(
             // Advance spinner each frame for animation
             s.advance_spinner();
             terminal.draw(|f| render::render(f, &s))?;
+            sync_mouse_capture(&s, &mut mouse_captured);
         }
 
         // Drain all pending agent events without blocking
@@ -433,10 +449,25 @@ fn event_loop(
             // flood that crashed the renderer (pearl th-paste-crash).
             if let Event::Paste(text) = &evt {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                let sanitized = text.replace(['\r', '\n'], " ");
-                for ch in sanitized.chars() {
-                    s.input_insert(ch);
-                }
+                // Newlines are KEPT now that the box wraps, grows and scrolls
+                // (th-958e2e). Line endings are normalized over the whole
+                // string, because terminals disagree about the separator
+                // (tmux sends bare `\r`) and CRLF can't be collapsed one char
+                // at a time.
+                s.input_insert_str(text);
+                continue;
+            }
+            // Wheel over the input scrolls the draft. Only ever reaches us
+            // while capture is on, i.e. while the draft overflows the box.
+            if let Event::Mouse(mouse) = evt {
+                let delta = match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => -1,
+                    crossterm::event::MouseEventKind::ScrollDown => 1,
+                    _ => continue,
+                };
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
+                s.input_scroll_by(delta, cols.saturating_sub(2), crate::composer::MAX_TEXT_ROWS);
                 continue;
             }
             // Pearl th-f294fd: clear the screen on terminal resize so
@@ -504,6 +535,44 @@ fn event_loop(
 /// freshly-listed set) and loads the summaries from the on-disk
 /// [`SessionManager`] store. A store error just yields an empty list
 /// (the "New conversation" row still works).
+/// Whether the draft is taller than the input box can show.
+///
+/// Pure and `pub(crate)` so the policy — *capture the mouse only when there is
+/// something to scroll* — is unit-testable without a terminal.
+pub(crate) fn input_overflows(input: &str, term_width: u16) -> bool {
+    let inner_width = term_width.saturating_sub(2);
+    crate::composer::wrap_rows(input, inner_width).len() > usize::from(crate::composer::MAX_TEXT_ROWS)
+}
+
+/// Turn mouse capture on only while the draft overflows its box, and off the
+/// moment it fits again (pearl th-958e2e).
+///
+/// Capture is a global terminal mode: while it is on, the emulator forwards
+/// wheel and click events to us instead of scrolling its own scrollback and
+/// handling drag-select. Since this TUI deliberately keeps finalized chat in
+/// the terminal's scrollback, holding capture for the whole session would cost
+/// the user native scrolling and copy/paste permanently. Scoping it to "there
+/// is a long draft open" keeps the default interaction intact.
+///
+/// Both calls are best-effort: a terminal that ignores the escape sequence
+/// simply never sends mouse events, and the input still scrolls to follow the
+/// cursor.
+fn sync_mouse_capture(state: &AppState, captured: &mut bool) {
+    let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
+    let want = input_overflows(&state.input, cols);
+    if want == *captured {
+        return;
+    }
+    let result = if want {
+        crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)
+    } else {
+        crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)
+    };
+    if result.is_ok() {
+        *captured = want;
+    }
+}
+
 fn toggle_session_sidebar(state: &mut AppState) {
     if state.session_picker.active {
         state.session_picker.deactivate();
@@ -1468,6 +1537,50 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
 }
 
 // ponytail: narc TUI removed with the old-cast crate; re-home onto the new engine's NarcHook later (th-3119e3)
+
+#[cfg(test)]
+mod mouse_capture_policy_tests {
+    use super::input_overflows;
+    use crate::composer::MAX_TEXT_ROWS;
+
+    /// The whole point of the scoped-capture design: in the common case the
+    /// terminal keeps its own wheel, drag-select and copy.
+    #[test]
+    fn a_normal_draft_never_captures_the_mouse() {
+        assert!(!input_overflows("", 80));
+        assert!(!input_overflows("fix the failing test", 80));
+        assert!(!input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) - 1), 80));
+    }
+
+    #[test]
+    fn an_overflowing_draft_captures_the_mouse() {
+        assert!(input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) + 2), 80));
+    }
+
+    /// Exactly-full is not overflowing — capture must not flap on the boundary.
+    #[test]
+    fn a_draft_that_exactly_fills_the_box_does_not_capture() {
+        let exact = (0..MAX_TEXT_ROWS).map(|i| format!("row{i}")).collect::<Vec<_>>().join("\n");
+        assert!(!input_overflows(&exact, 80));
+        assert!(input_overflows(&format!("{exact}\nmore"), 80));
+    }
+
+    /// Soft-wrapping counts: a single long line can overflow on a narrow
+    /// terminal while fitting on a wide one.
+    #[test]
+    fn wrapping_is_what_decides_not_newline_count() {
+        let long = "x".repeat(200);
+        assert!(!input_overflows(&long, 80), "200 cols fits in 6 rows at width 78");
+        assert!(input_overflows(&long, 22), "the same text needs 10 rows at width 20");
+    }
+
+    /// A degenerate width must not panic or divide by zero.
+    #[test]
+    fn tiny_terminals_are_handled() {
+        assert!(!input_overflows("", 0));
+        assert!(input_overflows(&"x".repeat(50), 1));
+    }
+}
 
 #[cfg(test)]
 mod bench_cost_sidecar_tests {

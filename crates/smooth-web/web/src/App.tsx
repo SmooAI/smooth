@@ -756,6 +756,16 @@ function Composer({
     const taRef = useRef<HTMLTextAreaElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
 
+    // Auto-grow fallback for browsers without CSS `field-sizing` (Firefox).
+    // Where it IS supported the class does the work and this never runs, so the
+    // box grows without a reflow on every keystroke.
+    useEffect(() => {
+        const ta = taRef.current;
+        if (!ta || CSS.supports('field-sizing', 'content')) return;
+        ta.style.height = 'auto';
+        ta.style.height = `${ta.scrollHeight}px`;
+    }, [text]);
+
     // Read picked/pasted/dropped images + PDFs as data-URLs (prefix kept — it's
     // the wire value AND the preview src). Images are DOWNSCALED to <=1568px on
     // the longest edge and re-encoded JPEG first: a raw phone photo is multiple
@@ -1105,7 +1115,11 @@ function Composer({
                         rows={1}
                         placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes · @ to mention)'}
                         disabled={disabled}
-                        className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.95rem] outline-none placeholder:text-(--color-muted-foreground)"
+                        // `field-sizing-content` grows the box with what you type; `max-h-40`
+                        // caps it at ~10 lines and `overflow-y-auto` hands the rest to the
+                        // wheel. `max-h-40` was already here but unreachable, because
+                        // `rows={1}` pinned the height forever.
+                        className="max-h-40 flex-1 resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-[0.95rem] outline-none field-sizing-content placeholder:text-(--color-muted-foreground)"
                     />
                     <button
                         onClick={submit}

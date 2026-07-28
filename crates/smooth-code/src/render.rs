@@ -24,9 +24,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // message. Cap at half the viewport height so a runaway response
     // doesn't crowd out the input/status; once it overflows, the
     // wrap-aware Paragraph keeps the most recent rows visible.
-    let max_preview = area.height.saturating_sub(4).max(1);
+    // The input box grows with its content, so the preview's ceiling moves
+    // with it (pearl th-958e2e). Width - 2 accounts for the box border.
+    let input_text_rows = crate::composer::desired_text_rows(&state.input, area.width.saturating_sub(2));
+    let input_h = crate::inline::input_height(input_text_rows);
+    let max_preview = area.height.saturating_sub(input_h + 1).max(1);
     let preview_h = crate::inline::preview_height(state, area.width, max_preview);
-    let regions = crate::inline::compute_regions(area, preview_h);
+    let regions = crate::inline::compute_regions(area, preview_h, input_h);
 
     if let Some(preview_rect) = regions.preview {
         let lines = crate::inline::viewport_preview_lines(state);
@@ -520,14 +524,34 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let input_text = Paragraph::new(state.input.as_str()).style(theme::input_style());
+    // Wrap + scroll + place the cursor from ONE source of arithmetic, so the
+    // box can never disagree with itself about where a row ends (th-958e2e).
+    // Before this the Paragraph had no `.wrap()` at all, so anything past the
+    // box width was silently clipped, and the cursor was `inner.x + byte
+    // offset` — which drifted on any multi-byte character.
+    let (cursor_row, cursor_col) = crate::composer::cursor_position(&state.input, state.input_cursor, inner.width);
+    let total_rows = u16::try_from(crate::composer::wrap_rows(&state.input, inner.width).len()).unwrap_or(u16::MAX);
+    // Follow the cursor while editing, but leave the view alone once the user
+    // has scrolled by hand — otherwise every frame snaps back to the caret and
+    // the wheel looks broken.
+    let scroll = if state.input_user_scrolled {
+        crate::composer::clamp_to_bounds(state.input_scroll, total_rows, inner.height)
+    } else {
+        crate::composer::clamp_scroll(state.input_scroll, cursor_row, total_rows, inner.height)
+    };
+
+    let input_text = Paragraph::new(state.input.as_str())
+        .style(theme::input_style())
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(input_text, inner);
 
-    // Position cursor
-    let cursor_x = inner.x + u16::try_from(state.input_cursor).unwrap_or(0);
-    let cursor_y = inner.y;
-    if cursor_x < inner.x + inner.width {
-        frame.set_cursor_position((cursor_x, cursor_y));
+    // Only draw the cursor when its row is actually on screen — a cursor
+    // parked outside `inner` is the shape of the out-of-buffer panic that
+    // pearl th-tui-popup fixed for the autocomplete popup.
+    let visible_row = cursor_row.saturating_sub(scroll);
+    if cursor_row >= scroll && visible_row < inner.height && cursor_col < inner.width {
+        frame.set_cursor_position((inner.x + cursor_col, inner.y + visible_row));
     }
 }
 

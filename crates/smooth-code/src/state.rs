@@ -293,10 +293,18 @@ pub struct AppState {
     /// at indices `< committed_count` so they don't double-paint
     /// inside the viewport while also living above it as scrollback.
     pub committed_count: usize,
-    /// Current text in the input box.
+    /// Current text in the input box. May contain `\n` — the box wraps,
+    /// grows, and scrolls (pearl th-958e2e).
     pub input: String,
     /// Cursor position within the input string (byte offset).
     pub input_cursor: usize,
+    /// First visible wrapped row of the input box. Non-zero only once the
+    /// draft is taller than the box; see [`crate::composer::clamp_scroll`].
+    pub input_scroll: u16,
+    /// Whether the user scrolled the input by hand. While set, the view stays
+    /// where they put it instead of snapping back to the cursor; any edit
+    /// clears it. Mirrors `user_scrolled` for the chat area.
+    pub input_user_scrolled: bool,
     /// Whether the sidebar panel is visible.
     pub sidebar_visible: bool,
     /// Scroll offset for the chat area (lines from bottom).
@@ -396,6 +404,8 @@ impl AppState {
             conversation_id: None,
             messages: Vec::new(),
             committed_count: 0,
+            input_scroll: 0,
+            input_user_scrolled: false,
             input: String::new(),
             input_cursor: 0,
             sidebar_visible: false,
@@ -493,18 +503,40 @@ impl AppState {
 
     /// Insert a character at the current cursor position.
     ///
-    /// Newlines and carriage returns are normalized to spaces — the
-    /// input box is single-line, and bracketed paste is best-effort
-    /// (pearl th-paste-crash). If bracketed paste isn't supported by
-    /// the terminal, multi-line pastes arrive as a stream of Char
-    /// events including embedded \n / \r; without this clamp those
-    /// would render as literal newlines in the Paragraph and trigger
-    /// the inline-viewport buffer overflow panic seen in
-    /// `index outside of buffer: ...`.
+    /// A lone `\r` becomes `\n` — terminals commonly send CR as the line
+    /// separator. (Multi-char sequences like CRLF can't be collapsed one char
+    /// at a time; [`Self::input_insert_str`] handles those.) Newlines
+    /// themselves are now **kept**: the box wraps, grows to
+    /// [`composer::MAX_TEXT_ROWS`](crate::composer::MAX_TEXT_ROWS), and scrolls
+    /// beyond that (pearl th-958e2e).
+    ///
+    /// They used to be flattened to spaces because the box was a fixed 3-row
+    /// `Paragraph` with no wrap, so a literal newline overflowed the rect and
+    /// panicked with `index outside of buffer: ...` (pearl th-paste-crash).
+    /// The renderer now derives its height from the same wrap arithmetic the
+    /// cursor uses and clamps to the available rect, so the overflow that
+    /// motivated the clamp can't happen.
     pub fn input_insert(&mut self, ch: char) {
-        let ch = if matches!(ch, '\n' | '\r') { ' ' } else { ch };
+        let ch = if ch == '\r' { '\n' } else { ch };
         self.input.insert(self.input_cursor, ch);
         self.input_cursor += ch.len_utf8();
+        self.input_user_scrolled = false;
+    }
+
+    /// Insert a whole string at the cursor, normalizing line endings.
+    ///
+    /// This is the bracketed-paste path, and it exists because line-ending
+    /// normalization needs to see *pairs*: terminals disagree about the
+    /// separator they send for a multi-line clipboard — tmux and many
+    /// emulators send bare `\r`, others `\n`, Windows clipboards `\r\n` — and
+    /// collapsing CRLF is impossible one `char` at a time. Getting this wrong
+    /// is silent and ugly: dropping `\r` glues every line together, mapping it
+    /// blindly double-spaces them.
+    pub fn input_insert_str(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(self.input_cursor, &normalized);
+        self.input_cursor += normalized.len();
+        self.input_user_scrolled = false;
     }
 
     /// Delete the character before the cursor (backspace).
@@ -514,11 +546,24 @@ impl AppState {
             let prev = self.input[..self.input_cursor].char_indices().next_back().map_or(0, |(i, _)| i);
             self.input.remove(prev);
             self.input_cursor = prev;
+            self.input_user_scrolled = false;
         }
+    }
+
+    /// Scroll the input box by `delta` rows (negative scrolls up), clamped to
+    /// the draft's extent. Drives the mouse wheel; a no-op when the whole
+    /// draft already fits.
+    pub fn input_scroll_by(&mut self, delta: i16, width: u16, visible_rows: u16) {
+        let total = u16::try_from(crate::composer::wrap_rows(&self.input, width).len()).unwrap_or(u16::MAX);
+        let max_scroll = total.saturating_sub(visible_rows.max(1));
+        let next = i32::from(self.input_scroll) + i32::from(delta);
+        self.input_scroll = u16::try_from(next.clamp(0, i32::from(max_scroll))).unwrap_or(0);
+        self.input_user_scrolled = true;
     }
 
     /// Move the input cursor one character to the left.
     pub fn input_move_left(&mut self) {
+        self.input_user_scrolled = false;
         if self.input_cursor > 0 {
             self.input_cursor = self.input[..self.input_cursor].char_indices().next_back().map_or(0, |(i, _)| i);
         }
@@ -526,6 +571,7 @@ impl AppState {
 
     /// Move the input cursor one character to the right.
     pub fn input_move_right(&mut self) {
+        self.input_user_scrolled = false;
         if self.input_cursor < self.input.len() {
             self.input_cursor = self.input[self.input_cursor..]
                 .char_indices()
@@ -537,6 +583,8 @@ impl AppState {
     /// Take the current input, clearing it and resetting the cursor.
     pub fn take_input(&mut self) -> String {
         self.input_cursor = 0;
+        self.input_scroll = 0;
+        self.input_user_scrolled = false;
         std::mem::take(&mut self.input)
     }
 
@@ -544,6 +592,8 @@ impl AppState {
     pub fn input_clear(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
+        self.input_scroll = 0;
+        self.input_user_scrolled = false;
     }
 
     /// Add a tool call to the last assistant message.
@@ -690,6 +740,97 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let path = dir.path().to_path_buf();
         (dir, path)
+    }
+
+    /// Newlines used to be rewritten to spaces on the way in, because the box
+    /// was a fixed single row that panicked on a literal `\n`
+    /// (pearl th-paste-crash). The box wraps and scrolls now, so they survive.
+    #[test]
+    fn newlines_survive_typing_and_pasting() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        for ch in "a\nb".chars() {
+            s.input_insert(ch);
+        }
+        assert_eq!(s.input, "a\nb");
+    }
+
+    /// Terminals disagree about the line separator in a bracketed paste —
+    /// tmux sends bare `\r`, Unix clipboards `\n`, Windows `\r\n`. All three
+    /// must land as exactly one newline per line. Getting this wrong is
+    /// silent: dropping `\r` glues every line together, mapping it blindly
+    /// double-spaces them.
+    #[test]
+    fn paste_normalizes_every_line_ending_convention() {
+        for (raw, label) in [("a\r\nb\r\nc", "CRLF"), ("a\rb\rc", "bare CR (tmux)"), ("a\nb\nc", "LF")] {
+            let (_dir, path) = test_dir();
+            let mut s = AppState::new(path);
+            s.input_insert_str(raw);
+            assert_eq!(s.input, "a\nb\nc", "{label} should collapse to one newline per line");
+            assert_eq!(s.input_cursor, s.input.len(), "{label} leaves the cursor at the end");
+        }
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_not_the_end() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.input_insert_str("ac");
+        s.input_move_left();
+        s.input_insert_str("b");
+        assert_eq!(s.input, "abc");
+    }
+
+    /// Enter arrives as `KeyCode::Enter`, but a stray `\r` in a char stream is
+    /// still a line break, not a character to swallow.
+    #[test]
+    fn a_lone_carriage_return_char_becomes_a_newline() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        for ch in "a\rb".chars() {
+            s.input_insert(ch);
+        }
+        assert_eq!(s.input, "a\nb");
+    }
+
+    #[test]
+    fn submitting_and_clearing_reset_the_scroll() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.input = "x\n".repeat(20);
+        s.input_scroll = 9;
+        assert_eq!(s.take_input(), "x\n".repeat(20));
+        assert_eq!(s.input_scroll, 0, "a fresh draft starts at the top");
+
+        s.input = "y\n".repeat(20);
+        s.input_scroll = 7;
+        s.input_clear();
+        assert_eq!(s.input_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_scrolling_is_clamped_to_the_draft() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.input = "line\n".repeat(10); // 11 rows (trailing newline -> empty row)
+
+        s.input_scroll_by(3, 40, 6);
+        assert_eq!(s.input_scroll, 3);
+
+        s.input_scroll_by(-99, 40, 6);
+        assert_eq!(s.input_scroll, 0, "cannot scroll above the first row");
+
+        s.input_scroll_by(99, 40, 6);
+        assert_eq!(s.input_scroll, 5, "11 rows in a 6-row box stops at 5");
+    }
+
+    #[test]
+    fn a_draft_that_fits_never_scrolls() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.input = "short".to_string();
+        s.input_scroll_by(5, 40, 6);
+        assert_eq!(s.input_scroll, 0);
     }
 
     #[test]
