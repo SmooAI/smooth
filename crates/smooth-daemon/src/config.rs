@@ -4,7 +4,7 @@
 //! 1. **Explicit env** — `SMOOTH_API_URL` + `SMOOTH_API_KEY` (+ `SMOOTH_MODEL`
 //!    or a per-task model override). Highest priority so a run can be pointed
 //!    at any endpoint without touching config.
-//! 2. **`providers.json`** — the credentials `th auth login` writes to
+//! 2. **`providers.json`** — the credentials `th model login` writes to
 //!    `~/.smooth/providers.json` (overridable with `SMOOTH_PROVIDERS_FILE`).
 //!    Resolved through the engine's [`ProviderRegistry`], so the always-on
 //!    daemon Just Works with the same creds the rest of `th` uses.
@@ -165,7 +165,7 @@ fn resolve_llm_inner(
         });
     }
 
-    // 2. providers.json (th auth login creds), via the engine's registry.
+    // 2. providers.json (th model login creds), via the engine's registry.
     if let Some(path) = providers_path {
         if path.exists() {
             let registry = ProviderRegistry::load_from_file(path).with_context(|| format!("reading {}", path.display()))?;
@@ -179,7 +179,7 @@ fn resolve_llm_inner(
         }
     }
 
-    anyhow::bail!("no LLM credentials: run `th auth login` (writes ~/.smooth/providers.json) or set SMOOTH_API_URL + SMOOTH_API_KEY (+ SMOOTH_MODEL)")
+    anyhow::bail!("no LLM credentials: run `th model login` (writes ~/.smooth/providers.json) or set SMOOTH_API_URL + SMOOTH_API_KEY (+ SMOOTH_MODEL)")
 }
 
 #[cfg(test)]
@@ -270,6 +270,6 @@ mod tests {
         let bogus = Path::new("/nonexistent/smooth-daemon/providers.json");
         let err = resolve_llm_inner(None, None, None, None, Some(bogus)).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("th auth login"), "actionable guidance: {msg}");
+        assert!(msg.contains("th model login"), "actionable guidance: {msg}");
     }
 }

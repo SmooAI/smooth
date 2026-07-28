@@ -2078,6 +2078,139 @@ fn cmd_db(cmd: DbCommands) -> Result<()> {
     Ok(())
 }
 
+/// The provider catalog `th model login` offers: `(id, display name, models,
+/// needs_key)`. The first entry is the recommended default — it's surfaced at
+/// the top of the picker. Smoo AI Gateway is the hosted LiteLLM-backed gateway
+/// run by Smoo AI with billing, moderation, governance, and provider routing on
+/// the server side. Display names are `String` so the recommended entry can
+/// carry the gradient wordmark for "Smoo AI" alongside the rest of the label.
+///
+/// Paired with [`provider_config_for`]: `catalog_ids_all_build_a_config` asserts
+/// every id here builds a config, so the picker can never again offer a provider
+/// the save path panics on (pearl th-6062ea — the *recommended default* was the
+/// one with no match arm).
+fn provider_catalog() -> Vec<(&'static str, String, Vec<&'static str>, bool)> {
+    vec![
+        (
+            "smooai-gateway",
+            format!("{} Gateway (recommended)", gradient::smoo_ai()),
+            // Concrete model names — the legacy `smooth-*` slot
+            // aliases were removed at the gateway under
+            // SMOODEV-1793. `smooth_policy::smooth_alias`
+            // holds the canonical mapping; see also the
+            // catalog in smooth-code/src/model_picker.rs.
+            vec![
+                "deepseek-v4-flash",     // coding + default
+                "deepseek-v4-pro",       // reasoning
+                "minimax-m2.7-direct",   // reviewing
+                "gemini-2.5-flash",      // judge + summarize
+                "gemini-2.5-flash-lite", // fast
+            ],
+            true,
+        ),
+        (
+            "llmgateway",
+            "LLM Gateway".to_string(),
+            vec!["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash", "deepseek/deepseek-v3"],
+            true,
+        ),
+        ("kimi-code", "Kimi Code".to_string(), vec!["kimi-for-coding"], true),
+        ("kimi", "Kimi".to_string(), vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
+        (
+            "openrouter",
+            "OpenRouter".to_string(),
+            vec![
+                "deepseek/deepseek-v3",
+                "openai/gpt-4o",
+                "anthropic/claude-sonnet-4",
+                "moonshot/kimi-k2.5",
+                "google/gemini-flash-2.0",
+            ],
+            true,
+        ),
+        ("openai", "OpenAI".to_string(), vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
+        (
+            "anthropic",
+            "Anthropic".to_string(),
+            vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+            true,
+        ),
+        ("google", "Google AI".to_string(), vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
+        ("ollama", "Ollama (local)".to_string(), vec!["llama3.3", "qwen3", "deepseek-r1"], false),
+    ]
+}
+
+/// Build the engine [`ProviderConfig`](smooth_operator::providers::ProviderConfig)
+/// for a [`provider_catalog`] id. `None` for an id the engine has no constructor
+/// for — the caller turns that into an error instead of a panic.
+fn provider_config_for(id: &str, api_key: &str) -> Option<smooth_operator::providers::ProviderConfig> {
+    use smooth_operator::providers::ProviderConfig as P;
+    Some(match id {
+        "smooai-gateway" => P::smooai_gateway(api_key),
+        "llmgateway" => P::llmgateway(api_key),
+        "kimi-code" => P::kimi_code(api_key),
+        "kimi" => P::kimi(api_key),
+        "openrouter" => P::openrouter(api_key),
+        "openai" => P::openai(api_key),
+        "anthropic" => P::anthropic(api_key),
+        "google" => P::google(api_key),
+        "ollama" => P::ollama(),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is the idiom for test assertions")]
+mod provider_catalog_tests {
+    use super::{provider_catalog, provider_config_for};
+
+    /// The picker's list and the config builder used to be two hand-maintained
+    /// match arms; `smooai-gateway` — the RECOMMENDED DEFAULT — was in the first
+    /// and missing from the second, so picking it hit `unreachable!()` and
+    /// panicked on a new user's very first command (pearl th-6062ea). This test
+    /// is the structural link: adding a catalog entry without a constructor is a
+    /// red build, not a first-run panic.
+    #[test]
+    fn catalog_ids_all_build_a_config() {
+        for (id, ..) in provider_catalog() {
+            let cfg = provider_config_for(id, "test-key").unwrap_or_else(|| panic!("catalog offers `{id}` with no provider_config_for arm"));
+            assert_eq!(cfg.id, id, "`{id}` must build a config carrying its own id");
+            assert!(!cfg.api_url.is_empty(), "`{id}` needs an api_url");
+        }
+    }
+
+    #[test]
+    fn catalog_is_unique_and_leads_with_the_recommended_gateway() {
+        let catalog = provider_catalog();
+        assert_eq!(
+            catalog.first().map(|(id, ..)| *id),
+            Some("smooai-gateway"),
+            "recommended default leads the picker"
+        );
+        let mut ids: Vec<&str> = catalog.iter().map(|(id, ..)| *id).collect();
+        ids.sort_unstable();
+        let count = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate catalog ids");
+        // Every entry offers at least one model to pick.
+        assert!(catalog.iter().all(|(_, _, models, _)| !models.is_empty()));
+    }
+
+    #[test]
+    fn unknown_provider_is_none_not_a_panic() {
+        assert!(provider_config_for("no-such-provider", "k").is_none());
+        assert!(provider_config_for("", "k").is_none());
+    }
+
+    /// Ollama is the one keyless entry — it must build without a key.
+    #[test]
+    fn ollama_needs_no_key() {
+        let (_, _, _, needs_key) = provider_catalog().into_iter().find(|(id, ..)| *id == "ollama").expect("ollama in catalog");
+        assert!(!needs_key);
+        assert_eq!(provider_config_for("ollama", "").expect("builds").api_key, "");
+    }
+}
+
 async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
 
@@ -2098,7 +2231,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                                     "  {} {:<12} {}",
                                     "\u{2717}".red().bold(),
                                     "Providers",
-                                    "none configured \u{2014} run: th auth login <provider>".red()
+                                    "none configured \u{2014} run: th model login <provider>".red()
                                 );
                             } else {
                                 println!(
@@ -2124,7 +2257,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                         "  {} {:<12} {}",
                         "\u{2717}".red().bold(),
                         "Providers",
-                        "not configured \u{2014} run: th auth login <provider>".red()
+                        "not configured \u{2014} run: th model login <provider>".red()
                     );
                 }
             }
@@ -2152,63 +2285,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
         ModelCommands::Login { provider, api_key } => {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
 
-            // Provider catalog: (id, display name, models, needs_key)
-            // First entry is the recommended default — it's surfaced at the
-            // top of the picker. Smoo AI Gateway is the hosted LiteLLM-backed
-            // gateway run by Smoo AI with billing, moderation, governance,
-            // and provider routing on the server side.
-            // Display names are `String` so the recommended entry can carry
-            // the gradient wordmark for "Smoo AI" alongside the rest of the
-            // label.
-            let smoo_ai_gateway_name = format!("{} Gateway (recommended)", gradient::smoo_ai());
-            let catalog: Vec<(&str, String, Vec<&str>, bool)> = vec![
-                (
-                    "smooai-gateway",
-                    smoo_ai_gateway_name,
-                    // Concrete model names — the legacy `smooth-*` slot
-                    // aliases were removed at the gateway under
-                    // SMOODEV-1793. `smooth_policy::smooth_alias`
-                    // holds the canonical mapping; see also the
-                    // catalog in smooth-code/src/model_picker.rs.
-                    vec![
-                        "deepseek-v4-flash",     // coding + default
-                        "deepseek-v4-pro",       // reasoning
-                        "minimax-m2.7-direct",   // reviewing
-                        "gemini-2.5-flash",      // judge + summarize
-                        "gemini-2.5-flash-lite", // fast
-                    ],
-                    true,
-                ),
-                (
-                    "llmgateway",
-                    "LLM Gateway".to_string(),
-                    vec!["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash", "deepseek/deepseek-v3"],
-                    true,
-                ),
-                ("kimi-code", "Kimi Code".to_string(), vec!["kimi-for-coding"], true),
-                ("kimi", "Kimi".to_string(), vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
-                (
-                    "openrouter",
-                    "OpenRouter".to_string(),
-                    vec![
-                        "deepseek/deepseek-v3",
-                        "openai/gpt-4o",
-                        "anthropic/claude-sonnet-4",
-                        "moonshot/kimi-k2.5",
-                        "google/gemini-flash-2.0",
-                    ],
-                    true,
-                ),
-                ("openai", "OpenAI".to_string(), vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
-                (
-                    "anthropic",
-                    "Anthropic".to_string(),
-                    vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-                    true,
-                ),
-                ("google", "Google AI".to_string(), vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
-                ("ollama", "Ollama (local)".to_string(), vec!["llama3.3", "qwen3", "deepseek-r1"], false),
-            ];
+            let catalog = provider_catalog();
 
             // Step 1: Pick provider (interactive if not given)
             let (provider_id, models, needs_key) = if let Some(ref p) = provider {
@@ -2369,17 +2446,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
 
             // Step 4: Test the connection
             print!("Testing connection... ");
-            let config = match provider_id.as_str() {
-                "openrouter" => smooth_operator::providers::ProviderConfig::openrouter(&api_key),
-                "openai" => smooth_operator::providers::ProviderConfig::openai(&api_key),
-                "anthropic" => smooth_operator::providers::ProviderConfig::anthropic(&api_key),
-                "kimi" => smooth_operator::providers::ProviderConfig::kimi(&api_key),
-                "kimi-code" => smooth_operator::providers::ProviderConfig::kimi_code(&api_key),
-                "llmgateway" => smooth_operator::providers::ProviderConfig::llmgateway(&api_key),
-                "ollama" => smooth_operator::providers::ProviderConfig::ollama(),
-                "google" => smooth_operator::providers::ProviderConfig::google(&api_key),
-                _ => unreachable!(),
-            };
+            let config = provider_config_for(&provider_id, &api_key).with_context(|| format!("no client for provider '{provider_id}'"))?;
 
             // Quick test: send a tiny request
             let test_llm = smooth_operator::llm::LlmClient::new(smooth_operator::llm::LlmConfig {
@@ -2437,7 +2504,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                         Ok(registry) => {
                             let providers = registry.list_providers();
                             if providers.is_empty() {
-                                println!("No providers configured. Run: th auth login <provider>");
+                                println!("No providers configured. Run: th model login <provider>");
                             } else {
                                 for id in &providers {
                                     println!("{id}: configured");
@@ -2449,7 +2516,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                         }
                     }
                 } else {
-                    println!("No providers configured. Run: th auth login <provider>");
+                    println!("No providers configured. Run: th model login <provider>");
                 }
             }
         }
@@ -2457,12 +2524,12 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
             if let Some(p) = provider {
                 if !path.exists() {
-                    println!("No providers configured. Run: th auth login {p} --api-key YOUR_KEY");
+                    println!("No providers configured. Run: th model login {p} --api-key YOUR_KEY");
                     return Ok(());
                 }
                 let mut registry = smooth_cast::provider_migration::load_providers_with_migration(path)?;
                 if registry.get_provider(&p).is_none() {
-                    println!("Provider {p} not configured. Run: th auth login {p} --api-key YOUR_KEY");
+                    println!("Provider {p} not configured. Run: th model login {p} --api-key YOUR_KEY");
                     return Ok(());
                 }
                 registry.set_default_provider(&p);
@@ -2475,7 +2542,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                     Err(_) => println!("No default configured"),
                 }
             } else {
-                println!("No providers configured. Run: th auth login <provider> --api-key YOUR_KEY");
+                println!("No providers configured. Run: th model login <provider> --api-key YOUR_KEY");
             }
         }
         ModelCommands::Remove { provider } => {
@@ -3057,7 +3124,7 @@ async fn cmd_code(
         let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
         if let Some(ref path) = providers_path {
             if !path.exists() {
-                println!("  {} {}", "\u{26a0}".yellow().bold(), "No providers configured. Run: th auth login".yellow());
+                println!("  {} {}", "\u{26a0}".yellow().bold(), "No providers configured. Run: th model login".yellow());
             }
         }
         let dolt_on_path = std::process::Command::new("smooth-dolt")
@@ -3279,7 +3346,7 @@ async fn cmd_doctor() -> Result<()> {
         if path.exists() {
             println!("  {} Providers: {}", "✓".green().bold(), format!("configured ({})", path.display()).green());
         } else {
-            println!("  {} Providers: {}", "✗".red().bold(), "not configured (run: th auth login <provider>)".red());
+            println!("  {} Providers: {}", "✗".red().bold(), "not configured (run: th model login <provider>)".red());
             issues += 1;
         }
     }
@@ -6226,7 +6293,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
     match cmd {
         RoutingCommands::Show => {
             if !providers_path.exists() {
-                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                println!("  {} No providers configured. Run: th model login", "✗".red().bold());
                 return Ok(());
             }
             let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
@@ -6258,7 +6325,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
         RoutingCommands::Resolved => {
             if !providers_path.exists() {
-                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                println!("  {} No providers configured. Run: th model login", "✗".red().bold());
                 return Ok(());
             }
             let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
@@ -6399,7 +6466,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
         RoutingCommands::Set { activity, model } => {
             if !providers_path.exists() {
-                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                println!("  {} No providers configured. Run: th model login", "✗".red().bold());
                 return Ok(());
             }
 
@@ -6769,7 +6836,7 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         .context("cannot determine home directory")?;
 
     if !providers_path.exists() {
-        eprintln!("not authed \u{2014} run th auth login");
+        eprintln!("not authed \u{2014} run th model login");
         std::process::exit(2);
     }
 
@@ -6786,18 +6853,18 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         } else if let Some(first) = registry.list_providers().first().map(|s| (*s).to_string()) {
             first
         } else {
-            eprintln!("not authed \u{2014} run th auth login");
+            eprintln!("not authed \u{2014} run th model login");
             std::process::exit(2);
         }
     };
 
     let Some(config) = registry.get_provider(&provider_id) else {
-        eprintln!("provider '{provider_id}' not configured \u{2014} run th auth login");
+        eprintln!("provider '{provider_id}' not configured \u{2014} run th model login");
         std::process::exit(2);
     };
 
     if config.api_key.is_empty() && provider_id != "ollama" {
-        eprintln!("not authed \u{2014} run th auth login");
+        eprintln!("not authed \u{2014} run th model login");
         std::process::exit(2);
     }
 
