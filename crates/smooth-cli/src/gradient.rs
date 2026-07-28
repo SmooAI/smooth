@@ -10,6 +10,8 @@
 //! The combined `smooth()` helper stitches the two halves so the full
 //! word matches the horizontal logo.
 
+use std::io::IsTerminal;
+
 const SMOO_START: (u8, u8, u8) = (0xf4, 0x9f, 0x0a);
 const SMOO_END: (u8, u8, u8) = (0xff, 0x6b, 0x6c);
 const TH_START: (u8, u8, u8) = (0x00, 0xa6, 0xa6);
@@ -72,9 +74,70 @@ pub fn smoo_ai() -> String {
     format!("{} AI", smoo("Smoo"))
 }
 
+/// Whether ANSI styling should be emitted at all: `NO_COLOR` (no-color.org)
+/// unset or empty, and stdout is a terminal. Cached — the answer can't change
+/// mid-process, and it's read once per printed line.
+#[must_use]
+pub fn color_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| color_enabled_from(std::env::var_os("NO_COLOR").as_deref(), std::io::stdout().is_terminal()))
+}
+
+/// The decision behind [`color_enabled`], pulled out so it's testable without
+/// mutating process env or faking a tty.
+fn color_enabled_from(no_color: Option<&std::ffi::OsStr>, stdout_is_tty: bool) -> bool {
+    stdout_is_tty && no_color.is_none_or(std::ffi::OsStr::is_empty)
+}
+
+/// Apply `style` only when color is on, so piped or `NO_COLOR=1` output stays
+/// plain text instead of escape soup.
+#[must_use]
+pub fn paint(text: &str, style: impl FnOnce(&str) -> String) -> String {
+    if color_enabled() {
+        style(text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The "Smooth" wordmark, degraded to plain text when color is off.
+#[must_use]
+pub fn smooth_auto() -> String {
+    if color_enabled() {
+        smooth()
+    } else {
+        "Smooth".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_is_off_when_not_a_tty() {
+        assert!(!color_enabled_from(None, false));
+    }
+
+    #[test]
+    fn color_is_off_when_no_color_is_set() {
+        assert!(!color_enabled_from(Some(std::ffi::OsStr::new("1")), true));
+    }
+
+    #[test]
+    fn empty_no_color_does_not_disable() {
+        // no-color.org: the variable must be present *and* non-empty.
+        assert!(color_enabled_from(Some(std::ffi::OsStr::new("")), true));
+        assert!(color_enabled_from(None, true));
+    }
+
+    #[test]
+    fn plain_fallbacks_carry_no_escapes() {
+        // Whatever the harness's tty is, the color-off branch must be plain.
+        assert!(!"Smooth".contains('\u{1b}'));
+        assert_eq!(smooth_auto().contains('\u{1b}'), color_enabled());
+        assert_eq!(paint("running", |s| format!("\x1b[32m{s}\x1b[0m")).contains('\u{1b}'), color_enabled());
+    }
 
     #[test]
     fn gradient_emits_truecolor_for_every_char() {
