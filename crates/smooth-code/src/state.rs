@@ -311,7 +311,14 @@ pub struct AppState {
     pub scroll_offset: usize,
     /// Whether the user has manually scrolled up.
     pub user_scrolled: bool,
-    /// Display name of the current LLM model.
+    /// The model we know this session runs on, or empty when we don't know.
+    ///
+    /// Only ever set from something that reaches the daemon: `--model`,
+    /// `/model <x>`, or the model picker writing the Default slot. Empty is the
+    /// honest default — the daemon picks its own model and reports it on no
+    /// frame, so anything else here is a guess. Pearl th-d49538: this used to
+    /// default to `"claude-sonnet-4"`, which was never updated, was never what
+    /// ran, and got written into every saved session's JSON.
     pub model_name: String,
     /// User-supplied model override from `th code --model <X>`. When
     /// `Some(_)`, every `TaskStart` dispatched to Big Smooth carries
@@ -411,7 +418,7 @@ impl AppState {
             sidebar_visible: false,
             scroll_offset: 0,
             user_scrolled: false,
-            model_name: "claude-sonnet-4".to_string(),
+            model_name: String::new(),
             model_override: None,
             agent_name: "fixer".to_string(),
             agent_pinned: false,
@@ -490,6 +497,33 @@ impl AppState {
         self.total_tokens = 0;
         self.total_cost_usd = 0.0;
         self.thinking = false;
+    }
+
+    /// What to call the model in the UI — the whole truth and nothing but.
+    ///
+    /// Precedence, most authoritative first:
+    /// 1. the routing alias (and resolved upstream, when known) the *runner*
+    ///    reported for the phase in flight — that came from the daemon;
+    /// 2. the model id we ourselves put on the wire (`--model` / `/model`),
+    ///    which the daemon applies verbatim as this turn's model id;
+    /// 3. `unknown`.
+    ///
+    /// Pearl th-d49538: case 3 used to synthesize `smooth-{slot}` from a local
+    /// cast table, so the status bar confidently named a model that had nothing
+    /// to do with what the daemon was actually running. A guess dressed as a
+    /// fact is worse than an admission of ignorance — the agent reads this bar.
+    #[must_use]
+    pub fn model_label(&self) -> String {
+        if let Some(alias) = self.current_phase_alias.as_deref().filter(|s| !s.is_empty()) {
+            return match self.current_phase_upstream.as_deref() {
+                Some(upstream) if !upstream.is_empty() => format!("{alias} → {upstream}"),
+                _ => alias.to_string(),
+            };
+        }
+        match self.model_name.trim() {
+            "" => "unknown".to_string(),
+            name => name.to_string(),
+        }
     }
 
     /// Add a message to the conversation history.
@@ -740,6 +774,58 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let path = dir.path().to_path_buf();
         (dir, path)
+    }
+
+    /// **The th-d49538 regression test (model name).**
+    ///
+    /// A fresh session has been told nothing about the model: no `--model`, no
+    /// `/model`, no phase report from the daemon. The label must admit that.
+    /// It used to synthesize `smooth-{slot}` from the local cast table — three
+    /// different wrong names were on screen at once (status bar, session JSON,
+    /// daemon log), and the one the user saw matched nothing that ran.
+    #[test]
+    fn unknown_model_is_admitted_not_synthesized() {
+        let (_dir, path) = test_dir();
+        let s = AppState::new(path);
+        assert_eq!(s.agent_name, "fixer", "the role that used to be laundered into a model name");
+        assert_eq!(s.model_label(), "unknown");
+        assert!(s.model_name.is_empty(), "an unknown model must not be persisted as a fact");
+    }
+
+    /// What we put on the wire is something we genuinely know: the daemon
+    /// applies a `send_message` model verbatim.
+    #[test]
+    fn requested_model_is_the_label() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.model_name = "deepseek-v4-flash".to_string();
+        assert_eq!(s.model_label(), "deepseek-v4-flash");
+    }
+
+    /// A phase report from the runner outranks our own request — it names the
+    /// alias the daemon routed through and the model it resolved to.
+    #[test]
+    fn runner_reported_routing_outranks_the_local_guess() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.model_name = "deepseek-v4-flash".to_string();
+        s.current_phase_alias = Some("smooth-reasoning".to_string());
+        assert_eq!(s.model_label(), "smooth-reasoning");
+        s.current_phase_upstream = Some("claude-opus-4-5".to_string());
+        assert_eq!(s.model_label(), "smooth-reasoning → claude-opus-4-5");
+    }
+
+    /// Blank strings are not names. An empty alias/upstream must fall through
+    /// rather than render `" → "` or an empty model slot.
+    #[test]
+    fn blank_routing_fields_fall_through() {
+        let (_dir, path) = test_dir();
+        let mut s = AppState::new(path);
+        s.current_phase_alias = Some(String::new());
+        s.current_phase_upstream = Some(String::new());
+        assert_eq!(s.model_label(), "unknown");
+        s.model_name = "  ".to_string();
+        assert_eq!(s.model_label(), "unknown");
     }
 
     /// Newlines used to be rewritten to spaces on the way in, because the box

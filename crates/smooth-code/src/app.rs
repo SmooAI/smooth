@@ -231,6 +231,9 @@ pub async fn run_with_session(
     // --model) actually get the requested model instead of silently
     // falling back to smooth-coding's default alias.
     if let Some(m) = model {
+        // Keep the displayed name in lockstep with the value actually put on
+        // the wire — the status bar has no other way to know (th-d49538).
+        initial_state.model_name.clone_from(&m);
         initial_state.model_override = Some(m);
     }
 
@@ -653,6 +656,19 @@ fn save_current_session(state: &AppState) {
     }
 }
 
+/// How many milliseconds a finished tool call took.
+///
+/// The canonical `toolResult` frame carries no timing — the engine measures a
+/// duration but the server doesn't forward it — so the honest number is the one
+/// the event loop measured itself, from the `Instant` captured when the
+/// matching `ToolCallStart` arrived. A server-sent value wins if one ever shows
+/// up. Pearl th-d49538: that `Instant` used to be captured and then dropped on
+/// the floor, so every tool in the transcript rendered `0.0s` and the agent
+/// read its own timings as evidence of hangs that never happened.
+fn resolve_duration_ms(from_server: Option<u64>, started: std::time::Instant) -> u64 {
+    from_server.unwrap_or_else(|| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Map an `AgentEvent` to the appropriate state mutation.
 fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     match event {
@@ -662,8 +678,19 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::TokenDelta { content } => {
             state.append_stream_content(&content);
         }
-        AgentEvent::Completed { cost_usd, iterations, .. } => {
+        AgentEvent::Completed {
+            cost_usd,
+            iterations,
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } => {
             state.total_cost_usd += cost_usd;
+            // th-d49538: the status bar used to say `0 tok` forever because
+            // nothing ever added to this counter. Saturating: the display is
+            // not worth a panic on an absurd count.
+            let turn_tokens = u32::try_from(prompt_tokens.saturating_add(completion_tokens)).unwrap_or(u32::MAX);
+            state.total_tokens = state.total_tokens.saturating_add(turn_tokens);
             // Pearl th-a08fa3: write a JSON cost sidecar when
             // SMOOTH_BENCH_COST_SIDECAR is set. The bench needs a
             // deterministic cost signal that doesn't depend on the
@@ -1456,15 +1483,18 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 duration_ms,
                 ..
             } => {
+                let mut resolved = duration_ms;
                 if let Some(q) = pending.get_mut(&tool_name) {
-                    if let Some((id, _, _)) = q.pop_front() {
+                    if let Some((id, started, _)) = q.pop_front() {
+                        let measured = resolve_duration_ms(duration_ms, started);
+                        resolved = Some(measured);
                         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                         for msg in &mut s.messages {
                             for tc in &mut msg.tool_calls {
                                 if tc.id == id {
                                     tc.output = Some(result.clone());
                                     tc.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
-                                    tc.duration_ms = Some(duration_ms);
+                                    tc.duration_ms = Some(measured);
                                 }
                             }
                         }
@@ -1475,16 +1505,17 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                     tool_name,
                     is_error,
                     result,
-                    duration_ms,
+                    duration_ms: resolved.unwrap_or_default(),
                 })
             }
-            ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
+            ServerEvent::TaskComplete { iterations, usage, .. } => {
+                let usage = usage.unwrap_or_default();
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: "task".into(),
                     iterations,
-                    cost_usd,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
+                    cost_usd: usage.cost_usd,
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
                     cached_tokens: 0,
                 });
                 break;
@@ -1656,5 +1687,43 @@ mod bench_cost_sidecar_tests {
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["cost_usd"].as_f64(), Some(0.25));
         assert_eq!(v["iterations"].as_u64(), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod duration_truth_tests {
+    use super::resolve_duration_ms;
+    use std::time::{Duration, Instant};
+
+    /// **The th-d49538 regression test.**
+    ///
+    /// The event loop captures an `Instant` when a tool starts and used to
+    /// throw it away on completion, taking the wire's hardcoded `0` instead —
+    /// so every tool call in the transcript rendered `0.0s`. With no timing
+    /// from the server, the measured elapsed time is the only truth available
+    /// and must be what surfaces.
+    #[test]
+    fn falls_back_to_measured_elapsed_when_the_server_sends_no_timing() {
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let ms = resolve_duration_ms(None, started);
+        assert!(ms >= 20, "expected the measured elapsed time, got {ms}");
+        assert!(ms < 60_000, "measurement should be sane, got {ms}");
+    }
+
+    /// A server-reported duration is authoritative — it measures the tool
+    /// itself rather than the round trip.
+    #[test]
+    fn server_reported_timing_wins() {
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(resolve_duration_ms(Some(7), started), 7);
+    }
+
+    /// A tool that genuinely finished within the same millisecond reports 0 —
+    /// that's a measurement, not the old hardcoded placeholder.
+    #[test]
+    fn instant_tool_reports_zero_from_measurement() {
+        assert_eq!(resolve_duration_ms(None, Instant::now()), 0);
     }
 }
