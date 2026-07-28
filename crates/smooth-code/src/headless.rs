@@ -120,8 +120,8 @@ pub async fn run_headless_capture(
                     success: !is_error,
                 });
             }
-            ServerEvent::TaskComplete { cost_usd, .. } => {
-                cost = cost_usd;
+            ServerEvent::TaskComplete { usage, .. } => {
+                cost = usage.map_or(0.0, |u| u.cost_usd);
                 break;
             }
             ServerEvent::TaskError { message, .. } => {
@@ -183,9 +183,18 @@ async fn run_headless_client(
                     success: !is_error,
                 });
             }
-            ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
-                cost = cost_usd;
-                eprintln!("[done] {iterations} iterations, ${cost_usd:.4}");
+            ServerEvent::TaskComplete { iterations, usage, .. } => {
+                // Report only what the server told us: `usage` is absent on
+                // turns the engine didn't account for, and the canonical
+                // protocol carries no iteration count at all (th-d49538).
+                cost = usage.map_or(0.0, |u| u.cost_usd);
+                let tally = usage.map_or_else(|| " (no usage reported)".to_string(), |u| format!(" ${:.4}", u.cost_usd));
+                let iters = if iterations == 0 {
+                    String::new()
+                } else {
+                    format!(" {iterations} iterations,")
+                };
+                eprintln!("[done]{iters}{tally}");
                 break;
             }
             ServerEvent::TaskError { message, .. } => {

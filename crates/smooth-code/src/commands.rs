@@ -212,12 +212,13 @@ fn cmd_model(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
         state.model_picker.activate();
         Ok(CommandOutput::None)
     } else {
-        let old = state.model_name.clone();
+        let old = state.model_label();
         state.model_name = args.to_string();
-        Ok(CommandOutput::Message(format!(
-            "Model switched: {old} -> {} (current: {})",
-            state.model_name, state.model_name
-        )))
+        // th-d49538: setting only the display name renamed the label without
+        // changing anything about the turn. `model_override` is the field that
+        // rides `send_message`, so a switch has to set both or the bar lies.
+        state.model_override = Some(args.to_string());
+        Ok(CommandOutput::Message(format!("Model switched: {old} -> {}", state.model_label())))
     }
 }
 
@@ -258,7 +259,7 @@ fn cmd_quit(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
 fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let status = format!(
         "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}",
-        state.model_name,
+        state.model_label(),
         state.total_tokens,
         state.messages.len(),
         state.session_id,
