@@ -99,6 +99,68 @@ pub async fn fresh_user_credentials_from(http: &reqwest::Client, store: &Credent
     fresh_credentials_from(http, store, "not logged in as a user — run `th auth login` first").await
 }
 
+/// `th auth refresh` — freshen the stored session **now**, headlessly.
+/// Default targets the user session; `--m2m` targets the service-account
+/// session. Whichever store is chosen, [`fresh_credentials_from`] inspects the
+/// loaded credentials and picks the right grant (Supabase exchange vs.
+/// `client_credentials` re-mint) — this command adds no refresh logic of its
+/// own, it just exposes the existing choke point (th-1d3362).
+///
+/// # Errors
+/// No session on disk, an expired session with no refresh material, or the
+/// grant itself failing — each already carries a `th auth login` hint.
+pub async fn cmd_refresh(m2m: bool) -> Result<()> {
+    let http = reqwest::Client::new();
+    let (store, hint, kind) = if m2m {
+        (
+            CredentialsStore::default_m2m().context("locate the M2M credentials store")?,
+            "no M2M session — run `th auth login --m2m` first",
+            "M2M",
+        )
+    } else {
+        (
+            CredentialsStore::default_user().context("locate the user credentials store")?,
+            "not logged in as a user — run `th auth login` first",
+            "user",
+        )
+    };
+    refresh_store(&http, &store, hint, kind).await.map(|_| ())
+}
+
+/// The refresh + user-facing reporting, against an explicit store (testable —
+/// `cmd_refresh` only resolves which store the `--m2m` flag selects). Returns
+/// the [`Refresh`] action taken so tests can assert refreshed-vs-already-fresh
+/// without scraping stdout.
+///
+/// # Errors
+/// No session on disk (worded by `hint`), an expired session with no refresh
+/// material, or the grant itself failing.
+async fn refresh_store(http: &reqwest::Client, store: &CredentialsStore, hint: &str, kind: &str) -> Result<Refresh> {
+    use owo_colors::OwoColorize;
+
+    // Peek before acting so we can report refreshed-vs-already-fresh honestly.
+    let before = store.load().context("load session")?.ok_or_else(|| anyhow::anyhow!("{hint}"))?;
+    let action = decide(&before)?;
+    if action == Refresh::NotNeeded {
+        println!("{} {kind} session already fresh", "✓".green().bold());
+        if let Some(exp) = before.expires_at {
+            println!("  {} expires {}", "ℹ".dimmed(), exp.format("%Y-%m-%d %H:%M UTC").to_string().dimmed());
+        }
+        return Ok(action);
+    }
+
+    let fresh = fresh_credentials_from(http, store, hint).await?;
+    println!("{} {kind} session refreshed", "✓".green().bold());
+    if let Some(exp) = fresh.expires_at {
+        println!(
+            "  {} access token expires {}",
+            "ℹ".dimmed(),
+            exp.format("%Y-%m-%d %H:%M UTC").to_string().dimmed()
+        );
+    }
+    Ok(action)
+}
+
 /// Exchange the stored Supabase `refresh_token` for a fresh
 /// `access_token` + new `refresh_token`. Preserves the user-display
 /// fields (`user`, `active_org_id`) from the previous credentials.
@@ -315,5 +377,52 @@ mod fresh_user_credentials_tests {
         let result = fresh_user_credentials_from(&http(), &store).await;
         restore("SMOOAI_SUPABASE_URL", prev);
         assert!(format!("{:#}", result.unwrap_err()).contains("th auth login"));
+    }
+
+    // ── refresh_store: the `th auth refresh` command's testable core ──
+
+    #[tokio::test]
+    async fn refresh_store_reports_already_fresh_without_touching_the_network() {
+        // A session with an hour of runway needs no grant — no stub, no env.
+        let dir = tempfile::tempdir().unwrap();
+        let store = write_creds(dir.path(), Some(Utc::now() + chrono::Duration::hours(1)), Some("rtok"));
+        let action = refresh_store(&http(), &store, "hint", "user").await.unwrap();
+        assert_eq!(action, Refresh::NotNeeded);
+    }
+
+    #[tokio::test]
+    async fn refresh_store_missing_session_errors_with_the_login_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        let err = refresh_store(&http(), &store, "no M2M session — run `th auth login --m2m` first", "M2M")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("th auth login --m2m"));
+    }
+
+    #[tokio::test]
+    async fn refresh_store_re_mints_an_expired_m2m_session_headlessly() {
+        // The exact capability the command exists to expose: an expired M2M
+        // session re-mints via `client_credentials` with no browser, and the
+        // fresh token lands on disk.
+        let _guard = ENV_LOCK.lock().await;
+        let prev = std::env::var("SMOOAI_AUTH_URL").ok();
+        std::env::set_var(
+            "SMOOAI_AUTH_URL",
+            stub_supabase(r#"{"access_token":"fresh-m2m-jwt","token_type":"Bearer","expires_in":3600}"#),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        store
+            .save(&creds(CredentialKind::M2m, Some(Utc::now() - chrono::Duration::hours(1)), None))
+            .unwrap();
+
+        let action = refresh_store(&http(), &store, "hint", "M2M").await;
+        restore("SMOOAI_AUTH_URL", prev);
+
+        assert_eq!(action.unwrap(), Refresh::M2m);
+        let on_disk = store.load().unwrap().unwrap();
+        assert_eq!(on_disk.access_token, "fresh-m2m-jwt");
+        assert!(!on_disk.is_expired(), "re-minted token must have runway");
     }
 }

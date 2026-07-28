@@ -105,6 +105,17 @@ pub enum AuthCommands {
         #[arg(long)]
         all: bool,
     },
+    /// Refresh the stored session now, headlessly. Defaults to the user
+    /// session; pass `--m2m` to refresh the service-account session. No-op
+    /// (and says so) when the token still has runway. Same silent-refresh
+    /// path every `th api *` call uses — user sessions exchange the Supabase
+    /// refresh token, M2M re-mints via `client_credentials`.
+    Refresh {
+        /// Refresh the M2M session at ~/.smooth/auth/smooai.json instead of
+        /// the user session.
+        #[arg(long)]
+        m2m: bool,
+    },
     /// Show currently-logged-in sessions (user + M2M).
     Whoami,
     /// Manage named auth profiles. Each profile bundles a user + M2M
@@ -164,6 +175,7 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
             }
         }
         AuthCommands::Logout { m2m, all } => logout::cmd_logout(m2m, all),
+        AuthCommands::Refresh { m2m } => refresh::cmd_refresh(m2m).await,
         AuthCommands::Whoami => whoami::cmd_whoami().await,
         AuthCommands::Profile { cmd } => profile::dispatch(cmd),
     }
