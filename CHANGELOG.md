@@ -1,5 +1,62 @@
 # @smooai/smooth
 
+## 0.26.5
+
+### Patch Changes
+
+- 8ea21d1: Fix `th code` dying with "Error: unknown error" on any turn longer than 15 seconds.
+
+  The keep-alive heartbeat serialized `ClientEvent::Ping` directly, putting the
+  bespoke `{"type":"Ping"}` on a wire that speaks the canonical operator protocol.
+  The server rejected it every 15s with `VALIDATION_ERROR / missing 'action' field`,
+  and that error tore down whatever turn was in flight — while the daemon went on
+  to finish the work and persist an answer the user never saw.
+
+  Three fixes:
+
+  - The heartbeat now builds its frame with `to_canonical_frame`, like every other
+    outbound message. The loop moved into a testable `heartbeat_loop` function, so
+    the regression test drives the real path instead of the helper that was always
+    correct.
+  - New shared `smooth_cast::wire::error_message`, used by `th code`,
+    `th api smooth-operator`, and the bench driver. All three read the `error` frame
+    with `as_str()` on what is actually an object, so every real server complaint
+    surfaced as the literal string "unknown error"; the code is now included in the
+    message. The bench's unit test asserted a frame shape the server never emits, so
+    it passed while the driver was wrong — corrected to the real shape.
+  - An error frame only ends the turn it names. Unattributed protocol errors render
+    as an inline warning and let the turn keep streaming.
+
+- 580017e: The message composer now grows with what you type, in both `th code` and Big Smooth.
+
+  **`th code`** — the input was one clipped row: anything past the box width was
+  invisible, `\n` was rewritten to a space on typing and paste, and the cursor was
+  placed by adding a raw _byte_ offset to the box origin, so it drifted on any
+  multi-byte character. It now wraps, grows to six rows, and scrolls beyond that.
+
+  - New `composer` module holds the wrap arithmetic — rows, cursor row/column, and
+    scroll clamping — so the renderer and the height calculation can't disagree
+    about where a row ends. Pure and unit-tested, including a property-style check
+    that every wrapped row is a valid `char` boundary at every width.
+  - Multi-line paste keeps its structure. Line endings are normalized over the
+    whole pasted string because terminals disagree about the separator (tmux sends
+    bare `\r`, Unix `\n`, Windows `\r\n`) and CRLF can't be collapsed one `char` at
+    a time.
+  - Mouse capture is enabled **only while the draft is taller than the box**, and
+    released the moment it fits again. The TUI keeps finalized chat in the
+    terminal's own scrollback, so holding capture for the whole session would cost
+    native wheel-scroll and drag-select permanently; scoping it to "there's a long
+    draft open" keeps the default interaction intact. It is also released
+    unconditionally on exit.
+  - Once you scroll by hand the view stays put until you type again, instead of
+    snapping back to the cursor every frame.
+  - The box borrows rows from the streaming preview, which is clamped so at least
+    one preview row survives — a long draft can't hide the answer you're replying to.
+
+  **Big Smooth** — the composer had `max-h-40` but `rows={1}` pinned it to one
+  line, so the cap was unreachable. It now uses CSS `field-sizing-content` (with a
+  JS fallback for browsers without it) to grow to that cap and scroll past it.
+
 ## 0.26.4
 
 ### Patch Changes
