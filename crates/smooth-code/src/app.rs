@@ -1214,7 +1214,7 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     // 2. Check providers
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
     if providers_path.as_ref().is_none_or(|p| !p.exists()) {
-        warnings.push("No LLM providers configured. Run: /model to select one, or th auth login <provider>".into());
+        warnings.push("No LLM providers configured. Run: /model to select one, or th model login <provider>".into());
     }
 
     // 3. Check database
