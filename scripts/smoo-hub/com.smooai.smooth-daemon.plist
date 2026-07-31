@@ -26,9 +26,12 @@
     <key>Label</key>
     <string>com.smooai.smooth-daemon</string>
 
+    <!-- The daemon now runs from the signed Big Smooth.app bundle so its
+         Info.plist usage strings unlock native TCC prompts (removable-volume/
+         FDA, Calendar, …). deploy.sh installs the bundle to ~/Applications. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/brentrager/smooth-daemon</string>
+        <string>/Users/brentrager/Applications/Big Smooth.app/Contents/MacOS/smooth-daemon</string>
         <string>run</string>
     </array>
 

@@ -1,10 +1,14 @@
 #!/bin/bash
-# Build, code-sign, and deploy Big Smooth (smooth-daemon + th) to smoo-hub.
-# (pearl th-56ee9f)
+# Build, code-sign, and deploy Big Smooth to smoo-hub.
+# (pearls th-56ee9f, th-f4baa5)
 #
 # Run this on the BUILD machine (your laptop), NOT on smoo-hub — it builds the
-# release binaries locally, signs them with a STABLE team identity, ships them
-# over SSH, and restarts the launchd agent on the hub.
+# release binaries locally, packages the daemon as a STABLY-signed
+# `Big Smooth.app` bundle (+ signs `th`), ships them over SSH, installs the app
+# to ~/Applications, and restarts the launchd agent on the hub.
+#
+# The bundle (vs a bare binary) is what lets macOS show native "Big Smooth wants
+# to access…" TCC prompts — see scripts/macos/make-app-bundle.sh + Info.plist.
 #
 # Why the signing matters (learned the hard way, 2026-07-30):
 #   * Ad-hoc signed binaries (Rust's default on Apple Silicon) have a
@@ -59,15 +63,17 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 LABEL="com.smooai.smooth-daemon"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -1)"
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
 
-say "Target host: ${HOST}   Signing identity: ${SIGN_IDENTITY}"
+say "Target host: ${HOST}   Signing identity: ${SIGN_IDENTITY}   Version: ${VERSION:-?}"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "  would: cargo build --release -p smooai-smooth-cli -p smooai-smooth-daemon"
-    echo "  would: codesign smooth-daemon (${DAEMON_ID}) + th (${TH_ID})"
-    echo "  would: scp both to ${HOST}, back up + swap, bootout/bootstrap, health-check"
+    echo "  would: assemble + sign 'Big Smooth.app' (${DAEMON_ID}) via scripts/macos/make-app-bundle.sh"
+    echo "  would: codesign th (${TH_ID})"
+    echo "  would: ship the .app to ${HOST}:~/Applications + th, install plist, bootout/bootstrap, health-check"
     exit 0
 fi
 
@@ -88,20 +94,24 @@ for b in "$DAEMON_BIN" "$TH_BIN"; do
     [ -x "$b" ] || { echo "error: build did not produce $b" >&2; exit 1; }
 done
 
-say "Signing with stable identity + fixed identifiers"
-cp "$DAEMON_BIN" "$STAGE/smooth-daemon"
-cp "$TH_BIN" "$STAGE/th"
+say "Assembling + signing 'Big Smooth.app'"
+# The daemon ships as a signed .app bundle (not a bare binary) so its Info.plist
+# usage strings unlock native TCC prompts (removable-volume/FDA, Calendar, …).
 # First run prompts for keychain access — click "Always Allow".
-codesign --force --sign "$SIGN_IDENTITY" --identifier "$DAEMON_ID" "$STAGE/smooth-daemon"
+APP="$(SIGN_IDENTITY="$SIGN_IDENTITY" "$REPO_ROOT/scripts/macos/make-app-bundle.sh" "$DAEMON_BIN" "$STAGE" "$VERSION")"
+echo "  bundle DR: $(codesign -d -r- "$APP" 2>&1 | grep -i designated)"
+# th stays a plain CLI (invoked from the shell; its FDA is secondary).
+cp "$TH_BIN" "$STAGE/th"
 codesign --force --sign "$SIGN_IDENTITY" --identifier "$TH_ID" "$STAGE/th"
-codesign --verify --strict "$STAGE/smooth-daemon"
 codesign --verify --strict "$STAGE/th"
-echo "  daemon DR: $(codesign -d -r- "$STAGE/smooth-daemon" 2>&1 | grep -i designated)"
 
 say "Shipping to ${HOST}"
-# Relative remote paths are resolved against the remote home dir.
-scp -q "$STAGE/smooth-daemon" "${HOST}:smooth-daemon.new"
+# Tar the bundle (preserves the .app tree over one SSH stream); relative remote
+# paths resolve against the remote home dir.
+( cd "$STAGE" && tar czf - "Big Smooth.app" ) | ssh "$HOST" 'cat > /tmp/big-smooth-app.tgz'
 scp -q "$STAGE/th" "${HOST}:.cargo/bin/th.new"
+# Ship the launchd plist too — its Program path now points at the bundle exe.
+scp -q "$REPO_ROOT/scripts/smoo-hub/com.smooai.smooth-daemon.plist" "${HOST}:Library/LaunchAgents/${LABEL}.plist"
 
 say "Swapping + restarting the daemon on ${HOST}"
 # SC2087: heredoc body intentionally runs remotely (quoted 'REMOTE').
@@ -111,10 +121,11 @@ ssh "$HOST" "LABEL='$LABEL' bash -s" <<'REMOTE'
 set -euo pipefail
 UID_NUM=$(id -u)
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+APPDIR="$HOME/Applications"; mkdir -p "$APPDIR"
 # Timestamped backups so a bad deploy is one mv away from rollback.
 ts=$(date +%Y%m%d-%H%M%S)
-[ -f "$HOME/smooth-daemon" ] && mv "$HOME/smooth-daemon" "$HOME/smooth-daemon.bak-$ts"
-mv "$HOME/smooth-daemon.new" "$HOME/smooth-daemon" && chmod +x "$HOME/smooth-daemon"
+[ -d "$APPDIR/Big Smooth.app" ] && mv "$APPDIR/Big Smooth.app" "$APPDIR/Big Smooth.app.bak-$ts"
+tar xzf /tmp/big-smooth-app.tgz -C "$APPDIR" && rm -f /tmp/big-smooth-app.tgz
 [ -f "$HOME/.cargo/bin/th" ] && mv "$HOME/.cargo/bin/th" "$HOME/.cargo/bin/th.bak-$ts"
 mv "$HOME/.cargo/bin/th.new" "$HOME/.cargo/bin/th" && chmod +x "$HOME/.cargo/bin/th"
 # The daemon shells out to `th`, but its launchd PATH (/opt/homebrew/bin:
@@ -124,7 +135,7 @@ mv "$HOME/.cargo/bin/th.new" "$HOME/.cargo/bin/th" && chmod +x "$HOME/.cargo/bin
 for d in /opt/homebrew/bin /usr/local/bin; do
     if [ -d "$d" ]; then ln -sf "$HOME/.cargo/bin/th" "$d/th"; echo "  linked $d/th -> ~/.cargo/bin/th"; break; fi
 done
-echo "  installed: $(codesign -dv "$HOME/smooth-daemon" 2>&1 | grep -i TeamIdentifier)"
+echo "  installed: $(codesign -dv "$APPDIR/Big Smooth.app" 2>&1 | grep -i TeamIdentifier)"
 # Full bootout/bootstrap re-derives the LWCR from the (now stable) identity.
 launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
 sleep 1; pkill -f "smooth-daemon run" 2>/dev/null || true; sleep 1
@@ -141,4 +152,4 @@ else
 fi
 REMOTE
 
-say "Deployed. If Full Disk Access isn't granted yet, run \`th doctor --fix-fda\` on ${HOST}'s console (one time; it persists now)."
+say "Deployed 'Big Smooth.app'. On first workspace/Calendar access it now shows a native 'Big Smooth wants to access…' prompt at ${HOST}'s console — click Allow (one time; persists via the stable signature). \`th doctor --fix-fda\` still works as a manual fallback."

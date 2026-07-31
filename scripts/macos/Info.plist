@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for Big Smooth.app (pearl th-f4baa5).
+
+  This turns the bare `smooth-daemon` binary into a proper macOS app bundle so it
+  can participate in the OS privacy model: a bundle can declare usage-description
+  strings, which is what lets macOS show a native "Big Smooth wants to access…"
+  prompt (a bare CLI just gets silent EPERM). It's the prerequisite for Full Disk
+  Access working cleanly AND for EventKit/Calendar, Contacts, Reminders, etc.
+
+  `__VERSION__` is substituted by scripts/macos/make-app-bundle.sh.
+  CFBundleIdentifier is the STABLE TCC key — never change it, or grants reset.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Big Smooth</string>
+    <key>CFBundleDisplayName</key>
+    <string>Big Smooth</string>
+    <key>CFBundleIdentifier</key>
+    <string>ai.smoo.smooth-daemon</string>
+    <key>CFBundleExecutable</key>
+    <string>smooth-daemon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© Smoo LLC</string>
+
+    <!-- Background agent: no Dock icon. Its UI surfaces are the web app and
+         (Phase 2, th-f7cb98) a menu-bar item. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <!-- Usage-description strings = the whole point of the bundle. Each one lets
+         Big Smooth trigger the matching native TCC prompt instead of a silent
+         denial. Add more as tools that need them land (Contacts, Reminders, …). -->
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Big Smooth works in a workspace that may live on an external volume.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Big Smooth reads and edits your calendar when you ask it to.</string>
+</dict>
+</plist>
