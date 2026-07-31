@@ -42,32 +42,41 @@ uses the same bootout → cp → bootstrap → enable → kickstart flow.
 ## Deploying a new Big Smooth build — `deploy.sh`
 
 `install-smooth-daemon.sh` installs the launchd *agent*; it does not build or
-ship the *binary*. `deploy.sh` does that end-to-end, from your **build machine**
+ship the app. `deploy.sh` does that end-to-end, from your **build machine**
 (laptop), not the hub:
 
 ```bash
-scripts/smoo-hub/deploy.sh                 # build → sign → ship → restart on smoo-hub
+scripts/smoo-hub/deploy.sh                 # build → package app → sign → ship → restart
 scripts/smoo-hub/deploy.sh --dry-run       # print the plan only
 SIGN_IDENTITY="Developer ID Application: Smoo LLC (DTX9733844)" \
   scripts/smoo-hub/deploy.sh               # upgrade to Developer ID later
 ```
 
-**Stable code-signing is the point (pearl th-56ee9f).** Ad-hoc signatures (Rust's
-default) have a cdhash-based designated requirement that changes every build, so
-each deploy trips `OS_REASON_CODESIGNING`, trips a stale launchd LWCR, and breaks
-any Full Disk Access grant. `deploy.sh` signs both binaries with a stable team
-identity + **fixed identifiers** (`ai.smoo.smooth-daemon`, `ai.smoo.th`) so the
-DR is constant across rebuilds — the FDA grant survives, and the churn stops.
-**Never change those identifiers** — the grant is keyed to them.
+**The daemon ships as `Big Smooth.app`, not a bare binary (pearl th-f4baa5).**
+A bare CLI can't declare Info.plist usage strings, so it can't trigger native TCC
+prompts (silent EPERM) or request Calendar/EventKit at all. `deploy.sh` packages
+the daemon with `scripts/macos/make-app-bundle.sh` (+ `scripts/macos/Info.plist`)
+and installs it to `~/Applications/Big Smooth.app`, so on first workspace/Calendar
+access macOS shows a **"Big Smooth wants to access…"** prompt — click Allow. That
+same bundle builder is generic and reusable by a future user-facing installer.
+
+**Stable code-signing is the other half (pearl th-56ee9f).** Ad-hoc signatures
+(Rust's default) have a cdhash-based designated requirement that changes every
+build, so each deploy would trip `OS_REASON_CODESIGNING`, trip a stale launchd
+LWCR, and break any granted permission. `deploy.sh` signs the **bundle** and `th`
+with a stable team identity + **fixed identifier** `ai.smoo.smooth-daemon`
+(`ai.smoo.th` for th), so the DR is constant across rebuilds — grants survive and
+the churn stops. **Never change those identifiers** — grants are keyed to them.
+(A grant made to the earlier bare binary carries over: same identifier + cert =
+same DR.)
 
 **One-time human steps** (can't be scripted):
 
 - *Build machine:* the first `codesign` pops a keychain prompt to use the private
   key — click **Always Allow** once; future signs are headless.
-- *Hub:* the workspace is on an external volume (`/Volumes/smoo-ext`), which macOS
-  TCC-gates. Grant Full Disk Access to `~/smooth-daemon` + `~/.cargo/bin/th` once
-  via `th doctor --fix-fda` at the hub's console. Thanks to the stable signature
-  it then persists across every future `deploy.sh`.
+- *Hub:* on first access Big Smooth prompts for the workspace's external volume —
+  click **Allow** at the console. `th doctor --fix-fda` remains a manual fallback.
+  Thanks to the stable signature it persists across every future `deploy.sh`.
 
-`deploy.sh` keeps timestamped `*.bak-<ts>` copies of the previous binaries on the
-hub, so a bad deploy is one `mv` away from rollback.
+`deploy.sh` keeps a timestamped `Big Smooth.app.bak-<ts>` (and `th.bak-<ts>`) on
+the hub, so a bad deploy is one `mv` away from rollback.
