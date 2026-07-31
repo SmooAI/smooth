@@ -96,8 +96,9 @@ enum ScheduleCmd {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+// NOT `#[tokio::main]`: in menu-bar mode AppKit must own the main thread, so we
+// build the runtime explicitly (the same multi-thread shape the macro builds).
+fn main() -> ExitCode {
     init_tracing();
     // Pearl th-16b0ca: resolve the active auth profile and export
     // SMOOAI_USER_AUTH_FILE / SMOOAI_AUTH_FILE, exactly as `th` does at
@@ -108,23 +109,65 @@ async fn main() -> ExitCode {
     // to reads — the daemon looked logged in while `th` did not. `init` won't
     // clobber values already set, so inheriting from `th up` still wins.
     smooth_policy::auth_paths::init(None);
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            tracing::error!(error = %e, "smooth-daemon exited with error");
-            eprintln!("smooth-daemon: {e:#}");
-            ExitCode::FAILURE
+    let cmd = Cli::parse().cmd.unwrap_or(Cmd::Run);
+
+    // Menu-bar mode (macOS, opt-in via SMOOTH_MENUBAR) wraps ONLY the
+    // long-running server commands: the tokio server runs on a background
+    // thread while the AppKit run loop owns the main thread (pearl th-f7cb98).
+    // Everything else falls through to the unchanged headless path below.
+    #[cfg(target_os = "macos")]
+    if smooth_menubar::enabled() {
+        if let Some(addr) = server_addr(&cmd) {
+            let addr = match addr {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("smooth-daemon: {e:#}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let url = format!("http://{addr}/");
+            return smooth_menubar::run(url, async move { smooth_daemon::serve_local_flavor(addr).await });
         }
+    }
+
+    // Default headless path — the exact runtime shape `#[tokio::main]` builds.
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("smooth-daemon: failed to build tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    rt.block_on(async {
+        match run(cmd).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(error = %e, "smooth-daemon exited with error");
+                eprintln!("smooth-daemon: {e:#}");
+                ExitCode::FAILURE
+            }
+        }
+    })
+}
+
+/// The bind address for the long-running server commands (`Run`/`Operator`), or
+/// `None` for the one-shot subcommands (which never get a menu bar).
+#[cfg(target_os = "macos")]
+fn server_addr(cmd: &Cmd) -> Option<Result<SocketAddr>> {
+    match cmd {
+        Cmd::Run => Some(resolve_run_addr()),
+        Cmd::Operator { addr } => Some(addr.parse().with_context(|| format!("invalid --addr {addr:?}"))),
+        _ => None,
     }
 }
 
-async fn run() -> Result<()> {
+async fn run(cmd: Cmd) -> Result<()> {
     // The north star: `th daemon` IS the operator. Both the default (`Run`) and
     // the explicit `operator` subcommand run smooth-operator's local flavor
     // (canonical WS protocol + official widget), durable via the local sqlite
     // adapter, egress-gated when configured. No second agent loop — the bespoke
     // serve_persistent path is retired (EPIC th-c89c2a).
-    match Cli::parse().cmd.unwrap_or(Cmd::Run) {
+    match cmd {
         Cmd::Run => {
             // `SMOOTH_ADDR` lets a launchd/systemd unit (or smoo-hub, where :8787
             // is already taken) bind a free port without a CLI arg; default is the

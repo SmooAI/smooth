@@ -97,3 +97,8 @@ http-body-util.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os="macos")'.dependencies]
+# Menu bar lives in the quarantined crate (it needs `unsafe` for AppKit); the
+# daemon only depends on it on macOS. Pearl th-f7cb98.
+smooth-menubar = { workspace = true }
