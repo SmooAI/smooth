@@ -117,6 +117,13 @@ ts=$(date +%Y%m%d-%H%M%S)
 mv "$HOME/smooth-daemon.new" "$HOME/smooth-daemon" && chmod +x "$HOME/smooth-daemon"
 [ -f "$HOME/.cargo/bin/th" ] && mv "$HOME/.cargo/bin/th" "$HOME/.cargo/bin/th.bak-$ts"
 mv "$HOME/.cargo/bin/th.new" "$HOME/.cargo/bin/th" && chmod +x "$HOME/.cargo/bin/th"
+# The daemon shells out to `th`, but its launchd PATH (/opt/homebrew/bin:
+# /usr/local/bin:…) doesn't include ~/.cargo/bin. Symlink the deployed th onto
+# that PATH so the daemon (and the login shell) resolve THIS build, not a stale
+# brew/hand-installed copy. Symlink → target, so future deploys stay current.
+for d in /opt/homebrew/bin /usr/local/bin; do
+    if [ -d "$d" ]; then ln -sf "$HOME/.cargo/bin/th" "$d/th"; echo "  linked $d/th -> ~/.cargo/bin/th"; break; fi
+done
 echo "  installed: $(codesign -dv "$HOME/smooth-daemon" 2>&1 | grep -i TeamIdentifier)"
 # Full bootout/bootstrap re-derives the LWCR from the (now stable) identity.
 launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
