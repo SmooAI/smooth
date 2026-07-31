@@ -1,0 +1,29 @@
+[package]
+name = "smooai-smooth-menubar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Quarantined macOS menu-bar (AppKit/objc2) FFI for Big Smooth — the one crate that opts out of the workspace `unsafe_code = \"forbid\"` (pearl th-f7cb98)."
+
+[lib]
+name = "smooth_menubar"
+
+# QUARANTINE — this crate deliberately does NOT do `[lints] workspace = true`.
+# AppKit via objc2 fundamentally requires `unsafe`; isolating it here keeps
+# `unsafe_code = "forbid"` on every other crate in the workspace. Only this crate
+# may touch raw AppKit, and its whole surface is a few dozen auditable lines.
+[lints.rust]
+unsafe_code = "allow"
+unused_must_use = "deny"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os="macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
