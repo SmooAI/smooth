@@ -19,6 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use smooth_bench::agentic::{default_scenarios, parse_scenarios, run_agentic, AgenticOpts};
+use smooth_bench::convo::{default_convo_scenarios, gateway_from_providers_json, parse_convo_scenarios, run_convo, ConvoOpts};
 use smooth_bench::curated::CuratedList;
 use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter, WorkspaceBooter};
 use smooth_bench::sweep::{current_commit_sha, StdoutObserver, SweepConfig, SweepGate};
@@ -71,6 +72,75 @@ enum Commands {
     /// system" is a JSON state file in the mounted workspace.
     /// Pearl th-300d7d.
     Agentic(AgenticArgs),
+
+    /// Agentic CONVERSATION benchmark: an LLM plays a user across several
+    /// turns against a live Big Smooth, and an LLM judge scores the whole
+    /// thread — helpfulness, correctness, tool use, and consistency
+    /// across turns.
+    ///
+    /// This is the suite that catches what a single-turn bench can't:
+    /// contradictory answers, stale replies to a superseded question,
+    /// confident claims with no tool call behind them.
+    ///
+    /// Slow, networked, and it costs money — deliberately NOT part of
+    /// `cargo test`. Run it explicitly:
+    ///
+    ///     SMOOAI_GATEWAY_KEY=… cargo run -p smooai-smooth-bench -- convo
+    ///
+    /// Pearl th-f19853.
+    Convo(ConvoArgs),
+}
+
+#[derive(Parser, Debug)]
+struct ConvoArgs {
+    /// Target an already-running Big Smooth instead of spawning one
+    /// (e.g. `http://127.0.0.1:8788`).
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Auth token for `--url` (the daemon runs strict-auth). Defaults to
+    /// $SMOOTH_LOCAL_TOKEN.
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Model the spawned daemon runs under. Ignored with `--url` (that
+    /// daemon owns its own routing); still recorded in the results.
+    #[arg(long, default_value = "deepseek-v4-flash")]
+    model: String,
+
+    /// Model that plays the user.
+    #[arg(long, default_value = "deepseek-v4-flash")]
+    driver_model: String,
+
+    /// Model that grades the conversation.
+    #[arg(long, default_value = "deepseek-v4-flash")]
+    judge_model: String,
+
+    /// Scenario TOML to run instead of the embedded suite.
+    #[arg(long)]
+    scenarios: Option<PathBuf>,
+
+    /// Run only the scenario(s) with these ids. Repeatable.
+    #[arg(long = "only")]
+    only: Vec<String>,
+
+    /// Run each scenario N times — conversations are stochastic.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    trials: u32,
+
+    /// Per-TURN deadline in seconds. Deliberately short: a turn that
+    /// takes many minutes is itself the bug this suite hunts.
+    #[arg(long, default_value_t = 180)]
+    turn_timeout_s: u64,
+
+    /// Boot timeout in seconds when spawning the daemon.
+    #[arg(long, default_value_t = 300)]
+    boot_timeout_s: u64,
+
+    /// Write JSON-lines transcripts here; the table still prints to
+    /// stdout. Defaults to `<run dir>/transcripts.jsonl`.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -215,7 +285,87 @@ async fn main() -> Result<()> {
         }
         Commands::Score(args) => run_score(args).await,
         Commands::Agentic(args) => run_agentic_cmd(args).await,
+        Commands::Convo(args) => run_convo_cmd(args).await,
     }
+}
+
+async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
+    let mut scenarios = match &args.scenarios {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            parse_convo_scenarios(&text)?
+        }
+        None => default_convo_scenarios()?,
+    };
+    if !args.only.is_empty() {
+        scenarios.retain(|s| args.only.contains(&s.id));
+        anyhow::ensure!(!scenarios.is_empty(), "--only matched no scenarios (have: {:?})", args.only);
+    }
+
+    // The driver and the judge are LLM calls of our own — without a key
+    // there is no conversation to hold and nothing to grade. Fall back to
+    // ~/.smooth/providers.json, the same store the daemon reads, so the
+    // suite runs without exporting anything by hand.
+    let mut env = EngineEnv {
+        gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
+        gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
+        persona: std::env::var("SMOOTH_PERSONA").ok(),
+    };
+    if env.gateway_key.is_none() {
+        let (url, key) = gateway_from_providers_json()
+            .context("no SMOOAI_GATEWAY_KEY and no OpenAI-compatible provider in ~/.smooth/providers.json — the driver and judge cannot run")?;
+        eprintln!("convo: using the {url} provider from ~/.smooth/providers.json");
+        env.gateway_url.get_or_insert(url);
+        env.gateway_key = Some(key);
+    }
+
+    let run_root = smooth_bench::runs_root()?.join(format!("convo-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    let work = run_root.join("work");
+    std::fs::create_dir_all(&work).with_context(|| format!("mkdir {}", work.display()))?;
+    eprintln!("convo: scratch at {}", run_root.display());
+
+    // Either drive a daemon that's already up, or spawn one rooted at the
+    // scratch workspace (and keep the guard alive so it's torn down after).
+    let (url, token, _guard) = match &args.url {
+        Some(u) => (u.clone(), args.token.clone().or_else(|| std::env::var("SMOOTH_LOCAL_TOKEN").ok()), None),
+        None => {
+            eprintln!("convo: spawning a Big Smooth daemon (workspace {}) …", work.display());
+            let mut booter = ProcessBooter::new(smooth_repo_root(), env.clone());
+            booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+            let booted = booter
+                .boot_workspace(Engine::Rust, &args.model, &work, &run_root.join("log"))
+                .await
+                .context("spawning the Big Smooth daemon (is `th` on PATH?)")?;
+            (booted.url.clone(), booted.token.clone(), Some(booted))
+        }
+    };
+    eprintln!("convo: target {url}");
+
+    let opts = ConvoOpts {
+        url,
+        token,
+        model: args.model.clone(),
+        driver_model: args.driver_model.clone(),
+        judge_model: args.judge_model.clone(),
+        gateway_url: env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string()),
+        gateway_key: env.gateway_key.clone(),
+        trials: args.trials as usize,
+        turn_deadline: Duration::from_secs(args.turn_timeout_s),
+    };
+
+    let run = run_convo(&scenarios, &opts).await;
+
+    let out_path = args.output.unwrap_or_else(|| run_root.join("transcripts.jsonl"));
+    std::fs::write(&out_path, run.to_jsonl()?).with_context(|| format!("writing transcripts to {}", out_path.display()))?;
+    print!("{}", run.render_table());
+    eprintln!("convo: transcripts at {}", out_path.display());
+
+    // Non-zero on FAIL, INCONCLUSIVE, or XPASS — an expected-fail
+    // scenario that starts passing means the flag is now a lie.
+    if !run.suite_ok() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Resolve the smooth repo root (holds `scripts/msb-spike/`) for the
