@@ -2,7 +2,8 @@
 //!
 //! The OpenClaw-style local-agent UX: when Big Smooth runs on a user's own Mac
 //! (as `Big Smooth.app`), it puts a status item in the menu bar so the agent is
-//! one click away — **Open Big Smooth** (the web UI) and **Quit**.
+//! one click away — **Open Big Smooth** (the web UI), **Install th CLI…** (when
+//! the app bundles one, pearl th-a647da), and **Quit**.
 //!
 //! ## Threading
 //! AppKit demands the main thread. So in menu-bar mode the tokio server runs on
@@ -20,7 +21,7 @@
 #![cfg(target_os = "macos")]
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
@@ -34,6 +35,22 @@ use objc2_foundation::{ns_string, MainThreadMarker, NSString};
 /// before the run loop starts, read by the menu action (which can't easily
 /// carry Rust state across the ObjC boundary).
 static WEB_URL: OnceLock<String> = OnceLock::new();
+
+/// The `th` binary bundled inside the .app, if this process was launched from
+/// one. Same story as [`WEB_URL`]: set before the run loop, read by the
+/// "Install th CLI…" action.
+static BUNDLED_TH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where "Install th CLI…" tries to put the symlink, in order. `/usr/local/bin`
+/// is the one already on everyone's `PATH`; `~/.local/bin` is the fallback for
+/// Macs where it isn't writable (Apple Silicon without Homebrew, mostly).
+fn link_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/usr/local/bin")];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/bin"));
+    }
+    dirs
+}
 
 /// Whether the menu bar should run for this process: either the `SMOOTH_MENUBAR`
 /// env opt-in, OR the daemon was launched as a `.app` bundle (double-clicked /
@@ -57,6 +74,49 @@ fn launched_from_app_bundle(exe: &Path) -> bool {
     exe.to_string_lossy().contains(".app/Contents/MacOS/")
 }
 
+/// The `th` shipped inside the bundle, resolved from this executable:
+/// `…/Big Smooth.app/Contents/MacOS/smooth-daemon` → `…/Contents/Resources/bin/th`
+/// (see scripts/macos/make-app-bundle.sh). `None` when it isn't there — an
+/// unbundled run, or a build made without the CLI.
+fn bundled_th(exe: &Path) -> Option<PathBuf> {
+    let th = exe.parent()?.parent()?.join("Resources/bin/th");
+    th.is_file().then_some(th)
+}
+
+/// Symlink `th` onto the user's `PATH`, trying `dirs` in order (the VS Code
+/// "install 'code' command" pattern). Returns the link that was created.
+fn install_cli(th: &Path, dirs: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    for dir in dirs {
+        if std::fs::create_dir_all(dir).is_err() {
+            continue; // not writable (the usual /usr/local/bin case) — next candidate
+        }
+        let link = dir.join("th");
+        // Replace whatever is there: an older symlink, or a hand-installed copy.
+        // `symlink_metadata` (not `exists`) so a DANGLING symlink is removed too.
+        if std::fs::symlink_metadata(&link).is_ok() && std::fs::remove_file(&link).is_err() {
+            continue;
+        }
+        if std::os::unix::fs::symlink(th, &link).is_ok() {
+            return Ok(link);
+        }
+    }
+    anyhow::bail!("couldn't write a `th` symlink into any of: {dirs:?}")
+}
+
+/// Show a modal message. `osascript` instead of `NSAlert` on purpose: a menu-bar
+/// action shouldn't block the AppKit main thread, and this keeps the unsafe
+/// AppKit surface of this crate as small as it already is.
+fn notify(message: &str) {
+    // AppleScript string literals escape with backslashes, same as Rust's.
+    let escaped = message.replace('\\', r"\\").replace('"', "\\\"");
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            &format!(r#"display dialog "{escaped}" buttons {{"OK"}} default button "OK" with title "Big Smooth""#),
+        ])
+        .spawn();
+}
+
 define_class!(
     // A trivial NSObject subclass that carries the menu actions. No ivars — the
     // URL lives in the `WEB_URL` static, and Quit just exits the process.
@@ -69,6 +129,15 @@ define_class!(
         fn open_app(&self, _sender: Option<&AnyObject>) {
             if let Some(url) = WEB_URL.get() {
                 let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+            }
+        }
+
+        #[unsafe(method(installCli:))]
+        fn install_cli_action(&self, _sender: Option<&AnyObject>) {
+            let Some(th) = BUNDLED_TH.get() else { return };
+            match install_cli(th, &link_dirs()) {
+                Ok(link) => notify(&format!("The `th` command is installed at {}.\n\nOpen a new terminal and run `th --help`.", link.display())),
+                Err(e) => notify(&format!("Couldn't install the `th` command: {e}")),
             }
         }
 
@@ -139,6 +208,12 @@ where
 
     let menu = NSMenu::new(mtm);
     add_item(&menu, mtm, ns_string!("Open Big Smooth"), sel!(openApp:), &target);
+    // Only offered when the .app actually carries a `th` — an unbundled or
+    // CLI-less build just gets the shorter menu.
+    if let Some(th) = std::env::current_exe().ok().and_then(|exe| bundled_th(&exe)) {
+        let _ = BUNDLED_TH.set(th);
+        add_item(&menu, mtm, ns_string!("Install th CLI…"), sel!(installCli:), &target);
+    }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     add_item(&menu, mtm, ns_string!("Quit Big Smooth"), sel!(quit:), &target);
     status_item.setMenu(Some(&menu));
@@ -184,5 +259,56 @@ mod tests {
         // A plain CLI binary on $PATH is NOT an app launch.
         assert!(!launched_from_app_bundle(Path::new("/Users/x/.cargo/bin/smooth-daemon")));
         assert!(!launched_from_app_bundle(Path::new("/opt/homebrew/bin/smooth-daemon")));
+    }
+
+    #[test]
+    fn bundled_th_found_only_when_the_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let macos = tmp.path().join("Big Smooth.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("smooth-daemon");
+
+        assert_eq!(bundled_th(&exe), None, "no Resources/bin/th yet");
+
+        let bin = tmp.path().join("Big Smooth.app/Contents/Resources/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("th"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(bundled_th(&exe), Some(bin.join("th")));
+
+        // A directory named `th` is not a binary.
+        std::fs::remove_file(bin.join("th")).unwrap();
+        std::fs::create_dir(bin.join("th")).unwrap();
+        assert_eq!(bundled_th(&exe), None);
+    }
+
+    #[test]
+    fn install_cli_falls_back_and_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let th = tmp.path().join("th");
+        std::fs::write(&th, b"#!/bin/sh\n").unwrap();
+
+        // First candidate is unwritable (can't mkdir under /), so it falls through.
+        let good = tmp.path().join("bin");
+        let dirs = vec![PathBuf::from("/nonexistent-th-a647da/bin"), good.clone()];
+
+        let link = install_cli(&th, &dirs).unwrap();
+        assert_eq!(link, good.join("th"));
+        assert_eq!(std::fs::read_link(&link).unwrap(), th);
+
+        // Re-running replaces an existing entry rather than failing…
+        assert!(install_cli(&th, &dirs).is_ok());
+        // …including a plain file left by a hand-install.
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, b"stale copy").unwrap();
+        assert!(install_cli(&th, &dirs).is_ok());
+        assert_eq!(std::fs::read_link(&link).unwrap(), th);
+    }
+
+    #[test]
+    fn install_cli_errors_when_nothing_is_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let th = tmp.path().join("th");
+        std::fs::write(&th, b"#!/bin/sh\n").unwrap();
+        assert!(install_cli(&th, &[PathBuf::from("/nonexistent-th-a647da/bin")]).is_err());
     }
 }

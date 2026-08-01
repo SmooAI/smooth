@@ -42,9 +42,11 @@ say "Building the web SPA (embedded into the daemon via rust-embed)"
 # does this too; a standalone cargo build does not.
 ( cd "$REPO_ROOT" && pnpm build:web )
 
-say "Building smooth-daemon (release)"
+say "Building smooth-daemon + th (release)"
 # AWS_LC_SYS_NO_ASM=1 dodges the aws-lc-sys iOS-asm build break on this toolchain.
-( cd "$REPO_ROOT" && AWS_LC_SYS_NO_ASM=1 cargo build --release -p smooai-smooth-daemon )
+# `th` rides along (same target dir, so make-app-bundle.sh finds it by default)
+# to be bundled at Contents/Resources/bin/th for the menu bar's "Install th CLI…".
+( cd "$REPO_ROOT" && AWS_LC_SYS_NO_ASM=1 cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli )
 # Resolve the actual target dir — honors a global `target-dir` in
 # ~/.cargo/config.toml (or CARGO_TARGET_DIR), not just ./target.
 TARGET_DIR="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null | grep -o '"target_directory":"[^"]*"' | head -1 | sed 's/.*:"//; s/"$//')"
