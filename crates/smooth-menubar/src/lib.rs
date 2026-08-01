@@ -28,8 +28,8 @@ use std::sync::OnceLock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
-use objc2_foundation::{ns_string, MainThreadMarker, NSString};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSSize, NSString};
 
 /// The web-UI URL the "Open Big Smooth" item launches. Set once in [`run`]
 /// before the run loop starts, read by the menu action (which can't easily
@@ -202,8 +202,13 @@ where
 
     let status_item: Retained<NSStatusItem> = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     if let Some(button) = status_item.button(mtm) {
-        // Title-only for v1 (a template icon is a follow-up once validated).
-        button.setTitle(ns_string!("Big Smooth"));
+        // The `th` mark as a template image (tints for light/dark). Fall back to
+        // text if the image can't be decoded, so the item is never invisible.
+        if let Some(icon) = template_icon() {
+            button.setImage(Some(&icon));
+        } else {
+            button.setTitle(ns_string!("Big Smooth"));
+        }
     }
 
     let menu = NSMenu::new(mtm);
@@ -224,6 +229,19 @@ where
 
     app.run();
     ExitCode::SUCCESS
+}
+
+/// The `th` mark as a menu-bar template image — black shape + alpha, so macOS
+/// tints it for the light/dark menu bar. Rendered from `images/smooth-icon.svg`
+/// and embedded at build time.
+fn template_icon() -> Option<Retained<NSImage>> {
+    const PNG: &[u8] = include_bytes!("../assets/th-icon.png");
+    let data = NSData::with_bytes(PNG);
+    let img = NSImage::initWithData(NSImage::alloc(), &data)?;
+    img.setTemplate(true);
+    // Point size (the PNG is 2×); 18pt is the conventional menu-bar glyph size.
+    img.setSize(NSSize::new(18.0, 18.0));
+    Some(img)
 }
 
 fn add_item(menu: &NSMenu, mtm: MainThreadMarker, title: &NSString, action: objc2::runtime::Sel, target: &MenuTarget) {
