@@ -11,14 +11,16 @@
 //! `th daemon`, a launchd agent without `SMOOTH_MENUBAR`) is byte-for-byte
 //! unchanged — [`enabled`] gates all of it.
 //!
-//! ## Opt-in
-//! Gated on `SMOOTH_MENUBAR` (truthy) for now, NOT auto-enabled for `.app`
-//! launches yet — so shipping the bundle can't flip a live headless daemon into
-//! an unvalidated GUI mode. Flip to auto-detect once validated on a real screen.
+//! ## When it turns on
+//! Either the `SMOOTH_MENUBAR` env opt-in, OR the daemon was launched as a
+//! `.app` bundle (double-clicked / `open`ed / a login-item) — the natural
+//! product signal. A plain `smooth-daemon` on `$PATH` (CLI, tests, a bare
+//! launchd agent like smoo-hub's) stays headless.
 
 #![cfg(target_os = "macos")]
 
 use std::future::Future;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
@@ -33,14 +35,26 @@ use objc2_foundation::{ns_string, MainThreadMarker, NSString};
 /// carry Rust state across the ObjC boundary).
 static WEB_URL: OnceLock<String> = OnceLock::new();
 
-/// Whether the menu bar should run for this process. macOS + `SMOOTH_MENUBAR`
-/// truthy. Deliberately conservative — see the module docs.
+/// Whether the menu bar should run for this process: either the `SMOOTH_MENUBAR`
+/// env opt-in, OR the daemon was launched as a `.app` bundle (double-clicked /
+/// `open`ed / a login-item) — the natural product signal. A plain
+/// `smooth-daemon` on `$PATH` (CLI, tests, a bare launchd agent) stays headless.
 #[must_use]
 pub fn enabled() -> bool {
-    std::env::var("SMOOTH_MENUBAR").is_ok_and(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v == "1" || v == "true" || v == "yes" || v == "on"
-    })
+    env_opt_in() || std::env::current_exe().is_ok_and(|p| launched_from_app_bundle(&p))
+}
+
+/// The `SMOOTH_MENUBAR` env override (truthy). Also forces the menu bar on for a
+/// CLI run, for validating without packaging an app.
+fn env_opt_in() -> bool {
+    std::env::var("SMOOTH_MENUBAR").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
+/// True when `exe` lives inside a macOS `.app` bundle
+/// (`…/Big Smooth.app/Contents/MacOS/smooth-daemon`) — i.e. it was launched as an
+/// app, so it should present its menu bar.
+fn launched_from_app_bundle(exe: &Path) -> bool {
+    exe.to_string_lossy().contains(".app/Contents/MacOS/")
 }
 
 define_class!(
@@ -92,17 +106,19 @@ where
         .name("big-smooth-server".into())
         .spawn(move || match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
             Ok(rt) => {
+                // Keep the menu bar alive even if the server stops or fails to
+                // start (port busy, missing creds) — the app must not silently
+                // vanish; the user can still see it and Quit.
                 if let Err(e) = rt.block_on(server) {
                     tracing::error!(error = %e, "smooth-daemon server exited with error");
                     eprintln!("smooth-daemon: {e:#}");
-                    std::process::exit(1);
+                } else {
+                    tracing::warn!("smooth-daemon server stopped");
                 }
-                // Server returned cleanly (unusual for an always-on daemon).
-                std::process::exit(0);
             }
             Err(e) => {
+                tracing::error!(error = %e, "failed to build tokio runtime");
                 eprintln!("smooth-daemon: failed to build runtime: {e}");
-                std::process::exit(1);
             }
         })
         .expect("spawn server thread");
@@ -150,13 +166,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabled_reads_truthy_env() {
+    fn env_opt_in_reads_truthy_values() {
         // ponytail: single test touching this process-global env; no lock needed.
         for (val, want) in [("1", true), ("true", true), ("YES", true), ("on", true), ("0", false), ("", false)] {
             std::env::set_var("SMOOTH_MENUBAR", val);
-            assert_eq!(enabled(), want, "SMOOTH_MENUBAR={val:?}");
+            assert_eq!(env_opt_in(), want, "SMOOTH_MENUBAR={val:?}");
         }
         std::env::remove_var("SMOOTH_MENUBAR");
-        assert!(!enabled(), "unset → disabled");
+        assert!(!env_opt_in(), "unset → disabled");
+    }
+
+    #[test]
+    fn app_bundle_launch_detected_by_path() {
+        assert!(launched_from_app_bundle(Path::new(
+            "/Users/x/Applications/Big Smooth.app/Contents/MacOS/smooth-daemon"
+        )));
+        // A plain CLI binary on $PATH is NOT an app launch.
+        assert!(!launched_from_app_bundle(Path::new("/Users/x/.cargo/bin/smooth-daemon")));
+        assert!(!launched_from_app_bundle(Path::new("/opt/homebrew/bin/smooth-daemon")));
     }
 }
