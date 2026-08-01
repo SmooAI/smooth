@@ -500,11 +500,7 @@ impl ConvoRun {
             "\nconvo — target {} · agent {} · driver {} · judge {}",
             self.url, self.model, self.driver_model, self.judge_model
         );
-        let _ = writeln!(
-            out,
-            "{:<22} {:<6} {:<12} {:<5} {:>7} {}",
-            "SCENARIO", "TRIAL", "STATUS", "TURNS", "SCORES", "REASON"
-        );
+        let _ = writeln!(out, "{:<22} {:<6} {:<12} {:<5} {:>7} REASON", "SCENARIO", "TRIAL", "STATUS", "TURNS", "SCORES");
         for r in &self.results {
             let scores = r.scores.map_or_else(
                 || "  -/-  ".to_string(),
