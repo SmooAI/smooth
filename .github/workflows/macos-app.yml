@@ -1,0 +1,152 @@
+# Build + package `Big Smooth.app` as a distributable .dmg (pearl th-a647da).
+#
+# Separate from release.yml on purpose: that workflow ships the `th` CLI
+# tarballs (and is load-bearing for the Homebrew tap), this one ships the
+# double-clickable Mac app. It degrades gracefully — with NO signing secrets it
+# still produces an ad-hoc-signed, un-notarized DMG as a workflow artifact, so
+# the packaging path is exercised on every run instead of rotting until the
+# certificate shows up.
+#
+# Triggers: a `v*` tag push, or manually (optionally against an existing tag,
+# in which case the DMG is attached to that GitHub Release too).
+#
+# Secrets (all optional; see scripts/macos/README.md for how to produce them):
+#   MACOS_SIGN_IDENTITY   e.g. "Developer ID Application: Smoo LLC (DTX9733844)"
+#   MACOS_CERT_P12        base64 of the exported .p12 (cert + private key)
+#   MACOS_CERT_PASSWORD   the .p12 export password
+#   NOTARY_KEY_P8         base64 of the App Store Connect AuthKey_XXXX.p8
+#   NOTARY_KEY_ID         the key ID
+#   NOTARY_ISSUER         the issuer UUID
+# Set them with scripts/secret-helpers/gh-secret-set (never `echo | gh secret
+# set --body -`, which stores a trailing newline — SMOODEV-879).
+
+name: macOS app (DMG)
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Existing release tag to build + attach the DMG to (blank = current branch, artifact only)"
+                required: false
+                type: string
+    push:
+        tags:
+            - "v*"
+
+concurrency:
+    group: macos-app-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    dmg:
+        name: Package Big Smooth.app
+        runs-on: macos-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref }}
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+
+            # Cheap insurance: a build.rs shelling out to protoc is exactly the
+            # kind of thing you don't want to discover in a release build
+            # (pearl th-14bddf).
+            - name: Install build deps
+              run: brew install protobuf
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Install Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            # Without this the daemon serves the build-time placeholder page —
+            # the SPA is embedded into the binary via rust-embed.
+            - name: Build web UI
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --no-frozen-lockfile
+                  pnpm build
+
+            - name: Build smooth-daemon + th (release)
+              run: cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
+
+            # Import the Developer ID cert into a throwaway keychain. Skipped
+            # (leaving SIGN_IDENTITY unset → ad-hoc) when the secret is absent.
+            - name: Import signing certificate
+              id: signing
+              env:
+                  CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+                  CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+                  SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+              run: |
+                  if [[ -z "${CERT_P12:-}" || -z "${SIGN_IDENTITY:-}" ]]; then
+                      echo "::warning::MACOS_CERT_P12 / MACOS_SIGN_IDENTITY not set — building an AD-HOC signed DMG (installable only past a Gatekeeper warning)."
+                      echo "identity=-" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+                  PASS="$(uuidgen)"
+                  security create-keychain -p "$PASS" "$KEYCHAIN"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+                  security unlock-keychain -p "$PASS" "$KEYCHAIN"
+                  echo -n "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+                  security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+                  # Without this, codesign blocks on a UI prompt for key access.
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+                  security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+                  rm -f "$RUNNER_TEMP/cert.p12"
+                  echo "identity=$SIGN_IDENTITY" >> "$GITHUB_OUTPUT"
+
+            - name: Package Big Smooth.app + DMG
+              id: package
+              env:
+                  SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+              run: |
+                  VERSION=$(node -p "require('./package.json').version")
+                  mkdir -p dist build
+                  APP=$(scripts/macos/make-app-bundle.sh target/release/smooth-daemon build "$VERSION")
+                  DMG=$(scripts/macos/make-dmg.sh "$APP" "dist/BigSmooth-${VERSION}.dmg" "Big Smooth ${VERSION}")
+                  codesign -dvv "$APP" 2>&1 | grep -Ei 'authority|runtime|identifier' || true
+                  {
+                      echo "version=${VERSION}"
+                      echo "app=${APP}"
+                      echo "dmg=${DMG}"
+                  } >> "$GITHUB_OUTPUT"
+
+            # No-op (exit 0) without notary credentials — see the script header.
+            - name: Notarize + staple
+              env:
+                  NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY_P8 }}
+                  NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+                  NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+              run: |
+                  if [[ -n "${NOTARY_KEY_B64:-}" ]]; then
+                      echo -n "$NOTARY_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+                      export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+                  fi
+                  scripts/macos/notarize-and-staple.sh "${{ steps.package.outputs.dmg }}"
+                  rm -f "$RUNNER_TEMP/notary.p8"
+
+            - name: Upload DMG artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: BigSmooth-${{ steps.package.outputs.version }}.dmg
+                  path: ${{ steps.package.outputs.dmg }}
+
+            # Attach to the GitHub Release when this ran for a tag. `--clobber`
+            # so a re-run replaces the asset instead of failing.
+            - name: Attach DMG to release
+              if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ inputs.tag || github.ref_name }}
+              run: gh release upload "$TAG" "${{ steps.package.outputs.dmg }}" --clobber
