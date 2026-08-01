@@ -44,6 +44,10 @@ pub struct CanonicalOutput {
     /// bench feeds this to the LLM judge as evidence; the polyglot bench
     /// ignores it (it scores the workspace, not the prose).
     pub text: String,
+    /// Whether the turn ended on an `eventual_response` (true) rather
+    /// than the server hanging up mid-turn (false). Multi-turn callers
+    /// need this to tell a finished turn from a dropped one.
+    pub completed: bool,
 }
 
 /// A single tool result observed during the turn.
@@ -66,57 +70,123 @@ pub async fn run_via_canonical(url: &str, prompt: &str, token: Option<&str>, dea
 
 /// One connect → create-session → send → drain cycle.
 async fn drive_once(url: &str, prompt: &str, token: Option<&str>) -> Result<CanonicalOutput> {
-    let ws_url = ws_url(url, token);
-    let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("operator WS connect failed ({ws_url}): {e}"))?;
-    let (mut sink, mut source) = stream.split();
-
-    // 1. Open a session.
-    sink.send(Message::Text(create_session_msg(&uuid::Uuid::new_v4().to_string()).into())).await?;
-    let mut session_id = None;
-    while let Some(Ok(msg)) = source.next().await {
-        let Message::Text(text) = msg else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        match classify(&v) {
-            Event::SessionCreated(sid) => {
-                session_id = Some(sid);
-                break;
-            }
-            Event::Error(m) => anyhow::bail!("operator error creating session: {m}"),
-            _ => {}
-        }
-    }
-    let sid = session_id.ok_or_else(|| anyhow::anyhow!("operator closed before a session was created"))?;
-
-    // 2. Fire the task prompt.
-    sink.send(Message::Text(send_message_msg(&sid, prompt).into())).await?;
-
-    // 3. Drain until the turn completes (or errors), collecting tool
-    //    results + a best-effort cost off the terminal event.
-    let mut out = CanonicalOutput::default();
-    while let Some(Ok(msg)) = source.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        match classify(&v) {
-            Event::TurnComplete => {
-                if let Some(c) = find_cost(&v) {
-                    out.cost = c;
-                }
-                break;
-            }
-            Event::Error(m) => anyhow::bail!("operator error on turn: {m}"),
-            Event::ToolResult { name, success } => out.tool_calls.push(CanonicalToolCall { name, success }),
-            Event::Token(t) => out.text.push_str(&t),
-            _ => {}
-        }
-    }
-    let _ = sink.send(Message::Close(None)).await;
+    let mut session = CanonicalSession::connect(url, token).await?;
+    session.send(prompt).await?;
+    let out = session.drain_one().await?;
+    session.close().await;
     Ok(out)
+}
+
+/// A live conversation on one WS connection — the multi-turn form of
+/// [`run_via_canonical`].
+///
+/// The single-shot helper opens a session, sends, drains, and hangs up.
+/// The agentic-conversation harness ([`crate::convo`]) needs the same
+/// `sessionId` across several user turns, because the agent's own memory
+/// of the conversation is exactly what's under test. It also needs to
+/// **send without draining** (barge-in: a correction fired before the
+/// previous turn finished), which is why `send` and `collect_turn` are
+/// separate calls rather than one `turn()`.
+pub struct CanonicalSession {
+    sink: futures_util::stream::SplitSink<WsStream, Message>,
+    source: futures_util::stream::SplitStream<WsStream>,
+    session_id: String,
+}
+
+type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+impl CanonicalSession {
+    /// Connect to `url` and open a conversation session.
+    ///
+    /// # Errors
+    /// Errors on WS connect failure, a server `error` event, or if the
+    /// server hangs up before acknowledging the session.
+    pub async fn connect(url: &str, token: Option<&str>) -> Result<Self> {
+        let ws_url = ws_url(url, token);
+        let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("operator WS connect failed ({ws_url}): {e}"))?;
+        let (mut sink, mut source) = stream.split();
+
+        sink.send(Message::Text(create_session_msg(&uuid::Uuid::new_v4().to_string()).into())).await?;
+        let mut session_id = None;
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(text) = msg else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            match classify(&v) {
+                Event::SessionCreated(sid) => {
+                    session_id = Some(sid);
+                    break;
+                }
+                Event::Error(m) => anyhow::bail!("operator error creating session: {m}"),
+                _ => {}
+            }
+        }
+        let session_id = session_id.ok_or_else(|| anyhow::anyhow!("operator closed before a session was created"))?;
+        Ok(Self { sink, source, session_id })
+    }
+
+    /// The server-assigned session id — identical across every turn.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Fire a user message and return immediately, without waiting for
+    /// the turn to complete. Sending twice in a row is the barge-in case.
+    ///
+    /// # Errors
+    /// Errors if the socket is already closed.
+    pub async fn send(&mut self, prompt: &str) -> Result<()> {
+        self.sink.send(Message::Text(send_message_msg(&self.session_id, prompt).into())).await?;
+        Ok(())
+    }
+
+    /// Drain events until one turn completes, bounded by `deadline`.
+    ///
+    /// A socket close or stream end yields whatever was collected with
+    /// `completed = false` — same leniency the single-shot driver has
+    /// always had — so callers distinguish "turn finished" from "the
+    /// server went away" by checking [`CanonicalOutput::completed`].
+    ///
+    /// # Errors
+    /// Errors on a server `error` event or when `deadline` elapses.
+    pub async fn collect_turn(&mut self, deadline: Duration) -> Result<CanonicalOutput> {
+        tokio::time::timeout(deadline, self.drain_one())
+            .await
+            .map_err(|_| anyhow::anyhow!("canonical turn timed out after {deadline:?}"))?
+    }
+
+    async fn drain_one(&mut self) -> Result<CanonicalOutput> {
+        let mut out = CanonicalOutput::default();
+        while let Some(Ok(msg)) = self.source.next().await {
+            let text = match msg {
+                Message::Text(t) => t,
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+            match classify(&v) {
+                Event::TurnComplete => {
+                    if let Some(c) = find_cost(&v) {
+                        out.cost = c;
+                    }
+                    out.completed = true;
+                    break;
+                }
+                Event::Error(m) => anyhow::bail!("operator error on turn: {m}"),
+                Event::ToolResult { name, success } => out.tool_calls.push(CanonicalToolCall { name, success }),
+                Event::Token(t) => out.text.push_str(&t),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Politely hang up. Errors are swallowed — the conversation is over.
+    pub async fn close(mut self) {
+        let _ = self.sink.send(Message::Close(None)).await;
+    }
 }
 
 /// Classification of one inbound server event.
