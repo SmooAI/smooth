@@ -4981,6 +4981,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-fetch"
+version = "2.1.2"
+source = "git+https://github.com/SmooAI/fetch.git?rev=238f63eed71155e92f33eb548ee7e862b41e5aa2#238f63eed71155e92f33eb548ee7e862b41e5aa2"
+dependencies = [
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smooai-smooth-api-client"
 version = "0.26.5"
 dependencies = [
@@ -5403,12 +5417,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+ "smooai-fetch",
  "smooai-smooth-cast",
  "smooai-smooth-operator-core",
  "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tracing",
+ "urlencoding",
 ]
 
 [[package]]
