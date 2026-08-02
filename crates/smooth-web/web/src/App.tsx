@@ -40,6 +40,7 @@ import {
     type ConversationSummary,
 } from './operator';
 import { SmooSignIn } from './SmooSignIn';
+import { canSend } from './turn-guard';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 import { usePush } from './usePush';
 
@@ -922,12 +923,17 @@ function Composer({
         }
     };
 
+    const sendable = canSend({ text, attachments: attachments.length, disabled, turnActive });
+
     const submit = () => {
         if (menu && selItem) {
             applyItem(selItem);
             return;
         }
-        if (!text.trim() && attachments.length === 0) return;
+        // th-426791: sending during a turn spawns a SECOND concurrent turn and
+        // the two replies come back swapped. The draft is left in the box so
+        // the keystroke costs nothing — Stop is the way through.
+        if (!sendable) return;
         onSend(text, attachments);
         setAttachments([]);
         update('');
@@ -1140,7 +1146,13 @@ function Composer({
                             }
                         }}
                         rows={1}
-                        placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes · @ to mention)'}
+                        placeholder={
+                            disabled
+                                ? 'Waiting for your operator…'
+                                : turnActive
+                                  ? 'Big Smooth is working — Stop to interrupt'
+                                  : 'Talk to Big Smooth…  (/ for modes · @ to mention)'
+                        }
                         disabled={disabled}
                         // `field-sizing-content` grows the box with what you type; `max-h-40`
                         // caps it at ~10 lines and `overflow-y-auto` hands the rest to the
@@ -1151,7 +1163,8 @@ function Composer({
                     {turnActive ? (
                         // While a turn is in flight the primary button becomes Stop
                         // (th-3a912a) — the one affordance for "he's being weird,
-                        // stop". Enter still sends, so nothing is taken away.
+                        // stop". Send is blocked outright meanwhile (th-426791),
+                        // so this is the only way forward.
                         // Deliberately neutral, not amber: amber is reserved for
                         // "he needs you", and stopping is you acting on him.
                         <button
@@ -1166,7 +1179,7 @@ function Composer({
                     ) : (
                         <button
                             onClick={submit}
-                            disabled={disabled || (!text.trim() && attachments.length === 0)}
+                            disabled={!sendable}
                             className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
                             aria-label="Send"
                         >
@@ -1175,6 +1188,12 @@ function Composer({
                     )}
                 </div>
             </div>
+            {/* Only once there's a draft that CAN'T go out — the Stop button and
+                the thinking face already say "he's working", so this line exists
+                purely to explain the swallowed Enter (th-426791). */}
+            {turnActive && !!text.trim() && (
+                <div className="mt-2 px-1 text-xs text-(--color-muted-foreground)">Turn in progress — Stop to interrupt, or wait; your draft is kept.</div>
+            )}
             {expensive && (
                 <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-amber/30 bg-amber/5 px-3 py-1.5 text-xs font-medium text-amber">
                     <span aria-hidden>⚠</span>
