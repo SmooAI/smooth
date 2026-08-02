@@ -103,6 +103,18 @@ instruction — and note the safeguards that bound the exposure:
 
 The user opts in with Full Disk Access and can revoke it in System Settings.
 
+**It intentionally reads a location the deny policy lists.** The daemon's embedded
+`DenyPolicy` has `**/Library/**` under `[paths] deny`, covering reads as well as
+writes. That tier gates tools which take a *path argument* (`read_file`,
+`write_file`, `bash`); `imessage` takes no path — the database location is fixed
+in the binary and not caller-supplied — so the glob never applies to it. That is
+the intended design (a fixed, audited location is exactly what a path deny-list
+protects against reaching *arbitrarily*), but it is worth stating plainly: adding
+this tool means `~/Library/Messages/chat.db` is now reachable by the agent through
+a route the path deny-list does not cover. Any future OS-integration tool that
+reads a denied path must be scrutinised the same way, and must keep its location
+fixed rather than caller-supplied.
+
 ## Related
 
 - [[The-Cast]]
