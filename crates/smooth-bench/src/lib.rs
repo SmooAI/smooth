@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 pub mod agentic;
 pub mod auto_approve;
 pub mod canonical_driver;
+pub mod convo;
 pub mod curated;
 pub mod engine;
 pub mod judge;

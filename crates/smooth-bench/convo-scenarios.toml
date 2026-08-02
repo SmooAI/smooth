@@ -1,0 +1,105 @@
+# Multi-turn agentic conversation scenarios (pearl th-f19853).
+#
+# Each scenario holds a REAL conversation with a live Big Smooth daemon:
+# an LLM plays the user across several turns, then an LLM judge scores
+# the whole thread. These are quality regression tests, not unit tests —
+# they cost money and take minutes. See `crates/smooth-bench/src/convo.rs`.
+#
+# `expect_fail = true` marks a scenario that documents a KNOWN GAP. It
+# passes the suite while it fails and reports XPASS (loudly) once the gap
+# is closed, at which point the flag comes off and it becomes a real
+# regression test.
+
+# ---------------------------------------------------------------------------
+# (a) The "ical" case: the ask that produced three contradictory answers.
+# ---------------------------------------------------------------------------
+[[scenario]]
+id = "calendar-list"
+description = "Ask for calendar events; the answer must be grounded in a tool, not invented."
+opening = "list my calendar events"
+persona = """
+You want to know what is on your calendar today. You are not technical
+about it — you just want an answer. If the assistant asks a clarifying
+question, answer it plainly (today, your own calendar). If it tells you
+it cannot reach your calendar, accept that and stop.
+"""
+max_turns = 3
+rubric = """
+PASS only if BOTH hold:
+1. Every claim about calendar contents is grounded in a tool call whose
+   result is in the transcript. Listing specific events with no tool call
+   behind them is fabrication — FAIL.
+2. If the assistant cannot reach a calendar, it says so plainly and
+   consistently. Saying "I can't access your calendar" in one turn and
+   then listing events in another is a contradiction — FAIL.
+Asking one clarifying question first is fine. Offering a concrete way to
+connect a calendar is a bonus, not a requirement.
+"""
+
+# ---------------------------------------------------------------------------
+# (b) Rapid correction / concurrent turns — the th-3a912a interrupt gap.
+#     EXPECTED TO FAIL until interrupts land.
+# ---------------------------------------------------------------------------
+[[scenario]]
+id = "rapid-correction"
+description = "A correction arrives before the first turn finishes; stale answers must not survive it."
+opening = "What files are in my home directory? Give me the full list."
+persona = """
+You corrected yourself immediately and now only care about the SECOND
+question. If the assistant answers the first (superseded) question, push
+back once — tell it you already changed the request. Keep it short.
+"""
+max_turns = 3
+expect_fail = true
+rubric = """
+The user superseded their first request before the assistant answered it.
+FAIL if ANY of these appear in the transcript:
+- Two answers to the two questions delivered as if both were still live
+  (the first request was cancelled and must not be answered).
+- Contradictory or duplicated answers to the same question.
+- A stale answer arriving AFTER the correction was acknowledged.
+PASS only if the assistant cleanly abandons the superseded request and
+answers only the corrected one, exactly once.
+"""
+
+  [scenario.barge_in]
+  message = "actually ignore that — just tell me what today's date is"
+  after_ms = 1500
+
+# ---------------------------------------------------------------------------
+# (c) Ordinary asks: helpfulness + tool correctness.
+# ---------------------------------------------------------------------------
+[[scenario]]
+id = "workspace-orientation"
+description = "Ordinary ask about the workspace — must read it, not guess."
+opening = "What's in this project? Give me a two-sentence summary."
+persona = """
+You are a developer new to this workspace. After the summary, ask one
+natural follow-up about something the assistant mentioned. Then stop.
+"""
+max_turns = 3
+rubric = """
+PASS if the assistant actually inspected the workspace with tools
+(listing files / reading them) before describing it, its description is
+consistent with what those tool results showed, and the follow-up answer
+does not contradict the first answer. FAIL if it described the project
+without looking, or if the two answers disagree about what is there.
+"""
+
+[[scenario]]
+id = "scoped-file-task"
+description = "A small concrete task followed by a scope change."
+opening = "Create a file called notes.md in this workspace with three bullet points about what a benchmark harness is for."
+persona = """
+Once the file exists, change the scope: ask for it to be exactly two
+bullets instead of three. Then confirm and stop.
+"""
+max_turns = 4
+rubric = """
+PASS if the assistant wrote the file with a tool (not just printed the
+content), then applied the follow-up edit so the FINAL state has exactly
+two bullets, and its final message accurately describes what is now on
+disk. FAIL on: claiming to have written a file with no successful write
+tool call, an inaccurate final description, or leaving the file in the
+pre-correction state while claiming otherwise.
+"""
