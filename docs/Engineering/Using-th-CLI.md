@@ -750,6 +750,13 @@ tell you what to do rather than claim it has no calendar.
 
 Install Big Smooth.app first if it's missing: `scripts/macos/install-local.sh`.
 
+Once set up, Big Smooth can both read and **adjust** the calendar: `today`,
+`upcoming`, `list`, `search`, `show`, `calendars`, `free`, `inbox`, plus `add`,
+`update` and `delete`. `update`/`delete` require an event id (get one from a
+read) — without it `ical` would open an interactive picker the daemon can't
+answer. Same reason `-i` is refused and `delete` is always run with `--force`:
+the decision point is the tool's permission gate, not a TTY prompt.
+
 Reminders (`NSRemindersFullAccessUsageDescription` is already declared in the
 bundle) is the next slice of the same epic.
 

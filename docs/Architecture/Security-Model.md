@@ -53,13 +53,27 @@ What keeps the exception narrow, and what any future one must also do:
 
 - **argv only, no shell** — no interpolation or injection path.
 - **fixed binary** — a resolved install path, never caller-supplied.
-- **verb allowlist** — read-only commands; mutation is a separate decision.
+- **verb allowlist, not a denylist** — an enumerated set of subcommands, so a new
+  upstream release can't quietly widen what the agent can reach.
 - **still a normal tool call** — the permission gate and Narc hook see it exactly
   like every other tool, so surveillance and policy are unchanged. Only the
   *kernel* layer is waived, and only for this one binary.
 
-The TCC grant itself is the compensating control: the OS asks the human once,
-per app bundle, and the user can revoke it in System Settings.
+The TCC grant is the compensating control: the OS asks the human once, per app
+bundle, and the user can revoke it in System Settings.
+
+**Mutations get no extra userspace gate, on purpose.** `calendar` can create,
+update and delete events. It sits behind the same permission gate as
+`write_file` and `bash` — which, in the daemon's default `AutoMode::Bypass`
+posture, means **a calendar write executes without a prompt**, exactly like a
+file write. That is the deliberate "allow benign, block dangerous" stance, not
+an oversight; `SMOOTH_AUTO_MODE=ask` is the knob for a stricter one.
+
+Corollary for any human-facing CLI wrapped this way: it will confirm destructive
+actions on a TTY the daemon doesn't have. Those prompts have to be suppressed
+(`--force`) and the interactive/picker modes refused outright — a wrapper that
+silently blocks on an unanswerable prompt is a worse failure than one that
+refuses the call.
 
 ## Related
 
