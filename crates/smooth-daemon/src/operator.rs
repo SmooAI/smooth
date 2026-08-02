@@ -148,6 +148,23 @@ impl ToolProvider for SandboxedToolProvider {
         tools.push(Arc::new(smooth_tools::RecallTool {
             memory: Arc::clone(&self.memory),
         }) as Arc<dyn Tool>);
+        // Platform-specific tools (pearl th-1665ed). The macOS Messages tool
+        // exists only where chat.db and Messages.app do, so it's cfg-gated —
+        // Linux/Windows never see it. It registers even when Full Disk Access
+        // hasn't been granted: the tool itself answers with "run
+        // `th doctor --setup-imessage`", which the agent can relay. Hiding it
+        // instead would make Big Smooth claim it can't text at all — wrong, and
+        // unactionable.
+        //
+        // NOTE: both halves deliberately run OUTSIDE the kernel sandbox — the
+        // read is in-process read-only SQLite (the sandbox denies ~/Library),
+        // and `send` spawns `osascript` directly (seatbelt blocks Apple Events).
+        // See the module docs on `smooth_tools::imessage` and the
+        // trusted-integration exceptions in docs/Architecture/Security-Model.md.
+        // It is still a normal tool call, so the permission gate and the Narc
+        // hook see it like any other.
+        #[cfg(target_os = "macos")]
+        tools.push(Arc::new(smooth_tools::IMessageTool) as Arc<dyn Tool>);
         // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
         // lets Big Smooth fan a self-contained subtask out to a `scout`
         // (read-only) or `runner` (full) sidekick — each runs in its own
@@ -787,6 +804,22 @@ mod tests {
         // The rest of the sandboxed set is still there (didn't clobber anything).
         assert!(names.iter().any(|n| n == "bash"), "bash still registered: {names:?}");
         assert!(names.iter().any(|n| n == "cd"), "cd still registered: {names:?}");
+    }
+
+    /// Platform-specific registration (pearl th-1665ed): the Messages tool must
+    /// reach the agent on macOS **unconditionally** — including on a box where
+    /// Full Disk Access hasn't been granted, because the tool's own answer ("run
+    /// `th doctor --setup-imessage`") is the actionable path. If this ever
+    /// regresses to a runtime availability gate, Big Smooth goes back to claiming
+    /// it can't read or send texts at all.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn provider_registers_the_imessage_tool_on_macos() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "imessage"), "imessage registered: {names:?}");
     }
 
     #[tokio::test]

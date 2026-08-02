@@ -38,6 +38,14 @@ tracing.workspace = true
 chrono.workspace = true
 iana-time-zone = "0.1"
 
+# th-1665ed: the `imessage` tool reads ~/Library/Messages/chat.db over a
+# READ-ONLY rusqlite connection, in-process by design — a `sqlite3` subprocess
+# would have to cross the kernel sandbox, which denies ~/Library outright.
+# macOS-only, like the tool itself, so no other platform pays for the bundled
+# SQLite build.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -27,6 +27,10 @@ smooth-code.workspace = true
 smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
+# th-1665ed: `th doctor --setup-imessage` reports readiness using the SAME
+# chat.db path + availability probe the `imessage` tool itself uses, so setup and
+# the tool can never disagree about whether Messages is usable.
+smooth-tools.workspace = true
 # Pearl th-16b0ca: auth profile/path resolution (`auth::paths` re-exports
 # `smooth_policy::auth_paths`) so `th` and `smooth-daemon` resolve the same
 # credential files regardless of which one is launched how.

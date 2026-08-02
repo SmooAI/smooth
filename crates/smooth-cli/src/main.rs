@@ -15,6 +15,9 @@ mod ext;
 mod fda;
 mod gradient;
 mod hooks;
+/// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
+#[cfg(target_os = "macos")]
+mod imessage_setup;
 mod mcp_config;
 mod mcp_serve;
 mod operator_serve;
@@ -564,6 +567,15 @@ enum Commands {
         /// automated as it gets. Run on the host's console, not over SSH.
         #[arg(long)]
         fix_fda: bool,
+        /// macOS only: set up Big Smooth's Messages tool. Reports whether
+        /// `~/Library/Messages/chat.db` is readable (Full Disk Access) and fires
+        /// a harmless Apple Event at Messages.app so the one-time Automation
+        /// prompt appears now instead of mid-turn. Neither grant can be given
+        /// programmatically (SIP-protected TCC.db), so this detects and guides.
+        /// Run on the host's console, not over SSH: the prompts need a GUI login
+        /// session.
+        #[arg(long)]
+        setup_imessage: bool,
     },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
@@ -1609,11 +1621,14 @@ async fn main() -> Result<()> {
             init_home_repo,
             remote,
             fix_fda,
+            setup_imessage,
         }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
             } else if fix_fda {
                 cmd_doctor_fix_fda()
+            } else if setup_imessage {
+                cmd_doctor_setup_imessage()
             } else {
                 cmd_doctor().await
             }
@@ -3547,6 +3562,23 @@ fn cmd_doctor_fix_fda() -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn cmd_doctor_fix_fda() -> Result<()> {
     println!("{} Full Disk Access is a macOS-only concept; nothing to do here.", "○".dimmed());
+    Ok(())
+}
+
+/// Drive the two one-time grants Big Smooth's `imessage` tool needs — Full Disk
+/// Access (to read chat.db) and Automation (to send through Messages.app) —
+/// pearl th-1665ed. Logic lives in [`imessage_setup`] so the app bundle's future
+/// "Set up messages…" menu item can shell out to this exact command instead of
+/// duplicating it.
+#[cfg(target_os = "macos")]
+fn cmd_doctor_setup_imessage() -> Result<()> {
+    println!("{} {}", gradient::smooth(), "Messages".bold().cyan());
+    imessage_setup::run()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_doctor_setup_imessage() -> Result<()> {
+    println!("{} iMessage is a macOS-only concept; nothing to set up here.", "○".dimmed());
     Ok(())
 }
 
