@@ -153,7 +153,7 @@ fn build_args(arguments: &Value) -> anyhow::Result<Vec<String>> {
 
 /// Spawn `ical` **outside** the kernel sandbox (see the module docs) and return
 /// its output, or setup guidance when the failure is a missing TCC grant.
-async fn run_ical(bin: &PathBuf, args: &[String]) -> anyhow::Result<String> {
+async fn run_ical(bin: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .stdin(Stdio::null())
