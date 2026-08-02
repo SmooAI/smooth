@@ -37,6 +37,12 @@ tracing.workspace = true
 # which chrono::Local alone does not know (it only carries the numeric offset).
 chrono.workspace = true
 iana-time-zone = "0.1"
+# th-7031ba: `web_search` is self-contained — it calls public search APIs
+# (Brave / SearXNG / DuckDuckGo / Wikipedia) in-process instead of shelling
+# `th search`, which needed Smoo auth + api.smoo.ai. smooai-fetch is the house
+# resilient client (retries/timeout/backoff); urlencoding builds query strings.
+smooai-fetch.workspace = true
+urlencoding.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
