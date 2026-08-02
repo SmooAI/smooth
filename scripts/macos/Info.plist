@@ -45,5 +45,11 @@
     <string>Big Smooth works in a workspace that may live on an external volume.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>Big Smooth reads and edits your calendar when you ask it to.</string>
+    <!-- Reminders is the next slice of pearl th-94cc4a. Declared now because
+         adding a usage string later means re-signing the bundle (and re-driving
+         the grant); the string is inert until something calls EventKit for
+         reminders. -->
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Big Smooth reads and edits your reminders when you ask it to.</string>
 </dict>
 </plist>

@@ -34,6 +34,10 @@ smooth-policy.workspace = true
 # skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
 smooth-cast.workspace = true
 smooth-api-client.workspace = true
+# Pearl th-94cc4a: `th doctor --setup-calendar` installs `ical` to the exact path
+# `smooth_tools::calendar::resolve_ical` looks in first — sharing the resolver
+# keeps the installer and the daemon's calendar tool from drifting apart.
+smooth-tools.workspace = true
 # Pearl th-abc4e2: `th admin login` uses the Supabase OAuth flow
 # from client-shared. The `auth` feature pulls in the oauth + m2m +
 # storage modules.

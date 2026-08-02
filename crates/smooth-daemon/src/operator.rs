@@ -148,6 +148,20 @@ impl ToolProvider for SandboxedToolProvider {
         tools.push(Arc::new(smooth_tools::RecallTool {
             memory: Arc::clone(&self.memory),
         }) as Arc<dyn Tool>);
+        // Platform-specific tools (pearl th-94cc4a). The macOS Calendar tool
+        // exists only where EventKit does, so it's cfg-gated — Linux/Windows
+        // never see it. It registers even when `ical` isn't installed or the TCC
+        // grant is missing: the tool itself answers with "run
+        // `th doctor --setup-calendar`", which the agent can relay. Hiding the
+        // tool instead would make Big Smooth claim it has no calendar at all —
+        // wrong, and unactionable.
+        //
+        // NOTE: this tool deliberately spawns `ical` OUTSIDE the kernel sandbox
+        // (seatbelt blocks EventKit's XPC/mach lookups). See the module docs on
+        // `smooth_tools::calendar` — it's still a normal tool call, so the
+        // permission gate and the Narc hook see it like any other.
+        #[cfg(target_os = "macos")]
+        tools.push(Arc::new(smooth_tools::CalendarTool) as Arc<dyn Tool>);
         // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
         // lets Big Smooth fan a self-contained subtask out to a `scout`
         // (read-only) or `runner` (full) sidekick — each runs in its own

@@ -21,6 +21,10 @@ use smooth_operator::{Tool, ToolRegistry};
 
 pub mod artifact;
 pub mod bash;
+/// macOS Calendar (EventKit, via the `ical` CLI). Platform-specific by nature —
+/// there is no cross-platform equivalent, so Linux/Windows never see the tool.
+#[cfg(target_os = "macos")]
+pub mod calendar;
 pub mod cd;
 pub mod crawl;
 pub mod create_skill;
@@ -41,6 +45,8 @@ pub mod write;
 
 pub use artifact::ArtifactTool;
 pub use bash::BashTool;
+#[cfg(target_os = "macos")]
+pub use calendar::CalendarTool;
 pub use cd::CdTool;
 pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;

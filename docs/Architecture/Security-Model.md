@@ -41,6 +41,26 @@ The [[Daemon-Direction|daemon epic]]'s security verdict: the load-bearing bounda
 
 Threat model: single-tenant (one trusted operator per instance). The real risk isn't a malicious tenant — it's prompt-injection / untrusted repo content turning the operator's own agent against them (the "lethal trifecta": private-data access + untrusted content + egress). The kernel sandbox + egress allowlist + auto-mode is the cheaper, correct defense for that.
 
+## Trusted-integration exceptions to the kernel sandbox
+
+Some OS integrations cannot run inside the tool sandbox at all: macOS EventKit
+reaches `calaccessd`/`tccd` over XPC + mach lookups that the seatbelt profile
+denies, so a calendar read through the sandboxed `bash` fails 100% of the time.
+The `calendar` tool (macOS, pearl th-94cc4a) is therefore the first **documented
+exception** — it spawns `ical` with a plain `Command`.
+
+What keeps the exception narrow, and what any future one must also do:
+
+- **argv only, no shell** — no interpolation or injection path.
+- **fixed binary** — a resolved install path, never caller-supplied.
+- **verb allowlist** — read-only commands; mutation is a separate decision.
+- **still a normal tool call** — the permission gate and Narc hook see it exactly
+  like every other tool, so surveillance and policy are unchanged. Only the
+  *kernel* layer is waived, and only for this one binary.
+
+The TCC grant itself is the compensating control: the OS asks the human once,
+per app bundle, and the user can revoke it in System Settings.
+
 ## Related
 
 - [[The-Cast]]

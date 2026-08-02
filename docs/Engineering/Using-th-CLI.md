@@ -721,9 +721,37 @@ th audit path                                      # ~/.smooth/audit/
 
 ```bash
 th doctor                                          # system health + auto-fix
+th doctor --fix-fda                                # macOS: guide the Full Disk Access grant
+th doctor --setup-calendar                         # macOS: install `ical` + drive the Calendar grant
 th cache list / prune / clear
 th service install / start / stop / status         # run smooth as a background daemon
 ```
+
+#### `th doctor --setup-calendar` (macOS)
+
+Makes Big Smooth's `calendar` tool work out of the box (pearl th-94cc4a). Two
+things have to be true; this command does the first and drives the second:
+
+1. **The `ical` CLI exists.** Side-loaded from the
+   [BRO3886/ical](https://github.com/BRO3886/ical) release to `~/.smooth/bin/ical`
+   — no Homebrew tap needed (`curl` + `tar` only). The daemon's tool resolves
+   `SMOOTH_ICAL_BIN` → `~/.smooth/bin/ical` → `/opt/homebrew/bin/ical` → `PATH`.
+2. **macOS has granted Big Smooth.app Calendar access.** A TCC grant belongs to
+   the **app bundle** that asks, so `th` cannot request it — it launches (or
+   tells you to restart) `Big Smooth.app`, which calls
+   `EKEventStore.requestFullAccessToEvents` at startup and makes the OS prompt
+   appear. **Click Allow.** The prompt only shows in a GUI login session on the
+   Mac itself — never over SSH — and macOS asks exactly once; after a denial it
+   must be re-enabled in System Settings → Privacy & Security → Calendars.
+
+Until both hold, the `calendar` tool still registers and answers every call with
+"run `th doctor --setup-calendar`" instead of failing opaquely, so Big Smooth can
+tell you what to do rather than claim it has no calendar.
+
+Install Big Smooth.app first if it's missing: `scripts/macos/install-local.sh`.
+
+Reminders (`NSRemindersFullAccessUsageDescription` is already declared in the
+bundle) is the next slice of the same epic.
 
 ### LLM cast
 
