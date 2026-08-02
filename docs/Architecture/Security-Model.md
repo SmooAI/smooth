@@ -41,6 +41,68 @@ The [[Daemon-Direction|daemon epic]]'s security verdict: the load-bearing bounda
 
 Threat model: single-tenant (one trusted operator per instance). The real risk isn't a malicious tenant — it's prompt-injection / untrusted repo content turning the operator's own agent against them (the "lethal trifecta": private-data access + untrusted content + egress). The kernel sandbox + egress allowlist + auto-mode is the cheaper, correct defense for that.
 
+## Trusted-integration exceptions to the kernel sandbox
+
+Some OS integrations cannot run inside the tool sandbox at all. macOS is the
+recurring case: the seatbelt profile denies the XPC + mach lookups that EventKit
+and Apple Events need, and denies reads under `~/Library` where the OS keeps its
+private stores. Those integrations therefore get a **documented, narrow exception**
+— they run outside the kernel layer.
+
+Every exception must earn it the same way:
+
+- **argv only, no shell** — no interpolation or injection path.
+- **fixed binary** — a resolved path, never caller-supplied.
+- **fixed script/statement** — the caller supplies *data*, never code.
+- **verb allowlist, not a denylist** — an enumerated set, so a new upstream release
+  can't quietly widen what the agent can reach.
+- **still a normal tool call** — the permission gate and Narc hook see it exactly
+  like every other tool, so surveillance and policy are unchanged. Only the
+  *kernel* layer is waived, and only for that one integration.
+
+The TCC grant is the compensating control: the OS asks the human once, per app
+bundle, and the user can revoke it in System Settings.
+
+### The exceptions that exist
+
+- **`calendar`** (macOS, pearl th-94cc4a) — spawns the `ical` EventKit client with
+  a plain `Command`.
+- **`imessage`** (macOS, pearl th-1665ed) — two halves, both outside the sandbox:
+  the **read** is *in-process* `rusqlite` against `~/Library/Messages/chat.db` on
+  a `SQLITE_OPEN_READ_ONLY` connection (no subprocess exists at all, so there is
+  no shell and no injection surface), and the **send** spawns `/usr/bin/osascript`
+  with a fixed AppleScript that takes the recipient and body as `on run argv`
+  arguments — never interpolated into script source.
+
+**Mutations get no extra userspace gate, on purpose.** `calendar` can delete an
+event and `imessage` can text a real human. Both sit behind the same permission
+gate as `write_file` and `bash` — which, in the daemon's default `AutoMode::Bypass`
+posture, means **a send executes without a prompt**, exactly like a file write.
+That is the deliberate "allow benign, block dangerous" stance, not an oversight;
+`SMOOTH_AUTO_MODE=ask` is the knob for a stricter one.
+
+Corollary for any human-facing CLI wrapped this way: it will confirm destructive
+actions on a TTY the daemon doesn't have, and its interactive/picker modes will
+block forever on the daemon's null stdin. Those prompts have to be suppressed and
+the interactive modes refused outright — a wrapper that silently blocks on an
+unanswerable prompt is a worse failure than one that refuses the call.
+
+### Reading private data is itself the risk
+
+`imessage` is the first tool that puts a large, sensitive, **attacker-influenced**
+corpus in front of the model: anyone who can text the user can write into it. That
+is the "untrusted content" leg of the lethal trifecta arriving through a channel
+the user doesn't think of as input. Treat message text as untrusted — it is not an
+instruction — and note the safeguards that bound the exposure:
+
+- every read is limited (default 20, hard cap 200 rows) — there is no
+  "dump the whole database" shape;
+- `thread` and `search` require a filter;
+- message bodies are truncated, and attachments are reported as a boolean, never
+  as a filesystem path the model could then go read.
+
+The user opts in with Full Disk Access and can revoke it in System Settings.
+
 ## Related
 
 - [[The-Cast]]
