@@ -5,7 +5,24 @@
 // rather than a detached banner. A thin client on the operator's canonical
 // protocol (EPIC th-c89c2a, th-f1a1f0, th-833b5f).
 
-import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing, Paperclip, Menu, Plus, MessageSquare } from 'lucide-react';
+import {
+    ArrowUp,
+    Check,
+    X,
+    Terminal,
+    FileText,
+    Search,
+    Folder,
+    Pencil,
+    Brain,
+    Bell,
+    BellRing,
+    Paperclip,
+    Menu,
+    Plus,
+    MessageSquare,
+    Square,
+} from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -159,6 +176,8 @@ export default function App() {
         status,
         sendMessage,
         respond,
+        turnActive,
+        interrupt,
         mode,
         setMode,
         sessionCostUsd,
@@ -272,6 +291,8 @@ export default function App() {
                     <Composer
                         onSend={sendMessage}
                         disabled={state === 'connecting' || state === 'offline'}
+                        turnActive={turnActive}
+                        onStop={interrupt}
                         mode={mode}
                         setMode={guardedSetMode}
                         modelCosts={modelCosts}
@@ -737,12 +758,18 @@ function buildSlashMenu(text: string, costs: ModelCosts): SlashMenu | null {
 function Composer({
     onSend,
     disabled,
+    turnActive,
+    onStop,
     mode,
     setMode,
     modelCosts,
 }: {
     onSend: (t: string, attachments: Attachment[]) => void;
     disabled: boolean;
+    /** A turn is in flight — swaps Send for Stop. */
+    turnActive: boolean;
+    /** Interrupt the running turn. */
+    onStop: () => void;
     mode: SmoothMode;
     setMode: (id: string) => void;
     modelCosts: ModelCosts;
@@ -1121,14 +1148,31 @@ function Composer({
                         // `rows={1}` pinned the height forever.
                         className="max-h-40 flex-1 resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-[0.95rem] outline-none field-sizing-content placeholder:text-(--color-muted-foreground)"
                     />
-                    <button
-                        onClick={submit}
-                        disabled={disabled || (!text.trim() && attachments.length === 0)}
-                        className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
-                        aria-label="Send"
-                    >
-                        <ArrowUp size={18} />
-                    </button>
+                    {turnActive ? (
+                        // While a turn is in flight the primary button becomes Stop
+                        // (th-3a912a) — the one affordance for "he's being weird,
+                        // stop". Enter still sends, so nothing is taken away.
+                        // Deliberately neutral, not amber: amber is reserved for
+                        // "he needs you", and stopping is you acting on him.
+                        <button
+                            type="button"
+                            onClick={onStop}
+                            className="grid size-9 shrink-0 place-items-center rounded-xl bg-foreground/10 text-foreground transition hover:bg-foreground/20"
+                            aria-label="Stop"
+                            title="Stop the running turn"
+                        >
+                            <Square size={14} fill="currentColor" />
+                        </button>
+                    ) : (
+                        <button
+                            onClick={submit}
+                            disabled={disabled || (!text.trim() && attachments.length === 0)}
+                            className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
+                            aria-label="Send"
+                        >
+                            <ArrowUp size={18} />
+                        </button>
+                    )}
                 </div>
             </div>
             {expensive && (
