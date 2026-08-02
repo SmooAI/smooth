@@ -851,6 +851,20 @@ fn accept_autocomplete(state: &mut AppState) {
     state.autocomplete.deactivate();
 }
 
+/// Would submitting `input` right now dispatch a SECOND concurrent agent turn?
+///
+/// Only [`InputKind::Normal`] reaches the agent; slash commands and `!shell`
+/// run locally, so they stay usable while a turn is in flight. Pure so the
+/// guard is testable without a terminal (pearl th-426791).
+///
+/// `ponytail:` an unknown `/name` that resolves to a *skill* also dispatches a
+/// turn, and isn't blocked here — deciding that needs the skill registry, and
+/// invoking a skill mid-turn is a corner of a corner. Move the check inside the
+/// skill branch if it ever bites.
+fn blocks_second_turn(input: &str, turn_in_flight: bool) -> bool {
+    turn_in_flight && matches!(parse_input(input), InputKind::Normal(text) if !text.is_empty())
+}
+
 /// Handle key events in input mode.
 #[allow(clippy::needless_pass_by_value)] // Arc is cloned into async tasks
 fn handle_input_mode(
@@ -957,6 +971,15 @@ fn handle_input_mode(
 
     match key.code {
         KeyCode::Enter => {
+            // th-426791: a second agent turn dispatched while one is still in
+            // flight runs CONCURRENTLY — the two responses stream back
+            // interleaved and each lands under the other's prompt. Refuse the
+            // dispatch *before* `take_input`, so the draft stays in the box and
+            // the keystroke costs nothing. Slash commands and `!shell` are
+            // handled locally, so they stay live while Big Smooth works.
+            if blocks_second_turn(&state.input, state.thinking) {
+                return;
+            }
             let input = state.take_input();
             if input.trim().is_empty() {
                 return;
@@ -1579,6 +1602,40 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
 }
 
 // ponytail: narc TUI removed with the old-cast crate; re-home onto the new engine's NarcHook later (th-3119e3)
+
+#[cfg(test)]
+mod second_turn_guard_tests {
+    use super::blocks_second_turn;
+
+    #[test]
+    fn nothing_is_blocked_while_idle() {
+        assert!(!blocks_second_turn("fix the failing test", false));
+        assert!(!blocks_second_turn("/help", false));
+    }
+
+    /// The whole point: a chat message can't start a turn racing the live one.
+    #[test]
+    fn a_chat_message_is_blocked_while_a_turn_is_in_flight() {
+        assert!(blocks_second_turn("what did you just say?", true));
+        assert!(blocks_second_turn("  leading space still counts  ", true));
+    }
+
+    /// Local surfaces stay usable — blocking `/clear` or `/quit` mid-turn would
+    /// leave the user with no way out at all.
+    #[test]
+    fn local_commands_stay_live_while_a_turn_is_in_flight() {
+        assert!(!blocks_second_turn("/help", true));
+        assert!(!blocks_second_turn("/quit", true));
+        assert!(!blocks_second_turn("!git status", true));
+    }
+
+    /// An empty draft was already a no-op; the guard must not claim it.
+    #[test]
+    fn an_empty_draft_is_not_reported_as_blocked() {
+        assert!(!blocks_second_turn("", true));
+        assert!(!blocks_second_turn("   \n ", true));
+    }
+}
 
 #[cfg(test)]
 mod mouse_capture_policy_tests {
