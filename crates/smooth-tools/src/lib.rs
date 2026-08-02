@@ -28,6 +28,11 @@ pub mod cwd;
 pub mod datetime;
 pub mod grep;
 pub mod guard;
+/// macOS Messages — reads `chat.db` and sends via Messages.app. Platform-specific
+/// by nature (there is no cross-platform equivalent), so Linux/Windows never see
+/// the tool.
+#[cfg(target_os = "macos")]
+pub mod imessage;
 pub mod knowledge_search;
 pub mod path;
 pub mod permission;
@@ -49,6 +54,8 @@ pub use cwd::SessionCwd;
 pub use datetime::CurrentDatetimeTool;
 pub use grep::GrepTool;
 pub use guard::is_circuit_breaker;
+#[cfg(target_os = "macos")]
+pub use imessage::IMessageTool;
 pub use knowledge_search::KnowledgeSearchTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
