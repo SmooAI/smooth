@@ -90,11 +90,17 @@ pub fn request_calendar_access() -> Access {
         // re-read the authoritative status below.
         let _ = tx.send(());
     });
-    // SAFETY: `completion` outlives the call (it's dropped after `recv_timeout`
-    // returns) and the pointer comes straight from a live `RcBlock`.
+    // SAFETY: the pointer comes straight from a live `RcBlock` that outlives the
+    // call, and EventKit copies the block for its async callback.
     unsafe { store.requestFullAccessToEventsWithCompletion(RcBlock::as_ptr(&completion)) };
 
-    let _ = rx.recv_timeout(PROMPT_TIMEOUT);
+    if rx.recv_timeout(PROMPT_TIMEOUT).is_err() {
+        // Timed out: the user hasn't answered the prompt yet, so the completion
+        // block may still be invoked after this function returns. Leak the one
+        // block rather than bet on EventKit having copied it — a few hundred
+        // bytes, once per process, against a use-after-free.
+        std::mem::forget(completion);
+    }
     calendar_access()
 }
 
