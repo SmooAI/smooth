@@ -80,3 +80,12 @@ same DR.)
 
 `deploy.sh` keeps a timestamped `Big Smooth.app.bak-<ts>` (and `th.bak-<ts>`) on
 the hub, so a bad deploy is one `mv` away from rollback.
+
+## Shipping the app to other people — see `scripts/macos/README.md`
+
+`deploy.sh` is the *hub* path (SSH + launchd, Apple Distribution signing). The
+user-facing path — DMG, hardened runtime, notarization, and the release job that
+does all three — lives in [`scripts/macos/README.md`](../macos/README.md) (pearl
+th-a647da). Both sit on the same `make-app-bundle.sh`, and the hub deploy signs
+exactly as it did before: hardened runtime turns on only for a `Developer ID`
+identity.
