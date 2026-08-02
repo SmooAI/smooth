@@ -5390,10 +5390,12 @@ version = "0.26.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "dirs-next",
  "globset",
  "grep-regex",
  "grep-searcher",
+ "iana-time-zone",
  "ignore",
  "serde",
  "serde_json",
