@@ -43,6 +43,46 @@ The "Line" is the rolling per-task score in `docs/bench-history.md`. Every merge
 - **Repo Dolt vs global:** the bench prefers the repo's local Dolt over the global registry. Don't write bench-only state into your global pearls.
 - **CMake / `[METRICS]` capture:** C++ tasks need `-DEXERCISM_RUN_ALL_TESTS` and the work dir named after the task. The harness handles this; if you add a new task type, replicate that contract.
 
+## Agentic conversation suite (`smooth-bench convo`)
+
+Pearl th-f19853. The scored suites above ask "did the agent solve the task?".
+This one asks "was Big Smooth any good to talk to?" — the failure mode behind
+the ical incident, where three contradictory calendar answers arrived in one
+conversation and no single turn was obviously wrong.
+
+An LLM **driver** plays a user across several turns on ONE canonical-protocol
+session (same `sessionId` throughout, so the agent's own memory is under test),
+then an LLM **judge** grades the whole thread 1–5 on helpfulness, correctness,
+tool use, and **consistency across turns**, plus a rubric PASS/FAIL.
+
+```bash
+# whole suite — spawns its own `th daemon` on :8791, tears it down after
+cargo run -p smooai-smooth-bench -- convo
+
+# one scenario, against a Big Smooth you already have running
+cargo run -p smooai-smooth-bench -- convo --only rapid-correction \
+  --url http://127.0.0.1:8788 --token "$SMOOTH_LOCAL_TOKEN"
+
+# stochastic — take a rate, not an anecdote
+cargo run -p smooai-smooth-bench -- convo --trials 3
+```
+
+Driver/judge credentials come from `SMOOAI_GATEWAY_KEY`, falling back to the
+first OpenAI-compatible provider in `~/.smooth/providers.json` (the same store
+the daemon reads). Scenarios live in `crates/smooth-bench/convo-scenarios.toml`;
+transcripts land as JSON-lines in `~/.smooth/bench-runs/convo-*/`.
+
+**Deliberately not in `cargo test`** — every scenario is several live LLM turns.
+Only the pure parsing/rendering logic is unit-tested.
+
+### `expect_fail` scenarios
+
+`rapid-correction` fires a correction 1.5s into the first turn — the th-3a912a
+interrupt gap — and is marked `expect_fail`. While the gap is open it records
+`XFAIL` and the suite stays green; the day interrupts land it records `XPASS`
+and exits non-zero, which is the signal to drop the flag and keep it as a
+plain regression test.
+
 ## Related
 
 - [[Architecture-Overview]]

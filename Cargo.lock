@@ -5259,6 +5259,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-event-kit",
  "objc2-foundation",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -5266,7 +5267,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1#ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5296,7 +5297,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1#ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5336,7 +5337,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-ingestion"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1#ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5357,7 +5358,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-server"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1#ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5429,11 +5430,14 @@ version = "0.26.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "dirs-next",
  "globset",
  "grep-regex",
  "grep-searcher",
+ "iana-time-zone",
  "ignore",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yml",

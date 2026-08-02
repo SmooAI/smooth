@@ -136,6 +136,10 @@ interface OperatorApi {
     status: Status;
     sendMessage: (text: string, attachments?: Attachment[]) => void;
     respond: (requestId: string, approved: boolean) => void;
+    /** True while a turn is in flight — what the composer's Stop button shows on. */
+    turnActive: boolean;
+    /** Stop the running turn (the `interrupt` action). No-op with no session. */
+    interrupt: () => void;
     /** Recent conversations for the sidebar (most-recent first), from `list_conversations`. */
     conversations: ConversationSummary[];
     /** The conversation currently loaded, for highlighting the active sidebar row. */
@@ -531,6 +535,15 @@ export function useOperator(): OperatorApi {
         [send],
     );
 
+    // Stop the running turn (th-3a912a). The daemon cancels it at its next await
+    // point and closes it out with a normal `eventual_response` on the TURN's
+    // requestId — so the transcript and `turnActive` unwind through the existing
+    // handler, and there is nothing to clear optimistically here.
+    const interrupt = useCallback(() => {
+        if (!sessionRef.current) return;
+        send({ action: 'interrupt', requestId: nextId('int'), sessionId: sessionRef.current });
+    }, [send]);
+
     const refreshConversations = useCallback(() => {
         send({ action: 'list_conversations', requestId: nextId('lc') });
     }, [send]);
@@ -589,6 +602,8 @@ export function useOperator(): OperatorApi {
         status,
         sendMessage,
         respond,
+        turnActive,
+        interrupt,
         mode,
         setMode,
         sessionCostUsd,

@@ -515,7 +515,10 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     // obvious place to type. Stays orange even when the chat panel
     // is focused — there's only one thing to do in this surface
     // (type) and we want it findable at a glance.
-    let title_line = Line::from(vec![Span::styled(" ▶ ", theme::title()), Span::styled("Message ", theme::title())]);
+    // While a turn is in flight Enter won't dispatch a second one (th-426791) —
+    // say so, because a swallowed keystroke otherwise reads as a broken input.
+    let label = if state.thinking { "Working… send paused " } else { "Message " };
+    let title_line = Line::from(vec![Span::styled(" ▶ ", theme::title()), Span::styled(label, theme::title())]);
     let block = Block::default()
         .title(title_line)
         .borders(Borders::ALL)

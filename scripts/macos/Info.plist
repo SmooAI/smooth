@@ -51,5 +51,11 @@
          reminders. -->
     <key>NSRemindersFullAccessUsageDescription</key>
     <string>Big Smooth reads and edits your reminders when you ask it to.</string>
+    <!-- th-1665ed: the `imessage` tool sends through Messages.app over Apple
+         Events, which is the Automation TCC gate. Reading chat.db is a separate
+         gate (Full Disk Access) that has no usage string — it can only be
+         granted by hand in System Settings. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Big Smooth sends messages through Messages.app when you ask it to.</string>
 </dict>
 </plist>

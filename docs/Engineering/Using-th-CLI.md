@@ -723,6 +723,7 @@ th audit path                                      # ~/.smooth/audit/
 th doctor                                          # system health + auto-fix
 th doctor --fix-fda                                # macOS: guide the Full Disk Access grant
 th doctor --setup-calendar                         # macOS: install `ical` + drive the Calendar grant
+th doctor --setup-imessage                         # macOS: set up the `imessage` tool (th-1665ed)
 th cache list / prune / clear
 th service install / start / stop / status         # run smooth as a background daemon
 ```
@@ -759,6 +760,19 @@ the decision point is the tool's permission gate, not a TTY prompt.
 
 Reminders (`NSRemindersFullAccessUsageDescription` is already declared in the
 bundle) is the next slice of the same epic.
+`--setup-imessage` reports whether `~/Library/Messages/chat.db` is readable (Full
+Disk Access) and fires a harmless Apple Event at Messages.app so the one-time
+**Automation** prompt appears now rather than mid-turn. Neither grant can be set
+programmatically (the TCC database is SIP-protected), so both are detect-and-guide
+— and both only prompt in a **GUI login session on the Mac itself**, never over
+SSH.
+
+Once granted, Big Smooth's `imessage` tool can read, search and **send** the
+user's real Messages: `recent`, `thread`, `search`, `conversations`, `send`.
+Reading exposes the whole message history to the model — a deliberate opt-in.
+Revoke by removing Big Smooth from Full Disk Access. See
+[Security-Model](../Architecture/Security-Model.md) for why it runs outside the
+kernel sandbox and what bounds the exposure.
 
 ### LLM cast
 
