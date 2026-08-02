@@ -217,8 +217,8 @@ prost-types = "0.13"
 # this rev; #330 is on core-main but core-main is still 0.16.2, so the daemon
 # stays on this 1.7.0 side lineage until main absorbs the core bump.
 smooth-operator = { version = "1.7.0", package = "smooai-smooth-operator-core" }
-smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1", package = "smooai-smooth-operator", default-features = false }
+smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "e9ce68c539c5d9966f9241e99b12fe9bb86b1885", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "e9ce68c539c5d9966f9241e99b12fe9bb86b1885", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.26.5", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
