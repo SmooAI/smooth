@@ -25,6 +25,7 @@ pub mod cd;
 pub mod crawl;
 pub mod create_skill;
 pub mod cwd;
+pub mod datetime;
 pub mod grep;
 pub mod guard;
 pub mod knowledge_search;
@@ -45,6 +46,7 @@ pub use cd::CdTool;
 pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;
 pub use cwd::SessionCwd;
+pub use datetime::CurrentDatetimeTool;
 pub use grep::GrepTool;
 pub use guard::is_circuit_breaker;
 pub use knowledge_search::KnowledgeSearchTool;
@@ -100,6 +102,9 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         // Lets Big Smooth author its own reusable skills (writes
         // ~/.smooth/skills/<name>/SKILL.md; workspace-independent).
         Arc::new(CreateSkillTool),
+        // th-4c6271: without a clock the model invents "today" from its
+        // training data. Argument-free and cheap, so always registered.
+        Arc::new(CurrentDatetimeTool),
         // Self-contained HTML report/artifact tool (Claude Code Artifacts style).
         Arc::new(ArtifactTool { workspace: workspace.clone() }),
         Arc::new(BashTool { workspace, proxy }),
@@ -127,6 +132,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
+            "current_datetime",
             "create_artifact",
             "bash",
         ] {
@@ -149,6 +155,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
+            "current_datetime",
             "create_artifact",
             "bash",
         ] {

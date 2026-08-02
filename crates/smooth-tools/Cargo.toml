@@ -32,6 +32,11 @@ globset.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 tracing.workspace = true
+# th-4c6271: the `current_datetime` tool. chrono formats it; iana-time-zone
+# (already in the tree via chrono) supplies the cross-platform IANA zone NAME,
+# which chrono::Local alone does not know (it only carries the numeric offset).
+chrono.workspace = true
+iana-time-zone = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
