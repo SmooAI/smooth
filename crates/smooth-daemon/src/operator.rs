@@ -803,6 +803,22 @@ mod tests {
         assert!(names.iter().any(|n| n == "cd"), "cd still registered: {names:?}");
     }
 
+    /// Platform-specific registration (pearl th-94cc4a): the calendar tool must
+    /// reach the agent on macOS **unconditionally** — including on a box where
+    /// `ical` isn't installed or the TCC grant is missing, because the tool's own
+    /// answer ("run `th doctor --setup-calendar`") is the actionable path. If
+    /// this ever regresses to a runtime availability gate, Big Smooth goes back
+    /// to claiming it has no calendar at all.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn provider_registers_the_calendar_tool_on_macos() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "calendar"), "calendar registered: {names:?}");
+    }
+
     #[tokio::test]
     async fn provider_memory_is_shared_write_visible_to_recall() {
         use smooth_operator_svc::access_control::AccessContext;
