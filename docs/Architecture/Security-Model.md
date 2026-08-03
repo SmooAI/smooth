@@ -65,8 +65,8 @@ bundle, and the user can revoke it in System Settings.
 
 ### The exceptions that exist
 
-- **`calendar`** (macOS, pearl th-94cc4a) — spawns the `ical` EventKit client with
-  a plain `Command`.
+- **`calendar`** / **`calendar_delete`** (macOS, pearl th-94cc4a) — spawn the
+  `ical` EventKit client with a plain `Command`.
 - **`imessage`** (macOS, pearl th-1665ed) — two halves, both outside the sandbox:
   the **read** is *in-process* `rusqlite` against `~/Library/Messages/chat.db` on
   a `SQLITE_OPEN_READ_ONLY` connection (no subprocess exists at all, so there is
@@ -74,12 +74,42 @@ bundle, and the user can revoke it in System Settings.
   with a fixed AppleScript that takes the recipient and body as `on run argv`
   arguments — never interpolated into script source.
 
-**Mutations get no extra userspace gate, on purpose.** `calendar` can delete an
-event and `imessage` can text a real human. Both sit behind the same permission
-gate as `write_file` and `bash` — which, in the daemon's default `AutoMode::Bypass`
-posture, means **a send executes without a prompt**, exactly like a file write.
-That is the deliberate "allow benign, block dangerous" stance, not an oversight;
-`SMOOTH_AUTO_MODE=ask` is the knob for a stricter one.
+**Mutations get no extra userspace gate, on purpose — with one exception.**
+`calendar` can book and move events and `imessage` can text a real human. Those
+sit behind the same permission gate as `write_file` and `bash` — which, in the
+daemon's default `AutoMode::Bypass` posture, means **a send executes without a
+prompt**, exactly like a file write. That is the deliberate "allow benign, block
+dangerous" stance, not an oversight; `SMOOTH_AUTO_MODE=ask` is the knob for a
+stricter one.
+
+**The exception: cancelling a calendar event confirms first.** Deleting is the
+one mutation here the agent can't walk back on the next turn, so `calendar_delete`
+parks the turn and asks. Mechanically it is the engine's existing
+write-confirmation HITL: the runner installs core's `ConfirmationHook` over the
+tool names in `ServerConfig::confirm_tools`, a matching call emits
+`write_confirmation_required` (which the web UI renders as an approve/deny
+prompt), and the tool only runs when the client answers `confirm_tool_action`
+with `approved: true`. Deny, timeout (5 min), or a client that never answers all
+fail **closed** — the tool call is refused, not silently run.
+
+Two shapes fall out of that mechanism and are worth knowing:
+
+- **The matcher is on the tool NAME, not the arguments** (`contains`). "This
+  *verb* needs confirmation" is therefore only expressible as "this *tool* needs
+  confirmation" — which is why `delete` was split off the `calendar` tool onto its
+  own `calendar_delete` rather than gated by inspecting a `command` argument. It
+  also means `delete` must be off the ungated tool's allowlist entirely, or the
+  model bypasses the gate by picking the other tool. There is a test for exactly
+  that.
+- **The gate is a floor, not a setting.** `smooth_daemon::operator::CONFIRM_TOOLS`
+  is merged into whatever `SMOOTH_AGENT_CONFIRM_TOOLS` sets, so the env var can
+  widen the confirm list but cannot shrink it — an unset/empty var can't quietly
+  disarm the delete gate.
+
+Known gap: `th code`'s WS client doesn't render `write_confirmation_required`
+yet, so a delete driven from that client parks and then fails closed on the
+timeout rather than prompting. The web UI (Big Smooth's own surface) and
+`th api smooth-operator` both handle the frame.
 
 Corollary for any human-facing CLI wrapped this way: it will confirm destructive
 actions on a TTY the daemon doesn't have, and its interactive/picker modes will

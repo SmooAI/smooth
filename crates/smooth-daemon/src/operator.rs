@@ -33,6 +33,8 @@
 //!   kernel sandbox + egress allowlist remain the load-bearing boundary; this is
 //!   defense-in-depth. (Content-aware hard-deny circuit-breakers — `rm -rf /` and
 //!   friends — need a host `ToolHook` seam in the operator; see pearl th-1f694a.)
+//!   The daemon ALWAYS adds [`CONFIRM_TOOLS`] to whatever this var sets, so the
+//!   `calendar_delete` gate can be widened from the env but never disarmed.
 //! - `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` — the LLM gateway (read by the
 //!   operator); with no key the server boots and `send_message` errors cleanly.
 //! - `SMOOTH_ADDR` — the `host:port` the default `th daemon` binds (else
@@ -160,8 +162,16 @@ impl ToolProvider for SandboxedToolProvider {
         // (seatbelt blocks EventKit's XPC/mach lookups). See the module docs on
         // `smooth_tools::calendar` — it's still a normal tool call, so the
         // permission gate and the Narc hook see it like any other.
+        //
+        // Cancelling an event is the one calendar mutation that isn't undoable
+        // from a follow-up turn, so it's split onto its own `calendar_delete`
+        // tool and listed in [`CONFIRM_TOOLS`] — a call parks the turn on
+        // `write_confirmation_required` until the user approves. Reads and
+        // `add`/`update` stay unprompted.
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::CalendarTool) as Arc<dyn Tool>);
+        #[cfg(target_os = "macos")]
+        tools.push(Arc::new(smooth_tools::CalendarDeleteTool) as Arc<dyn Tool>);
         // Platform-specific tools (pearl th-1665ed). The macOS Messages tool
         // exists only where chat.db and Messages.app do, so it's cfg-gated —
         // Linux/Windows never see it. It registers even when Full Disk Access
@@ -446,6 +456,32 @@ fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String
     Some((url, key, model))
 }
 
+/// Tools the daemon ALWAYS routes through the engine's write-confirmation HITL,
+/// on top of whatever `SMOOTH_AGENT_CONFIRM_TOOLS` adds (pearl th-94cc4a).
+///
+/// Big Smooth's posture is `AutoMode::Bypass` — mutations run unprompted — with
+/// exactly one exception so far: **cancelling a calendar event**. It's the one
+/// mutation the agent can't walk back on the next turn, so the user gets the
+/// last word. This is a floor, not a setting: the env var can widen the list but
+/// not shrink it, so an empty/absent `SMOOTH_AGENT_CONFIRM_TOOLS` can't quietly
+/// disarm the gate.
+///
+/// Matched by core's `ConfirmationHook` with `contains`, so these are tool-name
+/// SUBSTRINGS. `calendar_delete` is deliberately not a prefix of any other tool
+/// name — in particular the read/`add`/`update` `calendar` tool does NOT contain
+/// it, and stays unprompted.
+const CONFIRM_TOOLS: &[&str] = &["calendar_delete"];
+
+/// Merge [`CONFIRM_TOOLS`] into `configured` (the env-derived list), preserving
+/// the caller's entries and not duplicating ours.
+fn add_confirm_tools(configured: &mut Vec<String>) {
+    for name in CONFIRM_TOOLS {
+        if !configured.iter().any(|c| c == name) {
+            configured.push((*name).to_owned());
+        }
+    }
+}
+
 /// The LLM gateway config for the local flavor: the operator's env-based config
 /// first (`SMOOAI_GATEWAY_*`), and when no key is set, the user's
 /// `th model login` credentials from `providers.json` — so `th code` works
@@ -482,6 +518,7 @@ fn resolve_gateway_config() -> ServerConfig {
     if std::env::var_os("SMOOTH_AGENT_MAX_ITERATIONS").is_none() {
         config.max_iterations = 50;
     }
+    add_confirm_tools(&mut config.confirm_tools);
     tracing::info!(
         gateway = %config.gateway_url,
         model = %config.model,
@@ -834,6 +871,102 @@ mod tests {
         let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
         let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
         assert!(names.iter().any(|n| n == "calendar"), "calendar registered: {names:?}");
+        assert!(names.iter().any(|n| n == "calendar_delete"), "calendar_delete registered: {names:?}");
+    }
+
+    /// The confirm-gate floor (pearl th-94cc4a): `calendar_delete` must always be
+    /// in the resolved config's `confirm_tools`, whatever the env says, and must
+    /// not drag the read/add/update `calendar` tool in with it.
+    #[test]
+    fn confirm_tools_always_include_calendar_delete() {
+        let mut from_env: Vec<String> = Vec::new();
+        add_confirm_tools(&mut from_env);
+        assert_eq!(from_env, vec!["calendar_delete".to_owned()]);
+
+        // An env-configured list is preserved and widened, never replaced.
+        let mut widened = vec!["bash".to_owned()];
+        add_confirm_tools(&mut widened);
+        assert_eq!(widened, vec!["bash".to_owned(), "calendar_delete".to_owned()]);
+
+        // Idempotent — a second pass doesn't duplicate the entry.
+        add_confirm_tools(&mut widened);
+        assert_eq!(widened.iter().filter(|c| *c == "calendar_delete").count(), 1);
+    }
+
+    /// The gate is only as good as core's matcher, which is `contains` on the
+    /// tool NAME. Drive the real `ConfirmationHook` with the daemon's patterns:
+    /// `calendar_delete` must park (emit a `HumanRequest::Confirm` and block on
+    /// the verdict), `calendar` and `write_file` must sail straight through.
+    #[tokio::test]
+    async fn the_confirmation_hook_gates_delete_and_nothing_else() {
+        use smooth_operator::human::{human_channel, HumanRequest, HumanResponse};
+        use smooth_operator::tool::{ToolCall, ToolHook};
+
+        let pair = human_channel();
+        let hook = smooth_operator::human::ConfirmationHook::new(
+            CONFIRM_TOOLS.iter().map(|s| (*s).to_owned()).collect(),
+            pair.request_tx,
+            pair.response_rx,
+            std::time::Duration::from_secs(5),
+        );
+        let call = |name: &str| ToolCall {
+            id: "call-1".into(),
+            name: name.into(),
+            arguments: serde_json::json!({"args": ["EV-1"]}),
+        };
+
+        // Unprompted: nothing is emitted and the call proceeds immediately.
+        let mut request_rx = pair.request_rx;
+        for ungated in ["calendar", "write_file", "bash"] {
+            hook.pre_call(&call(ungated)).await.expect("{ungated} must not be gated");
+            assert!(request_rx.try_recv().is_err(), "{ungated} must not emit a confirm request");
+        }
+
+        // Gated: the call parks until a verdict arrives. Approve → it runs.
+        let approved = tokio::spawn(async move {
+            let req = request_rx.recv().await.expect("a confirm request must be emitted");
+            match &req {
+                HumanRequest::Confirm { tool_name, .. } => assert_eq!(tool_name, "calendar_delete"),
+                HumanRequest::Input { .. } => panic!("expected Confirm, got Input"),
+            }
+            pair.response_tx.send(HumanResponse::Approved).expect("send verdict");
+            req
+        });
+        hook.pre_call(&call("calendar_delete")).await.expect("approved delete must run");
+        approved.await.expect("bridge task");
+    }
+
+    /// Denying the confirmation must BLOCK the delete — the half of the gate that
+    /// actually protects the calendar.
+    #[tokio::test]
+    async fn a_denied_confirmation_blocks_the_delete() {
+        use smooth_operator::human::{human_channel, HumanResponse};
+        use smooth_operator::tool::{ToolCall, ToolHook};
+
+        let pair = human_channel();
+        let hook = smooth_operator::human::ConfirmationHook::new(
+            CONFIRM_TOOLS.iter().map(|s| (*s).to_owned()).collect(),
+            pair.request_tx,
+            pair.response_rx,
+            std::time::Duration::from_secs(5),
+        );
+        let mut request_rx = pair.request_rx;
+        tokio::spawn(async move {
+            request_rx.recv().await.expect("a confirm request must be emitted");
+            pair.response_tx
+                .send(HumanResponse::Denied { reason: "not that one".into() })
+                .expect("send verdict");
+        });
+        let err = hook
+            .pre_call(&ToolCall {
+                id: "call-1".into(),
+                name: "calendar_delete".into(),
+                arguments: serde_json::json!({"args": ["EV-1"]}),
+            })
+            .await
+            .expect_err("a denied delete must not run")
+            .to_string();
+        assert!(err.contains("not that one"), "{err}");
     }
 
     /// Platform-specific registration (pearl th-1665ed): the Messages tool must
