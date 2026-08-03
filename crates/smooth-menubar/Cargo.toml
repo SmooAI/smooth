@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Quarantined macOS menu-bar (AppKit/objc2) FFI for Big Smooth — the one crate that opts out of the workspace `unsafe_code = \"forbid\"` (pearl th-f7cb98)."
+description = "Quarantined macOS platform FFI for Big Smooth (AppKit menu bar + EventKit access requests, via objc2) — the one crate that opts out of the workspace `unsafe_code = \"forbid\"` (pearls th-f7cb98, th-94cc4a)."
 
 [lib]
 name = "smooth_menubar"
@@ -24,8 +24,10 @@ tracing.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os="macos")'.dependencies]
+block2 = "0.6.1"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
+objc2-event-kit = { version = "0.3.2", features = ["EKEventStore", "EKTypes", "block2"] }
 objc2-foundation = "0.3.2"
 
 [dev-dependencies]

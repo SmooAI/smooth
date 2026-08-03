@@ -7,6 +7,9 @@ mod active_org;
 mod admin;
 mod auth;
 mod boot_ui;
+/// macOS calendar setup driven by `th doctor --setup-calendar` (pearl th-94cc4a).
+#[cfg(target_os = "macos")]
+mod calendar_setup;
 mod claude;
 mod config;
 mod daemon_health;
@@ -567,6 +570,13 @@ enum Commands {
         /// automated as it gets. Run on the host's console, not over SSH.
         #[arg(long)]
         fix_fda: bool,
+        /// macOS only: set up Big Smooth's calendar tool. Installs the `ical`
+        /// CLI (side-loads the release binary to ~/.smooth/bin) and drives
+        /// Big Smooth.app into asking macOS for Calendar access — the grant
+        /// belongs to the app bundle, so a bare CLI can't request it. Run on the
+        /// host's console, not over SSH: the prompt needs a GUI login session.
+        #[arg(long)]
+        setup_calendar: bool,
         /// macOS only: set up Big Smooth's Messages tool. Reports whether
         /// `~/Library/Messages/chat.db` is readable (Full Disk Access) and fires
         /// a harmless Apple Event at Messages.app so the one-time Automation
@@ -1621,12 +1631,15 @@ async fn main() -> Result<()> {
             init_home_repo,
             remote,
             fix_fda,
+            setup_calendar,
             setup_imessage,
         }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
             } else if fix_fda {
                 cmd_doctor_fix_fda()
+            } else if setup_calendar {
+                cmd_doctor_setup_calendar()
             } else if setup_imessage {
                 cmd_doctor_setup_imessage()
             } else {
@@ -3562,6 +3575,22 @@ fn cmd_doctor_fix_fda() -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn cmd_doctor_fix_fda() -> Result<()> {
     println!("{} Full Disk Access is a macOS-only concept; nothing to do here.", "○".dimmed());
+    Ok(())
+}
+
+/// Install the `ical` CLI and drive the one-time Calendar (EventKit) grant so
+/// Big Smooth's `calendar` tool works (pearl th-94cc4a). Logic lives in
+/// [`calendar_setup`] so the app bundle's future "Set up calendar…" menu item
+/// can shell out to this exact command instead of duplicating it.
+#[cfg(target_os = "macos")]
+fn cmd_doctor_setup_calendar() -> Result<()> {
+    println!("{} {}", gradient::smooth(), "Calendar".bold().cyan());
+    calendar_setup::run()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_doctor_setup_calendar() -> Result<()> {
+    println!("{} Calendar access is a macOS/EventKit concept; nothing to set up here.", "○".dimmed());
     Ok(())
 }
 
