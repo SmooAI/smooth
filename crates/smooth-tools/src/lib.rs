@@ -42,6 +42,10 @@ pub mod path;
 pub mod permission;
 pub mod read;
 pub mod remember;
+/// macOS Reminders (EventKit, in-process). Platform-specific by nature — there
+/// is no cross-platform equivalent, so Linux/Windows never see the tool.
+#[cfg(target_os = "macos")]
+pub mod reminders;
 pub mod sandbox;
 pub mod search_native;
 pub mod th;
@@ -67,6 +71,8 @@ pub use knowledge_search::KnowledgeSearchTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::{RecallTool, RememberTool};
+#[cfg(target_os = "macos")]
+pub use reminders::RemindersTool;
 pub use sandbox::{SandboxPolicy, SandboxedCommand};
 pub use th::ThTool;
 pub use web_search::WebSearchTool;

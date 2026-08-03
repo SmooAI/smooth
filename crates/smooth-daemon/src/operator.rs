@@ -162,6 +162,18 @@ impl ToolProvider for SandboxedToolProvider {
         // permission gate and the Narc hook see it like any other.
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::CalendarTool) as Arc<dyn Tool>);
+        // The macOS Reminders tool (pearl th-94cc4a, reminders slice) — same
+        // deal, and a SEPARATE TCC grant from Calendar. It registers even when
+        // that grant is missing so the tool can answer with "run
+        // `th doctor --setup-reminders`"; hiding it would make Big Smooth claim
+        // the user has no todos at all.
+        //
+        // NOTE: unlike `calendar` there is no subprocess — EventKit is called
+        // in-process through `smooth_menubar::reminders` (the objc2 quarantine
+        // crate), which is likewise outside the kernel sandbox. See the
+        // trusted-integration exceptions in docs/Architecture/Security-Model.md.
+        #[cfg(target_os = "macos")]
+        tools.push(Arc::new(smooth_tools::RemindersTool) as Arc<dyn Tool>);
         // Platform-specific tools (pearl th-1665ed). The macOS Messages tool
         // exists only where chat.db and Messages.app do, so it's cfg-gated —
         // Linux/Windows never see it. It registers even when Full Disk Access
@@ -834,6 +846,20 @@ mod tests {
         let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
         let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
         assert!(names.iter().any(|n| n == "calendar"), "calendar registered: {names:?}");
+    }
+
+    /// Same contract for the reminders half of pearl th-94cc4a: registered on
+    /// macOS whether or not the (separate) Reminders TCC grant exists, so the
+    /// agent can relay `th doctor --setup-reminders` instead of reporting an
+    /// empty todo list.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn provider_registers_the_reminders_tool_on_macos() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "reminders"), "reminders registered: {names:?}");
     }
 
     /// Platform-specific registration (pearl th-1665ed): the Messages tool must
