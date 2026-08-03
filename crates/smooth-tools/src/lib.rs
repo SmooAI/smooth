@@ -43,6 +43,7 @@ pub mod permission;
 pub mod read;
 pub mod remember;
 pub mod sandbox;
+pub mod search_native;
 pub mod th;
 mod util;
 pub mod walk;
