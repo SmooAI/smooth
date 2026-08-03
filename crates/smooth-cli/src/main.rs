@@ -24,6 +24,9 @@ mod imessage_setup;
 mod mcp_config;
 mod mcp_serve;
 mod operator_serve;
+/// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
+#[cfg(target_os = "macos")]
+mod reminders_setup;
 mod service;
 mod smooai;
 
@@ -586,6 +589,14 @@ enum Commands {
         /// session.
         #[arg(long)]
         setup_imessage: bool,
+        /// macOS only: set up Big Smooth's reminders tool. Drives Big Smooth.app
+        /// into asking macOS for Reminders access — a SEPARATE grant from
+        /// Calendar, and one a bare CLI can't request (the grant belongs to the
+        /// app bundle). Nothing to install: reminders go through EventKit
+        /// in-process. Run on the host's console, not over SSH: the prompt needs
+        /// a GUI login session.
+        #[arg(long)]
+        setup_reminders: bool,
     },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
@@ -1633,6 +1644,7 @@ async fn main() -> Result<()> {
             fix_fda,
             setup_calendar,
             setup_imessage,
+            setup_reminders,
         }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
@@ -1642,6 +1654,8 @@ async fn main() -> Result<()> {
                 cmd_doctor_setup_calendar()
             } else if setup_imessage {
                 cmd_doctor_setup_imessage()
+            } else if setup_reminders {
+                cmd_doctor_setup_reminders()
             } else {
                 cmd_doctor().await
             }
@@ -3608,6 +3622,22 @@ fn cmd_doctor_setup_imessage() -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn cmd_doctor_setup_imessage() -> Result<()> {
     println!("{} iMessage is a macOS-only concept; nothing to set up here.", "○".dimmed());
+    Ok(())
+}
+
+/// Drive the one-time Reminders (EventKit) grant so Big Smooth's `reminders`
+/// tool works (pearl th-94cc4a). A separate grant from Calendar, so a separate
+/// flag. Logic lives in [`reminders_setup`] so the app bundle's future
+/// "Set up reminders…" menu item can shell out to this exact command.
+#[cfg(target_os = "macos")]
+fn cmd_doctor_setup_reminders() -> Result<()> {
+    println!("{} {}", gradient::smooth(), "Reminders".bold().cyan());
+    reminders_setup::run()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_doctor_setup_reminders() -> Result<()> {
+    println!("{} Reminders access is a macOS/EventKit concept; nothing to set up here.", "○".dimmed());
     Ok(())
 }
 

@@ -51,6 +51,10 @@ urlencoding.workspace = true
 # SQLite build.
 [target.'cfg(target_os = "macos")'.dependencies]
 rusqlite.workspace = true
+# th-94cc4a (reminders slice): the `reminders` tool calls EventKit in-process.
+# All the objc2 FFI lives in smooth-menubar, the workspace's macOS quarantine
+# crate (the only one that may use `unsafe`) — this crate stays `forbid`.
+smooth-menubar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

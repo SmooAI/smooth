@@ -724,6 +724,7 @@ th doctor                                          # system health + auto-fix
 th doctor --fix-fda                                # macOS: guide the Full Disk Access grant
 th doctor --setup-calendar                         # macOS: install `ical` + drive the Calendar grant
 th doctor --setup-imessage                         # macOS: set up the `imessage` tool (th-1665ed)
+th doctor --setup-reminders                        # macOS: drive the Reminders grant (th-94cc4a)
 th cache list / prune / clear
 th service install / start / stop / status         # run smooth as a background daemon
 ```
@@ -761,8 +762,36 @@ from a read) — without it `ical` would open an interactive picker the daemon
 can't answer. Same reason `-i` is refused and `delete` is always run with
 `--force`: the decision point is the confirmation prompt, not a TTY.
 
-Reminders (`NSRemindersFullAccessUsageDescription` is already declared in the
-bundle) is the next slice of the same epic.
+#### `th doctor --setup-reminders` (macOS)
+
+Makes Big Smooth's `reminders` tool work — the second slice of pearl th-94cc4a.
+Nothing to install: reminders are read and written through **EventKit
+in-process** (there is no reminders equivalent of the `ical` CLI). The only
+prerequisite is the grant, and Reminders is a **separate** TCC grant from
+Calendar — `--setup-calendar` does nothing for it. Same mechanics as the calendar
+grant: `th` can't ask (a TCC grant belongs to the app bundle), so this launches
+or tells you to restart `Big Smooth.app`, which calls
+`EKEventStore.requestFullAccessToReminders` at startup. **Click Allow.** GUI
+login session only, asked exactly once; after a denial, re-enable it in System
+Settings → Privacy & Security → Reminders.
+
+Until then the `reminders` tool still registers and answers every call with "run
+`th doctor --setup-reminders`" — better than reporting an empty todo list.
+
+Once granted, Big Smooth can read and adjust the user's real Reminders:
+
+| Verb | Arguments | Does |
+|---|---|---|
+| `list` | `status` (`open` default / `all`), `list` (filter by list name) | reads reminders |
+| `add` | `title` (required), `due`, `list` | creates one |
+| `complete` | `id` (from a `list`) | marks it done |
+
+Due dates are **absolute** — `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Natural language
+("tomorrow 2pm") is deliberately refused: the model resolves relative dates with
+the `current_datetime` tool first, rather than a half-working parser booking
+things on the wrong day. There is **no delete verb** — the reversible answer to a
+reminder the agent shouldn't have made is completing it.
+
 `--setup-imessage` reports whether `~/Library/Messages/chat.db` is readable (Full
 Disk Access) and fires a harmless Apple Event at Messages.app so the one-time
 **Automation** prompt appears now rather than mid-turn. Neither grant can be set

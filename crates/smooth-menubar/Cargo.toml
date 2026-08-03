@@ -27,7 +27,18 @@ tokio.workspace = true
 block2 = "0.6.1"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
-objc2-event-kit = { version = "0.3.2", features = ["EKEventStore", "EKTypes", "block2"] }
+objc2-event-kit = { version = "0.3.2", features = [
+    "EKEventStore",
+    "EKTypes",
+    "block2",
+    # th-94cc4a (reminders slice): unlike `calendar`, which shells the `ical`
+    # CLI, reminders are read and written through EKReminder in-process — `ical`
+    # is calendar-only and there is no equivalent CLI worth depending on.
+    "EKReminder",
+    "EKCalendarItem",
+    "EKCalendar",
+    "EKObject",
+] }
 objc2-foundation = "0.3.2"
 
 [dev-dependencies]

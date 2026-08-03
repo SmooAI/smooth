@@ -32,6 +32,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMen
 use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSSize, NSString};
 
 pub mod eventkit;
+pub mod reminders;
 
 /// The web-UI URL the "Open Big Smooth" item launches. Set once in [`run`]
 /// before the run loop starts, read by the menu action (which can't easily
@@ -171,11 +172,15 @@ where
 {
     let _ = WEB_URL.set(web_url);
 
-    // Ask for the Calendar TCC grant while we're a bundled GUI app — the only
-    // context where the OS will show the prompt (pearl th-94cc4a). Done off the
+    // Ask for the EventKit TCC grants while we're a bundled GUI app — the only
+    // context where the OS will show the prompts (pearl th-94cc4a). Done off the
     // main thread so the AppKit run loop below still comes up; without a grant
-    // the `calendar` tool's `ical` child process gets a silent denial.
+    // the `calendar` tool's `ical` child process gets a silent denial, and the
+    // `reminders` tool's in-process EventKit calls come back empty. Calendar and
+    // Reminders are separate grants, so both are asked for — macOS shows each
+    // prompt at most once, ever.
     eventkit::request_calendar_access_in_background();
+    eventkit::request_reminders_access_in_background();
 
     // Server on a background thread with its own multi-thread runtime — the same
     // runtime shape `#[tokio::main]` builds, just not on the main thread.
