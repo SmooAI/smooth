@@ -53,7 +53,7 @@ pub mod write;
 pub use artifact::ArtifactTool;
 pub use bash::BashTool;
 #[cfg(target_os = "macos")]
-pub use calendar::CalendarTool;
+pub use calendar::{CalendarDeleteTool, CalendarTool};
 pub use cd::CdTool;
 pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;
