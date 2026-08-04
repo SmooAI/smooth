@@ -1,6 +1,13 @@
 appId: ai.smoo.bigsmooth
 productName: Big Smooth
 copyright: © Smoo LLC
+# OTA updates (electron-updater). Baked into app-update.yml at build time; the
+# app polls latest-<os>.yml here and pulls the delta .zip. macOS only accepts a
+# same-Developer-ID + notarized update, which this pipeline produces. Publish in
+# CI with `electron-builder --publish always` → syncs artifacts to the bucket.
+publish:
+    provider: generic
+    url: https://downloads.smoo.ai/bigsmooth
 directories:
     output: release
     buildResources: build

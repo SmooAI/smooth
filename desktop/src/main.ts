@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray } from 'electron';
 
 import { baseUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
+import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
 let tray: Tray | undefined;
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
         return;
     }
     showWindow();
+    startAutoUpdates();
 }
 
 function showWindow(): void {
@@ -84,6 +86,7 @@ function createTray(): void {
     tray.setContextMenu(
         Menu.buildFromTemplate([
             { label: 'Open Big Smooth', click: showWindow },
+            { label: 'Check for Updates…', click: () => void checkForUpdatesInteractive() },
             { type: 'separator' },
             {
                 label: 'Set Up',
