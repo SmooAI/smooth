@@ -55,8 +55,7 @@ impl PushState {
         // here makes every `/push/*` route 503 through the existing
         // `enabled()` checks, no per-route cfg needed.
         let configured = !cfg!(target_os = "windows");
-        let public_key = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty() && configured);
-        let private_key = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty() && configured);
+        let (public_key, private_key) = resolve_vapid_keys(configured);
         Self {
             public_key,
             private_key,
@@ -164,6 +163,98 @@ fn subs_path() -> PathBuf {
     home.join(".smooth").join("push-subs.json")
 }
 
+/// `~/.smooth/vapid.json` — the auto-provisioned VAPID keypair (`SMOOTH_VAPID_FILE` overrides).
+fn vapid_path() -> PathBuf {
+    if let Ok(p) = std::env::var("SMOOTH_VAPID_FILE") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".smooth").join("vapid.json")
+}
+
+/// Persisted VAPID keypair (raw base64url, the `web-push` generate-vapid-keys format).
+#[derive(Serialize, Deserialize)]
+struct VapidFile {
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    #[serde(rename = "privateKey")]
+    private_key: String,
+}
+
+/// Resolve the VAPID keypair for [`PushState`]. Precedence: explicit
+/// `SMOOTH_VAPID_PUBLIC`/`_PRIVATE` env → the persisted `~/.smooth/vapid.json` →
+/// a freshly generated pair (persisted for next time). `configured == false`
+/// (Windows) short-circuits to no keys, keeping push disabled there.
+fn resolve_vapid_keys(configured: bool) -> (Option<String>, Option<String>) {
+    if !configured {
+        return (None, None);
+    }
+    let env_pub = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty());
+    let env_priv = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty());
+    if let (Some(pub_k), Some(priv_k)) = (env_pub, env_priv) {
+        return (Some(pub_k), Some(priv_k));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (pub_k, priv_k) = load_or_generate_vapid_at(&vapid_path());
+        (Some(pub_k), Some(priv_k))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        (None, None)
+    }
+}
+
+/// Load the persisted VAPID keypair, generating + persisting one on first run.
+/// Path-injectable so tests don't touch `~/.smooth`.
+#[cfg(not(target_os = "windows"))]
+fn load_or_generate_vapid_at(path: &std::path::Path) -> (String, String) {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(v) = serde_json::from_slice::<VapidFile>(&bytes) {
+            if !v.public_key.is_empty() && !v.private_key.is_empty() {
+                return (v.public_key, v.private_key);
+            }
+        }
+    }
+    let (pub_k, priv_k) = generate_vapid_keys();
+    let file = VapidFile {
+        public_key: pub_k.clone(),
+        private_key: priv_k.clone(),
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_vec_pretty(&file) {
+        if std::fs::write(path, json).is_ok() {
+            // The private key is a signing secret — lock it down like an ssh key.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            tracing::info!(path = %path.display(), "auto-provisioned a VAPID keypair for Web Push");
+        }
+    }
+    (pub_k, priv_k)
+}
+
+/// Generate a P-256 VAPID keypair as (public, private) raw base64url — the format
+/// `VapidSignatureBuilder::from_base64` reads and the browser's
+/// `applicationServerKey` expects (65-byte uncompressed point / 32-byte scalar).
+#[cfg(not(target_os = "windows"))]
+fn generate_vapid_keys() -> (String, String) {
+    use base64::Engine as _;
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+    let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
+    let public_point = secret.public_key().to_encoded_point(false); // uncompressed: 0x04 || x || y
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    (b64.encode(public_point.as_bytes()), b64.encode(secret.to_bytes().as_slice()))
+}
+
 /// `/push/*` — the browser subscribes here and the SPA reads the VAPID public key.
 pub fn push_router() -> Router {
     Router::new()
@@ -203,13 +294,42 @@ use axum::response::{IntoResponse, Response};
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn disabled_without_keys() {
-        std::env::remove_var("SMOOTH_VAPID_PUBLIC");
-        std::env::remove_var("SMOOTH_VAPID_PRIVATE");
-        let state = PushState::from_env();
-        assert!(!state.enabled());
-        assert_eq!(state.send_to_all("t", "b").await, 0);
+    #[test]
+    fn windows_resolves_to_no_keys() {
+        // `configured == false` (the Windows path) never provisions — push stays off.
+        assert_eq!(resolve_vapid_keys(false), (None, None));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn generated_keys_are_valid_vapid() {
+        use base64::Engine as _;
+        let (pub_k, priv_k) = generate_vapid_keys();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        // Public: 65-byte uncompressed EC point (0x04 || x || y); private: 32-byte scalar.
+        let pub_bytes = b64.decode(&pub_k).expect("public is base64url");
+        let priv_bytes = b64.decode(&priv_k).expect("private is base64url");
+        assert_eq!(pub_bytes.len(), 65);
+        assert_eq!(pub_bytes[0], 0x04, "uncompressed point marker");
+        assert_eq!(priv_bytes.len(), 32);
+        // web-push must accept our private key in its VAPID builder (p256dh reuses
+        // the generated public point — a valid uncompressed key; auth is 16 bytes).
+        let info = SubscriptionInfo::new("https://example.com/x", &pub_k, "MDEyMzQ1Njc4OWFiY2RlZg");
+        assert!(VapidSignatureBuilder::from_base64(&priv_k, &info).is_ok(), "web-push accepts the generated key");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn load_or_generate_is_stable() {
+        let dir = std::env::temp_dir().join(format!("vapid-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("vapid.json");
+        let first = load_or_generate_vapid_at(&path);
+        assert!(path.exists(), "keypair persisted on first run");
+        let second = load_or_generate_vapid_at(&path);
+        assert_eq!(first, second, "second run reuses the persisted pair");
+        assert!(!first.0.is_empty() && !first.1.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

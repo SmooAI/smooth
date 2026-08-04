@@ -111,3 +111,7 @@ smooth-menubar = { workspace = true }
 # notifications) and buys the agent engine. `push::PushState::send_to_all` is
 # cfg'd to a no-op and `/push/*` 503s there. Pearl th-a59af5.
 web-push = "0.11"
+# VAPID keypair generation for Web Push (auto-provisioned on first run when no
+# SMOOTH_VAPID_* env is set). Pure-Rust P-256; only used off Windows, where push
+# is disabled anyway. Pearl th-c561f1.
+p256 = "0.13"
