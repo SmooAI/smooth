@@ -35,7 +35,8 @@
         "ci:publish": "node scripts/ci-publish.mjs",
         "changeset": "changeset",
         "aichangeset": "changeset",
-        "test:dev-link": "bash scripts/dev-link-th.test.sh"
+        "test:dev-link": "bash scripts/dev-link-th.test.sh",
+        "install:bigsmooth": "bash scripts/macos/install-bigsmooth.sh"
     },
     "devDependencies": {
         "@changesets/cli": "^2.28.1",

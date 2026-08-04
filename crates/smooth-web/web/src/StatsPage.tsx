@@ -1,6 +1,7 @@
-//! The Stats tab — usage + spend. Spend is our own accounting (real token counts
-//! × model rates), persisted per-turn to `~/.smooth/usage.jsonl` via `/api/usage`
-//! and aggregated by `GET /api/stats`; activity comes from the operator db.
+//! The Stats tab — usage + spend. Spend is the authoritative per-call cost the
+//! LiteLLM gateway reports (`x-litellm-response-cost-*` → the engine's
+//! `gateway_cost_usd`), persisted per-turn to `~/.smooth/usage.jsonl` via
+//! `/api/usage` and aggregated by `GET /api/stats`; activity comes from the operator db.
 //!
 //! Presence styling: teal carries proportion (the only "live" signal here);
 //! everything else is panel + muted-foreground. No amber — nothing here needs you.
@@ -145,7 +146,7 @@ export default function StatsPage() {
 
                     <p className="mt-6 flex items-center gap-1.5 text-xs text-(--color-muted-foreground)">
                         <BarChart3 className="size-3.5" />
-                        Spend is estimated from token counts × model rates on this device — not a gateway invoice.
+                        Spend is the actual per-call cost the LiteLLM gateway reports for each turn.
                     </p>
                 </>
             )}

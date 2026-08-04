@@ -8,9 +8,11 @@
 //! tokens, by-model, by-day) alongside the durable activity counts the operator
 //! db already has ([`SqliteStorageAdapter::activity_snapshot`]).
 //!
-//! "Spend" is our own accounting — real token counts × the model rates the UI
-//! already shows per turn — not a gateway invoice; a personal daemon talks to
-//! its LLM provider directly, so there's no billed total to read back.
+//! "Spend" is the authoritative per-call cost the LiteLLM gateway reports
+//! (`x-litellm-response-cost-*` headers → the engine's `gateway_cost_usd`, which
+//! rides `eventual_response.usage.costUsd`) — not a local token×rate estimate.
+//! Recording it here on every turn keeps a durable spend ledger the gateway
+//! itself doesn't hand back to a single-tenant daemon.
 //!
 //! Ungated, like the sibling `/search` and `/api/session/cwd` routes: the daemon
 //! binds loopback (+ an opt-in tailnet), and these are usage counts, not secrets.
