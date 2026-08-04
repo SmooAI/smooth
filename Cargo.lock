@@ -5195,6 +5195,7 @@ dependencies = [
  "dirs-next",
  "futures-util",
  "http-body-util",
+ "p256",
  "rand 0.8.5",
  "regex",
  "reqwest",
