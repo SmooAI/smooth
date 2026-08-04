@@ -1,0 +1,168 @@
+# Build + notarize the Electron **Big Smooth** desktop app and publish it to the
+# OTA update channel (electron-updater generic provider → downloads.smoo.ai).
+#
+# Distinct from macos-app.yml (which packages the older *native* Big Smooth.app):
+# this builds the Electron shell in `desktop/`, which is THE installable going
+# forward (bundles smooth-daemon). It degrades gracefully — with no signing
+# secrets it builds an ad-hoc DMG (artifact only), and with no AWS creds it skips
+# the CDN sync — so the packaging path is exercised on every run.
+#
+# Secrets/vars (all optional; produce with scripts/secret-helpers/gh-secret-set):
+#   MACOS_SIGN_IDENTITY   "Developer ID Application: Smoo LLC (DTX9733844)"
+#   MACOS_CERT_P12        base64 of the exported .p12 (Developer ID cert + key)
+#   MACOS_CERT_PASSWORD   the .p12 export password
+#   NOTARY_KEY_P8         base64 of the App Store Connect AuthKey_XXXX.p8
+#   NOTARY_KEY_ID         the key ID
+#   NOTARY_ISSUER         the issuer UUID
+#   OTA_PUBLISH_ROLE_ARN  IAM role (OIDC) in the prod account with PutObject on
+#                         the Downloads bucket — provisioned by the smooai
+#                         downloads.smoo.ai stack (SMOODEV-2815)
+#   vars.DOWNLOADS_BUCKET the SST-generated bucket name (DownloadsBucket output)
+
+name: Desktop app (Electron, OTA)
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Existing release tag to build + attach the DMG to (blank = current branch)"
+                required: false
+                type: string
+    push:
+        tags:
+            - "v*"
+
+concurrency:
+    group: desktop-publish-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    mac:
+        name: Package + publish (macOS arm64)
+        runs-on: macos-latest
+        permissions:
+            contents: write
+            id-token: write # OIDC for aws-actions/configure-aws-credentials
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref }}
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+
+            - name: Install build deps
+              run: brew install protobuf
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Install Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            # Embedded into the daemon binary via rust-embed.
+            - name: Build web UI
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --no-frozen-lockfile
+                  pnpm build
+
+            - name: Build smooth-daemon (release)
+              run: cargo build --release -p smooai-smooth-daemon
+
+            # stage-daemon → resolveDaemonBin() looks in resources/current first.
+            - name: Stage daemon for bundling
+              run: |
+                  mkdir -p desktop/resources/current
+                  cp target/release/smooth-daemon desktop/resources/current/smooth-daemon
+
+            - name: Import signing certificate
+              id: signing
+              env:
+                  CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+                  CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+                  SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+              run: |
+                  if [[ -z "${CERT_P12:-}" || -z "${SIGN_IDENTITY:-}" ]]; then
+                      echo "::warning::MACOS_CERT_P12 / MACOS_SIGN_IDENTITY not set — building an AD-HOC signed app (not notarizable, not publishable)."
+                      echo "identity=" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+                  PASS="$(uuidgen)"
+                  security create-keychain -p "$PASS" "$KEYCHAIN"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+                  security unlock-keychain -p "$PASS" "$KEYCHAIN"
+                  echo -n "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+                  security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+                  security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+                  rm -f "$RUNNER_TEMP/cert.p12"
+                  echo "identity=$SIGN_IDENTITY" >> "$GITHUB_OUTPUT"
+
+            - name: Build DMG (electron-builder)
+              id: build
+              env:
+                  # Bare org name — electron-builder resolves the Developer ID cert
+                  # for the dmg/zip targets. Empty → ad-hoc (default in dist:mac).
+                  SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+              run: |
+                  cd desktop
+                  pnpm install --no-frozen-lockfile
+                  if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+                      pnpm dist:mac
+                  else
+                      CSC_IDENTITY_AUTO_DISCOVERY=false pnpm dist:mac
+                  fi
+                  echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+            - name: Notarize + staple
+              if: steps.signing.outputs.identity != ''
+              env:
+                  NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY_P8 }}
+                  NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+                  NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+              run: |
+                  if [[ -z "${NOTARY_KEY_B64:-}" ]]; then
+                      echo "::warning::NOTARY_KEY_P8 not set — DMG is signed but not notarized."
+                      exit 0
+                  fi
+                  echo -n "$NOTARY_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+                  NOTARY_KEY="$RUNNER_TEMP/notary.p8" NOTARY_KEY_ID="$NOTARY_KEY_ID" NOTARY_ISSUER="$NOTARY_ISSUER" \
+                      bash scripts/macos/notarize-and-staple.sh desktop/release/*.dmg
+                  rm -f "$RUNNER_TEMP/notary.p8"
+
+            - name: Upload DMG artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: BigSmooth-${{ steps.build.outputs.version }}-arm64.dmg
+                  path: desktop/release/*.dmg
+
+            # Publish to the OTA channel. Needs the notarized artifacts + AWS creds
+            # + the SST-provisioned bucket; skips cleanly if any are absent.
+            - name: Configure AWS credentials
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
+                  aws-region: us-east-2
+
+            - name: Publish to downloads.smoo.ai
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              env:
+                  BUCKET: ${{ vars.DOWNLOADS_BUCKET }}
+              run: |
+                  # Immutable, long-cached: the versioned artifacts the yml points at.
+                  aws s3 sync desktop/release "s3://$BUCKET/bigsmooth/" \
+                      --exclude "*" --include "*.dmg" --include "*.zip" --include "*.blockmap" \
+                      --cache-control "public,max-age=31536000,immutable" --no-progress
+                  # Fixed-name manifest: must never be stale, or updates lag a full TTL.
+                  aws s3 sync desktop/release "s3://$BUCKET/bigsmooth/" \
+                      --exclude "*" --include "*.yml" \
+                      --cache-control "no-cache" --content-type "text/yaml" --no-progress
+                  echo "Published $(basename desktop/release/*.dmg) → https://downloads.smoo.ai/bigsmooth/"
