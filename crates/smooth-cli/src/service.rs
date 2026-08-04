@@ -18,6 +18,7 @@
 #[cfg(unix)]
 use std::path::PathBuf;
 
+use anstream::println;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 

@@ -26,6 +26,7 @@
 //! Per-endpoint customization via [`TableOptions`]: explicit column
 //! order, omit noisy fields, label the table.
 
+use anstream::println;
 use owo_colors::OwoColorize;
 use serde_json::Value;
 use tabled::{

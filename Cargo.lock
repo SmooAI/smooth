@@ -5103,6 +5103,7 @@ dependencies = [
 name = "smooai-smooth-cli"
 version = "0.26.5"
 dependencies = [
+ "anstream",
  "anyhow",
  "atty",
  "axum 0.8.8",

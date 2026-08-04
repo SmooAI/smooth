@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use anstream::{eprintln, println};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

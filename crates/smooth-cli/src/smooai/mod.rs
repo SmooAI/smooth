@@ -38,6 +38,7 @@ pub mod widgets;
 
 use std::io::IsTerminal;
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Select};
 use owo_colors::OwoColorize;

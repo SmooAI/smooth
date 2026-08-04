@@ -19,6 +19,7 @@
 
 use std::process::Command;
 
+use anstream::println;
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use smooth_menubar::eventkit::{reminders_access, Access};

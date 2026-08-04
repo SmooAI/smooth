@@ -72,6 +72,7 @@
 //! `SMOOAI_ORG_ID` env, then `active_org_id` field in the credentials
 //! file. Same order as the rest of `th api *`.
 
+use anstream::{eprintln, print, println};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

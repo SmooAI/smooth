@@ -2,6 +2,7 @@
 
 use std::io::IsTerminal;
 
+use anstream::println;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use dialoguer::{theme::ColorfulTheme, Input, Password};
