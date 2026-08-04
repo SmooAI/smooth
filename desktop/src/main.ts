@@ -25,6 +25,9 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function main(): Promise<void> {
+    // Packaged builds get the th mark from BigSmooth.icns via electron-builder;
+    // an unpackaged run would otherwise show the stock Electron icon.
+    if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(asset('icon.png'));
     createTray();
     const result = await startDaemon();
     spawnedDaemon = result.spawned;
@@ -49,7 +52,10 @@ function showWindow(): void {
         minWidth: 480,
         minHeight: 480,
         title: 'Big Smooth',
-        titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+        // ponytail: a normal title bar. `hiddenInset` floats the traffic lights
+        // over the page, straight on top of smooth-web's top-left sidebar toggle.
+        // Going frameless again means insetting the SPA's header, which is
+        // smooth-web's business and would move the browser PWA too.
         backgroundColor: '#0b0f14',
         icon: asset('icon.png'),
         webPreferences: { nodeIntegration: false, contextIsolation: true },
