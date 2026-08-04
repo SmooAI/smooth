@@ -267,7 +267,7 @@ export default function App() {
             {/* Push to phone: enroll this device so Big Smooth can reach it with the
                 tab closed. Hidden when the browser can't do Web Push, or once enabled.
                 Sits a row below the sign-in pill so they stack, not overlap. */}
-            {push.supported && !push.enabled && (
+            {push.supported && push.configured && !push.enabled && (
                 <button
                     onClick={() => void push.enable()}
                     disabled={push.busy}

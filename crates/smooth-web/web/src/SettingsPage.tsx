@@ -13,6 +13,8 @@ interface PushApi {
     supported: boolean;
     enabled: boolean;
     busy: boolean;
+    /** Whether the daemon has push (VAPID) configured. null = still checking. */
+    configured: boolean | null;
     enable: () => void | Promise<void>;
 }
 
@@ -90,6 +92,13 @@ export default function SettingsPage({ mode, setMode, status, push }: { mode: Sm
                     <p className="text-sm text-(--color-muted-foreground)">Web push isn’t available in this browser.</p>
                 ) : push.enabled ? (
                     <p className="text-sm text-(--color-online)">Notifications are on for this device.</p>
+                ) : push.configured === false ? (
+                    <p className="text-sm text-(--color-muted-foreground)">
+                        Push notifications aren’t set up on Big Smooth yet — the daemon has no VAPID keys, so there’s nothing to enable. (Tracked:
+                        auto-provision on first run.)
+                    </p>
+                ) : push.configured === null ? (
+                    <p className="text-sm text-(--color-muted-foreground)">Checking…</p>
                 ) : (
                     <button
                         type="button"
