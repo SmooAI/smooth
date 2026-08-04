@@ -1,0 +1,27 @@
+# Packaging skeleton. Signing/notarization is a separate slice — nothing here
+# references certificates, so `pnpm dist` produces unsigned local artifacts.
+appId: ai.smoo.bigsmooth
+productName: Big Smooth
+directories:
+    output: release
+files:
+    - dist/**
+    - assets/**
+    - package.json
+# The native engine ships alongside the app; `resolveDaemonBin()` looks here first.
+# Populated by the (not yet written) release job that cross-compiles smooth-daemon.
+extraResources:
+    - from: resources/${os}/
+      to: .
+      filter: ['smooth-daemon*']
+mac:
+    category: public.app-category.productivity
+    icon: assets/icon.png
+    target: [dmg, zip]
+win:
+    icon: assets/icon.png
+    target: [nsis]
+linux:
+    icon: assets/icon.png
+    target: [AppImage]
+    category: Utility
