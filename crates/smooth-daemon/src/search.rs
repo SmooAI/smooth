@@ -162,9 +162,28 @@ fn score_match(query_lc: &str, key: &str) -> Option<MatchScore> {
 }
 
 /// Walk `workspace` (pruned of `.git`/`node_modules`/`target`/...) up to
+/// Render a **workspace-relative** path with forward slashes on every platform.
+///
+/// These strings are inserted into the composer and handed to the model, which
+/// then feeds them back to `read_file` — so they need one stable spelling, not
+/// `src/server.rs` on macOS and `src\server.rs` on Windows. Forward slashes are
+/// accepted by the Windows APIs, are what `smooth-tools` already renders for
+/// relative paths, and don't collide with the model's own escaping. Absolute
+/// typed paths are deliberately NOT normalized (see `expand_path_query`) — those
+/// echo back whatever the user typed.
+fn to_slash(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(target_os = "windows") {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 /// `budget` entries, building a [`Candidate`] per regular file: `haystack` and
-/// `value` are the workspace-relative path, `label` is the file name, `detail`
-/// is the relative parent directory (omitted at the root).
+/// `value` are the workspace-relative path (forward-slashed, see [`to_slash`]),
+/// `label` is the file name, `detail` is the relative parent directory (omitted
+/// at the root).
 fn file_candidates(workspace: &Path, budget: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     for entry in pruned_walk(workspace).flatten().take(budget) {
@@ -173,12 +192,12 @@ fn file_candidates(workspace: &Path, budget: usize) -> Vec<Candidate> {
         }
         let path = entry.path();
         let rel = path.strip_prefix(workspace).unwrap_or(path);
-        let rel_str = rel.to_string_lossy().into_owned();
+        let rel_str = to_slash(rel);
         if rel_str.is_empty() {
             continue;
         }
         let label = path.file_name().map_or_else(|| rel_str.clone(), |n| n.to_string_lossy().into_owned());
-        let detail = rel.parent().map(|p| p.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+        let detail = rel.parent().map(to_slash).filter(|s| !s.is_empty());
         out.push(Candidate {
             haystack: rel_str.clone(),
             result: SearchResult {
@@ -286,7 +305,13 @@ fn expand_path_query(query: &str) -> Vec<SearchResult> {
 /// taken verbatim. Used only to *resolve* a typed path for listing — the result
 /// `value` keeps the `~` form the user typed.
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
+    // `~\` counts on Windows too, otherwise a user who types the platform's own
+    // separator gets a literal `~\dev\` handed to `read_dir`, which fails, and
+    // the completion silently yields nothing.
+    let tilde_prefixed = path
+        .strip_prefix("~/")
+        .or_else(|| if cfg!(target_os = "windows") { path.strip_prefix(r"~\") } else { None });
+    if let Some(rest) = tilde_prefixed {
         if let Some(home) = dirs_next::home_dir() {
             return home.join(rest);
         }
@@ -396,6 +421,22 @@ mod tests {
         assert_eq!(hit.detail.as_deref(), Some("src"));
     }
 
+    /// Workspace-relative results carry ONE spelling on every platform. Without
+    /// this the same file was `src/server.rs` on macOS and `src\server.rs` on
+    /// Windows, and the model got a different path than the composer showed.
+    #[test]
+    fn workspace_relative_results_use_forward_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src").join("deep")).unwrap();
+        std::fs::write(root.join("src").join("deep").join("mod.rs"), "x").unwrap();
+
+        let hit = search(root, "mod.rs").into_iter().find(|r| r.label == "mod.rs").expect("found");
+        assert_eq!(hit.value, "src/deep/mod.rs", "value is forward-slashed");
+        assert_eq!(hit.detail.as_deref(), Some("src/deep"), "detail is forward-slashed");
+        assert!(!hit.value.contains('\\'), "no native separators leak: {}", hit.value);
+    }
+
     #[test]
     fn file_candidates_respects_budget() {
         let dir = tempfile::tempdir().unwrap();
@@ -486,7 +527,14 @@ mod tests {
     fn expand_tilde_resolves_home_only_for_tilde_prefix() {
         if let Some(home) = dirs_next::home_dir() {
             assert_eq!(expand_tilde("~/sub"), home.join("sub"));
-            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(expand_tilde("~"), home.clone());
+            // `~\sub` expands on Windows and is a literal name on Unix.
+            let backslash = expand_tilde(r"~\sub");
+            if cfg!(target_os = "windows") {
+                assert_eq!(backslash, home.join("sub"), "`~\\` is a real prefix on Windows");
+            } else {
+                assert_eq!(backslash, PathBuf::from(r"~\sub"), "`\\` is a filename char on Unix");
+            }
         }
         assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
         assert_eq!(expand_tilde("./rel"), PathBuf::from("./rel"));
