@@ -18,8 +18,24 @@ export function resolveAddr(env: NodeJS.ProcessEnv = process.env): string {
     return raw === '' ? '127.0.0.1:8787' : raw;
 }
 
+/** A full remote daemon URL to attach to (a tailnet daemon like smoo-hub) instead
+ * of the local one. Empty ⇒ local. main.ts sets it from the saved config before
+ * anything reads {@link baseUrl}. */
+export function remoteUrl(env: NodeJS.ProcessEnv = process.env): string {
+    return (env.SMOOTH_REMOTE_URL ?? '').trim();
+}
+
+/** The daemon the window connects to: the remote URL when set, else the local one.
+ * A remote daemon serves its own token-injected SPA, so loading this URL is a
+ * complete, authenticated connection — no token is passed by the client. */
 export function baseUrl(env: NodeJS.ProcessEnv = process.env): string {
-    return `http://${resolveAddr(env)}`;
+    const remote = remoteUrl(env);
+    return remote === '' ? `http://${resolveAddr(env)}` : remote.replace(/\/$/, '');
+}
+
+/** True when attached to a remote daemon (so: never spawn, never teardown). */
+export function isRemote(env: NodeJS.ProcessEnv = process.env): boolean {
+    return remoteUrl(env) !== '';
 }
 
 /**
@@ -96,6 +112,12 @@ let child: ChildProcess | undefined;
  * the caller can report a failure to the user.
  */
 export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; error?: string }> {
+    // Remote mode: never spawn a local daemon — just confirm the remote one answers.
+    if (isRemote()) {
+        return (await isHealthy())
+            ? { ok: true, spawned: false }
+            : { ok: false, spawned: false, error: `The remote daemon at ${baseUrl()} isn’t reachable — is it running and are you on the tailnet?` };
+    }
     if (await isHealthy()) return { ok: true, spawned: false };
 
     const bin = resolveDaemonBin();
