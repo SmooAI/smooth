@@ -133,7 +133,10 @@ async fn record_usage(State(state): State<StatsState>, Json(body): Json<RecordBo
 
 /// `GET /api/stats` — activity counts + the aggregated spend log.
 async fn get_stats(State(state): State<StatsState>) -> Result<Json<StatsReply>, (StatusCode, String)> {
-    let activity = state.storage.activity_snapshot().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let activity = state
+        .storage
+        .activity_snapshot()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let spend = aggregate(&read_records(&state.usage_path));
     Ok(Json(StatsReply { activity, spend }))
 }
@@ -157,7 +160,10 @@ fn read_records(path: &PathBuf) -> Vec<UsageRecord> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect()
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 /// Roll the records up into totals + by-model + by-day.
@@ -260,9 +266,18 @@ mod tests {
     #[tokio::test]
     async fn records_aggregate_by_total_and_model() {
         let (_tmp, router) = fixture();
-        assert_eq!(post_usage(&router, r#"{"model":"opus","prompt_tokens":100,"completion_tokens":50,"cost_usd":0.30}"#).await, StatusCode::NO_CONTENT);
-        assert_eq!(post_usage(&router, r#"{"model":"opus","prompt_tokens":200,"completion_tokens":80,"cost_usd":0.70}"#).await, StatusCode::NO_CONTENT);
-        assert_eq!(post_usage(&router, r#"{"model":"haiku","prompt_tokens":10,"completion_tokens":5,"cost_usd":0.01}"#).await, StatusCode::NO_CONTENT);
+        assert_eq!(
+            post_usage(&router, r#"{"model":"opus","prompt_tokens":100,"completion_tokens":50,"cost_usd":0.30}"#).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            post_usage(&router, r#"{"model":"opus","prompt_tokens":200,"completion_tokens":80,"cost_usd":0.70}"#).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            post_usage(&router, r#"{"model":"haiku","prompt_tokens":10,"completion_tokens":5,"cost_usd":0.01}"#).await,
+            StatusCode::NO_CONTENT
+        );
 
         let json = get_stats_json(&router).await;
         assert_eq!(json["spend"]["turns"], 3);
@@ -288,7 +303,11 @@ mod tests {
     #[tokio::test]
     async fn corrupt_lines_are_skipped() {
         let (tmp, router) = fixture();
-        std::fs::write(tmp.path().join("usage.jsonl"), "not json\n{\"ts\":\"2026-08-04T00:00:00Z\",\"model\":\"m\",\"cost_usd\":0.5}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("usage.jsonl"),
+            "not json\n{\"ts\":\"2026-08-04T00:00:00Z\",\"model\":\"m\",\"cost_usd\":0.5}\n",
+        )
+        .unwrap();
         let json = get_stats_json(&router).await;
         assert_eq!(json["spend"]["turns"], 1);
         assert!((json["spend"]["total_usd"].as_f64().unwrap() - 0.5).abs() < 1e-9);
