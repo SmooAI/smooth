@@ -597,6 +597,14 @@ enum Commands {
         /// a GUI login session.
         #[arg(long)]
         setup_reminders: bool,
+        /// Run the health check, then walk every setup step that isn't ready
+        /// (LLM providers, Smoo AI sign-in, Full Disk Access, Calendar,
+        /// Reminders, Messages) in order, driving each one's `--setup-*` path.
+        /// The guided first-run flow — same steps Big Smooth.app's Set Up menu
+        /// invokes. Run on the host's console, not over SSH: the macOS grants
+        /// need a GUI login session.
+        #[arg(long)]
+        onboard: bool,
     },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
@@ -1645,9 +1653,12 @@ async fn main() -> Result<()> {
             setup_calendar,
             setup_imessage,
             setup_reminders,
+            onboard,
         }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
+            } else if onboard {
+                cmd_doctor_onboard().await
             } else if fix_fda {
                 cmd_doctor_fix_fda()
             } else if setup_calendar {
@@ -3371,11 +3382,72 @@ fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
 }
 
 /// System health check and auto-fix.
+/// A one-time setup step `th doctor` reports and `--onboard` drives (pearl
+/// th-ba764e). Each maps to an already-existing `th doctor --…` flag: doctor
+/// raises what isn't ready, `--onboard` walks them in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code, reason = "the TCC grants are macOS-only"))]
+enum SetupStep {
+    Providers,
+    SmooLogin,
+    Fda,
+    Calendar,
+    Reminders,
+    Messages,
+}
+
+impl SetupStep {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Providers => "LLM provider credentials",
+            Self::SmooLogin => "Smoo AI sign-in",
+            Self::Fda => "Full Disk Access",
+            Self::Calendar => "Calendar access",
+            Self::Reminders => "Reminders access",
+            Self::Messages => "Messages access",
+        }
+    }
+
+    /// The command that fixes it — printed by `th doctor`, run by `--onboard`.
+    fn fix(self) -> &'static str {
+        match self {
+            Self::Providers => "th model login <provider>",
+            Self::SmooLogin => "th auth login",
+            Self::Fda => "th doctor --fix-fda",
+            Self::Calendar => "th doctor --setup-calendar",
+            Self::Reminders => "th doctor --setup-reminders",
+            Self::Messages => "th doctor --setup-imessage",
+        }
+    }
+
+    /// Run this step. The two credential steps are interactive flows of their
+    /// own, so onboarding points at them rather than hijacking the terminal.
+    fn drive(self) -> Result<()> {
+        match self {
+            Self::Providers | Self::SmooLogin => {
+                println!("  {} run: {}", "→".cyan(), self.fix().bold());
+                Ok(())
+            }
+            Self::Fda => cmd_doctor_fix_fda(),
+            Self::Calendar => cmd_doctor_setup_calendar(),
+            Self::Reminders => cmd_doctor_setup_reminders(),
+            Self::Messages => cmd_doctor_setup_imessage(),
+        }
+    }
+}
+
 async fn cmd_doctor() -> Result<()> {
+    run_doctor().await.map(|_| ())
+}
+
+/// The health check. Returns the setup steps that aren't ready, in the order
+/// they should be done — `--onboard` walks exactly that list.
+async fn run_doctor() -> Result<Vec<SetupStep>> {
     println!("{} {}", gradient::smooth(), "Doctor".bold().cyan());
     println!("{}", "checking system health...\n".dimmed());
 
     let mut issues = 0;
+    let mut pending: Vec<SetupStep> = Vec::new();
 
     // 1. Check Big Smooth API — same probe and same wording as `th status`.
     let port = daemon_health::DEFAULT_PORT;
@@ -3404,7 +3476,21 @@ async fn cmd_doctor() -> Result<()> {
         } else {
             println!("  {} Providers: {}", "✗".red().bold(), "not configured (run: th model login <provider>)".red());
             issues += 1;
+            pending.push(SetupStep::Providers);
         }
+    }
+
+    // 3b. Smoo AI session — `th api …`, the config server and the hosted
+    // gateway all need one. Not a health *failure* (a local-only Big Smooth
+    // works without it), so it's raised as a setup step, not an issue.
+    let profile = smooth_policy::auth_paths::active_profile();
+    let signed_in = smooth_policy::auth_paths::user_file(profile.as_deref()).exists() || smooth_policy::auth_paths::m2m_file(profile.as_deref()).exists();
+    if signed_in {
+        let which = profile.as_deref().unwrap_or("default");
+        println!("  {} Smoo AI: {}", "✓".green().bold(), format!("signed in (profile: {which})").green());
+    } else {
+        println!("  {} Smoo AI: {}", "○".dimmed(), "not signed in (run: th auth login)".dimmed());
+        pending.push(SetupStep::SmooLogin);
     }
 
     // 4. Check smooth home dir
@@ -3509,8 +3595,94 @@ async fn cmd_doctor() -> Result<()> {
             "→".cyan()
         );
         issues += 1;
+        pending.push(SetupStep::Fda);
     } else {
         println!("  {} Workspace: {}", "✓".green().bold(), "on boot volume (no Full Disk Access needed)".green());
+    }
+
+    // 11. macOS access grants (pearl th-ba764e). Before this they were only
+    // visible behind the `--setup-*` flags, so a bare `th doctor` said "all
+    // checks passed" on a Mac where every personal-data tool was dead. RAISE
+    // them here.
+    //
+    // The grants belong to **Big Smooth.app** — TCC is per-binary — so what
+    // `th` can read about itself is a proxy, never proof. Say so, and never
+    // report a grant as present on `th`'s word alone.
+    #[cfg(target_os = "macos")]
+    {
+        use smooth_menubar::eventkit::{calendar_access, reminders_access, Access};
+
+        println!("\n  {}", "macOS access".bold());
+        println!("    {}", "grants belong to Big Smooth.app; `th`'s own probe is a proxy, not proof".dimmed());
+
+        if let Some(app) = calendar_setup::app_bundle() {
+            println!(
+                "    {} Big {}.app: {}",
+                "✓".green().bold(),
+                gradient::smooth(),
+                app.display().to_string().dimmed()
+            );
+        } else {
+            println!(
+                "    {} Big {}.app: not installed — every grant below attaches to it",
+                "✗".red().bold(),
+                gradient::smooth()
+            );
+            println!("      {} {}", "→".cyan(), "scripts/macos/install-local.sh".bold());
+        }
+
+        // The calendar tool shells `ical`; no binary, no calendar, grant or not.
+        if let Some(bin) = smooth_tools::calendar::resolve_ical() {
+            println!("    {} ical CLI: {}", "✓".green().bold(), bin.display().to_string().dimmed());
+        } else {
+            println!("    {} ical CLI: {}", "✗".red().bold(), "not installed (the calendar tool shells it)".red());
+            println!("      {} {}", "→".cyan(), SetupStep::Calendar.fix().bold());
+            pending.push(SetupStep::Calendar);
+        }
+
+        for (step, name) in [(SetupStep::Calendar, "Calendar"), (SetupStep::Reminders, "Reminders")] {
+            let access = if step == SetupStep::Calendar { calendar_access() } else { reminders_access() };
+            match access {
+                Access::Granted => println!("    {} {name}: {} for `th`", "✓".green().bold(), access.label().green()),
+                Access::NotDetermined => {
+                    println!("    {} {name}: {} — nobody has asked yet", "○".dimmed(), access.label().dimmed());
+                    println!("      {} {} (or Big Smooth's Set Up menu)", "→".cyan(), step.fix().bold());
+                    if !pending.contains(&step) {
+                        pending.push(step);
+                    }
+                }
+                Access::Denied => {
+                    println!("    {} {name}: {} — macOS was told no", "✗".red().bold(), access.label().red());
+                    println!("      {} {} (or Big Smooth's Set Up menu)", "→".cyan(), step.fix().bold());
+                    if !pending.contains(&step) {
+                        pending.push(step);
+                    }
+                }
+            }
+        }
+
+        // Messages is the one grant `th` can check for real: chat.db is
+        // FDA-gated, so a successful read means Full Disk Access is in place.
+        match smooth_tools::imessage::chat_db_path() {
+            Some(path) => match smooth_tools::imessage::probe(&path) {
+                Ok(()) => println!("    {} Messages: {}", "✓".green().bold(), "chat.db readable (Full Disk Access granted)".green()),
+                Err(smooth_tools::imessage::Unavailable::Missing) => {
+                    println!("    {} Messages: {}", "○".dimmed(), format!("no chat.db at {}", path.display()).dimmed());
+                    println!("      {} open Messages.app and sign in once, then re-run", "→".cyan());
+                }
+                Err(smooth_tools::imessage::Unavailable::Denied) => {
+                    println!(
+                        "    {} Messages: {}",
+                        "✗".red().bold(),
+                        "chat.db unreadable — Full Disk Access not granted".red()
+                    );
+                    println!("      {} {} (or Big Smooth's Set Up menu)", "→".cyan(), SetupStep::Messages.fix().bold());
+                    pending.push(SetupStep::Messages);
+                }
+            },
+            None => println!("    {} Messages: {}", "✗".red().bold(), "cannot determine the home directory".red()),
+        }
+        println!();
     }
 
     // 9. Git hooks
@@ -3536,12 +3708,53 @@ async fn cmd_doctor() -> Result<()> {
     }
 
     println!();
-    if issues == 0 {
+    if issues == 0 && pending.is_empty() {
         println!("{} {} {}", "All checks passed.".green().bold(), gradient::smooth(), "is ready.".green().bold());
-    } else {
+    } else if issues > 0 {
         println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
     }
+    if !pending.is_empty() {
+        let labels = pending.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ");
+        println!("{}", format!("{} setup step(s) not ready: {labels}", pending.len()).yellow().bold());
+        println!("{}", "Walk them all: th doctor --onboard".yellow());
+    }
 
+    Ok(pending)
+}
+
+/// `th doctor --onboard` — the guided first-run flow (pearl th-ba764e). Runs the
+/// full health check, then walks every not-ready setup step in order, driving
+/// each one's existing `--setup-*` path. This is the CLI backbone Big Smooth's
+/// "Set Up" menu and the daemon's first-run onboarding shell out to, so the
+/// sequence lives in exactly one place.
+async fn cmd_doctor_onboard() -> Result<()> {
+    let pending = run_doctor().await?;
+    if pending.is_empty() {
+        println!("\n{} nothing left to set up.", "✓".green().bold());
+        return Ok(());
+    }
+
+    println!("\n{} {}", gradient::smooth(), "Onboarding".bold().cyan());
+    println!("{}", format!("walking {} setup step(s)…", pending.len()).dimmed());
+    println!("{}", "run this on the Mac's console — the macOS prompts never appear over SSH\n".dimmed());
+
+    let total = pending.len();
+    for (i, step) in pending.iter().enumerate() {
+        println!("{}", format!("── {}/{total}  {}", i + 1, step.label()).bold().cyan());
+        // One failing step must not strand the rest — report and keep walking.
+        if let Err(e) = step.drive() {
+            println!("  {} {} failed: {e:#}", "✗".red().bold(), step.label());
+            println!("  {} fix by hand with: {}", "→".cyan(), step.fix().bold());
+        }
+        println!();
+    }
+
+    println!("{}", "Onboarding walked every step.".bold());
+    println!(
+        "  {} click through any macOS prompts that appeared, then verify: {}",
+        "→".cyan(),
+        "th doctor".bold()
+    );
     Ok(())
 }
 
@@ -8348,6 +8561,65 @@ mod beads_model_tests {
         // up — caller treats None as "no remote to bootstrap from."
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod doctor_setup_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Every step must point at a command that actually exists — the fix string
+    /// is what a stuck human types, so a typo here is the whole feature broken.
+    #[test]
+    fn every_step_fix_is_a_real_command() {
+        let steps = [
+            SetupStep::Providers,
+            SetupStep::SmooLogin,
+            SetupStep::Fda,
+            SetupStep::Calendar,
+            SetupStep::Reminders,
+            SetupStep::Messages,
+        ];
+        for step in steps {
+            assert!(!step.label().is_empty(), "{step:?} has no label");
+            let fix = step.fix();
+            assert!(fix.starts_with("th "), "{step:?} fix must be a th command: {fix}");
+            // The doctor-driven ones must name a flag `th doctor` really parses.
+            if let Some(flag) = fix.strip_prefix("th doctor ") {
+                Cli::try_parse_from(["th", "doctor", flag]).unwrap_or_else(|e| panic!("{step:?} fix `{fix}` does not parse: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn onboard_parses_and_is_off_by_default() {
+        let onboard = |args: &[&str]| match Cli::try_parse_from(args).expect("parses").command {
+            Some(Commands::Doctor { onboard, .. }) => onboard,
+            _ => panic!("expected Doctor"),
+        };
+        assert!(onboard(&["th", "doctor", "--onboard"]));
+        assert!(!onboard(&["th", "doctor"]));
+    }
+
+    /// The walk order is the dependency order: credentials, then the disk-access
+    /// grant, then the per-tool grants that depend on both.
+    #[test]
+    fn setup_steps_are_distinct() {
+        let steps = [
+            SetupStep::Providers,
+            SetupStep::SmooLogin,
+            SetupStep::Fda,
+            SetupStep::Calendar,
+            SetupStep::Reminders,
+            SetupStep::Messages,
+        ];
+        for (i, a) in steps.iter().enumerate() {
+            for b in &steps[i + 1..] {
+                assert_ne!(a, b);
+                assert_ne!(a.fix(), b.fix(), "{a:?} and {b:?} share a fix command");
+            }
+        }
     }
 }
 
