@@ -64,19 +64,17 @@ async function probePeer(peer: PeerStatus): Promise<RemoteDaemon | null> {
         try {
             const health = await fetch(`${url}/health`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
             if (!health.ok) continue;
-            let identity: string | undefined;
-            try {
-                const status = await fetch(`${url}/api/auth/status`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-                if (status.ok) {
-                    const j = (await status.json()) as { user?: string; org_id?: string };
-                    identity = j.user ?? j.org_id ?? undefined;
-                }
-            } catch {
-                // identity is best-effort; a reachable /health is enough to list it.
-            }
-            return { name, url, identity };
+            // /health alone is NOT enough: a host can run the SmooHub dashboard on
+            // :443 (also 200 on /health) alongside the daemon on :8443. Require the
+            // daemon's own `/api/auth/status` JSON shape (a `loggedIn` boolean) to
+            // confirm this port is a Big Smooth daemon, not the dashboard's SPA HTML.
+            const status = await fetch(`${url}/api/auth/status`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+            if (!status.ok) continue;
+            const j = (await status.json().catch(() => null)) as { loggedIn?: unknown; user?: string; orgId?: string } | null;
+            if (!j || typeof j.loggedIn !== 'boolean') continue; // dashboard/other service → skip
+            return { name, url, identity: j.user ?? j.orgId ?? undefined };
         } catch {
-            // not this port — try the next
+            // not a daemon on this port (or not JSON) — try the next
         }
     }
     return null;
