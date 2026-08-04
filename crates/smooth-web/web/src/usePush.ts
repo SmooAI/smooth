@@ -24,13 +24,23 @@ export function usePush() {
     const supported = typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
     const [enabled, setEnabled] = useState(false);
     const [busy, setBusy] = useState(false);
+    // Whether the DAEMON has push set up (VAPID keys). null = still checking.
+    // Without this, "Enable notifications" silently no-ops when /push/key 503s
+    // (no VAPID keys configured), which reads as a dead button.
+    const [configured, setConfigured] = useState<boolean | null>(null);
 
     useEffect(() => {
-        if (!supported) return;
+        if (!supported) {
+            setConfigured(false);
+            return;
+        }
         navigator.serviceWorker.ready
             .then((reg) => reg.pushManager.getSubscription())
             .then((sub) => setEnabled(!!sub))
             .catch(() => {});
+        fetch('/push/key', { headers: authHeaders() })
+            .then((r) => setConfigured(r.ok))
+            .catch(() => setConfigured(false));
     }, [supported]);
 
     const enable = useCallback(async () => {
@@ -57,5 +67,5 @@ export function usePush() {
         }
     }, [supported, busy]);
 
-    return { supported, enabled, busy, enable };
+    return { supported, enabled, busy, configured, enable };
 }

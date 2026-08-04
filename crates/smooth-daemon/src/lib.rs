@@ -39,6 +39,7 @@ pub mod schedule;
 pub mod scheduler;
 pub mod search;
 pub mod tailscale;
+pub mod usage_route;
 
 pub use operator::{local_tool_provider, local_tool_provider_with_cwd, serve_local_flavor};
 pub use schedule::{InMemoryScheduleStore, Schedule, ScheduleKind, ScheduleStore, SqliteScheduleStore};

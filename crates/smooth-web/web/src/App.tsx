@@ -22,6 +22,9 @@ import {
     Plus,
     MessageSquare,
     Square,
+    BarChart3,
+    Settings,
+    MessagesSquare,
 } from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
@@ -39,7 +42,9 @@ import {
     type Status,
     type ConversationSummary,
 } from './operator';
+import SettingsPage from './SettingsPage';
 import { SmooSignIn } from './SmooSignIn';
+import StatsPage from './StatsPage';
 import { canSend } from './turn-guard';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 import { usePush } from './usePush';
@@ -191,6 +196,9 @@ export default function App() {
     } = useOperator();
     const push = usePush();
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    // Top-level surface: the chat, or the Stats / Settings tabs. No router — the
+    // app has exactly these three views, so a state switch is lighter than one.
+    const [view, setView] = useState<'chat' | 'stats' | 'settings'>('chat');
     const faceState: FaceState = state === 'connecting' || state === 'offline' ? 'idle' : (state as FaceState);
     const inConversation = messages.length > 0 || approvals.length > 0;
 
@@ -200,11 +208,18 @@ export default function App() {
         if (window.matchMedia('(max-width: 1023px)').matches) setSidebarOpen(false);
     };
     const onResume = (id: string) => {
+        setView('chat');
         resumeConversation(id);
         closeOnMobile();
     };
     const onNew = () => {
+        setView('chat');
         newConversation();
+        closeOnMobile();
+    };
+    // Sidebar tab pick → switch surface; on mobile the drawer dismisses like a resume.
+    const onNavigate = (v: 'chat' | 'stats' | 'settings') => {
+        setView(v);
         closeOnMobile();
     };
 
@@ -224,8 +239,10 @@ export default function App() {
         <>
             <Sidebar
                 open={sidebarOpen}
+                view={view}
+                onNavigate={onNavigate}
                 conversations={conversations}
-                activeId={activeConversationId}
+                activeId={view === 'chat' ? activeConversationId : null}
                 onResume={onResume}
                 onNew={onNew}
                 onRename={renameConversation}
@@ -250,7 +267,7 @@ export default function App() {
             {/* Push to phone: enroll this device so Big Smooth can reach it with the
                 tab closed. Hidden when the browser can't do Web Push, or once enabled.
                 Sits a row below the sign-in pill so they stack, not overlap. */}
-            {push.supported && !push.enabled && (
+            {push.supported && push.configured && !push.enabled && (
                 <button
                     onClick={() => void push.enable()}
                     disabled={push.busy}
@@ -270,37 +287,68 @@ export default function App() {
             )}
             <div className={`h-dvh transition-[padding] duration-200 ${sidebarOpen ? 'lg:pl-72' : ''}`}>
                 <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden px-5">
-                    {inConversation ? (
-                        <>
-                            <PresenceBar
-                                state={state}
-                                status={status}
-                                faceState={faceState}
-                                mode={mode}
-                                modelCosts={modelCosts}
-                                sessionCostUsd={sessionCostUsd}
-                            />
-                            <div className="presence-rule shrink-0" />
-                            <main className="flex min-h-0 flex-1 flex-col">
-                                <ApprovalDeck approvals={approvals} respond={respond} />
-                                <Conversation messages={messages} approvals={approvals} />
-                            </main>
-                        </>
+                    {view === 'stats' ? (
+                        <StatsPage />
+                    ) : view === 'settings' ? (
+                        <SettingsPage mode={mode} setMode={guardedSetMode} status={status} push={push} />
                     ) : (
-                        <Greeting state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
+                        <>
+                            {inConversation ? (
+                                <>
+                                    <PresenceBar
+                                        state={state}
+                                        status={status}
+                                        faceState={faceState}
+                                        mode={mode}
+                                        modelCosts={modelCosts}
+                                        sessionCostUsd={sessionCostUsd}
+                                    />
+                                    <div className="presence-rule shrink-0" />
+                                    <main className="flex min-h-0 flex-1 flex-col">
+                                        <ApprovalDeck approvals={approvals} respond={respond} />
+                                        <Conversation messages={messages} approvals={approvals} />
+                                    </main>
+                                </>
+                            ) : (
+                                <Greeting
+                                    state={state}
+                                    status={status}
+                                    faceState={faceState}
+                                    mode={mode}
+                                    modelCosts={modelCosts}
+                                    sessionCostUsd={sessionCostUsd}
+                                />
+                            )}
+                            <Composer
+                                onSend={sendMessage}
+                                disabled={state === 'connecting' || state === 'offline'}
+                                turnActive={turnActive}
+                                onStop={interrupt}
+                                mode={mode}
+                                setMode={guardedSetMode}
+                                modelCosts={modelCosts}
+                            />
+                        </>
                     )}
-                    <Composer
-                        onSend={sendMessage}
-                        disabled={state === 'connecting' || state === 'offline'}
-                        turnActive={turnActive}
-                        onStop={interrupt}
-                        mode={mode}
-                        setMode={guardedSetMode}
-                        modelCosts={modelCosts}
-                    />
                 </div>
             </div>
         </>
+    );
+}
+
+/** A sidebar tab row (Chat / Stats / Settings). Active gets the teal treatment
+ * the active conversation uses, so "where am I" reads the same everywhere. */
+function NavRow({ icon, label, active, onClick }: { icon: ReactNode; label: string; active: boolean; onClick: () => void }) {
+    return (
+        <button
+            onClick={onClick}
+            className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm transition ${
+                active ? 'bg-(--color-th-teal)/12 text-foreground ring-1 ring-(--color-th-teal)/40' : 'text-foreground/75 hover:bg-panel-2'
+            }`}
+        >
+            <span className={active ? 'text-(--color-th-teal)' : 'text-(--color-muted-foreground)'}>{icon}</span>
+            {label}
+        </button>
     );
 }
 
@@ -308,6 +356,8 @@ export default function App() {
  * Overlays with a backdrop on mobile; docks (no backdrop) on desktop (lg). */
 function Sidebar({
     open,
+    view,
+    onNavigate,
     conversations,
     activeId,
     onResume,
@@ -316,6 +366,8 @@ function Sidebar({
     onClose,
 }: {
     open: boolean;
+    view: 'chat' | 'stats' | 'settings';
+    onNavigate: (v: 'chat' | 'stats' | 'settings') => void;
     conversations: ConversationSummary[];
     activeId: string | null;
     onResume: (id: string) => void;
@@ -356,6 +408,14 @@ function Sidebar({
                 >
                     <Plus size={16} /> New chat
                 </button>
+                {/* Top-level tabs. "Chat" returns to the conversation surface; the
+                    active tab gets the same teal treatment as an active conversation. */}
+                <div className="mx-2 mb-2 space-y-0.5">
+                    <NavRow icon={<MessagesSquare size={16} />} label="Chat" active={view === 'chat'} onClick={() => onNavigate('chat')} />
+                    <NavRow icon={<BarChart3 size={16} />} label="Stats" active={view === 'stats'} onClick={() => onNavigate('stats')} />
+                    <NavRow icon={<Settings size={16} />} label="Settings" active={view === 'settings'} onClick={() => onNavigate('settings')} />
+                </div>
+                <div className="mx-3 mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Conversations</div>
                 <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pt-1 pb-4">
                     {conversations.length === 0 ? (
                         <p className="px-3 py-6 text-center text-xs text-(--color-muted-foreground)">No conversations yet.</p>

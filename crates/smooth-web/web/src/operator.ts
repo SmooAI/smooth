@@ -190,6 +190,76 @@ export function resolveTarget(): { http: string; token: string } {
 let msgSeq = 0;
 const nextId = (p: string) => `${p}-${++msgSeq}`;
 
+/** Fire-and-forget: persist a turn's usage to `POST /api/usage` so the Stats page
+ * can aggregate spend over time. The engine streams usage on `eventual_response`
+ * but never stores it, so the client is the one place that has the number when it
+ * lands. A failed write costs one turn of history, never the chat — hence the
+ * swallowed error. */
+export function recordUsage(record: {
+    conversationId?: string | null;
+    model?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+    costUsd?: number;
+}): void {
+    const { http, token } = resolveTarget();
+    void fetch(`${http}/api/usage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+            conversation_id: record.conversationId ?? undefined,
+            model: record.model ?? '',
+            prompt_tokens: record.promptTokens ?? 0,
+            completion_tokens: record.completionTokens ?? 0,
+            cost_usd: record.costUsd ?? 0,
+        }),
+    }).catch(() => {});
+}
+
+/** One spend rollup row (a model or a day) from `GET /api/stats`. */
+export interface StatsBucket {
+    key: string;
+    usd: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    turns: number;
+}
+
+/** The `GET /api/stats` payload: durable activity counts + the aggregated usage log. */
+export interface Stats {
+    activity: {
+        conversations: number;
+        sessions: number;
+        active_sessions: number;
+        ended_sessions: number;
+        messages: number;
+        inbound: number;
+        outbound: number;
+        last_activity?: string | null;
+    };
+    spend: {
+        total_usd: number;
+        prompt_tokens: number;
+        completion_tokens: number;
+        turns: number;
+        by_model: StatsBucket[];
+        by_day: StatsBucket[];
+    };
+}
+
+/** Fetch the Stats page data. Returns null on any failure — the page shows an
+ * empty state rather than throwing. */
+export async function fetchStats(): Promise<Stats | null> {
+    const { http, token } = resolveTarget();
+    try {
+        const r = await fetch(`${http}/api/stats`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+        if (!r.ok) return null;
+        return (await r.json()) as Stats;
+    } catch {
+        return null;
+    }
+}
+
 export function useOperator(): OperatorApi {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [approvals, setApprovals] = useState<Approval[]>([]);
@@ -369,8 +439,16 @@ export function useOperator(): OperatorApi {
                     patchStreaming((m) => ({ ...m, streaming: false }));
                     // Usage rides the eventual_response — read defensively since the
                     // exact path may shift slightly at integration (th-2a6330).
-                    const cost = Number(v?.data?.data?.usage?.costUsd ?? v?.data?.data?.costUsd ?? v?.data?.costUsd ?? v?.usage?.costUsd);
-                    if (Number.isFinite(cost) && cost > 0) setSessionCostUsd((c) => c + cost);
+                    const usage = v?.data?.data?.usage ?? v?.data?.usage ?? v?.usage ?? {};
+                    const cost = Number(usage.costUsd ?? v?.data?.data?.costUsd ?? v?.data?.costUsd);
+                    const promptTokens = Number(usage.promptTokens ?? usage.prompt_tokens ?? 0) || 0;
+                    const completionTokens = Number(usage.completionTokens ?? usage.completion_tokens ?? 0) || 0;
+                    const costUsd = Number.isFinite(cost) && cost > 0 ? cost : 0;
+                    if (costUsd > 0) setSessionCostUsd((c) => c + costUsd);
+                    // Persist this turn's usage so Stats can accumulate spend across restarts.
+                    if (costUsd > 0 || promptTokens > 0 || completionTokens > 0) {
+                        recordUsage({ conversationId: activeConvRef.current, model: modeRef.current.model, promptTokens, completionTokens, costUsd });
+                    }
                     // The turn just landed — refresh the sidebar so this chat appears/updates.
                     send({ action: 'list_conversations', requestId: nextId('lc') });
                     break;

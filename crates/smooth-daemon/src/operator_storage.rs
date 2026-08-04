@@ -21,14 +21,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
 use smooth_operator::{CheckpointStore, InMemoryKnowledge, KnowledgeBase, Memory, MemoryCheckpointStore, MemoryEntry};
 use smooth_operator_svc::access_control::{AccessContext, AclKnowledgeStore};
 use smooth_operator_svc::adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
-use smooth_operator_svc::domain::{Conversation, Message, Participant, Session};
+use smooth_operator_svc::domain::{Conversation, Direction, Message, Participant, Session, SessionStatus};
 
 /// The OLTP slices, kept in memory for reads — identical layout to the operator's
 /// in-memory adapter, so the query logic is a faithful mirror.
@@ -138,6 +138,62 @@ impl SqliteStorageAdapter {
             memories: Arc::clone(&self.memories),
         })
     }
+
+    /// Count the durable activity for the Stats page — conversations, sessions
+    /// (active/idle vs ended), and messages (inbound vs outbound). Reads the
+    /// in-memory tables (already hydrated on open), so it's a cheap lock-and-count
+    /// with no db round-trip.
+    ///
+    /// This is the ONE aggregate the daemon can report from its own data:
+    /// per-turn token/cost is computed by the engine but not persisted here (it's
+    /// streamed to the client on `eventual_response.usage`), so spend history
+    /// comes from the separate `usage.jsonl` written by the `/api/usage` route.
+    ///
+    /// # Errors
+    /// Returns an error only if the tables lock is poisoned.
+    pub fn activity_snapshot(&self) -> Result<ActivitySnapshot> {
+        let t = self.tables.read().map_err(|e| anyhow!("lock poisoned: {e}"))?;
+        let mut snap = ActivitySnapshot {
+            conversations: t.conversations.len(),
+            sessions: t.sessions.len(),
+            messages: t.messages.len(),
+            ..ActivitySnapshot::default()
+        };
+        for s in t.sessions.values() {
+            // Idle and not-yet-set both count as "active" — only an explicit End retires a session.
+            if matches!(s.status, Some(SessionStatus::Ended)) {
+                snap.ended_sessions += 1;
+            } else {
+                snap.active_sessions += 1;
+            }
+        }
+        let mut last: Option<DateTime<Utc>> = None;
+        for m in t.messages.values() {
+            match m.direction {
+                Direction::Inbound => snap.inbound += 1,
+                Direction::Outbound => snap.outbound += 1,
+            }
+            if last.is_none_or(|l| m.created_at > l) {
+                last = Some(m.created_at);
+            }
+        }
+        snap.last_activity = last.map(|d| d.to_rfc3339());
+        Ok(snap)
+    }
+}
+
+/// Durable-activity counts for the Stats page (see [`SqliteStorageAdapter::activity_snapshot`]).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ActivitySnapshot {
+    pub conversations: usize,
+    pub sessions: usize,
+    pub active_sessions: usize,
+    pub ended_sessions: usize,
+    pub messages: usize,
+    pub inbound: usize,
+    pub outbound: usize,
+    /// RFC 3339 timestamp of the most recent message, if any.
+    pub last_activity: Option<String>,
 }
 
 /// Write-through one entity as a JSON blob (idempotent replace on `entity,id`).
@@ -526,6 +582,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = SqliteStorageAdapter::open(&dir.path().join("empty.db")).unwrap();
         assert!(a.get_conversation("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn activity_snapshot_counts_conversations_sessions_and_message_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db")).unwrap();
+
+        // Empty store → all zeros, no last-activity.
+        let empty = a.activity_snapshot().unwrap();
+        assert_eq!((empty.conversations, empty.sessions, empty.messages), (0, 0, 0));
+        assert!(empty.last_activity.is_none());
+
+        a.create_conversation(conv("conv-1")).await.unwrap();
+        a.create_session(sess("sess-1", "conv-1")).await.unwrap();
+        a.append_message(msg("in-1", "conv-1")).await.unwrap();
+        a.append_message(msg("in-2", "conv-1")).await.unwrap();
+        let mut out = msg("out-1", "conv-1");
+        out.direction = smooth_operator_svc::domain::Direction::Outbound;
+        a.append_message(out).await.unwrap();
+
+        let snap = a.activity_snapshot().unwrap();
+        assert_eq!(snap.conversations, 1);
+        assert_eq!(snap.sessions, 1);
+        assert_eq!(snap.active_sessions, 1, "a non-ended session counts as active");
+        assert_eq!(snap.ended_sessions, 0);
+        assert_eq!(snap.messages, 3);
+        assert_eq!(snap.inbound, 2);
+        assert_eq!(snap.outbound, 1);
+        assert!(snap.last_activity.is_some(), "last_activity set once there are messages");
     }
 
     // ── durable agent memory (th-6d1692) ─────────────────────────────────────
