@@ -10,7 +10,9 @@ import { join } from 'node:path';
 
 import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray } from 'electron';
 
-import { baseUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
+import { loadConfig, saveConfig } from './config.js';
+import { baseUrl, isRemote, remoteUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
+import { discoverDaemons, type RemoteDaemon } from './discovery.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
@@ -26,6 +28,11 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function main(): Promise<void> {
+    // Pick the daemon target BEFORE anything reads it: the saved remote URL (a
+    // tailnet daemon like smoo-hub) or the local one. daemon.ts reads this env.
+    const cfg = loadConfig();
+    if (cfg.remoteUrl) process.env.SMOOTH_REMOTE_URL = cfg.remoteUrl;
+
     // Packaged builds get the th mark from BigSmooth.icns via electron-builder;
     // an unpackaged run would otherwise show the stock Electron icon.
     if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(asset('icon.png'));
@@ -33,6 +40,21 @@ async function main(): Promise<void> {
     const result = await startDaemon();
     spawnedDaemon = result.spawned;
     if (!result.ok) {
+        // A dead LOCAL daemon is fatal; a dead REMOTE one shouldn't strand the app —
+        // offer to fall back to This Mac (the tray stays alive either way to reconnect).
+        if (isRemote()) {
+            const { response } = await dialog.showMessageBox({
+                type: 'warning',
+                buttons: ['Switch to This Mac', 'Quit'],
+                defaultId: 0,
+                cancelId: 1,
+                message: 'Can’t reach the remote Big Smooth',
+                detail: result.error ?? '',
+            });
+            if (response === 0) connectTo(null);
+            else app.quit();
+            return;
+        }
         dialog.showErrorBox('Big Smooth could not start', result.error ?? 'The daemon failed to start.');
         app.quit();
         return;
@@ -53,7 +75,7 @@ function showWindow(): void {
         height: 800,
         minWidth: 480,
         minHeight: 480,
-        title: 'Big Smooth',
+        title: windowTitle(),
         // ponytail: a normal title bar. `hiddenInset` floats the traffic lights
         // over the page, straight on top of smooth-web's top-left sidebar toggle.
         // Going frameless again means insetting the SPA's header, which is
@@ -79,19 +101,54 @@ function showWindow(): void {
     });
 }
 
+/** The window/label name for the current target: "Big Smooth" locally, or
+ * "Big Smooth — <host>" when attached to a remote (tailnet) daemon. */
+function windowTitle(): string {
+    if (!isRemote()) return 'Big Smooth';
+    try {
+        return `Big Smooth — ${new URL(baseUrl()).hostname.split('.')[0]}`;
+    } catch {
+        return 'Big Smooth (remote)';
+    }
+}
+
 function createTray(): void {
     const icon = nativeImage.createFromPath(asset('tray.png'));
     tray = new Tray(icon);
     tray.setToolTip('Big Smooth');
-    tray.setContextMenu(
+    tray.on('click', showWindow);
+    applyTrayMenu([]); // first paint with no discovered peers yet…
+    void refreshDiscovery(); // …then discover tailnet daemons and repaint.
+}
+
+/** (Re)build the tray menu, including the Connect submenu from `daemons`. */
+function applyTrayMenu(daemons: RemoteDaemon[]): void {
+    const active = remoteUrl(); // '' = local
+    const connect: Electron.MenuItemConstructorOptions[] = [{ label: 'This Mac (local)', type: 'radio', checked: active === '', click: () => connectTo(null) }];
+    if (daemons.length > 0) {
+        connect.push({ type: 'separator' });
+        for (const d of daemons) {
+            connect.push({
+                label: d.identity ? `${d.name} — ${d.identity}` : d.name,
+                type: 'radio',
+                checked: active === d.url,
+                click: () => connectTo(d.url),
+            });
+        }
+    }
+    connect.push({ type: 'separator' }, { label: 'Refresh', click: () => void refreshDiscovery() });
+
+    tray?.setContextMenu(
         Menu.buildFromTemplate([
             { label: 'Open Big Smooth', click: showWindow },
             { label: 'Check for Updates…', click: () => void checkForUpdatesInteractive() },
             { type: 'separator' },
+            { label: 'Connect', submenu: connect },
             {
                 label: 'Set Up',
-                // Every entry is a macOS TCC gate; nothing to set up elsewhere.
-                visible: process.platform === 'darwin',
+                // TCC gates are on THIS Mac's local daemon; irrelevant when attached
+                // to a remote one, so hide it there.
+                visible: process.platform === 'darwin' && !isRemote(),
                 submenu: [
                     { label: 'Calendar…', click: () => grantEventKit('calendar') },
                     { label: 'Reminders…', click: () => grantEventKit('reminders') },
@@ -103,7 +160,27 @@ function createTray(): void {
             { label: 'Quit Big Smooth', click: () => app.quit() },
         ]),
     );
-    tray.on('click', showWindow);
+}
+
+/** Discover tailnet daemons and repaint the tray's Connect submenu. */
+async function refreshDiscovery(): Promise<void> {
+    try {
+        applyTrayMenu(await discoverDaemons());
+    } catch {
+        applyTrayMenu([]);
+    }
+}
+
+/** Switch the daemon target (null = local) and relaunch so `main()` re-reads it —
+ * `before-quit` stops any local daemon we spawned, then we reconnect. */
+function connectTo(url: string | null): void {
+    if ((loadConfig().remoteUrl ?? null) === (url ?? null)) {
+        showWindow();
+        return;
+    }
+    saveConfig({ remoteUrl: url });
+    app.relaunch();
+    app.quit();
 }
 
 /**
