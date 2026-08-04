@@ -1,0 +1,67 @@
+appId: ai.smoo.bigsmooth
+productName: Big Smooth
+copyright: © Smoo LLC
+# OTA updates (electron-updater). Baked into app-update.yml at build time; the
+# app polls latest-<os>.yml here and pulls the delta .zip. macOS only accepts a
+# same-Developer-ID + notarized update, which this pipeline produces. Publish in
+# CI with `electron-builder --publish always` → syncs artifacts to the bucket.
+publish:
+    provider: generic
+    url: https://downloads.smoo.ai/bigsmooth
+directories:
+    output: release
+    buildResources: build
+files:
+    - dist/**
+    - assets/**
+    - package.json
+# The engine ships inside the app; resolveDaemonBin() looks here first.
+# `pnpm stage-daemon` fills resources/current/ with the binary for the platform
+# being built (each OS builds its own installer, so one directory is enough).
+extraResources:
+    - from: resources/current/
+      to: .
+      filter: ['smooth-daemon*']
+
+mac:
+    category: public.app-category.productivity
+    icon: ../scripts/macos/BigSmooth.icns
+    target: [dmg, zip]
+    # Notarization requires it, and it's what makes the entitlements below bite.
+    hardenedRuntime: true
+    entitlements: build/entitlements.mac.plist
+    entitlementsInherit: build/entitlements.mac.plist
+    # Notarization is a separate step (`pnpm notarize` → scripts/macos/notarize-and-staple.sh,
+    # which no-ops without credentials), so leave builder's own hook off.
+    notarize: false
+    # Required, but NOT sufficient — see "TCC" in the README. A spawned child does
+    # not inherit the right to *ask*: the daemon's EventKit request returns
+    # not-determined with no prompt even with these strings present (verified).
+    # They still have to be here for anything the app itself asks for, and for the
+    # helper-bundle fix. Same text as scripts/macos/Info.plist (the native app's).
+    extendInfo:
+        LSMinimumSystemVersion: '14.0'
+        NSCalendarsFullAccessUsageDescription: Big Smooth reads and edits your calendar when you ask it to.
+        NSRemindersFullAccessUsageDescription: Big Smooth reads and edits your reminders when you ask it to.
+        NSAppleEventsUsageDescription: Big Smooth sends messages through Messages.app when you ask it to.
+        NSRemovableVolumesUsageDescription: Big Smooth works in a workspace that may live on an external volume.
+
+dmg:
+    title: Big Smooth
+
+win:
+    icon: assets/icon.png
+    target: [nsis]
+    # Authenticode: point WIN_CSC_LINK at a .pfx (or its base64) plus
+    # WIN_CSC_KEY_PASSWORD and electron-builder signs. Absent → unsigned installer,
+    # which still builds.
+    signtoolOptions:
+        signingHashAlgorithms: [sha256]
+nsis:
+    oneClick: false
+    allowToChangeInstallationDirectory: true
+
+linux:
+    icon: assets/icon.png
+    target: [AppImage]
+    category: Utility

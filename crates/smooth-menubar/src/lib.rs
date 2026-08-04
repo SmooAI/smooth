@@ -56,19 +56,30 @@ fn link_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Whether the menu bar should run for this process: either the `SMOOTH_MENUBAR`
-/// env opt-in, OR the daemon was launched as a `.app` bundle (double-clicked /
-/// `open`ed / a login-item) — the natural product signal. A plain
-/// `smooth-daemon` on `$PATH` (CLI, tests, a bare launchd agent) stays headless.
+/// Whether the menu bar should run for this process: `SMOOTH_MENUBAR` decides
+/// when it's set either way, otherwise the daemon presents a menu bar iff it was
+/// launched as a `.app` bundle (double-clicked / `open`ed / a login-item) — the
+/// natural product signal. A plain `smooth-daemon` on `$PATH` (CLI, tests, a bare
+/// launchd agent) stays headless.
+///
+/// The **off** direction is what the Electron desktop app uses: it bundles the
+/// daemon in its own `Contents/MacOS` (so EventKit finds the app's usage strings)
+/// and owns the tray itself, so the daemon must not raise a second status item.
 #[must_use]
 pub fn enabled() -> bool {
-    env_opt_in() || std::env::current_exe().is_ok_and(|p| launched_from_app_bundle(&p))
+    env_override().unwrap_or_else(|| std::env::current_exe().is_ok_and(|p| launched_from_app_bundle(&p)))
 }
 
-/// The `SMOOTH_MENUBAR` env override (truthy). Also forces the menu bar on for a
-/// CLI run, for validating without packaging an app.
-fn env_opt_in() -> bool {
-    std::env::var("SMOOTH_MENUBAR").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+/// The `SMOOTH_MENUBAR` override: `Some(true)` forces the menu bar on for a CLI
+/// run (validating without packaging an app), `Some(false)` forces it off inside
+/// a bundle, `None` when unset or unparseable.
+fn env_override() -> Option<bool> {
+    let raw = std::env::var("SMOOTH_MENUBAR").ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// True when `exe` lives inside a macOS `.app` bundle
@@ -363,14 +374,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_opt_in_reads_truthy_values() {
+    fn env_override_decides_in_both_directions() {
         // ponytail: single test touching this process-global env; no lock needed.
-        for (val, want) in [("1", true), ("true", true), ("YES", true), ("on", true), ("0", false), ("", false)] {
+        let cases = [
+            ("1", Some(true)),
+            ("true", Some(true)),
+            ("YES", Some(true)),
+            ("on", Some(true)),
+            ("0", Some(false)),
+            ("off", Some(false)),
+            ("NO", Some(false)),
+            ("", None),
+            ("maybe", None),
+        ];
+        for (val, want) in cases {
             std::env::set_var("SMOOTH_MENUBAR", val);
-            assert_eq!(env_opt_in(), want, "SMOOTH_MENUBAR={val:?}");
+            assert_eq!(env_override(), want, "SMOOTH_MENUBAR={val:?}");
         }
         std::env::remove_var("SMOOTH_MENUBAR");
-        assert!(!env_opt_in(), "unset → disabled");
+        assert_eq!(env_override(), None, "unset → no opinion");
+
+        // The off direction must beat the in-a-bundle default — that's what lets
+        // the Electron app bundle the daemon without getting a second status item.
+        std::env::set_var("SMOOTH_MENUBAR", "0");
+        assert!(!enabled(), "explicit off wins over the bundle heuristic");
+        std::env::remove_var("SMOOTH_MENUBAR");
     }
 
     #[test]

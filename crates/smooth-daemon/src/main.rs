@@ -57,6 +57,34 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PermissionsCmd,
     },
+    /// Ask macOS for an EventKit grant, printing the resulting status.
+    ///
+    /// Exists for the desktop app's tray, which drives the grants as a one-shot
+    /// child rather than over HTTP: the long-running daemon may have been
+    /// started by launchd or a terminal, and TCC would attribute the prompt to
+    /// *that*, which is the silent-denial trap.
+    ///
+    /// Caveat (macOS, measured): being a spawned child of a bundled app is not
+    /// enough to be allowed to *ask*. The prompt only appears when the process
+    /// is an app bundle's main executable launched through LaunchServices —
+    /// this same command under `open <bundle>.app --args tcc calendar` prompts,
+    /// spawned from a parent app it returns `not-determined` silently.
+    #[cfg(target_os = "macos")]
+    Tcc {
+        #[command(subcommand)]
+        cmd: TccCmd,
+    },
+}
+
+/// The EventKit grants — macOS treats them as separate permissions with
+/// separate prompts, so they're separate subcommands.
+#[cfg(target_os = "macos")]
+#[derive(Subcommand, Clone, Copy)]
+enum TccCmd {
+    /// Request full Calendar access.
+    Calendar,
+    /// Request full Reminders access.
+    Reminders,
 }
 
 #[derive(Subcommand)]
@@ -183,7 +211,22 @@ async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Audit { lines } => cmd_audit(lines),
         Cmd::Schedule { cmd } => cmd_schedule(cmd).await,
         Cmd::Permissions { cmd } => cmd_permissions(&cmd),
+        #[cfg(target_os = "macos")]
+        Cmd::Tcc { cmd } => cmd_tcc(cmd),
     }
+}
+
+/// Drive one EventKit prompt to completion and print the resulting status.
+/// Blocks — the whole point is to be alive while the user answers the dialog.
+#[cfg(target_os = "macos")]
+fn cmd_tcc(cmd: TccCmd) -> Result<()> {
+    use smooth_menubar::eventkit;
+    let (what, access) = match cmd {
+        TccCmd::Calendar => ("calendar", eventkit::request_calendar_access()),
+        TccCmd::Reminders => ("reminders", eventkit::request_reminders_access()),
+    };
+    println!("{what}: {}", access.label());
+    Ok(())
 }
 
 /// The address the default `th daemon` (`Run`) binds. `SMOOTH_ADDR` (a
