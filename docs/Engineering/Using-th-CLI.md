@@ -720,7 +720,8 @@ th audit path                                      # ~/.smooth/audit/
 ### Doctor / cache / service
 
 ```bash
-th doctor                                          # system health + auto-fix
+th doctor                                          # system health + macOS access grants + auto-fix
+th doctor --onboard                                # guided first run: walk every not-ready setup step
 th doctor --fix-fda                                # macOS: guide the Full Disk Access grant
 th doctor --setup-calendar                         # macOS: install `ical` + drive the Calendar grant
 th doctor --setup-imessage                         # macOS: set up the `imessage` tool (th-1665ed)
@@ -728,6 +729,65 @@ th doctor --setup-reminders                        # macOS: drive the Reminders 
 th cache list / prune / clear
 th service install / start / stop / status         # run smooth as a background daemon
 ```
+
+#### What `th doctor` raises (pearl th-ba764e)
+
+Besides the health checks (daemon, Dolt, providers, `~/.smooth`, pearls, backup,
+workspace volume, git hooks) a bare `th doctor` now reports two more things:
+
+- **Smoo AI sign-in** — whether a user or M2M session exists for the active auth
+  profile (`th auth login` if not). Not a health failure: a local-only Big Smooth
+  works without it, so it's raised as a *setup step*, not an issue.
+- **A `macOS access` section** — the grants Big Smooth's personal-data tools
+  need, which used to be visible only behind the `--setup-*` flags. Before this,
+  a bare `th doctor` could say "all checks passed" on a Mac where the calendar,
+  reminders and messages tools were all dead.
+
+  ```
+    macOS access
+      grants belong to Big Smooth.app; `th`'s own probe is a proxy, not proof
+      ✓ Big Smooth.app: /Users/you/Applications/Big Smooth.app
+      ✓ ical CLI: /opt/homebrew/bin/ical
+      ○ Calendar: not-determined — nobody has asked yet
+        → th doctor --setup-calendar (or Big Smooth's Set Up menu)
+      ○ Reminders: not-determined — nobody has asked yet
+        → th doctor --setup-reminders (or Big Smooth's Set Up menu)
+      ✓ Messages: chat.db readable (Full Disk Access granted)
+  ```
+
+  **The load-bearing nuance: the process that needs these grants is the daemon
+  (`Big Smooth.app`), not `th`.** TCC grants are per-binary, so what `th` reads
+  about *itself* (the EventKit statuses, `chat.db` readability) is a proxy — it
+  never proves the app bundle is granted, which is why every line says "for
+  `th`" and the fix always names the app. The one real check is Messages:
+  `~/Library/Messages/chat.db` is Full-Disk-Access-gated, so a successful read
+  means FDA is genuinely in place for the probing binary.
+
+The run ends with a setup-step summary — `N setup step(s) not ready: …` plus
+`Walk them all: th doctor --onboard` — kept separate from the `N issue(s) found`
+health count.
+
+#### `th doctor --onboard`
+
+The guided first-run flow, and the CLI backbone Big Smooth.app's **Set Up** menu
+and the daemon's first-run onboarding shell out to (so the sequence lives in one
+place). It runs the full health check, then walks every step that came back not
+ready, in dependency order:
+
+1. **LLM provider credentials** → points at `th model login <provider>`
+2. **Smoo AI sign-in** → points at `th auth login`
+3. **Full Disk Access** → runs `--fix-fda`
+4. **Calendar** → runs `--setup-calendar`
+5. **Reminders** → runs `--setup-reminders`
+6. **Messages** → runs `--setup-imessage`
+
+Ready steps are skipped, so re-running it is cheap and idempotent. A step that
+fails is reported with its manual command and the walk continues — one broken
+step never strands the rest. The two credential steps are interactive flows of
+their own, so onboarding points at them rather than hijacking the terminal.
+
+Run it on the Mac's console: like every `--setup-*` flag, the macOS prompts never
+appear over SSH. Verify afterwards with a plain `th doctor`.
 
 #### `th doctor --setup-calendar` (macOS)
 
