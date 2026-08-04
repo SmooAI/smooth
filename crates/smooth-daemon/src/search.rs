@@ -162,9 +162,28 @@ fn score_match(query_lc: &str, key: &str) -> Option<MatchScore> {
 }
 
 /// Walk `workspace` (pruned of `.git`/`node_modules`/`target`/...) up to
+/// Render a **workspace-relative** path with forward slashes on every platform.
+///
+/// These strings are inserted into the composer and handed to the model, which
+/// then feeds them back to `read_file` — so they need one stable spelling, not
+/// `src/server.rs` on macOS and `src\server.rs` on Windows. Forward slashes are
+/// accepted by the Windows APIs, are what `smooth-tools` already renders for
+/// relative paths, and don't collide with the model's own escaping. Absolute
+/// typed paths are deliberately NOT normalized (see `expand_path_query`) — those
+/// echo back whatever the user typed.
+fn to_slash(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(target_os = "windows") {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 /// `budget` entries, building a [`Candidate`] per regular file: `haystack` and
-/// `value` are the workspace-relative path, `label` is the file name, `detail`
-/// is the relative parent directory (omitted at the root).
+/// `value` are the workspace-relative path (forward-slashed, see [`to_slash`]),
+/// `label` is the file name, `detail` is the relative parent directory (omitted
+/// at the root).
 fn file_candidates(workspace: &Path, budget: usize) -> Vec<Candidate> {
     let mut out = Vec::new();
     for entry in pruned_walk(workspace).flatten().take(budget) {
@@ -173,12 +192,12 @@ fn file_candidates(workspace: &Path, budget: usize) -> Vec<Candidate> {
         }
         let path = entry.path();
         let rel = path.strip_prefix(workspace).unwrap_or(path);
-        let rel_str = rel.to_string_lossy().into_owned();
+        let rel_str = to_slash(rel);
         if rel_str.is_empty() {
             continue;
         }
         let label = path.file_name().map_or_else(|| rel_str.clone(), |n| n.to_string_lossy().into_owned());
-        let detail = rel.parent().map(|p| p.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+        let detail = rel.parent().map(to_slash).filter(|s| !s.is_empty());
         out.push(Candidate {
             haystack: rel_str.clone(),
             result: SearchResult {
@@ -192,20 +211,59 @@ fn file_candidates(workspace: &Path, budget: usize) -> Vec<Candidate> {
     out
 }
 
-/// Expand `query` as a filesystem path when it *looks* like one (anchored at
-/// `/`, `~`, `./`, or `../`): list the typed directory and keep entries whose
-/// name starts with the partial final component. `value` preserves the typed
-/// form (so a `~`-anchored query inserts a `~`-anchored path); directories get a
-/// trailing slash. Returns empty for non-path queries or an unreadable dir.
+/// Whether `query` is anchored like a path: `/`, `~`, `./`, `../`, or — on
+/// Windows — a drive letter (`C:\…`, `c:/…`) or a UNC/rooted backslash.
+///
+/// Without the Windows arm every absolute path a Windows user types starts with
+/// a drive letter, fails the anchor check, and the composer's `@`-mention path
+/// completion silently returns nothing (th-a59af5).
+fn looks_like_path(query: &str) -> bool {
+    if query.starts_with('/') || query.starts_with('~') || query.starts_with("./") || query.starts_with("../") {
+        return true;
+    }
+    if cfg!(target_os = "windows") {
+        if query.starts_with('\\') || query.starts_with(".\\") || query.starts_with("..\\") {
+            return true;
+        }
+        // `C:` + a separator. Anything shorter has no directory to list yet.
+        let b = query.as_bytes();
+        if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Index of the last path separator in `query`, and the separator itself.
+///
+/// `\` counts only on Windows: it is a perfectly legal character in a Unix
+/// filename, so treating it as a separator there would split `/tmp/a\b` in the
+/// wrong place.
+fn last_separator(query: &str) -> Option<(usize, char)> {
+    let fwd = query.rfind('/');
+    let back = if cfg!(target_os = "windows") { query.rfind('\\') } else { None };
+    match (fwd, back) {
+        (Some(f), Some(b)) if b > f => Some((b, '\\')),
+        (Some(f), _) => Some((f, '/')),
+        (None, Some(b)) => Some((b, '\\')),
+        (None, None) => None,
+    }
+}
+
+/// Expand `query` as a filesystem path when it *looks* like one (see
+/// [`looks_like_path`]): list the typed directory and keep entries whose name
+/// starts with the partial final component. `value` preserves the typed form
+/// (so a `~`-anchored query inserts a `~`-anchored path); directories get a
+/// trailing separator. Returns empty for non-path queries or an unreadable dir.
 fn expand_path_query(query: &str) -> Vec<SearchResult> {
-    if !(query.starts_with('/') || query.starts_with('~') || query.starts_with("./") || query.starts_with("../")) {
+    if !looks_like_path(query) {
         return Vec::new();
     }
     // Need a directory boundary to know what to list and what to complete.
-    let Some(slash) = query.rfind('/') else {
+    let Some((slash, sep)) = last_separator(query) else {
         return Vec::new();
     };
-    let typed_dir = &query[..=slash]; // includes the trailing '/', preserves the ~ form
+    let typed_dir = &query[..=slash]; // includes the trailing separator, preserves the ~ form
     let partial = &query[slash + 1..];
     let partial_lc = partial.to_lowercase();
 
@@ -222,9 +280,11 @@ fn expand_path_query(query: &str) -> Vec<SearchResult> {
             }
             let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
             let mut value = format!("{typed_dir}{name}");
+            // Echo back the separator the user typed rather than hard-coding
+            // `/`, so a Windows completion doesn't hand them `C:\dev\proj/`.
             let label = if is_dir {
-                value.push('/');
-                format!("{name}/")
+                value.push(sep);
+                format!("{name}{sep}")
             } else {
                 name
             };
@@ -232,7 +292,7 @@ fn expand_path_query(query: &str) -> Vec<SearchResult> {
                 kind: "path",
                 value,
                 label,
-                detail: Some(typed_dir.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()),
+                detail: Some(typed_dir.trim_end_matches(sep).to_string()).filter(|s| !s.is_empty()),
             })
         })
         .collect();
@@ -245,7 +305,13 @@ fn expand_path_query(query: &str) -> Vec<SearchResult> {
 /// taken verbatim. Used only to *resolve* a typed path for listing — the result
 /// `value` keeps the `~` form the user typed.
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
+    // `~\` counts on Windows too, otherwise a user who types the platform's own
+    // separator gets a literal `~\dev\` handed to `read_dir`, which fails, and
+    // the completion silently yields nothing.
+    let tilde_prefixed = path
+        .strip_prefix("~/")
+        .or_else(|| if cfg!(target_os = "windows") { path.strip_prefix(r"~\") } else { None });
+    if let Some(rest) = tilde_prefixed {
         if let Some(home) = dirs_next::home_dir() {
             return home.join(rest);
         }
@@ -355,6 +421,22 @@ mod tests {
         assert_eq!(hit.detail.as_deref(), Some("src"));
     }
 
+    /// Workspace-relative results carry ONE spelling on every platform. Without
+    /// this the same file was `src/server.rs` on macOS and `src\server.rs` on
+    /// Windows, and the model got a different path than the composer showed.
+    #[test]
+    fn workspace_relative_results_use_forward_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src").join("deep")).unwrap();
+        std::fs::write(root.join("src").join("deep").join("mod.rs"), "x").unwrap();
+
+        let hit = search(root, "mod.rs").into_iter().find(|r| r.label == "mod.rs").expect("found");
+        assert_eq!(hit.value, "src/deep/mod.rs", "value is forward-slashed");
+        assert_eq!(hit.detail.as_deref(), Some("src/deep"), "detail is forward-slashed");
+        assert!(!hit.value.contains('\\'), "no native separators leak: {}", hit.value);
+    }
+
     #[test]
     fn file_candidates_respects_budget() {
         let dir = tempfile::tempdir().unwrap();
@@ -375,16 +457,59 @@ mod tests {
         std::fs::write(root.join("banana.txt"), "x").unwrap();
 
         // Absolute path query: dir + partial "a" → alpha/ and apple.txt only.
-        let query = format!("{}/a", root.display());
+        // Built with the platform separator: a Windows tempdir is `C:\…`, and
+        // the completion echoes back whichever separator was typed.
+        let sep = std::path::MAIN_SEPARATOR;
+        let query = format!("{}{sep}a", root.display());
         let out = expand_path_query(&query);
         assert!(out.iter().all(|r| r.kind == "path"), "all path-kind: {out:?}");
+        let dir_label = format!("alpha{sep}");
         let labels: Vec<&str> = out.iter().map(|r| r.label.as_str()).collect();
-        assert!(labels.contains(&"alpha/"), "dir gets trailing slash: {labels:?}");
+        assert!(labels.contains(&dir_label.as_str()), "dir gets trailing separator: {labels:?}");
         assert!(labels.contains(&"apple.txt"), "file matches prefix: {labels:?}");
         assert!(!labels.contains(&"banana.txt"), "non-prefix excluded: {labels:?}");
-        // The directory entry inserts a trailing-slash value preserving the typed dir.
-        let alpha = out.iter().find(|r| r.label == "alpha/").unwrap();
-        assert!(alpha.value.ends_with("/alpha/"), "dir value keeps typed dir + slash: {}", alpha.value);
+        // The directory entry inserts a trailing-separator value preserving the typed dir.
+        let alpha = out.iter().find(|r| r.label == dir_label).unwrap();
+        assert!(
+            alpha.value.ends_with(&format!("{sep}alpha{sep}")),
+            "dir value keeps typed dir + separator: {}",
+            alpha.value
+        );
+    }
+
+    /// A Windows absolute path is anchored by a drive letter, not `/`. Without
+    /// that arm every such query failed the anchor check and `@`-mention path
+    /// completion returned nothing on Windows.
+    #[test]
+    fn looks_like_path_accepts_the_platform_anchors() {
+        for anchored in ["/etc/ho", "~/dev/", "./src/m", "../sib/x"] {
+            assert!(looks_like_path(anchored), "{anchored} is path-anchored everywhere");
+        }
+        for not_a_path in ["server", "foo bar", "C:", "just:text"] {
+            assert!(!looks_like_path(not_a_path), "{not_a_path} must not be treated as a path");
+        }
+        for windows_only in [r"C:\dev\pro", r"c:/dev/pro", r"\\server\share\x", r".\src\m"] {
+            assert_eq!(
+                looks_like_path(windows_only),
+                cfg!(target_os = "windows"),
+                "{windows_only} is a path anchor on Windows only"
+            );
+        }
+    }
+
+    /// `\` is a legal filename character on Unix, so it must NOT be treated as
+    /// a separator there — splitting `/tmp/a\b` at the backslash would list the
+    /// wrong directory.
+    #[test]
+    fn last_separator_only_honors_backslash_on_windows() {
+        assert_eq!(last_separator("/tmp/dir/par"), Some((8, '/')));
+        assert_eq!(last_separator("no-separator"), None);
+        let mixed = last_separator(r"/tmp/a\b");
+        if cfg!(target_os = "windows") {
+            assert_eq!(mixed, Some((6, '\\')), "backslash wins when it is later");
+        } else {
+            assert_eq!(mixed, Some((4, '/')), "backslash is a filename char on Unix");
+        }
     }
 
     #[test]
@@ -402,7 +527,14 @@ mod tests {
     fn expand_tilde_resolves_home_only_for_tilde_prefix() {
         if let Some(home) = dirs_next::home_dir() {
             assert_eq!(expand_tilde("~/sub"), home.join("sub"));
-            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(expand_tilde("~"), home.clone());
+            // `~\sub` expands on Windows and is a literal name on Unix.
+            let backslash = expand_tilde(r"~\sub");
+            if cfg!(target_os = "windows") {
+                assert_eq!(backslash, home.join("sub"), "`~\\` is a real prefix on Windows");
+            } else {
+                assert_eq!(backslash, PathBuf::from(r"~\sub"), "`\\` is a filename char on Unix");
+            }
         }
         assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
         assert_eq!(expand_tilde("./rel"), PathBuf::from("./rel"));

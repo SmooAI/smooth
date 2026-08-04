@@ -270,6 +270,13 @@ Three layers, in the order a tool call meets them:
    pass goalie's exact-host allowlist. `SandboxedCommand` is the only way `bash`
    builds a subprocess — there is no plain-`Command` constructor.
 
+   ⚠️ **macOS only.** Layer 3 is Seatbelt-backed and exists nowhere else
+   (th-08e05a). On Linux and Windows `bash` runs unsandboxed with a startup
+   warning — layers 1 and 2 still apply, but they are userspace, and the egress
+   allowlist drops from a boundary to a suggestion. Before shipping a Windows
+   build read [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
+   which enumerates exactly what is exposed there.
+
 Removed with the microVM stack (2026-07, pearl th-f4a801; see git history):
 **Wonk** (per-VM access authority), Goalie's per-VM FUSE + iptables enforcement,
 and the "Big Smooth is READ-ONLY inside The Safehouse VM" isolation model.

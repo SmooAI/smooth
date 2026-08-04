@@ -24,9 +24,15 @@
 //!
 //! Platform status:
 //! - **macOS**: Seatbelt via `sandbox-exec` with a generated profile. Enforced.
-//! - **Linux / other**: NOT YET (bubblewrap + Landlock + seccomp is TODO).
-//!   Falls back to an unsandboxed shell with a loud warning — acceptable only
-//!   for the single-trusted-user loopback daemon; tracked for hardening.
+//! - **Linux**: NOT YET (bubblewrap + Landlock + seccomp is TODO, th-08e05a).
+//! - **Windows**: NOT YET (AppContainer / Job Object + restricted token is TODO,
+//!   th-08e05a). The shell there is `cmd /C`, run with the operator's own token.
+//!
+//! On both non-macOS platforms the shell falls back to **unsandboxed** with a
+//! loud warning. Only [`scrub_secret_env`] and the userspace layers (permission
+//! gate + Narc) still apply — see `docs/Architecture/Windows-Security-Posture.md`
+//! for what that leaves exposed. Acceptable only for the single-trusted-user
+//! loopback daemon; tracked for hardening.
 
 use std::path::PathBuf;
 
@@ -47,13 +53,17 @@ pub struct SandboxPolicy {
 }
 
 impl SandboxPolicy {
-    /// Build a policy confining writes to `workspace`, reading `HOME` from env
-    /// for the credential-deny rules.
+    /// Build a policy confining writes to `workspace`, resolving the operator's
+    /// home for the credential-deny rules.
+    ///
+    /// Uses `dirs_next::home_dir()` rather than `$HOME` directly: `HOME` is not
+    /// set on Windows (it's `%USERPROFILE%`), so an env read silently yielded
+    /// `None` there and dropped every credential-deny rule on the floor.
     #[must_use]
     pub fn for_workspace(workspace: PathBuf) -> Self {
         Self {
             workspace,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: dirs_next::home_dir(),
             proxy: None,
         }
     }
@@ -80,7 +90,8 @@ impl SandboxPolicy {
 pub struct SandboxedCommand(Command);
 
 impl SandboxedCommand {
-    /// Build a sandboxed `sh -c <command>` under `policy`.
+    /// Build a sandboxed shell invocation of `command` under `policy` — `sh -c`
+    /// on Unix, `cmd /C` on Windows (see [`build`]).
     ///
     /// As well as the kernel FS confinement, the child env is **scrubbed** of
     /// secret-named variables (the daemon's own `SMOOTH_API_KEY` /
@@ -200,7 +211,26 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
     p
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: no kernel sandbox yet, and no `sh` — the shell is `cmd /C`.
+///
+/// `cmd` is the one interpreter guaranteed present on every Windows host;
+/// PowerShell startup is ~10x slower and its default execution policy can
+/// refuse to run at all. Model-authored `bash` snippets that use POSIX syntax
+/// will fail here — that is visible in the tool output (a `cmd` error), which
+/// the agent can react to, unlike a silently missing binary.
+#[cfg(target_os = "windows")]
+fn build(policy: &SandboxPolicy, command: &str) -> Command {
+    let _ = policy;
+    tracing::warn!(
+        "bash is running UNSANDBOXED: kernel sandbox not yet implemented on Windows \
+         (AppContainer/Job Object is TODO, th-08e05a). See docs/Architecture/Windows-Security-Posture.md"
+    );
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(command);
+    cmd
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn build(policy: &SandboxPolicy, command: &str) -> Command {
     let _ = policy;
     tracing::warn!("bash is running UNSANDBOXED: kernel sandbox not yet implemented on this platform (Linux: bubblewrap+Landlock is TODO, th-08e05a)");
@@ -463,11 +493,34 @@ mod tests {
         }
     }
 
+    /// Cross-platform: the home used for the credential-deny rules must come
+    /// from `dirs_next`, not `$HOME` — `HOME` is unset on Windows, so an env
+    /// read yielded `None` and dropped every deny rule (see `for_workspace`).
     #[test]
     fn policy_for_workspace_picks_up_home() {
         let p = SandboxPolicy::for_workspace(PathBuf::from("/ws"));
         assert_eq!(p.workspace, PathBuf::from("/ws"));
-        // HOME is set in basically every test env.
-        assert_eq!(p.home, std::env::var_os("HOME").map(PathBuf::from));
+        assert_eq!(p.home, dirs_next::home_dir());
+        assert!(p.home.is_some(), "a home directory must resolve on every supported platform");
+    }
+
+    /// The non-macOS shell must be the platform's own interpreter. Regression
+    /// guard for the Windows break: `sh -c` spawned a binary that does not
+    /// exist there, so every `bash` tool call failed to spawn.
+    #[tokio::test]
+    async fn non_macos_shell_uses_the_platform_interpreter() {
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+        // `echo hi` is valid in sh, cmd, and under sandbox-exec alike.
+        let out = SandboxedCommand::shell(&policy, "echo hi")
+            .into_command()
+            .current_dir(dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .expect("the platform shell must exist and spawn");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
     }
 }

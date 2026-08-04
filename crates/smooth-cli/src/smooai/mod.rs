@@ -133,34 +133,30 @@ fn to_api_credentials(creds: &smooai_client_shared::auth::storage::Credentials) 
 /// while older builds + `SMOOAI_USER_AUTH_FILE` use the flat legacy path — so we
 /// try them all and use the first that holds a valid session.
 ///   1. `$SMOOAI_USER_AUTH_FILE` (explicit override)
-///   2. active profile: `$XDG_CONFIG_HOME|~/.config`/smooth/auth/profiles/<active>/smooai-user.json,
-///      where <active> = `$SMOOAI_PROFILE` or the name in `.../auth/active`
-///   3. legacy `~/.smooth/auth/smooai-user.json`
+///   2. the active profile's session file
+///   3. the default (unnamed) profile's session file
+///   4. legacy `~/.smooth/auth/smooai-user.json`
+///
+/// Steps 2–4 delegate to `smooth_policy::auth_paths` — the single source of
+/// truth both `th` and `smooth-daemon` resolve through (th-16b0ca). This used
+/// to re-derive them from `$XDG_CONFIG_HOME`/`$HOME` by hand, and the copy
+/// drifted twice over: it skipped the default profile entirely, and `$HOME` is
+/// unset on Windows (it's `%USERPROFILE%`), so BOTH non-override candidates
+/// evaporated there and `th api` reported "not logged in" against a perfectly
+/// good session.
 fn user_jwt_candidates() -> Vec<std::path::PathBuf> {
-    use std::path::PathBuf;
+    use smooth_policy::auth_paths;
     let mut paths = Vec::new();
 
     if let Some(explicit) = std::env::var_os("SMOOAI_USER_AUTH_FILE") {
-        paths.push(PathBuf::from(explicit));
+        paths.push(std::path::PathBuf::from(explicit));
     }
-
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-    if let Some(cfg) = config_home {
-        let auth = cfg.join("smooth").join("auth");
-        let profile = std::env::var("SMOOAI_PROFILE")
-            .ok()
-            .or_else(|| std::fs::read_to_string(auth.join("active")).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        if let Some(name) = profile {
-            paths.push(auth.join("profiles").join(name).join("smooai-user.json"));
-        }
+    if let Some(name) = auth_paths::resolve_profile(None) {
+        paths.push(auth_paths::user_file(Some(&name)));
     }
-
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".smooth").join("auth").join("smooai-user.json"));
+    paths.push(auth_paths::user_file(None));
+    if let Some(home) = dirs_next::home_dir() {
+        paths.push(home.join(".smooth").join("auth").join("smooai-user.json"));
     }
 
     paths
@@ -499,6 +495,29 @@ mod tests {
             org("11111111-1111-4111-8111-111111111111", "ATS", "ats"),
             org("22222222-2222-4222-8222-222222222222", "Amplified Tech Solutions", "amplified"),
         ]
+    }
+
+    /// The candidate list must never be empty, on any platform. It used to be
+    /// derived from `$XDG_CONFIG_HOME`/`$HOME`; `HOME` is unset on Windows, so
+    /// every non-override candidate vanished and `th api` reported "not logged
+    /// in" against a perfectly good session. Both surviving candidates now come
+    /// from `smooth_policy::auth_paths` / `dirs_next`.
+    ///
+    /// Reads no env and touches no disk, so it's safe to run alongside the
+    /// env-mutating tests elsewhere in the binary (th-129eda).
+    #[test]
+    fn user_jwt_candidates_resolve_on_every_platform() {
+        let paths = user_jwt_candidates();
+        assert!(!paths.is_empty(), "at least the default profile + legacy paths must resolve");
+        assert!(paths.iter().all(|p| p.is_absolute()), "candidates must be absolute, got {paths:?}");
+        assert!(
+            paths.iter().any(|p| p.ends_with("auth/smooai-user.json")),
+            "the default profile's session file must be a candidate: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with(".smooth/auth/smooai-user.json")),
+            "the legacy path must still be a candidate: {paths:?}"
+        );
     }
 
     #[test]

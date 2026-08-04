@@ -71,7 +71,6 @@ dirs-next.workspace = true
 # spawn this binary rather than statically linking the operator runtime.
 clap = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["json"] }
-web-push = "0.11"
 # th-bc624a: "Sign in with Smoo" browser OAuth2 + PKCE from the web UI. Persists a
 # user session via smooai-client-shared's CredentialsStore (the same file `th`
 # reads), so Big Smooth can act on the user's Smoo org via th-backed extensions.
@@ -102,3 +101,13 @@ workspace = true
 # Menu bar lives in the quarantined crate (it needs `unsafe` for AppKit); the
 # daemon only depends on it on macOS. Pearl th-f7cb98.
 smooth-menubar = { workspace = true }
+
+[target.'cfg(not(target_os="windows"))'.dependencies]
+# Web Push. NOT on Windows: web-push -> ece hard-depends on `openssl` (ece 2.x
+# has no pure-Rust backend), and a stock Windows host has no OpenSSL — no vcpkg
+# tree, no OPENSSL_DIR. That single leaf dependency is why this whole crate was
+# `--exclude`d from the Windows CI lane, i.e. why the entire daemon was
+# unbuildable there. Scoping it off Windows costs one feature (phone
+# notifications) and buys the agent engine. `push::PushState::send_to_all` is
+# cfg'd to a no-op and `/push/*` 503s there. Pearl th-a59af5.
+web-push = "0.11"
