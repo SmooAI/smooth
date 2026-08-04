@@ -33,14 +33,17 @@ jobs:
                 include:
                     - os: ubuntu-latest
                       test_args: ''
-                    # smooth-daemon depends on web-push -> ece -> openssl-sys,
-                    # which finds no OpenSSL on windows-latest (no vcpkg tree,
-                    # no OPENSSL_DIR). It is a leaf crate — nothing in the
-                    # workspace depends on it, `th` included — and it is a
-                    # Unix-only service anyway (launchd/systemd installers,
-                    # Unix-socket dolt server, tailscale). Excluded explicitly
-                    # rather than silently skipped; making it build on Windows
-                    # means vendoring OpenSSL and is its own piece of work.
+                    # smooth-daemon JOINED this lane in th-a59af5. It is Big
+                    # Smooth itself, so excluding it meant the actual product
+                    # was never compiled — let alone tested — on a platform we
+                    # intend to ship to, and every Windows break in it landed
+                    # green. The blocker was one leaf dependency: web-push ->
+                    # ece -> openssl-sys, and windows-latest has no OpenSSL (no
+                    # vcpkg tree, no OPENSSL_DIR). `web-push` is now declared
+                    # only for non-Windows targets, so Windows gives up phone
+                    # notifications (/push/* 503s there) and gains the whole
+                    # agent engine. Do not re-add the exclude to make a red
+                    # Windows build green — that is the bug it was hiding.
                     #
                     # smooth-diver's e2e and six smooth-pearls test modules
                     # drive a real pearl store, which shells out to the
@@ -52,7 +55,6 @@ jobs:
                     - os: windows-latest
                       test_args: >-
                           --workspace
-                          --exclude smooai-smooth-daemon
                           --exclude smooai-smooth-diver
                           -E 'not (package(smooai-smooth-pearls) & test(/^(agents|memory|memory_tools|messaging|store|tools)::/))'
         steps:

@@ -36,7 +36,18 @@ impl Tool for BashTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".into(),
-            description: "Run a shell command (sh -c) with the workspace as the working directory. Returns exit code, stdout, stderr.".into(),
+            // Name the interpreter accurately per platform. Told "sh -c" on a
+            // Windows host, the model writes POSIX syntax that `cmd` rejects,
+            // then reads the resulting error as its own mistake rather than a
+            // shell mismatch and retries the same thing.
+            description: if cfg!(target_os = "windows") {
+                "Run a shell command via `cmd /C` — the Windows command shell, NOT bash. Use Windows syntax (`dir`, `type`, `%VAR%`, `&&`); \
+                 POSIX-isms like pipes into `grep`, `$VAR`, or `&&` chains with Unix tools will fail. The workspace is the working \
+                 directory. Returns exit code, stdout, stderr."
+            } else {
+                "Run a shell command (sh -c) with the workspace as the working directory. Returns exit code, stdout, stderr."
+            }
+            .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

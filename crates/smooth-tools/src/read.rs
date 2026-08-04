@@ -158,7 +158,7 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
     let pattern_path = std::path::Path::new(pattern);
     let mut rel_pattern: String = if pattern_path.is_absolute() || pattern_path.has_root() {
         match pattern_path.strip_prefix(base) {
-            Ok(stripped) => stripped.to_string_lossy().replace('\\', "/"),
+            Ok(stripped) => crate::util::to_slash(stripped),
             Err(_) => return Ok(format!("no files match `{pattern}` (path is outside the workspace)")),
         }
     } else {

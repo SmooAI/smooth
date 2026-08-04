@@ -111,7 +111,10 @@ fn grep_blocking(
                 continue;
             }
         }
-        let display = rel.display().to_string();
+        // Forward-slashed on every platform: this string is what the model sees
+        // and hands back to `read_file`, so one file must not have two spellings
+        // depending on the host.
+        let display = crate::util::to_slash(rel);
 
         let mut local: Vec<(u64, String)> = Vec::new();
         let _ = searcher.search_path(

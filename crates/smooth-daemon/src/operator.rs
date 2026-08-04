@@ -383,14 +383,26 @@ fn restrict_permissions(_path: &Path) {}
 /// # Errors
 /// Returns an error if the token directory/file can't be created or written.
 pub fn provision_local_token() -> Result<String> {
+    provision_local_token_at(&token_path())
+}
+
+/// The provisioning proper, against an explicit path.
+///
+/// Split out so it is testable with a tempdir. Driving the public entry point
+/// from a test means redirecting the home directory, and that is not portable:
+/// `dirs_next::home_dir()` honors `$HOME` on Unix but calls
+/// `SHGetKnownFolderPath` on Windows, which no environment variable can
+/// override — so an env-based test wrote into the real user profile there and
+/// then asserted against a tempdir that stayed empty. Same reasoning as
+/// `smooth_policy::auth_paths::migrate_legacy_between`.
+fn provision_local_token_at(path: &Path) -> Result<String> {
     if let Ok(env_token) = std::env::var("SMOOTH_LOCAL_TOKEN") {
         let env_token = env_token.trim().to_owned();
         if !env_token.is_empty() {
             return Ok(env_token);
         }
     }
-    let path = token_path();
-    if let Ok(existing) = std::fs::read_to_string(&path) {
+    if let Ok(existing) = std::fs::read_to_string(path) {
         let existing = existing.trim().to_owned();
         if !existing.is_empty() {
             return Ok(existing);
@@ -401,8 +413,8 @@ pub fn provision_local_token() -> Result<String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::write(&path, &token).with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(&path);
+    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
+    restrict_permissions(path);
     tracing::info!(path = %path.display(), "provisioned a local operator token");
     Ok(token)
 }
@@ -1211,7 +1223,7 @@ mod tests {
     #[test]
     fn skills_section_indexes_discovered_project_skill() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join(".smooth/skills/add-show");
+        let skill_dir = tmp.path().join(".smooth").join("skills").join("add-show");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), SAMPLE_SKILL).unwrap();
 
@@ -1256,12 +1268,12 @@ mod tests {
     fn discovery_skips_malformed_skill_but_keeps_valid_one() {
         let tmp = tempfile::tempdir().unwrap();
         // Valid skill (frontmatter name = "good").
-        let good = tmp.path().join(".smooth/skills/good");
+        let good = tmp.path().join(".smooth").join("skills").join("good");
         std::fs::create_dir_all(&good).unwrap();
         std::fs::write(good.join("SKILL.md"), "---\nname: good\ndescription: a valid skill\n---\n\nbody\n").unwrap();
         // Malformed skill — opened frontmatter, never closed. `discover` skips it
         // with a warning instead of crashing the turn.
-        let bad = tmp.path().join(".smooth/skills/bad");
+        let bad = tmp.path().join(".smooth").join("skills").join("bad");
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), "---\nname: bad\ndescription: broken\n\nno close marker").unwrap();
 
@@ -1485,25 +1497,34 @@ mod tests {
         std::env::remove_var("SMOOTH_LOCAL_TOKEN");
     }
 
+    /// Uses an explicit path rather than redirecting the home directory: `HOME`
+    /// steers `dirs_next` on Unix but not on Windows (`SHGetKnownFolderPath`
+    /// ignores the environment), so the env-based version of this test wrote a
+    /// token into the real user profile there and asserted against a tempdir
+    /// that never got one.
     #[test]
     fn provision_generates_and_persists_when_unset() {
         let _guard = TOKEN_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Isolate HOME so we read/write a temp ~/.smooth/operator-token.
         std::env::remove_var("SMOOTH_LOCAL_TOKEN");
         let home = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        let path = home.path().join(".smooth").join("operator-token");
 
-        let first = provision_local_token().unwrap();
+        let first = provision_local_token_at(&path).unwrap();
         assert!(!first.is_empty(), "a token is generated");
         // The same token is returned on the next call (persisted, not regenerated).
-        let second = provision_local_token().unwrap();
+        let second = provision_local_token_at(&path).unwrap();
         assert_eq!(first, second, "token persists across calls");
-        assert!(home.path().join(".smooth/operator-token").exists());
+        assert!(path.exists(), "the token is persisted at the requested path");
+    }
 
-        match prev {
-            Some(p) => std::env::set_var("HOME", p),
-            None => std::env::remove_var("HOME"),
+    /// `token_path` must land under the real home on every platform — the
+    /// tempdir test above deliberately bypasses it, so this covers the wiring.
+    #[test]
+    fn token_path_is_under_the_home_dot_smooth() {
+        let p = token_path();
+        assert!(p.ends_with(".smooth/operator-token"), "{}", p.display());
+        if let Some(home) = dirs_next::home_dir() {
+            assert!(p.starts_with(&home), "{} must resolve under {}", p.display(), home.display());
         }
     }
 }

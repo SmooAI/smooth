@@ -73,8 +73,16 @@ pub fn bash_denied(command: &str) -> bool {
 /// workspace root (so rules read like `Write(.git/hooks/**)` / `Read(**/.env)`
 /// regardless of where the workspace lives on disk). Falls back to the absolute
 /// path if it isn't under the workspace (shouldn't happen — the tools confine).
+///
+/// **Separators are normalized to `/`, and that is security-relevant.** Rules
+/// are authored with forward slashes; a resolved path on Windows comes back
+/// with backslashes (`.git\hooks\pre-commit`), so without this an author's
+/// `Write(.git/hooks/**)` deny would silently never match and Gate 1 would wave
+/// the write through — the failure mode you never notice. On Windows Gate 1 is
+/// the *only* gate; there is no kernel sandbox behind it (see
+/// `docs/Architecture/Windows-Security-Posture.md`). th-a59af5.
 fn workspace_relative(workspace: &Path, resolved: &Path) -> String {
-    resolved.strip_prefix(workspace).unwrap_or(resolved).to_string_lossy().into_owned()
+    crate::util::to_slash(resolved.strip_prefix(workspace).unwrap_or(resolved))
 }
 
 /// Whether the configured Gate-1 rules **deny** modifying the file at `resolved`
@@ -119,6 +127,30 @@ mod tests {
         assert_eq!(workspace_relative(ws, &ws.join(".git/hooks/pre-commit")), ".git/hooks/pre-commit");
         assert_eq!(rules.decide("Write", ".git/hooks/pre-commit"), Decision::Deny);
         assert_ne!(rules.decide("Write", "src/main.rs"), Decision::Deny);
+    }
+
+    /// The rule target must be forward-slashed even when the resolved path uses
+    /// the platform's native separator — which is what a canonicalized path
+    /// actually looks like on Windows.
+    ///
+    /// The test above builds its path with an embedded `/`, so it passes on
+    /// Windows by accident. This one builds component-by-component, the way the
+    /// real resolver does, and would catch a `Write(.git/hooks/**)` deny
+    /// silently failing to match there. Gate 1 is the only gate on Windows.
+    #[test]
+    fn rule_target_is_forward_slashed_even_with_native_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.toml");
+        std::fs::write(&path, "deny = [\"Write(.git/hooks/**)\"]\n").unwrap();
+        let rules = load_rules_from(&path);
+
+        let ws = dir.path();
+        let resolved = ws.join(".git").join("hooks").join("pre-commit");
+        let target = workspace_relative(ws, &resolved);
+
+        assert_eq!(target, ".git/hooks/pre-commit", "native separators must normalize");
+        assert!(!target.contains('\\'), "no backslash may reach the matcher: {target}");
+        assert_eq!(rules.decide("Write", &target), Decision::Deny, "the deny rule must still bite");
     }
 
     #[test]

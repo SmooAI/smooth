@@ -18,6 +18,16 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 const BIN: &str = "smooth-daemon";
+
+/// The daemon's file name on this platform — `smooth-daemon` on Unix,
+/// `smooth-daemon.exe` on Windows. Every directory join below goes through
+/// this: a bare `smooth-daemon` matches nothing on Windows, and even a
+/// correctly-downloaded binary saved without the extension can't be spawned
+/// by full path, so `th daemon` was unusable there.
+fn bin_name() -> String {
+    format!("{BIN}{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// Where the on-demand download lands (and the first place we look after env).
 fn install_dir() -> Option<PathBuf> {
     dirs_next::home_dir().map(|h| h.join(".smooth").join("bin"))
@@ -45,13 +55,14 @@ fn find_existing() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Some(p) = install_dir().map(|d| d.join(BIN)) {
+    let exe_name = bin_name();
+    if let Some(p) = install_dir().map(|d| d.join(&exe_name)) {
         if p.is_file() {
             return Some(p);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(p) = exe.parent().map(|d| d.join(BIN)) {
+        if let Some(p) = exe.parent().map(|d| d.join(&exe_name)) {
             if p.is_file() {
                 return Some(p);
             }
@@ -65,7 +76,7 @@ fn find_existing() -> Option<PathBuf> {
         let mut dir = PathBuf::from(manifest);
         for _ in 0..6 {
             for profile in ["release", "debug"] {
-                let cand = dir.join("target").join(profile).join(BIN);
+                let cand = dir.join("target").join(profile).join(&exe_name);
                 if cand.is_file() {
                     return Some(cand);
                 }
@@ -80,7 +91,8 @@ fn find_existing() -> Option<PathBuf> {
 
 fn which_on_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(BIN)).find(|p| p.is_file())
+    let exe_name = bin_name();
+    std::env::split_paths(&path).map(|d| d.join(&exe_name)).find(|p| p.is_file())
 }
 
 /// Download `smooth-daemon` for the current platform from the latest GitHub
@@ -95,13 +107,12 @@ async fn download() -> Result<PathBuf> {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    let suffix = if std::env::consts::OS == "windows" { ".exe" } else { "" };
-    let asset = format!("{BIN}-{target}{suffix}");
+    let asset = format!("{BIN}-{target}{}", std::env::consts::EXE_SUFFIX);
     let url = format!("https://github.com/SmooAI/smooth/releases/latest/download/{asset}");
 
     let dir = install_dir().context("no home dir for ~/.smooth/bin")?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let dest = dir.join(BIN);
+    let dest = dir.join(bin_name());
 
     eprintln!("th: fetching {BIN} ({target}) → {} …", dest.display());
     let client = reqwest::Client::builder().build()?;
@@ -151,8 +162,9 @@ mod tests {
 
     #[test]
     fn target_is_known_on_supported_hosts() {
-        // The CI hosts (mac arm64 / linux x64) must map to a real triple.
-        if matches!(std::env::consts::OS, "macos" | "linux") {
+        // The CI hosts (mac arm64 / linux x64 / windows x64) must map to a
+        // real triple — Windows included, now that it builds the daemon.
+        if matches!(std::env::consts::OS, "macos" | "linux" | "windows") {
             assert_ne!(current_target(), "unknown");
         }
     }
@@ -162,5 +174,30 @@ mod tests {
         if let Some(d) = install_dir() {
             assert!(d.ends_with(".smooth/bin"));
         }
+    }
+
+    /// The binary must carry the platform's executable extension. Windows
+    /// cannot spawn a full path with no extension, so a bare `smooth-daemon`
+    /// there was both un-findable and un-runnable — `th daemon` never worked.
+    #[test]
+    fn bin_name_carries_the_platform_exe_suffix() {
+        assert_eq!(bin_name(), format!("{BIN}{}", std::env::consts::EXE_SUFFIX));
+        if cfg!(target_os = "windows") {
+            assert_eq!(bin_name(), "smooth-daemon.exe");
+        } else {
+            assert_eq!(bin_name(), "smooth-daemon");
+        }
+    }
+
+    /// The release asset name and the on-disk destination are computed
+    /// separately; they must agree on the extension. They didn't on Windows —
+    /// the download fetched `…-x86_64-pc-windows-msvc.exe` and saved it as
+    /// plain `smooth-daemon`, which nothing could then execute.
+    #[test]
+    fn downloaded_asset_and_destination_share_an_extension() {
+        let asset = format!("{BIN}-{}{}", current_target(), std::env::consts::EXE_SUFFIX);
+        let ext = std::env::consts::EXE_SUFFIX;
+        assert!(asset.ends_with(ext), "asset {asset} must end with {ext:?}");
+        assert!(bin_name().ends_with(ext), "destination {} must end with {ext:?}", bin_name());
     }
 }

@@ -37,7 +37,9 @@ The [[Daemon-Direction|daemon epic]]'s security verdict: the load-bearing bounda
 
 - **Gate 1** — a deterministic rule engine (wonk's successor) in-process via the engine hooks: `deny → ask → allow`, first match wins, `ask` realized by the hook awaiting an approval result (fail-closed on deny/timeout).
 - **Gate 2** — an LLM classifier (narc's judge) in `auto` mode only, run out-of-process with an rlimit cap, fail-closed on timeout.
-- **Kernel sandbox** — sandbox the **tool subprocesses, never the daemon** (Codex's model): macOS Seatbelt / `sandbox-exec`, Linux `bubblewrap` + Landlock + seccomp; plus an egress-allowlist proxy as the real network boundary.
+- **Kernel sandbox** — sandbox the **tool subprocesses, never the daemon** (Codex's model): macOS Seatbelt / `sandbox-exec`, Linux `bubblewrap` + Landlock + seccomp, Windows restricted token + Job Object / AppContainer; plus an egress-allowlist proxy as the real network boundary.
+
+> ⚠️ **Only macOS enforces the kernel layer today** (th-08e05a). On Linux and Windows the `bash` tool runs unsandboxed with a startup warning, which also demotes the egress allowlist from a boundary to a suggestion (a tool that ignores `HTTP_PROXY` can still connect out). Before shipping a Windows build, read **[[Windows-Security-Posture]]** — it enumerates exactly what is exposed there.
 
 Threat model: single-tenant (one trusted operator per instance). The real risk isn't a malicious tenant — it's prompt-injection / untrusted repo content turning the operator's own agent against them (the "lethal trifecta": private-data access + untrusted content + egress). The kernel sandbox + egress allowlist + auto-mode is the cheaper, correct defense for that.
 
