@@ -50,6 +50,22 @@ the logged-in user can:
   suggestion. This is the third leg of the lethal trifecta (private-data access
   + untrusted content + egress) left open.
 
+### Layer 1 was silently inert for path rules — fixed in th-a59af5
+
+Worth recording because it is the exact failure mode this page exists to warn
+about. `permission::workspace_relative` built the string the Gate-1 matcher runs
+rules against using the platform's native separator, while rules are authored
+with forward slashes (`Write(.git/hooks/**)`). On Windows the target came out as
+`.git\hooks\pre-commit`, the glob never matched, and **the deny silently waved
+the write through** — no error, no log, an operator believing a path was
+protected when it was wide open. The crate's own test passed on Windows by
+accident because it built its fixture path with an embedded `/`.
+
+Fixed (targets are normalized to `/` before matching, with a test that builds
+the path component-by-component). Called out here because the same shape —
+a Unix-separator assumption that turns an *enforcement* check into a no-op
+rather than an error — is the thing to look for in any future Windows work.
+
 ### Layer 1 is only *partly* Windows-shaped
 
 Separately from the missing kernel layer: the daemon's embedded `DenyPolicy`
