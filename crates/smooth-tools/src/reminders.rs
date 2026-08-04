@@ -38,6 +38,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::{json, Value};
 use smooth_menubar::eventkit::reminders_access;
 use smooth_menubar::reminders::{self as ek, Due, Reminder};
+use smooth_menubar::setup::{initiate, Grant};
 use smooth_operator::{Tool, ToolSchema};
 
 /// The verbs this tool exposes. An allowlist, not a denylist.
@@ -106,7 +107,11 @@ impl Tool for RemindersTool {
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let call = Call::parse(&arguments)?;
         if !reminders_access().granted() {
-            return Ok(format!("Reminders access has not been granted to Big Smooth. {SETUP_HINT}"));
+            // Ask for it right here (once per session) rather than sending the
+            // user off to `th doctor` — the prompt has to come from this
+            // process for the grant to land on it (pearl th-ba764e).
+            let next_step = initiate(Grant::Reminders).unwrap_or(SETUP_HINT);
+            return Ok(format!("Reminders access has not been granted to Big Smooth. {next_step}"));
         }
         // EventKit blocks (see `smooth_menubar::reminders`) — keep it off the
         // async runtime's worker threads.
