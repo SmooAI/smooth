@@ -741,6 +741,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let storage_path = operator_storage_path();
     let storage = Arc::new(crate::operator_storage::SqliteStorageAdapter::open(&storage_path)?);
     tracing::info!(db = %storage_path.display(), "operator durable storage");
+    // Kept for the Stats route (`/api/stats` reads activity counts from the same
+    // store); the original Arc is moved into `.storage(...)` below.
+    let storage_for_stats = Arc::clone(&storage);
     // The DURABLE agent-memory backend lives in the same sqlite db (th-6d1692).
     // The `remember`/`recall` tools share it, so a fact saved in one session is
     // recalled in the next — even across a restart.
@@ -818,7 +821,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
                 // a conversation's cwd in the SAME store the tool provider reads.
-                .merge(crate::cwd_route::cwd_router(session_cwd)),
+                .merge(crate::cwd_route::cwd_router(session_cwd))
+                // POST /api/usage + GET /api/stats — the Stats page: activity from
+                // this durable store, spend from ~/.smooth/usage.jsonl (the client
+                // POSTs each turn's streamed usage, which the engine doesn't persist).
+                .merge(crate::usage_route::stats_router(crate::usage_route::usage_log_path(), storage_for_stats)),
         )
         .spawn()
         .await
