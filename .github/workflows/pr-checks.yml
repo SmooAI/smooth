@@ -54,7 +54,6 @@ jobs:
                     # dolt_server stub) still runs here.
                     - os: windows-latest
                       test_args: >-
-                          --no-fail-fast
                           --workspace
                           --exclude smooai-smooth-diver
                           -E 'not (package(smooai-smooth-pearls) & test(/^(agents|memory|memory_tools|messaging|store|tools)::/))'
