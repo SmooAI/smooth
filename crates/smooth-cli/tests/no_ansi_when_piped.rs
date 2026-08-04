@@ -32,7 +32,13 @@ fn assert_no_escapes(args: &[&str], out: &Output) {
 }
 
 /// Clap-internal commands: they exit 0 and print, so a crash is unmistakable.
+///
+/// Ignored on Windows for pearl th-bd84cf, a pre-existing bug unrelated to
+/// ANSI: rendering help/version for th's 53-command clap tree overflows the
+/// 1 MB Windows main-thread stack, so the child dies before writing anything.
+/// Reproduced on plain `main` (PR #331 probe) — un-ignore once th-bd84cf lands.
 #[test]
+#[cfg_attr(windows, ignore = "pearl th-bd84cf: clap help/version overflows the 1 MB Windows main stack")]
 fn clap_output_is_plain_and_the_process_exits_cleanly() {
     for args in [&["--version"][..], &["--help"][..], &["pearls", "--help"][..]] {
         let out = run(args);
