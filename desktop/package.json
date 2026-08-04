@@ -8,19 +8,25 @@
     "scripts": {
         "build": "tsc",
         "dev": "tsc && electron .",
-        "dist": "tsc && electron-builder",
+        "dist": "pnpm stage-daemon && electron-builder",
+        "dist:mac": "pnpm stage-daemon && CSC_NAME=\"${SIGN_IDENTITY:-Apple Distribution: Smoo LLC (DTX9733844)}\" electron-builder --mac",
+        "notarize": "bash ../scripts/macos/notarize-and-staple.sh release/*.dmg",
+        "stage-daemon": "tsc && node scripts/stage-daemon.mjs",
         "format": "oxfmt .",
         "lint": "oxlint .",
         "test": "tsc && node --test dist/daemon.test.js",
         "typecheck": "tsc --noEmit"
-    },
-    "pnpm": {
-        "onlyBuiltDependencies": ["electron", "esbuild"]
     },
     "devDependencies": {
         "@types/node": "^25.5.2",
         "electron": "^40.0.0",
         "electron-builder": "^26.0.12",
         "typescript": "^5.8.3"
+    },
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "electron",
+            "esbuild"
+        ]
     }
 }

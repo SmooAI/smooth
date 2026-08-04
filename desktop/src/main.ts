@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray } from 'electron';
 
-import { baseUrl, startDaemon, stopDaemon } from './daemon.js';
+import { baseUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
 
 let win: BrowserWindow | undefined;
 let tray: Tray | undefined;
@@ -81,11 +81,13 @@ function createTray(): void {
             { type: 'separator' },
             {
                 label: 'Set Up',
+                // Every entry is a macOS TCC gate; nothing to set up elsewhere.
+                visible: process.platform === 'darwin',
                 submenu: [
-                    { label: 'Calendar…', click: () => runSetup('--setup-calendar') },
-                    { label: 'Reminders…', click: () => runSetup('--setup-reminders') },
-                    { label: 'Messages…', click: () => runSetup('--setup-imessage') },
-                    { label: 'Full Disk Access…', click: () => runSetup('--fix-fda') },
+                    { label: 'Calendar…', click: () => grantEventKit('calendar') },
+                    { label: 'Reminders…', click: () => grantEventKit('reminders') },
+                    { label: 'Messages…', click: grantAppleEvents },
+                    { label: 'Full Disk Access…', click: openFullDiskAccess },
                 ],
             },
             { type: 'separator' },
@@ -96,20 +98,38 @@ function createTray(): void {
 }
 
 /**
- * The setup flows are interactive `th doctor` commands (they prompt, and the OS
- * permission prompts must come from a real GUI session), so hand them a terminal
- * rather than reimplementing them here.
- *
- * ponytail: shells out to Terminal.app on macOS and shows the command elsewhere —
- * swap in a real in-app flow when the daemon exposes these over HTTP.
+ * Calendar / Reminders: `smooth-daemon tcc <what>` as our child, so TCC names
+ * THIS bundle in the prompt and reads its usage strings (see runDaemonCommand).
  */
-function runSetup(flag: string): void {
-    const command = `th doctor ${flag}`;
-    if (process.platform === 'darwin') {
-        spawn('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script "${command}"`, '-e', 'tell application "Terminal" to activate']);
-        return;
-    }
-    dialog.showMessageBox({ type: 'info', message: 'Run this in a terminal:', detail: command });
+async function grantEventKit(what: 'calendar' | 'reminders'): Promise<void> {
+    const { ok, output } = await runDaemonCommand(['tcc', what]);
+    // The daemon prints `<what>: granted|denied|not-determined`; a denial can only
+    // be undone in System Settings, so say so rather than silently doing nothing.
+    dialog.showMessageBox({
+        type: ok && output.includes('granted') ? 'info' : 'warning',
+        message: output || 'No response from the daemon.',
+        detail: output.includes('denied') ? 'Grant it in System Settings › Privacy & Security.' : undefined,
+    });
+}
+
+/**
+ * Messages: the gate is Automation (Apple Events), and it fires the first time
+ * something actually talks to Messages.app. Poking it with `osascript` as our
+ * child is the whole flow — same attribution rule, no daemon involvement.
+ */
+function grantAppleEvents(): void {
+    spawn('/usr/bin/osascript', ['-e', 'tell application "Messages" to count of windows']);
+}
+
+/**
+ * Full Disk Access has no prompt — it can only be granted by hand. Open the pane
+ * and reveal the app so it can be dragged in.
+ */
+function openFullDiskAccess(): void {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+    // Reveal the .app itself, not the executable buried inside it — the pane
+    // wants the bundle dragged in.
+    shell.showItemInFolder(app.getPath('exe').replace(/(\.app)\/Contents\/MacOS\/.*$/, '$1'));
 }
 
 function asset(name: string): string {

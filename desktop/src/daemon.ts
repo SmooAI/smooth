@@ -5,7 +5,7 @@
 //! (the common case on a dev box running `th up` or a launchd unit) and only
 //! spawn — and therefore only ever kill — a daemon we started ourselves.
 
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -27,11 +27,18 @@ export function baseUrl(env: NodeJS.ProcessEnv = process.env): string {
  * with the packaged copy first: bundled resources → `SMOOTH_DAEMON_BIN` → `~/.smooth/bin` →
  * `PATH` → the cargo target dir (dev, honoring a global `build.target-dir`).
  */
-export function resolveDaemonBin(candidates: string[] = defaultCandidates()): string | undefined {
+export function resolveDaemonBin(candidates?: string[]): string | undefined {
+    if (candidates) return firstExisting(candidates);
+    // The cargo lookup shells out, so only reach for it when the cheap candidates
+    // miss — in a packaged app the bundled copy is first and always wins.
+    return firstExisting(cheapCandidates()) ?? firstExisting(cargoCandidates());
+}
+
+function firstExisting(candidates: string[]): string | undefined {
     return candidates.find((p) => p !== '' && existsSync(p));
 }
 
-function defaultCandidates(): string[] {
+function cheapCandidates(): string[] {
     const out: string[] = [];
     if (process.resourcesPath) out.push(join(process.resourcesPath, BIN));
     out.push((process.env.SMOOTH_DAEMON_BIN ?? '').trim());
@@ -39,10 +46,11 @@ function defaultCandidates(): string[] {
     for (const dir of (process.env.PATH ?? '').split(delimiter)) {
         if (dir) out.push(join(dir, BIN));
     }
-    for (const target of cargoTargetDirs()) {
-        out.push(join(target, 'release', BIN), join(target, 'debug', BIN));
-    }
     return out;
+}
+
+function cargoCandidates(): string[] {
+    return cargoTargetDirs().flatMap((dir) => [join(dir, 'release', BIN), join(dir, 'debug', BIN)]);
 }
 
 /** Dev fallback: where `cargo build` puts things. `cargo metadata` is the only thing that
@@ -95,7 +103,10 @@ export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; er
         return { ok: false, spawned: false, error: `Could not find ${BIN}. Build it with \`pnpm install:th\`, or set SMOOTH_DAEMON_BIN.` };
     }
 
-    child = spawn(bin, ['run'], { stdio: 'inherit', env: { ...process.env, SMOOTH_ADDR: resolveAddr() } });
+    // SMOOTH_MENUBAR=0: the bundled daemon lives in Contents/MacOS, which is the
+    // daemon's own "I was launched as an app, show a status item" signal. We own
+    // the tray, so turn its one off.
+    child = spawn(bin, ['run'], { stdio: 'inherit', env: { ...process.env, SMOOTH_ADDR: resolveAddr(), SMOOTH_MENUBAR: '0' } });
     child.on('exit', () => {
         child = undefined;
     });
@@ -115,4 +126,27 @@ export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; er
 export function stopDaemon(): void {
     child?.kill('SIGTERM');
     child = undefined;
+}
+
+/**
+ * Run a one-shot daemon subcommand as OUR child.
+ *
+ * This is the TCC seam, and it does NOT work yet — see "TCC" in the README. A
+ * spawned child inherits the responsible process for grants it already has, but
+ * it cannot *ask*: `smooth-daemon tcc calendar` run from here returns
+ * not-determined and no prompt appears, while the identical binary launched via
+ * `open` as an app bundle's main executable prompts correctly. The plumbing is
+ * right; the embedding isn't.
+ */
+export async function runDaemonCommand(args: string[]): Promise<{ ok: boolean; output: string }> {
+    const bin = resolveDaemonBin();
+    if (!bin) return { ok: false, output: `Could not find ${BIN}.` };
+    return new Promise((resolve) => {
+        // No timeout: an EventKit request blocks while the OS prompt waits for
+        // an answer, and the daemon already caps that at two minutes.
+        execFile(bin, args, (err, stdout, stderr) => {
+            const output = `${stdout}${stderr}`.trim();
+            resolve({ ok: !err, output: output || (err ? String(err) : '') });
+        });
+    });
 }

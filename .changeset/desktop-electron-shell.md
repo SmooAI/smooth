@@ -2,4 +2,4 @@
 '@smooai/smooth': patch
 ---
 
-Add the Big Smooth desktop shell (`desktop/`, pearl th-a59af5): an Electron app that manages the native `smooth-daemon`, opens a window on the daemon's web UI, and provides a cross-platform `th` tray with Open / Set Up / Quit. It attaches to an already-running daemon and only terminates one it spawned itself. Packaging and signing are deferred — `electron-builder.yml` is a skeleton.
+Big Smooth desktop (`desktop/`, pearl th-a59af5): the Electron app is now the installable — it bundles `smooth-daemon` as its engine, packages via electron-builder (signed .dmg/.zip on macOS with the hardened runtime and the TCC usage strings; NSIS on Windows), and its tray drives Open / Set Up / Quit. Adds `smooth-daemon tcc calendar|reminders` for the grant flows, and `SMOOTH_MENUBAR` now turns the native menu bar OFF as well as on, so a bundled daemon doesn't raise a second status item. Calendar/Reminders prompts do not fire from a spawned child yet — measured, documented in `desktop/README.md`.
