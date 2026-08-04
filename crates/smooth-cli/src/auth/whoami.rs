@@ -9,6 +9,7 @@
 //! `th config` / `th api` call would see, instead of being told to
 //! "log in again" when nothing of the sort is required.
 
+use anstream::println;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};

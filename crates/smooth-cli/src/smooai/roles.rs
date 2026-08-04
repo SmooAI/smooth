@@ -19,6 +19,7 @@
 //! System roles are immutable: grant/revoke/set-permissions/delete refuse them
 //! locally with a clear error *before* the API call (the server also 403s).
 
+use anstream::{eprintln, println};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

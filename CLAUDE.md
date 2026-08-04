@@ -180,6 +180,10 @@ pnpm install:th:brew         # Install the latest RELEASED th via Homebrew (no s
 pnpm build:web               # Just rebuild the embedded web SPA
 ```
 
+> **`pnpm install:th` installs to `~/.cargo/bin/th`, which does NOT automatically win on `PATH`.** The menu bar's "Install th CLI…" symlinks `/usr/local/bin/th` (or `~/.local/bin/th`) at `Big Smooth.app/Contents/Resources/bin/th`, and those dirs usually come first — so a successful dev install can silently keep serving the older bundled binary while you debug a stale `th` (pearl th-fd9d98 lost real time to exactly this). `install:th` now ends with `scripts/dev-link-th.sh`, which repoints that symlink at your build; it only ever rewrites a **symlink**, warns and leaves regular files (Homebrew, manual copies) alone, and is skipped by `SMOOTH_NO_DEV_LINK=1`. Check with `bash scripts/dev-link-th.test.sh`.
+>
+> **Sanity check after any install:** `th --version` prints the commit it was built from — compare it to `git log -1`. If they differ, you are testing the wrong binary.
+
 ### Web UI (crates/smooth-web/web/)
 
 ```bash

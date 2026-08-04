@@ -136,6 +136,7 @@ pub async fn cmd_refresh(m2m: bool) -> Result<()> {
 /// No session on disk (worded by `hint`), an expired session with no refresh
 /// material, or the grant itself failing.
 async fn refresh_store(http: &reqwest::Client, store: &CredentialsStore, hint: &str, kind: &str) -> Result<Refresh> {
+    use anstream::println;
     use owo_colors::OwoColorize;
 
     // Peek before acting so we can report refreshed-vs-already-fresh honestly.

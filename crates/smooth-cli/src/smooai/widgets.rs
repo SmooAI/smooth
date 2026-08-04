@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

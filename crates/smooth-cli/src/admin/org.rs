@@ -3,6 +3,7 @@
 //! Every subcommand accepts `--json` for raw JSON; default is a
 //! pretty table.
 
+use anstream::{eprintln, println};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

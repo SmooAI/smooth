@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

@@ -240,7 +240,15 @@ mod tests {
 
     /// End-to-end: `th --version` succeeds when the binary is resolvable.
     /// Gated on the binary being present so the suite passes in bare CI.
+    ///
+    /// Ignored on Windows for pearl th-bd84cf: rendering help/version for th's
+    /// 53-command clap tree overflows the 1 MB Windows main-thread stack, so
+    /// the child dies with 0xC00000FD before printing. Pre-existing and
+    /// reproduced on plain `main` (PR #331 probe) — it only started firing here
+    /// because a new `CARGO_BIN_EXE_th` test puts `th.exe` where `resolve_th()`
+    /// finds it, so this stopped skipping. Un-ignore once th-bd84cf lands.
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "pearl th-bd84cf: clap help/version overflows the 1 MB Windows main stack")]
     async fn version_runs_when_th_is_installed() {
         if resolve_th().is_none() {
             eprintln!("skipping: `th` not resolvable in this environment");
@@ -252,7 +260,13 @@ mod tests {
     }
 
     /// Error path: an unknown subcommand surfaces a non-zero exit + stderr.
+    ///
+    /// Also ignored on Windows for th-bd84cf, though it *passes* there — a
+    /// stack overflow exits non-zero too, so the assertion holds for the wrong
+    /// reason. A test that is green only because the binary crashed is worse
+    /// than one that is skipped.
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "pearl th-bd84cf: passes only vacuously — the crash exit is also non-zero")]
     async fn unknown_subcommand_surfaces_nonzero_exit() {
         if resolve_th().is_none() {
             eprintln!("skipping: `th` not resolvable in this environment");

@@ -2,6 +2,7 @@
 //! knowledge endpoints. All calls go through the raw HTTP helper so
 //! the CLI doesn't have to keep up with progenitor's typed-body churn.
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
 use owo_colors::OwoColorize;

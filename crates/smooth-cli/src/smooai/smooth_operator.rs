@@ -17,6 +17,7 @@
 //!   chat     SEP WS  wss://smooth-operator.smoo.ai/ws  (token from api-prime)
 //!   history  GET     /organizations/{org}/smooth-operator/conversations/{id}
 
+use anstream::println;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

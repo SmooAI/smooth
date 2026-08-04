@@ -17,6 +17,7 @@
 //! cross-org). There is no in-place rotate endpoint: `rotate` mints a
 //! fresh client of the same type/origins then revokes the old one.
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
 use owo_colors::OwoColorize;

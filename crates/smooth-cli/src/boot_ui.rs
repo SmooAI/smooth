@@ -29,6 +29,7 @@
 //! The state machine — `Pending → Running → Done(Ok|Fail)` — is
 //! tested in `mod tests` without touching a real terminal.
 
+use anstream::println;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use std::time::Duration;

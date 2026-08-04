@@ -32,6 +32,7 @@ mod smooai;
 
 use smooai::cmd_orgs;
 
+use anstream::{eprintln, print, println};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
@@ -2459,7 +2460,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                     };
                     if !api_url.is_empty() {
                         print!("  Fetching models... ");
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        let _ = std::io::Write::flush(&mut anstream::stdout());
                         match reqwest::blocking::get(api_url) {
                             Ok(resp) => match resp.json::<serde_json::Value>() {
                                 Ok(body) => {
@@ -2792,7 +2793,7 @@ async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<
                     "TokenDelta" => {
                         if let Some(content) = evt.get("content").and_then(|v| v.as_str()) {
                             print!("{content}");
-                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let _ = std::io::Write::flush(&mut anstream::stdout());
                         }
                     }
                     "ToolCallStart" => {

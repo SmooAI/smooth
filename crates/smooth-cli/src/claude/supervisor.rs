@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anstream::println;
 use anyhow::Result;
 use chrono::Utc;
 use owo_colors::OwoColorize;

@@ -1,5 +1,6 @@
 //! `th auth profile …` — manage named auth profiles. SMOODEV-1739.
 
+use anstream::println;
 use anyhow::Result;
 use owo_colors::OwoColorize;
 use smooai_client_shared::auth::storage::CredentialsStore;

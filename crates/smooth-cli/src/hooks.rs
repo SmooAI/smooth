@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anstream::{eprintln, println};
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 
