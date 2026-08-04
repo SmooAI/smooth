@@ -33,6 +33,7 @@ use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSSize, NSString};
 
 pub mod eventkit;
 pub mod reminders;
+pub mod setup;
 
 /// The web-UI URL the "Open Big Smooth" item launches. Set once in [`run`]
 /// before the run loop starts, read by the menu action (which can't easily
@@ -120,6 +121,47 @@ fn notify(message: &str) {
         .spawn();
 }
 
+/// The System Settings deep link for Privacy & Security → Full Disk Access —
+/// the grant that unlocks `~/Library/Messages/chat.db` and external-volume
+/// workspaces. FDA cannot be granted programmatically (SIP-protected TCC db),
+/// so getting the user to the toggle is the whole job. Same URL as
+/// `smooth-cli`'s `fda::open_fda_settings`, duplicated rather than depending on
+/// the CLI crate from this leaf.
+const FDA_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+/// An Apple Event to Messages that sends nothing but still trips the Automation
+/// prompt. Same probe as `smooth-cli`'s `imessage_setup`; here it fires from
+/// inside Big Smooth.app, so TCC attributes the grant to the app rather than to
+/// `th` — which is the whole reason these items exist in the menu.
+const MESSAGES_PROBE: &str = r#"tell application "Messages" to get name"#;
+
+/// `open(1)` a URL. Used for both the web UI and the System Settings deep links.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+}
+
+/// Ask for an EventKit grant off the main thread and report the outcome.
+///
+/// Off-thread is load-bearing: `request_*_access` blocks until the user answers
+/// the prompt, and blocking the AppKit main thread would deadlock the prompt it
+/// is waiting for. Already-answered grants return immediately — macOS never
+/// re-prompts, so a `denied` here has to be undone in System Settings.
+fn grant_in_background(what: &'static str, request: fn() -> eventkit::Access) {
+    std::thread::spawn(move || {
+        let access = request();
+        tracing::info!(status = access.label(), "{what} access request answered");
+        let message = if access.granted() {
+            format!("{what} access: granted.")
+        } else {
+            format!(
+                "{what} access: {}.\n\nEnable it in System Settings → Privacy & Security → {what}.",
+                access.label()
+            )
+        };
+        notify(&message);
+    });
+}
+
 define_class!(
     // A trivial NSObject subclass that carries the menu actions. No ivars — the
     // URL lives in the `WEB_URL` static, and Quit just exits the process.
@@ -131,8 +173,41 @@ define_class!(
         #[unsafe(method(openApp:))]
         fn open_app(&self, _sender: Option<&AnyObject>) {
             if let Some(url) = WEB_URL.get() {
-                let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+                open_url(url);
             }
+        }
+
+        #[unsafe(method(openFullDiskAccess:))]
+        fn open_full_disk_access(&self, _sender: Option<&AnyObject>) {
+            open_url(FDA_SETTINGS_URL);
+        }
+
+        #[unsafe(method(grantCalendar:))]
+        fn grant_calendar(&self, _sender: Option<&AnyObject>) {
+            grant_in_background("Calendar", eventkit::request_calendar_access);
+        }
+
+        #[unsafe(method(grantReminders:))]
+        fn grant_reminders(&self, _sender: Option<&AnyObject>) {
+            grant_in_background("Reminders", eventkit::request_reminders_access);
+        }
+
+        #[unsafe(method(setUpMessages:))]
+        fn set_up_messages(&self, _sender: Option<&AnyObject>) {
+            // Two grants, two mechanisms: chat.db reads need Full Disk Access
+            // (manual toggle, no prompt exists), sending needs Automation
+            // (promptable — the probe below is what makes it appear).
+            open_url(FDA_SETTINGS_URL);
+            std::thread::spawn(|| {
+                match std::process::Command::new("/usr/bin/osascript").arg("-e").arg(MESSAGES_PROBE).output() {
+                    Ok(out) if out.status.success() => notify("Messages automation: allowed — Big Smooth can send texts.\n\nFor reading, add Big Smooth to Full Disk Access in the window that just opened."),
+                    Ok(out) => notify(&format!(
+                        "Messages automation: not granted.\n\n{}\n\nAllow it in System Settings → Privacy & Security → Automation.",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )),
+                    Err(e) => notify(&format!("Couldn't run the Messages check: {e}")),
+                }
+            });
         }
 
         #[unsafe(method(installCli:))]
@@ -232,6 +307,22 @@ where
         let _ = BUNDLED_TH.set(th);
         add_item(&menu, mtm, ns_string!("Install th CLI…"), sel!(installCli:), &target);
     }
+    // The macOS access grants, driven from inside the app so TCC attributes them
+    // to Big Smooth.app — the process that actually reads chat.db and calls
+    // EventKit — instead of to whatever `th` happened to run (pearl th-ba764e).
+    // A submenu rather than four more top-level rows: one-time setup shouldn't
+    // outweigh the two things you click every day.
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let setup = NSMenu::new(mtm);
+    add_item(&setup, mtm, ns_string!("Configure Full Disk Access…"), sel!(openFullDiskAccess:), &target);
+    add_item(&setup, mtm, ns_string!("Grant Calendar Access…"), sel!(grantCalendar:), &target);
+    add_item(&setup, mtm, ns_string!("Grant Reminders Access…"), sel!(grantReminders:), &target);
+    add_item(&setup, mtm, ns_string!("Set Up Messages…"), sel!(setUpMessages:), &target);
+    let setup_item = NSMenuItem::new(mtm);
+    setup_item.setTitle(ns_string!("Set Up"));
+    setup_item.setSubmenu(Some(&setup));
+    menu.addItem(&setup_item);
+
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     add_item(&menu, mtm, ns_string!("Quit Big Smooth"), sel!(quit:), &target);
     status_item.setMenu(Some(&menu));
@@ -333,6 +424,23 @@ mod tests {
         std::fs::write(&link, b"stale copy").unwrap();
         assert!(install_cli(&th, &dirs).is_ok());
         assert_eq!(std::fs::read_link(&link).unwrap(), th);
+    }
+
+    #[test]
+    fn the_messages_probe_sends_nothing() {
+        // Load-bearing: a setup click must never text a human. If someone
+        // "improves" this into a real send, this fails.
+        assert!(!MESSAGES_PROBE.contains("send"), "{MESSAGES_PROBE}");
+        assert!(!MESSAGES_PROBE.contains("participant"), "{MESSAGES_PROBE}");
+        assert!(MESSAGES_PROBE.contains("get name"));
+    }
+
+    #[test]
+    fn fda_link_targets_the_full_disk_access_pane() {
+        // Drift here silently opens the wrong Settings pane; the anchor is what
+        // selects Full Disk Access rather than the top of Privacy & Security.
+        assert!(FDA_SETTINGS_URL.starts_with("x-apple.systempreferences:"));
+        assert!(FDA_SETTINGS_URL.ends_with("?Privacy_AllFiles"));
     }
 
     #[test]

@@ -55,6 +55,38 @@ then offers **Install th CLI…**, which symlinks it to `/usr/local/bin/th`, or
 `~/.local/bin/th` when that isn't writable (the VS Code "install `code` command"
 pattern). No `th` in the build → no menu item, no error.
 
+## The app icon
+
+`BigSmooth.icns` is checked in (built asset) and copied to
+`Contents/Resources/`; `Info.plist` points at it with `CFBundleIconFile`. Source
+art is the `th` PWA icon, `crates/smooth-web/web/public/pwa-512x512.png` — a
+full-bleed dark square. macOS does **not** re-mask app icons, so the rounded
+rect is baked in here: the square is scaled to Apple's 824×824 art area inside a
+1024×1024 canvas and masked with a 22.37%-radius rounded rect. Regenerate after
+a brand change:
+
+```bash
+python3 - <<'PY'
+from PIL import Image, ImageDraw
+S, INSET = 1024, 100
+art = S - 2 * INSET
+im = Image.open('crates/smooth-web/web/public/pwa-512x512.png').convert('RGB').resize((art, art), Image.LANCZOS)
+mask = Image.new('L', (art * 4, art * 4), 0)   # 4x then downsample = cheap AA
+ImageDraw.Draw(mask).rounded_rectangle([0, 0, art * 4 - 1, art * 4 - 1], radius=int(0.2237 * art * 4), fill=255)
+out = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+out.paste(im, (INSET, INSET), mask.resize((art, art), Image.LANCZOS))
+out.save('/tmp/icon_1024.png')
+PY
+mkdir -p /tmp/BigSmooth.iconset
+for s in 16 32 128 256 512; do
+    sips -z $s $s /tmp/icon_1024.png --out "/tmp/BigSmooth.iconset/icon_${s}x${s}.png"
+    sips -z $((s*2)) $((s*2)) /tmp/icon_1024.png --out "/tmp/BigSmooth.iconset/icon_${s}x${s}@2x.png"
+done
+iconutil -c icns /tmp/BigSmooth.iconset -o scripts/macos/BigSmooth.icns
+```
+
+macOS caches icons aggressively — after installing, `touch "$HOME/Applications/Big Smooth.app" && killall Dock Finder`.
+
 ## Notarization credentials
 
 `notarize-and-staple.sh` reads one of two credential sets from the environment

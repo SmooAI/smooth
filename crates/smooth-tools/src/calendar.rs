@@ -57,6 +57,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use smooth_menubar::setup::{initiate, Grant};
 use smooth_operator::{Tool, ToolSchema};
 
 /// Max bytes of output returned before truncation.
@@ -276,8 +277,11 @@ async fn run_ical(bin: &std::path::Path, args: &[String]) -> anyhow::Result<Stri
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
         if looks_like_permission_denial(&stderr) || looks_like_permission_denial(&stdout) {
+            // `ical` is a child process, but the grant it needs belongs to this
+            // one — so ask for it here, once per session (pearl th-ba764e).
+            let next_step = initiate(Grant::Calendar).unwrap_or(SETUP_HINT);
             return Ok(format!(
-                "Calendar access has not been granted to Big Smooth. {SETUP_HINT}\n\n--- ical said ---\n{}",
+                "Calendar access has not been granted to Big Smooth. {next_step}\n\n--- ical said ---\n{}",
                 truncate(&stderr)
             ));
         }
