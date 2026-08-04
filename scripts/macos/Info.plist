@@ -24,6 +24,10 @@
     <string>smooth-daemon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Resources/BigSmooth.icns — the `th` PWA mark. macOS does NOT re-mask app
+         icons, so the art already carries its own rounded-rect shape. -->
+    <key>CFBundleIconFile</key>
+    <string>BigSmooth</string>
     <key>CFBundleShortVersionString</key>
     <string>__VERSION__</string>
     <key>CFBundleVersion</key>

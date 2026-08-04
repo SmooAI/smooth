@@ -35,13 +35,19 @@ TH_BIN="${TH_BIN:-$(dirname "$BIN")/th}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST_SRC="${SCRIPT_DIR}/Info.plist"
+ICNS_SRC="${SCRIPT_DIR}/BigSmooth.icns"
 
 [ -f "$BIN" ] || { echo "error: binary not found: $BIN" >&2; exit 1; }
 [ -f "$PLIST_SRC" ] || { echo "error: missing template: $PLIST_SRC" >&2; exit 1; }
+[ -f "$ICNS_SRC" ] || { echo "error: missing icon: $ICNS_SRC" >&2; exit 1; }
 
 APP="${OUT}/Big Smooth.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# Dock/Finder icon (CFBundleIconFile in Info.plist). Checked in as a built asset
+# so packaging stays offline — README.md has the regeneration recipe.
+cp "$ICNS_SRC" "$APP/Contents/Resources/BigSmooth.icns"
 
 cp "$BIN" "$APP/Contents/MacOS/smooth-daemon"
 chmod +x "$APP/Contents/MacOS/smooth-daemon"
