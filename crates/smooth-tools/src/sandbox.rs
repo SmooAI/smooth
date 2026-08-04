@@ -90,7 +90,8 @@ impl SandboxPolicy {
 pub struct SandboxedCommand(Command);
 
 impl SandboxedCommand {
-    /// Build a sandboxed `sh -c <command>` under `policy`.
+    /// Build a sandboxed shell invocation of `command` under `policy` — `sh -c`
+    /// on Unix, `cmd /C` on Windows (see [`build`]).
     ///
     /// As well as the kernel FS confinement, the child env is **scrubbed** of
     /// secret-named variables (the daemon's own `SMOOTH_API_KEY` /
