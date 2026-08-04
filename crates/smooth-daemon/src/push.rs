@@ -21,6 +21,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+#[cfg(not(target_os = "windows"))]
 use web_push::{ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder};
 
 /// A browser push subscription (`PushSubscription.toJSON()`).
@@ -48,8 +49,14 @@ pub struct PushState {
 
 impl PushState {
     pub fn from_env() -> Self {
-        let public_key = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty());
-        let private_key = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty());
+        // Windows has no sender (see `send_to_all`), so it must not advertise a
+        // VAPID key either — handing one out would let the SPA register a
+        // service worker for pushes that can never arrive. Dropping the keys
+        // here makes every `/push/*` route 503 through the existing
+        // `enabled()` checks, no per-route cfg needed.
+        let configured = !cfg!(target_os = "windows");
+        let public_key = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty() && configured);
+        let private_key = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty() && configured);
         Self {
             public_key,
             private_key,
@@ -81,6 +88,23 @@ impl PushState {
 
     /// Send `{title, body}` to every subscribed device. Expired subscriptions
     /// (410/404) are pruned. Best-effort: a failing endpoint never blocks the rest.
+    ///
+    /// **Windows: always a no-op.** The `web-push` crate reaches `ece`, which
+    /// hard-depends on `openssl` (no pure-Rust backend in 2.x) and finds no
+    /// OpenSSL on a stock Windows host. The dependency is therefore declared
+    /// only for non-Windows targets, which is what lets the rest of the daemon
+    /// — the whole agent engine — compile and run there at all. Subscribing
+    /// still 503s on Windows via [`Self::enabled`], so the SPA degrades
+    /// cleanly rather than half-registering a service worker. Windows push is
+    /// a follow-up (vendored OpenSSL, or a `web-push` release on `ece` 3.x).
+    #[cfg(target_os = "windows")]
+    pub async fn send_to_all(&self, title: &str, body: &str) -> usize {
+        let _ = (title, body);
+        tracing::debug!("web push is not available on Windows (web-push -> ece -> openssl); skipping notification");
+        0
+    }
+
+    #[cfg(not(target_os = "windows"))]
     pub async fn send_to_all(&self, title: &str, body: &str) -> usize {
         if !self.enabled() {
             return 0;
@@ -133,7 +157,10 @@ impl PushState {
 }
 
 fn subs_path() -> PathBuf {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+    // `dirs_next`, not `$HOME`: Windows sets `%USERPROFILE%`, so an env read
+    // fell through to `.` and scattered a push-subs.json into whatever the cwd
+    // happened to be.
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".smooth").join("push-subs.json")
 }
 

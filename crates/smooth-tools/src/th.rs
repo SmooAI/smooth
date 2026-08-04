@@ -23,6 +23,13 @@ pub struct ThTool {
     pub workspace: PathBuf,
 }
 
+/// The `th` executable's file name for this platform — `th` on Unix, `th.exe`
+/// on Windows. Every non-env lookup below joins a directory with this, so the
+/// binary is actually found on Windows (a bare `th` matches nothing there).
+fn th_exe_name() -> String {
+    format!("th{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// Locate the `th` binary. Resolution order (mirrors `daemon_launcher`'s shape):
 /// `SMOOTH_TH_BIN` env → next to the running executable → `~/.cargo/bin/th` →
 /// `PATH`.
@@ -33,14 +40,15 @@ fn resolve_th() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    let exe_name = th_exe_name();
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(p) = exe.parent().map(|d| d.join("th")) {
+        if let Some(p) = exe.parent().map(|d| d.join(&exe_name)) {
             if p.is_file() {
                 return Some(p);
             }
         }
     }
-    if let Some(p) = dirs_next::home_dir().map(|h| h.join(".cargo").join("bin").join("th")) {
+    if let Some(p) = dirs_next::home_dir().map(|h| h.join(".cargo").join("bin").join(&exe_name)) {
         if p.is_file() {
             return Some(p);
         }
@@ -50,7 +58,8 @@ fn resolve_th() -> Option<PathBuf> {
 
 fn which_on_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join("th")).find(|p| p.is_file())
+    let exe_name = th_exe_name();
+    std::env::split_paths(&path).map(|d| d.join(&exe_name)).find(|p| p.is_file())
 }
 
 #[async_trait]
@@ -200,6 +209,20 @@ mod tests {
     #[test]
     fn parse_args_rejects_non_string_elements() {
         assert!(parse_args(&json!({"args": ["search", 7]})).is_err());
+    }
+
+    /// Every non-env lookup in `resolve_th` joins a directory with this name,
+    /// so it has to carry the platform's executable extension — a bare `th`
+    /// matches nothing on Windows, and the tool then reported "could not find
+    /// the `th` binary" on a host where `th.exe` was sitting right there.
+    #[test]
+    fn th_exe_name_carries_the_platform_suffix() {
+        assert_eq!(th_exe_name(), format!("th{}", std::env::consts::EXE_SUFFIX));
+        if cfg!(target_os = "windows") {
+            assert_eq!(th_exe_name(), "th.exe");
+        } else {
+            assert_eq!(th_exe_name(), "th");
+        }
     }
 
     #[test]

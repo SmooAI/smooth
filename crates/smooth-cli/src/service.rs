@@ -46,8 +46,7 @@ pub fn install(system: bool) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = (log_path, err_path);
-        windows::install_user(&exe)
+        windows::install_user(&exe, &log_path, &err_path)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -105,8 +104,14 @@ pub fn logs(follow: bool) -> Result<()> {
         return Ok(());
     }
 
-    // `tail -F` gracefully handles files appearing/rotating. Prefer it
-    // over re-implementing in Rust.
+    let files: Vec<&std::path::Path> = if err.exists() { vec![&log, &err] } else { vec![&log] };
+    tail_files(&files, follow)
+}
+
+/// `tail -F` gracefully handles files appearing/rotating. Prefer it over
+/// re-implementing in Rust.
+#[cfg(not(target_os = "windows"))]
+fn tail_files(files: &[&std::path::Path], follow: bool) -> Result<()> {
     let mut args: Vec<String> = Vec::new();
     if follow {
         args.push("-F".to_string());
@@ -114,10 +119,7 @@ pub fn logs(follow: bool) -> Result<()> {
         args.push("-n".to_string());
         args.push("200".to_string());
     }
-    args.push(log.to_string_lossy().to_string());
-    if err.exists() {
-        args.push(err.to_string_lossy().to_string());
-    }
+    args.extend(files.iter().map(|p| p.to_string_lossy().to_string()));
 
     let status = std::process::Command::new("tail")
         .args(&args)
@@ -125,6 +127,27 @@ pub fn logs(follow: bool) -> Result<()> {
         .context("spawn `tail` to read service logs")?;
     if !status.success() {
         anyhow::bail!("tail exited {status}");
+    }
+    Ok(())
+}
+
+/// Windows has no `tail`. PowerShell's `Get-Content -Tail`/`-Wait` is the
+/// closest equivalent and ships with every supported Windows version.
+/// One invocation per file — `Get-Content -Wait` only follows a single path.
+#[cfg(target_os = "windows")]
+fn tail_files(files: &[&std::path::Path], follow: bool) -> Result<()> {
+    for path in files {
+        let mut script = format!("Get-Content -LiteralPath '{}' -Tail 200", path.display().to_string().replace('\'', "''"));
+        if follow {
+            script.push_str(" -Wait");
+        }
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .context("spawn `powershell -Command Get-Content` to read service logs")?;
+        if !status.success() {
+            anyhow::bail!("Get-Content exited {status}");
+        }
     }
     Ok(())
 }
@@ -480,11 +503,26 @@ mod windows {
 
     pub const TASK_NAME: &str = "SmoothAI";
 
-    pub fn install_user(exe: &std::path::Path) -> Result<()> {
+    /// The task's `/TR` command line.
+    ///
+    /// Wrapped in `cmd /C` purely to get the stdout/stderr redirects: Task
+    /// Scheduler has no equivalent of launchd's `StandardOutPath` or systemd's
+    /// `StandardOutput=append:`, so without this the daemon's output goes
+    /// nowhere and `th service logs` finds two files that never appear.
+    pub fn task_command(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path) -> String {
+        format!(
+            "cmd /C \"\"{}\" up --foreground >> \"{}\" 2>> \"{}\"\"",
+            exe.display(),
+            log.display(),
+            err.display()
+        )
+    }
+
+    pub fn install_user(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path) -> Result<()> {
         // Best-effort: delete an existing task so re-install is idempotent.
         let _ = std::process::Command::new("schtasks").args(["/Delete", "/TN", TASK_NAME, "/F"]).status();
 
-        let cmd = format!("\"{}\" up --foreground", exe.display());
+        let cmd = task_command(exe, log, err);
         let out = std::process::Command::new("schtasks")
             .args(["/Create", "/SC", "ONLOGON", "/TN", TASK_NAME, "/TR", &cmd, "/RL", "LIMITED", "/F"])
             .output()
@@ -571,5 +609,21 @@ mod tests {
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(unit.contains("append:/tmp/smooth.log"));
+    }
+
+    /// Task Scheduler has no `StandardOutPath`, so the redirects have to be in
+    /// the command line itself — otherwise `th service logs` follows two files
+    /// nothing ever writes to.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_task_command_redirects_both_streams() {
+        let exe = std::path::PathBuf::from(r"C:\th\th.exe");
+        let log = std::path::PathBuf::from(r"C:\Users\x\.smooth\service.log");
+        let err = std::path::PathBuf::from(r"C:\Users\x\.smooth\service.err");
+        let cmd = windows::task_command(&exe, &log, &err);
+        assert!(cmd.starts_with("cmd /C "), "{cmd}");
+        assert!(cmd.contains("up --foreground"), "{cmd}");
+        assert!(cmd.contains(r#">> "C:\Users\x\.smooth\service.log""#), "{cmd}");
+        assert!(cmd.contains(r#"2>> "C:\Users\x\.smooth\service.err""#), "{cmd}");
     }
 }
