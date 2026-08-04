@@ -9,7 +9,7 @@
         "build": "tsc",
         "dev": "tsc && electron .",
         "dist": "pnpm stage-daemon && electron-builder",
-        "dist:mac": "pnpm stage-daemon && CSC_NAME=\"${SIGN_IDENTITY:-Apple Distribution: Smoo LLC (DTX9733844)}\" electron-builder --mac",
+        "dist:mac": "pnpm stage-daemon && CSC_NAME=\"${SIGN_IDENTITY:-Smoo LLC (DTX9733844)}\" electron-builder --mac",
         "notarize": "bash ../scripts/macos/notarize-and-staple.sh release/*.dmg",
         "stage-daemon": "tsc && node scripts/stage-daemon.mjs",
         "format": "oxfmt .",
