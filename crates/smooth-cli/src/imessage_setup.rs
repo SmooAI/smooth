@@ -24,6 +24,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use anstream::println;
 use anyhow::Result;
 use owo_colors::OwoColorize;
 

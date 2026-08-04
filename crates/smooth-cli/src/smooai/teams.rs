@@ -11,6 +11,7 @@
 //! team's complete membership / role set. Members resolve from email (or a
 //! member-id uuid); roles resolve from role name (or a role-id uuid).
 
+use anstream::println;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

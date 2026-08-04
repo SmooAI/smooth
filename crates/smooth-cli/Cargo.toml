@@ -57,6 +57,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 dirs-next.workspace = true
 toml.workspace = true
+anstream.workspace = true
 owo-colors.workspace = true
 indicatif.workspace = true
 atty.workspace = true

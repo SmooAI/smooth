@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anstream::{eprintln, println};
 use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

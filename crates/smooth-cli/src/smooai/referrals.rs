@@ -8,6 +8,7 @@
 //! Backed by `/organizations/{org_id}/referral-programs…` and
 //! `/organizations/{org_id}/referrals/commissions`. SMOODEV-2768.
 
+use anstream::println;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;

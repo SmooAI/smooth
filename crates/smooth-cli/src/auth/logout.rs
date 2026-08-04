@@ -1,5 +1,6 @@
 //! `th auth logout` — clear one or both stored sessions.
 
+use anstream::println;
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use smooai_client_shared::auth::storage::CredentialsStore;

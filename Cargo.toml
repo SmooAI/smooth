@@ -147,6 +147,7 @@ arc-swap = "1"
 
 # Colors
 owo-colors = "4"
+anstream = "1"
 
 # Progress / spinners (boot indicator, long-running commands)
 indicatif = "0.17"

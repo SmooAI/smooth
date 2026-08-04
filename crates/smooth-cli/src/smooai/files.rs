@@ -6,6 +6,7 @@
 //! bearer-less client — a presigned URL carries its own auth in the query, and
 //! an extra `Authorization` header makes S3 reject the request.
 
+use anstream::println;
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
 use clap::{Subcommand, ValueEnum};
