@@ -50,6 +50,32 @@ the logged-in user can:
   suggestion. This is the third leg of the lethal trifecta (private-data access
   + untrusted content + egress) left open.
 
+### Layer 1 is only *partly* Windows-shaped
+
+Separately from the missing kernel layer: the daemon's embedded `DenyPolicy`
+path list (`DENY_POLICY_TOML` in `smooth-daemon/src/operator.rs`) was written
+for Unix. The home-relative globs still bite on Windows —
+
+- `**/.ssh/**`, `**/.aws/**`, `**/.smooth/auth/**` ✅
+
+— but every absolute-rooted entry matches nothing there:
+
+- `/etc/**`, `/System/**`, `/usr/**`, `/bin/**`, `/sbin/**`, `/Library/**` ❌
+- and there are **no** entries for `C:\Windows\**`, `C:\Program Files\**`, the
+  per-user Startup folder, or the `Run` registry key — the Windows equivalents
+  of exactly what those globs exist to protect.
+
+The command denylist has the same shape problem: it names `launchctl`,
+`kextload`, `nvram`, `diskutil`, `crontab` and friends, with no `reg.exe`,
+`schtasks`, `vssadmin`, `bcdedit`, or `Set-MpPreference`.
+
+Adding them is not a one-liner to do blind: `globset` treats `\` as an escape
+character by default, so a naively-added `C:\Windows\**` compiles to something
+that never matches and reads as protection while providing none. It needs
+`GlobBuilder::backslash_escape(false)` (or forward-slash normalization at the
+call site) plus a real Windows host to verify against. Tracked with th-08e05a;
+do not add Windows path denies without testing them on Windows.
+
 What *does* still hold on Windows:
 
 - **Secret-named env vars are scrubbed** from the child at the single spawn
