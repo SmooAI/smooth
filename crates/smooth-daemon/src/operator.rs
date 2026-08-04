@@ -1223,7 +1223,7 @@ mod tests {
     #[test]
     fn skills_section_indexes_discovered_project_skill() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join(".smooth/skills/add-show");
+        let skill_dir = tmp.path().join(".smooth").join("skills").join("add-show");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), SAMPLE_SKILL).unwrap();
 
@@ -1268,12 +1268,12 @@ mod tests {
     fn discovery_skips_malformed_skill_but_keeps_valid_one() {
         let tmp = tempfile::tempdir().unwrap();
         // Valid skill (frontmatter name = "good").
-        let good = tmp.path().join(".smooth/skills/good");
+        let good = tmp.path().join(".smooth").join("skills").join("good");
         std::fs::create_dir_all(&good).unwrap();
         std::fs::write(good.join("SKILL.md"), "---\nname: good\ndescription: a valid skill\n---\n\nbody\n").unwrap();
         // Malformed skill — opened frontmatter, never closed. `discover` skips it
         // with a warning instead of crashing the turn.
-        let bad = tmp.path().join(".smooth/skills/bad");
+        let bad = tmp.path().join(".smooth").join("skills").join("bad");
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), "---\nname: bad\ndescription: broken\n\nno close marker").unwrap();
 

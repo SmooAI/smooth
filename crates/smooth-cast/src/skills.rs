@@ -256,17 +256,23 @@ pub fn discover(workspace_root: &Path) -> Vec<Skill> {
 pub fn discover_with_overrides(workspace_root: &Path) -> Vec<Skill> {
     let mut skills: Vec<Skill> = Vec::new();
 
-    let project_dir = workspace_root.join(".smooth/skills");
+    // One component per `join`, deliberately. A single `join(".smooth/skills")`
+    // opens fine on Windows but produces a MIXED-separator root
+    // (`C:\ws\.smooth/skills`), and every discovered skill path inherits it —
+    // `C:\ws\.smooth/skills\add-show\SKILL.md`. Those paths go into the
+    // persona for the model to read back, and any code comparing a discovered
+    // path against one built normally never matches. th-a59af5.
+    let project_dir = workspace_root.join(".smooth").join("skills");
     collect_from(&project_dir, SkillSource::Project, &mut skills);
 
     if let Some(home) = dirs_next::home_dir() {
-        collect_from(&home.join(".smooth/skills"), SkillSource::UserSmooth, &mut skills);
-        collect_from(&home.join(".claude/skills"), SkillSource::ClaudeCode, &mut skills);
+        collect_from(&home.join(".smooth").join("skills"), SkillSource::UserSmooth, &mut skills);
+        collect_from(&home.join(".claude").join("skills"), SkillSource::ClaudeCode, &mut skills);
         // opencode uses `~/.opencode/agents/<name>/...` in some
         // versions and `~/.opencode/skills/<name>/...` in others;
         // scan both.
-        collect_from(&home.join(".opencode/skills"), SkillSource::OpenCode, &mut skills);
-        collect_from(&home.join(".opencode/agents"), SkillSource::OpenCode, &mut skills);
+        collect_from(&home.join(".opencode").join("skills"), SkillSource::OpenCode, &mut skills);
+        collect_from(&home.join(".opencode").join("agents"), SkillSource::OpenCode, &mut skills);
     }
 
     // SEP extensions contribute their `[resources] skills` dirs (trusted only).
@@ -589,7 +595,7 @@ body"#;
     #[test]
     fn discover_from_temp_project_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let skill_dir = tmp.path().join(".smooth/skills/add-show");
+        let skill_dir = tmp.path().join(".smooth").join("skills").join("add-show");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), ADD_SHOW_SKILL).unwrap();
         let skills = discover(tmp.path());
@@ -602,7 +608,7 @@ body"#;
         // discover() should pick the project version when both
         // exist with the same name.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let project_dir = tmp.path().join(".smooth/skills/dupe");
+        let project_dir = tmp.path().join(".smooth").join("skills").join("dupe");
         fs::create_dir_all(&project_dir).unwrap();
         fs::write(project_dir.join("SKILL.md"), "---\nname: dupe\ndescription: PROJECT VERSION\n---\n\nbody").unwrap();
         // We can't easily mock ~/.smooth/, so the precedence test
