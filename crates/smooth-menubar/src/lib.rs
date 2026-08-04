@@ -33,6 +33,7 @@ use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSSize, NSString};
 
 pub mod eventkit;
 pub mod reminders;
+pub mod setup;
 
 /// The web-UI URL the "Open Big Smooth" item launches. Set once in [`run`]
 /// before the run loop starts, read by the menu action (which can't easily

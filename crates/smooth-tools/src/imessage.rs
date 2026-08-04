@@ -60,6 +60,7 @@ use chrono::{Local, TimeZone};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
+use smooth_menubar::setup::{initiate, Grant};
 use smooth_operator::{Tool, ToolSchema};
 
 /// Max bytes of output returned before truncation.
@@ -139,9 +140,12 @@ impl Unavailable {
                 "No Messages database at {} — Messages.app may never have been used on this Mac. {SETUP_HINT}",
                 path.display()
             ),
+            // Full Disk Access has no prompt API, so the most this process can
+            // do is put the pane in front of the user — once (pearl th-ba764e).
             Self::Denied => format!(
-                "Big Smooth can't read the Messages database at {} — macOS Full Disk Access has not been granted. {SETUP_HINT}",
-                path.display()
+                "Big Smooth can't read the Messages database at {} — macOS Full Disk Access has not been granted. {}",
+                path.display(),
+                initiate(Grant::FullDiskAccess).unwrap_or(SETUP_HINT)
             ),
         }
     }
@@ -560,8 +564,11 @@ async fn send_message(contact: &str, text: &str) -> anyhow::Result<String> {
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if looks_like_automation_denial(&stderr) {
+        // Re-fire the Apple Event as a no-op probe: on a never-answered grant
+        // that's what makes the prompt appear (pearl th-ba764e).
+        let next_step = initiate(Grant::MessagesAutomation).unwrap_or(SETUP_HINT);
         return Ok(format!(
-            "Big Smooth isn't allowed to control Messages.app. {SETUP_HINT}\n\n--- osascript said ---\n{}",
+            "Big Smooth isn't allowed to control Messages.app. {next_step}\n\n--- osascript said ---\n{}",
             truncate(&stderr)
         ));
     }
