@@ -8,7 +8,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { app, BrowserWindow, dialog, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 
 import { loadConfig, saveConfig } from './config.js';
 import { baseUrl, isRemote, remoteUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     // Packaged builds get the th mark from BigSmooth.icns via electron-builder;
     // an unpackaged run would otherwise show the stock Electron icon.
     if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(asset('icon.png'));
+    registerIpc();
     createTray();
     const result = await startDaemon();
     spawnedDaemon = result.spawned;
@@ -82,7 +83,9 @@ function showWindow(): void {
         // smooth-web's business and would move the browser PWA too.
         backgroundColor: '#0b0f14',
         icon: asset('icon.png'),
-        webPreferences: { nodeIntegration: false, contextIsolation: true },
+        // sandbox off so the ESM preload can load (Electron 40); the surface it
+        // exposes is a two-method contextBridge, nothing else.
+        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: false, preload: join(import.meta.dirname, 'preload.js') },
     });
     win.loadURL(`${baseUrl()}/`);
     // Closing the window parks the app in the tray; only Quit exits.
@@ -114,6 +117,10 @@ function windowTitle(): string {
 
 function createTray(): void {
     const icon = nativeImage.createFromPath(asset('tray.png'));
+    // Template image: macOS renders the black silhouette in the menu-bar colour —
+    // white on a dark bar, black on light — so the `th` mark stays legible instead
+    // of a low-contrast teal. No-op off macOS.
+    icon.setTemplateImage(true);
     tray = new Tray(icon);
     tray.setToolTip('Big Smooth');
     tray.on('click', showWindow);
@@ -169,6 +176,15 @@ async function refreshDiscovery(): Promise<void> {
     } catch {
         applyTrayMenu([]);
     }
+}
+
+/** IPC the preload exposes to the SPA's Settings → Connection: the same
+ * list + switch the tray Connect menu drives, so either surface can reconnect. */
+function registerIpc(): void {
+    ipcMain.handle('daemons:list', async () => ({ current: remoteUrl() || null, daemons: await discoverDaemons() }));
+    ipcMain.handle('daemons:connect', (_event, url: unknown) => {
+        connectTo(typeof url === 'string' && url !== '' ? url : null);
+    });
 }
 
 /** Switch the daemon target (null = local) and relaunch so `main()` re-reads it —
