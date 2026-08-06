@@ -6,12 +6,16 @@
 //! an umbrella tool's description. A dedicated `web_search { query }` tool with a
 //! typed parameter is picked reliably.
 //!
-//! **th-7031ba**: results now come from [`crate::search_native`] — public search
-//! APIs called in-process — instead of shelling `th search`, which required Smoo
-//! auth plus api.smoo.ai being reachable. `answer: true` still prefers the
-//! in-house service (it's the only one that synthesizes an answer) and falls
-//! back to native results when it isn't available, so the tool returns something
-//! useful on any machine, logged in or not.
+//! **th-67180f**: prefer the Smoo cluster search (`th search`) first — it's the
+//! good one (the same search the org's Smooth Operator uses, better ranking than
+//! the keyless public APIs, and the only source that can synthesize an answer) —
+//! and fall back to [`crate::search_native`] (public keyless search APIs called
+//! in-process) only when the cluster is unavailable: `th` missing, not logged
+//! in, or api.smoo.ai unreachable. So a logged-in daemon (smoo-hub) gets real
+//! cluster results, and a bare machine still gets something useful.
+//!
+//! (Supersedes th-7031ba, which had inverted this to native-first and left the
+//! cluster reachable only on `answer: true`.)
 
 use std::path::PathBuf;
 
@@ -24,9 +28,10 @@ use crate::search_native;
 /// How many ranked results a `web_search` call returns.
 const MAX_RESULTS: usize = 8;
 
-/// `web_search` — current-information web search over public search APIs.
+/// `web_search` — current-information web search: the Smoo cluster (`th search`)
+/// first, public keyless APIs as a fallback.
 pub struct WebSearchTool {
-    /// Working directory for the `th` invocation (the `answer: true` path).
+    /// Working directory for the `th search` (cluster) invocation.
     pub workspace: PathBuf,
 }
 
@@ -61,16 +66,18 @@ impl Tool for WebSearchTool {
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let query = query_of(&arguments)?;
-        // Answer synthesis only exists on the Smoo service; try it, but never let
-        // an unauthenticated/unreachable service cost us the results.
+        // Cluster first (th-67180f): the org's own search — better ranking, and
+        // the only path that synthesizes an answer. `capture_th` returns Some
+        // only on clean success, so a missing/logged-out/unreachable `th` just
+        // yields None and we fall back to native, never a bare error.
+        let mut args = vec!["search".to_owned(), query.to_owned()];
         if arguments.get("answer").and_then(Value::as_bool) == Some(true) {
-            let args = vec!["search".to_owned(), query.to_owned(), "--answer".to_owned()];
-            match crate::th::run_th(&args, &self.workspace).await {
-                Ok(out) if !out.trim().is_empty() => return Ok(out),
-                Ok(_) => tracing::debug!("`th search --answer` returned nothing; falling back to native search"),
-                Err(err) => tracing::debug!(%err, "`th search --answer` unavailable; falling back to native search"),
-            }
+            args.push("--answer".to_owned());
         }
+        if let Some(out) = crate::th::capture_th(&args, &self.workspace).await {
+            return Ok(out);
+        }
+        tracing::debug!("`th search` unavailable; falling back to native search");
         // Boxed: four concurrent HTTP futures make a fat state machine to hold
         // inline in every tool-call frame.
         let results = Box::pin(search_native::search(query, MAX_RESULTS)).await;
