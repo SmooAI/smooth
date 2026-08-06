@@ -523,6 +523,9 @@ Things worth knowing before you use it:
   whole column, so `th branding` reads-modifies-writes it for you. An empty
   string (`--accent ''`) clears a token; an untouched token stays untouched.
   There is no PATCH on this route, so PUT-with-merge is the permanent contract.
+  The merge sends **only keys that carry a value** — it never null-pads absent
+  tokens, and it drops nulls already in the row, so one `th branding set` heals
+  a row the dashboard poisoned (SMOODEV-2822).
 - **`from-url` shows which logo candidate it picked** (`→` vs `○`). The
   extractor can return several per kind and the first isn't always the mark —
   one real run returned the wordmark *and* the page's `og:image` screenshot,

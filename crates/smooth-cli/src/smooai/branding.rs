@@ -482,6 +482,13 @@ fn merge_theme(current: Option<&Value>, updates: &[(&str, &str)]) -> Value {
     for (k, v) in updates {
         theme.insert((*k).to_string(), nullable(v));
     }
+    // Emit only keys that carry a value. Because PUT replaces the whole column,
+    // an absent key and a null one read identically — so dropping nulls clears
+    // a token just as well while keeping the payload to what's actually set.
+    // That matters beyond tidiness: a strict server rejects on the KEY, not the
+    // value, so a row already holding null-valued keys would otherwise poison
+    // every later write (SMOODEV-2822 — the dashboard emits exactly that).
+    theme.retain(|_, v| !v.is_null());
     Value::Object(theme)
 }
 
@@ -1243,7 +1250,7 @@ mod tests {
         assert!(after_c.get("border").is_none(), "an untouched token must not appear as null");
         // Clearing one leaves the rest alone.
         let cleared = merge_theme(Some(&after_c), &[("accent", "")]);
-        assert!(cleared["accent"].is_null());
+        assert!(cleared.get("accent").is_none());
         assert_eq!(cleared["primary"], "#111111");
     }
 
@@ -1252,7 +1259,30 @@ mod tests {
         let fresh = merge_theme(None, &[("primary", "#fff")]);
         assert_eq!(fresh["primary"], "#fff");
         let cleared = merge_theme(Some(&json!({ "primary": "#fff" })), &[("primary", "")]);
-        assert!(cleared["primary"].is_null());
+        assert!(cleared.get("primary").is_none(), "a cleared token is dropped, not sent as null");
+    }
+
+    #[test]
+    fn merge_never_emits_a_null_and_never_pads_absent_tokens() {
+        // SMOODEV-2822: the dashboard emits every surface key unconditionally,
+        // null when blank, and a strict server rejects on the KEY regardless of
+        // value — so one dashboard save would poison every later CLI write.
+        // We send ONLY keys that carry a value: no padding, and inherited nulls
+        // are dropped rather than echoed back.
+        let poisoned = json!({
+            "primary": "#7c3aed", "accent": null, "colorScheme": null, "background": null,
+            "foreground": null, "card": null, "border": null, "mutedForeground": null,
+        });
+        let merged = merge_theme(Some(&poisoned), &[("accent", "#47c4d7")]);
+        let obj = merged.as_object().unwrap();
+        assert!(obj.values().all(|v| !v.is_null()), "must never emit a null theme key: {merged}");
+        assert_eq!(obj.len(), 2, "only the two tokens that carry a value: {merged}");
+        assert_eq!(obj["primary"], "#7c3aed");
+        assert_eq!(obj["accent"], "#47c4d7");
+
+        // And setting one token never invents the other twelve.
+        let one = merge_theme(None, &[("primary", "#111111")]);
+        assert_eq!(one.as_object().unwrap().len(), 1);
     }
 
     #[test]
