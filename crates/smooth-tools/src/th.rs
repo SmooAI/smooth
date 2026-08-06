@@ -149,6 +149,38 @@ pub(crate) fn th_is_resolvable() -> bool {
     resolve_th().is_some()
 }
 
+/// Run `th <args>` and return its stdout **only on clean success** (exit 0,
+/// non-blank stdout). Returns `None` when `th` is missing, exits non-zero
+/// (e.g. not logged in / api.smoo.ai unreachable), or prints nothing — the
+/// caller's cue to fall back. Unlike [`run_th`] this returns the raw stdout,
+/// not the `$ th … / exit / stdout / stderr` frame, so results go straight to
+/// the model.
+pub(crate) async fn capture_th(args: &[String], cwd: &std::path::Path) -> Option<String> {
+    let bin = resolve_th()?;
+    let output = tokio::process::Command::new(&bin)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    accept_stdout(output.status.success(), &output.stdout)
+}
+
+/// Accept a subprocess' stdout only on clean success with non-blank output
+/// (truncated to [`OUTPUT_CAP`]); otherwise `None`. Split out from
+/// [`capture_th`] so the decision is testable without spawning a process.
+fn accept_stdout(success: bool, stdout: &[u8]) -> Option<String> {
+    if !success {
+        return None;
+    }
+    let stdout = truncate(&String::from_utf8_lossy(stdout));
+    (!stdout.trim().is_empty()).then_some(stdout)
+}
+
 /// Extract the required `args` array as a `Vec<String>`, rejecting non-string
 /// elements. At least one arg is required.
 fn parse_args(arguments: &Value) -> anyhow::Result<Vec<String>> {
@@ -209,6 +241,17 @@ mod tests {
     #[test]
     fn parse_args_rejects_non_string_elements() {
         assert!(parse_args(&json!({"args": ["search", 7]})).is_err());
+    }
+
+    #[test]
+    fn accept_stdout_keeps_clean_success_and_rejects_the_rest() {
+        // Clean success with real output → kept (this is the cluster-hit path).
+        assert_eq!(accept_stdout(true, b"results\n").as_deref(), Some("results\n"));
+        // Non-zero exit (not logged in / unreachable) → fall back.
+        assert_eq!(accept_stdout(false, b"results"), None);
+        // Success but empty/blank stdout → nothing to show → fall back.
+        assert_eq!(accept_stdout(true, b""), None);
+        assert_eq!(accept_stdout(true, b"   \n"), None);
     }
 
     /// Every non-env lookup in `resolve_th` joins a directory with this name,
