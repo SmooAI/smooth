@@ -28,7 +28,38 @@ if (!version) {
     process.exit(1);
 }
 
+// The Claude Code plugin ships this repo's hooks (worktree enforcement,
+// th-over-curl, attest-push-hint). Its manifests carry their OWN version, and
+// `claude plugin update` only reinstalls when it sees a version DELTA — so a
+// plugin change that ships without a bump is a change nobody can install.
+//
+// That is not hypothetical: smooth-agent sat installed at 0.2.0 for 26 days
+// (2026-07-11 → 2026-08-06) while this repo shipped 20+ versions. Two hooks
+// merged in that window simply never ran on anyone's machine, and the one that
+// prompted this — attest-push-hint — was reported as "live" three separate
+// times while doing nothing.
+//
+// Riding the changeset version removes the judgment call entirely: every
+// release bumps the plugin, so an installed copy is always comparable to the
+// published one. Over-bumping (plugin version moves when only Rust changed) is
+// harmless — `claude plugin update` just reinstalls the same hooks.
+//
+// plugin.json and the marketplace entry MUST agree; `claude plugin tag`
+// validates that, so both are updated here together.
+const pluginVersion = (label) => ({
+    path: label,
+    apply(content) {
+        const pattern = /("version"\s*:\s*")([^"]+)(")/;
+        if (!pattern.test(content)) {
+            throw new Error(`"version" not found in ${label}`);
+        }
+        return content.replace(pattern, `$1${version}$3`);
+    },
+});
+
 const updates = [
+    pluginVersion("claude-plugins/smooth-agent/.claude-plugin/plugin.json"),
+    pluginVersion(".claude-plugin/marketplace.json"),
     {
         path: "Cargo.toml",
         apply(content) {
