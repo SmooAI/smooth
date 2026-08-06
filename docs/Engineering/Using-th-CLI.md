@@ -488,6 +488,50 @@ th testing deployments|cases|environments <sub>
 This replaces the old `npx @smooai/testing runs report` + `junit-to-ctrf`
 combo — one `th` invocation, authed the same way every other `th` command is.
 
+### White-label branding (`th branding`, alias `th brand`)
+
+Top-level, like `th crm` — SMOODEV-2820. Wraps the org's white-label row
+(`/organizations/{org}/branding`) and re-hosts logos on our CDN so a partner's
+own server is never left as the source of truth for their mark.
+
+```bash
+th branding show [--json]                          # LIVE vs staged, swatch table, preview URL
+th branding from-url https://partner.example       # DRY RUN — theme, logos, contrast verdict
+th branding from-url https://partner.example --apply    # stage it (enabled stays false)
+th branding from-url https://partner.example --enable   # stage AND go live
+th branding set --app-name "Acme CRM" --primary '#7c3aed' --primary-foreground '#ffffff'
+th branding set --logo ./logo.png --logo-dark https://partner.example/dark.svg --favicon ./icon.svg
+th branding enable                                 # the live switch
+th branding disable                                # keeps the config, stops applying it
+th branding preview                                # the ?brandPreview=1 URL
+th branding clear --yes                            # delete the row
+```
+
+Things worth knowing before you use it:
+
+- **A row existing is NOT enablement.** `--apply` stages; `enable` goes live.
+  Staged branding renders at `…/apps?brandPreview=1` for anyone with the link.
+- **`enable` refuses a theme that fails WCAG AA (4.5:1).** Shipping an
+  unreadable dashboard to a partner is the failure this gate exists for.
+  `--force` overrides it, deliberately loudly.
+- **`--logo` / `--logo-dark` / `--favicon` take a local path or a remote URL.**
+  A remote URL is fetched (http(s) only, no private/loopback/link-local hosts,
+  no redirect following, 5 MB cap) and re-uploaded to the org's brand assets.
+  `.ico` is rejected — the platform's allowlist is png / jpeg / gif / webp / svg.
+- **`set` is partial**, including `themeJson`: the server's PUT replaces that
+  whole column, so `th branding` reads-modifies-writes it for you. An empty
+  string (`--accent ''`) clears a token.
+- **The Aurora meaning tokens are never white-labeled** — `--color-heat-0..5`,
+  `--color-ai`, `--gradient-aurora`, ok/warn/crit encode meaning, not chrome,
+  and there are deliberately no flags for them.
+- **Auth:** the user JWT (`th auth login`), because the M2M session is
+  org-locked and 403s on any org whose client you don't hold.
+- **Known server gap:** the platform's write validator is still Phase 1, so the
+  surface tokens (`--background`, `--card`, `--sidebar`, …) 400 today; the CLI
+  turns that into a diagnosis naming the two stale schemas. `from-url` 404s
+  until the propose endpoint deploys. Accent tokens, logos, and the
+  enable/disable/clear lifecycle all work now.
+
 ### Profile / products
 
 ```bash
@@ -1075,6 +1119,11 @@ th api jobs list
 th api config values --environment=production
 th api members list
 th api keys list                                                    # (403 today on M2M tokens — uses dashboard auth)
+
+# White-label a partner org
+th branding from-url https://partner.example                        # dry run
+th branding set --logo ./logo.png --primary '#7c3aed'
+th branding enable                                                  # refuses on bad contrast
 
 # Pearls
 th pearls ready
