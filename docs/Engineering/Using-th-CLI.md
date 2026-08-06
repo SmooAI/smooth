@@ -499,6 +499,7 @@ th branding show [--json]                          # LIVE vs staged, swatch tabl
 th branding from-url https://partner.example       # DRY RUN — theme, logos, contrast verdict
 th branding from-url https://partner.example --apply    # stage it (enabled stays false)
 th branding from-url https://partner.example --enable   # stage AND go live
+th branding from-url https://partner.example --apply --logo ./real-logo.svg   # override a bad pick
 th branding set --app-name "Acme CRM" --primary '#7c3aed' --primary-foreground '#ffffff'
 th branding set --logo ./logo.png --logo-dark https://partner.example/dark.svg --favicon ./icon.svg
 th branding enable                                 # the live switch
@@ -520,7 +521,12 @@ Things worth knowing before you use it:
   `.ico` is rejected — the platform's allowlist is png / jpeg / gif / webp / svg.
 - **`set` is partial**, including `themeJson`: the server's PUT replaces that
   whole column, so `th branding` reads-modifies-writes it for you. An empty
-  string (`--accent ''`) clears a token.
+  string (`--accent ''`) clears a token; an untouched token stays untouched.
+  There is no PATCH on this route, so PUT-with-merge is the permanent contract.
+- **`from-url` shows which logo candidate it picked** (`→` vs `○`). The
+  extractor can return several per kind and the first isn't always the mark —
+  one real run returned the wordmark *and* the page's `og:image` screenshot,
+  both as `logo`. Override with `--logo` / `--logo-dark` / `--favicon`.
 - **The Aurora meaning tokens are never white-labeled** — `--color-heat-0..5`,
   `--color-ai`, `--gradient-aurora`, ok/warn/crit encode meaning, not chrome,
   and there are deliberately no flags for them.

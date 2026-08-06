@@ -188,6 +188,15 @@ pub enum Cmd {
         /// Skip re-hosting the logo candidates (colors + app name only).
         #[arg(long = "no-logo")]
         no_logo: bool,
+        /// Use this logo instead of the extractor's pick (path or URL).
+        #[arg(long)]
+        logo: Option<String>,
+        /// Use this dark logo instead of the extractor's pick (path or URL).
+        #[arg(long = "logo-dark")]
+        logo_dark: Option<String>,
+        /// Use this favicon instead of the extractor's pick (path or URL).
+        #[arg(long)]
+        favicon: Option<String>,
         /// Go live even though the contrast check fails.
         #[arg(long)]
         force: bool,
@@ -275,11 +284,24 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             apply,
             enable,
             no_logo,
+            logo,
+            logo_dark,
+            favicon,
             force,
             json,
         } => {
             let o = require_active_org(&client, org)?;
-            from_url(&client, &o, &url, apply || enable, enable, no_logo, force, json).await?;
+            let opts = FromUrlOpts {
+                apply: apply || enable,
+                enable,
+                no_logo,
+                force,
+                as_json: json,
+                logo,
+                logo_dark,
+                favicon,
+            };
+            from_url(&client, &o, &url, &opts).await?;
         }
         Cmd::Set {
             theme,
@@ -407,8 +429,11 @@ async fn put_branding(client: &SmoothApiClient, org: &str, body: &Value) -> Resu
 }
 
 /// Map a raw PUT error onto the cause. The stale-schema 400 is the one that
-/// will bite until the two `ThemeOverride` structs catch up with the canonical
+/// will bite until the server's theme validator catches up with the canonical
 /// Zod (see the module docs); a 403 is almost always the org-locked M2M token.
+///
+/// Deliberately points at *what* the server doesn't understand, not at which
+/// file to edit — the files move, the symptom doesn't.
 fn explain_put_failure(err: &str, body: &Value) -> anyhow::Error {
     if err.contains("HTTP 400") {
         let offenders: Vec<&str> = body
@@ -418,11 +443,10 @@ fn explain_put_failure(err: &str, body: &Value) -> anyhow::Error {
             .unwrap_or_default();
         if !offenders.is_empty() {
             return anyhow::anyhow!(
-                "{err}\n\nthe theme tokens {} are rejected by the server's white-label write validator, \
-                 which is still Phase 1 (primary / primaryForeground / accent / accentForeground only). \
-                 Both `rust/api-prime/src/handlers/organization_branding.rs::ThemeOverride` and \
-                 `packages/backend/src/routes/organization-branding.ts::ThemeOverrideOpenApi` need the \
-                 SMOODEV-1813 surface tokens added. Until then, set only the accent tokens.",
+                "{err}\n\nthe server's theme schema predates the token(s) you set: {}. \
+                 It still accepts only the accent layer (primary / primaryForeground / accent / accentForeground), \
+                 while the canonical schema and the dashboard's read path carry the full surface layer. \
+                 Set only the accent tokens until the write validator is widened.",
                 offenders.join(", ")
             );
         }
@@ -556,13 +580,12 @@ fn contrast_verdict(theme: Option<&Value>) -> Verdict {
 fn print_contrast(verdict: &Verdict, server: Option<&Contrast>) {
     println!();
     println!("  {}", "Contrast".bold());
-    if let Some(c) = server {
-        for (label, ratio) in [
-            ("foreground on background", c.foreground_on_background),
-            ("primaryForeground on primary", c.primary_foreground_on_primary),
-            ("mutedForeground on background", c.muted_foreground_on_background),
-        ] {
-            let Some(r) = ratio else { continue };
+    // The server omits a ratio it couldn't derive, so `passes: true` with zero
+    // ratios is vacuous — an empty proposal trivially "passes". Never paint a
+    // green check over nothing; say what wasn't measured and let the local
+    // verdict below speak instead.
+    if let Some(c) = server.filter(|c| !c.measured().is_empty()) {
+        for (label, r) in c.measured() {
             print_ratio(label, Some(r));
         }
         for w in &c.warnings {
@@ -575,6 +598,13 @@ fn print_contrast(verdict: &Verdict, server: Option<&Contrast>) {
         }
         println!();
         return;
+    }
+    if server.is_some() {
+        println!(
+            "    {} {}",
+            "●".dimmed(),
+            "the extractor measured no color pairs — its verdict is vacuous".dimmed()
+        );
     }
     if verdict.pairs.is_empty() {
         println!("    {} nothing to check — the theme keeps the Smoo defaults", "●".dimmed());
@@ -726,9 +756,28 @@ struct Contrast {
 }
 
 impl Proposal {
-    /// First candidate of each kind. The extractor emits them best-first.
+    /// First candidate of each kind. The extractor emits them best-first and
+    /// can return several per kind (a real run returned the wordmark PNG *and*
+    /// the `og:image` page graphic, both as `logo`), so the pick is shown in
+    /// the output and overridable with `--logo` / `--logo-dark` / `--favicon`.
     fn candidate(&self, kind: &str) -> Option<&LogoCandidate> {
         self.logo_candidates.iter().find(|c| c.kind == kind)
+    }
+}
+
+impl Contrast {
+    /// The ratios the extractor actually derived. Absent (not null) is how it
+    /// reports "couldn't measure this pair", so an empty result means the
+    /// `passes` flag has nothing behind it.
+    fn measured(&self) -> Vec<(&'static str, f64)> {
+        [
+            ("foreground on background", self.foreground_on_background),
+            ("primaryForeground on primary", self.primary_foreground_on_primary),
+            ("mutedForeground on background", self.muted_foreground_on_background),
+        ]
+        .into_iter()
+        .filter_map(|(label, r)| r.map(|r| (label, r)))
+        .collect()
     }
 }
 
@@ -746,8 +795,40 @@ fn refuse_to_go_live(contrast: Option<&Contrast>, theme: Option<&Value>, force: 
     !force && (server_refuses(contrast) || !contrast_verdict(theme).passes())
 }
 
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-async fn from_url(client: &SmoothApiClient, org: &str, url: &str, apply: bool, enable: bool, no_logo: bool, force: bool, as_json: bool) -> Result<()> {
+/// Everything `from-url` does beyond "fetch the proposal".
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools, reason = "these are the command's flags, one field per flag")]
+struct FromUrlOpts {
+    apply: bool,
+    enable: bool,
+    no_logo: bool,
+    force: bool,
+    as_json: bool,
+    logo: Option<String>,
+    logo_dark: Option<String>,
+    favicon: Option<String>,
+}
+
+impl FromUrlOpts {
+    /// The operator's override for a slot, if they passed one.
+    fn override_for(&self, slot: Slot) -> Option<&str> {
+        match slot {
+            Slot::Logo => self.logo.as_deref(),
+            Slot::LogoDark => self.logo_dark.as_deref(),
+            Slot::Favicon => self.favicon.as_deref(),
+        }
+    }
+}
+
+async fn from_url(client: &SmoothApiClient, org: &str, url: &str, opts: &FromUrlOpts) -> Result<()> {
+    let FromUrlOpts {
+        apply,
+        enable,
+        no_logo,
+        force,
+        as_json,
+        ..
+    } = *opts;
     let raw = client
         .post(&format!("/organizations/{org}/branding/propose"), Some(&json!({ "url": url })))
         .await
@@ -775,7 +856,7 @@ async fn from_url(client: &SmoothApiClient, org: &str, url: &str, apply: bool, e
             println!("  {:<12} {}", "App name:".dimmed(), name.bold());
         }
         print_theme(proposal.theme.as_ref());
-        print_candidates(&proposal);
+        print_candidates(&proposal, opts);
         print_contrast(&contrast_verdict(proposal.theme.as_ref()), proposal.contrast.as_ref());
         for n in &proposal.notes {
             println!("  {} {}", "●".dimmed(), n.dimmed());
@@ -816,15 +897,20 @@ async fn from_url(client: &SmoothApiClient, org: &str, url: &str, apply: bool, e
             ("logo", "logoUrl", Slot::Logo),
             ("favicon", "faviconUrl", Slot::Favicon),
         ] {
-            let Some(c) = proposal.candidate(kind) else { continue };
+            // An explicit --logo/--logo-dark/--favicon beats the extractor's
+            // pick. Worth having: the first `logo` candidate is sometimes the
+            // page's og:image (a screenshot) rather than the mark.
+            let Some(src) = opts.override_for(slot).or_else(|| proposal.candidate(kind).map(|c| c.url.as_str())) else {
+                continue;
+            };
             // A single unusable candidate (an .ico favicon, a 404, a host that
             // resolves private) must not sink the whole apply — the colors are
             // still worth writing.
-            match resolve_asset(client, org, slot, &c.url).await {
+            match resolve_asset(client, org, slot, src).await {
                 Ok(hosted) => {
                     body.insert(field.into(), json!(hosted));
                 }
-                Err(e) => eprintln!("  {} skipped {kind} ({}): {e}", "!".yellow(), c.url.dimmed()),
+                Err(e) => eprintln!("  {} skipped {kind} ({}): {e}", "!".yellow(), src.dimmed()),
             }
         }
     }
@@ -840,15 +926,32 @@ async fn from_url(client: &SmoothApiClient, org: &str, url: &str, apply: bool, e
     Ok(())
 }
 
-fn print_candidates(proposal: &Proposal) {
+/// List the candidates, marking the one that would actually be used for each
+/// slot. The extractor can return several per kind and the first isn't always
+/// the mark — showing the pick is what makes the `--logo` override discoverable.
+fn print_candidates(proposal: &Proposal, opts: &FromUrlOpts) {
+    for (kind, slot) in [("logo", Slot::Logo), ("logoDark", Slot::LogoDark), ("favicon", Slot::Favicon)] {
+        if let Some(src) = opts.override_for(slot) {
+            println!("  {} {:<10} {} {}", "→".green().bold(), kind.bold(), src, "(--override)".dimmed());
+        }
+    }
     if proposal.logo_candidates.is_empty() {
         println!("  {} {}", "Logos:".dimmed(), "none found".dimmed());
         return;
     }
     println!("  {}", "Logo candidates".bold());
+    let mut seen: Vec<&str> = Vec::new();
     for c in &proposal.logo_candidates {
+        let overridden = Slot::for_kind(&c.kind).is_some_and(|s| opts.override_for(s).is_some());
+        let picked = !overridden && !seen.contains(&c.kind.as_str());
+        seen.push(&c.kind);
         let src = c.source.as_deref().unwrap_or("");
-        println!("    {} {:<10} {} {}", "○".dimmed(), c.kind.bold(), c.url, format!("({src})").dimmed());
+        let marker = if picked {
+            "→".green().bold().to_string()
+        } else {
+            "○".dimmed().to_string()
+        };
+        println!("    {marker} {:<10} {} {}", c.kind.bold(), c.url, format!("({src})").dimmed());
     }
 }
 
@@ -858,7 +961,7 @@ fn print_candidates(proposal: &Proposal) {
 
 /// What the asset is for. Distinct from the upload endpoint's `variant`,
 /// which has no dark slot — see [`Slot::variant`].
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
     Logo,
     LogoDark,
@@ -866,6 +969,16 @@ enum Slot {
 }
 
 impl Slot {
+    /// The propose endpoint's `kind` → the slot it fills.
+    fn for_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "logo" => Some(Self::Logo),
+            "logoDark" => Some(Self::LogoDark),
+            "favicon" => Some(Self::Favicon),
+            _ => None,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Logo => "logo",
@@ -1116,6 +1229,25 @@ mod tests {
     }
 
     #[test]
+    fn sequential_sets_accumulate_rather_than_replace() {
+        // The behavior most likely to regress silently: PUT replaces the whole
+        // theme_json column, so `set A` then `set B` must leave A in place —
+        // and an absent token must stay absent, not become an explicit null.
+        let after_a = merge_theme(None, &[("primary", "#111111")]);
+        let after_b = merge_theme(Some(&after_a), &[("accent", "#222222")]);
+        let after_c = merge_theme(Some(&after_b), &[("sidebar", "#333333")]);
+        assert_eq!(after_c["primary"], "#111111");
+        assert_eq!(after_c["accent"], "#222222");
+        assert_eq!(after_c["sidebar"], "#333333");
+        // Absent ≠ null: untouched tokens are not written at all.
+        assert!(after_c.get("border").is_none(), "an untouched token must not appear as null");
+        // Clearing one leaves the rest alone.
+        let cleared = merge_theme(Some(&after_c), &[("accent", "")]);
+        assert!(cleared["accent"].is_null());
+        assert_eq!(cleared["primary"], "#111111");
+    }
+
+    #[test]
     fn merge_from_nothing_and_clears_with_empty_string() {
         let fresh = merge_theme(None, &[("primary", "#fff")]);
         assert_eq!(fresh["primary"], "#fff");
@@ -1293,6 +1425,77 @@ mod tests {
         assert!(!refuse_to_go_live(None, None, false));
     }
 
+    /// The real chakrasolutions.ai run (Lane A, PR #3676) — multiple candidates
+    /// per kind, and the second `logo` is the page's og:image rather than the mark.
+    const CHAKRA_LIVE_FIXTURE: &str = r##"{
+      "url": "https://chakrasolutions.ai/",
+      "theme": { "colorScheme":"light","primary":"#8b5cf6","primaryForeground":"#000000","accent":"#47c4d7",
+                 "background":"#ffffff","foreground":"#000000","card":"#f5f5f5","border":"#eeeeee",
+                 "muted":"#f4f4f4","mutedForeground":"#686e77" },
+      "appName": "Chakra AI Solutions",
+      "logoCandidates": [ { "url":"https://x/wordmark.png", "kind":"logo",    "source":"img" },
+                          { "url":"https://x/og-image.png", "kind":"logo",    "source":"meta[og:image]" },
+                          { "url":"https://x/icon-32.png",  "kind":"favicon", "source":"link[rel=icon]" },
+                          { "url":"https://x/icon-192.png", "kind":"favicon", "source":"link[rel=icon]" } ],
+      "dominantColors": [ { "hex":"#ffffff","weight":141,"luminance":1,"chroma":0,"hue":null } ],
+      "contrast": { "foregroundOnBackground":21, "primaryForegroundOnPrimary":4.96,
+                    "mutedForegroundOnBackground":4.54, "passes":true, "warnings":[] },
+      "notes": []
+    }"##;
+
+    #[test]
+    fn live_chakra_fixture_picks_first_per_kind_and_agrees_on_contrast() {
+        let p: Proposal = serde_json::from_str(CHAKRA_LIVE_FIXTURE).unwrap();
+        // Two `logo` and two `favicon` — best-first, so first-match per kind.
+        assert_eq!(p.logo_candidates.len(), 4);
+        assert_eq!(p.candidate("logo").map(|c| c.url.as_str()), Some("https://x/wordmark.png"));
+        assert_eq!(p.candidate("favicon").map(|c| c.url.as_str()), Some("https://x/icon-32.png"));
+        // No logoDark on this site — the slot is simply left alone.
+        assert!(p.candidate("logoDark").is_none());
+        // `hue: null` on a true neutral must not break the parse.
+        assert!(p.contrast.is_some());
+        // Our local check and the server's report must agree on the verdict,
+        // even though the two compute the ratios slightly differently.
+        assert!(!refuse_to_go_live(p.contrast.as_ref(), p.theme.as_ref(), false));
+    }
+
+    #[test]
+    fn overrides_beat_the_extractors_pick() {
+        let opts = FromUrlOpts {
+            logo: Some("./our-logo.svg".into()),
+            ..Default::default()
+        };
+        assert_eq!(opts.override_for(Slot::Logo), Some("./our-logo.svg"));
+        assert_eq!(opts.override_for(Slot::Favicon), None);
+        assert_eq!(Slot::for_kind("logoDark"), Some(Slot::LogoDark));
+        assert_eq!(Slot::for_kind("wordmark"), None);
+    }
+
+    #[test]
+    fn a_verdict_with_no_measurements_is_vacuous() {
+        // The extractor OMITS a ratio it couldn't derive, so `passes: true`
+        // with nothing measured must not read as a pass — an empty proposal
+        // would otherwise sail through `--enable`.
+        let empty = Contrast {
+            passes: Some(true),
+            ..Default::default()
+        };
+        assert!(empty.measured().is_empty());
+
+        let real: Proposal = serde_json::from_str(CHAKRA_LIVE_FIXTURE).unwrap();
+        let measured = real.contrast.as_ref().unwrap().measured();
+        assert_eq!(measured.len(), 3);
+        assert!((measured[0].1 - 21.0).abs() < f64::EPSILON);
+
+        // A partial report is still real evidence for the pairs it covers.
+        let partial = Contrast {
+            foreground_on_background: Some(12.0),
+            passes: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(partial.measured().len(), 1);
+    }
+
     #[test]
     fn swatch_renders_a_block_for_hex_and_blank_for_anything_else() {
         let block = swatch("#7c3aed");
@@ -1420,14 +1623,16 @@ mod tests {
         let msg = explain_put_failure("PUT /x returned HTTP 400 Bad Request: Invalid request body", &body).to_string();
         assert!(msg.contains("background"), "must name the offending token: {msg}");
         assert!(!msg.contains("primary = "), "must not blame an accepted token");
-        assert!(msg.contains("Phase 1"));
+        assert!(msg.contains("predates"), "must explain the cause: {msg}");
+        // Worded to age: it describes the symptom, not a file that will move.
+        assert!(!msg.contains(".rs") && !msg.contains(".ts"), "must not name source files: {msg}");
     }
 
     #[test]
     fn other_failures_are_passed_through_or_explained_on_their_own_terms() {
         let accent_only = json!({ "themeJson": { "primary": "#fff" } });
         let msg = explain_put_failure("PUT /x returned HTTP 400 Bad Request: nope", &accent_only).to_string();
-        assert!(!msg.contains("Phase 1"), "accent-only 400 has a different cause: {msg}");
+        assert!(!msg.contains("predates"), "accent-only 400 has a different cause: {msg}");
 
         let forbidden = explain_put_failure("PUT /x returned HTTP 403 Forbidden", &json!({})).to_string();
         assert!(forbidden.contains("th auth login"));

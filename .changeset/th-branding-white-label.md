@@ -28,6 +28,10 @@ Three things it refuses to do, on purpose:
 `from-url` is a dry run by default: it prints the derived swatch table, the logo
 candidates and the contrast verdict, and writes nothing. `--apply` stages
 (`enabled` stays false, previewable via `?brandPreview=1`); `--enable` goes live.
+It marks which candidate it picked per slot — the extractor can return several
+per kind and the first isn't always the mark — and `--logo` / `--logo-dark` /
+`--favicon` override the pick. A verdict with no measured ratios is reported as
+vacuous rather than as a pass.
 
 The Aurora meaning tokens (`--color-heat-0..5`, `--color-ai`, `--gradient-aurora`,
 ok/warn/crit) are never white-labeled and the command exposes no flags for them.
