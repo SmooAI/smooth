@@ -28,7 +28,38 @@ if (!version) {
     process.exit(1);
 }
 
+// The Claude Code plugin ships this repo's hooks (worktree enforcement,
+// th-over-curl, attest-push-hint). Its manifests carry their OWN version, and
+// `claude plugin update` only reinstalls when it sees a version DELTA — so a
+// plugin change that ships without a bump is a change nobody can install.
+//
+// That is not hypothetical: smooth-agent sat installed at 0.2.0 for 26 days
+// (2026-07-11 → 2026-08-06) while this repo shipped 20+ versions. Two hooks
+// merged in that window simply never ran on anyone's machine, and the one that
+// prompted this — attest-push-hint — was reported as "live" three separate
+// times while doing nothing.
+//
+// Riding the changeset version removes the judgment call entirely: every
+// release bumps the plugin, so an installed copy is always comparable to the
+// published one. Over-bumping (plugin version moves when only Rust changed) is
+// harmless — `claude plugin update` just reinstalls the same hooks.
+//
+// plugin.json and the marketplace entry MUST agree; `claude plugin tag`
+// validates that, so both are updated here together.
+const pluginVersion = (label) => ({
+    path: label,
+    apply(content) {
+        const pattern = /("version"\s*:\s*")([^"]+)(")/;
+        if (!pattern.test(content)) {
+            throw new Error(`"version" not found in ${label}`);
+        }
+        return content.replace(pattern, `$1${version}$3`);
+    },
+});
+
 const updates = [
+    pluginVersion("claude-plugins/smooth-agent/.claude-plugin/plugin.json"),
+    pluginVersion(".claude-plugin/marketplace.json"),
     {
         path: "Cargo.toml",
         apply(content) {
@@ -118,19 +149,26 @@ const updates = [
             // smooth-operator repo — their locked versions track that repo, NOT
             // the workspace version. Bumping a lock entry to a workspace version
             // that source never published breaks `cargo` resolution under
-            // `--locked` ("= "*" locked to 0.23.0 … candidate 1.23.1"). Three
-            // package names, matched exactly:
-            //   - `smooai-smooth-operator-core`   (crates.io engine)
-            //   - `smooai-smooth-operator-server` (git dep)
-            //   - `smooai-smooth-operator`        (git dep, the svc crate)
-            // The Cargo.toml dep skip (above) keys on `git =`, but lock entries
-            // carry `source` on a separate line outside this 2-line match, so
-            // here we skip by exact name. Pearl th-1ee32b (the lock twin the
-            // git-dep Cargo.toml fix in #260 left behind).
+            // `--locked` ("= "*" locked to 0.23.0 … candidate 1.23.1"). Pearl
+            // th-1ee32b (the lock twin the git-dep Cargo.toml fix in #260 left
+            // behind).
+            //
+            // Matched by PREFIX, not by an exact list. It used to be
+            // `(-core|-server)?`, which silently missed
+            // `smooai-smooth-operator-adapter-memory` and
+            // `smooai-smooth-operator-ingestion` once those joined the dep graph
+            // — so every `version:sync` rewrote two git-dep entries and every
+            // lock-touching PR carried the churn (pearl th-16ff70, "flips
+            // 0.23.x↔1.23.x on every local build").
+            //
+            // A hand-maintained allowlist cannot track a dependency graph that
+            // grows upstream. The prefix is safe because NO crate in this
+            // workspace is named `smooai-smooth-operator*` — the engine lives in
+            // its own repo (see CLAUDE.md §1); `ls crates/` is the check.
             const pattern =
                 /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
             return content.replace(pattern, (match, pre, _ver, post) => {
-                if (/name = "smooai-smooth-operator(-core|-server)?"\n/.test(pre)) {
+                if (/name = "smooai-smooth-operator[^"]*"\n/.test(pre)) {
                     return match;
                 }
                 return `${pre}${version}${post}`;

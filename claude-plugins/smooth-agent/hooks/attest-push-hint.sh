@@ -30,12 +30,42 @@ echo "$CMD" | grep -q 'attest:ack' && exit 0
 # Only care about an actual `git push` that publishes commits. Skip the forms that
 # publish nothing a CI run would check: tag/branch deletion, --dry-run, and
 # `th pearls push` (a Dolt sync, not git).
-echo "$CMD" | grep -qE '(^|[;&|]|\s)git\s+(-[^ ]+\s+)*push(\s|$)' || exit 0
+# The `(-C|--git-dir|--work-tree) <arg>` alternative is load-bearing: those flags
+# take a VALUE, so a naive `(-[^ ]+\s+)*push` lets the value eat the `push` token
+# and `git -C /some/repo push` reads as "not a push". Caught in testing 2026-08-06.
+echo "$CMD" | grep -qE '(^|[;&|]|\s)git\s+((-C|--git-dir|--work-tree)[[:space:]=]+[^ ]+\s+|-[^ ]+\s+)*push(\s|$)' || exit 0
 echo "$CMD" | grep -qE '(--delete|--dry-run|-d\s|--tags)' && exit 0
+
+# WHERE the push will actually happen. `.cwd` is the SESSION's directory, which is
+# not where the command runs: a session sits in one repo for its whole life, so
+# agents write `cd /path/to/other-repo && git push`. Resolving from `.cwd` alone
+# silently missed exactly that — the common case — and the hook shipped that way
+# (verified 2026-08-06: real `cd …/smooai && git push` from a smooth session
+# exited 0, while the same push with cwd=smooai correctly asked).
+#
+# Precedence, last wins, mirroring how the shell would actually end up:
+#   1. `git -C <path> push`  — explicit, beats everything
+#   2. the LAST `cd <path>` in the chain
+#   3. `.cwd`
+resolve_dir() {
+    local base target
+    base=$(echo "$INPUT" | jq -r '.cwd // "."' 2>/dev/null)
+
+    target=$(echo "$CMD" | sed -nE 's/.*git[[:space:]]+-C[[:space:]]+([^[:space:];&|]+).*/\1/p' | tail -1)
+    [[ -z "$target" ]] && target=$(echo "$CMD" | sed -nE 's/.*(^|[;&|][[:space:]]*)cd[[:space:]]+([^[:space:];&|]+).*/\2/p' | tail -1)
+
+    # Strip quotes an agent may have wrapped a path in, and expand a leading ~.
+    target=${target%\"}; target=${target#\"}; target=${target%\'}; target=${target#\'}
+    [[ "$target" == "~"* ]] && target="$HOME${target#\~}"
+
+    [[ -z "$target" ]] && { echo "$base"; return; }
+    [[ "$target" == /* ]] && { echo "$target"; return; }
+    echo "$base/$target"
+}
 
 # Repo-agnostic by design: the hook fires only where the convention exists, so
 # copying scripts/ci/ into another repo turns this on there with no extra wiring.
-ROOT=$(cd "$(echo "$INPUT" | jq -r '.cwd // "."' 2>/dev/null)" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
+ROOT=$(cd "$(resolve_dir)" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
 [[ -n "$ROOT" && -x "$ROOT/scripts/ci/attest.sh" ]] || exit 0
 
 # What could be credited here, straight from the directory — no list to keep in sync.
