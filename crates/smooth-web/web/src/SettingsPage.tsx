@@ -5,9 +5,103 @@
 //! "present" thing on the page); amber is never used — settings never demand you.
 
 import { Bell, KeyRound, Link2, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { MODES, type SmoothMode } from './modes';
 import { resolveTarget, type Status } from './operator';
+
+/** A Big Smooth daemon discovered on the tailnet (mirrors the Electron shape). */
+interface RemoteDaemon {
+    name: string;
+    url: string;
+    identity?: string;
+}
+
+/** The narrow bridge the Electron preload injects; absent in the browser PWA. */
+interface BigSmoothBridge {
+    listDaemons: () => Promise<{ current: string | null; daemons: RemoteDaemon[] }>;
+    connectTo: (url: string | null) => Promise<void>;
+}
+declare global {
+    interface Window {
+        bigSmooth?: BigSmoothBridge;
+    }
+}
+
+/** One connect target row (This Mac / a tailnet daemon). Teal = the active one. */
+function TargetRow({ label, active, disabled, onPick }: { label: string; active: boolean; disabled: boolean; onPick: () => void }) {
+    return (
+        <button
+            type="button"
+            disabled={disabled || active}
+            onClick={onPick}
+            className={`flex w-full items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-sm transition ${
+                active
+                    ? 'border-transparent bg-(--color-th-teal)/12 text-foreground ring-1 ring-(--color-th-teal)/40'
+                    : 'border-border bg-panel/60 text-foreground/80 hover:bg-panel-2 disabled:opacity-60'
+            }`}
+        >
+            <span className={`size-2 rounded-full ${active ? 'bg-(--color-th-teal)' : 'bg-(--color-muted-foreground)/40'}`} />
+            {label}
+        </button>
+    );
+}
+
+/** Switch which daemon the window is attached to — This Mac or a discovered
+ * tailnet daemon (e.g. smoo-hub). Electron-only (drives the app via the preload
+ * bridge); in the browser PWA it just points at the menu-bar app. */
+function ConnectionSwitcher() {
+    const bridge = typeof window === 'undefined' ? undefined : window.bigSmooth;
+    const [state, setState] = useState<{ current: string | null; daemons: RemoteDaemon[] } | null>(null);
+    const [busy, setBusy] = useState(false);
+
+    const load = useCallback(() => {
+        if (bridge)
+            void bridge
+                .listDaemons()
+                .then(setState)
+                .catch(() => setState({ current: null, daemons: [] }));
+    }, [bridge]);
+    useEffect(load, [load]);
+
+    if (!bridge) {
+        return (
+            <p className="mb-3 text-xs text-(--color-muted-foreground)">
+                Switch between this Mac and tailnet daemons from the Big Smooth menu-bar icon → <span className="text-foreground/80">Connect</span>.
+            </p>
+        );
+    }
+
+    const active = state?.current ?? null;
+    const pick = (url: string | null) => {
+        setBusy(true);
+        void bridge.connectTo(url); // the app relaunches onto the new target
+    };
+
+    return (
+        <div className="mb-3">
+            <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs uppercase tracking-wide text-(--color-muted-foreground)">Connect to</span>
+                <button type="button" onClick={load} className="text-xs text-(--color-muted-foreground) transition hover:text-foreground">
+                    Refresh
+                </button>
+            </div>
+            <div className="space-y-1">
+                <TargetRow label="This Mac (local)" active={active === null} disabled={busy} onPick={() => pick(null)} />
+                {state?.daemons.map((d) => (
+                    <TargetRow
+                        key={d.url}
+                        label={d.identity ? `${d.name} — ${d.identity}` : d.name}
+                        active={active === d.url}
+                        disabled={busy}
+                        onPick={() => pick(d.url)}
+                    />
+                ))}
+            </div>
+            {busy && <p className="mt-2 text-xs text-(--color-muted-foreground)">Reconnecting — the app will relaunch.</p>}
+        </div>
+    );
+}
 
 interface PushApi {
     supported: boolean;
@@ -112,6 +206,7 @@ export default function SettingsPage({ mode, setMode, status, push }: { mode: Sm
             </Section>
 
             <Section icon={<Link2 className="size-4" />} title="Connection">
+                <ConnectionSwitcher />
                 <div className="rounded-2xl border border-border bg-panel/60 px-4">
                     <Row label="Daemon" value={http || '—'} />
                     <Row label="Auth token" value={token ? 'present' : 'none'} />
