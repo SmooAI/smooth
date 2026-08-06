@@ -21,7 +21,7 @@ Twelve crates. `ls crates/` is the source of truth; this list is kept in sync wi
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary `th` — clap entry point (53 top-level commands)
+│   ├── smooth-cli/          # Binary `th` — clap entry point (54 top-level commands)
 │   ├── smooth-daemon/       # Binary + lib — Big Smooth: the always-on personal-agent daemon
 │   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the kernel OS sandbox
 │   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
@@ -42,7 +42,7 @@ smooth/
 
 ### Key Crates
 
-- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 53 top-level commands. Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
+- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 54 top-level commands. Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
 - **smooth-daemon** (`crates/smooth-daemon/`): **Big Smooth.** The always-on, single-tenant personal-agent daemon (EPIC th-c89c2a). It hosts smooth-operator's `LocalServer` in-process — canonical WS protocol, no bespoke agent loop — with durable SQLite storage, scheduled/proactive turns, web push, tailnet exposure, and the security hooks. `th daemon` runs it directly; `th up` also launches it.
 - **smooth-operator**: the agent engine (LLM client, agent loop, tool registry + hooks, conversation, checkpointing, cast, permissions, `DenyPolicy`). **It is not in this workspace** — it's a git/crates.io dependency from the separate `SmooAI/smooth-operator` repo. Don't look for `crates/smooth-operator/`.
 - **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` runs only inside `sandbox.rs`'s kernel OS sandbox. `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
@@ -82,6 +82,10 @@ smooth/
 ```bash
 # Smoo platform — replaces every curl to api.smoo.ai
 th api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing
+
+# White-label an org — theme + logos (logo re-hosted from a path OR a remote URL).
+# `enable` is the live switch and refuses a theme that fails WCAG AA contrast.
+th branding show|from-url|set|enable|disable|preview|clear
 
 # Cross-org admin (planned — pearl th-feebd2, blocked on th-abc4e2)
 th admin onboard-customer / mint-key / set-secret / org list|show

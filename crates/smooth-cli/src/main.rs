@@ -345,6 +345,16 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
+    /// White-label a Smoo AI org — app name, chrome colors, and logos (local
+    /// path or remote URL, always re-hosted on our CDN). `from-url` derives a
+    /// theme from the partner's website; `enable` is the live switch and
+    /// refuses a theme that fails WCAG AA contrast. The Aurora meaning tokens
+    /// (heat / ai / gradients) are never white-labeled.
+    #[command(visible_alias = "brand")]
+    Branding {
+        #[command(subcommand)]
+        cmd: smooai::branding::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -1720,6 +1730,7 @@ async fn main() -> Result<()> {
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
         Some(Commands::Crm { cmd }) => smooai::crm::cmd(cmd).await,
+        Some(Commands::Branding { cmd }) => smooai::branding::cmd(cmd).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
