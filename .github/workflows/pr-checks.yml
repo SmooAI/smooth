@@ -15,6 +15,11 @@ on:
 env:
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+# dorny/paths-filter queries a PR's changed files through the API.
+permissions:
+    contents: read
+    pull-requests: read
+
 jobs:
     rust:
         # Pearl th-a165b4: Windows joins the test matrix so cross-platform
@@ -60,31 +65,73 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # th-6578ee: a bash/JSON/doc-only PR was compiling the whole Rust
+            # workspace on TWO platforms (Windows bills at 2x) plus a full web
+            # build — ~45 min of runner time to validate a shell script.
+            #
+            # The filter gates STEPS, not the job. The job must still run and
+            # report: branch protection requires these checks, and a workflow-
+            # level `paths:` would make them never appear at all, blocking the PR
+            # forever. Same reason the `push:` trigger exists (pearl th-e392d9).
+            #
+            # PR events only. On push-to-main and merge_group there is no
+            # reliable base to diff against, and those are exactly the moments a
+            # skipped check would be expensive to be wrong about — so they run
+            # everything.
+            - name: Detect changes
+              id: filter
+              if: github.event_name == 'pull_request'
+              uses: dorny/paths-filter@v3
+              with:
+                  filters: |
+                      rust:
+                          - 'crates/**'
+                          - 'Cargo.toml'
+                          - 'Cargo.lock'
+                          - 'rust-toolchain.toml'
+                          - 'rustfmt.toml'
+                          - 'go/**'
+                          - 'scripts/build-smooth-dolt.sh'
+                          - '.github/workflows/pr-checks.yml'
+
+            # One boolean instead of repeating the compound condition on a dozen
+            # steps. `shell: bash` because the Windows leg defaults to pwsh,
+            # where `>> $GITHUB_OUTPUT` is `$env:GITHUB_OUTPUT`.
+            - name: Gate
+              id: gate
+              shell: bash
+              run: echo "run=${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}" >>"$GITHUB_OUTPUT"
+
             - name: Install system dependencies
-              if: runner.os == 'Linux'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev libicu-dev pkg-config protobuf-compiler
 
             # No apt on Windows — protoc is the only native build-time tool the
             # workspace needs there (tonic-build in smooth-scribe et al.).
             - name: Install protoc
-              if: runner.os == 'Windows'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Windows'
               uses: arduino/setup-protoc@v3
               with:
                   repo-token: ${{ secrets.GITHUB_TOKEN }}
 
             - uses: dtolnay/rust-toolchain@stable
+              if: steps.gate.outputs.run == 'true'
               with:
                   components: rustfmt, clippy
 
             - uses: Swatinem/rust-cache@v2
+              if: steps.gate.outputs.run == 'true'
 
             - uses: pnpm/action-setup@v4
+              if: steps.gate.outputs.run == 'true'
 
             - uses: actions/setup-node@v4
+              if: steps.gate.outputs.run == 'true'
               with:
                   node-version: 22
 
             - name: Build web UI
+              if: steps.gate.outputs.run == 'true'
               shell: bash
               run: |
                   cd crates/smooth-web/web
@@ -101,23 +148,24 @@ jobs:
             # TCP transport is pearl th-5f35a5) — but the binary must keep
             # compiling so it can't silently regress with another unix-only call.
             - name: Build smooth-dolt (embedded Dolt for pearl memory tests)
-              if: runner.os == 'Linux'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: bash scripts/build-smooth-dolt.sh
 
             - name: Build smooth-dolt (Windows — CGO via mingw, gms_pure_go drops ICU)
-              if: runner.os == 'Windows'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Windows'
               shell: bash
               run: cd go/smooth-dolt && CGO_ENABLED=1 go build -tags gms_pure_go -o smooth-dolt.exe .
 
             - name: Install nextest
+              if: steps.gate.outputs.run == 'true'
               uses: taiki-e/install-action@nextest
 
             - name: Format check
-              if: runner.os == 'Linux'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: cargo fmt --check
 
             - name: Clippy
-              if: runner.os == 'Linux'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               # Honor the lint levels declared in [workspace.lints]: clippy::all
               # (deny) + unused_must_use/unsafe_code fail the build; pedantic and
               # nursery are advisory `warn` by design, so a blanket `-D warnings`
@@ -125,11 +173,13 @@ jobs:
               run: cargo clippy
 
             - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
+              if: steps.gate.outputs.run == 'true'
               run: cargo build --examples --workspace
 
             # bash on both legs so the filter expression quotes predictably
             # (pwsh would need its own escaping for the `&` and parentheses).
             - name: Test
+              if: steps.gate.outputs.run == 'true'
               shell: bash
               run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
@@ -138,7 +188,7 @@ jobs:
             # One report per PR — publishing from both legs would double every
             # entry in the check summary.
             - name: Publish test report
-              if: always() && runner.os == 'Linux'
+              if: always() && steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               uses: ctrf-io/github-test-reporter@v1
               with:
                   report-path: target/nextest/ci/junit.xml
@@ -146,7 +196,7 @@ jobs:
               continue-on-error: true
 
             - name: Build
-              if: runner.os == 'Linux'
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: cargo build --release -p smooai-smooth-cli
 
     web:
@@ -156,14 +206,34 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # Same step-gating rationale as the rust job above: the job must keep
+            # reporting for branch protection, so only the work is skipped.
+            - name: Detect changes
+              id: filter
+              if: github.event_name == 'pull_request'
+              uses: dorny/paths-filter@v3
+              with:
+                  filters: |
+                      web:
+                          - 'crates/smooth-web/web/**'
+                          - '.github/workflows/pr-checks.yml'
+
+            - name: Gate
+              id: gate
+              run: echo "run=${{ github.event_name != 'pull_request' || steps.filter.outputs.web == 'true' }}" >>"$GITHUB_OUTPUT"
+
             - uses: pnpm/action-setup@v4
+              if: steps.gate.outputs.run == 'true'
 
             - uses: actions/setup-node@v4
+              if: steps.gate.outputs.run == 'true'
               with:
                   node-version: 22
 
             - name: Install
+              if: steps.gate.outputs.run == 'true'
               run: cd crates/smooth-web/web && pnpm install --no-frozen-lockfile
 
             - name: Build
+              if: steps.gate.outputs.run == 'true'
               run: cd crates/smooth-web/web && pnpm build
