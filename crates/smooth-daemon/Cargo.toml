@@ -54,7 +54,9 @@ rusqlite.workspace = true
 axum = { workspace = true, features = ["ws"] }
 tokio.workspace = true
 tokio-stream.workspace = true
-tokio-tungstenite.workspace = true
+# rustls feature: the workspace pin carries NO TLS (loopback-only elsewhere);
+# the relay client dials wss://relay.smoo.ai, which needs it (smooth-cli precedent).
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

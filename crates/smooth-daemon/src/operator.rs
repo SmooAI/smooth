@@ -844,6 +844,14 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         tracing::info!(%url, "tailnet reachability armed via `tailscale serve` (tailnet-private, not funnel)");
     }
 
+    // Smoo Relay (th-2f626d): dial OUT to relay.smoo.ai and bridge phones to
+    // this operator — remote control with NO tailnet membership. Best-effort
+    // like tailscale above: signed-out or unreachable just waits and retries.
+    let _relay = crate::relay::resolve_relay_url().map(|relay_url| {
+        tracing::info!(relay = %relay_url, "Smoo Relay armed — phones can reach Big Smooth without tailscale");
+        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone())
+    });
+
     // Proactivity: the always-on agent fires due schedules into its *own*
     // operator as a loopback WS client (canonical send_message) — "just another
     // client on the protocol" (EPIC th-c89c2a, th-2ff975). Durable across
