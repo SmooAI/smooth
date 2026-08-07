@@ -11,7 +11,7 @@
 //! in-progress code block rather than a chunk of raw text.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Convert a markdown source string into styled [`Line`]s.
@@ -238,21 +238,30 @@ impl RenderState {
     }
 }
 
+/// Inline code and fenced blocks.
+///
+/// Foreground only. This used to paint a `bg` fill, which is the TUI's
+/// cardinal sin: it fights the user's own terminal theme, breaks
+/// transparency, and smears into every copy/paste of the transcript.
+/// Style the glyphs and let their terminal be the ground.
 fn code_style() -> Style {
-    Style::default().fg(Color::Rgb(0xc8, 0xa6, 0x6b)).bg(Color::Rgb(0x1c, 0x1c, 0x22))
+    Style::default().fg(crate::theme::SMOO_ORANGE_400)
 }
 
 fn muted() -> Style {
-    Style::default().fg(Color::Rgb(0x88, 0x88, 0x95))
+    crate::theme::muted()
 }
 
+/// Headings step down in WEIGHT, not through a private colour ramp.
+///
+/// The old ramp was four off-brand oranges that existed nowhere else in
+/// the product; the depth it encoded is carried better by bold → plain →
+/// dim, which also survives `NO_COLOR`.
 fn heading_style(level: HeadingLevel) -> Style {
-    let base = Style::default().add_modifier(Modifier::BOLD);
     match level {
-        HeadingLevel::H1 => base.fg(Color::Rgb(0xff, 0x9f, 0x43)),
-        HeadingLevel::H2 => base.fg(Color::Rgb(0xff, 0xa6, 0x55)),
-        HeadingLevel::H3 => base.fg(Color::Rgb(0xff, 0xb1, 0x6c)),
-        _ => base.fg(Color::Rgb(0xff, 0xc4, 0x8d)),
+        HeadingLevel::H1 | HeadingLevel::H2 => Style::default().fg(crate::theme::SMOO_WHITE).add_modifier(Modifier::BOLD),
+        HeadingLevel::H3 => Style::default().fg(crate::theme::SMOO_WHITE),
+        _ => Style::default().fg(crate::theme::MUTED).add_modifier(Modifier::BOLD),
     }
 }
 
