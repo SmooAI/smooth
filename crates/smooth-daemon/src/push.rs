@@ -256,12 +256,15 @@ fn generate_vapid_keys() -> (String, String) {
 }
 
 /// `/push/*` — the browser subscribes here and the SPA reads the VAPID public key.
-pub fn push_router() -> Router {
+/// Takes the state so the caller can ALSO hand it to the turn notifier
+/// (th-b9a636) — before this, `PushState` never escaped the router and nothing
+/// could ever trigger a push.
+pub fn push_router(state: PushState) -> Router {
     Router::new()
         .route("/push/key", get(get_key))
         .route("/push/subscribe", post(subscribe))
         .route("/push/test", post(test_push))
-        .with_state(PushState::from_env())
+        .with_state(state)
 }
 
 async fn get_key(State(state): State<PushState>) -> Response {
