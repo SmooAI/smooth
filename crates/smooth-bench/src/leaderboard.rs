@@ -32,6 +32,12 @@ pub struct ModelRow {
     pub duration_ms: u64,
     /// `(scenario id, verdict)` — one entry per scenario, in suite order.
     pub cells: Vec<(String, Cell)>,
+    /// False when the measured cost is not distinguishable from the
+    /// shared key's background traffic. The figure is then rendered as
+    /// `<noise` rather than a precise-looking number, because a cost
+    /// column that ranks a premium model below a budget one is worse
+    /// than an empty one — someone will act on it.
+    pub cost_resolvable: bool,
 }
 
 /// A scenario's outcome for one model, reduced to what the grid shows.
@@ -65,11 +71,12 @@ impl Cell {
 ///
 /// `None` when nothing passed — a free run that solves nothing has no
 /// meaningful price per pass, and reporting `$0.0000` would rank it
-/// first.
+/// first — or when the cost itself is below the noise floor, since
+/// dividing an unresolvable number does not make it resolvable.
 #[must_use]
 #[allow(clippy::cast_precision_loss, reason = "scenario counts are single digits")]
 pub fn cost_per_pass(row: &ModelRow) -> Option<f64> {
-    (row.passed > 0).then(|| row.cost_usd / row.passed as f64)
+    (row.passed > 0 && row.cost_resolvable).then(|| row.cost_usd / row.passed as f64)
 }
 
 /// Scenarios no model passed, excluding already-documented gaps. These
@@ -105,7 +112,15 @@ pub fn ranked(rows: &[ModelRow]) -> Vec<&ModelRow> {
         b.pass_rate
             .partial_cmp(&a.pass_rate)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cost_usd.partial_cmp(&b.cost_usd).unwrap_or(std::cmp::Ordering::Equal))
+            // Only break a rate tie on cost when BOTH figures actually
+            // mean something; otherwise noise decides the ranking.
+            .then_with(|| {
+                if a.cost_resolvable && b.cost_resolvable {
+                    a.cost_usd.partial_cmp(&b.cost_usd).unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
     });
     out
 }
@@ -126,12 +141,16 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
     for r in ranked(rows) {
         let _ = writeln!(
             out,
-            "  {model:<25} {passed:>3}/{conclusive:<3} {rate:>5.1}%  {cost:>8.4}  {per:>8}  {secs:>5.1}s{inc}",
+            "  {model:<25} {passed:>3}/{conclusive:<3} {rate:>5.1}%  {cost:>8}  {per:>8}  {secs:>5.1}s{inc}",
             model = r.model,
             passed = r.passed,
             conclusive = r.conclusive,
             rate = r.pass_rate * 100.0,
-            cost = r.cost_usd,
+            cost = if r.cost_resolvable {
+                format!("{:.4}", r.cost_usd)
+            } else {
+                "<noise".to_string()
+            },
             per = cost_per_pass(r).map_or_else(|| "-".to_string(), |c| format!("{c:.4}")),
             secs = r.duration_ms as f64 / 1000.0,
             inc = if r.inconclusive > 0 {
@@ -200,6 +219,7 @@ mod tests {
             inconclusive: cells.iter().filter(|(_, c)| *c == Cell::Inconclusive).count(),
             cost_usd: cost,
             duration_ms: 1000,
+            cost_resolvable: true,
             cells: cells.iter().map(|(id, c)| ((*id).to_string(), *c)).collect(),
         }
     }
@@ -268,6 +288,28 @@ mod tests {
         let cheap = t.find("deepseek-v4-flash").expect("present");
         let pricey = t.find("gpt-5.5-pro").expect("present");
         assert!(cheap < pricey);
+    }
+
+    #[test]
+    fn an_unresolvable_cost_renders_as_noise_and_suppresses_per_pass() {
+        let mut r = row("noisy", 1.0, 1, 0.002, &[("a", Cell::Pass)]);
+        r.cost_resolvable = false;
+        assert!(cost_per_pass(&r).is_none(), "dividing noise does not make it a measurement");
+        let t = render("convo", std::slice::from_ref(&r));
+        assert!(t.contains("<noise"), "an unresolvable cost must not print as a precise figure: {t}");
+        assert!(!t.contains("0.0020"));
+    }
+
+    #[test]
+    fn noise_never_decides_the_ranking() {
+        // Same rate; one cost is real, one is noise. Ordering must not
+        // claim the noisy one is cheaper.
+        let mut noisy = row("noisy", 1.0, 1, 0.001, &[("a", Cell::Pass)]);
+        noisy.cost_resolvable = false;
+        let real = row("real", 1.0, 1, 0.900, &[("a", Cell::Pass)]);
+        let rows = vec![real, noisy];
+        let order: Vec<&str> = ranked(&rows).iter().map(|r| r.model.as_str()).collect();
+        assert_eq!(order, ["real", "noisy"], "input order preserved; noise must not sort ahead");
     }
 
     #[test]
