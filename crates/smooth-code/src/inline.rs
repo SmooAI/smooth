@@ -149,7 +149,7 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     for tc in &msg.tool_calls {
         let (icon, icon_style) = match tc.status {
             ToolStatus::Pending => ("⏳", theme::muted()),
-            ToolStatus::Running => ("⚙", theme::user_label()),
+            ToolStatus::Running => (theme::tool_status_glyph(ToolStatus::Running), theme::tool_status_border(ToolStatus::Running)),
             ToolStatus::Done => ("✓", theme::success()),
             ToolStatus::Error => ("✗", theme::error()),
         };
