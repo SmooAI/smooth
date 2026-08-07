@@ -16,6 +16,10 @@ name = "smooth_bench"
 path = "src/lib.rs"
 
 [dependencies]
+# The `--surface thcode` driver reuses smooth-code's OWN client codepath
+# rather than re-implementing it, so the bench exercises what `th code`
+# actually runs.
+smooth-code = { workspace = true }
 smooth-cast.workspace = true
 smooth-operator.workspace = true
 smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }

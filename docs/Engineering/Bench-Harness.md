@@ -154,6 +154,31 @@ not_contains = "I'm unable"
 `pointer`/`missing`/`unchanged` are meaningless on an answer assertion —
 all three are rejected at parse time.
 
+
+## Two client surfaces (`--surface`)
+
+Pearl th-b3fe81. `th code --headless` and the Big Smooth PWA both speak
+the **same canonical WebSocket to the same daemon** (`smooth_code::client`
+has been canonical since th-a14138), so "run the bench against both" is
+not two harnesses. It is two client codepaths onto one engine.
+
+```bash
+cargo run -p smooai-smooth-bench -- agentic --surface daemon   # as the PWA drives it
+cargo run -p smooai-smooth-bench -- agentic --surface thcode   # as `th code` drives it
+```
+
+`daemon` (default) calls `run_via_canonical` directly. `thcode` goes
+through `smooth_code::headless::run_headless_capture` — smooth-code's
+OWN client, not a re-implementation — so what the bench exercises is
+what `th code` actually runs.
+
+Because the engine is shared, a **difference** between the two surfaces
+is attributable to `th code`'s own layer: the cast role it requests and
+the working directory it pins. A regression that shows up on both is in
+the agent; one that shows up only on `thcode` is in the coding harness.
+The surface is recorded on the run and in every JSONL record so the two
+sets stay tellable apart after the fact.
+
 ## Where the scenarios come from
 
 The original scenarios were written from first principles. The corpus
