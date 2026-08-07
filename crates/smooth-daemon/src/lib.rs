@@ -31,6 +31,7 @@ pub mod auth_login;
 pub mod config;
 pub mod cwd_route;
 pub mod hooks;
+pub mod notify;
 pub mod operator;
 mod operator_storage;
 pub mod org_auth;

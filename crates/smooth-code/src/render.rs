@@ -97,7 +97,10 @@ fn render_session_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
     let [panel] = Layout::vertical([Constraint::Length(height)]).flex(Flex::Center).areas(col);
 
     frame.render_widget(Clear, panel);
-    let block = Block::default().title(" Conversations ").borders(Borders::ALL).border_style(theme::title());
+    let block = Block::default()
+        .title(" Conversations ")
+        .borders(Borders::ALL)
+        .border_style(theme::panel_border(true));
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
 
@@ -426,7 +429,7 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         for tc in &msg.tool_calls {
             let (icon, icon_style) = match tc.status {
                 ToolStatus::Pending => ("⏳", theme::muted()),
-                ToolStatus::Running => ("⚙", theme::user_label()),
+                ToolStatus::Running => (theme::tool_status_glyph(ToolStatus::Running), theme::tool_status_border(ToolStatus::Running)),
                 ToolStatus::Done => ("✓", theme::success()),
                 ToolStatus::Error => ("✗", theme::error()),
             };
@@ -754,7 +757,7 @@ fn render_model_picker(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
 
-    let block = Block::default().title(title).borders(Borders::ALL).border_style(theme::title());
+    let block = Block::default().title(title).borders(Borders::ALL).border_style(theme::panel_border(true));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 

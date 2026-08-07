@@ -11,7 +11,7 @@
 //! grep, and friends fall back to the existing
 //! "header + collapsed output" rendering in `inline::message_lines`.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 use similar::TextDiff;
@@ -131,32 +131,37 @@ fn trim_diff_for_display<'a>(lines: &'a [&'a str]) -> Vec<String> {
     head.chain(std::iter::once(marker)).chain(tail).collect()
 }
 
+// Every style here routes through `theme`. This module used to carry a
+// private six-colour palette that duplicated theme.rs's semantics with
+// different hexes — so a diff's "added" green and the UI's "success"
+// green were two different greens for the same idea.
+
 fn header_style() -> Style {
-    Style::default().fg(Color::Rgb(0xff, 0x9f, 0x43)).add_modifier(Modifier::BOLD)
+    Style::default().fg(crate::theme::SMOO_WHITE).add_modifier(Modifier::BOLD)
 }
 
 fn muted() -> Style {
-    Style::default().fg(Color::Rgb(0x88, 0x88, 0x95))
+    crate::theme::muted()
 }
 
 fn added_prefix() -> Style {
-    Style::default().fg(Color::Rgb(0x6f, 0xcf, 0x97)).add_modifier(Modifier::BOLD)
+    Style::default().fg(crate::theme::SUCCESS_GREEN).add_modifier(Modifier::BOLD)
 }
 
 fn added_content() -> Style {
-    Style::default().fg(Color::Rgb(0xb6, 0xe2, 0xc1))
+    Style::default().fg(crate::theme::SUCCESS_GREEN)
 }
 
 fn removed_prefix() -> Style {
-    Style::default().fg(Color::Rgb(0xff, 0x6b, 0x6b)).add_modifier(Modifier::BOLD)
+    Style::default().fg(crate::theme::ERROR_RED).add_modifier(Modifier::BOLD)
 }
 
 fn removed_content() -> Style {
-    Style::default().fg(Color::Rgb(0xff, 0xa6, 0xa6))
+    Style::default().fg(crate::theme::SMOO_RED_400)
 }
 
 fn hunk_style() -> Style {
-    Style::default().fg(Color::Rgb(0x82, 0xb1, 0xff))
+    crate::theme::muted()
 }
 
 #[cfg(test)]

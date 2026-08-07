@@ -92,6 +92,9 @@ pub struct OperatorTurnDriver {
     token: String,
     /// Per-firing ceiling — a wedged turn can't block the loop forever.
     timeout: Duration,
+    /// Fires web + phone notifications when a turn completes (th-b9a636) —
+    /// this is what makes a scheduled reminder actually reach the user.
+    notifier: Option<std::sync::Arc<crate::notify::TurnNotifier>>,
 }
 
 impl OperatorTurnDriver {
@@ -103,7 +106,15 @@ impl OperatorTurnDriver {
             url: url.into(),
             token: token.into(),
             timeout: Duration::from_secs(600),
+            notifier: None,
         }
+    }
+
+    /// Attach a turn-completion notifier (web + phone push fan-out).
+    #[must_use]
+    pub fn with_notifier(mut self, notifier: std::sync::Arc<crate::notify::TurnNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
     }
 
     /// One connect → create-session → send → drain cycle.
@@ -155,7 +166,9 @@ impl OperatorTurnDriver {
         ))
         .await?;
 
-        // 3. Drain until the turn completes (or errors).
+        // 3. Drain until the turn completes (or errors), capturing the final
+        // response text — it becomes the notification body (th-b9a636).
+        let mut response = None;
         while let Some(Ok(msg)) = source.next().await {
             let Message::Text(text) = msg else {
                 if matches!(msg, Message::Close(_)) {
@@ -165,12 +178,21 @@ impl OperatorTurnDriver {
             };
             let v: Value = serde_json::from_str(&text)?;
             match v.get("type").and_then(Value::as_str) {
-                Some("eventual_response") => break,
+                Some("eventual_response") => {
+                    response = crate::notify::response_text(&v);
+                    break;
+                }
                 Some("error") => anyhow::bail!("operator error on scheduled turn: {text}"),
                 _ => {}
             }
         }
         let _ = sink.send(Message::Close(None)).await;
+        // The turn is DONE — tell the user on every channel we have. Best-effort
+        // by construction; a notification failure never fails the schedule.
+        if let Some(notifier) = &self.notifier {
+            let body = response.unwrap_or_else(|| format!("Finished: {prompt}"));
+            notifier.turn_completed("Big Smooth", &body).await;
+        }
         Ok(())
     }
 }

@@ -36,6 +36,7 @@ pub mod curated;
 pub mod engine;
 pub mod judge;
 pub mod lang_detect;
+pub mod leaderboard;
 pub mod scenarios;
 pub mod score;
 pub mod sweep;

@@ -5074,6 +5074,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smooai-smooth-cast",
+ "smooai-smooth-code",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
  "tempfile",

@@ -764,6 +764,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let session_cwd = SessionCwd::new(workspace.clone());
     let provider = local_tool_provider_with_memory(session_cwd.clone(), egress_proxy, memory);
 
+    // Web-push state, built ONCE and shared: the /push/* router and the turn
+    // notifier (th-b9a636) — the trigger layer push never had.
+    let push_state = crate::push::PushState::from_env();
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
@@ -817,7 +820,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // th-backed extensions (th-bc624a).
         .serve_routes(
             crate::search::search_router(workspace)
-                .merge(crate::push::push_router())
+                .merge(crate::push::push_router(push_state.clone()))
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
                 // a conversation's cwd in the SAME store the tool provider reads.
@@ -859,7 +862,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // the loop without taking the daemon down.
     let _scheduler = match crate::schedule::SqliteScheduleStore::open(&schedule_store_path()) {
         Ok(store) => {
-            let driver = crate::scheduler::OperatorTurnDriver::new(format!("http://{}", server.addr()), token.clone());
+            let driver = crate::scheduler::OperatorTurnDriver::new(format!("http://{}", server.addr()), token.clone())
+                .with_notifier(Arc::new(crate::notify::TurnNotifier::new(push_state.clone())));
             let handle = crate::scheduler::spawn_scheduler(Arc::new(store), Arc::new(driver), std::time::Duration::from_secs(30));
             tracing::info!("scheduler armed (30s tick) — proactive schedules fire into the operator");
             Some(handle)

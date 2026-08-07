@@ -39,8 +39,48 @@ pub const SMOO_GRAY_900: Color = Color::Rgb(29, 29, 29); // #1d1d1d
 pub const MUTED: Color = Color::Rgb(163, 163, 163);
 /// Error indicator — --color-smooai-red
 pub const ERROR_RED: Color = Color::Rgb(255, 107, 108);
-/// Success indicator
-pub const SUCCESS_GREEN: Color = Color::Rgb(46, 160, 67);
+/// Success indicator.
+///
+/// Deliberately NOT a teal-adjacent green: the teal end of the `th`
+/// gradient is Big Smooth's face, and a success tick that reads as "the
+/// agent is here" is exactly the collision Presence forbids.
+pub const SUCCESS_GREEN: Color = Color::Rgb(111, 207, 151);
+
+// ── Presence semantics ────────────────────────────────────────
+//
+// Presence spends color on PRESENCE and ATTENTION, never on decoration.
+// The palette above is the raw material; these four are the meanings.
+// Before adding a colour here, ask which of the four it is — if it is
+// none of them, it does not get a colour at all.
+
+/// The `th` face, teal end. Big Smooth's PRESENCE — his mark, his turns,
+/// his heartbeat. Chrome never wears the face.
+pub const TH_TEAL: Color = Color::Rgb(0x00, 0xa6, 0xa6);
+/// The `th` face, blue end.
+pub const TH_BLUE: Color = Color::Rgb(0x12, 0x38, 0xdd);
+
+/// ATTENTION — the affirmative action, and where the user acts. This is
+/// the primary accent that used to be spread across focus, typing, and
+/// running tools all at once.
+pub const CORAL: Color = Color::Rgb(0xfb, 0x7a, 0x4d);
+
+/// ATTENTION — "Big Smooth needs you", and nothing else. An approval
+/// gate, a blocked run, a question he cannot answer alone. The moment
+/// amber shows up anywhere else it stops meaning anything, so there is
+/// exactly one style function that returns it: [`needs_you`].
+pub const AMBER: Color = Color::Rgb(0xf4, 0x9f, 0x0a);
+
+/// Awake / alive status.
+pub const ONLINE: Color = Color::Rgb(0x6f, 0xcf, 0x97);
+
+/// Warm hairline for chrome that must recede — panel borders, rules,
+/// separators. Warm, because Presence's ground is a room you share, not
+/// a dashboard you audit; cool grey is Aurora's, not ours.
+pub const HAIRLINE: Color = Color::Rgb(0x4a, 0x45, 0x42);
+/// Warm hairline, raised — the FOCUSED panel's border. Brighter neutral
+/// plus BOLD, not an accent: focus is a change in weight, not a change
+/// in meaning.
+pub const HAIRLINE_BRIGHT: Color = Color::Rgb(0x8a, 0x82, 0x7c);
 
 // ── Gradient title spans ──────────────────────────────────────
 
@@ -106,21 +146,64 @@ pub fn smooth_wordmark() -> Vec<Span<'static>> {
     out
 }
 
-/// Style for the main title bar — orange is the brand's primary
-/// accent; green is secondary and shows up on assistant labels and
-/// the vertical banner gradient.
+/// Style for titles and section labels.
+///
+/// Warm off-white + bold, NOT the brand orange it used to be. Brand
+/// orange is byte-identical to [`AMBER`] (`#f49f0a`), so every title and
+/// every panel border wearing it meant amber could never be reserved for
+/// "Big Smooth needs you" — the one thing it is supposed to mean. Titles
+/// are chrome; chrome gets weight, not colour.
 pub fn title() -> Style {
-    Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD)
+    Style::default().fg(SMOO_WHITE).add_modifier(Modifier::BOLD)
 }
 
 /// Style for user message labels ("You").
+///
+/// Deliberately quiet. The user is not a presence indicator and not an
+/// attention state — and keeping it neutral is what lets the assistant's
+/// teal→blue face read instantly as "he is talking now".
 pub fn user_label() -> Style {
-    Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD)
+    Style::default().fg(SMOO_WHITE).add_modifier(Modifier::BOLD)
 }
 
 /// Style for assistant message labels ("Smooth").
+///
+/// This is Big Smooth speaking, so it wears the face. Use
+/// [`assistant_label_spans`] where the label is long enough for the
+/// gradient to read; this flat form is the fallback for one- or
+/// two-character marks.
 pub fn assistant_label() -> Style {
-    Style::default().fg(SMOO_GREEN).add_modifier(Modifier::BOLD)
+    Style::default().fg(TH_TEAL).add_modifier(Modifier::BOLD)
+}
+
+/// The assistant's label rendered in the `th` face gradient — teal→blue
+/// across the word. Presence's one rule: the face marks where *he* is,
+/// and nothing else in the UI may wear it.
+pub fn assistant_label_spans(label: &str) -> Vec<Span<'static>> {
+    let n = label.chars().count();
+    label
+        .chars()
+        .enumerate()
+        .map(|(i, c)| Span::styled(c.to_string(), Style::default().fg(th_gradient_color(i, n)).add_modifier(Modifier::BOLD)))
+        .collect()
+}
+
+/// "Big Smooth needs you" — an approval gate, a blocked run, a question
+/// only the user can answer. The ONLY function that returns [`AMBER`].
+/// If you are reaching for this for anything else, reach for
+/// [`attention`] instead.
+pub fn needs_you() -> Style {
+    Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
+}
+
+/// The affirmative action / where the user acts.
+pub fn attention() -> Style {
+    Style::default().fg(CORAL).add_modifier(Modifier::BOLD)
+}
+
+/// Awake / alive.
+pub fn online() -> Style {
+    Style::default().fg(ONLINE)
 }
 
 /// Style for the input text area.
@@ -230,39 +313,59 @@ pub fn file_color(extension: &str) -> Color {
     }
 }
 
+/// A tool call's status as a GLYPH.
+///
+/// Presence rule: state is encoded in form, not only in colour. Roughly
+/// 8% of users cannot read a hue distinction, `NO_COLOR` strips it
+/// entirely, and a piped capture has none at all — the glyph is what
+/// survives all three.
+#[must_use]
+pub const fn tool_status_glyph(status: crate::state::ToolStatus) -> &'static str {
+    use crate::state::ToolStatus;
+    match status {
+        ToolStatus::Pending => "○",
+        ToolStatus::Running => "◐",
+        ToolStatus::Done => "●",
+        ToolStatus::Error => "✗",
+    }
+}
+
 /// Style for a tool-call status border.
 pub fn tool_status_border(status: crate::state::ToolStatus) -> Style {
     use crate::state::ToolStatus;
     match status {
         ToolStatus::Pending => Style::default().fg(MUTED),
-        ToolStatus::Running => Style::default().fg(SMOO_ORANGE),
+        ToolStatus::Running => Style::default().fg(CORAL),
         ToolStatus::Done => Style::default().fg(SUCCESS_GREEN),
         ToolStatus::Error => Style::default().fg(ERROR_RED),
     }
 }
 
-/// Panel border style — bright orange when focused (the brand's
-/// primary accent), dim gray when inactive. Green is reserved for
-/// assistant labels + the banner gradient so users can visually
-/// separate "where the UI wants attention" (orange) from
-/// "agent speaking" (green).
+/// Panel border style — a warm hairline that recedes, brighter and bold
+/// when focused.
+///
+/// Chrome does not get an accent colour. It used to be brand orange,
+/// which meant orange simultaneously said "this panel is focused",
+/// "type here", and "a tool is running" — three meanings, so none of
+/// them read. Focus is now carried by WEIGHT (brighter + bold), leaving
+/// coral free to mean "act here" and amber free to mean "he needs you".
 pub fn panel_border(active: bool) -> Style {
     if active {
-        Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD)
+        Style::default().fg(HAIRLINE_BRIGHT).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(SMOO_GRAY_700)
+        Style::default().fg(HAIRLINE)
     }
 }
 
-/// Border for the message-input panel. Always the primary accent
-/// (orange + bold) so the user can find "where do I type" at a
+/// Border for the message-input panel. Always the action accent
+/// (coral + bold) so the user can find "where do I type" at a
 /// glance — even when the chat panel is the focused one. Falls back
 /// to muted gray when the user has explicitly escaped into normal
 /// mode.
 pub fn input_border(mode: crate::state::Mode) -> Style {
     match mode {
-        crate::state::Mode::Input => Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD),
-        crate::state::Mode::Normal => Style::default().fg(SMOO_GRAY_700),
+        crate::state::Mode::Input => Style::default().fg(CORAL).add_modifier(Modifier::BOLD),
+        crate::state::Mode::Normal => Style::default().fg(HAIRLINE),
     }
 }
 
@@ -286,7 +389,7 @@ mod tests {
         assert_eq!(SMOO_WHITE, Color::Rgb(248, 250, 252));
         assert_eq!(MUTED, Color::Rgb(163, 163, 163));
         assert_eq!(ERROR_RED, Color::Rgb(255, 107, 108));
-        assert_eq!(SUCCESS_GREEN, Color::Rgb(46, 160, 67));
+        assert_eq!(SUCCESS_GREEN, Color::Rgb(111, 207, 151));
     }
 
     #[test]
@@ -311,13 +414,13 @@ mod tests {
     fn test_style_functions_return_styles() {
         // Ensure style functions don't panic and return non-default styles
         let t = title();
-        assert_eq!(t.fg, Some(SMOO_ORANGE));
+        assert_eq!(t.fg, Some(SMOO_WHITE));
 
         let ul = user_label();
-        assert_eq!(ul.fg, Some(SMOO_ORANGE));
+        assert_eq!(ul.fg, Some(SMOO_WHITE));
 
         let al = assistant_label();
-        assert_eq!(al.fg, Some(SMOO_GREEN));
+        assert_eq!(al.fg, Some(TH_TEAL));
 
         let is = input_style();
         assert_eq!(is.fg, Some(Color::White));
@@ -381,7 +484,7 @@ mod tests {
         assert_eq!(pending.fg, Some(MUTED));
 
         let running = tool_status_border(ToolStatus::Running);
-        assert_eq!(running.fg, Some(SMOO_ORANGE));
+        assert_eq!(running.fg, Some(CORAL));
 
         let done = tool_status_border(ToolStatus::Done);
         assert_eq!(done.fg, Some(SUCCESS_GREEN));
@@ -396,14 +499,99 @@ mod tests {
         let inactive = panel_border(false);
 
         assert_ne!(active.fg, inactive.fg);
-        assert_eq!(active.fg, Some(SMOO_ORANGE));
-        assert_eq!(inactive.fg, Some(SMOO_GRAY_700));
+        assert_eq!(active.fg, Some(HAIRLINE_BRIGHT));
+        assert_eq!(inactive.fg, Some(HAIRLINE));
+        // Focus is carried by WEIGHT, so it survives NO_COLOR.
+        assert!(active.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Presence's load-bearing rule: chrome never wears an accent. If a
+    /// panel border ever becomes coral/amber/face-coloured again, those
+    /// colours stop meaning "act here" / "he needs you" / "he is here".
+    #[test]
+    fn chrome_never_wears_an_accent_colour() {
+        for style in [panel_border(true), panel_border(false)] {
+            let fg = style.fg.expect("border has a colour");
+            assert!(
+                ![CORAL, AMBER, TH_TEAL, TH_BLUE, SMOO_ORANGE, ONLINE].contains(&fg),
+                "panel chrome must stay a neutral hairline, got {fg:?}"
+            );
+        }
+    }
+
+    /// Amber has exactly one meaning, so exactly one style function may
+    /// return it. This test is the enforcement.
+    #[test]
+    fn amber_is_only_ever_needs_you() {
+        assert_eq!(needs_you().fg, Some(AMBER));
+        for style in [
+            title(),
+            user_label(),
+            attention(),
+            online(),
+            assistant_label(),
+            panel_border(true),
+            panel_border(false),
+            input_border(crate::state::Mode::Input),
+            input_border(crate::state::Mode::Normal),
+            muted(),
+            error(),
+            success(),
+            status_style(),
+        ] {
+            assert_ne!(style.fg, Some(AMBER), "only needs_you() may return amber");
+        }
+    }
+
+    /// The face marks Big Smooth's presence and nothing else.
+    #[test]
+    fn only_the_assistant_wears_the_face() {
+        assert_eq!(assistant_label().fg, Some(TH_TEAL));
+        for style in [
+            panel_border(true),
+            panel_border(false),
+            input_border(crate::state::Mode::Input),
+            attention(),
+            needs_you(),
+        ] {
+            let fg = style.fg.expect("has a colour");
+            assert!(![TH_TEAL, TH_BLUE].contains(&fg), "chrome must not wear the face, got {fg:?}");
+        }
     }
 
     #[test]
-    fn test_input_border_is_orange_in_input_mode_gray_in_normal() {
+    fn assistant_label_spans_run_teal_to_blue() {
+        let spans = assistant_label_spans("Smooth");
+        assert_eq!(spans.len(), 6);
+        assert_eq!(spans[0].style.fg, Some(TH_TEAL), "starts at the teal end");
+        assert_eq!(spans[5].style.fg, Some(TH_BLUE), "ends at the blue end");
+        // Degenerate widths must not panic or divide by zero.
+        assert_eq!(assistant_label_spans("").len(), 0);
+        assert_eq!(assistant_label_spans("t").len(), 1);
+    }
+
+    /// Colour is never the only carrier: every status has a distinct glyph.
+    #[test]
+    fn every_tool_status_has_a_distinct_glyph() {
+        use crate::state::ToolStatus;
+        let glyphs: Vec<&str> = [ToolStatus::Pending, ToolStatus::Running, ToolStatus::Done, ToolStatus::Error]
+            .into_iter()
+            .map(tool_status_glyph)
+            .collect();
+        let mut sorted = glyphs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), glyphs.len(), "statuses must be distinguishable without colour: {glyphs:?}");
+        // Single-cell glyphs only — emoji wreck column alignment.
+        for g in glyphs {
+            assert_eq!(g.chars().count(), 1, "status glyph {g:?} must be one character");
+        }
+    }
+
+    #[test]
+    fn test_input_border_is_the_action_accent_in_input_mode() {
         use crate::state::Mode;
-        assert_eq!(input_border(Mode::Input).fg, Some(SMOO_ORANGE));
-        assert_eq!(input_border(Mode::Normal).fg, Some(SMOO_GRAY_700));
+        assert_eq!(input_border(Mode::Input).fg, Some(CORAL));
+        assert_eq!(input_border(Mode::Normal).fg, Some(HAIRLINE));
     }
 }
