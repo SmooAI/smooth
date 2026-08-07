@@ -429,9 +429,13 @@ fn convo_row(run: &ConvoRun) -> leaderboard::ModelRow {
                 conclusive += 1;
                 leaderboard::Cell::Pass
             }
-            ConvoStatus::Fail | ConvoStatus::XFail => {
+            ConvoStatus::Fail => {
                 conclusive += 1;
                 leaderboard::Cell::Fail
+            }
+            ConvoStatus::XFail => {
+                conclusive += 1;
+                leaderboard::Cell::KnownGap
             }
             ConvoStatus::Inconclusive => {
                 inconclusive += 1;

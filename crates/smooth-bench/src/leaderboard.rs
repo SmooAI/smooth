@@ -42,6 +42,11 @@ pub enum Cell {
     /// No usable data — a boot failure or a broken judge. Never counted
     /// as either a pass or a fail.
     Inconclusive,
+    /// Failed, but the gap is already documented (`expect_fail`). Counts
+    /// as a fail in the rate — it genuinely isn't solved — but stays out
+    /// of the "suspect the harness" callout, which exists to surface
+    /// gaps nobody has written down yet.
+    KnownGap,
 }
 
 impl Cell {
@@ -51,6 +56,7 @@ impl Cell {
             Self::Pass => "✓",
             Self::Fail => "✗",
             Self::Inconclusive => "·",
+            Self::KnownGap => "⊘",
         }
     }
 }
@@ -66,8 +72,9 @@ pub fn cost_per_pass(row: &ModelRow) -> Option<f64> {
     (row.passed > 0).then(|| row.cost_usd / row.passed as f64)
 }
 
-/// Scenarios no model passed. These are the harness backlog: when every
-/// model fails the same row, the row is the bug.
+/// Scenarios no model passed, excluding already-documented gaps. These
+/// are the harness backlog: when every model fails the same row and
+/// nobody has written down why, the row is the bug.
 #[must_use]
 pub fn universally_failed(rows: &[ModelRow]) -> Vec<String> {
     let mut ever_passed: BTreeMap<&str, bool> = BTreeMap::new();
@@ -78,7 +85,9 @@ pub fn universally_failed(rows: &[ModelRow]) -> Vec<String> {
                 order.push(id.as_str());
             }
             let seen = ever_passed.entry(id.as_str()).or_insert(false);
-            *seen = *seen || *cell == Cell::Pass;
+            // A documented gap counts as "accounted for" — it is already
+            // tracked, so re-reporting it as an unknown is noise.
+            *seen = *seen || matches!(cell, Cell::Pass | Cell::KnownGap);
         }
     }
     order
@@ -148,7 +157,7 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
         seen
     };
     if !scenarios.is_empty() {
-        let _ = writeln!(out, "\n  scenario × model   (✓ pass  ✗ fail  · inconclusive)");
+        let _ = writeln!(out, "\n  scenario × model   (✓ pass  ✗ fail  ⊘ known gap  · inconclusive)");
         let _ = write!(out, "\n  {:<28}", "");
         for i in 1..=ordered.len() {
             let _ = write!(out, " {i:>3}");
@@ -223,6 +232,17 @@ mod tests {
 
         let rows = vec![row("a", 0.0, 0, 0.1, &[("x", Cell::Inconclusive)]), row("b", 0.0, 0, 0.1, &[("x", Cell::Fail)])];
         assert_eq!(universally_failed(&rows), ["x"], "inconclusive everywhere-but-one still counts the fail");
+    }
+
+    #[test]
+    fn a_documented_gap_is_not_reported_as_an_unknown() {
+        // rapid-correction is expect_fail: every model fails it, and that
+        // is already tracked. Reporting it as a harness mystery is noise.
+        let rows = vec![
+            row("a", 0.0, 0, 0.1, &[("rapid-correction", Cell::KnownGap), ("real", Cell::Fail)]),
+            row("b", 0.0, 0, 0.1, &[("rapid-correction", Cell::KnownGap), ("real", Cell::Fail)]),
+        ];
+        assert_eq!(universally_failed(&rows), ["real"]);
     }
 
     #[test]
