@@ -39,7 +39,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_driver::run_via_canonical;
+use crate::canonical_driver::{run_via_canonical, CanonicalOutput};
 use crate::engine::{Engine, Isolation, WorkspaceBooter};
 use crate::judge::{judge, JudgeEvidence};
 
@@ -381,6 +381,7 @@ fn dedup_in_order<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
 pub struct AgenticRun {
     pub engine: String,
     pub model: String,
+    pub surface: String,
     pub isolation: String,
     pub judge_model: String,
     /// Trials requested per scenario.
@@ -482,6 +483,7 @@ impl AgenticRun {
         let mut out = String::new();
         let _ = writeln!(out, "smooth-bench agentic — workflow/action benchmark");
         let _ = writeln!(out, "  engine/model:  {} / {}", self.engine, self.model);
+        let _ = writeln!(out, "  surface:       {}", self.surface);
         let _ = writeln!(out, "  isolation:     {}", self.isolation);
         let _ = writeln!(out, "  judge model:   {}", self.judge_model);
         let _ = writeln!(out, "  trials:        {} per scenario", self.trials);
@@ -700,11 +702,85 @@ fn evaluate_text(a: &Assertion, target: &str, where_: &str) -> AssertResult {
     }
 }
 
+/// Which client surface drives the turn.
+///
+/// `th code` headless and the Big Smooth PWA both speak the **same**
+/// canonical WebSocket to the **same** daemon — `smooth_code::client`
+/// has been canonical since th-a14138 — so this is not two backends. It
+/// is two client codepaths onto one engine, and the delta between them
+/// is attributable to `th code`'s own layer: the cast role it requests
+/// and the working directory it pins.
+///
+/// Running the corpus through both is what tells you whether a
+/// regression lives in the agent or in the coding harness wrapped
+/// around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Surface {
+    /// Drive the canonical protocol directly, as the PWA does.
+    Daemon,
+    /// Drive through `smooth_code`'s own client — the codepath
+    /// `th code --headless` runs.
+    ThCode,
+}
+
+impl Surface {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::ThCode => "thcode",
+        }
+    }
+
+    #[must_use]
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "daemon" | "pwa" => Some(Self::Daemon),
+            "thcode" | "th-code" | "code" => Some(Self::ThCode),
+            _ => None,
+        }
+    }
+}
+
+/// Drive one turn through the selected surface, normalising both into
+/// [`CanonicalOutput`] so scoring never has to care which ran.
+async fn drive_turn(surface: Surface, url: &str, prompt: &str, token: Option<&str>, work: &Path, model: &str) -> Result<CanonicalOutput> {
+    match surface {
+        Surface::Daemon => run_via_canonical(url, prompt, token, crate::turn_deadline()).await,
+        Surface::ThCode => {
+            let out = tokio::time::timeout(
+                crate::turn_deadline(),
+                smooth_code::headless::run_headless_capture(url, work.to_path_buf(), prompt.to_string(), Some(model.to_string()), None),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("th code turn timed out after {:?}", crate::turn_deadline()))??;
+            Ok(CanonicalOutput {
+                cost: out.cost,
+                tool_calls: out
+                    .tool_calls
+                    .into_iter()
+                    .map(|t| crate::canonical_driver::CanonicalToolCall {
+                        name: t.name,
+                        success: t.success,
+                    })
+                    .collect(),
+                text: out.content,
+                // `run_headless_capture` only returns Ok on TaskComplete,
+                // so reaching here means the turn finished.
+                completed: true,
+            })
+        }
+    }
+}
+
 /// Knobs for one agentic run.
 #[derive(Debug, Clone)]
 pub struct AgenticOpts {
     pub engine: Engine,
     pub model: String,
+    /// Which client codepath drives the turn.
+    pub surface: Surface,
     pub isolation: Isolation,
     pub judge_model: String,
     pub gateway_url: String,
@@ -746,6 +822,7 @@ pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], bo
     Ok(AgenticRun {
         engine: opts.engine.as_str().to_string(),
         model: opts.model.clone(),
+        surface: opts.surface.as_str().to_string(),
         isolation: opts.isolation.as_str().to_string(),
         judge_model: opts.judge_model.clone(),
         trials,
@@ -801,7 +878,7 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
         }
     };
 
-    let driven = run_via_canonical(&server.url, &s.prompt, server.token.as_deref(), crate::turn_deadline()).await;
+    let driven = drive_turn(opts.surface, &server.url, &s.prompt, server.token.as_deref(), &work, &opts.model).await;
     // Tear the engine/VM down before scoring so nothing can race the
     // assertions against a still-writing agent.
     drop(server);
@@ -972,6 +1049,7 @@ mod tests {
         AgenticRun {
             engine: "rust".into(),
             model: "deepseek-v4-flash".into(),
+            surface: "daemon".into(),
             isolation: "microvm".into(),
             judge_model: "deepseek-v4-flash".into(),
             trials,
@@ -1851,5 +1929,39 @@ kind = "deterministic"
 asserts = []
 "#;
         assert!(parse_scenarios(toml).is_err(), "a check that asserts nothing must not parse");
+    }
+    // ---- client surface (pearl th-b3fe81) ----
+
+    #[test]
+    fn surface_names_round_trip_and_accept_aliases() {
+        assert_eq!(Surface::from_name("daemon"), Some(Surface::Daemon));
+        assert_eq!(Surface::from_name("pwa"), Some(Surface::Daemon));
+        assert_eq!(Surface::from_name("thcode"), Some(Surface::ThCode));
+        assert_eq!(Surface::from_name("th-code"), Some(Surface::ThCode));
+        assert_eq!(Surface::from_name("code"), Some(Surface::ThCode));
+        assert_eq!(Surface::from_name("nope"), None);
+        // as_str must feed back into from_name, since it is what lands
+        // in the JSONL and the run header.
+        for s in [Surface::Daemon, Surface::ThCode] {
+            assert_eq!(Surface::from_name(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn the_run_records_which_surface_produced_it() {
+        // Two surfaces' results are only comparable if you can tell them
+        // apart after the fact.
+        let run = AgenticRun {
+            engine: "rust".to_string(),
+            model: "m".to_string(),
+            surface: Surface::ThCode.as_str().to_string(),
+            isolation: "host".to_string(),
+            judge_model: "j".to_string(),
+            trials: 1,
+            ran_at: chrono::Utc::now(),
+            results: Vec::new(),
+        };
+        assert!(run.render_table().contains("thcode"), "the table must name the surface");
+        assert!(run.to_jsonl().expect("serialises").is_empty() || run.to_jsonl().expect("serialises").contains("thcode"));
     }
 }

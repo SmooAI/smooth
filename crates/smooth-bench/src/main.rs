@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use smooth_bench::agentic::{default_scenarios, parse_scenarios, run_agentic, AgenticOpts, AgenticRun, Verdict};
+use smooth_bench::agentic::{default_scenarios, parse_scenarios, run_agentic, AgenticOpts, AgenticRun, Surface, Verdict};
 use smooth_bench::convo::{default_convo_scenarios, gateway_from_providers_json, parse_convo_scenarios, run_convo, ConvoOpts, ConvoRun, ConvoStatus};
 use smooth_bench::curated::CuratedList;
 use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter, WorkspaceBooter};
@@ -164,6 +164,14 @@ struct AgenticArgs {
     #[arg(long, default_value = "microvm", value_parser = parse_isolation)]
     isolation: Isolation,
 
+    /// Which CLIENT drives the turn. `daemon` (default) speaks the
+    /// canonical protocol directly, as the Big Smooth PWA does;
+    /// `thcode` drives through smooth-code's own client, the codepath
+    /// `th code --headless` runs. Same engine either way — the delta is
+    /// attributable to `th code`'s layer. Pearl th-b3fe81.
+    #[arg(long, default_value = "daemon", value_parser = parse_surface)]
+    surface: Surface,
+
     /// Cheap model used to grade `kind = "judge"` scenarios.
     #[arg(long, default_value = "deepseek-v4-flash")]
     judge_model: String,
@@ -255,6 +263,10 @@ struct ScoreArgs {
 
 fn parse_engine(s: &str) -> Result<Engine, String> {
     Engine::from_name(s).ok_or_else(|| format!("unknown engine {s:?} (valid: rust, go, ts, python, dotnet)"))
+}
+
+fn parse_surface(s: &str) -> Result<Surface, String> {
+    Surface::from_name(s).ok_or_else(|| format!("unknown surface {s:?} (valid: daemon, thcode)"))
 }
 
 fn parse_isolation(s: &str) -> Result<Isolation, String> {
@@ -533,6 +545,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             // would score against model A's leftover workspace.
             runs_root: if models.len() > 1 { run_root.join(slugify(model)) } else { run_root.clone() },
             model: model.clone(),
+            surface: args.surface,
             isolation: args.isolation,
             judge_model: args.judge_model.clone(),
             gateway_url: gateway_url.clone(),
