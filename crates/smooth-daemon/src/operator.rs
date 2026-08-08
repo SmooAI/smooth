@@ -139,7 +139,7 @@ impl ToolProvider for SandboxedToolProvider {
         let session = ctx.conversation_id.clone().unwrap_or_default();
         let dir = self.cwd.get(&session);
         let mut tools = smooth_tools::default_tools_with_proxy(dir.clone(), self.proxy.clone());
-        tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session, dir)) as Arc<dyn Tool>);
+        tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session, dir.clone())) as Arc<dyn Tool>);
         // Durable cross-session memory: `remember` writes, `recall` reads — both
         // over the same shared backend, injected here (not in the generic
         // `default_tools_with_proxy`) because they need the daemon's `Memory`
@@ -201,6 +201,18 @@ impl ToolProvider for SandboxedToolProvider {
         // hook see it like any other.
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::IMessageTool) as Arc<dyn Tool>);
+        // CLI-wrapper plugins (th-262e5f): `~/.smooth/plugins/<name>/plugin.toml`
+        // plus this session's workspace `.smooth/plugins/`, project shadowing
+        // global. Registered HERE — on the per-turn registry — so each plugin
+        // sits behind the permission gate and Narc like a built-in, and its
+        // command runs in the same kernel sandbox `bash` does.
+        //
+        // ponytail: the two manifest dirs are re-scanned per turn rather than
+        // cached at startup. That's two readdirs over a handful of tiny files,
+        // and it means `th plugin init` takes effect on the next message rather
+        // than the next daemon restart. Cache behind an mtime check if someone
+        // ever ships hundreds of plugins.
+        tools.extend(smooth_tools::plugin_tools(&dir, self.proxy.as_deref()));
         // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
         // lets Big Smooth fan a self-contained subtask out to a `scout`
         // (read-only) or `runner` (full) sidekick — each runs in its own
@@ -823,7 +835,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
-                .merge(crate::skills_route::skills_router(workspace))
+                .merge(crate::skills_route::skills_router(workspace.clone()))
+                // GET /api/plugins — the installed CLI-wrapper plugin catalog,
+                // the same merged list the per-turn registry registers as tools
+                // (th-262e5f).
+                .merge(crate::plugins_route::plugins_router(workspace))
                 // GET /api/mode — the model the next turn would run with, so
                 // faces can show a real name at idle instead of "unknown"
                 // (pearl th-7630a7). Name only; credentials never leave.
@@ -906,6 +922,27 @@ mod tests {
         // The rest of the sandboxed set is still there (didn't clobber anything).
         assert!(names.iter().any(|n| n == "bash"), "bash still registered: {names:?}");
         assert!(names.iter().any(|n| n == "cd"), "cd still registered: {names:?}");
+    }
+
+    /// A `plugin.toml` in the session workspace must reach the per-turn registry
+    /// as a tool — that's the whole of th-262e5f: plugins are registered
+    /// engine-side, so they sit behind the permission gate and Narc.
+    #[tokio::test]
+    async fn provider_registers_workspace_plugins() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let workspace = tempfile::tempdir().unwrap();
+        let plugin_dir = workspace.path().join(".smooth/plugins/greet");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.toml"),
+            "name = \"greet\"\ndescription = \"Say hello.\"\ncommand = \"echo hi\"\n",
+        )
+        .unwrap();
+
+        let provider = local_tool_provider(workspace.path().to_path_buf(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "plugin_greet"), "project plugin registered: {names:?}");
     }
 
     /// Platform-specific registration (pearl th-94cc4a): the calendar tool must

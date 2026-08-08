@@ -39,7 +39,7 @@
 ## Extensibility
 
 - **MCP server** — A Model Context Protocol server whose tools land in the registry as `<server>.<tool>`. Configured via `mcp.toml`.
-- **Plugin** — A CLI-wrapper tool declared in `plugin.toml`, registered as `plugin.<name>`.
+- **Plugin** — A CLI-wrapper tool declared in `plugin.toml`, registered by the daemon as `plugin_<name>` and listed at `GET /api/plugins`.
 - **SEP** — *Planned.* The Smooth Extension Protocol — subprocess extensions over JSON-RPC. See [[Architecture/Extension-System]].
 - **`SMOOTH_NARC_URL`** — The URL operatives dial to escalate ambiguous tool calls to Narc. Loopback, since operatives are host subprocesses.
 

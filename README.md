@@ -443,7 +443,7 @@ Two extension points add tools without rebuilding the binary:
   `th mcp remove budget-aware-mcp`.
 - **CLI-wrapper plugins** — drop a TOML manifest at
   `.smooth/plugins/<name>/plugin.toml` and the runner registers it as
-  `plugin.<name>`, rendering `{{placeholder}}` args into a shell
+  `plugin_<name>`, rendering `{{placeholder}}` args into a shell
   command template.
 
 Both are configurable globally (`~/.smooth/`) and per-project
