@@ -10,12 +10,21 @@
 # PreToolUse nudge has neither problem: it fires once, on the agent's own command,
 # and the agent can decline with a reason.
 #
-# Exit codes: 0 allow silently, 1 ask the user (stderr hint is visible to Claude),
-# 2 hard block. We use 1 — this is a nudge, not a gate. Attesting is often the
-# WRONG call (a doc typo doesn't need 10 minutes of checks), so the agent has to
-# be able to say no.
+# Exit codes: 0 allow silently, 1 ask, 2 hard block (stderr goes back to the model).
 #
-# Background: scripts/ci/README.md in the consuming repo · pearl th-6578ee
+# This shipped as `exit 1` on the theory that a nudge was enough, because attesting
+# is often the WRONG call and the agent has to be able to say no. Measured
+# 2026-08-08, that theory was wrong: of 18 Claude transcripts that ran a `git push`
+# that day, 7 had this hook fire — its stderr is right there in the transcript — and
+# ZERO ran attest.sh or used the ack below. The last 15 merged smooai PRs carried 0
+# ci-attest statuses and paid full CI. An ask is something an agent running in auto
+# mode approves for itself, so `exit 1` was a log line with extra steps.
+#
+# Hence 2. Saying no is still cheap and still supported — it just has to be said out
+# loud, by appending ` # attest:ack reason=...`, which is one comment rather than a
+# silent default.
+#
+# Background: scripts/ci/README.md in the consuming repo · pearls th-6578ee, th-22d257
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
@@ -99,4 +108,4 @@ attested), append \` # attest:ack reason=...\` and re-run.
 
 Reference: scripts/ci/README.md
 EOF
-exit 1
+exit 2
