@@ -320,7 +320,6 @@ fn apply_engine_env(command: &mut Command, model: &str, env: &EngineEnv) {
 /// # Errors
 /// Errors on prep failure, spawn failure, or if the port never listens
 /// within `ready_timeout`.
-#[allow(clippy::too_many_arguments)]
 /// Open `<log_dir>/<engine>.log` twice (stdout + stderr both append to
 /// it, interleaved as the process emits them).
 ///
@@ -336,6 +335,10 @@ fn open_engine_log(log_dir: &Path, engine: Engine) -> Option<(std::fs::File, std
     Some((out, err))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a spawn takes what a spawn takes; splitting it into a struct would only move the arity"
+)]
 fn spawn_engine(
     engine: Engine,
     model: &str,

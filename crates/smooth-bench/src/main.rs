@@ -361,6 +361,9 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
         "--url targets an existing daemon whose routing we don't control; pass a single --model, or drop --url so each model gets its own daemon"
     );
 
+    // convo always drives the Rust daemon, spawned or via --url.
+    eprintln!("{}", smooth_bench::provenance::Provenance::detect().render());
+
     let run_root = smooth_bench::runs_root()?.join(format!("convo-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
     std::fs::create_dir_all(&run_root).with_context(|| format!("mkdir {}", run_root.display()))?;
     eprintln!("convo: scratch at {}", run_root.display());
@@ -530,6 +533,14 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     };
     if env.gateway_key.is_none() {
         eprintln!("warning: SMOOAI_GATEWAY_KEY is unset — the agent will boot but every turn errors; scenarios will be INCONCLUSIVE");
+    }
+
+    // Say which binary is about to be benchmarked. The Rust engine boots
+    // `th daemon` from PATH and nothing rebuilds it, so a run can silently
+    // score a months-old build (th-cdf7b8).
+    if args.engine == Engine::Rust {
+        let prov = smooth_bench::provenance::Provenance::detect();
+        eprintln!("{}", prov.render());
     }
 
     let run_root = smooth_bench::runs_root()?.join(format!("agentic-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));

@@ -37,6 +37,7 @@ pub mod engine;
 pub mod judge;
 pub mod lang_detect;
 pub mod leaderboard;
+pub mod provenance;
 pub mod scenarios;
 pub mod score;
 pub mod spend;
