@@ -52,6 +52,48 @@ pricing comes from `/model/info`.
 | `EMPTY REPLY` | 200 with neither content nor a tool call — the "Big Smooth says nothing" failure |
 | `BROKEN (…)` | the gateway rejected the call outright |
 
+
+## Prefer the latest — with two hard gates
+
+Default to the newest version in each family. Model families move fast
+and a picker pinned to last quarter's release is quietly paying more for
+less. `probe-models.py` lists everything the gateway serves, and family
+names sort usefully (`minimax-m2.7` < `minimax-m3-direct`,
+`glm-5.1` < `glm-5.2-direct`, `kimi-k2.5` < `kimi-k2.7-code-direct`).
+
+Two things stop a swap, and neither is negotiable:
+
+**1. It must be priced.** Several models are routable and tool-capable
+but carry **no cost in the LiteLLM config**, so the gateway reports
+`x-litellm-response-cost: 0`. Routing to one means serving traffic that
+cannot be billed or attributed, and the bench renders its cost as `—`
+rather than `$0` because a zero there is a missing measurement, not a
+free model. Check before promoting:
+
+```bash
+python3 .claude/skills/update-models/probe-models.py | awk '$2==0 && $3==0'
+```
+
+As of 2026-08-08 that list is `glm-5.2-direct`, `glm-5-turbo-direct`,
+`qwen3-max-direct`, `qwen3.5-plus-direct`, `qwen3.5-flash-direct`,
+`qwen3.6-flash-direct`. The config carries a `# TODO: pricing not in
+LiteLLM catalog yet — set manually before traffic` for exactly this.
+Price it in `apps/k8s/apps/litellm/config.yaml` (smooai repo, via
+`/litellm-model-refresh`) first.
+
+**2. It must beat the incumbent on the bench.** "Newer" is a hypothesis,
+not a result. Run the suite before swapping:
+
+```bash
+smooth-bench convo --model <incumbent> --model <candidate> --trials 3 \
+  --scoreboard board.json
+```
+
+Read the **tool-use block**, not just the pass rate — a model can match
+on outcomes while taking three times the tool calls with a higher error
+rate, which is the difference between an agent you can leave running and
+one you cannot.
+
 ## 2. Update every surface
 
 `rg '"deepseek-v4-flash"' crates/` finds most of it. The full list:
