@@ -1,5 +1,728 @@
 # @smooai/smooth
 
+## 0.27.2
+
+### Patch Changes
+
+- b6da4e2: Fix the `resolve_org` tests, which passed by ordering luck rather than by asserting anything (pearl th-4c6b2a).
+
+  `resolve_org` falls through to its in-memory credentials only when `active_org::resolve` finds nothing — and that reads process-global env **plus** the three credential stores under `~/.smooth/auth/`. The tests cleared `SMOOAI_ORG_ID` but never the stores, so on any machine with a real active org the store branch answered first. Run filtered they failed outright; in the full suite they passed only because an earlier test happened to clear the env, and any concurrent `th` invocation flipped them back.
+
+  They now run against a temp `HOME` with no credential stores, under a lock, with the previous environment restored. A new test asserts the fixture itself hides the real active org, so the isolation cannot silently stop working.
+
+## 0.27.1
+
+### Patch Changes
+
+- 9577545: `th config set` no longer silently corrupts number-shaped values (pearl th-a5fc9e).
+
+  Values were JSON-parsed whenever they parsed, so an all-digit token became an f64 and lost everything past ~17 significant figures. Four live values are already corrupted and unrecoverable, since every stored copy is lossy: `slackClientId` (`10574252146965.107` — ten fractional digits gone), `derekDettmanSparkAgentKey`, `derekDettmanSparkOfficeKey`, and `sparkAgentKey` in Derek's org.
+
+  Secrets are now never parsed — a secret is an opaque token whose bytes must round-trip exactly. Every other tier must round-trip: the parsed value is re-serialized and compared to the input, and a mismatch is refused rather than stored. That second rule is the one that matters, because `slackClientId` is public tier and a secrets-only rule would have missed it. Pass `--string` to store a number-shaped identifier verbatim. Feature flags, limits and ordinary numbers round-trip, so they still parse as before.
+
+## 0.27.0
+
+### Minor Changes
+
+- d6c73ec: th code composer attachments — paste an image with Ctrl+V (macOS clipboard) or drag an image/PDF onto the terminal, and it ships as data-URL `images[]` on the canonical `send_message` frame, wire-identical to the web SPA composer (pearl th-d16f7c, epic th-d7366d). Staged attachments show in the input border title; Backspace on an empty draft removes the newest one. Ctrl-chorded keys no longer leak into the draft as literal characters (Ctrl+B used to type a `b` while toggling the sidebar).
+- 0196bb8: th code sessions ARE daemon conversations (pearl th-aaa53a, epic th-d7366d). The Ctrl+B sidebar now lists Big Smooth's `list_conversations` — the same rows the web SPA shows — so a chat started in any face is resumable from every face; resuming binds the conversation and hydrates the transcript from stored history over the canonical protocol. Local `~/.smooth/coding-sessions/` JSON is no longer written (legacy sessions remain readable as the offline fallback). The client-side `prior_messages` replay is gone — the engine already replays a resumed conversation's history by thread_id, so the TUI was double-feeding context. Also fixes "New conversation" not unbinding the daemon conversation, which made the next turn silently resume the chat the user just left.
+- 7d81734: One `@`-mention backend for every Big Smooth face (pearl th-8e9cf6, epic th-d7366d). The daemon's `GET /search` now serves pearls (open + in-progress, from the workspace's `.smooth/dolt` with a 30s TTL cache) alongside files and paths — resolving the v1 deferral, so the web composer gets pearl mentions for free — and accepts a guarded `?cwd=` override so a client can search its own working directory (honored only for the daemon workspace or paths under the user's home). `th code`'s `@` picker now queries that same `/search` endpoint and overlays the daemon's ranked results when they arrive (generation-guarded against stale replies), keeping its local walk purely as the offline fallback.
+- a47221a: Plugins are a daemon surface (th-262e5f). `plugin.toml` manifests have been a
+  config format with nothing reading them since the microVM operative was deleted
+  — the loader went with it, so an installed plugin was a file on disk the agent
+  never saw. The daemon now owns them: `smooth_tools::plugin` merges
+  `~/.smooth/plugins/<name>/plugin.toml` with the workspace's
+  `.smooth/plugins/` (project shadows global) and registers each enabled manifest
+  on the operator's **per-turn** registry, so a plugin sits behind the permission
+  gate and Narc like a built-in and its command runs through the same kernel OS
+  sandbox `bash` does — not a raw subprocess. Discovery runs per turn, so
+  `th plugin init` takes effect on the next message instead of the next restart.
+
+  `GET /api/plugins` serves the merged catalog (manifest fields + scope +
+  registered tool name + path, plus any manifests that failed to parse), honoring
+  the same guarded `?cwd=` override as `/api/skills`, so a face with no disk
+  access can render the list the agent actually has rather than re-walking the
+  directories itself. Tool names are now `plugin_<name>` rather than
+  `plugin.<name>` — a `.` is invalid in a provider tool name and would have
+  failed the whole LLM request.
+
+- eeb68b3: Skills are a daemon surface (pearl th-a5952d, epic th-d7366d). New ungated `GET /api/skills` route serves the one skill catalog (`smooth_cast::skills::discover` — project, user, Claude Code, and opencode skills) with the same guarded `?cwd=` override as `/search`, giving the web SPA (which has no disk access) a skills menu for the first time. `th code`'s `/skill` command, `/` popup, and chief skill-composition now read that daemon catalog (fetched once at startup), falling back to a local discover walk only when the daemon is unreachable. Server-side composition via a `skill` field on `send_message` is the follow-up (pearl th-b30a6a — needs an engine change).
+- e680453: Big Smooth registers on the Smoo Relay with a stable per-machine device id instead of the hardcoded `daemon`, so one Smoo account can run several daemons (laptop + smoo-hub) without them fighting over the same relay slot. The id is `daemon-<12 hex>`, minted once and persisted to `~/.smooth/relay-device-id` (mode 600), and the daemon now also announces `label` (the machine's short hostname) and `kind=daemon` so phones can tell the daemons apart. `SMOOTH_RELAY_DEVICE_ID` and `SMOOTH_RELAY_LABEL` override both.
+- c39898f: Big Smooth dials the Smoo Relay — remote control without tailscale (pearl th-2f626d, EPIC th-5561c5).
+
+  The daemon now connects OUT to the Smoo Relay (`wss://relay.smoo.ai/ws`, smooai SMOODEV-2828) as the signed-in user's device `daemon`, authenticating with the stored Smoo session (re-read fresh on every reconnect — the credential heartbeat rotates it). Phones connect to the same relay as their own devices; the relay forwards opaque `{to, frame}` envelopes same-user-only, and the daemon bridges each phone to its own operator over a per-device loopback WS (`ws://127.0.0.1:<port>/ws?token=…` — the scheduler's exact seam), so the operator sees each phone as just another canonical-protocol client. Exponential-backoff reconnect; a signed-out daemon waits quietly; `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the endpoint. This is the foundation for the Big Smooth iOS/Android apps (SMOODEV-2829/2830).
+
+- bf1e8f3: Big Smooth notifications actually fire (pearl th-b9a636, EPIC th-5561c5): scheduled/proactive turns now notify the user on completion.
+
+  `push.rs` could _send_ web pushes since th-c561f1 but nothing ever triggered one — a reminder ran its turn and the result sat silently in the conversation. New `notify.rs` (`TurnNotifier`) fans out on scheduled-turn completion: (1) the existing VAPID **web push** to the installed PWA (`PushState` now escapes `push_router()` so the scheduler can hold it), and (2) **phone push** via the Smoo platform's existing `POST /organizations/{org}/notifications/self` (in-app + FCM to the user's devices, deep link `bigsmooth://chat` for the Big Smooth mobile apps) using the daemon's stored Smoo session — no push credentials on the daemon, no new backend surface. The scheduler's turn driver captures the final response text and uses it as the notification body. Signed-out or unreachable channels skip quietly; notifications never fail a schedule.
+
+- 545c336: `th branding` — white-label a Smoo AI org, logo included, from the CLI (SMOODEV-2820)
+
+  New top-level command (alias `th brand`): `show` / `from-url` / `set` / `enable` /
+  `disable` / `preview` / `clear`. It wraps the org's white-label row and, unlike
+  pasting a URL into the dashboard, actually re-hosts the logo — `--logo`,
+  `--logo-dark` and `--favicon` each take a local path or a remote URL, and a
+  remote one is fetched and uploaded to the org's brand assets so a partner's own
+  server is never left as the source of truth for their mark.
+
+  Three things it refuses to do, on purpose:
+
+  - **Go live on an unreadable theme.** `enable` (and `from-url --enable`) computes
+    WCAG contrast for foreground/background, primaryForeground/primary and
+    mutedForeground/background and stops at anything under 4.5:1. `--force`
+    overrides. Shipping an illegible dashboard to a partner is the failure mode
+    the whole gate exists for.
+  - **Fetch a private host.** Remote logo URLs are vetted the way the server's
+    `vetUrl` does — http(s) only, no loopback / RFC1918 / `169.254.` (the cloud
+    metadata endpoint), no redirect following, 5 MB cap — and the bytes are
+    magic-byte sniffed against the platform's allowlist before upload.
+  - **Silently wipe a theme.** The server's PUT replaces the whole `themeJson`
+    column, so every partial `set` is a read-modify-write over the current row.
+
+  `from-url` is a dry run by default: it prints the derived swatch table, the logo
+  candidates and the contrast verdict, and writes nothing. `--apply` stages
+  (`enabled` stays false, previewable via `?brandPreview=1`); `--enable` goes live.
+  It marks which candidate it picked per slot — the extractor can return several
+  per kind and the first isn't always the mark — and `--logo` / `--logo-dark` /
+  `--favicon` override the pick. A verdict with no measured ratios is reported as
+  vacuous rather than as a pass.
+
+  The Aurora meaning tokens (`--color-heat-0..5`, `--color-ai`, `--gradient-aurora`,
+  ok/warn/crit) are never white-labeled and the command exposes no flags for them.
+
+  Two server-side gaps are surfaced as diagnoses rather than bare errors: the
+  platform's write validator is still Phase 1, so the surface tokens
+  (`--background`, `--card`, `--sidebar`, …) 400 today; and `from-url` 404s until
+  the propose endpoint deploys.
+
+### Patch Changes
+
+- 4d53bf5: Add `smooth-bench convo` — an agentic conversation harness that catches quality regressions a single-turn bench can't see (pearl th-f19853).
+
+  An LLM driver plays a realistic user across several turns on ONE canonical-protocol session against a live Big Smooth; an LLM judge then grades the whole thread 1–5 on helpfulness, correctness, tool use, and consistency across turns, plus a rubric PASS/FAIL. Transcripts are emitted as JSON-lines.
+
+  Ships four scenarios: the "list my calendar events" ask that produced three contradictory answers, a rapid-correction/barge-in scenario that documents the th-3a912a interrupt gap (marked `expect_fail`, so it records XFAIL today and XPASS — loudly — once interrupts land), and two ordinary helpfulness/tool-correctness asks.
+
+  Also adds `CanonicalSession` to the bench's canonical driver: multi-turn conversations on one connection, with send and collect split so a message can be fired before the previous turn finishes. The suite is a `smooth-bench` subcommand, never part of `cargo test`.
+
+- c1bbca7: bench: export SMOOTH_WORKSPACE for every engine, and refuse to attach to a foreign process
+
+  Two more cases of the bench measuring the wrong thing. Every polyglot host reads
+  `SMOOTH_WORKSPACE` and falls back to cwd, but the bench exported it only for Rust.
+  Go/TS/Python happened to work because their launchers run with cwd = workspace, while
+  `dotnet run --project` runs the app from the project directory — so .NET confined its
+  coding tools to the engine checkout, read files fine, and never wrote where the
+  scenario asserted. With it exported, .NET goes 0% → 100% and all five engines are green.
+
+  Ports are fixed per engine and `wait_for_port` only waits for _something_ to accept TCP,
+  so a concurrent run or a leftover daemon would be silently attached to and scored as if
+  it were the engine we spawned. The bench now refuses to start on an occupied port and
+  explains why.
+
+- 6c4135b: attest-push-hint now BLOCKS a bare `git push` (exit 2) instead of asking (exit 1).
+
+  Measured on 2026-08-08: of 18 Claude transcripts that ran a `git push` that day, 7
+  had the hook fire and zero ran `attest.sh` or used the `attest:ack` bypass. The last
+  15 merged smooai PRs carried no `ci-attest` statuses and paid full CI. An ask is
+  something an agent in auto mode approves for itself, so the nudge was a log line
+  with extra steps.
+
+  Declining is unchanged and still cheap — append ` # attest:ack reason=...` — it just
+  has to be explicit now. Adds a committed 17-case test suite; this hook had shipped
+  broken twice with no test to catch it.
+
+- 7a8bde6: smooth-agent: attest-push-hint missed `cd <repo> && git push` (the common shape)
+
+  Resolved the repo from the session's `.cwd`, which is never where the command
+  runs — agents `cd` inline. Also fixed push-detection so `git -C <path> push` is
+  recognised (the flag's value was eating the `push` token).
+
+- 0d29425: smooth-agent: nudge `git push` toward `scripts/ci/attest.sh` in repos that have it
+
+  New `attest-push-hint.sh` PreToolUse hook. Fires only where `scripts/ci/attest.sh`
+  exists, so it turns itself on in any repo adopting the convention and stays silent
+  everywhere else. Exits 1 (ask), not 2 (block) — attesting is often the wrong call,
+  and a red local check is sometimes the machine rather than the code.
+
+- 9188793: bench: measure real LLM cost, and fix `--model` silently doing nothing
+
+  The cost column reported `$0` because llm.smoo.ai returns a request's price only
+  in the `x-litellm-response-cost` **response header**, and the engine parses the
+  JSON body (pearl th-11f9bb tracks the root fix). The bench now measures spend
+  itself from the gateway key's delta, minus its own driver/judge calls — with two
+  correctness guards: it waits for LiteLLM's asynchronous spend posting to settle,
+  and it samples the shared key's background traffic and renders anything below 2x
+  that noise as `<noise` instead of a precise-looking figure.
+
+  Separately, and more seriously: `--model` was silently ignored on the host spawn
+  path. The daemon reads `SMOOTH_AGENT_MODEL`, the bench set only `SMOOAI_MODEL`,
+  so every row of a model matrix ran the daemon's own default and the differences
+  between rows were run-to-run variance. Now pinned via a tested `apply_engine_env`.
+
+  With the pin working, every model other than the default returns an empty reply
+  (pearl th-c127d1, P0) — the bench reports those as INCONCLUSIVE rather than
+  inventing a result.
+
+- 442ea7d: bench: cross-model leaderboard + an agentic corpus mined from real Big Smooth transcripts
+
+  `--model` is now repeatable on `smooth-bench agentic` and `smooth-bench convo`, so
+  one invocation scores several models and prints a leaderboard plus a scenario ×
+  model grid. Each model gets its own scratch subtree (and, for convo, its own
+  daemon and workspace) so model B never inherits model A's memories. The grid
+  surfaces scenarios that _every_ model fails — those are harness bugs, not model
+  bugs, and they were invisible in any single-model run.
+
+  Fourteen new scenarios (nine agentic, five convo) written from ~1,300 rows of the
+  smoo-hub daemon's real conversation history rather than from first principles:
+  workspace discovery, recursive search, find-and-follow a procedure doc,
+  multi-item follow-through, backfilling incomplete records, groundedness,
+  over-refusal, standing-instruction decay, injection carried inside quoted
+  third-party text, and ambiguous targets.
+
+  Deterministic assertions can now target the agent's spoken answer (`answer = true`)
+  and the turn's tool calls (`tools_used` / `tools_forbidden`) — the two failure
+  modes that leave no trace on disk.
+
+- ecd67ce: bench: weekly model-leaderboard workflow
+
+  Publishes the model leaderboard on a schedule instead of whenever someone remembers
+  to run it. Deliberately multi-trial: at `--trials 1` the suite could not tell
+  deepseek-v4-flash and gpt-5.5 apart at all — every apparent difference was noise on
+  one known-flaky scenario. A published number from a single trial is an anecdote
+  wearing a percentage sign.
+
+  Weekly rather than nightly because 3 trials across the suite costs real LLM spend.
+  `workflow_dispatch` takes models/trials as inputs and gates the commit behind an
+  explicit `publish` flag, so you can score a candidate model without touching the
+  published board.
+
+- ecd67ce: bench: record which binary was actually benchmarked
+
+  The Rust engine boots `th daemon` from PATH, and `th daemon` runs the separate
+  `smooth-daemon` binary, also from PATH. `prepare_engine` rebuilds go/ts/python but
+  Rust falls through, so the reference implementation — the one every other engine is
+  compared against, and the one the published leaderboard uses — was whatever happened
+  to be installed.
+
+  Runs now print the resolved binaries and `th --version`, and warn when it was not
+  built from the checkout's HEAD. The warning fired on the first real run, against a
+  binary from the commit the session started on. Same class as the stale TypeScript
+  `dist/` (th-11284c), wider blast radius.
+
+- aee8272: bench: `--surface {daemon,thcode}` — run the agentic corpus through `th code`'s client
+
+  `th code --headless` and the Big Smooth PWA speak the same canonical WebSocket to
+  the same daemon, so this is two client codepaths onto one engine rather than two
+  backends. `--surface thcode` drives turns through `smooth_code`'s own
+  `run_headless_capture` (not a re-implementation), so a difference between the two
+  surfaces is attributable to `th code`'s own layer — the cast role it requests and
+  the working directory it pins. The surface is recorded on the run and in every
+  JSONL record.
+
+- e036112: smooth-bench + `operator-serve.sh`: always rebuild the TypeScript LocalServer instead of reusing whatever is in `dist/` (pearl th-11284c).
+
+  Both launchers skipped `pnpm install && pnpm build` whenever `typescript/server/dist/main.js` merely existed. `dist/` is gitignored, so it can be arbitrarily older than the checkout — and on a machine where it predated the coding toolset (th-82ad57), the bench booted a chat-only bundle: the server started, turns completed and produced text, but ZERO tools were ever registered. That scored as a model-quality FAIL (ts 0/2, empty tools column) rather than the stale-artifact problem it was, while rust/go/python passed with tools. A stale `node_modules` bites identically (the engine dep had moved 0.1.1 → 1.7.1 without a reinstall), so the install runs too.
+
+  `tsc` is incremental (~7s cold, ~2s warm), which is what Go's unconditional `go build` and Python's `uv sync` in the same function already cost. With the rebuild in place, `agentic --engine ts --model deepseek-v4-flash` passes with `read_file,edit_file` in the tools column.
+
+- 933e717: Package the daemon as `Big Smooth.app` (macOS privacy foundation)
+
+  A bare CLI binary can't declare Info.plist usage-description strings, so it can only get silent `EPERM` on TCC-gated resources and can't request Calendar/EventKit, Contacts, Reminders, etc. at all. This packages `smooth-daemon` as a proper signed `Big Smooth.app` bundle so macOS shows a native "Big Smooth wants to access…" prompt on first access — the prerequisite for Full Disk Access working cleanly _and_ for the upcoming ical/Calendar tool.
+
+  - `scripts/macos/make-app-bundle.sh` + `scripts/macos/Info.plist`: a generic, reusable bundle builder (assemble → fill version → sign the bundle → verify). `CFBundleName`/`DisplayName` = "Big Smooth" so the prompt is branded; `CFBundleIdentifier` = `ai.smoo.smooth-daemon` (the stable TCC key); `LSUIElement` background app; usage strings for removable volumes (the FDA blocker) and Calendar (imminent). Reusable by a future user-facing installer, not just smoo-hub.
+  - `scripts/smoo-hub/deploy.sh` now builds + ships `Big Smooth.app` to `~/Applications` (instead of a bare binary), and the launchd plist runs the bundle's executable. The stable-signing work carries over unchanged; a grant made to the earlier bare binary still applies (same identifier + cert = same designated requirement).
+
+  Phase 1 of the "Big Smooth as a local menu-bar agent" direction; the menu-bar item (th-f7cb98) is Phase 2.
+
+- acbcce8: Big Smooth.app now ships a real Dock/Finder icon — the `th` PWA mark (dark rounded square, teal→blue glyph) as `scripts/macos/BigSmooth.icns`, wired via `CFBundleIconFile`. Previously the bundle declared no icon and got the generic macOS placeholder.
+- 225d866: Big Smooth.app: auto-enable the menu bar on app launch + a local install script
+
+  The menu bar was env-only (`SMOOTH_MENUBAR=1`), so a double-clicked `Big Smooth.app` showed nothing. Now `smooth_menubar::enabled()` also returns true when the daemon is launched from inside a `.app` bundle (its executable path is `…/Big Smooth.app/Contents/MacOS/smooth-daemon`) — double-click / `open` / a login-item all light up the menu bar. A plain `smooth-daemon` on `$PATH` (CLI, tests, a bare launchd agent like smoo-hub's) stays headless.
+
+  Also: the menu bar now survives a server error (port busy, missing creds) instead of exiting — a menu-bar app must not silently vanish. And `scripts/macos/install-local.sh` builds + packages + installs `Big Smooth.app` to `~/Applications` on the local Mac (the laptop counterpart to `scripts/smoo-hub/deploy.sh`), with `--login-item` for auto-start and `--open` to launch it.
+
+- d4afc63: Cancelling a calendar event now asks you first (pearl th-94cc4a).
+
+  Big Smooth's default posture is `AutoMode::Bypass` — mutations run unprompted.
+  Deleting a calendar event is the one mutation the agent can't walk back on the
+  next turn, so it's now the exception.
+
+  - **`calendar_delete`** — `delete` moved off the `calendar` tool onto its own
+    tool, which the daemon always lists in `ServerConfig::confirm_tools`. A call
+    parks the turn on `write_confirmation_required`; the web UI renders the
+    approve/deny prompt and the delete runs only on `confirm_tool_action`
+    `approved: true`. Deny, a 5-minute timeout, or a client that never answers all
+    fail **closed**.
+  - **`calendar` keeps reads plus `add`/`update`, all unprompted** — behavior
+    unchanged there. `delete` is off its allowlist and its schema enum entirely, so
+    the gate can't be sidestepped by calling the other tool.
+  - The split is forced by the mechanism: the engine's `ConfirmationHook` matches
+    on tool **name** (`contains`), not on arguments — "this verb confirms" is only
+    expressible as "this tool confirms".
+  - The confirm list is a **floor**: `SMOOTH_AGENT_CONFIRM_TOOLS` can widen it but
+    can't shrink it, so an unset env var can't disarm the gate.
+
+  Known gap: `th code`'s WS client doesn't render `write_confirmation_required`
+  yet, so a delete driven from there fails closed on the timeout instead of
+  prompting.
+
+- 239804a: Big Smooth can read and adjust your macOS Calendar (pearl th-94cc4a, first slice).
+
+  - **`calendar` tool** (macOS only) — a first-class tool over the
+    [`ical`](https://github.com/BRO3886/ical) EventKit CLI. Reads: `today`,
+    `upcoming`, `list`, `search`, `show`, `calendars`, `free`, `inbox`. Writes:
+    `add`, `update`, `delete`. Always JSON. It is the first **documented exception**
+    to "every subprocess goes through the kernel sandbox": seatbelt blocks
+    EventKit's XPC/mach lookups, so it spawns `ical` with a plain `Command` — argv
+    only, fixed binary, verb allowlist, and still a normal tool call the permission
+    gate and Narc hook see.
+  - **`ical`'s human-first modes are neutralized**, because the daemon spawns it
+    with null stdin: `-i` is refused, `update`/`delete` require an event id (a bare
+    one opens a picker), and `delete` always gets `--force`. The decision point is
+    the tool's permission gate, not a TTY prompt nothing can answer.
+  - **Platform-specific tool registry** — the daemon cfg-gates the tool to macOS
+    (Linux/Windows never see it) and registers it even when it can't work yet: a
+    missing `ical` or an ungranted TCC permission answers "run
+    `th doctor --setup-calendar`" instead of failing opaquely.
+  - **`th doctor --setup-calendar`** — side-loads the `ical` release binary to
+    `~/.smooth/bin/ical` (no Homebrew tap), then drives Big Smooth.app into asking
+    macOS for Calendar access and reports what's left to click.
+  - **Native EventKit grant request** — `smooth_menubar::eventkit` (the macOS
+    quarantine crate) calls `EKEventStore.requestFullAccessToEvents` at app
+    startup, which is what makes the OS prompt appear; a bare CLI asking gets a
+    silent denial.
+  - `Info.plist` also declares `NSRemindersFullAccessUsageDescription` now, so the
+    reminders slice doesn't need a re-sign.
+
+- 053b643: Make `Big Smooth.app` distributable (pearl th-a647da): a `make-dmg.sh` that
+  packages the app into a drag-to-Applications DMG, optional hardened-runtime
+  signing in `make-app-bundle.sh` (on for a `Developer ID` identity, unchanged for
+  ad-hoc and the smoo-hub Apple Distribution deploys), a `notarize-and-staple.sh`
+  that no-ops cleanly without Apple credentials, and a `macos-app.yml` release job
+  that builds/packages/notarizes and attaches the DMG to the GitHub Release.
+
+  The app now bundles the `th` CLI at `Contents/Resources/bin/th`, and the menu bar
+  gained **Install th CLI…** — it symlinks the bundled binary onto `PATH`
+  (`/usr/local/bin`, falling back to `~/.local/bin`), the VS Code "install shell
+  command" pattern.
+
+- cbf36a6: Big Smooth can read, search and send your macOS Messages (pearl th-1665ed).
+
+  A new macOS-only `imessage` tool with five verbs — `recent`, `thread`, `search`,
+  `conversations` and `send`. Reads go straight at `~/Library/Messages/chat.db`
+  over an in-process **read-only** SQLite connection (including a decoder for the
+  `attributedBody` typedstream, so messages composed on modern macOS — which leave
+  the `text` column NULL — still read). Sending goes through Messages.app via a
+  fixed AppleScript that takes the recipient and body as `argv`, so nothing the
+  caller supplies is ever parsed as script.
+
+  Both halves run outside the kernel sandbox as a documented trusted-integration
+  exception (the seatbelt profile denies `~/Library` reads and Apple Events), and
+  both are still normal tool calls — the permission gate and the Narc hook see them
+  like any other. `th doctor --setup-imessage` drives the two grants this needs:
+  Full Disk Access to read, and Automation to send.
+
+  Reading exposes the user's message history to the model — a deliberate opt-in,
+  bounded by per-call row limits (default 20, hard cap 200), a required filter on
+  `thread`/`search`, body truncation, and attachments reported as a boolean rather
+  than a filesystem path.
+
+- b05688f: Big Smooth menu bar: use the `th` mark icon instead of text
+
+  The menu-bar item now shows the `th` glyph as a template image (black shape + alpha, so macOS tints it for the light/dark menu bar) instead of the "Big Smooth" text. Rendered from `images/smooth-icon.svg` to a 36px PNG and embedded in `smooth-menubar` at build time; falls back to the text title if the image can't be decoded.
+
+- d2d755f: Big Smooth menu-bar item (macOS) — Phase 2 of the local-agent app
+
+  When Big Smooth runs on a user's own Mac it now puts a status item in the menu bar (**Open Big Smooth** → the web UI, **Quit**), the OpenClaw-style local-agent UX. `smooth-daemon`'s `main()` is restructured so the tokio server runs on a background thread while the AppKit run loop owns the main thread; the headless path (CI, tests, `th daemon`, a launchd agent) is unchanged and gated behind `SMOOTH_MENUBAR`.
+
+  The AppKit/objc2 FFI (which needs `unsafe`) is quarantined in a new `smooai-smooth-menubar` crate — the one crate that opts out of the workspace-wide `unsafe_code = "forbid"`, keeping `forbid` everywhere else. On non-macOS the crate is empty and the daemon doesn't depend on it. Deliberately opt-in (not auto-enabled for `.app` launches yet) so shipping the bundle can't flip a live headless daemon into a GUI mode before it's validated on a real screen; v1 is title-only (icon/status/restart/logs are follow-ups).
+
+- ddc6b39: fix(web, th code): block send while a turn is in flight — no more concurrent turns
+
+  Sending a message while a turn was already running did **not** queue behind it: the
+  daemon spawned a second concurrent turn, the two streamed back interleaved, and each
+  answer landed under the other's prompt. The agentic conversation bench reproduces it
+  with plainly swapped responses, and it's the root cause behind the contradictory
+  date/calendar replies (th-426791). The Stop button (th-3a912a) gave a way out of a
+  bad turn but left the footgun itself in place.
+
+  Send is now blocked outright while a turn is in flight, in both composers:
+
+  - **smooth-web** — Enter and the send button both go through one pure predicate
+    (`canSend` in `turn-guard.ts`). The draft stays in the box, the placeholder reads
+    "Big Smooth is working — Stop to interrupt", and a line under the composer explains
+    the paused Enter once you've typed something. Stop remains the way through.
+  - **`th code`** — Enter refuses to dispatch a second agent turn before it takes the
+    input, so nothing is lost. Slash commands and `!shell` are local and stay live, and
+    the input box titles itself "Working… send paused" so the swallowed keystroke reads
+    as intent rather than a bug.
+
+  Blocking rather than queueing: a queued message would be composed against a
+  conversation state the user never saw, and silently firing it later is the same
+  surprise the concurrency bug produced. Stop is an explicit, visible alternative.
+
+- abfbbc0: Give Big Smooth a clock: new `current_datetime` tool (th-4c6271)
+
+  The daemon had no way to ask what time it was, so the model invented "today" from its training data (observed "Fri May 22" and "December 19, 2024"). `current_datetime` returns the local time, weekday, IANA timezone, ISO-8601 timestamp, UTC, and unix epoch. It takes no arguments, is registered in the default tool set on every platform, and uses `chrono` + `iana-time-zone` so it works identically on macOS, Linux, and Windows.
+
+- 73feb3e: th code's composer catches up to Claude Code ergonomics. A large text paste (over 5 lines or 400 chars) no longer floods the draft — it stages as a compact `[Pasted #N — X lines]` reference that expands back into the real text at send, and deleting the reference drops the paste. The input box's growth ceiling is now responsive: the inline viewport scales to 40% of tall terminals (fixed 14 rows before) and the composer grows up to 16 text rows there, while short terminals behave exactly as before. Word and line editing landed too: Alt+Backspace kills the previous word, Cmd+Backspace kills to line start, and Ctrl+W / Ctrl+U are the always-works spellings for terminals that never deliver those modifiers.
+- afcc428: daemon: send temperature 1.0, not 0.0 — 0 is rejected by many frontier models
+
+  A growing set of models reject any temperature but their default and 400 the whole
+  request ("Unsupported value: 'temperature' does not support 0 with this model").
+  The symptom doesn't look like a config error: the daemon boots, accepts the turn,
+  every LLM call 400s, and the user sees an assistant that says nothing.
+
+  A per-model allowlist would be provably wrong — `gpt-5.1` rejects while `gpt-5.2`
+  accepts, `gpt-5.4` accepts while `gpt-5.4-pro` rejects. `1.0` was accepted by all
+  12 models tested across 6 families, so it is the one value that works everywhere.
+
+  Engine pin bumped to b8acb3b, which carries the load-bearing half (the turn config in smooth-operator-server). Verified end-to-end: gpt-5.5 goes from producing nothing to passing conversation scenarios 5/5/5/5 with zero LLM errors.
+
+  This also covers the daemon's own LLM configs (narc judge, sidekick factory, env-resolved
+  gateway). The main chat turn's config is built inside the engine and still needs the
+  same fix there — tracked in th-c127d1.
+
+  Consolidated: the value now lives in one place, `smooth_policy::llm_params::AGENT_TEMPERATURE`,
+  used by the daemon, `th model login`'s connection test, and the bench's own driver and judge
+  (a strict `--judge-model` used to 400 too). A guard test walks `crates/` and fails the build
+  if any file hardcodes a zero temperature again, naming the file and line.
+
+- 619e573: Desktop app → 0.1.1: first OTA release that bundles the `th` CLI (rides the update channel + PATH symlink from #363). Cutting a new version so installed 0.1.0 clients auto-update to the th-included build.
+- af446fa: Big Smooth desktop (`desktop/`, pearl th-a59af5): the Electron app is now the installable — it bundles `smooth-daemon` as its engine, packages via electron-builder (signed .dmg/.zip on macOS with the hardened runtime and the TCC usage strings; NSIS on Windows), and its tray drives Open / Set Up / Quit. Adds `smooth-daemon tcc calendar|reminders` for the grant flows, and `SMOOTH_MENUBAR` now turns the native menu bar OFF as well as on, so a bundled daemon doesn't raise a second status item. Calendar/Reminders prompts do not fire from a spawned child yet — measured, documented in `desktop/README.md`.
+- 2213400: `pnpm install:th` now makes the binary it just built actually win on `PATH`.
+
+  The menu bar's "Install th CLI…" symlinks `/usr/local/bin/th` (or
+  `~/.local/bin/th`) at `Big Smooth.app/Contents/Resources/bin/th`, and those
+  directories usually precede `~/.cargo/bin`. A successful dev install therefore
+  kept serving the older bundled binary — you'd debug a stale `th` and conclude
+  your change hadn't worked.
+
+  `install:th` now ends with `scripts/dev-link-th.sh`, which repoints that
+  symlink at the fresh build. It only ever rewrites a symlink; a regular file
+  (Homebrew, a manual copy) gets a warning and is left alone. Opt out with
+  `SMOOTH_NO_DEV_LINK=1`.
+
+- 06e2cb1: th doctor: detect a workspace on a TCC-gated external volume + guided Full Disk Access helper
+
+  Big Smooth's workspace can live on an external volume (on smoo-hub `~/dev` is a symlink to `/Volumes/smoo-ext`). macOS gates external volumes behind TCC (`kTCCServiceSystemPolicyRemovableVolumes`), so a daemon/`th` without the grant gets `EPERM` on every filesystem op there and looks jailed in its own workspace — separate from the seatbelt sandbox. `th doctor` now flags when the resolved workspace is on a non-boot `/Volumes` path (and whether access is already denied), and `th doctor --fix-fda` opens the Full Disk Access settings pane and reveals `th` + the daemon binary in Finder to drag in. FDA can't be granted programmatically (SIP-protected TCC.db), so this is as automated as the grant gets; it also warns that an ad-hoc-signed `th` loses the grant on every rebuild.
+
+- 0d92468: ADR-006: durable execution — extend `SqliteScheduleStore`, don't adopt apalis (th-2bcd7f)
+
+  Records the "local Temporal" decision for Big Smooth. apalis is a job queue, not durable execution — it gives at-least-once delivery and retry/backoff, not Temporal's deterministic replay — and replay is the wrong model for an agent turn anyway (LLM sampling is non-deterministic and side-effecting; the fitting primitive is checkpointing, which the engine already models). Adopting `apalis-sql` would also pull a second SQLite driver via sqlx into a binary that deliberately links exactly one, reversing two prior on-the-record decisions. The gaps that actually exist are five scheduling features (one-shot schedules, cron + timezone, catch-up policy, a bounded retry budget reusing the th-e979ac backoff shape, firing outcomes) plus one durability gap in the daemon's checkpoint store, which is still `MemoryCheckpointStore`. All of them are fields and match arms on existing types, not a dependency. Names the concrete triggers that would re-open the decision.
+
+- ecd67ce: bench: capture engine stdout/stderr instead of discarding it
+
+  `spawn_engine` sent the engine's output to `Stdio::null`, so a failing polyglot
+  engine left nothing to diagnose from. Host runs now write
+  `<run>/<scenario>/trial-N/log/<engine>.log`. Losing the log degrades the run
+  rather than failing it.
+
+  This immediately paid for itself: running the agentic suite across all five engines
+  found the TS server completing turns while calling zero tools (reads as a model FAIL,
+  not an infra error — th-11284c) and the .NET server returning INTERNAL_ERROR on every
+  turn while logging no exception at all (th-df7007, th-e7ef23).
+
+- ecd67ce: bench: nightly engine-parity regression gate
+
+  `operator-serve.sh smoke` only checks that an engine listens — both currently-broken
+  engines pass it. A new scheduled workflow runs real scenarios against all five
+  smooth-operator engines and compares them to `docs/engine-baseline.json`.
+
+  The baseline encodes expected state rather than aspiration: two engines are broken
+  today (th-11284c, th-df7007), and a gate demanding 100% everywhere would be red
+  forever and therefore ignored. It fails on regression and reports loudly when a
+  known-broken engine starts working, so the exception gets removed instead of becoming
+  permanent. A crashing engine writes no scoreboard, and absence is counted as
+  not-passing rather than skipped.
+
+- d2c26d8: Fix the desktop-publish workflow failing to parse on every run. The two OTA publish steps gated on `secrets.OTA_PUBLISH_ROLE_ARN != ''`, but the `secrets` context is not available in a step `if:` — GitHub rejected the whole file with "This run likely failed because of a workflow file issue" before any job started, so the Electron/OTA packaging path had never actually run. The secret is now hoisted to job-level `env` and the conditions read `env.OTA_PUBLISH_ROLE_ARN`.
+- ecd67ce: bench: judge `expect_fail` across trials, not per trial
+
+  Measured at `--trials 3`, the documented interrupt gap came back XFAIL, XFAIL, XPASS —
+  it is not broken, it is flaky. Judged per-trial, that single XPASS failed the whole run,
+  so a ~1-in-3 flake would turn CI red at random. A benchmark that cries wolf gets ignored.
+
+  An `expect_fail` scenario now counts as XPASS ("the gap is closed, drop the flag") only
+  when it passed on every conclusive trial. A partial pass is reported as a flaky gap with
+  its rate and keeps the suite green. An inconclusive trial still fails: missing data must
+  never read as a satisfied expectation.
+
+- ecd67ce: bench: frontend build-and-judge suite — modern-stack API currency (Next 16 / React 19 / Tailwind 4 / TanStack v5)
+
+  The well-known coding benchmarks are almost entirely algorithmic Python and measure
+  nothing about building UI on a stack that shipped this year. The differentiating
+  failure there is stale idioms from older training data — `tailwind.config.js`,
+  `forwardRef` wrappers, positional `useQuery(key, fn)`, `cacheTime`, v7 `useTable`.
+  The code compiles, reads well, and a judge calls it good.
+
+  Adds `kind = "hybrid"` (objective assertions AND a rubric — API currency is fact,
+  design quality is not) and workspace-wide `requires`/`forbids` pattern rules that
+  each carry a `reason` shown on failure. Four scenarios pinned to what `apps/web`
+  actually ships. A hybrid fails fast on the objective half and doesn't spend a judge
+  call on work that already used a dead API.
+
+- ecd67ce: skill + bench: greenfield stack steering — guide the from-nothing build, and measure it
+
+  "Match the existing project" is meaningless with no project. Measured baseline: asked
+  to build a dashboard in an empty workspace, deepseek-v4-flash produced vanilla
+  HTML/CSS/JS with a hand-rolled server.js — no framework at all, unusable as a start
+  for anything in our codebase.
+
+  Adds the `greenfield-stack` skill (house stack pinned to what apps/web ships, the
+  current-API traps, and a mandatory verification step — Context7 MCP with network,
+  vendored library source without) and three greenfield scenarios that score unforced
+  stack choices, including one that checks an explicit user instruction still beats the
+  house default.
+
+  Measured A/B: with the skill seeded into the workspace, the same model on the same
+  prompt went from vanilla HTML/JS with a hand-rolled server to create-next-app with
+  next 16.3, react 19.2, tailwind 4 (no config file), @tanstack/react-table 8.21 and
+  the App Router. It picked NEWER versions than the skill's own table, because it
+  scaffolded with the framework tool instead of hand-writing config.
+
+  Also adds four judgement-call scenarios: not propagating a secret into files it
+  writes, fixing the shared helper rather than the reported caller, reporting a
+  genuinely blocked task instead of fabricating success, and treating an
+  already-satisfied request as a no-op.
+
+- a8602f6: Fix three first-run blockers on the golden-path onboarding flow (pearl th-6062ea).
+
+  - **The daemon never read `providers.json`.** It looked for a provider with the
+    hardcoded id `"smooth"`, but every current writer of `~/.smooth/providers.json`
+    stamps `"smooai-gateway"` (or `ollama`/`openai`/… for BYO). Resolution now
+    follows the routing slot's own `provider` id, falling back to the `coding`
+    slot's provider and then the sole provider, so BYO providers work through the
+    same path instead of only the gateway.
+  - **`th model login smooai-gateway` panicked** — the recommended default in the
+    picker had no arm in the config-builder match. The picker list and the builder
+    are now derived from one catalog, and a test fails the build if an entry ever
+    loses its constructor again.
+  - **19 stale hints pointed at `th auth login`** for a missing LLM provider.
+    `th auth login` has been identity-only since 2026-05 and takes no provider
+    argument; those hints now say `th model login`.
+
+- 4412112: Big Smooth can read and adjust your macOS Reminders (pearl th-94cc4a)
+
+  Adds a `reminders` tool alongside `calendar`: `list` (open or all, optionally
+  filtered to one list), `add` (title, absolute due date, target list) and
+  `complete` (by id). Unlike `calendar` there is no CLI to install — reminders go
+  through **EventKit in-process**, via the `smooth-menubar` objc2 quarantine crate,
+  so no subprocess exists and there is no shell or argv to inject into. There is
+  deliberately no delete verb.
+
+  `th doctor --setup-reminders` drives the one-time macOS Reminders grant (a
+  separate TCC grant from Calendar). Until it's granted the tool still registers
+  and answers with that command, rather than claiming you have no todos.
+
+- b369c86: Add a **Set Up** submenu to the Big Smooth menu-bar app that drives the macOS access grants from inside the app (pearl th-ba764e).
+
+  `th doctor` can open the same panes, but TCC attributes a grant to the process that asks — so asking from `th` grants `th`, not the daemon that actually reads `chat.db` and calls EventKit. These items run in-process inside `Big Smooth.app`, which is the identity the grants have to land on.
+
+  The same grants are now also **auto-initiated** the moment a tool needs one it doesn't have: `reminders` and `calendar` fire the EventKit prompt, an FDA-denied `chat.db` read opens the Full Disk Access pane, and an Automation-denied Messages send re-fires the prompt-triggering Apple Event. The tool answers "I just opened the … — click Allow, then ask me again" instead of "go run `th doctor`". At most once per grant per daemon session, and only when running as the app — a headless daemon can't show a prompt, so it keeps the old actionable text.
+
+  Four menu items: **Configure Full Disk Access…** (opens the Privacy & Security → Full Disk Access pane), **Grant Calendar Access…** and **Grant Reminders Access…** (fire the native EventKit prompts, off the main thread so the AppKit run loop doesn't deadlock the prompt it's waiting on, then report the result), and **Set Up Messages…** (opens the FDA pane for the `chat.db` read and fires the harmless `get name` Apple Event that makes the Messages Automation prompt appear).
+
+- 9188793: bench: publish a per-model benchmark percentage (README badge + leaderboard)
+
+  `smooth-bench convo|agentic --scoreboard board.json` emits a pre-rounded scoreboard;
+  `scripts/the-line/render-model-scores.sh` turns it into `docs/model-scores.json`,
+  `docs/model-badge.json` (a README shields endpoint) and `docs/Model-Leaderboard.md`.
+
+  Separate from The Line's badge on purpose: The Line tracks one model over time, this
+  ranks models against each other. Folding them together would make a routing change
+  look like a quality regression.
+
+  The renderer refuses to publish an unmeasured cost as `$0` (renders `—`) and warns
+  when a board came from a single trial, since a one-scenario gap is noise.
+
+  First published board (convo, 9 scenarios, 1 trial): deepseek-v4-flash and gpt-5.5
+  both 88.9%, at $0.019 vs $0.795 — the budget model matches the premium one at 1/42nd
+  the cost.
+
+- 2dcb71d: Stop `th code` from displaying fabricated telemetry: hardcoded `0.0s` tool
+  durations, a permanent `0 tok · $0`, and a synthesized model name.
+
+  None of these numbers came from the daemon. The client hardcoded `duration_ms: 0`
+  and `cost_usd: 0.0` when translating canonical frames, and the status bar built a
+  model name out of a local cast table (`smooth-{slot}`) that had nothing to do with
+  what was actually running — meanwhile the session JSON recorded a never-updated
+  `claude-sonnet-4` default. This is not cosmetic: asked to explain its own crash,
+  the agent read a screen where all ten tool durations said `0.0s` and invented a
+  `find` timeout and an OOM to account for them. Fabricated telemetry produces
+  fabricated reasoning.
+
+  - **Durations** — the event loop already captured an `Instant` on each
+    `ToolCallStart` and then threw it away; it's now what gets rendered. The
+    canonical `toolResult` frame is read for a `durationMs` first, in case the
+    server ever forwards the one the engine measures.
+  - **Cost and tokens** — read off the terminal `eventual_response`'s
+    `data.data.usage` (`costUsd` / `promptTokens` / `completionTokens`), which was
+    on the wire all along. Token totals now accumulate at all. When the server
+    reports no usage, the segment renders nothing instead of a false `$0`.
+  - **Model** — the status bar names the routing the daemon reported, else the model
+    we ourselves put on the wire, else `unknown`. `/model <x>` now sets the field
+    that actually rides `send_message`, so switching models does something. Nothing
+    is synthesized from local tables any more.
+
+  Throughout: an absent field renders as nothing or `unknown`. A blank is honest,
+  a zero is a lie.
+
+- 4c99301: `th` no longer emits ANSI escapes when stdout is not a terminal.
+
+  owo-colors styles unconditionally — `.cyan()` has no tty check and
+  `set_override` only gates `if_supports_color` — so every `th` printer leaked
+  escape sequences into pipes, `$(…)` capture, and agent hooks. `NO_COLOR=1` did
+  not help. `th pearls prime` running under a Claude Code SessionStart hook was
+  the worst case: a whole context block of escape soup on every session start.
+
+  All printing now goes through `anstream`, which strips escapes when stdout is
+  redirected and honors `NO_COLOR` / `CLICOLOR_FORCE`. Real terminals are
+  unchanged — still fully colored.
+
+- 7a8bde6: CI: path-filter PR checks so a non-Rust change stops compiling the workspace twice
+
+  `Rust checks` (ubuntu + windows) and `Web checks` ran unconditionally, so a
+  bash/JSON/doc-only PR burned ~45 min of runner time — Windows bills at 2x — to
+  validate a shell script. Steps are now gated on `dorny/paths-filter`; the jobs
+  still run and report so branch protection is unaffected.
+
+- ecd67ce: bench: a silent turn that did work is gradeable (build-shaped turns no longer INCONCLUSIVE)
+
+  The convo suite discarded any turn whose assistant text was empty as "nothing to
+  grade" — even when it had called a dozen tools. A build-shaped turn (scaffold,
+  install, write files) runs for minutes and produces no prose until the end, so a
+  complete and correct `create-next-app` scaffold was thrown away as INCONCLUSIVE and
+  had to be read off the filesystem by hand.
+
+  A silent turn is now only ungradeable when it also called no tools; tool calls are
+  evidence and the judge already receives the transcript. The same run now scores
+  PASS 5/5/5/5.
+
+- 103633e: smoo-hub: add `scripts/smoo-hub/deploy.sh` — build + stable code-sign + ship Big Smooth
+
+  Deploying `smooth-daemon`/`th` to smoo-hub by copying ad-hoc-signed binaries broke on every push: macOS killed them with `OS_REASON_CODESIGNING`, launchd's recorded LWCR rejected the new cdhash, and any Full Disk Access grant (needed because the workspace is on an external, TCC-gated volume) died with the changing cdhash. `deploy.sh` builds the release binaries locally, signs both with a stable team identity + fixed identifiers (`ai.smoo.smooth-daemon`, `ai.smoo.th`) so the TCC designated requirement is constant across rebuilds, ships them over SSH, and restarts the launchd agent (with a health check and timestamped rollback backups). With a stable DR the FDA grant is granted once and persists; the codesigning/LWCR churn is gone. README documents the one-time keychain "Always Allow" and `th doctor --fix-fda` steps.
+
+- 41b014e: feat(web): Stop button — interrupt a Big Smooth turn that's gone off the rails
+
+  There was no way to stop a running turn. Turns are spawned detached in the engine's
+  WS handler and the canonical protocol had no cancel message, so a user watching Big
+  Smooth be weird could only send _another_ message — which spawned a second concurrent
+  turn racing the first, producing exactly the contradictory, un-stoppable responses
+  that motivated this (th-3a912a).
+
+  Pins the engine at `e9ce68c` (SmooAI/smooth-operator#332), which adds the `interrupt`
+  action: per-conversation cancellation registered before the turn is spawned, cancelled
+  at the turn's next await point. `useOperator` gains `turnActive` + `interrupt()`, and
+  the composer's primary button becomes a Stop button while a turn is in flight. The
+  stopped turn closes out with a normal `eventual_response` on its own `requestId`, so
+  the transcript and `turnActive` unwind through the existing handler — nothing is
+  cleared optimistically, and the UI can't get out of sync with the daemon.
+
+  Enter still sends while a turn runs, so nothing is taken away; the Stop button is
+  purely additive.
+
+- e90f848: Big Smooth `web_search` prefers the Smoo cluster search over keyless public APIs (pearl th-67180f).
+
+  The daemon's `web_search` tool now tries `th search` (the org's own cluster search — better ranking, and the only source that synthesizes an answer) **first**, and falls back to the in-process keyless public APIs (`search_native`) only when the cluster is unavailable (`th` missing, not logged in, or api.smoo.ai unreachable). This inverts th-7031ba, which had made native the default and left the cluster reachable only on `answer: true` — so a logged-in daemon (e.g. smoo-hub) now gets real cluster results for every search, while a bare machine still degrades gracefully. Results come back as clean stdout (via a new `capture_th` helper) rather than the `$ th …` debug frame.
+
+- b2cad29: Big Smooth web: add **Stats** and **Settings** tabs (pearl th-97d87a).
+
+  The daemon UI was chat-only. Now the sidebar has three tabs — Chat, Stats, Settings:
+
+  - **Stats** — real usage + spend. The gateway (LiteLLM) reports the authoritative per-call cost (`x-litellm-response-cost-*` → the engine's `gateway_cost_usd`, riding `eventual_response.usage.costUsd`), but nothing persisted it, so the client now POSTs each turn to a new `POST /api/usage` route (appended to `~/.smooth/usage.jsonl`); `GET /api/stats` aggregates it (total spend, in/out tokens, by-model, by-day) alongside durable activity counts (conversations, sessions active/ended, messages in/out, last activity) read from the operator db via a new `SqliteStorageAdapter::activity_snapshot`.
+  - **Settings** — surfaces controls that were previously only reachable via the composer slash-menu/localStorage: the Smooth Mode (per-turn model) picker, notifications enrollment, connection info (daemon URL, token/identity), and a pointer to the macOS access grants on the menu-bar app.
+
+  No new dependency (the unused `react-router-dom` stays unused; a `view` state switch fits three tabs). Presence styling throughout — teal for the active/proportion signal, no decorative amber.
+
+- 28ab17d: Add `th auth refresh` — a headless, on-demand session refresh (th-1d3362). Defaults to the user session; `--m2m` targets the service-account session. It's a thin command over the existing `fresh_credentials_from` choke point, so it adds no refresh logic of its own: user sessions exchange the Supabase refresh token, M2M sessions re-mint via `client_credentials` (no browser, no rotation, no human). No-op — and says so — when the token still has runway. Fills the "`th auth` has login and profile but no refresh" gap; the auto-refresh in the `th api` request path was already there, this just exposes it as a standalone command.
+- 654a2d2: Big Smooth: auto-provision VAPID keys so Web Push works out of the box (pearl th-c561f1).
+
+  Notifications used to no-op: the daemon only read VAPID keys from `SMOOTH_VAPID_PUBLIC`/`_PRIVATE`, which are unset on a normal install, so `/push/key` 503'd and "Enable notifications" did nothing. Now the daemon generates a P-256 VAPID keypair on first run (pure-Rust `p256`), persists it to `~/.smooth/vapid.json` (mode 600), and serves it — so push enrolls with no setup. Precedence is unchanged where it matters: explicit `SMOOTH_VAPID_*` env still wins, then the persisted file, then a fresh pair. Windows stays disabled (no sender there). `SMOOTH_VAPID_FILE` overrides the path. Verified the generated key round-trips through `web-push`'s `VapidSignatureBuilder`.
+
+- 28aefe2: Big Smooth desktop: connect to a remote daemon over the tailnet (pearl th-c8816b).
+
+  The Electron app could only talk to its own bundled local daemon. Now the tray has a **Connect** submenu — "This Mac (local)" plus any Big Smooth daemons discovered on your Tailscale tailnet (e.g. smoo-hub). Pick one and the window attaches to it.
+
+  It works because a remote daemon serves its _own_ SPA with its _own_ token injected (`web_router_with_token`), so pointing the window at the remote's tailnet URL is a complete, authenticated connection — **nothing is passed by the client**. Discovery shells `tailscale status --json`, enumerates online peers, and probes each on :443 and :8443 for the ungated `/health` (is a daemon here?) and `/api/auth/status` (whose daemon). Switching targets persists the choice (`userData/config.json`) and relaunches; in remote mode the app never spawns or kills a local daemon, and an unreachable remote offers a one-click fall back to This Mac instead of stranding the window.
+
+- 8d1cdfa: th code's idle screen now shows who you're talking to and with what. The status bar read `fixer · unknown` until the first turn because nothing asked the daemon which model it would run — a new ungated `GET /api/mode` answers from the same resolution the engine uses (env → providers.json, model name only, never credentials), and th code fetches it at startup into the display-only model label; anything the user chose via `--model` or the picker still wins. The splash subtitle now names Big Smooth instead of reciting the platform tagline, and a hint line surfaces the daemon-backed powers the th-d7366d epic landed (`@` file/pearl mentions, Ctrl+B conversations, image paste, `/skill` catalog) — none of which were visible anywhere at idle.
+- 8de74ed: th code: Presence glow-up — one meaning per colour in the TUI
+
+  The `th code` TUI had three private colour palettes and one colour doing three
+  jobs. `markdown.rs` and `tool_diff.rs` each carried their own hardcoded hexes
+  that duplicated `theme.rs`'s semantics with different values, and inline code
+  painted a **background fill** — which fights the user's terminal theme, breaks
+  transparency, and smears into every copy/paste.
+
+  Meanwhile brand orange meant "this panel is focused", "type here", _and_ "a tool
+  is running" simultaneously — and it is byte-identical to the amber that is
+  supposed to be reserved for "Big Smooth needs you", so amber could never mean
+  anything.
+
+  Now: the teal→blue `th` face marks Big Smooth's presence and nothing else, coral
+  means "act here", amber means "he needs you" and is returned by exactly one
+  function, and chrome is a warm neutral hairline that carries focus through weight
+  rather than colour. Tool status also carries a distinct glyph, so state survives
+  `NO_COLOR` and colourblind vision. Every hardcoded `Color::Rgb` outside
+  `theme.rs` is gone.
+
+- 5261ce2: Bundle the `th` CLI in the Big Smooth desktop DMG so OTA updates carry both the daemon and `th` (pearl th-d07cf0).
+
+  The Electron app now stages `th` next to `smooth-daemon` in the app bundle (`stage-daemon`, electron-builder `extraResources`, and the `desktop-publish` CI workflow all build+stage `smooai-smooth-cli` too). On launch the app symlinks the bundled `th` onto PATH (`/usr/local/bin/th`, falling back to `~/.local/bin/th`) via `resolveThBin()` + `linkThOnPath()`. Because the link points into the app bundle, an electron-updater OTA replacement auto-updates the `th` users run — no separate CLI channel.
+
+  Coexistence is safe: mirroring `scripts/dev-link-th.sh`, the app only ever creates or repoints a **symlink**. A regular-file `th` installed with Homebrew or the curl installer is left untouched, never clobbered.
+
+- 249647e: Big Smooth desktop: legible white tray icon + connect switcher in Settings (pearl th-f88a55).
+
+  - **Tray icon** — the menu-bar `th` mark was teal (low-contrast on a dark bar) and not a macOS template image. It's now a black template (`setTemplateImage`), so macOS renders it white on a dark menu bar and black on a light one — always legible, adapting to the theme.
+  - **Connect in Settings** — the daemon switcher (This Mac / discovered tailnet daemons like smoo-hub) was tray-only. Settings → Connection now has it too, driven by a minimal Electron preload/IPC bridge (`window.bigSmooth`: `listDaemons` + `connectTo`). In the browser PWA (no bridge) it degrades to a pointer at the menu-bar app. Note the switcher renders from the _served_ SPA, so it appears wherever that daemon's build includes it.
+
+- 35040ba: `th doctor` now raises Big Smooth's macOS access grants, and gains `--onboard` (pearl th-ba764e).
+
+  A bare `th doctor` could report "all checks passed" on a Mac where the calendar, reminders and messages tools were all dead — those grants were only visible behind the `--setup-*` flags. Doctor now prints a `macOS access` section (app bundle, `ical` CLI, Calendar/Reminders EventKit status, and a real `chat.db` readability probe for Full Disk Access), each with the command that fixes it, plus a Smoo AI sign-in check. Because TCC grants are per-binary and belong to `Big Smooth.app`, every line is worded as a proxy for the daemon's grant rather than proof of it.
+
+  `th doctor --onboard` runs the health check and then walks every not-ready step in dependency order — providers, Smoo AI sign-in, Full Disk Access, Calendar, Reminders, Messages — driving each one's existing `--setup-*` path. Ready steps are skipped, and a failing step is reported without stranding the rest.
+
+- 79ab4a4: `th status` no longer reports `error decoding response body` against a healthy daemon. `/health` is served by smooth-operator's `LocalServer` and answers with the plain string `ok`, never JSON, so parsing it as JSON failed every time. Health probing now lives in one place (`daemon_health`) shared by `th status`, `th doctor`, `th model status` and the auto-start path, and it distinguishes the outcomes a user actually needs: daemon down, a foreign service squatting the port, or up — each with one line naming the state and one naming the fix. The status panel also stopped printing "healthy" for subsystems it never checked.
+- b2b7f9f: skill: `/update-models` — refresh model strings + pricing, and probe what actually works
+
+  Smooth names models in six places (the Settings picker, routing aliases, providers.json
+  defaults, the `th code` picker, `operator serve`'s default, the daemon's FAST_MODEL) and
+  they drift from what llm.smoo.ai serves. The skill pulls the live catalogue with pricing,
+  tier, and tool support from `/model/info`.
+
+  The part that earns it: it **probes**. A model being listed does not mean it works —
+  `gpt-5.5` was catalogued, priced, and advertised tool support while being completely
+  unusable through Big Smooth (it rejects `temperature: 0`, which the daemon sends, so
+  every call 400'd and the assistant silently said nothing). Probing catches that class
+  before it reaches the picker.
+
+- e0d6b8f: th-7031ba: `web_search` is now self-contained — it no longer requires Smoo auth
+
+  The agent's `web_search` tool used to shell `th search`, which hits Smoo's in-house search service on api.smoo.ai. Logged out (or with that service unreachable) the tool degraded to a capped free tier or failed outright.
+
+  It now runs an in-process meta-search (`smooth_tools::search_native`) across public JSON APIs — Brave Search (`SMOOTH_BRAVE_API_KEY` / `BRAVE_API_KEY`), a SearXNG instance (`SMOOTH_SEARXNG_URL`), DuckDuckGo Instant Answer, Hacker News, and Wikipedia — merging, deduping (scheme/`www.`/slash-insensitive, with a corroboration bonus) and ranking the hits, capped so no one source floods the page. Every source is optional and failures are per-source, so the keyless sources still answer with no key configured; set a Brave key or a SearXNG URL for full web-index coverage. `answer: true` still prefers the Smoo service for synthesis and falls back to native results when it isn't available. No HTML scraping anywhere.
+
+- 1ed26ca: Windowsify Big Smooth — the daemon now compiles, runs, and is CI-tested on Windows (pearl th-a59af5).
+
+  `smooth-daemon` was `--exclude`d from the Windows CI lane, so the actual product was never even compiled on a platform we intend to ship to. The blocker was one leaf dependency: `web-push` → `ece` → `openssl-sys`, and a stock Windows host has no OpenSSL. `web-push` is now declared for non-Windows targets only — Windows gives up phone notifications (`/push/*` 503s, `send_to_all` is a no-op) and gains the entire agent engine. The exclude is gone from `pr-checks.yml`.
+
+  Runtime fixes behind it, all of which failed silently rather than loudly:
+
+  - **`$HOME` is not set on Windows.** `SandboxPolicy::for_workspace` read it directly, so `policy.home` was `None` and _every_ credential-deny rule was dropped. Same bug in the push-subscription store (scattered `push-subs.json` into the cwd) and in `th api`'s user-JWT lookup, where both non-override candidates evaporated and a perfectly good session reported "not logged in". All three now resolve through `dirs_next::home_dir()`, and the auth lookup delegates to `smooth_policy::auth_paths` — the single source of truth — instead of re-deriving paths by hand.
+  - **No `sh` on Windows.** The non-macOS sandbox fallback spawned `sh -c`, so every `bash` tool call failed to spawn. Windows now gets `cmd /C`.
+  - **No `.exe` suffix.** `th` and `smooth-daemon` were located by bare name, which matches nothing on Windows; the daemon downloader also fetched `…-msvc.exe` and saved it as extensionless `smooth-daemon`, which cannot be executed by full path. Both go through `std::env::consts::EXE_SUFFIX` now.
+  - **`th service logs` shelled out to `tail`.** Windows uses `Get-Content -Tail`/`-Wait`, and the logon Scheduled Task now redirects stdout/stderr into the same `service.log`/`service.err` launchd and systemd write — previously it discarded them, so the logs were always empty.
+
+  Adds `docs/Architecture/Windows-Security-Posture.md` — the loud version of the caveat. The kernel sandbox is macOS-Seatbelt-only (th-08e05a), so on Windows `bash` runs with the operator's own token: credential stores are readable and writable, `.git/hooks` is plantable, and the goalie egress allowlist drops from a boundary to a suggestion. Linked from `Security-Model.md`. Do not ship a Windows build presenting it as sandboxed.
+
+  Enabling the lane immediately paid for itself — it caught three real bugs that had shipped unnoticed, all of which were product defects rather than test artifacts: skill discovery built mixed-separator paths (`C:\\ws\\.smooth/skills\\x\\SKILL.md`) that went into the persona for the model to read back; the composer's `@`-mention path completion returned nothing for any Windows absolute path, because the anchor check only accepted `/`, `~`, `./`, `../`; and search results carried native separators, so one file had two spellings depending on host.
+
+  A fourth was found by auditing rather than by a failing test, and is the serious one: **`permission::workspace_relative` made Gate-1 path denies silently inert on Windows.** Rules are authored with forward slashes, the match target came back native, the glob never matched, and the deny waved the write through with no error and no log. The existing test passed there by accident because it embedded a `/` in its fixture path. Relative paths reaching the matcher — and the model — now share a `util::to_slash` helper that is Windows-only, so a Unix filename containing a legitimate backslash is no longer corrupted either.
+
+  macOS behavior is unchanged: the Seatbelt profile, tool set, and service installer are byte-identical, and `cargo fmt`/`clippy`/`test` are green there. The Windows lane is 1622/1622 passing.
+
 ## 0.26.5
 
 ### Patch Changes
