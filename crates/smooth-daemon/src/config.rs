@@ -159,7 +159,7 @@ fn resolve_llm_inner(
             api_key,
             model,
             max_tokens: 32_768,
-            temperature: 0.0,
+            temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
             retry_policy: smooth_operator::llm::RetryPolicy::default(),
             api_format,
         });
@@ -271,5 +271,14 @@ mod tests {
         let err = resolve_llm_inner(None, None, None, None, Some(bogus)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("th model login"), "actionable guidance: {msg}");
+    }
+    #[test]
+    fn every_llm_config_the_daemon_builds_uses_it() {
+        // config.rs's env path — the one the bench and `th daemon` take.
+        let cfg = resolve_llm_inner(Some("https://llm.smoo.ai/v1".into()), Some("k".into()), Some("gpt-5.5".into()), None, None).unwrap();
+        assert!(
+            (cfg.temperature - smooth_policy::llm_params::AGENT_TEMPERATURE).abs() < f32::EPSILON,
+            "a hardcoded 0.0 here is the bug that made the model picker a no-op"
+        );
     }
 }
