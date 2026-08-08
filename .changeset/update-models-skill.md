@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 skill: `/update-models` — refresh model strings + pricing, and probe what actually works

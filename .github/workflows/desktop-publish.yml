@@ -43,6 +43,10 @@ jobs:
         permissions:
             contents: write
             id-token: write # OIDC for aws-actions/configure-aws-credentials
+        # The `secrets` context is not available in a step `if:` — hoisting it to
+        # job env is the only way to make "skip when unset" conditional.
+        env:
+            OTA_PUBLISH_ROLE_ARN: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
         steps:
             - uses: actions/checkout@v4
               with:
@@ -146,14 +150,14 @@ jobs:
             # Publish to the OTA channel. Needs the notarized artifacts + AWS creds
             # + the SST-provisioned bucket; skips cleanly if any are absent.
             - name: Configure AWS credentials
-              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && env.OTA_PUBLISH_ROLE_ARN != ''
               uses: aws-actions/configure-aws-credentials@v4
               with:
-                  role-to-assume: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
+                  role-to-assume: ${{ env.OTA_PUBLISH_ROLE_ARN }}
                   aws-region: us-east-2
 
             - name: Publish to downloads.smoo.ai
-              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && env.OTA_PUBLISH_ROLE_ARN != ''
               env:
                   BUCKET: ${{ vars.DOWNLOADS_BUCKET }}
               run: |
