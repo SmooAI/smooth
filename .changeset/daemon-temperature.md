@@ -18,3 +18,8 @@ Engine pin bumped to b8acb3b, which carries the load-bearing half (the turn conf
 This also covers the daemon's own LLM configs (narc judge, sidekick factory, env-resolved
 gateway). The main chat turn's config is built inside the engine and still needs the
 same fix there — tracked in th-c127d1.
+
+Consolidated: the value now lives in one place, `smooth_policy::llm_params::AGENT_TEMPERATURE`,
+used by the daemon, `th model login`'s connection test, and the bench's own driver and judge
+(a strict `--judge-model` used to 400 too). A guard test walks `crates/` and fails the build
+if any file hardcodes a zero temperature again, naming the file and line.

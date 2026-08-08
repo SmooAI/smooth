@@ -5077,6 +5077,7 @@ dependencies = [
  "smooai-smooth-code",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
+ "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
