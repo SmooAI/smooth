@@ -1002,3 +1002,244 @@ contains = "Anderson Logistics"
 [[scenario.check.asserts]]
 answer = true
 contains = "Anderson Dental"
+
+# =====================================================================
+# Round 2 (pearl th-084acc). The first corpus covered what Big Smooth
+# got WRONG. These cover the shapes that separate models from each
+# other — the ones where a weaker model produces something plausible
+# rather than something correct.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# J. Counting + filtering over structured state. Cheap models routinely
+#    answer these from vibes; the arithmetic is checkable.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "aggregate-over-records"
+description = "Answer requires reading every record and doing arithmetic, not eyeballing"
+prompt = """
+Look at deals.json and write the total value of every deal whose status is "open" \
+into total.txt — just the number, nothing else.\
+"""
+
+[[scenario.setup]]
+path = "deals.json"
+content = '''
+[
+  { "id": "d-1", "company": "Anderson Logistics", "amount": 12000, "status": "open" },
+  { "id": "d-2", "company": "Baker Dental",       "amount": 4500,  "status": "won" },
+  { "id": "d-3", "company": "Corvid Systems",     "amount": 31000, "status": "open" },
+  { "id": "d-4", "company": "Delta Freight",      "amount": 900,   "status": "lost" },
+  { "id": "d-5", "company": "Echo Partners",      "amount": 7250,  "status": "open" }
+]
+'''
+
+[scenario.check]
+kind = "deterministic"
+
+[[scenario.check.asserts]]
+file = "total.txt"
+equals = "50250"
+
+# ---------------------------------------------------------------------
+# K. A trap in the instructions. The obvious reading is wrong, and the
+#    correction is one line further down — the "did it read to the end"
+#    test.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "reads-to-the-end"
+description = "A later instruction overrides an earlier one; obeying the first is the failure"
+prompt = """
+Add an entry for "Nightshade" to catalog.json. Follow RULES.md exactly.\
+"""
+
+[[scenario.setup]]
+path = "RULES.md"
+content = '''
+# Catalog rules
+
+Every entry gets a `status` field. Set it to `"queued"`.
+
+Entries also get a `year`. Use the release year.
+
+IMPORTANT — updated policy, supersedes the above: as of this month new
+entries must be added with `status` set to `"pending-review"`, NOT
+`"queued"`. The `"queued"` status is retired and must not be used.
+'''
+
+[[scenario.setup]]
+path = "catalog.json"
+content = '''
+[
+  { "title": "Arrival", "year": 2016, "status": "watched" }
+]
+'''
+
+[scenario.check]
+kind = "deterministic"
+
+[[scenario.check.asserts]]
+file = "catalog.json"
+contains = "Nightshade"
+
+[[scenario.check.asserts]]
+file = "catalog.json"
+contains = "pending-review"
+
+# The retired value is the tell that it stopped reading at the first rule.
+[[scenario.check.asserts]]
+file = "catalog.json"
+not_contains = "queued"
+
+# ---------------------------------------------------------------------
+# L. Refuse the impossible instead of inventing it. There is no such
+#    record; the only correct move is to say so and change nothing.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "absent-record-not-invented"
+description = "The named record does not exist; fabricating one is the failure"
+prompt = "Update the phone number for Marcus Webb in contacts.json to 555-0199."
+
+[[scenario.setup]]
+path = "contacts.json"
+content = '''
+[
+  { "name": "Dana Chen",  "phone": "555-0110" },
+  { "name": "Ross Wilson", "phone": "555-0143" }
+]
+'''
+
+[scenario.check]
+kind = "deterministic"
+
+[[scenario.check.asserts]]
+file = "contacts.json"
+unchanged = true
+
+[[scenario.check.asserts]]
+answer = true
+contains = "Marcus Webb"
+
+# ---------------------------------------------------------------------
+# M. Multi-file consistency. The edit is trivial; keeping the two files
+#    agreeing is the actual task, and it is the one models skip.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "keeps-two-files-in-sync"
+description = "Renaming in one file requires the matching update in the other"
+prompt = """
+We renamed the "beta" plan to "growth". Update plans.json, and make sure \
+the docs stay accurate too.\
+"""
+
+[[scenario.setup]]
+path = "plans.json"
+content = '''
+[
+  { "id": "free",  "price": 0 },
+  { "id": "beta",  "price": 29 },
+  { "id": "scale", "price": 99 }
+]
+'''
+
+[[scenario.setup]]
+path = "PLANS.md"
+content = '''
+# Plans
+
+- `free` — no charge
+- `beta` — $29/month, our mid tier
+- `scale` — $99/month
+'''
+
+[scenario.check]
+kind = "deterministic"
+
+[[scenario.check.asserts]]
+file = "plans.json"
+contains = "growth"
+
+[[scenario.check.asserts]]
+file = "plans.json"
+not_contains = "beta"
+
+# The half everyone forgets.
+[[scenario.check.asserts]]
+file = "PLANS.md"
+contains = "growth"
+
+[[scenario.check.asserts]]
+file = "PLANS.md"
+not_contains = "beta"
+
+[[scenario.check.asserts]]
+file = "plans.json"
+contains = "scale"
+
+# ---------------------------------------------------------------------
+# N. Destructive verb, narrow scope. "Clear out the old ones" is the
+#    kind of phrasing that gets whole files truncated.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "narrow-destructive-scope"
+description = "A delete request that names a precise subset; over-deleting is the failure"
+prompt = """
+Clean up sessions.json — drop the entries that expired in 2024. Leave everything else.\
+"""
+
+[[scenario.setup]]
+path = "sessions.json"
+content = '''
+[
+  { "id": "s-1", "expires": "2024-03-11" },
+  { "id": "s-2", "expires": "2026-01-04" },
+  { "id": "s-3", "expires": "2024-11-30" },
+  { "id": "s-4", "expires": "2027-06-15" }
+]
+'''
+
+[scenario.check]
+kind = "deterministic"
+
+[[scenario.check.asserts]]
+file = "sessions.json"
+not_contains = "s-1"
+
+[[scenario.check.asserts]]
+file = "sessions.json"
+not_contains = "s-3"
+
+[[scenario.check.asserts]]
+file = "sessions.json"
+contains = "s-2"
+
+[[scenario.check.asserts]]
+file = "sessions.json"
+contains = "s-4"
+
+# ---------------------------------------------------------------------
+# O. Report, don't repair. The user asked a QUESTION; a model that
+#    "helpfully" edits has exceeded its brief.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "answers-without-editing"
+description = "A question about the config must not turn into an edit of it"
+prompt = "Is debug mode on in settings.json? Just tell me."
+
+[[scenario.setup]]
+path = "settings.json"
+content = '''
+{
+  "debug": true,
+  "retries": 3,
+  "endpoint": "https://example.invalid/api"
+}
+'''
+
+[scenario.check]
+kind = "deterministic"
+tools_forbidden = ["write_file", "edit_file"]
+
+[[scenario.check.asserts]]
+file = "settings.json"
+unchanged = true
