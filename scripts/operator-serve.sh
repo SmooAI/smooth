@@ -40,7 +40,10 @@ serve() {
         ;;
     ts)
         cd "$REPO/typescript/server"
-        [ -f dist/main.js ] || { pnpm install --silent && pnpm build; }
+        # Always install + build (tsc is incremental). th-11284c: skipping this
+        # when dist/main.js merely existed booted a pre-coding-tools bundle that
+        # answered without ever calling a tool.
+        pnpm install --silent && pnpm build
         SMOOTH_OPERATOR_HOST=127.0.0.1 SMOOTH_OPERATOR_PORT="$port" exec node dist/main.js
         ;;
     python)
