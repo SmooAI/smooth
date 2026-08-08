@@ -3,23 +3,53 @@
 #engineering
 
 > [!info] How we measure ourselves
-> `th bench` runs Exercism-style problems through the agent loop with deterministic scoring. The dashboard's "The Line" tracks the rolling score over time so we can tell when a change made the agent better or worse.
+> `crates/smooth-bench/` scores the agent four ways — can it edit code,
+> does it take the right actions, is it any good to talk to, and do all
+> five engines still work. "The Line" tracks the coding score over time;
+> the model leaderboard ranks models against each other.
 
-## The crate
+> [!warning] There is no `th bench`
+> `smooth-bench` is a separate internal binary, deliberately **not**
+> shipped in the `th` CLI. This page used to say `th bench` and to tell
+> you to build `smooth-operative` — a binary removed with the microVM
+> stack ([[../Decisions/ADR-004-remove-microvm-sandbox-stack]]). Both
+> were wrong; run the commands below.
 
-`crates/smooth-bench/` owns the harness. Curated tasks live in `crates/smooth-bench/curated-tasks.toml`. Each task is a directory of problem statement + tests + reference solution; the harness scores by running the test suite.
+## The suites
+
+| Command | Question it answers |
+| --- | --- |
+| `aider-polyglot` | Can it edit code? One curated Exercism-style task, scored by running the canonical test suite. |
+| `score` | Engine parity — the curated suite through each of the five smooth-operator engines. |
+| `agentic` | Does it take the right ACTIONS? Seeds a workspace, drives one turn, scores the resulting state. |
+| `convo` | Is it any good to talk to? Multi-turn, LLM driver + LLM judge. |
+
+Scenario corpora live beside the crate: `agentic-scenarios.toml` (the
+general suite), `frontend-scenarios.toml` (modern-stack API currency) and
+`greenfield-scenarios.toml` (from-nothing builds). `curated-tasks.toml`
+holds the coding tasks.
 
 ## Running locally
 
 ```bash
-th bench                             # Run the curated suite
-th bench --task <id>                 # Run a single task
-th bench --print                     # Pretty-print results + cost
+# every command is `cargo run -p smooai-smooth-bench -- <suite>`
+cargo run -p smooai-smooth-bench -- agentic --only no-over-refusal
+cargo run -p smooai-smooth-bench -- convo   --model deepseek-v4-flash
+cargo run -p smooai-smooth-bench -- agentic --scenarios crates/smooth-bench/frontend-scenarios.toml
+cargo run -p smooai-smooth-bench -- score   --engine rust --engine go
+
+# every suite: --help lists the flags
+cargo run -p smooai-smooth-bench -- agentic --help
 ```
 
-The harness talks to the same host-process daemon everything else does (`th up`; the microVM mode is gone — [[../Decisions/ADR-004-remove-microvm-sandbox-stack]]). It needs the native `smooth-operative` binary in `target/release/` — build it with `cargo build -p smooth-operative --release` before running.
+Credentials come from `SMOOAI_GATEWAY_KEY`, falling back to the
+`llm.smoo.ai` provider in `~/.smooth/providers.json` — the same store the
+daemon reads, so a working `th` usually means a working bench.
 
-It also sets `SMOOTH_WORKFLOW_SKIP_TEST=1` so the TEST phase doesn't add tests of its own (which would skew the score). The harness runs the canonical test suite itself, post-agent.
+`agentic` defaults to microVM isolation; `--isolation host` runs the
+engine as a plain subprocess, which is what you want when the microVM
+tooling isn't installed. `convo` spawns its own daemon unless you point
+it at a running one with `--url` + `--token`.
 
 ## What gets measured
 
