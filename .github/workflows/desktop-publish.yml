@@ -76,14 +76,16 @@ jobs:
                   pnpm install --no-frozen-lockfile
                   pnpm build
 
-            - name: Build smooth-daemon (release)
-              run: cargo build --release -p smooai-smooth-daemon
+            - name: Build smooth-daemon + th (release)
+              run: cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
 
-            # stage-daemon → resolveDaemonBin() looks in resources/current first.
-            - name: Stage daemon for bundling
+            # resolveDaemonBin()/resolveThBin() look in resources/current first, and
+            # main.ts symlinks the bundled `th` onto PATH — so both ride every OTA update.
+            - name: Stage daemon + th for bundling
               run: |
                   mkdir -p desktop/resources/current
                   cp target/release/smooth-daemon desktop/resources/current/smooth-daemon
+                  cp target/release/th desktop/resources/current/th
 
             - name: Import signing certificate
               id: signing
