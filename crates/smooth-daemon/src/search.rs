@@ -159,7 +159,11 @@ fn allowed_cwd(requested: &str, home: Option<&Path>, workspace: &Path) -> Option
         return None;
     }
     let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    if canon == ws_canon || home.is_some_and(|h| canon.starts_with(h)) {
+    // Canonicalize home as well before comparing: on Windows `canonicalize`
+    // yields an extended-length `\\?\C:\…` path while `home_dir()` does not,
+    // so a raw `starts_with` would wrongly refuse every home path there.
+    let home_canon = home.and_then(|h| std::fs::canonicalize(h).ok());
+    if canon == ws_canon || home_canon.is_some_and(|h| canon.starts_with(&h)) {
         Some(canon)
     } else {
         None
