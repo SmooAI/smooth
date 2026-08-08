@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 daemon: send temperature 1.0, not 0.0 — 0 is rejected by many frontier models

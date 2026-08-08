@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: cross-model leaderboard + an agentic corpus mined from real Big Smooth transcripts
