@@ -6,17 +6,47 @@
 //! spawn — and therefore only ever kill — a daemon we started ourselves.
 
 import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const BIN = process.platform === 'win32' ? 'smooth-daemon.exe' : 'smooth-daemon';
 const TH = process.platform === 'win32' ? 'th.exe' : 'th';
 
-/** `host:port` the daemon binds. Mirrors `resolve_run_addr()` in smooth-daemon/src/main.rs. */
-export function resolveAddr(env: NodeJS.ProcessEnv = process.env): string {
+/** Where the running daemon advertises its bound `host:port` (written by
+ * smooth-daemon's `persist_daemon_addr`). Lets us find it on whatever port it
+ * landed on instead of guessing. */
+const DAEMON_ADDR_FILE = join(homedir(), '.smooth', 'daemon.addr');
+
+/**
+ * `host:port` the daemon binds. Resolution order:
+ *   1. `SMOOTH_ADDR` env (an explicit override — launchd/systemd unit or the user)
+ *   2. `~/.smooth/daemon.addr` — what the RUNNING daemon actually bound
+ *   3. the `127.0.0.1:8787` default (mirrors `resolve_run_addr()` in the daemon)
+ *
+ * Step 2 is the fix for hosts where `:8787` is taken (smoo-hub runs the SmooHub
+ * dashboard there, so the daemon moves to `:8788`): a double-clicked app gets no
+ * launchd env, and without this it would default to `:8787` and load the wrong
+ * app. Reading the daemon's advertised addr makes the window follow the daemon
+ * wherever it is. (th-8af70d)
+ */
+export function resolveAddr(env: NodeJS.ProcessEnv = process.env, addrFile: string = DAEMON_ADDR_FILE): string {
     const raw = (env.SMOOTH_ADDR ?? '').trim();
-    return raw === '' ? '127.0.0.1:8787' : raw;
+    if (raw !== '') return raw;
+    const advertised = readAdvertisedAddr(addrFile);
+    return advertised ?? '127.0.0.1:8787';
+}
+
+/** Read + validate `~/.smooth/daemon.addr`. Returns undefined on any problem
+ * (missing, unreadable, or not a plausible `host:port`) so we cleanly fall back. */
+function readAdvertisedAddr(addrFile: string): string | undefined {
+    try {
+        if (!existsSync(addrFile)) return undefined;
+        const v = readFileSync(addrFile, 'utf8').trim();
+        return /^[^\s/:]+:\d{1,5}$/.test(v) ? v : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /** A full remote daemon URL to attach to (a tailnet daemon like smoo-hub) instead

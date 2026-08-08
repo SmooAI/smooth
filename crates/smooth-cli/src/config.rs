@@ -167,6 +167,9 @@ pub enum Cmd {
     /// and schema by name, then PUTs to /config/values. `value` is
     /// parsed as JSON when possible (so `42`, `true`, `[1,2]` go in as
     /// numbers/bools/arrays), otherwise stored as a plain string.
+    /// SECRETS ARE NEVER PARSED — they are stored verbatim. For other
+    /// tiers a parse that would not round-trip (an all-digit token
+    /// truncated by f64) is REFUSED; pass `--string` to store it as-is.
     Set {
         /// The config key name.
         key: String,
@@ -192,6 +195,11 @@ pub enum Cmd {
         /// returned by the API (matches `smooai-config set` behavior).
         #[arg(long)]
         schema_name: Option<String>,
+        /// Store the value verbatim as a string, skipping JSON parsing.
+        /// Use for identifiers and tokens that merely look numeric —
+        /// Slack client ids (`<digits>.<digits>`), MLS agent keys, etc.
+        #[arg(long)]
+        string: bool,
         /// Emit the API response as JSON instead of the pretty echo
         /// (mirrors `get --json`). Useful for scripting + CI gates.
         #[arg(long)]
@@ -650,11 +658,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org_id,
             tier,
             schema_name,
+            string,
             json,
             reveal,
             m2m,
             force,
-        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force).await,
+        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force, string).await,
         Cmd::List {
             environment,
             org_id,
@@ -897,6 +906,65 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, revea
     Ok(())
 }
 
+/// th-a5fc9e: decide how `value` reaches the wire.
+///
+/// The old rule was "JSON-parse when it parses, else string". That silently
+/// destroyed data: an all-digit token becomes an f64 and loses everything past
+/// 17 significant figures. Confirmed casualties, all unrecoverable because
+/// every stored copy is already lossy —
+///   slackClientId              10574252146965.107     (10 fractional digits gone)
+///   derekDettmanSparkAgentKey  2.0241204053835265e25
+///   sparkAgentKey              2.0241204053835265e25  (both environments)
+///
+/// Two rules, in order:
+///
+/// 1. **Secrets are never parsed.** A secret is an opaque token whose bytes
+///    must round-trip exactly; asking "is it valid JSON?" is a category error.
+///
+/// 2. **Any other tier must round-trip.** Re-serialize what we parsed and
+///    compare against the input — if they differ, the parse lost information,
+///    so refuse rather than store it.
+///
+/// Rule 1 alone would have caught all four known corruptions — every one is
+/// `secret` tier (verified against the stored `tier` on each value row, not
+/// inferred from the key name). Rule 2 is not carrying those cases. It is here
+/// because the same silent truncation applies to any number-shaped public
+/// config, flag or limit, and "the stored value must mean what was typed" is
+/// the property we actually want; the tier is a proxy for it.
+///
+/// `--string` opts out of parsing entirely, which is the escape hatch for a
+/// number-shaped value that is really an identifier.
+fn parse_set_value(key: &str, value: &str, tier: Tier, force_string: bool) -> Result<Value> {
+    if force_string || tier == Tier::Secret {
+        return Ok(Value::String(value.to_string()));
+    }
+
+    let Ok(parsed) = serde_json::from_str::<Value>(value) else {
+        // Not JSON at all — a plain string, which is the common case.
+        return Ok(Value::String(value.to_string()));
+    };
+
+    // Only scalars can silently lose precision; objects/arrays re-serialize
+    // with different whitespace than the input, so comparing them would be a
+    // false positive. Their numeric members are a known gap (see the doc test).
+    let reserialized = serde_json::to_string(&parsed).unwrap_or_default();
+    if parsed.is_number() && reserialized != value.trim() {
+        anyhow::bail!(
+            "refusing to store `{key}` — the value does not survive JSON parsing.\n\
+             \x20 you typed:  {value}\n\
+             \x20 would store: {stored}\n\
+             This is silent data loss: JSON numbers are f64, so anything past ~17 significant\n\
+             digits is gone and cannot be recovered from the stored value.\n\
+             If this is an identifier or token rather than a real number, pass --string.",
+            key = key,
+            value = value.trim(),
+            stored = reserialized,
+        );
+    }
+
+    Ok(parsed)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_set(
     key: String,
@@ -909,6 +977,7 @@ async fn cmd_set(
     reveal: bool,
     m2m: bool,
     force: bool,
+    string: bool,
 ) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
@@ -978,8 +1047,7 @@ async fn cmd_set(
         credential_tripwire_gate(&key, force)?;
     }
 
-    // Parse value as JSON, fall back to string. Matches smooai-config.
-    let parsed_value = serde_json::from_str::<Value>(&value).unwrap_or_else(|_| Value::String(value.clone()));
+    let parsed_value = parse_set_value(&key, &value, resolved_tier, string)?;
 
     let tier_wire = resolved_tier.as_wire();
     let body = serde_json::json!({
@@ -1176,7 +1244,7 @@ async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
             // Reuse the shared value-write path with the tier pinned to Limit.
             // `reveal=true` because limit values are non-sensitive numbers —
             // masking a number to `**` would be pure noise.
-            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false).await
+            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false, false).await
         }
     }
 }
@@ -2412,6 +2480,81 @@ impl ConfigClient {
 mod tests {
     use super::*;
 
+    // th-a5fc9e: the JSON coercion that silently corrupted live values.
+    fn parsed(value: &str, tier: Tier) -> Value {
+        parse_set_value("k", value, tier, false).expect("should not be refused")
+    }
+
+    #[test]
+    fn refuses_a_number_shaped_public_value_that_would_truncate() {
+        // Shape taken from the real corruption: a Slack client id is
+        // `<13 digits>.<13 digits>` and f64 stored `10574252146965.107`.
+        // That key is actually `secret` tier, so rule 1 already covers it —
+        // this asserts rule 2 independently, on the PUBLIC tier, where the
+        // round-trip check is the only thing standing between a value and
+        // silent truncation.
+        let err = parse_set_value("slackClientId", "10574252146965.1074252146965", Tier::Public, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not survive JSON parsing"), "{err}");
+        assert!(err.contains("--string"), "{err}");
+        assert!(err.contains("slackClientId"), "{err}");
+    }
+
+    #[test]
+    fn refuses_an_all_digit_token_too_long_for_f64() {
+        // Shape of the Spark agent key, stored as 2.0241204053835265e25.
+        // Also secret tier in reality; asserted here on public for the same
+        // reason as above.
+        assert!(parse_set_value("sparkAgentKey", "20241204053835265000000000", Tier::Public, false).is_err());
+    }
+
+    #[test]
+    fn secrets_are_never_parsed_even_when_they_look_numeric() {
+        assert_eq!(
+            parsed("20241204053835265000000000", Tier::Secret),
+            Value::String("20241204053835265000000000".into())
+        );
+        assert_eq!(parsed("42", Tier::Secret), Value::String("42".into()));
+        assert_eq!(parsed("true", Tier::Secret), Value::String("true".into()));
+    }
+
+    #[test]
+    fn string_flag_stores_verbatim() {
+        let v = parse_set_value("k", "10574252146965.1074252146965", Tier::Public, true).unwrap();
+        assert_eq!(v, Value::String("10574252146965.1074252146965".into()));
+    }
+
+    #[test]
+    fn values_that_round_trip_exactly_still_parse() {
+        assert_eq!(parsed("42", Tier::Public), Value::from(42));
+        assert_eq!(parsed("true", Tier::FeatureFlag), Value::Bool(true));
+        assert_eq!(parsed("false", Tier::FeatureFlag), Value::Bool(false));
+        assert_eq!(parsed("30", Tier::Limit), Value::from(30));
+        assert_eq!(parsed("0.5", Tier::Limit), Value::from(0.5));
+        // Largest exactly-representable integer — must NOT be refused.
+        assert_eq!(parsed("9007199254740991", Tier::Public), Value::from(9007199254740991i64));
+    }
+
+    #[test]
+    fn non_json_stays_a_string() {
+        assert_eq!(parsed("https://api.smoo.ai", Tier::Public), Value::String("https://api.smoo.ai".into()));
+        assert_eq!(
+            parsed("d9cp8wgxpbcmk5sv07oit298n", Tier::Public),
+            Value::String("d9cp8wgxpbcmk5sv07oit298n".into())
+        );
+    }
+
+    #[test]
+    fn composite_values_pass_through_unchecked() {
+        // ponytail: only scalars are round-trip checked. An array/object
+        // re-serializes with different whitespace than the input, so comparing
+        // would false-positive; a lossy number *inside* one is the known gap.
+        // Upgrade path if it ever bites: walk the parsed tree and re-check each
+        // number against its source span.
+        assert_eq!(parsed("[1,2]", Tier::Public), serde_json::json!([1, 2]));
+    }
+
     #[test]
     fn mask_secret_short() {
         assert_eq!(mask_secret(""), "");
@@ -2820,31 +2963,108 @@ mod tests {
         assert_eq!(res, "org_override");
     }
 
+    // th-4c6b2a: `resolve_org` falls through to `self.creds` only when
+    // `active_org::resolve` finds nothing — and that reads process-global env
+    // PLUS the three credential stores under `~/.smooth/auth/`. These tests
+    // only cleared `SMOOAI_ORG_ID`, so on any machine with a real active org
+    // the store branch answered first and they asserted against
+    // `8be5f5fd-…` instead of `org_abc`.
+    //
+    // They failed two ways: run filtered (`--bin th config::`) they failed
+    // outright, and in the full suite they passed only because some earlier
+    // test happened to clear the env first. A concurrent `th` invocation
+    // touching `~/.smooth` flipped them too — which on this box, with several
+    // agents live, is the normal condition. A suite that is green only when
+    // nothing else is running proves nothing.
+    //
+    // So: give them a HOME with no credential stores in it, and restore
+    // whatever was there. `ENV_LOCK` serializes because env is process-global.
+    //
+    // ponytail: this EnvGuard is a near-duplicate of the one in
+    // `auth/login.rs`'s test module. Left duplicated rather than extracting a
+    // shared test-helper module, which would churn a passing test file for no
+    // behaviour change. Extract if a third copy shows up.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// A HOME with no `~/.smooth/auth/*` stores, so `active_org::resolve`
+    /// finds nothing and the `self.creds` fallback is what gets exercised.
+    /// Tuple field order is load-bearing: fields drop in declaration order, so
+    /// the lock must come LAST. Returning it first released the mutex before
+    /// the `EnvGuard`s restored `HOME`, letting the next test set its own HOME
+    /// mid-restore — which is the same race this fix exists to remove, and it
+    /// only showed up under `--test-threads` > 1.
+    fn no_active_org_env() -> (tempfile::TempDir, EnvGuard, EnvGuard, EnvGuard, std::sync::MutexGuard<'static, ()>) {
+        let lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tmp home");
+        let path = home.path().to_str().expect("utf8 home");
+        let home_guard = EnvGuard::set("HOME", path);
+        // `dirs::home_dir()` reads USERPROFILE on Windows, not HOME, so
+        // overriding only HOME would leave a Windows dev with a real active
+        // org still racing. Set both — the unused one is inert per platform.
+        // CI cannot catch this: a clean runner has no `~/.smooth`, so these
+        // tests pass there whether or not the isolation works.
+        let profile_guard = EnvGuard::set("USERPROFILE", path);
+        let org_guard = EnvGuard::unset("SMOOAI_ORG_ID");
+        (home, home_guard, profile_guard, org_guard, lock)
+    }
+
     #[test]
     fn resolve_org_falls_back_to_active_org() {
+        let _env = no_active_org_env();
         let c = make_client(fixture_creds(false));
-        // Make sure env var doesn't leak from another test.
-        std::env::remove_var("SMOOAI_ORG_ID");
         let res = c.resolve_org(None).expect("ok");
         assert_eq!(res, "org_abc");
     }
 
     #[test]
     fn resolve_org_empty_override_is_ignored() {
+        let _env = no_active_org_env();
         let c = make_client(fixture_creds(false));
-        std::env::remove_var("SMOOAI_ORG_ID");
         let res = c.resolve_org(Some("   ".into())).expect("ok");
         assert_eq!(res, "org_abc");
     }
 
     #[test]
     fn resolve_org_errors_when_nothing_set() {
+        let _env = no_active_org_env();
         let mut creds = fixture_creds(false);
         creds.active_org_id = None;
         let c = make_client(creds);
-        std::env::remove_var("SMOOAI_ORG_ID");
         let err = c.resolve_org(None).unwrap_err();
         assert!(err.to_string().contains("no active org set"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_org_fixture_env_actually_hides_the_real_active_org() {
+        // The guard above is the whole fix, so assert it works rather than
+        // trusting it: inside it, resolution must find nothing at all.
+        let _env = no_active_org_env();
+        assert!(crate::active_org::resolve(None).is_err(), "tempdir HOME still resolved a real active org");
     }
 
     // ----- Lane D tests ----------------------------------------------------
