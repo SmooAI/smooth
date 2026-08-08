@@ -452,6 +452,21 @@ fn event_loop(
             // flood that crashed the renderer (pearl th-paste-crash).
             if let Event::Paste(text) = &evt {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                // A dragged file lands as a paste of its (possibly quoted /
+                // escaped) path. If it's an image or PDF, stage it as an
+                // attachment instead of inserting the path as text
+                // (pearl th-d16f7c).
+                if let Some(path) = crate::attachments::attachable_path(text) {
+                    match crate::attachments::attach_file(&path) {
+                        Ok(a) => {
+                            s.messages
+                                .push(crate::state::ChatMessage::system(format!("📎 Attached {} ({})", a.name, a.mime)));
+                            s.attachments.push(a);
+                        }
+                        Err(e) => s.messages.push(crate::state::ChatMessage::system(format!("Attachment failed: {e}"))),
+                    }
+                    continue;
+                }
                 // Newlines are KEPT now that the box wraps, grows and scrolls
                 // (th-958e2e). Line endings are normalized over the whole
                 // string, because terminals disagree about the separator
@@ -508,7 +523,26 @@ fn event_loop(
                     match key.code {
                         KeyCode::Char('c') => s.should_quit = true,
                         KeyCode::Char('b') => toggle_session_sidebar(&mut s),
+                        // Ctrl+V: attach an image from the OS clipboard
+                        // (screenshots, copied images) — Claude Code parity
+                        // (pearl th-d16f7c). Bracketed paste still handles
+                        // text; this path only fires for pixel data.
+                        KeyCode::Char('v') => match crate::attachments::clipboard_image() {
+                            Some(a) => {
+                                s.messages
+                                    .push(crate::state::ChatMessage::system(format!("📎 Attached {} ({})", a.name, a.mime)));
+                                s.attachments.push(a);
+                            }
+                            None => s.messages.push(crate::state::ChatMessage::system(
+                                "No image on the clipboard. (Text pastes with your terminal's normal paste key.)".to_string(),
+                            )),
+                        },
                         _ => {}
+                    }
+                    // Ctrl-chorded keys are commands, not text — don't let
+                    // them fall through to the input handler as characters.
+                    if !matches!(key.code, KeyCode::Char('c')) {
+                        continue;
                     }
                 }
 
@@ -981,7 +1015,7 @@ fn handle_input_mode(
                 return;
             }
             let input = state.take_input();
-            if input.trim().is_empty() {
+            if input.trim().is_empty() && state.attachments.is_empty() {
                 return;
             }
 
@@ -1034,7 +1068,9 @@ fn handle_input_mode(
                                 let tx_skill = event_tx.clone();
                                 let state_for_skill = Arc::clone(&state_arc);
                                 tokio::spawn(async move {
-                                    if let Err(e) = run_agent_streaming(&composed, tx_skill.clone(), Some(agent), Arc::clone(&state_for_skill)).await {
+                                    if let Err(e) =
+                                        run_agent_streaming(&composed, tx_skill.clone(), Some(agent), Arc::clone(&state_for_skill), Vec::new()).await
+                                    {
                                         let _ = tx_skill.send(AgentEvent::Error { message: e.to_string() });
                                     }
                                 });
@@ -1106,6 +1142,9 @@ fn handle_input_mode(
                     // the spawned task so the gateway round-trip
                     // doesn't block the event loop.
                     let message = input;
+                    // Ship the staged attachments with THIS turn and clear
+                    // the tray — same one-shot semantics as the web composer.
+                    let images: Vec<String> = state.attachments.drain(..).map(|a| a.data_url).collect();
                     let tx = event_tx;
                     let pinned = state.agent_pinned;
                     let pinned_agent = state.agent_name.clone();
@@ -1151,14 +1190,25 @@ fn handle_input_mode(
                             };
                             (role, composed)
                         };
-                        if let Err(e) = run_agent_streaming(&message_with_skill, tx.clone(), Some(agent), Arc::clone(&state_for_routing)).await {
+                        if let Err(e) = run_agent_streaming(&message_with_skill, tx.clone(), Some(agent), Arc::clone(&state_for_routing), images).await {
                             let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                         }
                     });
                 }
             }
         }
-        KeyCode::Backspace => state.input_backspace(),
+        KeyCode::Backspace => {
+            // Empty draft: backspace removes the newest staged attachment,
+            // so a mis-paste is one keystroke to undo (pearl th-d16f7c).
+            if state.input.is_empty() && !state.attachments.is_empty() {
+                let removed = state.attachments.pop();
+                if let Some(a) = removed {
+                    state.messages.push(crate::state::ChatMessage::system(format!("Removed attachment {}", a.name)));
+                }
+            } else {
+                state.input_backspace();
+            }
+        }
         KeyCode::Left => state.input_move_left(),
         KeyCode::Right => state.input_move_right(),
         KeyCode::Esc => {
@@ -1326,7 +1376,13 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
 /// execution happens inside a hardware-isolated sandbox — smooth-code is
 /// just a rendering client.
-async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>, agent: Option<String>, state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
+async fn run_agent_streaming(
+    message: &str,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    agent: Option<String>,
+    state: Arc<Mutex<AppState>>,
+    images: Vec<String>,
+) -> anyhow::Result<()> {
     use std::collections::{HashMap, VecDeque};
 
     use crate::client::{BigSmoothClient, ServerEvent};
@@ -1440,7 +1496,15 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
         s.model_override.clone()
     };
     let mut events = client
-        .run_task(message, model_override.as_deref(), None, cwd.as_deref(), agent.as_deref(), prior_messages)
+        .run_task(
+            message,
+            model_override.as_deref(),
+            None,
+            cwd.as_deref(),
+            agent.as_deref(),
+            prior_messages,
+            images,
+        )
         .await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits
