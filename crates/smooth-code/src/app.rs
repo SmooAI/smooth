@@ -335,6 +335,17 @@ pub async fn run_with_session(
                 s.model_picker.gateway_models = catalog;
             }
         });
+
+        // Skill catalog from the daemon — the ONE catalog every face renders
+        // (pearl th-a5952d). Best-effort: unreachable daemon leaves the local
+        // discover fallback in place.
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Some(skills) = fetch_remote_skills().await {
+                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                s.remote_skills = Some(skills);
+            }
+        });
     }
 
     // Initial forced draw before the event loop starts. If the loop later
@@ -828,6 +839,22 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
 /// Refresh the autocomplete query from the current input buffer —
 /// the text between `trigger_pos + 1` and the cursor — and re-run
 /// the filter against the appropriate candidate source.
+/// `GET {SMOOTH_URL}/api/skills?cwd=…` → the daemon's skill catalog, or
+/// `None` on any failure so callers keep the local-discover fallback.
+async fn fetch_remote_skills() -> Option<Vec<smooth_cast::skills::Skill>> {
+    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+    let resp = client
+        .get(format!("{}/api/skills", base.trim_end_matches('/')))
+        .query(&[("cwd", cwd.as_str())])
+        .send()
+        .await
+        .ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    serde_json::from_value(body.get("skills")?.clone()).ok()
+}
+
 /// `GET {SMOOTH_URL}/search?q=…&cwd=…` → popup rows, or `None` on any
 /// failure (daemon down, timeout, off-contract JSON) so the caller keeps the
 /// locally-computed results. The route is ungated by design — no token.
@@ -905,8 +932,7 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
             // can discover them visually. Built-in commands stay
             // first (alphabetical), skills appended after.
             let mut commands = command_registry.list_commands();
-            let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            for skill in smooth_cast::skills::discover(&workspace) {
+            for skill in crate::commands::available_skills(state) {
                 // Skip if a built-in command already has the same
                 // name (precedence: built-ins win).
                 if commands.iter().any(|(n, _)| n == &skill.name) {
@@ -1103,8 +1129,7 @@ fn handle_input_mode(
                             // invocation: compose the skill body +
                             // user-supplied args and dispatch through
                             // the normal agent path.
-                            let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                            let skills = smooth_cast::skills::discover(&workspace);
+                            let skills = crate::commands::available_skills(state);
                             if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
                                 let source_label = skill.source.label();
                                 state.add_message(ChatMessage::system(format!("✦ Invoking skill: {} (from {})", skill.name, source_label)));
@@ -1225,8 +1250,10 @@ fn handle_input_mode(
                                 s.agent_name = role.clone();
                             }
                             let composed = if let Some(name) = skill_name {
-                                let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                let skills = smooth_cast::skills::discover(&workspace);
+                                let skills = {
+                                    let s = state_for_routing.lock().unwrap_or_else(|e| e.into_inner());
+                                    crate::commands::available_skills(&s)
+                                };
                                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
                                     let source_label = skill.source.label();
                                     // Pearl th-e0f812 (user observation 2026-05-12):

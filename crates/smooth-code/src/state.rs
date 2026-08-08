@@ -296,6 +296,11 @@ pub struct AppState {
     /// Attachments staged in the composer (pasted images, dragged files),
     /// sent as data-URL `images[]` on the next turn (pearl th-d16f7c).
     pub attachments: Vec<crate::attachments::PendingAttachment>,
+    /// Skill catalog from the daemon's `GET /api/skills` — the ONE catalog
+    /// every face renders (pearl th-a5952d). `None` until the startup fetch
+    /// lands (or forever, when the daemon is unreachable); readers fall back
+    /// to a local `smooth_cast::skills::discover` walk in that case.
+    pub remote_skills: Option<Vec<smooth_cast::skills::Skill>>,
     /// Current text in the input box. May contain `\n` — the box wraps,
     /// grows, and scrolls (pearl th-958e2e).
     pub input: String,
@@ -417,6 +422,7 @@ impl AppState {
             input_scroll: 0,
             input_user_scrolled: false,
             attachments: Vec::new(),
+            remote_skills: None,
             input: String::new(),
             input_cursor: 0,
             sidebar_visible: false,
