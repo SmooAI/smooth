@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: publish the first model leaderboard, and fix two reporting bugs the real data exposed

@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 Settings picker: Code and UI move to benchmarked models

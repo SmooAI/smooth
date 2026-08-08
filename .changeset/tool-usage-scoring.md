@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: score tool usage, not just pass rate

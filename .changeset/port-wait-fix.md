@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: wait for the port to free instead of failing fast
