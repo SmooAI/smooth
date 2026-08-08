@@ -1,5 +1,21 @@
 # @smooai/smooth
 
+## 0.27.4
+
+### Patch Changes
+
+- 034a2bb: Desktop app → 0.1.2: OTA release carrying the daemon-addr discovery hardening (#373 — app never loads the wrong PWA) and the signed EventKit helper (#375 — Calendar/Reminders grants finally prompt on the Electron app). Cutting a new version so installed 0.1.1 clients auto-update.
+- 3597cf4: Fix macOS Calendar/Reminders (EventKit) grants on the Electron Big Smooth app.
+
+  macOS only shows the EventKit prompt for a signed bundle whose main executable
+  asks, and the Electron app's daemon runs as a child — so `Set Up → Calendar…`
+  never prompted. Ship a signed nested helper bundle
+  (`Big Smooth.app/Contents/Helpers/BigSmoothTCC.app`) whose main executable is
+  `smooth-daemon`, assembled + signed by an electron-builder `afterPack` hook.
+  `grantEventKit()` and `th doctor --setup-calendar`/`--setup-reminders` now launch
+  the helper via `open --args tcc <what>` (which prompts) and poll the resulting
+  grant status.
+
 ## 0.27.3
 
 ### Patch Changes
