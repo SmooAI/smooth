@@ -212,6 +212,13 @@ pub enum Cmd {
         /// value.
         #[arg(long)]
         force: bool,
+        /// Assert an AD-HOC write for a key not declared in any of the
+        /// org's config schemas (release tooling secrets, one-off ops
+        /// values). The server refuses undeclared keys without this;
+        /// requires an explicit `--tier` so the write states its
+        /// sensitivity out loud rather than inheriting a default.
+        #[arg(long, requires = "tier")]
+        adhoc: bool,
     },
     /// List all config values for an environment as a key→value map.
     List {
@@ -654,7 +661,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             reveal,
             m2m,
             force,
-        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force).await,
+            adhoc,
+        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force, adhoc).await,
         Cmd::List {
             environment,
             org_id,
@@ -909,6 +917,7 @@ async fn cmd_set(
     reveal: bool,
     m2m: bool,
     force: bool,
+    adhoc: bool,
 ) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
@@ -982,13 +991,19 @@ async fn cmd_set(
     let parsed_value = serde_json::from_str::<Value>(&value).unwrap_or_else(|_| Value::String(value.clone()));
 
     let tier_wire = resolved_tier.as_wire();
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "schemaId": schema_id,
         "environmentId": env_id,
         "key": key,
         "value": parsed_value,
         "tier": tier_wire,
     });
+    // AD-HOC write (key declared in no schema): the server refuses undeclared
+    // keys unless asserted explicitly (ADR-075's loud-failure default); clap
+    // already forced an explicit --tier alongside --adhoc.
+    if adhoc {
+        body["adhoc"] = serde_json::Value::Bool(true);
+    }
     let resp = cfg
         .put(&format!("/organizations/{org}/config/values"), &body)
         .await
@@ -1176,7 +1191,7 @@ async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
             // Reuse the shared value-write path with the tier pinned to Limit.
             // `reveal=true` because limit values are non-sensitive numbers —
             // masking a number to `**` would be pure noise.
-            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false).await
+            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false, false).await
         }
     }
 }
