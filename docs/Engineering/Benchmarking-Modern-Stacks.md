@@ -97,6 +97,43 @@ house default gets applied, and `greenfield-respects-named-stack` checks
 that an explicit user instruction still beats it. A suite that only
 tested the first would teach the agent to override people.
 
+
+### The A/B: steering works, measured
+
+Same prompt, same model (`deepseek-v4-flash`), same empty workspace. The
+only difference is `.smooth/skills/greenfield-stack/SKILL.md` seeded into
+the workspace, which `smooth-cast`'s project-scoped discovery picks up.
+
+| | unguided | steered |
+| --- | --- | --- |
+| scaffold | `index.html` + hand-rolled `server.js` | `create-next-app` |
+| framework | **none** — vanilla JS | next **16.3.0**, react **19.2.8** |
+| styling | hand-written CSS | tailwind **4** + `@tailwindcss/postcss`, no config file |
+| table | hand-rolled `<table>` | `@tanstack/react-table` **8.21.3** |
+| routing | — | App Router (`src/app/`), incl. `loading.tsx` |
+
+Note the versions: the steered run produced next **16.3**, *newer* than
+the 16.2 pinned in the skill's own table. It scaffolded with
+`create-next-app` rather than hand-writing config, so it inherited
+current defaults for free — which is exactly what the skill's build order
+tells it to do, and the reason that step is written as "use the
+framework's own tool, not by hand".
+
+That is the argument for a golden path over a version table: the table
+rots, the procedure does not.
+
+> [!warning] Two caveats on this run
+> It was run against a **host** daemon, which has network — so
+> `create-next-app` and `npm install` could actually run. Inside the
+> agentic sandbox (default-deny egress) they cannot, which is why the
+> sandboxed suites score code rather than scaffolding.
+>
+> The convo bench recorded this trial `INCONCLUSIVE` ("the assistant
+> never said anything") because the scaffold-and-install turn outran the
+> read; the result above was read off the filesystem. A long build turn
+> is a shape the conversation suite does not currently tolerate — see
+> th-f39abc.
+
 ## How we measure it
 
 `crates/smooth-bench/frontend-scenarios.toml`, run with:
