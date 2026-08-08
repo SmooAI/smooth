@@ -140,6 +140,12 @@ struct ConvoArgs {
     #[arg(long, default_value_t = 300)]
     boot_timeout_s: u64,
 
+    /// Write a publishable scoreboard (per-model pass %, cost, $/pass)
+    /// as JSON here. Feed it to scripts/the-line/render-model-scores.sh
+    /// to update docs/model-scores.json + the README badge.
+    #[arg(long)]
+    scoreboard: Option<PathBuf>,
+
     /// Write JSON-lines transcripts here; the table still prints to
     /// stdout. Defaults to `<run dir>/transcripts.jsonl`.
     #[arg(long)]
@@ -199,6 +205,12 @@ struct AgenticArgs {
     /// Per-scenario boot timeout in seconds.
     #[arg(long, default_value_t = 300)]
     boot_timeout_s: u64,
+
+    /// Write a publishable scoreboard (per-model pass %, cost, $/pass)
+    /// as JSON here. Feed it to scripts/the-line/render-model-scores.sh
+    /// to update docs/model-scores.json + the README badge.
+    #[arg(long)]
+    scoreboard: Option<PathBuf>,
 
     /// Write JSON-lines here; the table still prints to stdout.
     #[arg(long)]
@@ -432,6 +444,7 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
     if runs.len() > 1 {
         print!("{}", leaderboard::render("convo", &rows));
     }
+    write_scoreboard(args.scoreboard.as_deref(), "convo", args.trials as usize, &rows)?;
     print_cost_note(&runs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), noise);
     eprintln!("convo: transcripts at {}", out_path.display());
 
@@ -607,6 +620,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     if runs.len() > 1 {
         print!("{}", leaderboard::render("agentic", &rows));
     }
+    write_scoreboard(args.scoreboard.as_deref(), "agentic", args.trials as usize, &rows)?;
     print_cost_note(&runs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), noise);
 
     // Non-zero when any scenario didn't pass every conclusive trial — CI
@@ -615,6 +629,21 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     if runs.iter().any(|(r, _)| r.passed() < r.scenario_count()) {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Write the publishable scoreboard, if `--scoreboard` asked for one.
+///
+/// Separate from the JSONL transcripts on purpose: those are the raw
+/// record, this is the artefact other things parse (the docs table, the
+/// README badge). Keeping it small and pre-rounded means the badge, the
+/// table and the JSON can never disagree with each other.
+fn write_scoreboard(path: Option<&std::path::Path>, suite: &str, trials: usize, rows: &[leaderboard::ModelRow]) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let board = leaderboard::Scoreboard::from_rows(suite, trials, rows);
+    let json = serde_json::to_string_pretty(&board).context("serialising the scoreboard")?;
+    std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;
+    eprintln!("scoreboard: wrote {}", path.display());
     Ok(())
 }
 

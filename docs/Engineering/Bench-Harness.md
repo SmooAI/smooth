@@ -209,6 +209,41 @@ not_contains = "I'm unable"
 all three are rejected at parse time.
 
 
+
+## Publishing model scores
+
+Pearl th-adf614. The Line (`docs/bench-badge.json`) answers *"is the agent
+getting better?"* — one number, one model, over time. The model scoreboard
+answers a different question: *"which model should we run?"* They are
+separate badges on purpose; folding a per-model comparison into The Line
+would make a routing change look like a quality regression.
+
+```bash
+smooth-bench convo --model deepseek-v4-flash --model gpt-5.5 \
+  --scoreboard board.json
+scripts/the-line/render-model-scores.sh board.json
+```
+
+That writes three artefacts, all from one pre-rounded source so the badge,
+the table and the JSON can never disagree:
+
+| file | for |
+|---|---|
+| `docs/model-scores.json` | machine-readable, the scoreboard verbatim |
+| `docs/model-badge.json` | the README shields endpoint (best model + %) |
+| `docs/Model-Leaderboard.md` | the human table |
+
+Tests: `bash scripts/the-line/test-model-scores.sh`.
+
+Two things the renderer deliberately refuses to do:
+
+- **Publish an unmeasured cost as `$0`.** A zero means the spend had not
+  posted or the sample missed it — not that the model was free. Those
+  render as `—`.
+- **Let a one-trial run read as a ranking.** Any `--trials 1` board
+  carries a warning that a one-scenario gap is noise. Use `--trials 3`
+  before acting on a close result.
+
 ## Two client surfaces (`--surface`)
 
 Pearl th-b3fe81. `th code --headless` and the Big Smooth PWA both speak

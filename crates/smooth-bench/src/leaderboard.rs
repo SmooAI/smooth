@@ -18,6 +18,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use serde::Serialize;
+
 /// One model's results, flattened by the caller.
 #[derive(Debug, Clone)]
 pub struct ModelRow {
@@ -123,6 +125,80 @@ pub fn ranked(rows: &[ModelRow]) -> Vec<&ModelRow> {
             })
     });
     out
+}
+
+/// One model's row in the published scoreboard.
+///
+/// Deliberately a separate, flatter type from [`ModelRow`]: this one is
+/// a published artefact other things parse (the docs table, the badge,
+/// anything tracking a model over time), so it must not churn every
+/// time the in-process row gains a field.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PublishedModel {
+    pub model: String,
+    /// Pass rate as a PERCENT, one decimal — the number that gets
+    /// published, pre-rounded so the badge, the table and the JSON can
+    /// never disagree.
+    pub pass_rate_pct: f64,
+    pub passed: usize,
+    pub conclusive: usize,
+    pub inconclusive: usize,
+    /// `None` when the cost was not resolvable above the key's noise —
+    /// publishing an unresolvable number as fact is how a premium model
+    /// ends up looking cheap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_per_pass_usd: Option<f64>,
+    pub duration_s: f64,
+}
+
+/// The whole scoreboard, ready to serialise into `docs/model-scores.json`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Scoreboard {
+    /// Which suite produced this — `convo` and `agentic` measure
+    /// different things and their percentages are not comparable.
+    pub suite: String,
+    /// Trials per scenario. A 1-trial run is an anecdote; published
+    /// numbers must carry this so nobody over-reads a 1-scenario gap.
+    pub trials: usize,
+    pub scenario_count: usize,
+    pub models: Vec<PublishedModel>,
+}
+
+impl Scoreboard {
+    /// Build from leaderboard rows, best-first.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, reason = "durations are ms; f64 is exact well past that")]
+    pub fn from_rows(suite: &str, trials: usize, rows: &[ModelRow]) -> Self {
+        let models: Vec<PublishedModel> = ranked(rows)
+            .into_iter()
+            .map(|r| PublishedModel {
+                model: r.model.clone(),
+                pass_rate_pct: (r.pass_rate * 1000.0).round() / 10.0,
+                passed: r.passed,
+                conclusive: r.conclusive,
+                inconclusive: r.inconclusive,
+                cost_usd: r.cost_resolvable.then_some(r.cost_usd),
+                cost_per_pass_usd: cost_per_pass(r),
+                duration_s: (r.duration_ms as f64 / 100.0).round() / 10.0,
+            })
+            .collect();
+        let scenario_count = rows.first().map_or(0, |r| r.cells.len());
+        Self {
+            suite: suite.to_string(),
+            trials,
+            scenario_count,
+            models,
+        }
+    }
+
+    /// The headline: the best model and its percentage, for the badge.
+    /// `None` for an empty board.
+    #[must_use]
+    pub fn best(&self) -> Option<&PublishedModel> {
+        self.models.first()
+    }
 }
 
 /// The leaderboard plus the scenario × model grid.
@@ -310,6 +386,32 @@ mod tests {
         let rows = vec![real, noisy];
         let order: Vec<&str> = ranked(&rows).iter().map(|r| r.model.as_str()).collect();
         assert_eq!(order, ["real", "noisy"], "input order preserved; noise must not sort ahead");
+    }
+
+    #[test]
+    fn scoreboard_is_ranked_and_pre_rounded() {
+        let rows = vec![
+            row("cheap", 8.0 / 9.0, 8, 0.0188, &[("a", Cell::Pass)]),
+            row("pricey", 7.0 / 9.0, 7, 0.7948, &[("a", Cell::Fail)]),
+        ];
+        let b = Scoreboard::from_rows("convo", 1, &rows);
+        assert_eq!(b.suite, "convo");
+        assert_eq!(b.trials, 1);
+        assert_eq!(b.models[0].model, "cheap", "best model first");
+        // Pre-rounded so badge/table/JSON can never disagree.
+        assert!((b.models[0].pass_rate_pct - 88.9).abs() < 1e-9, "got {}", b.models[0].pass_rate_pct);
+        assert_eq!(b.best().map(|m| m.model.as_str()), Some("cheap"));
+    }
+
+    #[test]
+    fn an_unresolvable_cost_is_omitted_not_published_as_fact() {
+        let mut r = row("noisy", 1.0, 1, 0.002, &[("a", Cell::Pass)]);
+        r.cost_resolvable = false;
+        let b = Scoreboard::from_rows("convo", 1, &[r]);
+        assert_eq!(b.models[0].cost_usd, None);
+        assert_eq!(b.models[0].cost_per_pass_usd, None);
+        let json = serde_json::to_string(&b).expect("serialises");
+        assert!(!json.contains("cost_usd"), "an unmeasured cost must be absent, not 0: {json}");
     }
 
     #[test]

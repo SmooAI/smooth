@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="docs/bench-history.md"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/bench-badge.json&style=for-the-badge&labelColor=020618" alt="The Line"></a>
+  <a href="docs/Model-Leaderboard.md"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/model-badge.json&style=for-the-badge&labelColor=020618" alt="Model Leaderboard"></a>
   <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
 </p>

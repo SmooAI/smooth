@@ -212,6 +212,12 @@ impl Measured {
     /// point of the column is telling them apart.
     #[must_use]
     pub fn is_resolvable(self, noise: Option<NoiseFloor>, duration_ms: u64) -> bool {
+        // A cost of exactly zero is never a measurement. It means the
+        // spend had not posted yet, or the sample missed it — publishing
+        // "$0.0000" would read as "this model is free".
+        if self.agent() <= 0.0 {
+            return false;
+        }
         noise.is_none_or(|n| {
             let expected = n.over(duration_ms);
             expected <= f64::EPSILON || self.agent() > 2.0 * expected
@@ -337,6 +343,19 @@ mod tests {
             harness: 0.0,
         };
         assert!(big.is_resolvable(noise, 20_000), "0.5 is far above the floor");
+    }
+
+    #[test]
+    fn a_zero_cost_is_never_published_as_a_measurement() {
+        // Observed live: a short run whose spend had not posted yet
+        // produced agent() == 0.0, and the scoreboard published
+        // "cost_usd: 0.0" — which reads as "free".
+        let nothing = Measured {
+            gateway_total: 0.0,
+            harness: 0.0,
+        };
+        assert!(!nothing.is_resolvable(Some(NoiseFloor { usd_per_second: 0.0 }), 10_000));
+        assert!(!nothing.is_resolvable(None, 10_000));
     }
 
     #[test]
