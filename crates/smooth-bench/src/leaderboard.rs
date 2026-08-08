@@ -293,7 +293,11 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
 
     let stuck = universally_failed(rows);
     if !stuck.is_empty() {
-        let _ = writeln!(out, "\n  ⚠ no model passed these — suspect the harness, not the model:");
+        let _ = writeln!(
+            out,
+            "\n  ⚠ no model passed these. Read the transcripts before concluding anything —\n\
+             \x20    it means EITHER the scenario is broken OR the failure is universal:"
+        );
         for id in &stuck {
             let _ = writeln!(out, "      {id}");
         }
