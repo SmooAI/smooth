@@ -495,6 +495,9 @@ impl AppState {
     /// conversation" entry.
     pub fn start_new_conversation(&mut self) {
         self.session_id = Uuid::new_v4().to_string();
+        // Unbind the daemon conversation too — without this the next turn
+        // silently RESUMED the conversation the user just left (th-aaa53a).
+        self.conversation_id = None;
         self.session_title = None;
         self.messages.clear();
         self.committed_count = 0;
@@ -850,6 +853,18 @@ mod tests {
     /// must land as exactly one newline per line. Getting this wrong is
     /// silent: dropping `\r` glues every line together, mapping it blindly
     /// double-spaces them.
+    #[test]
+    fn start_new_conversation_unbinds_the_daemon_conversation() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.conversation_id = Some("conv-1".into());
+        s.session_title = Some("Old chat".into());
+        s.start_new_conversation();
+        // Without this the next turn silently resumed the conversation the
+        // user just left (th-aaa53a).
+        assert!(s.conversation_id.is_none());
+        assert!(s.session_title.is_none());
+    }
+
     #[test]
     fn paste_normalizes_every_line_ending_convention() {
         for (raw, label) in [("a\r\nb\r\nc", "CRLF"), ("a\rb\rc", "bare CR (tmux)"), ("a\nb\nc", "LF")] {

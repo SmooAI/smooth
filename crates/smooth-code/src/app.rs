@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
 use crate::render;
-use crate::session::{Session, SessionManager};
+use crate::session::SessionManager;
 use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
 
 /// Log a diagnostic line to `~/.smooth/logs/smooth-code.log` when
@@ -353,15 +353,6 @@ pub async fn run_with_session(
     let result = event_loop(&mut terminal, &state, &event_tx, event_rx);
     tui_debug(format!("event_loop returned: {result:?}"));
 
-    // Auto-save on quit
-    {
-        let s = state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Ok(mgr) = SessionManager::new() {
-            let session = Session::from_state(&s);
-            let _ = mgr.save(&session);
-        }
-    }
-
     // Restore terminal — inline-viewport mode only needs to disable
     // raw mode and ensure the cursor is visible. There's no alt-
     // screen to leave: the viewport sat in the primary buffer the
@@ -393,24 +384,10 @@ fn event_loop(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
 ) -> anyhow::Result<()> {
     let command_registry = CommandRegistry::new();
-    let mut last_save = std::time::Instant::now();
-    let auto_save_interval = Duration::from_secs(30);
     // Tracks whether mouse capture is currently on; see `sync_mouse_capture`.
     let mut mouse_captured = false;
 
     loop {
-        // Auto-save every 30s if there are messages
-        if last_save.elapsed() >= auto_save_interval {
-            let s = state.lock().unwrap_or_else(|e| e.into_inner());
-            if !s.messages.is_empty() {
-                if let Ok(mgr) = SessionManager::new() {
-                    let session = Session::from_state(&s);
-                    let _ = mgr.save(&session);
-                }
-            }
-            drop(s);
-            last_save = std::time::Instant::now();
-        }
         // Draw. We do NOT wrap this in CSI 2026 synchronized output —
         // on terminals that half-support it (or where `print!`
         // doesn't flush between the begin/end), frames get stuck in
@@ -522,7 +499,7 @@ fn event_loop(
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match key.code {
                         KeyCode::Char('c') => s.should_quit = true,
-                        KeyCode::Char('b') => toggle_session_sidebar(&mut s),
+                        KeyCode::Char('b') => toggle_session_sidebar(&mut s, state),
                         // Ctrl+V: attach an image from the OS clipboard
                         // (screenshots, copied images) — Claude Code parity
                         // (pearl th-d16f7c). Bracketed paste still handles
@@ -610,30 +587,43 @@ fn sync_mouse_capture(state: &AppState, captured: &mut bool) {
     }
 }
 
-fn toggle_session_sidebar(state: &mut AppState) {
+fn toggle_session_sidebar(state: &mut AppState, state_arc: &Arc<Mutex<AppState>>) {
     if state.session_picker.active {
         state.session_picker.deactivate();
         return;
     }
-    let sessions = match SessionManager::new() {
-        Ok(mgr) => {
-            // Persist the current session so resuming back into it
-            // later doesn't lose in-flight history, and so it appears
-            // in the list we're about to show.
-            if !state.messages.is_empty() {
-                let _ = mgr.save(&Session::from_state(state));
-            }
-            mgr.list().unwrap_or_default()
+    // Sessions ARE daemon conversations (pearl th-aaa53a): the sidebar lists
+    // the daemon's `list_conversations` — the same rows the web SPA shows —
+    // so a chat started in any face is resumable from every face. The legacy
+    // on-disk store is only the offline fallback (a down daemon can't chat
+    // anyway, but the user can still eyeball old local transcripts).
+    let arc = Arc::clone(state_arc);
+    tokio::spawn(async move {
+        let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+        let rows = match crate::client::list_remote_conversations(&url).await {
+            Ok(convs) => convs
+                .into_iter()
+                .map(|c| crate::session::SessionSummary {
+                    id: c.conversation_id,
+                    title: Some(c.title),
+                    preview: String::new(),
+                    message_count: usize::try_from(c.message_count).unwrap_or(usize::MAX),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&c.updated_at).map_or_else(|_| chrono::Utc::now(), |t| t.with_timezone(&chrono::Utc)),
+                })
+                .collect(),
+            Err(_) => SessionManager::new().and_then(|m| m.list()).unwrap_or_default(),
+        };
+        let mut s = arc.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.session_picker.active {
+            let current = s.conversation_id.clone().unwrap_or_default();
+            s.session_picker.open(rows, &current);
         }
-        Err(_) => Vec::new(),
-    };
-    let current_id = state.session_id.clone();
-    state.session_picker.open(sessions, &current_id);
+    });
 }
 
 /// Handle a key while the conversation sidebar owns the keyboard.
 /// Returns `true` when the key was consumed.
-fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState) -> bool {
+fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState, state_arc: &Arc<Mutex<AppState>>) -> bool {
     use crate::session_picker::PickerAction;
 
     match key.code {
@@ -643,7 +633,6 @@ fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState) -> boo
         KeyCode::Char('n') => {
             // Shortcut for the "New conversation" entry regardless of
             // cursor position.
-            save_current_session(state);
             state.start_new_conversation();
             state.add_message(ChatMessage::system("Started a new conversation. Type a message to get going."));
             state.session_picker.deactivate();
@@ -651,25 +640,54 @@ fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState) -> boo
         KeyCode::Enter => {
             match state.session_picker.selected_action() {
                 PickerAction::New => {
-                    save_current_session(state);
                     state.start_new_conversation();
                     state.add_message(ChatMessage::system("Started a new conversation. Type a message to get going."));
                 }
                 PickerAction::Resume(id) => {
-                    if id == state.session_id {
+                    if state.conversation_id.as_deref() == Some(id.as_str()) {
                         // Already viewing it — just close.
-                    } else if let Ok(mgr) = SessionManager::new() {
-                        save_current_session(state);
-                        match mgr.load(&id) {
-                            Ok(session) => {
-                                state.resume_from(&session);
-                                let label = state.session_title.clone().unwrap_or_else(|| id.clone());
-                                state.add_message(ChatMessage::system(format!("Resumed session: {label}")));
+                    } else if let Ok(session) = SessionManager::new().and_then(|m| m.load(&id)) {
+                        // Legacy on-disk session (offline-fallback rows only).
+                        state.resume_from(&session);
+                        let label = state.session_title.clone().unwrap_or_else(|| id.clone());
+                        state.add_message(ChatMessage::system(format!("Resumed session: {label}")));
+                    } else {
+                        // Daemon conversation: bind to it, then hydrate the
+                        // transcript from stored history (th-aaa53a). The
+                        // engine replays context server-side on the next turn.
+                        let title = state
+                            .session_picker
+                            .sessions
+                            .iter()
+                            .find(|r| r.id == id)
+                            .and_then(|r| r.title.clone())
+                            .unwrap_or_else(|| id.clone());
+                        state.start_new_conversation();
+                        state.conversation_id = Some(id.clone());
+                        state.session_title = Some(title.clone());
+                        state.add_message(ChatMessage::system(format!("Resuming conversation: {title}…")));
+                        let arc = Arc::clone(state_arc);
+                        tokio::spawn(async move {
+                            let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+                            let fetched = crate::client::fetch_conversation_history(&url, &id).await;
+                            let mut s = arc.lock().unwrap_or_else(|e| e.into_inner());
+                            // Only hydrate if the user is still on this conversation.
+                            if s.conversation_id.as_deref() != Some(id.as_str()) {
+                                return;
                             }
-                            Err(e) => {
-                                state.add_message(ChatMessage::system(format!("Could not load session {id}: {e}")));
+                            match fetched {
+                                Ok(history) => {
+                                    for m in history {
+                                        match m.role.as_str() {
+                                            "user" => s.add_message(ChatMessage::user(&m.content)),
+                                            "assistant" => s.add_message(ChatMessage::assistant(&m.content)),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Err(e) => s.add_message(ChatMessage::system(format!("Could not load history: {e}"))),
                             }
-                        }
+                        });
                     }
                 }
             }
@@ -678,16 +696,6 @@ fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState) -> boo
         _ => {}
     }
     true
-}
-
-/// Best-effort save of the current session to the on-disk store.
-fn save_current_session(state: &AppState) {
-    if state.messages.is_empty() {
-        return;
-    }
-    if let Ok(mgr) = SessionManager::new() {
-        let _ = mgr.save(&Session::from_state(state));
-    }
 }
 
 /// How many milliseconds a finished tool call took.
@@ -914,7 +922,7 @@ fn handle_input_mode(
     // Up/Down navigates, Enter resumes (or starts a new chat on the
     // "New conversation" row), `n` is a new-chat shortcut, Esc closes.
     if state.session_picker.active {
-        handle_session_sidebar_key(key, state);
+        handle_session_sidebar_key(key, state, &state_arc);
         return;
     }
 
@@ -1422,70 +1430,10 @@ async fn run_agent_streaming(
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
 
-    // Build a structured prior-conversation array from this TUI
-    // session's chat history. Sent over the wire as `prior_messages`
-    // on TaskStart and replayed by the runner as native
-    // `Message::user` / `Message::assistant` entries before the
-    // current turn (pearl th-422b93). This is how Claude Code /
-    // OpenCode / the Anthropic API handle history — proper role
-    // alternation, prompt-cache friendly, tool-call structure
-    // preserved.
-    //
-    // Constraints:
-    //   - Only User and Assistant roles. System messages are TUI-side
-    //     status banners that the agent doesn't need.
-    //   - Skip the last two (current user message + streaming assistant
-    //     placeholder).
-    //   - Drop runner-stderr / cast-summary diagnostic lines from
-    //     prose so we don't feed noise back into the model.
-    let prior_messages: Vec<crate::client::PriorMessage> = {
-        let s = state.lock().unwrap_or_else(|e| e.into_inner());
-        let upper = s.messages.len().saturating_sub(2);
-        let mut out = Vec::with_capacity(upper);
-        for msg in s.messages.iter().take(upper) {
-            let role = match msg.role {
-                crate::state::ChatRole::User => "user",
-                crate::state::ChatRole::Assistant => "assistant",
-                crate::state::ChatRole::System => continue,
-            };
-            let cleaned: String = msg
-                .content
-                .lines()
-                .filter(|l| !l.starts_with("[runner] ") && !l.starts_with("[runner stderr]") && !l.starts_with("[cast-summary]"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let trimmed = cleaned.trim();
-            // Pearl th-91075b: do NOT drop the whole assistant turn when
-            // its cleaned content is empty (e.g. when the assistant
-            // turn was almost entirely [runner] tool prose). Dropping
-            // the turn here was breaking inter-turn context — the LLM
-            // on turn 2 would see system + turn-1-user + turn-2-user
-            // and respond "I don't see a plan above" because the
-            // assistant's turn-1 reply had been silently removed.
-            //
-            // Preserve the turn structure with a brief placeholder so
-            // the LLM at least knows "an assistant turn happened here,
-            // it consisted of tool ops." The tool calls themselves are
-            // already in the runner's structured tool-call channel —
-            // this prose path only needs to keep the turn ordering
-            // intact.
-            let content = if trimmed.is_empty() {
-                match msg.role {
-                    crate::state::ChatRole::Assistant => "(prior turn: ran tools; output omitted from prose history)".to_string(),
-                    // User turns that are empty are truly nothing —
-                    // skip those as before.
-                    _ => continue,
-                }
-            } else {
-                trimmed.to_string()
-            };
-            out.push(crate::client::PriorMessage {
-                role: role.to_string(),
-                content,
-            });
-        }
-        out
-    };
+    // History replay happens SERVER-SIDE: the client resumes the daemon
+    // conversation (th-255d2a) and the engine replays its stored history by
+    // thread_id on every turn. The old client-side `prior_messages` replay
+    // (th-422b93, pre-resume) double-fed that history and is gone (th-aaa53a).
 
     // Pearl th-20574a: read the user's --model override from AppState
     // so it actually reaches Big Smooth's routing layer. Was a literal
@@ -1496,15 +1444,7 @@ async fn run_agent_streaming(
         s.model_override.clone()
     };
     let mut events = client
-        .run_task(
-            message,
-            model_override.as_deref(),
-            None,
-            cwd.as_deref(),
-            agent.as_deref(),
-            prior_messages,
-            images,
-        )
+        .run_task(message, model_override.as_deref(), None, cwd.as_deref(), agent.as_deref(), Vec::new(), images)
         .await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits
