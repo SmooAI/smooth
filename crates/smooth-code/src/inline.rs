@@ -417,10 +417,11 @@ pub struct InlineRegions {
     pub input: Rect,
 }
 
-/// Rows the input box needs to show `text_rows` rows of text, plus its border.
+/// Rows the input box needs to show `text_rows` rows of text, plus its
+/// border. `cap` is the growth ceiling ([`crate::composer::max_text_rows`]).
 #[must_use]
-pub fn input_height(text_rows: u16) -> u16 {
-    text_rows.clamp(1, crate::composer::MAX_TEXT_ROWS) + 2
+pub fn input_height(text_rows: u16, cap: u16) -> u16 {
+    text_rows.clamp(1, cap.max(1)) + 2
 }
 
 /// Compute regions inside the viewport. `preview_h` is the desired
@@ -530,7 +531,7 @@ mod tests {
     #[test]
     fn compute_regions_no_preview_when_zero() {
         let area = Rect::new(0, 0, 80, 8);
-        let r = compute_regions(area, 0, input_height(1));
+        let r = compute_regions(area, 0, input_height(1, crate::composer::MAX_TEXT_ROWS));
         assert!(r.preview.is_none());
         assert_eq!(r.status.height, 1);
         assert_eq!(r.input.height, 3);
@@ -541,7 +542,7 @@ mod tests {
     #[test]
     fn compute_regions_with_preview() {
         let area = Rect::new(0, 0, 80, 12);
-        let r = compute_regions(area, 4, input_height(1));
+        let r = compute_regions(area, 4, input_height(1, crate::composer::MAX_TEXT_ROWS));
         let preview = r.preview.expect("preview should be present");
         assert_eq!(preview.height, 4);
         assert_eq!(preview.y, 0);
@@ -554,17 +555,18 @@ mod tests {
         // Tiny viewport — preview gets squeezed to 0 if input+status
         // already fill it.
         let area = Rect::new(0, 0, 80, 4);
-        let r = compute_regions(area, 8, input_height(1));
+        let r = compute_regions(area, 8, input_height(1, crate::composer::MAX_TEXT_ROWS));
         assert!(r.preview.is_none());
     }
 
     /// One text row + two border rows, capped at `MAX_TEXT_ROWS`.
     #[test]
     fn input_height_adds_the_border_and_caps_growth() {
-        assert_eq!(input_height(1), 3, "the historical fixed height");
-        assert_eq!(input_height(4), 6);
-        assert_eq!(input_height(0), 3, "never smaller than one text row");
-        assert_eq!(input_height(99), crate::composer::MAX_TEXT_ROWS + 2);
+        assert_eq!(input_height(1, crate::composer::MAX_TEXT_ROWS), 3, "the historical fixed height");
+        assert_eq!(input_height(4, crate::composer::MAX_TEXT_ROWS), 6);
+        assert_eq!(input_height(0, crate::composer::MAX_TEXT_ROWS), 3, "never smaller than one text row");
+        assert_eq!(input_height(99, crate::composer::MAX_TEXT_ROWS), crate::composer::MAX_TEXT_ROWS + 2);
+        assert_eq!(input_height(99, 12), 14, "a taller viewport raises the ceiling (th-d5eb9f)");
     }
 
     /// A growing draft borrows rows from the preview — the viewport height is
@@ -572,8 +574,8 @@ mod tests {
     #[test]
     fn a_taller_input_takes_rows_from_the_preview() {
         let area = Rect::new(0, 0, 80, 14);
-        let short = compute_regions(area, 10, input_height(1));
-        let tall = compute_regions(area, 10, input_height(5));
+        let short = compute_regions(area, 10, input_height(1, crate::composer::MAX_TEXT_ROWS));
+        let tall = compute_regions(area, 10, input_height(5, crate::composer::MAX_TEXT_ROWS));
 
         assert_eq!(short.input.height, 3);
         assert_eq!(tall.input.height, 7);
@@ -595,7 +597,7 @@ mod tests {
     #[test]
     fn input_growth_leaves_a_preview_row_when_one_is_wanted() {
         let area = Rect::new(0, 0, 80, 8);
-        let r = compute_regions(area, 4, input_height(crate::composer::MAX_TEXT_ROWS));
+        let r = compute_regions(area, 4, input_height(crate::composer::MAX_TEXT_ROWS, crate::composer::MAX_TEXT_ROWS));
         let preview = r.preview.expect("preview must survive");
         assert!(preview.height >= 1);
         assert_eq!(preview.height + r.status.height + r.input.height, area.height);
@@ -607,7 +609,7 @@ mod tests {
         for height in 1..=16u16 {
             for text_rows in 1..=crate::composer::MAX_TEXT_ROWS {
                 let area = Rect::new(0, 0, 40, height);
-                let r = compute_regions(area, height, input_height(text_rows));
+                let r = compute_regions(area, height, input_height(text_rows, crate::composer::MAX_TEXT_ROWS));
                 let bottom = r.input.y + r.input.height;
                 assert!(
                     bottom <= area.y + area.height.max(4),

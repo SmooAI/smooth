@@ -22,6 +22,15 @@
 /// prompt while leaving the preview usable.
 pub const MAX_TEXT_ROWS: u16 = 6;
 
+/// The box's growth ceiling for a given inline-viewport height — responsive
+/// instead of hard-capped at [`MAX_TEXT_ROWS`] (pearl th-d5eb9f). Reserves 8
+/// rows for the streaming preview, status line, and borders; the old constant
+/// stays as the floor so short terminals behave exactly as before.
+#[must_use]
+pub fn max_text_rows(viewport_h: u16) -> u16 {
+    viewport_h.saturating_sub(8).clamp(MAX_TEXT_ROWS, 16)
+}
+
 /// Display width of a `char` in terminal columns.
 ///
 /// Deliberately narrow: control characters are zero-width, everything else is
@@ -117,11 +126,11 @@ pub fn cursor_position(text: &str, cursor: usize, width: u16) -> (u16, u16) {
     (u16::try_from(last).unwrap_or(u16::MAX), 0)
 }
 
-/// Rows of text the box wants, clamped to [1, `MAX_TEXT_ROWS`].
+/// Rows of text the box wants, clamped to [1, `cap`] (see [`max_text_rows`]).
 #[must_use]
-pub fn desired_text_rows(text: &str, width: u16) -> u16 {
+pub fn desired_text_rows(text: &str, width: u16, cap: u16) -> u16 {
     let rows = u16::try_from(wrap_rows(text, width).len()).unwrap_or(u16::MAX);
-    rows.clamp(1, MAX_TEXT_ROWS)
+    rows.clamp(1, cap.max(1))
 }
 
 /// Clamp a scroll offset to the draft's extent, leaving it where it is.
@@ -163,14 +172,14 @@ mod tests {
     #[test]
     fn empty_input_still_occupies_one_row() {
         assert_eq!(wrap_rows("", 10).len(), 1);
-        assert_eq!(desired_text_rows("", 10), 1);
+        assert_eq!(desired_text_rows("", 10, MAX_TEXT_ROWS), 1);
         assert_eq!(cursor_position("", 0, 10), (0, 0));
     }
 
     #[test]
     fn short_text_is_a_single_row() {
         assert_eq!(rows_as_str("hello", 10), vec!["hello"]);
-        assert_eq!(desired_text_rows("hello", 10), 1);
+        assert_eq!(desired_text_rows("hello", 10, MAX_TEXT_ROWS), 1);
     }
 
     /// The old renderer clipped here — everything past the box width was
@@ -179,19 +188,19 @@ mod tests {
     #[test]
     fn long_text_soft_wraps_at_the_box_width() {
         assert_eq!(rows_as_str("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
-        assert_eq!(desired_text_rows("abcdefghij", 4), 3);
+        assert_eq!(desired_text_rows("abcdefghij", 4, MAX_TEXT_ROWS), 3);
     }
 
     #[test]
     fn text_exactly_the_box_width_does_not_wrap() {
         assert_eq!(rows_as_str("abcd", 4), vec!["abcd"]);
-        assert_eq!(desired_text_rows("abcd", 4), 1);
+        assert_eq!(desired_text_rows("abcd", 4, MAX_TEXT_ROWS), 1);
     }
 
     #[test]
     fn newlines_start_new_rows() {
         assert_eq!(rows_as_str("ab\ncd", 10), vec!["ab", "cd"]);
-        assert_eq!(desired_text_rows("ab\ncd", 10), 2);
+        assert_eq!(desired_text_rows("ab\ncd", 10, MAX_TEXT_ROWS), 2);
     }
 
     /// Pressing Enter at the end must give the cursor a row to sit on.
@@ -210,7 +219,7 @@ mod tests {
     fn growth_is_capped_then_the_box_scrolls() {
         let tall = "x\n".repeat(usize::from(MAX_TEXT_ROWS) + 5);
         assert!(wrap_rows(&tall, 10).len() > usize::from(MAX_TEXT_ROWS));
-        assert_eq!(desired_text_rows(&tall, 10), MAX_TEXT_ROWS);
+        assert_eq!(desired_text_rows(&tall, 10, MAX_TEXT_ROWS), MAX_TEXT_ROWS);
     }
 
     /// The cursor used to be `inner.x + byte_offset`, so any multi-byte char
@@ -245,7 +254,7 @@ mod tests {
     #[test]
     fn zero_width_does_not_divide_by_zero() {
         assert!(!wrap_rows("abc", 0).is_empty());
-        assert_eq!(desired_text_rows("abc", 0), 3);
+        assert_eq!(desired_text_rows("abc", 0, MAX_TEXT_ROWS), 3);
     }
 
     #[test]
