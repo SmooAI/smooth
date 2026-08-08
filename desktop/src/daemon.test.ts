@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { baseUrl, isRemote, remoteUrl, resolveAddr, resolveDaemonBin } from './daemon.js';
+import { baseUrl, isRemote, remoteUrl, resolveAddr, resolveDaemonBin, tccHelperApp, tccOpenArgs } from './daemon.js';
 
 test('resolveAddr defaults, overrides, and ignores blanks', () => {
     assert.equal(resolveAddr({}), '127.0.0.1:8787');
@@ -33,4 +33,17 @@ test('resolveDaemonBin takes the first candidate that exists', () => {
     writeFileSync(real, '');
     assert.equal(resolveDaemonBin([join(dir, 'missing'), '', real]), real);
     assert.equal(resolveDaemonBin([join(dir, 'missing')]), undefined);
+});
+
+test('tccHelperApp resolves the sibling helper under Contents/Helpers on macOS', () => {
+    // resourcesPath is <app>/Contents/Resources; the helper is Contents/Helpers/...
+    assert.equal(tccHelperApp('/Applications/Big Smooth.app/Contents/Resources', 'darwin'), '/Applications/Big Smooth.app/Contents/Helpers/BigSmoothTCC.app');
+    // Off macOS, or with no resourcesPath (unpackaged), there is no helper.
+    assert.equal(tccHelperApp('/whatever/Contents/Resources', 'win32'), undefined);
+    assert.equal(tccHelperApp(undefined, 'darwin'), undefined);
+});
+
+test('tccOpenArgs builds a fresh-instance `open` invocation forwarding the tcc verb', () => {
+    assert.deepEqual(tccOpenArgs('/x/BigSmoothTCC.app', 'calendar'), ['-n', '/x/BigSmoothTCC.app', '--args', 'tcc', 'calendar']);
+    assert.deepEqual(tccOpenArgs('/x/BigSmoothTCC.app', 'reminders'), ['-n', '/x/BigSmoothTCC.app', '--args', 'tcc', 'reminders']);
 });

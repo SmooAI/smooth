@@ -17,8 +17,6 @@
 
 #![cfg(target_os = "macos")]
 
-use std::process::Command;
-
 use anstream::println;
 use anyhow::Result;
 use owo_colors::OwoColorize;
@@ -64,21 +62,10 @@ pub fn run() -> Result<()> {
     };
     println!("  {} Big Smooth.app: {}", "✓".green().bold(), app.display().to_string().dimmed());
 
-    // 3. Drive the grant. The daemon asks EventKit at startup, so the trigger is
-    //    simply "(re)launch the app in this GUI session".
-    if crate::calendar_setup::app_is_running() {
-        println!("  {} Big Smooth is already running — it asks for Reminders access at startup,", "→".cyan());
-        println!("    so restart it to trigger the prompt:");
-        println!(
-            "      {}",
-            format!("osascript -e 'quit app \"Big Smooth\"' && open -a \"{}\"", app.display()).bold()
-        );
-    } else {
-        println!("  {} launching Big Smooth so it asks macOS for Reminders access…", "→".cyan());
-        if let Err(e) = Command::new("/usr/bin/open").arg(&app).status() {
-            println!("    {} couldn't launch it ({e}) — open it from Finder instead.", "✗".red().bold());
-        }
-    }
+    // 3. Drive the grant. Prefers the packaged app's nested TCC helper (whose
+    //    daemon runs as a child and so can't ask at startup); falls back to
+    //    (re)launching the native app bundle.
+    crate::calendar_setup::drive_eventkit_grant(&app, "reminders");
 
     println!("\n  {}", "What you have to click:".bold());
     println!(

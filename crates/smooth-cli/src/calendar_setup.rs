@@ -76,6 +76,49 @@ pub fn app_is_running() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The nested TCC helper bundle inside a packaged (Electron) Big Smooth.app, if
+/// present. Its main executable is `smooth-daemon`, so `open`ing it lets macOS
+/// attribute the EventKit prompt to Big Smooth. The native app bundle
+/// (`scripts/macos`) has no helper — its own main executable is the daemon, so
+/// launching the app itself already prompts.
+#[must_use]
+pub fn tcc_helper(app: &Path) -> Option<PathBuf> {
+    let helper = app.join("Contents/Helpers/BigSmoothTCC.app");
+    helper.is_dir().then_some(helper)
+}
+
+/// Drive one EventKit grant to a prompt. Prefers the nested helper (Electron
+/// bundle, whose daemon runs as a child and so can't ask at startup); falls back
+/// to (re)launching the app itself (native bundle). `what` is `"calendar"` or
+/// `"reminders"` — the `smooth-daemon tcc <what>` subcommand.
+pub fn drive_eventkit_grant(app: &Path, what: &str) {
+    if let Some(helper) = tcc_helper(app) {
+        println!("  {} asking macOS for {what} access via the TCC helper…", "→".cyan());
+        // `-n`: a fresh instance each time; the helper exits when the prompt is answered.
+        if let Err(e) = Command::new("/usr/bin/open").arg("-n").arg(&helper).args(["--args", "tcc", what]).status() {
+            println!(
+                "    {} couldn't launch the helper ({e}) — open Big Smooth’s Set Up menu instead.",
+                "✗".red().bold()
+            );
+        }
+        return;
+    }
+    // Native app bundle: its main executable IS smooth-daemon, which asks
+    // EventKit at startup, so (re)launching the app triggers the prompt.
+    if app_is_running() {
+        println!("  {} Big Smooth is already running — it asks at startup, so restart it:", "→".cyan());
+        println!(
+            "      {}",
+            format!("osascript -e 'quit app \"Big Smooth\"' && open -a \"{}\"", app.display()).bold()
+        );
+    } else {
+        println!("  {} launching Big Smooth so it asks macOS for {what} access…", "→".cyan());
+        if let Err(e) = Command::new("/usr/bin/open").arg(app).status() {
+            println!("    {} couldn't launch it ({e}) — open it from Finder instead.", "✗".red().bold());
+        }
+    }
+}
+
 /// Download the latest `ical` release and install it at [`install_path`].
 ///
 /// Shells `curl` and `tar` (macOS base system) rather than pulling a TLS +
@@ -199,21 +242,10 @@ pub fn run() -> Result<()> {
     };
     println!("  {} {APP_NAME}: {}", "✓".green().bold(), app.display().to_string().dimmed());
 
-    // 3. Drive the grant. The daemon asks EventKit at startup, so the trigger is
-    //    simply "(re)launch the app in this GUI session".
-    if app_is_running() {
-        println!("  {} Big Smooth is already running — it asks for Calendar access at startup,", "→".cyan());
-        println!("    so restart it to trigger the prompt:");
-        println!(
-            "      {}",
-            format!("osascript -e 'quit app \"Big Smooth\"' && open -a \"{}\"", app.display()).bold()
-        );
-    } else {
-        println!("  {} launching Big Smooth so it asks macOS for Calendar access…", "→".cyan());
-        if let Err(e) = Command::new("/usr/bin/open").arg(&app).status() {
-            println!("    {} couldn't launch it ({e}) — open it from Finder instead.", "✗".red().bold());
-        }
-    }
+    // 3. Drive the grant. Prefers the packaged app's nested TCC helper (whose
+    //    daemon runs as a child and so can't ask at startup); falls back to
+    //    (re)launching the native app bundle.
+    drive_eventkit_grant(&app, "calendar");
 
     println!("\n  {}", "What you have to click:".bold());
     println!(
@@ -284,5 +316,18 @@ mod tests {
     #[test]
     fn version_probe_returns_none_for_a_non_ical_binary() {
         assert!(ical_version(Path::new("/nonexistent/ical")).is_none());
+    }
+
+    #[test]
+    fn tcc_helper_is_some_only_when_the_nested_bundle_exists() {
+        let root = tempdir("tcc-helper-test").unwrap();
+        let app = root.join("Big Smooth.app");
+        // No helper yet — a native bundle has none.
+        assert!(tcc_helper(&app).is_none());
+        // Create the nested helper bundle dir the afterPack hook assembles.
+        let helper = app.join("Contents/Helpers/BigSmoothTCC.app");
+        std::fs::create_dir_all(&helper).unwrap();
+        assert_eq!(tcc_helper(&app), Some(helper));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

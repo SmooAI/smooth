@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 
 import { loadConfig, saveConfig } from './config.js';
-import { baseUrl, isRemote, remoteUrl, resolveThBin, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
+import { baseUrl, isRemote, remoteUrl, resolveThBin, runDaemonCommand, startDaemon, stopDaemon, tccHelperApp, tccOpenArgs } from './daemon.js';
 import { discoverDaemons, type RemoteDaemon } from './discovery.js';
 import { linkThOnPath } from './installth.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
@@ -202,18 +202,53 @@ function connectTo(url: string | null): void {
 }
 
 /**
- * Calendar / Reminders: `smooth-daemon tcc <what>` as our child, so TCC names
- * THIS bundle in the prompt and reads its usage strings (see runDaemonCommand).
+ * Calendar / Reminders. macOS shows the EventKit prompt only for a signed
+ * bundle whose MAIN executable asks — the daemon spawned as our child can't (it
+ * returns not-determined silently). So we launch the nested helper bundle
+ * (Contents/Helpers/BigSmoothTCC.app, main exe = smooth-daemon) via `open`,
+ * which prompts, then poll the grant status (`open` can't return the child's
+ * stdout, and reading status as a child works even though asking doesn't).
  */
 async function grantEventKit(what: 'calendar' | 'reminders'): Promise<void> {
-    const { ok, output } = await runDaemonCommand(['tcc', what]);
-    // The daemon prints `<what>: granted|denied|not-determined`; a denial can only
-    // be undone in System Settings, so say so rather than silently doing nothing.
+    const helper = tccHelperApp();
+    if (!helper) {
+        // Unpackaged/dev build: no helper bundle. Fall back to the child path,
+        // which at least reports current status (it just can't prompt).
+        const { output } = await runDaemonCommand(['tcc', what]);
+        dialog.showMessageBox({ type: 'warning', message: output || 'TCC helper is only available in the packaged app.' });
+        return;
+    }
+    // Fire the prompt (LaunchServices attributes it to the helper bundle).
+    spawn('/usr/bin/open', tccOpenArgs(helper, what), { stdio: 'ignore' });
+    const status = await pollTccStatus(what);
     dialog.showMessageBox({
-        type: ok && output.includes('granted') ? 'info' : 'warning',
-        message: output || 'No response from the daemon.',
-        detail: output.includes('denied') ? 'Grant it in System Settings › Privacy & Security.' : undefined,
+        type: status === 'granted' ? 'info' : 'warning',
+        message: `${what}: ${status}`,
+        detail:
+            status === 'denied'
+                ? 'Grant it in System Settings › Privacy & Security.'
+                : status === 'not-determined'
+                  ? 'No answer yet — try Set Up again, or check System Settings › Privacy & Security.'
+                  : undefined,
     });
+}
+
+/** Poll the daemon's `tcc <what>` status (as our child — reading works, asking
+ * doesn't) until it leaves `not-determined` or ~2 min elapses. That window
+ * matches the daemon's own EventKit request cap; the user is answering a dialog. */
+async function pollTccStatus(what: 'calendar' | 'reminders'): Promise<string> {
+    const deadline = Date.now() + 120_000;
+    let last = 'not-determined';
+    while (Date.now() < deadline) {
+        const { output } = await runDaemonCommand(['tcc', what]);
+        const match = /granted|denied|not-determined/.exec(output);
+        if (match) {
+            last = match[0];
+            if (last !== 'not-determined') return last;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+    }
+    return last;
 }
 
 /**
