@@ -153,7 +153,7 @@ async fn search_handler(State(state): State<Arc<SearchState>>, Query(query): Que
 /// directory that is the daemon's own workspace or under the user's home dir.
 /// Anything else falls back to the daemon workspace (never an error — mentions
 /// must degrade, not trap).
-fn allowed_cwd(requested: &str, home: Option<&Path>, workspace: &Path) -> Option<PathBuf> {
+pub(crate) fn allowed_cwd(requested: &str, home: Option<&Path>, workspace: &Path) -> Option<PathBuf> {
     let canon = std::fs::canonicalize(requested).ok()?;
     if !canon.is_dir() {
         return None;

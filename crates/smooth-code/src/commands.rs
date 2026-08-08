@@ -457,15 +457,23 @@ fn cmd_verbose(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn cmd_skill(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+/// The skill catalog: the daemon's `GET /api/skills` when the startup fetch
+/// landed (one catalog for every face — pearl th-a5952d), else a local
+/// `discover` walk so a down daemon degrades to yesterday's behavior.
+pub(crate) fn available_skills(state: &AppState) -> Vec<smooth_cast::skills::Skill> {
+    if let Some(remote) = &state.remote_skills {
+        return remote.clone();
+    }
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    smooth_cast::skills::discover(&workspace)
+}
+
+fn cmd_skill(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let args = args.trim();
 
-    // `/skill:name` is now sugar over smooth-cast's canonical skill catalog —
-    // the one discovery path (project + ~/.smooth + Claude/opencode imports +
-    // trusted SEP extensions' `[resources] skills`). smooth-code no longer
-    // parses skills itself.
-    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let skills = smooth_cast::skills::discover(&workspace);
+    // `/skill:name` is sugar over the ONE skill catalog — served by the
+    // daemon (`/api/skills`), locally discovered only as offline fallback.
+    let skills = available_skills(state);
 
     if args.is_empty() {
         // /skill with no args — list available skills
@@ -574,6 +582,26 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn available_skills_prefers_the_daemon_catalog() {
+        let mut state = AppState::new(std::env::temp_dir());
+        // No cache → local discover fallback (may be empty in a temp dir; the
+        // point is it doesn't panic and returns SOMETHING deterministic).
+        let _ = available_skills(&state);
+        // With the daemon cache set, it is returned verbatim — no disk walk.
+        let skill = smooth_cast::skills::parse_skill_string(
+            "---\nname: remote-skill\ndescription: from the daemon\n---\nbody\n",
+            std::path::Path::new("/x/SKILL.md"),
+            smooth_cast::skills::SkillSource::Builtin,
+        )
+        .unwrap()
+        .unwrap();
+        state.remote_skills = Some(vec![skill]);
+        let got = available_skills(&state);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "remote-skill");
+    }
 
     #[test]
     fn test_register_and_execute() {
