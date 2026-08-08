@@ -59,6 +59,10 @@ pub struct AutocompleteState {
     /// selection to replace `@query` / `/query` with the full insert
     /// text.
     pub trigger_pos: usize,
+    /// Monotonic id of the newest remote `/search` request. A response
+    /// tagged with an older generation is stale (the user kept typing)
+    /// and is dropped by [`Self::apply_remote_results`] (th-8e9cf6).
+    pub generation: u64,
 }
 
 impl AutocompleteState {
@@ -89,6 +93,24 @@ impl AutocompleteState {
     #[cfg(test)]
     pub fn activate(&mut self, at_pos: usize) {
         self.activate_files(at_pos);
+    }
+
+    /// Overlay results fetched from Big Smooth's `GET /search` onto the
+    /// popup — the parity path: one backend ranks mentions for every face,
+    /// and the locally-computed results this popup opened with become the
+    /// offline fallback (pearl th-8e9cf6).
+    ///
+    /// Applied only when the popup is still open on a file (`@`) query and
+    /// `generation` matches the newest request; an empty remote set keeps
+    /// the local results (a daemon that can't help must not blank a popup
+    /// the local walk already filled). Returns whether it applied.
+    pub fn apply_remote_results(&mut self, generation: u64, results: Vec<AutocompleteResult>) -> bool {
+        if !self.active || self.kind != CompletionKind::File || generation != self.generation || results.is_empty() {
+            return false;
+        }
+        self.results = results;
+        self.selected = self.selected.min(self.results.len().saturating_sub(1));
+        true
     }
 
     /// Deactivate autocomplete and clear all state.
@@ -466,6 +488,40 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn remote(label: &str) -> AutocompleteResult {
+        AutocompleteResult {
+            label: label.to_string(),
+            detail: String::new(),
+            insert_text: format!("@{label}"),
+        }
+    }
+
+    #[test]
+    fn apply_remote_results_guards_staleness_kind_and_emptiness() {
+        let mut ac = AutocompleteState::default();
+        ac.activate_files(0);
+        ac.generation = 3;
+
+        // Stale generation → dropped.
+        assert!(!ac.apply_remote_results(2, vec![remote("a.rs")]));
+        // Empty remote set → local results kept.
+        assert!(!ac.apply_remote_results(3, vec![]));
+        // Fresh + non-empty → applied.
+        assert!(ac.apply_remote_results(3, vec![remote("a.rs"), remote("b.rs")]));
+        assert_eq!(ac.results.len(), 2);
+        // Selected index is clamped into the new set.
+        ac.selected = 5;
+        assert!(ac.apply_remote_results(3, vec![remote("c.rs")]));
+        assert_eq!(ac.selected, 0);
+        // Inactive popup → dropped.
+        ac.deactivate();
+        assert!(!ac.apply_remote_results(3, vec![remote("d.rs")]));
+        // Command popup → dropped (remote search is `@`-only).
+        ac.activate_commands(0);
+        ac.generation = 9;
+        assert!(!ac.apply_remote_results(9, vec![remote("e.rs")]));
+    }
 
     fn sample_files() -> Vec<FileEntry> {
         vec![
