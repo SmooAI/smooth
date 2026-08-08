@@ -417,6 +417,16 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
         };
         eprintln!("convo: target {url}");
 
+        // Pin WHICH BUILD served this model. Ids are aliases that float
+        // (th-cdf7b8) — one ~1-token call is cheaper than a board nobody
+        // can attribute to a build.
+        if let Some(k) = gateway_key.as_deref() {
+            match smooth_bench::provenance::ModelBuild::probe(&gateway_url, k, model).await {
+                Ok(b) => eprintln!("{}", b.render()),
+                Err(e) => eprintln!("  model build:   {model} -> unknown ({e})"),
+            }
+        }
+
         let opts = ConvoOpts {
             url,
             token,
