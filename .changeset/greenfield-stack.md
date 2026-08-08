@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 skill + bench: greenfield stack steering — guide the from-nothing build, and measure it

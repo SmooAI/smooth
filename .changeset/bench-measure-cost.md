@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: measure real LLM cost, and fix `--model` silently doing nothing

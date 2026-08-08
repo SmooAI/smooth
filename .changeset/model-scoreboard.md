@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: publish a per-model benchmark percentage (README badge + leaderboard)
