@@ -24,6 +24,43 @@ use smooth_operator::LlmConfig;
 /// programmatic clients must present `Authorization: Bearer <token>`. An
 /// all-whitespace value is treated as unset.
 #[must_use]
+/// The temperature every daemon LLM call uses.
+///
+/// **1.0, not 0.0** (pearl th-c127d1). Agentic work wants determinism, so
+/// this was 0.0 — but a growing set of models reject any temperature but
+/// their default and 400 the whole request:
+///
+/// ```text
+/// Unsupported value: 'temperature' does not support 0 with this model.
+/// Only the default (1) value is supported.
+/// ```
+///
+/// That is why Big Smooth's model picker was broken for everything but
+/// the default model: the daemon booted, accepted the turn, and the
+/// assistant said nothing, because every call 400'd.
+///
+/// A per-model allowlist was the obvious fix and is provably wrong — the
+/// behaviour does not follow the names. Measured against llm.smoo.ai on
+/// 2026-08-07:
+///
+/// | rejects `temperature: 0` | accepts it |
+/// |---|---|
+/// | `gpt-5.1`, `gpt-5.4-pro`, `gpt-5.5`, `gpt-5.5-pro` | `gpt-5`, `gpt-5.2`, `gpt-5.4` |
+/// | `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-fable-5` | `claude-haiku-4-5`, `claude-sonnet-4-5/4-6`, `claude-opus-4-6` |
+///
+/// `gpt-5.1` rejects while `gpt-5.2` accepts; `gpt-5.4` accepts while
+/// `gpt-5.4-pro` rejects. There is no prefix rule to write.
+///
+/// `1.0` was accepted by all 12 models tested across 6 families, so it is
+/// the one value that works everywhere. The cost is losing temperature-0
+/// determinism on the models that would allow it — a fair trade against
+/// "only one model works at all".
+///
+/// The durable fix is in the engine: make `temperature` an `Option` (or
+/// retry once without it on a 400 naming it) so we send nothing and take
+/// each model's default. Tracked in [pearl th-a4bd21].
+pub const AGENT_TEMPERATURE: f32 = 1.0;
+
 pub fn resolve_auth_token() -> Option<String> {
     std::env::var("SMOOTH_DAEMON_TOKEN").ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
 }
@@ -159,7 +196,7 @@ fn resolve_llm_inner(
             api_key,
             model,
             max_tokens: 32_768,
-            temperature: 0.0,
+            temperature: AGENT_TEMPERATURE,
             retry_policy: smooth_operator::llm::RetryPolicy::default(),
             api_format,
         });
@@ -272,4 +309,27 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("th model login"), "actionable guidance: {msg}");
     }
+    /// Every model the daemon can be pointed at must accept the
+    /// temperature we send. 1.0 is the only value that does — see
+    /// [`AGENT_TEMPERATURE`] for the measured table. Pinning this in a
+    /// test so a future "let's make it deterministic again" change has
+    /// to read why it isn't.
+    #[test]
+    fn agent_temperature_is_the_universally_accepted_value() {
+        assert!(
+            (AGENT_TEMPERATURE - 1.0).abs() < f32::EPSILON,
+            "temperature must be 1.0: gpt-5.1/5.5, claude-opus-4-7/4-8, claude-sonnet-5 and others 400 on anything else (th-c127d1)"
+        );
+    }
+
+    #[test]
+    fn every_llm_config_the_daemon_builds_uses_it() {
+        // config.rs's env path — the one the bench and `th daemon` take.
+        let cfg = resolve_llm_inner(Some("https://llm.smoo.ai/v1".into()), Some("k".into()), Some("gpt-5.5".into()), None, None).unwrap();
+        assert!(
+            (cfg.temperature - AGENT_TEMPERATURE).abs() < f32::EPSILON,
+            "a hardcoded 0.0 here is the bug that made the model picker a no-op"
+        );
+    }
+
 }
