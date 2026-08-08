@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 th code: Presence glow-up — one meaning per colour in the TUI

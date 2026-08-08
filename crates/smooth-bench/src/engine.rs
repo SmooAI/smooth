@@ -384,11 +384,19 @@ fn prepare_engine(engine: Engine, repo: &Path) -> Result<()> {
             run_prep(&dir, "go", &["build", "-o", &bin.display().to_string(), "./cmd/serve"])?;
         }
         Engine::Ts => {
+            // ALWAYS install + build (tsc is incremental: ~7s cold, ~2s warm),
+            // exactly like Go's unconditional `go build` and Python's `uv sync`.
+            // Pearl th-11284c: keying off `dist/main.js` merely EXISTING meant a
+            // `dist/` built before the coding toolset landed was silently reused —
+            // the server booted and turns completed, but with ZERO tools
+            // registered, so the bench scored it as a model-quality FAIL rather
+            // than a stale bundle. `dist/` is gitignored, so it can be
+            // arbitrarily older than the checkout; existence proves nothing.
+            // A stale `node_modules` bites the same way (the engine dep had been
+            // bumped 0.1.1 → 1.7.1 without a reinstall), hence install too.
             let dir = repo.join("typescript").join("server");
-            if !dir.join("dist").join("main.js").exists() {
-                run_prep(&dir, "pnpm", &["install", "--silent"])?;
-                run_prep(&dir, "pnpm", &["build"])?;
-            }
+            run_prep(&dir, "pnpm", &["install", "--silent"])?;
+            run_prep(&dir, "pnpm", &["build"])?;
         }
         Engine::Python => {
             run_prep(&repo.join("python").join("server"), "uv", &["sync", "--quiet"])?;

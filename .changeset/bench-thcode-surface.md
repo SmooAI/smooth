@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: `--surface {daemon,thcode}` — run the agentic corpus through `th code`'s client

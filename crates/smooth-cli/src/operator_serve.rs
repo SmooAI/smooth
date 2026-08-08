@@ -28,7 +28,7 @@ pub enum Lang {
     Rust,
     /// Go — `go run ./cmd/serve`.
     Go,
-    /// TypeScript — `node dist/main.js` (auto-built if `dist/main.js` missing).
+    /// TypeScript — `node dist/main.js` (always rebuilt first; tsc is incremental).
     Ts,
     /// Python — `uv run python -m smooth_operator_server` (bind is hardcoded
     /// 127.0.0.1:8787 upstream; `--port` is ignored).
@@ -140,10 +140,14 @@ fn prebuild(lang: Lang, cwd: Option<&PathBuf>) -> Result<()> {
     let Some(cwd) = cwd else { return Ok(()) };
     match lang {
         Lang::Ts => {
-            if !cwd.join("dist").join("main.js").is_file() {
-                prep(cwd, "pnpm", &["install"])?;
-                prep(cwd, "pnpm", &["build"])?;
-            }
+            // ALWAYS, not "only when dist/main.js is missing" — `dist/` is
+            // gitignored and can be arbitrarily older than the checkout. Pearl
+            // th-11284c: a bundle built before the coding toolset landed booted
+            // fine and answered turns while registering ZERO tools, which reads
+            // as a bad model rather than a stale artifact. `tsc` is incremental,
+            // same cost as Python's unconditional `uv sync` below.
+            prep(cwd, "pnpm", &["install"])?;
+            prep(cwd, "pnpm", &["build"])?;
         }
         Lang::Python => prep(cwd, "uv", &["sync", "--quiet"])?,
         _ => {}
