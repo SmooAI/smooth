@@ -923,8 +923,14 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, revea
 ///
 /// 2. **Any other tier must round-trip.** Re-serialize what we parsed and
 ///    compare against the input — if they differ, the parse lost information,
-///    so refuse rather than store it. This is what catches `slackClientId`,
-///    which is PUBLIC tier: gating on the tier alone would have missed it.
+///    so refuse rather than store it.
+///
+/// Rule 1 alone would have caught all four known corruptions — every one is
+/// `secret` tier (verified against the stored `tier` on each value row, not
+/// inferred from the key name). Rule 2 is not carrying those cases. It is here
+/// because the same silent truncation applies to any number-shaped public
+/// config, flag or limit, and "the stored value must mean what was typed" is
+/// the property we actually want; the tier is a proxy for it.
 ///
 /// `--string` opts out of parsing entirely, which is the escape hatch for a
 /// number-shaped value that is really an identifier.
@@ -2494,7 +2500,9 @@ mod tests {
 
     #[test]
     fn refuses_an_all_digit_token_too_long_for_f64() {
-        // The Spark agent key: stored as 2.0241204053835265e25, unrecoverable.
+        // Shape of the Spark agent key, stored as 2.0241204053835265e25.
+        // Also secret tier in reality; asserted here on public for the same
+        // reason as above.
         assert!(parse_set_value("sparkAgentKey", "20241204053835265000000000", Tier::Public, false).is_err());
     }
 
