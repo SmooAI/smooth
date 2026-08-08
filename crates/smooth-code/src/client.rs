@@ -664,6 +664,9 @@ impl BigSmoothClient {
     ///
     /// The returned receiver will yield events until the task completes or
     /// errors.  The caller should drain this receiver.
+    // ponytail: 8 args — fold into a TaskSpec struct when the 9th arrives
+    // (the th-d7366d epic will add more turn fields; do the struct then).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_task(
         &mut self,
         message: &str,
