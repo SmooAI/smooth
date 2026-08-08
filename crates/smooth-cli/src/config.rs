@@ -2486,10 +2486,13 @@ mod tests {
     }
 
     #[test]
-    fn refuses_the_real_slack_client_id_that_was_corrupted() {
-        // Slack client ids are `<13 digits>.<13 digits>`. Parsed as f64 this
-        // stored `10574252146965.107` — ten fractional digits gone, and the
-        // key is PUBLIC tier, so a secret-only rule would not have caught it.
+    fn refuses_a_number_shaped_public_value_that_would_truncate() {
+        // Shape taken from the real corruption: a Slack client id is
+        // `<13 digits>.<13 digits>` and f64 stored `10574252146965.107`.
+        // That key is actually `secret` tier, so rule 1 already covers it —
+        // this asserts rule 2 independently, on the PUBLIC tier, where the
+        // round-trip check is the only thing standing between a value and
+        // silent truncation.
         let err = parse_set_value("slackClientId", "10574252146965.1074252146965", Tier::Public, false)
             .unwrap_err()
             .to_string();
