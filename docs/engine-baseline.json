@@ -1,0 +1,29 @@
+{
+  "_comment": "Expected agentic pass rate per smooth-operator engine. CI fails when an engine drops BELOW its baseline, and reports loudly when a known-broken one starts working (drop the exception, raise the baseline). Measured 2026-08-08 (ts raised after th-11284c) with deepseek-v4-flash, host isolation, scenarios: discovery-nested-path + no-over-refusal.",
+  "scenarios": [
+    "discovery-nested-path",
+    "no-over-refusal"
+  ],
+  "engines": {
+    "rust": {
+      "min_pass_rate_pct": 100.0,
+      "note": "reference implementation"
+    },
+    "go": {
+      "min_pass_rate_pct": 100.0,
+      "note": ""
+    },
+    "python": {
+      "min_pass_rate_pct": 100.0,
+      "note": ""
+    },
+    "ts": {
+      "min_pass_rate_pct": 100.0,
+      "note": "was 0% \u2014 the launcher booted a stale dist/ with no coding tools (th-11284c, PR #359). Fixed; baseline raised so the gate protects it."
+    },
+    "dotnet": {
+      "min_pass_rate_pct": 0.0,
+      "note": "BROKEN th-df7007 \u2014 every turn returns INTERNAL_ERROR. Raise to 100 when fixed."
+    }
+  }
+}

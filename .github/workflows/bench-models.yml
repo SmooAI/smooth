@@ -1,0 +1,96 @@
+# Publish the model leaderboard (pearls th-898ec6, th-adf614).
+#
+# The Line answers "is the agent getting better?" — one model over time.
+# This answers "which model should we run?" and keeps the answer current
+# without anyone remembering to re-run it by hand.
+#
+# WEEKLY, NOT NIGHTLY, and multi-trial. At --trials 1 the suite could not
+# tell deepseek-v4-flash and gpt-5.5 apart at all: every apparent
+# difference was noise on one known-flaky scenario. A published number
+# from a single trial is an anecdote wearing a percentage sign, so this
+# runs 3 trials — which costs real money, hence weekly.
+# REQUIRES `--scoreboard` and scripts/the-line/render-model-scores.sh,
+# both added in PR #346. Until that lands on the branch being run, the
+# scoring step fails with "unexpected argument '--scoreboard'" and the
+# render step with "No such file".
+name: Model Leaderboard
+
+on:
+    schedule:
+        # Sunday 06:00 UTC — a fresh number waiting on Monday.
+        - cron: '0 6 * * 0'
+    workflow_dispatch:
+        inputs:
+            models:
+                description: 'Space-separated models to score'
+                required: false
+                default: 'deepseek-v4-flash gpt-5.5'
+            trials:
+                description: 'Trials per scenario (1 is an anecdote, not a rate)'
+                required: false
+                default: '3'
+            publish:
+                description: 'Commit the scoreboard + badge to main'
+                type: boolean
+                required: false
+                default: false
+
+permissions:
+    contents: write
+
+jobs:
+    leaderboard:
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+
+            - name: Score the models
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+                  SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
+                  MODELS: ${{ inputs.models || 'deepseek-v4-flash gpt-5.5' }}
+                  TRIALS: ${{ inputs.trials || '3' }}
+              run: |
+                  args=()
+                  for m in $MODELS; do args+=(--model "$m"); done
+                  # `convo` spawns its own daemon per model, so `th` must be
+                  # on PATH — it launches the separate smooth-daemon binary.
+                  cargo install --path crates/smooth-cli --bin th --locked
+                  cargo install --path crates/smooth-daemon --bin smooth-daemon --locked
+                  cargo run --release -p smooai-smooth-bench -- convo \
+                      "${args[@]}" --trials "$TRIALS" --turn-timeout-s 300 \
+                      --scoreboard board.json | tee leaderboard.txt
+
+            - name: Render the artefacts
+              run: bash scripts/the-line/render-model-scores.sh board.json docs
+
+            - name: Publish
+              if: inputs.publish == true || github.event_name == 'schedule'
+              run: |
+                  git config user.name  "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add docs/model-scores.json docs/model-badge.json docs/Model-Leaderboard.md
+                  if git diff --cached --quiet; then
+                      echo "leaderboard unchanged"
+                  else
+                      git commit -m "chore(bench): publish model leaderboard [skip ci]"
+                      git push origin HEAD:main
+                  fi
+
+            - name: Upload
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: model-leaderboard
+                  path: |
+                      board.json
+                      leaderboard.txt
+                      docs/Model-Leaderboard.md
+                  if-no-files-found: warn
+                  retention-days: 30

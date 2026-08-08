@@ -1,0 +1,106 @@
+# Engine-parity regression gate (pearls th-11284c, th-df7007, th-901bdc).
+#
+# `operator-serve.sh smoke` reports all five engines PASS — it only checks
+# that they LISTEN. Two of them are broken in ways only a real turn finds:
+# the TS server completes turns while calling zero tools, and the .NET
+# server returns INTERNAL_ERROR on every turn. Booting is not working, so
+# this runs actual scenarios.
+#
+# Scheduled rather than per-PR: each run costs real LLM spend and boots
+# five servers. A PR that breaks an engine is caught by the next nightly,
+# and `workflow_dispatch` is there when you want it sooner.
+#
+# REQUIRES `smooth-bench agentic --scoreboard`, added in PR #346. If this
+# workflow fails at the "run the agentic suite" step with "unexpected
+# argument '--scoreboard'", #346 has not landed on the branch being run.
+name: Engine Parity
+
+on:
+    schedule:
+        # 07:00 UTC daily — after the US evening, before the UK morning.
+        - cron: '0 7 * * *'
+    workflow_dispatch:
+        inputs:
+            engines:
+                description: 'Space-separated engines to run'
+                required: false
+                default: 'rust go ts python dotnet'
+
+permissions:
+    contents: read
+
+jobs:
+    parity:
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        env:
+            ENGINES: ${{ inputs.engines || 'rust go ts python dotnet' }}
+            SMOOTH_OPERATOR_REPO: ${{ github.workspace }}/smooth-operator
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  path: smooth
+
+            - name: Check out the engines
+              uses: actions/checkout@v4
+              with:
+                  repository: SmooAI/smooth-operator
+                  path: smooth-operator
+                  token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: smooth
+
+            # The polyglot engines each need their own toolchain. A
+            # missing one must fail that engine, not the whole matrix —
+            # see the `continue-on-error` on the run step.
+            - uses: actions/setup-node@v4
+              with: { node-version: '22' }
+            - uses: actions/setup-go@v5
+              with: { go-version: '1.23' }
+            - uses: actions/setup-python@v5
+              with: { python-version: '3.13' }
+            - uses: actions/setup-dotnet@v4
+              with: { dotnet-version: '9.0.x' }
+            - name: Install uv
+              run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+            - name: Run the agentic suite per engine
+              id: run
+              continue-on-error: true
+              working-directory: smooth
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+                  SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
+              run: |
+                  mkdir -p boards
+                  for e in $ENGINES; do
+                      echo "::group::engine $e"
+                      # An engine that dies must not abort the others — its
+                      # missing board is the finding, and the checker treats
+                      # absence as not-passing rather than as no-data.
+                      cargo run --release -p smooai-smooth-bench -- agentic \
+                          --engine "$e" --isolation host \
+                          --only discovery-nested-path --only no-over-refusal \
+                          --model deepseek-v4-flash \
+                          --boot-timeout-s 300 \
+                          --scoreboard "boards/board-$e.json" || echo "engine $e failed to produce a board"
+                      echo "::endgroup::"
+                  done
+
+            - name: Check against the baseline
+              working-directory: smooth
+              run: bash scripts/the-line/check-engine-parity.sh boards docs/engine-baseline.json
+
+            - name: Upload boards and engine logs
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: engine-parity
+                  path: |
+                      smooth/boards/
+                      ~/.smooth/bench-runs/**/log/*.log
+                  if-no-files-found: warn
+                  retention-days: 14
