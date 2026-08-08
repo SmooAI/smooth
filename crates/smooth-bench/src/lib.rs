@@ -39,6 +39,7 @@ pub mod lang_detect;
 pub mod leaderboard;
 pub mod scenarios;
 pub mod score;
+pub mod spend;
 pub mod sweep;
 
 /// Where we cache the cloned polyglot-benchmark repo.

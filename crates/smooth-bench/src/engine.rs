@@ -293,6 +293,30 @@ impl TaskRunner for EngineTaskRunner {
 /// polyglot servers), and a teardown guard that kills the process (and
 /// its children) on drop.
 ///
+/// Apply the model + gateway environment a spawned engine needs.
+///
+/// Split out of [`spawn_engine`] purely so it can be tested: the model
+/// pin here was wrong for months in a way nothing could catch.
+fn apply_engine_env(command: &mut Command, model: &str, env: &EngineEnv) {
+    command.env("SMOOAI_MODEL", model);
+    // BOTH model vars, for the same reason the microVM path sets both:
+    // the daemon's `resolve_gateway_config` only reads
+    // SMOOTH_AGENT_MODEL. With `SMOOAI_MODEL` alone the daemon silently
+    // ran its own default, so `--model` was decorative — every row of a
+    // model matrix was the SAME model, and the differences between them
+    // were run-to-run variance being read as model quality.
+    command.env("SMOOTH_AGENT_MODEL", model);
+    if let Some(u) = &env.gateway_url {
+        command.env("SMOOAI_GATEWAY_URL", u);
+    }
+    if let Some(k) = &env.gateway_key {
+        command.env("SMOOAI_GATEWAY_KEY", k);
+    }
+    if let Some(p) = &env.persona {
+        command.env("SMOOTH_PERSONA", p);
+    }
+}
+
 /// # Errors
 /// Errors on prep failure, spawn failure, or if the port never listens
 /// within `ready_timeout`.
@@ -317,16 +341,7 @@ fn spawn_engine(
     for (k, v) in &cmd.env {
         command.env(k, v);
     }
-    command.env("SMOOAI_MODEL", model);
-    if let Some(u) = &env.gateway_url {
-        command.env("SMOOAI_GATEWAY_URL", u);
-    }
-    if let Some(k) = &env.gateway_key {
-        command.env("SMOOAI_GATEWAY_KEY", k);
-    }
-    if let Some(p) = &env.persona {
-        command.env("SMOOTH_PERSONA", p);
-    }
+    apply_engine_env(&mut command, model, env);
     // The rust daemon runs strict-auth; hand it a known token so the driver
     // can authenticate. The polyglot servers are anonymous (token = None).
     let token = if engine == Engine::Rust {
@@ -1264,5 +1279,38 @@ mod tests {
         }
         // Summary renders one row per cell (+ header).
         assert_eq!(run.render_summary().lines().count(), 5);
+    }
+    /// The host path must pin the model the SAME way the microVM path
+    /// does. It didn't, and `--model` was silently ignored: every row of
+    /// a `convo --model A --model B` matrix ran the daemon's own default
+    /// model, so the two rows differed only by run-to-run variance —
+    /// which read as one model beating another.
+    #[test]
+    fn host_spawn_pins_both_model_vars() {
+        let mut c = Command::new("true");
+        apply_engine_env(
+            &mut c,
+            "gpt-5.5",
+            &EngineEnv {
+                gateway_url: Some("https://llm.smoo.ai/v1".into()),
+                gateway_key: Some("k".into()),
+                persona: None,
+            },
+        );
+        let envs: Vec<(String, Option<String>)> = c
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        let get = |name: &str| envs.iter().find(|(k, _)| k == name).and_then(|(_, v)| v.clone());
+
+        assert_eq!(get("SMOOAI_MODEL").as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            get("SMOOTH_AGENT_MODEL").as_deref(),
+            Some("gpt-5.5"),
+            "the daemon reads SMOOTH_AGENT_MODEL; without it --model does nothing"
+        );
+        assert_eq!(get("SMOOAI_GATEWAY_URL").as_deref(), Some("https://llm.smoo.ai/v1"));
+        assert_eq!(get("SMOOAI_GATEWAY_KEY").as_deref(), Some("k"));
+        assert!(get("SMOOTH_PERSONA").is_none(), "an unset persona must not be exported");
     }
 }

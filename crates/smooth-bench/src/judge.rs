@@ -70,6 +70,10 @@ pub async fn judge(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev
     }
     let resp = req.send().await.with_context(|| format!("judge request to {url}"))?;
     let status = resp.status();
+    // This call is OUR spend, not the agent's. Record it so the
+    // leaderboard can subtract it (pearl th-adf614) — otherwise a cheap
+    // agent graded by an expensive judge reads as expensive.
+    crate::spend::record_harness_response(resp.headers());
     let text = resp.text().await.context("reading judge response body")?;
     anyhow::ensure!(status.is_success(), "judge gateway returned {status}: {}", truncate(&text, 400));
 

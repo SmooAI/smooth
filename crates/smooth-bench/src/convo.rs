@@ -391,6 +391,10 @@ async fn chat(gateway_url: &str, gateway_key: Option<&str>, model: &str, system:
     }
     let resp = req.send().await.with_context(|| format!("gateway request to {url}"))?;
     let status = resp.status();
+    // This call is OUR spend, not the agent's. Record it so the
+    // leaderboard can subtract it (pearl th-adf614) — otherwise a cheap
+    // agent graded by an expensive judge reads as expensive.
+    crate::spend::record_harness_response(resp.headers());
     let text = resp.text().await.context("reading gateway response body")?;
     anyhow::ensure!(status.is_success(), "gateway returned {status}: {}", truncate(&text, 400));
     let v: Value = serde_json::from_str(&text).with_context(|| format!("gateway response was not JSON: {}", truncate(&text, 400)))?;

@@ -109,23 +109,77 @@ prompt, and `universally_failed` calls those out explicitly as the
 harness backlog. Rows marked `⊘` are `expect_fail` scenarios: already
 documented, so they stay out of that callout.
 
-First real run (2026-08-07, 9 convo scenarios, 1 trial each):
+> ⚠️ **The 2026-08-07 result previously recorded here was invalid** and has
+> been removed. `--model` was silently ignored on the host spawn path
+> (the daemon reads `SMOOTH_AGENT_MODEL`; the bench set only
+> `SMOOAI_MODEL`), so both rows of that "deepseek-v4-flash beats gpt-5.5"
+> comparison were the SAME model and the difference was run-to-run
+> variance. Fixed, with a regression test — see *The model pin* below.
 
-| model | rate | wall |
-|---|---|---|
-| `deepseek-v4-flash` | 8/9 (88.9%) | 100s |
-| `gpt-5.5` | 7/9 (77.8%) | 223s |
+## Cost
 
-The premium model lost, and took 2.2× as long. It failed `calendar-list`
-by claiming calendar access was not set up *while the calendar tool was
-returning ok* — a groundedness failure the cheap model did not make.
+Cost is measured from the gateway, not from the protocol.
 
-> ⚠️ **`$cost` reads `$0.0000` today.** The daemon does not surface
-> per-turn LLM spend over the canonical protocol, so the cost and
-> `$/pass` columns are structurally present but unpopulated. Pearl
-> th-7a3a4c (record LiteLLM cost server-side) is what fills them in;
-> until then rank on pass rate and wall time, and do not read the cost
-> column as evidence of anything.
+llm.smoo.ai returns a request's price only in the **`x-litellm-response-cost`
+response header**; the JSON body carries token counts and no cost at all.
+The engine parses the body, so `AgentEvent::Completed.cost_usd` is always
+`0.0` — and that zero propagates cleanly through a pipe that is otherwise
+correct (`runner.rs` → `TurnUsage` → `eventual_response.data.data.usage.costUsd`).
+Pearl **th-11f9bb** fixes it at the source, which is what makes cost work
+for `th code`'s status bar and the daemon too.
+
+Until then the bench measures it itself (`spend.rs`):
+
+1. `GET /key/info` before and after each model's run — the delta is what
+   that key spent. (`/spend/logs` is admin-only.)
+2. Minus the bench's **own** driver and judge calls, read off
+   `x-litellm-response-cost` on our own responses. Left in, a cheap agent
+   graded by an expensive judge reads as expensive, inverting the exact
+   comparison the column exists for. In practice the harness has been
+   ~40% of a short run's total.
+
+Two traps, both of which produced confidently wrong numbers before being
+handled:
+
+- **LiteLLM posts spend asynchronously.** A response whose header already
+  says `0.00117` does not appear in `/key/info` for another second or
+  two, so sampling immediately after a run undercounts it — and
+  undercounts the *slowest* model worst. Both samples now poll until the
+  figure settles.
+- **The key is shared.** Background traffic from the smoo-hub daemon or a
+  `th code` session lands in the delta, and on a short suite it is the
+  same order as the signal. The bench samples that drift for 10s before
+  the suite and renders anything below 2× it as **`<noise`** rather than
+  a precise-looking number — a cost column that ranks a premium model
+  below a budget one is worse than an empty one, because someone acts on
+  it. `$/pass` is suppressed for those rows too, and an unresolvable cost
+  never breaks a rank tie.
+
+For exact figures, run against a dedicated gateway key.
+
+## The model pin
+
+`--model` reaches the daemon through **two** environment variables, and
+only one of them is the one it reads:
+
+| var | read by |
+|---|---|
+| `SMOOAI_MODEL` | the polyglot `operator serve` launcher |
+| `SMOOTH_AGENT_MODEL` | **the daemon's `resolve_gateway_config`** |
+
+The microVM path always set both (with a comment saying why). The host
+path — which `convo` uses — set only `SMOOAI_MODEL`, so every model in a
+matrix silently ran the daemon's own default. `apply_engine_env` now sets
+both and `host_spawn_pins_both_model_vars` guards it.
+
+> 🚨 **Known blocker (pearl th-c127d1, P0):** with the pin working, every
+> model *except* the default returns an **empty reply** — the daemon
+> boots, accepts the turn, and the assistant says nothing. Confirmed for
+> `gpt-5.5` and `claude-sonnet-5`; `deepseek-v4-flash` is fine. It is not
+> the gateway (a direct tools-bearing POST returns an identical shape for
+> both). Until that is fixed, a cross-model comparison will show
+> non-default models as `INCONCLUSIVE`, which is the honest answer rather
+> than a fabricated pass.
 
 ## Asserting on the answer and on tool use
 
@@ -154,6 +208,41 @@ not_contains = "I'm unable"
 `pointer`/`missing`/`unchanged` are meaningless on an answer assertion —
 all three are rejected at parse time.
 
+
+
+## Publishing model scores
+
+Pearl th-adf614. The Line (`docs/bench-badge.json`) answers *"is the agent
+getting better?"* — one number, one model, over time. The model scoreboard
+answers a different question: *"which model should we run?"* They are
+separate badges on purpose; folding a per-model comparison into The Line
+would make a routing change look like a quality regression.
+
+```bash
+smooth-bench convo --model deepseek-v4-flash --model gpt-5.5 \
+  --scoreboard board.json
+scripts/the-line/render-model-scores.sh board.json
+```
+
+That writes three artefacts, all from one pre-rounded source so the badge,
+the table and the JSON can never disagree:
+
+| file | for |
+|---|---|
+| `docs/model-scores.json` | machine-readable, the scoreboard verbatim |
+| `docs/model-badge.json` | the README shields endpoint (best model + %) |
+| `docs/Model-Leaderboard.md` | the human table |
+
+Tests: `bash scripts/the-line/test-model-scores.sh`.
+
+Two things the renderer deliberately refuses to do:
+
+- **Publish an unmeasured cost as `$0`.** A zero means the spend had not
+  posted or the sample missed it — not that the model was free. Those
+  render as `—`.
+- **Let a one-trial run read as a ranking.** Any `--trials 1` board
+  carries a warning that a one-scenario gap is noise. Use `--trials 3`
+  before acting on a close result.
 
 ## Two client surfaces (`--surface`)
 

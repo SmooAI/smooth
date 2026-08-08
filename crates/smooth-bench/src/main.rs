@@ -140,6 +140,12 @@ struct ConvoArgs {
     #[arg(long, default_value_t = 300)]
     boot_timeout_s: u64,
 
+    /// Write a publishable scoreboard (per-model pass %, cost, $/pass)
+    /// as JSON here. Feed it to scripts/the-line/render-model-scores.sh
+    /// to update docs/model-scores.json + the README badge.
+    #[arg(long)]
+    scoreboard: Option<PathBuf>,
+
     /// Write JSON-lines transcripts here; the table still prints to
     /// stdout. Defaults to `<run dir>/transcripts.jsonl`.
     #[arg(long)]
@@ -199,6 +205,12 @@ struct AgenticArgs {
     /// Per-scenario boot timeout in seconds.
     #[arg(long, default_value_t = 300)]
     boot_timeout_s: u64,
+
+    /// Write a publishable scoreboard (per-model pass %, cost, $/pass)
+    /// as JSON here. Feed it to scripts/the-line/render-model-scores.sh
+    /// to update docs/model-scores.json + the README badge.
+    #[arg(long)]
+    scoreboard: Option<PathBuf>,
 
     /// Write JSON-lines here; the table still prints to stdout.
     #[arg(long)]
@@ -356,6 +368,20 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
     let gateway_url = env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string());
     let gateway_key = env.gateway_key.clone();
 
+    // Sample how fast the SHARED key is spending on traffic that isn't
+    // ours, before anything of ours is in flight. Without this the cost
+    // column happily ranked gpt-5.5 below deepseek-v4-flash.
+    let noise = match gateway_key.as_deref() {
+        Some(k) => {
+            eprintln!("cost: sampling the key's background spend for 10s …");
+            smooth_bench::spend::NoiseFloor::sample(&gateway_url, k, std::time::Duration::from_secs(10))
+                .await
+                .map_err(|e| eprintln!("cost: could not sample background spend — {e:#}"))
+                .ok()
+        }
+        None => None,
+    };
+
     let mut runs = Vec::with_capacity(models.len());
     for model in &models {
         if models.len() > 1 {
@@ -399,28 +425,32 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
             trials: args.trials as usize,
             turn_deadline: Duration::from_secs(args.turn_timeout_s),
         };
-        runs.push(run_convo(&scenarios, &opts).await);
+        let (run, measured) = smooth_bench::spend::measure(&gateway_url, gateway_key.as_deref(), run_convo(&scenarios, &opts)).await;
+        runs.push((run, measured));
         // `_guard` drops here — the daemon is torn down before the next
         // model boots, so they never contend for the port.
     }
 
     let out_path = args.output.unwrap_or_else(|| run_root.join("transcripts.jsonl"));
     let mut jsonl = String::new();
-    for run in &runs {
+    for (run, _) in &runs {
         jsonl.push_str(&run.to_jsonl()?);
     }
     std::fs::write(&out_path, jsonl).with_context(|| format!("writing transcripts to {}", out_path.display()))?;
-    for run in &runs {
+    for (run, _) in &runs {
         print!("{}", run.render_table());
     }
+    let rows: Vec<_> = runs.iter().map(|(r, m)| convo_row(r, *m, noise)).collect();
     if runs.len() > 1 {
-        print!("{}", leaderboard::render("convo", &runs.iter().map(convo_row).collect::<Vec<_>>()));
+        print!("{}", leaderboard::render("convo", &rows));
     }
+    write_scoreboard(args.scoreboard.as_deref(), "convo", args.trials as usize, &rows)?;
+    print_cost_note(&runs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), noise);
     eprintln!("convo: transcripts at {}", out_path.display());
 
     // Non-zero on FAIL, INCONCLUSIVE, or XPASS — an expected-fail
     // scenario that starts passing means the flag is now a lie.
-    if runs.iter().any(|r| !r.suite_ok()) {
+    if runs.iter().any(|(r, _)| !r.suite_ok()) {
         std::process::exit(1);
     }
     Ok(())
@@ -431,7 +461,7 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
 /// `XFAIL` maps to a fail cell: the documented gap is genuinely not
 /// solved, and a green suite shouldn't inflate a model's pass rate.
 /// `XPASS` maps to a pass — that model really did clear the bar.
-fn convo_row(run: &ConvoRun) -> leaderboard::ModelRow {
+fn convo_row(run: &ConvoRun, measured: Option<smooth_bench::spend::Measured>, noise: Option<smooth_bench::spend::NoiseFloor>) -> leaderboard::ModelRow {
     let mut cells = Vec::with_capacity(run.results.len());
     let (mut passed, mut conclusive, mut inconclusive) = (0usize, 0usize, 0usize);
     for r in &run.results {
@@ -458,14 +488,16 @@ fn convo_row(run: &ConvoRun) -> leaderboard::ModelRow {
     }
     #[allow(clippy::cast_precision_loss, reason = "scenario counts are single digits")]
     let pass_rate = if conclusive == 0 { 0.0 } else { passed as f64 / conclusive as f64 };
+    let duration_ms = run.results.iter().map(|r| r.duration_ms).sum();
     leaderboard::ModelRow {
         model: run.model.clone(),
         pass_rate,
         passed,
         conclusive,
         inconclusive,
-        cost_usd: run.results.iter().map(|r| r.cost_usd).sum(),
-        duration_ms: run.results.iter().map(|r| r.duration_ms).sum(),
+        cost_usd: measured.map_or_else(|| run.results.iter().map(|r| r.cost_usd).sum(), smooth_bench::spend::Measured::agent),
+        cost_resolvable: measured.is_some_and(|m| m.is_resolvable(noise, duration_ms)),
+        duration_ms,
         cells,
     }
 }
@@ -532,6 +564,20 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         }
     };
 
+    // Sample how fast the SHARED key is spending on traffic that isn't
+    // ours, before anything of ours is in flight. Without this the cost
+    // column happily ranked gpt-5.5 below deepseek-v4-flash.
+    let noise = match gateway_key.as_deref() {
+        Some(k) => {
+            eprintln!("cost: sampling the key's background spend for 10s …");
+            smooth_bench::spend::NoiseFloor::sample(&gateway_url, k, std::time::Duration::from_secs(10))
+                .await
+                .map_err(|e| eprintln!("cost: could not sample background spend — {e:#}"))
+                .ok()
+        }
+        None => None,
+    };
+
     // One suite run per model, sequentially: every trial boots an engine
     // and grabs a port, so overlapping models would fight over both.
     let mut runs = Vec::with_capacity(models.len());
@@ -552,11 +598,12 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             gateway_key: gateway_key.clone(),
             trials: args.trials as usize,
         };
-        runs.push(run_agentic(&scenarios, booter.as_ref(), &opts).await?);
+        let (run, measured) = smooth_bench::spend::measure(&gateway_url, gateway_key.as_deref(), run_agentic(&scenarios, booter.as_ref(), &opts)).await;
+        runs.push((run?, measured));
     }
 
     let mut jsonl = String::new();
-    for run in &runs {
+    for (run, _) in &runs {
         jsonl.push_str(&run.to_jsonl()?);
     }
     if let Some(path) = args.output.as_deref() {
@@ -566,24 +613,42 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         print!("{jsonl}");
     }
     println!();
-    for run in &runs {
+    for (run, _) in &runs {
         print!("{}", run.render_table());
     }
+    let rows: Vec<_> = runs.iter().map(|(r, m)| agentic_row(r, *m, noise)).collect();
     if runs.len() > 1 {
-        print!("{}", leaderboard::render("agentic", &runs.iter().map(agentic_row).collect::<Vec<_>>()));
+        print!("{}", leaderboard::render("agentic", &rows));
     }
+    write_scoreboard(args.scoreboard.as_deref(), "agentic", args.trials as usize, &rows)?;
+    print_cost_note(&runs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), noise);
 
     // Non-zero when any scenario didn't pass every conclusive trial — CI
     // (and a human) should notice an INCONCLUSIVE or a FLAKY just as much
     // as a FAIL. With several models, any model falling short fails the run.
-    if runs.iter().any(|r| r.passed() < r.scenario_count()) {
+    if runs.iter().any(|(r, _)| r.passed() < r.scenario_count()) {
         std::process::exit(1);
     }
     Ok(())
 }
 
+/// Write the publishable scoreboard, if `--scoreboard` asked for one.
+///
+/// Separate from the JSONL transcripts on purpose: those are the raw
+/// record, this is the artefact other things parse (the docs table, the
+/// README badge). Keeping it small and pre-rounded means the badge, the
+/// table and the JSON can never disagree with each other.
+fn write_scoreboard(path: Option<&std::path::Path>, suite: &str, trials: usize, rows: &[leaderboard::ModelRow]) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let board = leaderboard::Scoreboard::from_rows(suite, trials, rows);
+    let json = serde_json::to_string_pretty(&board).context("serialising the scoreboard")?;
+    std::fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))?;
+    eprintln!("scoreboard: wrote {}", path.display());
+    Ok(())
+}
+
 /// Flatten one agentic run into a leaderboard row.
-fn agentic_row(run: &AgenticRun) -> leaderboard::ModelRow {
+fn agentic_row(run: &AgenticRun, measured: Option<smooth_bench::spend::Measured>, noise: Option<smooth_bench::spend::NoiseFloor>) -> leaderboard::ModelRow {
     let cells = run
         .aggregates()
         .iter()
@@ -596,15 +661,40 @@ fn agentic_row(run: &AgenticRun) -> leaderboard::ModelRow {
             (a.id.clone(), cell)
         })
         .collect();
+    let duration_ms = run.results.iter().map(|r| r.duration_ms).sum();
     leaderboard::ModelRow {
         model: run.model.clone(),
         pass_rate: run.pass_rate(),
         passed: run.passed(),
         conclusive: run.conclusive(),
         inconclusive: run.inconclusive(),
-        cost_usd: run.total_cost_usd(),
-        duration_ms: run.results.iter().map(|r| r.duration_ms).sum(),
+        // Prefer the gateway-measured figure: the protocol reports $0
+        // until th-11f9bb lands, and the polyglot engines never report
+        // cost at all.
+        cost_usd: measured.map_or_else(|| run.total_cost_usd(), smooth_bench::spend::Measured::agent),
+        cost_resolvable: measured.is_some_and(|m| m.is_resolvable(noise, duration_ms)),
+        duration_ms,
         cells,
+    }
+}
+
+/// Say where the cost numbers came from — or that there are none.
+fn print_cost_note(measured: &[Option<smooth_bench::spend::Measured>], noise: Option<smooth_bench::spend::NoiseFloor>) {
+    use smooth_bench::spend::Measured;
+    if measured.iter().all(Option::is_none) {
+        println!("\n  cost: not measured (no gateway key, or /key/info unreachable).");
+        return;
+    }
+    let harness: f64 = measured.iter().flatten().map(|m| m.harness).sum();
+    println!("\n  cost: {}", Measured::caveat());
+    println!("  harness (driver + judge) excluded from the per-model figures: ${harness:.4}");
+    if let Some(n) = noise {
+        println!(
+            "  background spend on this key: ${:.6}/s — a 60s run carries ~${:.4} that is not ours.",
+            n.usd_per_second,
+            n.over(60_000)
+        );
+        println!("  figures shown as `<noise` are below twice that and are NOT a measurement; use a dedicated key, or a longer run.");
     }
 }
 
