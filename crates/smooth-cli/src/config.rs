@@ -906,7 +906,6 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, revea
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// th-a5fc9e: decide how `value` reaches the wire.
 ///
 /// The old rule was "JSON-parse when it parses, else string". That silently
@@ -960,6 +959,7 @@ fn parse_set_value(key: &str, value: &str, tier: Tier, force_string: bool) -> Re
     Ok(parsed)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_set(
     key: String,
     value: String,
@@ -2484,7 +2484,9 @@ mod tests {
         // Slack client ids are `<13 digits>.<13 digits>`. Parsed as f64 this
         // stored `10574252146965.107` — ten fractional digits gone, and the
         // key is PUBLIC tier, so a secret-only rule would not have caught it.
-        let err = parse_set_value("slackClientId", "10574252146965.1074252146965", Tier::Public, false).unwrap_err().to_string();
+        let err = parse_set_value("slackClientId", "10574252146965.1074252146965", Tier::Public, false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("does not survive JSON parsing"), "{err}");
         assert!(err.contains("--string"), "{err}");
         assert!(err.contains("slackClientId"), "{err}");
@@ -2498,7 +2500,10 @@ mod tests {
 
     #[test]
     fn secrets_are_never_parsed_even_when_they_look_numeric() {
-        assert_eq!(parsed("20241204053835265000000000", Tier::Secret), Value::String("20241204053835265000000000".into()));
+        assert_eq!(
+            parsed("20241204053835265000000000", Tier::Secret),
+            Value::String("20241204053835265000000000".into())
+        );
         assert_eq!(parsed("42", Tier::Secret), Value::String("42".into()));
         assert_eq!(parsed("true", Tier::Secret), Value::String("true".into()));
     }
@@ -2523,7 +2528,10 @@ mod tests {
     #[test]
     fn non_json_stays_a_string() {
         assert_eq!(parsed("https://api.smoo.ai", Tier::Public), Value::String("https://api.smoo.ai".into()));
-        assert_eq!(parsed("d9cp8wgxpbcmk5sv07oit298n", Tier::Public), Value::String("d9cp8wgxpbcmk5sv07oit298n".into()));
+        assert_eq!(
+            parsed("d9cp8wgxpbcmk5sv07oit298n", Tier::Public),
+            Value::String("d9cp8wgxpbcmk5sv07oit298n".into())
+        );
     }
 
     #[test]
