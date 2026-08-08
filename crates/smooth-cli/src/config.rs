@@ -2963,31 +2963,108 @@ mod tests {
         assert_eq!(res, "org_override");
     }
 
+    // th-4c6b2a: `resolve_org` falls through to `self.creds` only when
+    // `active_org::resolve` finds nothing — and that reads process-global env
+    // PLUS the three credential stores under `~/.smooth/auth/`. These tests
+    // only cleared `SMOOAI_ORG_ID`, so on any machine with a real active org
+    // the store branch answered first and they asserted against
+    // `8be5f5fd-…` instead of `org_abc`.
+    //
+    // They failed two ways: run filtered (`--bin th config::`) they failed
+    // outright, and in the full suite they passed only because some earlier
+    // test happened to clear the env first. A concurrent `th` invocation
+    // touching `~/.smooth` flipped them too — which on this box, with several
+    // agents live, is the normal condition. A suite that is green only when
+    // nothing else is running proves nothing.
+    //
+    // So: give them a HOME with no credential stores in it, and restore
+    // whatever was there. `ENV_LOCK` serializes because env is process-global.
+    //
+    // ponytail: this EnvGuard is a near-duplicate of the one in
+    // `auth/login.rs`'s test module. Left duplicated rather than extracting a
+    // shared test-helper module, which would churn a passing test file for no
+    // behaviour change. Extract if a third copy shows up.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// A HOME with no `~/.smooth/auth/*` stores, so `active_org::resolve`
+    /// finds nothing and the `self.creds` fallback is what gets exercised.
+    /// Tuple field order is load-bearing: fields drop in declaration order, so
+    /// the lock must come LAST. Returning it first released the mutex before
+    /// the `EnvGuard`s restored `HOME`, letting the next test set its own HOME
+    /// mid-restore — which is the same race this fix exists to remove, and it
+    /// only showed up under `--test-threads` > 1.
+    fn no_active_org_env() -> (tempfile::TempDir, EnvGuard, EnvGuard, EnvGuard, std::sync::MutexGuard<'static, ()>) {
+        let lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tmp home");
+        let path = home.path().to_str().expect("utf8 home");
+        let home_guard = EnvGuard::set("HOME", path);
+        // `dirs::home_dir()` reads USERPROFILE on Windows, not HOME, so
+        // overriding only HOME would leave a Windows dev with a real active
+        // org still racing. Set both — the unused one is inert per platform.
+        // CI cannot catch this: a clean runner has no `~/.smooth`, so these
+        // tests pass there whether or not the isolation works.
+        let profile_guard = EnvGuard::set("USERPROFILE", path);
+        let org_guard = EnvGuard::unset("SMOOAI_ORG_ID");
+        (home, home_guard, profile_guard, org_guard, lock)
+    }
+
     #[test]
     fn resolve_org_falls_back_to_active_org() {
+        let _env = no_active_org_env();
         let c = make_client(fixture_creds(false));
-        // Make sure env var doesn't leak from another test.
-        std::env::remove_var("SMOOAI_ORG_ID");
         let res = c.resolve_org(None).expect("ok");
         assert_eq!(res, "org_abc");
     }
 
     #[test]
     fn resolve_org_empty_override_is_ignored() {
+        let _env = no_active_org_env();
         let c = make_client(fixture_creds(false));
-        std::env::remove_var("SMOOAI_ORG_ID");
         let res = c.resolve_org(Some("   ".into())).expect("ok");
         assert_eq!(res, "org_abc");
     }
 
     #[test]
     fn resolve_org_errors_when_nothing_set() {
+        let _env = no_active_org_env();
         let mut creds = fixture_creds(false);
         creds.active_org_id = None;
         let c = make_client(creds);
-        std::env::remove_var("SMOOAI_ORG_ID");
         let err = c.resolve_org(None).unwrap_err();
         assert!(err.to_string().contains("no active org set"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_org_fixture_env_actually_hides_the_real_active_org() {
+        // The guard above is the whole fix, so assert it works rather than
+        // trusting it: inside it, resolution must find nothing at all.
+        let _env = no_active_org_env();
+        assert!(crate::active_org::resolve(None).is_err(), "tempdir HOME still resolved a real active org");
     }
 
     // ----- Lane D tests ----------------------------------------------------
