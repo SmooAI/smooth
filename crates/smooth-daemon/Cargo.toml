@@ -78,6 +78,8 @@ reqwest = { workspace = true, features = ["json"] }
 # reads), so Big Smooth can act on the user's Smoo org via th-backed extensions.
 smooai-client-shared.workspace = true
 base64 = "0.22"
+# /search pearl suggestions (th-8e9cf6) — open the project/global Dolt store
+smooth-pearls.workspace = true
 sha2 = "0.10"
 rand = "0.8"
 # th-3119e3: re-homed narc surveillance detectors (secret + prompt-injection
