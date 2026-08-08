@@ -36,6 +36,7 @@ pub mod notify;
 pub mod operator;
 mod operator_storage;
 pub mod org_auth;
+pub mod plugins_route;
 pub mod push;
 pub mod relay;
 pub mod schedule;

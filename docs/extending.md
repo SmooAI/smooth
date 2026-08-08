@@ -10,7 +10,7 @@ let you add more without modifying the binary:
    their tools to the agent as `<server>.<tool>`.
 2. **CLI-wrapper plugins** — drop a TOML manifest describing a shell
    command and the runner registers it as a tool named
-   `plugin.<name>`. No protocol, no separate process — "render this
+   `plugin_<name>`. No protocol, no separate process — "render this
    command template and pipe stdout to the agent."
 
 Use MCP when the tool is stateful or ships a typed protocol. Use a
@@ -181,10 +181,25 @@ are JSON-stringified. Missing keys expand to empty strings. Values
 containing literal `{{x}}` can't trigger recursion — substitution
 is single-pass.
 
-The rendered command runs via `bash -lc`, so you get shell features
+The rendered command runs through the same kernel OS sandbox the
+`bash` tool uses (writes confined to the workspace, credential stores
+denied, egress via the goalie allowlist), so you get shell features
 (pipes, here-docs, variable expansion) at the cost of shell-quoting
 concerns for your placeholder values. For anything with complex
 arguments or stateful sessions, prefer MCP.
+
+### Who loads them
+
+The **daemon** does, on every turn: it merges the two manifest
+directories and registers each enabled plugin on the per-turn tool
+registry, behind the permission gate and Narc like any built-in. A
+newly scaffolded plugin is live on the next message — no daemon
+restart. `GET /api/plugins` serves the same merged catalog (plus any
+manifests that failed to parse), so a face with no disk access — the web
+SPA, a remote `th code` — can render exactly what the agent has instead
+of re-walking the directories itself. `?cwd=` selects another
+workspace's project plugins under the same guard `/api/skills` uses.
+(`th plugin list` is the local, daemon-free view of the same thing.)
 
 ### `prompt_hint` vs `description`
 

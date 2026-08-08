@@ -24,6 +24,8 @@ serde_json.workspace = true
 # with serde_yml (the same parser the skills catalog reads back), so escaping is
 # correct for descriptions/triggers containing YAML metacharacters.
 serde_yml.workspace = true
+# th-262e5f: CLI-wrapper plugin manifests (`plugin.toml`).
+toml.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

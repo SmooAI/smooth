@@ -926,7 +926,7 @@ enum ServiceCommands {
 enum PluginCommands {
     /// Scaffold a new plugin (default: ~/.smooth/plugins/<name>/plugin.toml)
     Init {
-        /// Plugin name (becomes the tool name as `plugin.<name>`)
+        /// Plugin name (becomes the tool name as `plugin_<name>`)
         name: String,
         /// Shell command template; use `{{param}}` placeholders for args
         #[arg(long)]
@@ -8087,7 +8087,7 @@ fn cmd_plugin(cmd: PluginCommands) -> Result<()> {
                     } else {
                         ("✓".green().bold().to_string(), "[global]".dimmed().to_string())
                     };
-                    println!("  {} plugin.{:<14} {}  {}", marker, n.bold(), desc.dimmed(), tag);
+                    println!("  {} plugin_{:<14} {}  {}", marker, n.bold(), desc.dimmed(), tag);
                 }
             }
 
@@ -8096,7 +8096,7 @@ fn cmd_plugin(cmd: PluginCommands) -> Result<()> {
                     println!("\n  {} {}\n", "Project".cyan().bold(), format!("({})", pd.display()).dimmed());
                 }
                 for (n, desc) in &project_plugins {
-                    println!("  {} plugin.{:<14} {}  {}", "✓".green().bold(), n.bold(), desc.dimmed(), "[project]".dimmed());
+                    println!("  {} plugin_{:<14} {}  {}", "✓".green().bold(), n.bold(), desc.dimmed(), "[project]".dimmed());
                 }
             }
             println!();

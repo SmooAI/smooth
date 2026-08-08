@@ -5470,6 +5470,7 @@ dependencies = [
  "smooai-smooth-policy",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "urlencoding",
 ]
