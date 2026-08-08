@@ -95,6 +95,29 @@ rate, which is the difference between an agent you can leave running and
 one you cannot.
 
 
+
+> [!warning] Do not probe during a rollout — you will get a false BROKEN
+> A litellm `config.yaml` change ships as a kustomize ConfigMap whose
+> hash forces a rolling restart, so for a few minutes some pods serve the
+> old `model_list` and some the new. `/v1/models` lists the new model
+> immediately while `/chat/completions` returns
+> `Invalid model name passed in model=…` for whichever share of traffic
+> lands on an old pod — measured at 5/10, then 3/6, then 6/6 as it
+> converged (th-66c65b).
+>
+> A single `--probe` call in that window reports a perfectly good model
+> as `BROKEN`. Confirm convergence first:
+>
+> ```bash
+> for i in $(seq 1 6); do
+>   curl -s -o /dev/null -w "%{http_code} " -X POST https://llm.smoo.ai/v1/chat/completions \
+>     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+>     -d '{"model":"<new-model>","messages":[{"role":"user","content":"hi"}],"max_tokens":3}'
+> done; echo
+> ```
+>
+> Six 200s means every pod has it. Anything mixed means wait.
+
 ## Cost bracket before capability
 
 Check the price before you spend a benchmark run on a model. The suite
