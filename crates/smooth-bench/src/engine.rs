@@ -326,10 +326,6 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
     }
 }
 
-/// # Errors
-/// Errors on prep failure, spawn failure, or if the port never listens
-/// within `ready_timeout`.
-
 /// How long to let a port free up before calling it someone else's.
 ///
 /// Sized for the sequential case: one scenario's engine is killed and
@@ -368,6 +364,9 @@ fn open_engine_log(log_dir: &Path, engine: Engine) -> Option<(std::fs::File, std
     Some((out, err))
 }
 
+/// # Errors
+/// Errors on prep failure, spawn failure, or if the port never listens
+/// within `ready_timeout`.
 #[allow(
     clippy::too_many_arguments,
     reason = "a spawn takes what a spawn takes; splitting it into a struct would only move the arity"
