@@ -90,6 +90,27 @@ pub struct Assertion {
     pub unchanged: bool,
 }
 
+/// A substring that must (or must not) appear ANYWHERE in the produced
+/// workspace, with a human reason attached to the failure.
+///
+/// [`Assertion`] targets one named file, which is the wrong shape for
+/// "the model must not have written a 2023 idiom" — you do not know
+/// which file it would land in, and naming one lets the same mistake
+/// pass in another. This scans every text file under the workspace.
+///
+/// The `reason` is not decoration: `getServerSideProps` failing a check
+/// tells you nothing on its own, but "Next 16 App Router — pages-router
+/// data fetching was removed" tells you what the model got wrong and
+/// why it matters.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PatternRule {
+    /// The substring to look for.
+    pub pattern: String,
+    /// Why this matters, shown verbatim on failure.
+    pub reason: String,
+}
+
 /// How a scenario is scored.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
@@ -109,6 +130,32 @@ pub enum Check {
     },
     /// LLM-as-judge over a rubric. For open-ended goals only.
     Judge { rubric: String },
+    /// Both: objective assertions AND a rubric. Passes only if every
+    /// assertion holds and the judge passes.
+    ///
+    /// This exists for build tasks, where the two halves ask genuinely
+    /// different questions. "Did it use the current API?" is a fact —
+    /// `useReactTable` vs v7's `useTable` is not a matter of taste, and
+    /// a judge would happily call either one good. "Is the dashboard any
+    /// good?" has no crisp ground truth and needs a model to read it.
+    /// Scoring a build task with only one half misses the other
+    /// entirely.
+    Hybrid {
+        #[serde(default)]
+        asserts: Vec<Assertion>,
+        #[serde(default)]
+        tools_used: Vec<String>,
+        #[serde(default)]
+        tools_forbidden: Vec<String>,
+        /// Substrings that must appear somewhere in the workspace.
+        #[serde(default)]
+        requires: Vec<PatternRule>,
+        /// Substrings that must NOT appear anywhere — the stale-API
+        /// detector.
+        #[serde(default)]
+        forbids: Vec<PatternRule>,
+        rubric: String,
+    },
 }
 
 impl Check {
@@ -117,6 +164,7 @@ impl Check {
         match self {
             Self::Deterministic { .. } => "deterministic",
             Self::Judge { .. } => "judge",
+            Self::Hybrid { .. } => "hybrid",
         }
     }
 }
@@ -135,6 +183,21 @@ pub struct Scenario {
     #[serde(default)]
     pub setup: Vec<SetupFile>,
     pub check: Check,
+}
+
+/// The frontend build-and-judge suite (pearl th-f39abc), embedded at
+/// build time like the default suite.
+///
+/// Kept SEPARATE from `agentic-scenarios.toml` rather than appended:
+/// these cost a judge call each, pin a specific library stack that will
+/// need refreshing as versions move, and answer a different question
+/// ("does it write current-stack code?"). Run with
+/// `--scenarios crates/smooth-bench/frontend-scenarios.toml`.
+///
+/// # Errors
+/// Propagates a parse/validation failure in the embedded TOML.
+pub fn frontend_scenarios() -> Result<Vec<Scenario>> {
+    parse_scenarios(include_str!("../frontend-scenarios.toml"))
 }
 
 /// Raw TOML wrapper: `[[scenario]]` array.
@@ -219,6 +282,41 @@ pub fn parse_scenarios(toml_str: &str) -> Result<Vec<Scenario>> {
                 }
             }
             Check::Judge { rubric } => anyhow::ensure!(!rubric.trim().is_empty(), "scenario {} has an empty judge rubric", s.id),
+            Check::Hybrid {
+                asserts,
+                tools_used,
+                tools_forbidden,
+                requires,
+                forbids,
+                rubric,
+            } => {
+                anyhow::ensure!(!rubric.trim().is_empty(), "scenario {} has an empty judge rubric", s.id);
+                // A hybrid with no objective half is just a judge, and
+                // saying so is cheaper than letting it silently pretend
+                // to be stricter than it is.
+                anyhow::ensure!(
+                    !asserts.is_empty() || !requires.is_empty() || !forbids.is_empty() || !tools_used.is_empty() || !tools_forbidden.is_empty(),
+                    "scenario {} is `hybrid` but has no objective checks — use kind = \"judge\"",
+                    s.id
+                );
+                for a in asserts {
+                    anyhow::ensure!(
+                        a.answer || is_safe_relative(&a.file),
+                        "scenario {}: assert path {:?} escapes the workspace",
+                        s.id,
+                        a.file
+                    );
+                }
+                for r in requires.iter().chain(forbids) {
+                    anyhow::ensure!(!r.pattern.trim().is_empty(), "scenario {}: empty pattern rule", s.id);
+                    anyhow::ensure!(
+                        !r.reason.trim().is_empty(),
+                        "scenario {}: pattern {:?} has no reason — the reason IS the error message",
+                        s.id,
+                        r.pattern
+                    );
+                }
+            }
         }
     }
     Ok(file.scenario)
@@ -567,6 +665,67 @@ pub fn evaluate(asserts: &[Assertion], workspace: &Path, seeded: &BTreeMap<Strin
     asserts.iter().map(|a| evaluate_one(a, workspace, seeded, answer)).collect()
 }
 
+/// Scan every text file under `workspace` for the required / forbidden
+/// substrings.
+///
+/// Binary and oversized files are skipped: `read_to_string` fails on
+/// non-UTF8, which we treat as "not source", and a scenario that seeds a
+/// large fixture should not make the scan quadratic.
+#[must_use]
+pub fn evaluate_patterns(requires: &[PatternRule], forbids: &[PatternRule], workspace: &Path) -> Vec<AssertResult> {
+    const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+
+    let mut texts: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![workspace.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // node_modules is seeded scaffolding, not the agent's work;
+                // scanning it would flag every vendored idiom.
+                if p.file_name().and_then(|n| n.to_str()) != Some("node_modules") {
+                    stack.push(p);
+                }
+            } else if e.metadata().is_ok_and(|m| m.len() <= MAX_SCAN_BYTES) {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    let rel = p.strip_prefix(workspace).unwrap_or(&p);
+                    texts.push((to_slash(rel), text));
+                }
+            }
+        }
+    }
+
+    let find = |needle: &str| -> Option<String> { texts.iter().find(|(_, t)| t.contains(needle)).map(|(name, _)| name.clone()) };
+
+    let mut out = Vec::with_capacity(requires.len() + forbids.len());
+    for r in requires {
+        match find(&r.pattern) {
+            Some(file) => out.push(AssertResult {
+                ok: true,
+                detail: format!("{:?} present in {file}", r.pattern),
+            }),
+            None => out.push(AssertResult {
+                ok: false,
+                detail: format!("{:?} appears nowhere — {}", r.pattern, r.reason),
+            }),
+        }
+    }
+    for f in forbids {
+        match find(&f.pattern) {
+            Some(file) => out.push(AssertResult {
+                ok: false,
+                detail: format!("{:?} found in {file} — {}", f.pattern, f.reason),
+            }),
+            None => out.push(AssertResult {
+                ok: true,
+                detail: format!("{:?} absent, as required", f.pattern),
+            }),
+        }
+    }
+    out
+}
+
 /// Assertions over which tools the turn actually called.
 ///
 /// Separate from [`evaluate`] because they read the transcript, not the
@@ -910,6 +1069,48 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
                 failed.iter().map(|r| r.detail.clone()).collect::<Vec<_>>().join(" | ")
             };
         }
+        Check::Hybrid {
+            asserts,
+            tools_used,
+            tools_forbidden,
+            requires,
+            forbids,
+            rubric,
+        } => {
+            let mut results = evaluate(asserts, &work, &seeded, &turn.text);
+            results.extend(evaluate_tools(tools_used, tools_forbidden, &outcome.tools));
+            results.extend(evaluate_patterns(requires, forbids, &work));
+            let failed: Vec<&AssertResult> = results.iter().filter(|r| !r.ok).collect();
+
+            if failed.is_empty() {
+                // Objective half held; the rubric decides.
+                let evidence = JudgeEvidence {
+                    rubric: rubric.clone(),
+                    prompt: s.prompt.clone(),
+                    transcript: turn
+                        .tool_calls
+                        .iter()
+                        .map(|t| format!("{} -> {}", t.name, if t.success { "ok" } else { "error" }))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    final_response: turn.text.clone(),
+                    workspace: dump_workspace(&work),
+                };
+                match judge(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, &evidence).await {
+                    Ok(v) => {
+                        outcome.verdict = if v.passed { Verdict::Pass } else { Verdict::Fail };
+                        outcome.rationale = format!("{} objective check(s) held; judge: {}", results.len(), v.reason);
+                    }
+                    Err(e) => outcome.rationale = format!("judge inconclusive: {e:#}"),
+                }
+            } else {
+                // Don't spend a judge call on work that already failed a
+                // fact — and report the fact, which is actionable, rather
+                // than a rubric opinion about it.
+                outcome.verdict = Verdict::Fail;
+                outcome.rationale = failed.iter().map(|r| r.detail.clone()).collect::<Vec<_>>().join(" | ");
+            }
+        }
         Check::Judge { rubric } => {
             let evidence = JudgeEvidence {
                 rubric: rubric.clone(),
@@ -1109,7 +1310,7 @@ mod tests {
         let s = default_scenarios().unwrap();
         let sc = s.into_iter().find(|x| x.id == id).unwrap_or_else(|| panic!("no scenario {id}"));
         match sc.check {
-            Check::Deterministic { asserts, .. } => asserts,
+            Check::Deterministic { asserts, .. } | Check::Hybrid { asserts, .. } => asserts,
             Check::Judge { .. } => panic!("{id} is not deterministic"),
         }
     }
@@ -1249,7 +1450,7 @@ mod tests {
         // asserts a seeded file is untouched.
         let s = default_scenarios().unwrap();
         let has_unchanged = s.iter().any(|x| match &x.check {
-            Check::Deterministic { asserts, .. } => asserts.iter().any(|a| a.unchanged),
+            Check::Deterministic { asserts, .. } | Check::Hybrid { asserts, .. } => asserts.iter().any(|a| a.unchanged),
             Check::Judge { .. } => false,
         });
         assert!(has_unchanged, "no negative (must-not-mutate) scenario in the suite");
@@ -1963,5 +2164,107 @@ asserts = []
         };
         assert!(run.render_table().contains("thcode"), "the table must name the surface");
         assert!(run.to_jsonl().expect("serialises").is_empty() || run.to_jsonl().expect("serialises").contains("thcode"));
+    }
+    // ---- frontend suite + hybrid checks (pearl th-f39abc) ----
+
+    #[test]
+    fn frontend_suite_parses_and_validates() {
+        let s = frontend_scenarios().expect("embedded frontend suite must parse");
+        assert!(s.len() >= 4, "expected the full frontend suite, got {}", s.len());
+        assert!(
+            s.iter().all(|x| x.check.kind() == "hybrid"),
+            "frontend scenarios score objectively AND by rubric"
+        );
+    }
+
+    /// Every stale-API rule must explain itself. `getServerSideProps`
+    /// failing a check tells a reader nothing; the reason is the whole
+    /// value of the finding.
+    #[test]
+    fn every_pattern_rule_carries_a_reason() {
+        for sc in frontend_scenarios().expect("parses") {
+            let Check::Hybrid { requires, forbids, .. } = &sc.check else {
+                panic!("{} should be hybrid", sc.id)
+            };
+            assert!(!forbids.is_empty(), "{} has no stale-API rules — that is the point of the suite", sc.id);
+            for r in requires.iter().chain(forbids) {
+                assert!(
+                    r.reason.len() > 20,
+                    "{}: rule {:?} needs a real explanation, got {:?}",
+                    sc.id,
+                    r.pattern,
+                    r.reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn patterns_scan_the_whole_workspace_not_one_named_file() {
+        let d = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(d.path().join("src")).expect("mkdir");
+        std::fs::write(d.path().join("src/Table.tsx"), "const t = useReactTable({});").expect("write");
+
+        let req = vec![PatternRule {
+            pattern: "useReactTable".to_string(),
+            reason: "v8 hook".to_string(),
+        }];
+        let bad = vec![PatternRule {
+            pattern: "useTable(".to_string(),
+            reason: "v7 hook".to_string(),
+        }];
+        let r = evaluate_patterns(&req, &bad, d.path());
+        assert!(r.iter().all(|x| x.ok), "{r:?}");
+
+        // The stale idiom in a file nobody named must still be caught.
+        std::fs::write(d.path().join("src/Legacy.tsx"), "const t = useTable({});").expect("write");
+        let r = evaluate_patterns(&[], &bad, d.path());
+        assert!(!r[0].ok);
+        assert!(r[0].detail.contains("Legacy.tsx"), "must name the offending file: {}", r[0].detail);
+        assert!(r[0].detail.contains("v7 hook"), "must carry the reason: {}", r[0].detail);
+    }
+
+    #[test]
+    fn seeded_scaffolding_is_not_scanned() {
+        // node_modules is what we handed the agent, not what it wrote —
+        // scanning it would flag every vendored idiom as the agent's.
+        let d = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(d.path().join("node_modules/pkg")).expect("mkdir");
+        std::fs::write(d.path().join("node_modules/pkg/i.js"), "useTable(").expect("write");
+        let bad = vec![PatternRule {
+            pattern: "useTable(".to_string(),
+            reason: "v7".to_string(),
+        }];
+        assert!(evaluate_patterns(&[], &bad, d.path())[0].ok, "node_modules must be skipped");
+    }
+
+    #[test]
+    fn a_hybrid_with_no_objective_half_is_rejected() {
+        let toml = r#"
+[[scenario]]
+id = "soft"
+prompt = "build it"
+[scenario.check]
+kind = "hybrid"
+rubric = "looks nice?"
+"#;
+        let err = parse_scenarios(toml).expect_err("must reject");
+        assert!(format!("{err:#}").contains("no objective checks"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_pattern_rule_without_a_reason_is_rejected() {
+        let toml = r#"
+[[scenario]]
+id = "nr"
+prompt = "build it"
+[scenario.check]
+kind = "hybrid"
+rubric = "ok?"
+[[scenario.check.forbids]]
+pattern = "forwardRef"
+reason = "  "
+"#;
+        assert!(parse_scenarios(toml).is_err(), "a rule with no reason must not parse");
     }
 }
