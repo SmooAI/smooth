@@ -11,8 +11,9 @@ import { join } from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 
 import { loadConfig, saveConfig } from './config.js';
-import { baseUrl, isRemote, remoteUrl, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
+import { baseUrl, isRemote, remoteUrl, resolveThBin, runDaemonCommand, startDaemon, stopDaemon } from './daemon.js';
 import { discoverDaemons, type RemoteDaemon } from './discovery.js';
+import { linkThOnPath } from './installth.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
     if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(asset('icon.png'));
     registerIpc();
     createTray();
+    installThCli();
     const result = await startDaemon();
     spawnedDaemon = result.spawned;
     if (!result.ok) {
@@ -232,6 +234,27 @@ function openFullDiskAccess(): void {
     // Reveal the .app itself, not the executable buried inside it — the pane
     // wants the bundle dragged in.
     shell.showItemInFolder(app.getPath('exe').replace(/(\.app)\/Contents\/MacOS\/.*$/, '$1'));
+}
+
+/**
+ * Symlink the bundled `th` onto PATH so it works from a terminal, and so OTA
+ * updates (which replace the whole app bundle) carry `th` too. Best-effort: never
+ * let a PATH-link failure block the app. See installth.ts for the safety rule
+ * (a real brew/curl `th` is left alone, never clobbered).
+ */
+function installThCli(): void {
+    try {
+        const res = linkThOnPath(resolveThBin());
+        if (res.action === 'skipped-regular-file') {
+            console.log(`th: leaving your own \`th\` at ${res.path} in place (not from Big Smooth).`);
+        } else if (res.action === 'created' || res.action === 'repointed') {
+            console.log(`th: ${res.action} ${res.path} → bundled CLI.`);
+        } else if (res.action === 'no-writable-dir') {
+            console.log('th: no writable PATH dir; run the CLI from the app bundle or add ~/.local/bin to PATH.');
+        }
+    } catch (err) {
+        console.log(`th: could not link onto PATH: ${String(err)}`);
+    }
 }
 
 function asset(name: string): string {

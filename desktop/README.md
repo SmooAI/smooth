@@ -23,12 +23,12 @@ pnpm dist:mac      # macOS, signed as $SIGN_IDENTITY (default: Apple Distributio
 pnpm notarize      # notarize + staple release/*.dmg — no-ops without credentials
 ```
 
-`dist` first runs `stage-daemon`, which copies this host's `smooth-daemon` into
-`resources/current/` for electron-builder to bundle. Artifacts land in `release/`.
-Stage a **real** daemon build — the web SPA is embedded into that binary at
-compile time, so a daemon built without `pnpm build:web` serves a placeholder
-page and the app window comes up blank. `pnpm install:th` from the repo root
-does both in the right order.
+`dist` first runs `stage-daemon`, which copies this host's `smooth-daemon` **and**
+`th` into `resources/current/` for electron-builder to bundle. Artifacts land in
+`release/`. Stage a **real** daemon build — the web SPA is embedded into that
+binary at compile time, so a daemon built without `pnpm build:web` serves a
+placeholder page and the app window comes up blank. `pnpm install:th` from the
+repo root does both in the right order.
 
 - **macOS** → `.dmg` + `.zip`, hardened runtime, entitlements in
   `build/entitlements.mac.plist`, icon from `scripts/macos/BigSmooth.icns`. The
@@ -53,6 +53,15 @@ does both in the right order.
   with its local auth token already injected into `index.html`, so there is no
   renderer, preload, or IPC code here. Closing hides to the tray; Quit exits.
 - **Tray.** The `th` mark, with Open / Set Up / Quit.
+- **`th` on PATH.** The DMG bundles the `th` CLI next to the daemon. On launch the
+  app symlinks it into a PATH dir (`/usr/local/bin/th`, falling back to
+  `~/.local/bin/th`) so `th` works from a terminal. Because the link points **into
+  the app bundle**, an OTA update that replaces the bundle auto-updates the `th`
+  users run — no separate CLI update channel. **Coexistence rule** (mirrors
+  `scripts/dev-link-th.sh`): the app only ever creates or repoints a **symlink**.
+  A regular file at the target — a `th` you installed with Homebrew or the curl
+  installer — is left untouched, never clobbered; the app logs and defers to it.
+  Logic + tests in `src/installth.ts`.
 
 ## TCC (macOS permissions) — known gap
 
