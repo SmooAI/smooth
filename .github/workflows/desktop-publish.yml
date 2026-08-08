@@ -43,6 +43,15 @@ jobs:
         permissions:
             contents: write
             id-token: write # OIDC for aws-actions/configure-aws-credentials
+        # `secrets` is not available in a step-level `if:` — referencing it there
+        # is a startup-failure that makes the WHOLE workflow refuse to run (so no
+        # build ever published). Hoist the presence check into a job-level env
+        # flag the OTA steps can gate on. Empty ⇒ "false", so the publish steps
+        # skip cleanly when the secret is unset (the graceful-degrade this file
+        # always intended).
+        env:
+            OTA_PUBLISH_ROLE_ARN: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
+            HAS_OTA: ${{ secrets.OTA_PUBLISH_ROLE_ARN != '' }}
         steps:
             - uses: actions/checkout@v4
               with:
@@ -146,14 +155,14 @@ jobs:
             # Publish to the OTA channel. Needs the notarized artifacts + AWS creds
             # + the SST-provisioned bucket; skips cleanly if any are absent.
             - name: Configure AWS credentials
-              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && env.HAS_OTA == 'true'
               uses: aws-actions/configure-aws-credentials@v4
               with:
-                  role-to-assume: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
+                  role-to-assume: ${{ env.OTA_PUBLISH_ROLE_ARN }}
                   aws-region: us-east-2
 
             - name: Publish to downloads.smoo.ai
-              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && secrets.OTA_PUBLISH_ROLE_ARN != ''
+              if: steps.signing.outputs.identity != '' && vars.DOWNLOADS_BUCKET != '' && env.HAS_OTA == 'true'
               env:
                   BUCKET: ${{ vars.DOWNLOADS_BUCKET }}
               run: |
