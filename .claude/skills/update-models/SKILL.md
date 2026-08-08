@@ -94,6 +94,30 @@ on outcomes while taking three times the tool calls with a higher error
 rate, which is the difference between an agent you can leave running and
 one you cannot.
 
+
+## Cost bracket before capability
+
+Check the price before you spend a benchmark run on a model. The suite
+costs real money per model, and a model outside the bracket you are
+willing to pay is not a candidate no matter how it scores.
+
+Measured 2026-08-08, against `deepseek-v4-flash` at $0.14/$0.28:
+
+| bracket | models | vs flash |
+| --- | --- | --- |
+| **workhorse** (the target) | `deepseek-v4-flash`, `groq-gpt-oss-120b`, `minimax-m3-direct`, `qwen3.6-flash-direct`, `qwen3.5-plus-direct` | 1–3x |
+| mid | `glm-5.2-direct`, `kimi-k2.7-code-direct`, `qwen3-max-direct` | 6–10x |
+| premium | `gpt-5.5`, `kimi-k3-direct`, `claude-opus-4-8` | 20–100x |
+
+**Having a model in LiteLLM is not the same as routing to it.** Keep the
+premium tier configured and priced — it costs nothing until called, and
+an unpriced model is unbillable (see the gates above). But do not spend
+bench runs proving what a price sheet already tells you: `kimi-k3-direct`
+at $3.00/$15.00 is a gpt-5.5 alternative, not a flash alternative, and if
+nobody intends to pay gpt-5.5 rates then neither is a candidate.
+
+Bench the bracket you would actually ship.
+
 ## 2. Update every surface
 
 `rg '"deepseek-v4-flash"' crates/` finds most of it. The full list:
