@@ -3018,12 +3018,19 @@ mod tests {
     /// the `EnvGuard`s restored `HOME`, letting the next test set its own HOME
     /// mid-restore — which is the same race this fix exists to remove, and it
     /// only showed up under `--test-threads` > 1.
-    fn no_active_org_env() -> (tempfile::TempDir, EnvGuard, EnvGuard, std::sync::MutexGuard<'static, ()>) {
+    fn no_active_org_env() -> (tempfile::TempDir, EnvGuard, EnvGuard, EnvGuard, std::sync::MutexGuard<'static, ()>) {
         let lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().expect("tmp home");
-        let home_guard = EnvGuard::set("HOME", home.path().to_str().expect("utf8 home"));
+        let path = home.path().to_str().expect("utf8 home");
+        let home_guard = EnvGuard::set("HOME", path);
+        // `dirs::home_dir()` reads USERPROFILE on Windows, not HOME, so
+        // overriding only HOME would leave a Windows dev with a real active
+        // org still racing. Set both — the unused one is inert per platform.
+        // CI cannot catch this: a clean runner has no `~/.smooth`, so these
+        // tests pass there whether or not the isolation works.
+        let profile_guard = EnvGuard::set("USERPROFILE", path);
         let org_guard = EnvGuard::unset("SMOOAI_ORG_ID");
-        (home, home_guard, org_guard, lock)
+        (home, home_guard, profile_guard, org_guard, lock)
     }
 
     #[test]
