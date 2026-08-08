@@ -459,6 +459,37 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
     Ok(())
 }
 
+/// Tool usage across a convo run: the judge's `tool_use` axis plus the
+/// objective counts the transcript already carries.
+///
+/// The objective half matters because the judged half can be generous —
+/// a model that reached the right answer after twelve calls and four
+/// errors can still read as good tool use to a grader looking at the
+/// outcome. Error rate and calls-per-turn do not flatter anyone.
+fn convo_tool_usage(run: &ConvoRun) -> leaderboard::ToolUsage {
+    let mut u = leaderboard::ToolUsage::default();
+    let mut graded = Vec::new();
+    for r in &run.results {
+        if let Some(s) = &r.scores {
+            graded.push(f64::from(s.tool_use));
+        }
+        for t in &r.turns {
+            u.turns += 1;
+            if t.tools.is_empty() {
+                u.turns_without_tools += 1;
+            }
+            u.calls += t.tools.len();
+            // Recorded as "name -> ok" / "name -> error".
+            u.errors += t.tools.iter().filter(|c| c.ends_with("error")).count();
+        }
+    }
+    #[allow(clippy::cast_precision_loss, reason = "trial counts are small")]
+    if !graded.is_empty() {
+        u.judge_score = Some(graded.iter().sum::<f64>() / graded.len() as f64);
+    }
+    u
+}
+
 /// Flatten one convo run into a leaderboard row.
 ///
 /// `XFAIL` maps to a fail cell: the documented gap is genuinely not
@@ -492,9 +523,11 @@ fn convo_row(run: &ConvoRun, measured: Option<smooth_bench::spend::Measured>, no
     #[allow(clippy::cast_precision_loss, reason = "scenario counts are single digits")]
     let pass_rate = if conclusive == 0 { 0.0 } else { passed as f64 / conclusive as f64 };
     let duration_ms = run.results.iter().map(|r| r.duration_ms).sum();
+    let tools = convo_tool_usage(run);
     leaderboard::ModelRow {
         model: run.model.clone(),
         pass_rate,
+        tools,
         passed,
         conclusive,
         inconclusive,
@@ -685,6 +718,16 @@ fn agentic_row(run: &AgenticRun, measured: Option<smooth_bench::spend::Measured>
         cost_usd: measured.map_or_else(|| run.total_cost_usd(), smooth_bench::spend::Measured::agent),
         cost_resolvable: measured.is_some_and(|m| m.is_resolvable(noise, duration_ms)),
         duration_ms,
+        // The agentic runner records tool NAMES per trial, not per-call
+        // outcomes, so an error rate is unavailable here — reported as 0
+        // rather than guessed. One turn per trial.
+        tools: leaderboard::ToolUsage {
+            calls: run.results.iter().map(|r| r.tools.len()).sum(),
+            errors: 0,
+            judge_score: None,
+            turns_without_tools: run.results.iter().filter(|r| r.tools.is_empty()).count(),
+            turns: run.results.len(),
+        },
         cells,
     }
 }
