@@ -128,11 +128,11 @@ rots, the procedure does not.
 > agentic sandbox (default-deny egress) they cannot, which is why the
 > sandboxed suites score code rather than scaffolding.
 >
-> The convo bench recorded this trial `INCONCLUSIVE` ("the assistant
-> never said anything") because the scaffold-and-install turn outran the
-> read; the result above was read off the filesystem. A long build turn
-> is a shape the conversation suite does not currently tolerate — see
-> th-f39abc.
+> The convo bench originally recorded this trial `INCONCLUSIVE` ("the
+> assistant never said anything") — it discarded any turn with no prose,
+> even one that had called a dozen tools. Fixed (th-b59d2b): a silent
+> turn is only ungradeable when it ALSO called no tools. The same run now
+> scores **PASS 5/5/5/5**, with the judge citing the stack it chose.
 
 ## How we measure it
 

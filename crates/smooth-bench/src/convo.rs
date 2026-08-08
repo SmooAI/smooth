@@ -624,9 +624,29 @@ async fn run_one(s: &ConvoScenario, trial_index: usize, opts: &ConvoOpts) -> Con
     outcome.cost_usd = outcome.turns.iter().map(|t| t.cost_usd).sum();
     outcome.duration_ms = elapsed_ms(t0);
 
-    if outcome.turns.iter().all(|t| t.assistant.trim().is_empty()) {
-        outcome.reason = "the assistant never said anything — nothing to grade".to_string();
+    // An empty reply is only "nothing to grade" when the agent ALSO did
+    // nothing. A build-shaped turn (scaffold a project, install deps,
+    // write files) can run for minutes and produce no prose until the
+    // end — discarding it threw away a complete, correct `create-next-app`
+    // scaffold as INCONCLUSIVE and the result had to be read off the
+    // filesystem by hand (th-b59d2b). Tool calls ARE evidence, and the
+    // judge already receives the tool transcript.
+    let said_nothing = outcome.turns.iter().all(|t| t.assistant.trim().is_empty());
+    let did_nothing = outcome.turns.iter().all(|t| t.tools.is_empty());
+    if said_nothing && did_nothing {
+        outcome.reason = "the assistant never said anything and called no tools — nothing to grade".to_string();
         return outcome;
+    }
+    if said_nothing {
+        // Gradeable, but the silence is itself a finding: an agent that
+        // works for minutes and never reports back is a bad turn, not an
+        // unmeasurable one. Say so to the judge rather than letting it
+        // infer from an empty transcript.
+        eprintln!(
+            "convo: {} produced no text but made {} tool call(s) — grading on the tool transcript",
+            s.id,
+            outcome.turns.iter().map(|t| t.tools.len()).sum::<usize>()
+        );
     }
 
     match judge_conversation(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, s, &outcome.turns).await {
@@ -911,5 +931,39 @@ mod tests {
         let first: Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(first["status"], "PASS");
         assert_eq!(first["turns"][0]["user"], "hi");
+    }
+    fn turn_with_tools(assistant: &str, tools: &[&str]) -> ConvoTurn {
+        ConvoTurn {
+            tools: tools.iter().map(|t| format!("{t} -> ok")).collect(),
+            ..turn(0, "do the thing", assistant)
+        }
+    }
+
+    /// th-b59d2b: a build-shaped turn scaffolds a project over several
+    /// minutes and produces no prose until the end. Treating "no text"
+    /// as "nothing to grade" discarded a complete, correct
+    /// `create-next-app` scaffold — the result had to be read off the
+    /// filesystem by hand. Tool calls are evidence.
+    #[test]
+    fn a_silent_turn_that_did_work_is_still_gradeable() {
+        let worked = vec![turn_with_tools("", &["bash", "write_file", "write_file"])];
+        let said_nothing = worked.iter().all(|t| t.assistant.trim().is_empty());
+        let did_nothing = worked.iter().all(|t| t.tools.is_empty());
+        assert!(said_nothing, "premise: no prose");
+        assert!(!did_nothing, "but it called tools — that is evidence");
+
+        // And the judge must be able to SEE that evidence.
+        let rendered = render_transcript(&worked);
+        assert!(rendered.contains("write_file"), "tool calls must reach the judge: {rendered}");
+        assert!(rendered.contains("said nothing"), "the silence must be visible too: {rendered}");
+    }
+
+    #[test]
+    fn a_turn_with_neither_text_nor_tools_is_genuinely_ungradeable() {
+        let nothing = vec![turn_with_tools("  ", &[])];
+        assert!(nothing.iter().all(|t| t.assistant.trim().is_empty()));
+        assert!(nothing.iter().all(|t| t.tools.is_empty()));
+        let rendered = render_transcript(&nothing);
+        assert!(rendered.contains("tool calls: none"));
     }
 }
