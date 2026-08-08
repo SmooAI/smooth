@@ -21,6 +21,9 @@ path = "src/lib.rs"
 # actually runs.
 smooth-code = { workspace = true }
 smooth-cast.workspace = true
+# For llm_params::AGENT_TEMPERATURE — the driver and judge are LLM calls too,
+# so a strict --judge-model would 400 on a hardcoded temperature (th-c127d1).
+smooth-policy.workspace = true
 smooth-operator.workspace = true
 smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }
 anyhow.workspace = true
