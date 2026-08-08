@@ -34,12 +34,59 @@ pub struct ModelRow {
     pub duration_ms: u64,
     /// `(scenario id, verdict)` — one entry per scenario, in suite order.
     pub cells: Vec<(String, Cell)>,
+    /// How the model used its tools. Pass rate alone hides this: a model
+    /// can reach the right answer while flailing — twelve calls where
+    /// three would do, or a third of them erroring — and that is the
+    /// difference between an agent you can leave running and one you
+    /// cannot.
+    pub tools: ToolUsage,
     /// False when the measured cost is not distinguishable from the
     /// shared key's background traffic. The figure is then rendered as
     /// `<noise` rather than a precise-looking number, because a cost
     /// column that ranks a premium model below a budget one is worse
     /// than an empty one — someone will act on it.
     pub cost_resolvable: bool,
+}
+
+/// How a model handled its tools, across every trial.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct ToolUsage {
+    /// Total tool calls made.
+    pub calls: usize,
+    /// Calls whose result came back an error.
+    pub errors: usize,
+    /// The judge's 1–5 `tool_use` axis, averaged over graded trials.
+    /// `None` when nothing was graded (an all-inconclusive run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_score: Option<f64>,
+    /// Turns that made no tool call at all. High on a suite whose tasks
+    /// all need tools means the model is answering from memory.
+    pub turns_without_tools: usize,
+    pub turns: usize,
+}
+
+impl ToolUsage {
+    /// Fraction of calls that errored, `0.0` when nothing was called.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, reason = "call counts are small")]
+    pub fn error_rate(self) -> f64 {
+        if self.calls == 0 {
+            0.0
+        } else {
+            self.errors as f64 / self.calls as f64
+        }
+    }
+
+    /// Average calls per turn — the flailing metric.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, reason = "call counts are small")]
+    pub fn calls_per_turn(self) -> f64 {
+        if self.turns == 0 {
+            0.0
+        } else {
+            self.calls as f64 / self.turns as f64
+        }
+    }
 }
 
 /// A scenario's outcome for one model, reduced to what the grid shows.
@@ -157,6 +204,7 @@ pub struct PublishedModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_per_pass_usd: Option<f64>,
     pub duration_s: f64,
+    pub tools: ToolUsage,
 }
 
 /// The whole scoreboard, ready to serialise into `docs/model-scores.json`.
@@ -193,6 +241,7 @@ impl Scoreboard {
                 cost_usd: r.cost_resolvable.then(|| round6(r.cost_usd)),
                 cost_per_pass_usd: cost_per_pass(r).map(round6),
                 duration_s: (r.duration_ms as f64 / 100.0).round() / 10.0,
+                tools: r.tools,
             })
             .collect();
         // DISTINCT scenarios. `cells` carries one entry per TRIAL, so a
@@ -253,6 +302,25 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
             } else {
                 String::new()
             },
+        );
+    }
+
+    // Tool usage. Separate block rather than more columns on the rate
+    // table: these answer "how did it work?", not "did it win?", and
+    // cramming them in makes both harder to read.
+    let _ = writeln!(out, "\n  tool use            calls  err%   /turn  judge  silent turns");
+    for r in ranked(rows) {
+        let t = r.tools;
+        let _ = writeln!(
+            out,
+            "  {model:<19} {calls:>5} {err:>5.0}% {per:>7.1} {judge:>6} {silent:>8}/{turns}",
+            model = r.model,
+            calls = t.calls,
+            err = t.error_rate() * 100.0,
+            per = t.calls_per_turn(),
+            judge = t.judge_score.map_or_else(|| "-".to_string(), |s| format!("{s:.1}")),
+            silent = t.turns_without_tools,
+            turns = t.turns,
         );
     }
 
@@ -318,6 +386,7 @@ mod tests {
             inconclusive: cells.iter().filter(|(_, c)| *c == Cell::Inconclusive).count(),
             cost_usd: cost,
             duration_ms: 1000,
+            tools: ToolUsage::default(),
             cost_resolvable: true,
             cells: cells.iter().map(|(id, c)| ((*id).to_string(), *c)).collect(),
         }
@@ -458,5 +527,64 @@ mod tests {
     #[test]
     fn render_survives_an_empty_run() {
         assert!(render("agentic", &[]).contains("no models ran"));
+    }
+    #[test]
+    fn tool_error_rate_and_efficiency() {
+        let t = ToolUsage {
+            calls: 20,
+            errors: 5,
+            judge_score: Some(4.0),
+            turns_without_tools: 1,
+            turns: 10,
+        };
+        assert!((t.error_rate() - 0.25).abs() < 1e-9);
+        assert!((t.calls_per_turn() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_tool_calls_is_zero_not_a_division_by_zero() {
+        let t = ToolUsage::default();
+        assert!((t.error_rate() - 0.0).abs() < f64::EPSILON);
+        assert!((t.calls_per_turn() - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// Pass rate hides flailing: two models can both score 100% while one
+    /// takes three calls per turn and the other twelve with a third
+    /// erroring. That difference is the whole point of the block.
+    #[test]
+    fn the_tool_block_separates_two_models_with_identical_pass_rates() {
+        let mut clean = row("clean", 1.0, 1, 0.1, &[("a", Cell::Pass)]);
+        clean.tools = ToolUsage {
+            calls: 6,
+            errors: 0,
+            judge_score: Some(5.0),
+            turns_without_tools: 0,
+            turns: 3,
+        };
+        let mut flailing = row("flailing", 1.0, 1, 0.1, &[("a", Cell::Pass)]);
+        flailing.tools = ToolUsage {
+            calls: 36,
+            errors: 12,
+            judge_score: Some(2.0),
+            turns_without_tools: 0,
+            turns: 3,
+        };
+        let t = render("convo", &[clean, flailing]);
+        assert!(t.contains("tool use"), "the block must render: {t}");
+        assert!(t.contains("33%"), "error rate must be visible: {t}");
+        assert!(t.contains("12.0"), "calls-per-turn must be visible: {t}");
+    }
+
+    #[test]
+    fn an_ungraded_run_shows_a_dash_not_a_zero_score() {
+        // judge_score None means "not graded", not "scored zero".
+        let mut r = row("m", 1.0, 1, 0.1, &[("a", Cell::Pass)]);
+        r.tools = ToolUsage {
+            calls: 1,
+            turns: 1,
+            ..ToolUsage::default()
+        };
+        let t = render("convo", &[r]);
+        assert!(!t.contains(" 0.0 "), "an ungraded axis must not print as 0.0: {t}");
     }
 }
