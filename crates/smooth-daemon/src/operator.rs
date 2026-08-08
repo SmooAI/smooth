@@ -819,7 +819,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // into Smoo AI by clicking a button — Big Smooth then acts on their org via
         // th-backed extensions (th-bc624a).
         .serve_routes(
-            crate::search::search_router(workspace)
+            crate::search::search_router(workspace.clone())
+                // GET /api/skills — the one skill catalog every face renders
+                // (the web SPA has no disk access; th code prefers this over
+                // its local discover). Pearl th-a5952d.
+                .merge(crate::skills_route::skills_router(workspace))
                 .merge(crate::push::push_router(push_state.clone()))
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
