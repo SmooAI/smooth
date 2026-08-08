@@ -15,13 +15,15 @@ files:
     - dist/**
     - assets/**
     - package.json
-# The engine ships inside the app; resolveDaemonBin() looks here first.
-# `pnpm stage-daemon` fills resources/current/ with the binary for the platform
-# being built (each OS builds its own installer, so one directory is enough).
+# The engine (smooth-daemon) AND the `th` CLI ship inside the app;
+# resolveDaemonBin()/resolveThBin() look here first, and main.ts symlinks the
+# bundled `th` onto PATH — so an OTA update that replaces the bundle carries a
+# fresh `th` too. `pnpm stage-daemon` fills resources/current/ with both binaries
+# for the platform being built (each OS builds its own installer, so one dir is enough).
 extraResources:
     - from: resources/current/
       to: .
-      filter: ['smooth-daemon*']
+      filter: ['smooth-daemon*', 'th', 'th.exe']
 
 mac:
     category: public.app-category.productivity

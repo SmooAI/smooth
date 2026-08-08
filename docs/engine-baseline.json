@@ -22,8 +22,8 @@
       "note": "was 0% \u2014 the launcher booted a stale dist/ with no coding tools (th-11284c, PR #359). Fixed; baseline raised so the gate protects it."
     },
     "dotnet": {
-      "min_pass_rate_pct": 0.0,
-      "note": "BROKEN th-df7007 \u2014 every turn returns INTERNAL_ERROR. Raise to 100 when fixed."
+      "min_pass_rate_pct": 100.0,
+      "note": "was INTERNAL_ERROR then read-only \u2014 gateway env spelling (th-df7007) + SMOOTH_WORKSPACE not exported (th-93112a). Both fixed; all five engines green."
     }
   }
 }

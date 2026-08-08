@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const BIN = process.platform === 'win32' ? 'smooth-daemon.exe' : 'smooth-daemon';
+const TH = process.platform === 'win32' ? 'th.exe' : 'th';
 
 /** `host:port` the daemon binds. Mirrors `resolve_run_addr()` in smooth-daemon/src/main.rs. */
 export function resolveAddr(env: NodeJS.ProcessEnv = process.env): string {
@@ -47,26 +48,34 @@ export function resolveDaemonBin(candidates?: string[]): string | undefined {
     if (candidates) return firstExisting(candidates);
     // The cargo lookup shells out, so only reach for it when the cheap candidates
     // miss — in a packaged app the bundled copy is first and always wins.
-    return firstExisting(cheapCandidates()) ?? firstExisting(cargoCandidates());
+    return firstExisting(cheapCandidates(BIN)) ?? firstExisting(cargoCandidates(BIN));
+}
+
+/** Locate the bundled `th` CLI. Same candidate order as {@link resolveDaemonBin}
+ * (bundled resources first), so a packaged app finds the copy staged next to the
+ * daemon; a dev box falls back to `~/.smooth/bin`, PATH, then the cargo target. */
+export function resolveThBin(candidates?: string[]): string | undefined {
+    if (candidates) return firstExisting(candidates);
+    return firstExisting(cheapCandidates(TH)) ?? firstExisting(cargoCandidates(TH));
 }
 
 function firstExisting(candidates: string[]): string | undefined {
     return candidates.find((p) => p !== '' && existsSync(p));
 }
 
-function cheapCandidates(): string[] {
+function cheapCandidates(bin: string): string[] {
     const out: string[] = [];
-    if (process.resourcesPath) out.push(join(process.resourcesPath, BIN));
-    out.push((process.env.SMOOTH_DAEMON_BIN ?? '').trim());
-    out.push(join(homedir(), '.smooth', 'bin', BIN));
+    if (process.resourcesPath) out.push(join(process.resourcesPath, bin));
+    if (bin === BIN) out.push((process.env.SMOOTH_DAEMON_BIN ?? '').trim());
+    out.push(join(homedir(), '.smooth', 'bin', bin));
     for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-        if (dir) out.push(join(dir, BIN));
+        if (dir) out.push(join(dir, bin));
     }
     return out;
 }
 
-function cargoCandidates(): string[] {
-    return cargoTargetDirs().flatMap((dir) => [join(dir, 'release', BIN), join(dir, 'debug', BIN)]);
+function cargoCandidates(bin: string): string[] {
+    return cargoTargetDirs().flatMap((dir) => [join(dir, 'release', bin), join(dir, 'debug', bin)]);
 }
 
 /** Dev fallback: where `cargo build` puts things. `cargo metadata` is the only thing that
