@@ -346,6 +346,21 @@ pub async fn run_with_session(
                 s.remote_skills = Some(skills);
             }
         });
+
+        // The model Big Smooth would run the next turn with, so the idle
+        // status bar shows a real name instead of "unknown" (pearl
+        // th-7630a7). Display-only: `model_name` never goes on the wire
+        // (`model_override` does), and anything the user already chose —
+        // `--model` at startup or the picker mid-fetch — wins.
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Some(model) = fetch_daemon_mode().await {
+                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                if s.model_name.trim().is_empty() {
+                    s.model_name = model;
+                }
+            }
+        });
     }
 
     // Initial forced draw before the event loop starts. If the loop later
@@ -853,6 +868,22 @@ async fn fetch_remote_skills() -> Option<Vec<smooth_cast::skills::Skill>> {
         .ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
     serde_json::from_value(body.get("skills")?.clone()).ok()
+}
+
+/// `GET {SMOOTH_URL}/api/mode` → the model the daemon would run the next turn
+/// with, or `None` on any failure (daemon down, no credentials resolved) so
+/// the status bar keeps its honest "unknown" (pearl th-7630a7).
+async fn fetch_daemon_mode() -> Option<String> {
+    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+    let resp = client.get(format!("{}/api/mode", base.trim_end_matches('/'))).send().await.ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let model = body.get("model")?.as_str()?.trim().to_string();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model)
+    }
 }
 
 /// `GET {SMOOTH_URL}/search?q=…&cwd=…` → popup rows, or `None` on any
