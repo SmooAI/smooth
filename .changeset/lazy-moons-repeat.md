@@ -1,5 +1,5 @@
 ---
-"smooth": patch
+'@smooai/smooth': patch
 ---
 
 Fix three first-run blockers on the golden-path onboarding flow (pearl th-6062ea).
