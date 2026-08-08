@@ -200,6 +200,22 @@ pub fn frontend_scenarios() -> Result<Vec<Scenario>> {
     parse_scenarios(include_str!("../frontend-scenarios.toml"))
 }
 
+/// The greenfield "build me something" suite (pearl th-f39abc).
+///
+/// Separate from the frontend suite because it tests the opposite
+/// situation: those seed a `package.json` so a model can read the stack
+/// off disk, these hand it an empty workspace. With nothing to match, a
+/// model falls back entirely on training data — which is exactly when it
+/// reaches for create-react-app and the pages router. It is the harder
+/// test of whether steering (the `greenfield-stack` skill) actually
+/// changes behaviour: run it with and without.
+///
+/// # Errors
+/// Propagates a parse/validation failure in the embedded TOML.
+pub fn greenfield_scenarios() -> Result<Vec<Scenario>> {
+    parse_scenarios(include_str!("../greenfield-scenarios.toml"))
+}
+
 /// Raw TOML wrapper: `[[scenario]]` array.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2266,5 +2282,36 @@ pattern = "forwardRef"
 reason = "  "
 "#;
         assert!(parse_scenarios(toml).is_err(), "a rule with no reason must not parse");
+    }
+    #[test]
+    fn greenfield_suite_parses_and_scores_unforced_choices() {
+        let s = greenfield_scenarios().expect("embedded greenfield suite must parse");
+        assert!(s.len() >= 3, "got {}", s.len());
+
+        // The point of the suite: at least one scenario hands over a
+        // workspace with NOTHING to copy a stack from.
+        assert!(
+            s.iter().any(|x| x.setup.is_empty()),
+            "greenfield means an empty workspace — a seeded package.json would let the model read the answer"
+        );
+        for sc in &s {
+            let Check::Hybrid { forbids, rubric, .. } = &sc.check else {
+                panic!("{} should be hybrid", sc.id)
+            };
+            assert!(!forbids.is_empty(), "{}: needs stale-choice rules", sc.id);
+            assert!(rubric.len() > 100, "{}: rubric too thin to grade a build", sc.id);
+        }
+    }
+
+    /// Steering has two failure modes, and a suite that only tests one
+    /// teaches the agent to over-apply the house default.
+    #[test]
+    fn greenfield_tests_both_directions_of_steering() {
+        let s = greenfield_scenarios().expect("parses");
+        assert!(s.iter().any(|x| x.id == "greenfield-dashboard"), "missing: does it pick current defaults");
+        assert!(
+            s.iter().any(|x| x.id == "greenfield-respects-named-stack"),
+            "missing: does an explicit user instruction still win over the house default"
+        );
     }
 }

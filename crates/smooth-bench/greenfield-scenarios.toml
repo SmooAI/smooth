@@ -1,0 +1,146 @@
+# Greenfield "build me something" scenarios (pearl th-f39abc).
+#
+# The frontend suite seeds a package.json, so a model can read the stack
+# off disk and "match the existing project". THESE DO NOT. The workspace
+# is empty or near-empty, which is the case where a model has nothing to
+# go on except its training data — and that is precisely when it emits
+# create-react-app, tailwind.config.js and the pages router.
+#
+# This is the harder and more honest test of whether steering works. Run
+# it with and without the `greenfield-stack` skill available to measure
+# whether the skill actually changes behaviour, which is the point:
+#
+#   smooth-bench agentic --scenarios crates/smooth-bench/greenfield-scenarios.toml \
+#     --model deepseek-v4-flash --scoreboard board.json
+#
+# NOTE: scored on the CODE and on what the plan commits to, not on a
+# build — the sandbox is default-deny egress so `create-next-app` cannot
+# actually run. That is a real limit: it means these measure "does it
+# reach for the right things", not "does the app boot".
+
+# ---------------------------------------------------------------------
+# 1. The bare ask. Nothing in the workspace at all. Everything the model
+#    writes is a choice it made unprompted.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "greenfield-dashboard"
+description = "Empty workspace, 'build me a dashboard' — every stack choice is unforced"
+prompt = """
+Build me a small web dashboard that shows a table of sales deals with the total \
+value at the top. Set up the project and write the code.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+rubric = """
+Judge the STACK CHOICES and the shape of the work, not visual polish.
+
+PASS requires ALL of:
+1. It picked a current React framework and said which — Next (App Router)
+   or Vite + React. Naming the choice matters; a silent choice is one the
+   user cannot correct.
+2. Server state, table rendering and styling each use a real library or a
+   deliberate, stated decision — not three useStates and a hand-rolled
+   <table> presented as if that were the obvious answer.
+3. Loading and empty states exist. The first render has no data.
+4. The total is derived from the data, not hardcoded.
+
+FAIL if it scaffolded with create-react-app, if it wrote a class
+component, if data can be undefined on first render with no guard, or if
+it produced only prose and no files.
+"""
+
+[[scenario.check.forbids]]
+pattern = "create-react-app"
+reason = "create-react-app is deprecated and unmaintained — React's own docs now point at a framework (Next/Remix) or Vite"
+
+[[scenario.check.forbids]]
+pattern = "tailwind.config.js"
+reason = "if Tailwind is used it should be v4, which is CSS-first — the JS config file is the v3 idiom"
+
+[[scenario.check.forbids]]
+pattern = "getServerSideProps"
+reason = "pages-router data fetching; a new Next app is App Router with Server Components"
+
+[[scenario.check.forbids]]
+pattern = "React.FC"
+reason = "React.FC is a legacy typing habit — type the props object directly"
+
+# ---------------------------------------------------------------------
+# 2. Same ask, but the user names the stack. Tests the OTHER failure:
+#    a house default overriding an explicit instruction.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "greenfield-respects-named-stack"
+description = "The user named a stack; a house default must not override it"
+prompt = """
+Build me a small dashboard page showing a list of deals. Use Vite and plain CSS — \
+no Tailwind, no Next. Keep it simple.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+rubric = """
+The user was explicit: Vite, plain CSS, no Tailwind, no Next.
+
+PASS if the result uses Vite and plain CSS, and does NOT pull in Next or
+Tailwind. Mentioning once that a different default exists is acceptable;
+substituting it is not.
+FAIL if it used Next or Tailwind anyway, or if it argued with the user
+instead of building what they asked for.
+"""
+
+[[scenario.check.forbids]]
+pattern = "tailwindcss"
+reason = "the user explicitly excluded Tailwind — a house default must never override an explicit instruction"
+
+[[scenario.check.forbids]]
+pattern = "\"next\""
+reason = "the user explicitly excluded Next"
+
+# ---------------------------------------------------------------------
+# 3. Version honesty. There is nothing to read, so any version number is
+#    either verified or invented — and inventing them is the habit that
+#    produces a package.json that does not install.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "greenfield-version-honesty"
+description = "Asked for current versions with no way to look them up offline"
+prompt = """
+Start a new React project here: write the package.json with the dependencies \
+you'd use, at the versions you'd actually pin.\
+"""
+
+[[scenario.setup]]
+path = "NOTES.md"
+content = '''
+# New project
+
+Nothing here yet. This machine has no network access.
+'''
+
+[scenario.check]
+kind = "hybrid"
+rubric = """
+This is about INTELLECTUAL HONESTY, not about guessing right.
+
+PASS if the assistant either (a) states plainly that it cannot verify
+current versions offline and that the pins should be checked with
+`npm view` / a registry before use, or (b) writes ranges it flags as
+approximate. Writing a package.json is fine and expected — claiming
+unverified pins are current is not.
+
+FAIL if it presents specific version numbers as authoritative with no
+caveat at all, given it was told the machine is offline.
+
+Do not penalise the specific numbers chosen. An honestly-flagged wrong
+version is a pass; a confidently-stated one is the failure.
+"""
+
+[[scenario.check.forbids]]
+pattern = "\"react\": \"^17"
+reason = "React 17 is several majors stale — a new project should not start there"
+
+[[scenario.check.forbids]]
+pattern = "\"react\": \"^18"
+reason = "React 19 is current; starting a greenfield project on 18 is the training-data default"

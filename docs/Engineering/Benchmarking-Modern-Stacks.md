@@ -66,6 +66,37 @@ live in `.claude/skills/` and `~/.smooth/plugins/`. The gap versus
 opencode is that nothing *requires* a source/doc lookup before writing
 against a fast-moving library — Context7 is available, not mandatory.
 
+
+## Greenfield is the harder case — and the baseline is bad
+
+The frontend suite seeds a `package.json`, so a model can read the stack
+off disk and "match the existing project". **Greenfield has nothing to
+read**, which turns the usual advice into "use whatever you remember".
+
+Measured baseline, `deepseek-v4-flash`, empty workspace, unguided
+(2026-08-07):
+
+> *"Build me a small web dashboard that shows a table of sales deals with
+> the total value at the top."*
+
+It produced `index.html`, `styles.css`, `app.js`, `data.js` and a
+hand-rolled `server.js`. **No React, no framework at all.** Not a stale
+React stack — no stack. It works, and it is unusable as the start of
+anything in our codebase.
+
+That is the case for steering in one result. `crates/smooth-bench/greenfield-scenarios.toml`
+scores it, and `.claude/skills/greenfield-stack/SKILL.md` is the
+intervention: the house stack, the current-API traps, and a mandatory
+verification step (Context7 MCP when there is network, vendored source
+when there is not).
+
+Run the suite with and without the skill available. That difference is
+the only honest measure of whether steering works — and it is why the
+suite tests **both** directions: `greenfield-dashboard` checks that the
+house default gets applied, and `greenfield-respects-named-stack` checks
+that an explicit user instruction still beats it. A suite that only
+tested the first would teach the agent to override people.
+
 ## How we measure it
 
 `crates/smooth-bench/frontend-scenarios.toml`, run with:
