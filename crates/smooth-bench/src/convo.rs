@@ -218,7 +218,15 @@ pub async fn driver_next_message(
         scenario.persona.trim(),
         render_transcript(turns)
     );
-    let content = chat(gateway_url, gateway_key, model, DRIVER_SYSTEM, &prompt, 0.4).await?;
+    let content = chat(
+        gateway_url,
+        gateway_key,
+        model,
+        DRIVER_SYSTEM,
+        &prompt,
+        smooth_policy::llm_params::AGENT_TEMPERATURE,
+    )
+    .await?;
     let msg = content.trim().trim_matches('"').trim().to_string();
     if msg.is_empty() || msg.eq_ignore_ascii_case(DRIVER_DONE) || msg.starts_with(DRIVER_DONE) {
         return Ok(None);
@@ -282,7 +290,15 @@ pub async fn judge_conversation(
         scenario.persona.trim(),
         truncate(&render_transcript(turns), 24_000)
     );
-    let content = chat(gateway_url, gateway_key, model, JUDGE_SYSTEM, &prompt, 0.0).await?;
+    let content = chat(
+        gateway_url,
+        gateway_key,
+        model,
+        JUDGE_SYSTEM,
+        &prompt,
+        smooth_policy::llm_params::AGENT_TEMPERATURE,
+    )
+    .await?;
     parse_grade(&content).ok_or_else(|| anyhow::anyhow!("judge reply did not match the contract: {}", truncate(&content, 400)))
 }
 

@@ -56,7 +56,7 @@ pub async fn judge(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
     let body = json!({
         "model": model,
-        "temperature": 0,
+        "temperature": smooth_policy::llm_params::AGENT_TEMPERATURE,
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": render_evidence(ev)},
