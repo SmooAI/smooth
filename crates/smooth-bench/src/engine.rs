@@ -297,8 +297,17 @@ impl TaskRunner for EngineTaskRunner {
 ///
 /// Split out of [`spawn_engine`] purely so it can be tested: the model
 /// pin here was wrong for months in a way nothing could catch.
-fn apply_engine_env(command: &mut Command, model: &str, env: &EngineEnv) {
+fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &EngineEnv) {
     command.env("SMOOAI_MODEL", model);
+    // EVERY host reads SMOOTH_WORKSPACE and falls back to cwd — go's
+    // main.go:43, typescript's main.ts:112, python's server.py:332, and
+    // .NET's Program.cs:140. Setting cwd alone is not enough: `dotnet
+    // run --project <dir>` runs the app from the PROJECT directory, so
+    // the .NET host confined its coding tools to the engine checkout
+    // instead of the scenario workspace and never wrote the file the
+    // scenario asserted on (th-93112a). Exporting it explicitly removes
+    // the cwd dependency for all five.
+    command.env("SMOOTH_WORKSPACE", workspace);
     // BOTH model vars, for the same reason the microVM path sets both:
     // the daemon's `resolve_gateway_config` only reads
     // SMOOTH_AGENT_MODEL. With `SMOOAI_MODEL` alone the daemon silently
@@ -360,7 +369,7 @@ fn spawn_engine(
     for (k, v) in &cmd.env {
         command.env(k, v);
     }
-    apply_engine_env(&mut command, model, env);
+    apply_engine_env(&mut command, model, workspace, env);
     // The rust daemon runs strict-auth; hand it a known token so the driver
     // can authenticate. The polyglot servers are anonymous (token = None).
     let token = if engine == Engine::Rust {
@@ -387,12 +396,29 @@ fn spawn_engine(
         }
     }
 
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().context("engine bind addr")?;
+
+    // Refuse to start if the port is already taken. Ports are fixed per
+    // engine, so a second concurrent run — or a daemon left over from a
+    // previous one — is already listening there. `wait_for_port` below
+    // only waits for SOMETHING to accept TCP: it cannot tell our engine
+    // from a stranger's, so without this check the bench would attach to
+    // the wrong process and score it. That is the same class of failure
+    // as benchmarking a stale binary, and just as invisible.
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+        anyhow::bail!(
+            "{addr} is already in use, so the {} engine cannot start there. Another bench run \
+             (or a leftover daemon) owns it — the bench refuses to attach to a process it did not \
+             spawn, because it would score that one instead. Stop the other run, or wait for it.",
+            engine.as_str()
+        );
+    }
+
     let child = command
         .spawn()
         .with_context(|| format!("spawning {} engine ({} {:?})", engine.as_str(), cmd.program, cmd.args))?;
     let guard = KillOnDrop(child);
 
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().context("engine bind addr")?;
     wait_for_port(addr, ready_timeout).with_context(|| format!("{} engine never opened {addr}", engine.as_str()))?;
 
     Ok((format!("http://127.0.0.1:{port}"), token, guard))
@@ -1321,6 +1347,7 @@ mod tests {
         apply_engine_env(
             &mut c,
             "gpt-5.5",
+            Path::new("/scratch/work"),
             &EngineEnv {
                 gateway_url: Some("https://llm.smoo.ai/v1".into()),
                 gateway_key: Some("k".into()),
@@ -1342,6 +1369,12 @@ mod tests {
         assert_eq!(get("SMOOAI_GATEWAY_URL").as_deref(), Some("https://llm.smoo.ai/v1"));
         assert_eq!(get("SMOOAI_GATEWAY_KEY").as_deref(), Some("k"));
         assert!(get("SMOOTH_PERSONA").is_none(), "an unset persona must not be exported");
+        assert_eq!(
+            get("SMOOTH_WORKSPACE").as_deref(),
+            Some("/scratch/work"),
+            "every host confines its coding tools to SMOOTH_WORKSPACE and falls back to cwd; \
+             `dotnet run --project` makes cwd the engine checkout, not the scenario workspace (th-93112a)"
+        );
     }
 
     #[test]
