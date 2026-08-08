@@ -3,7 +3,11 @@
 //!
 //! The daemon dials OUT to the Smoo Relay (`rust/relay-ws` in the smooai repo,
 //! SMOODEV-2828, `wss://relay.smoo.ai/ws`) and registers as the signed-in
-//! user's device **`daemon`**. Phones connect to the same relay as their own
+//! user's device **`daemon-<uuid>`** — a per-machine id persisted to
+//! `~/.smooth/relay-device-id` and announced with a `label` (the machine's
+//! short hostname) and `kind=daemon`, so ONE Smoo account can run several
+//! daemons (laptop + smoo-hub) without them claiming the same relay slot
+//! (th-764b57). Phones connect to the same relay as their own
 //! device ids and exchange `{to, frame}` envelopes; the relay forwards frames
 //! between a user's devices — opaquely, same-user-only — so a phone anywhere
 //! on the internet can chat with THIS daemon with no tailnet membership.
@@ -21,9 +25,11 @@
 //! reachability layer, never a reason the daemon can't boot.
 //!
 //! Config: `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the default
-//! relay endpoint (the env-knob precedent of `config.rs`).
+//! relay endpoint; `SMOOTH_RELAY_DEVICE_ID` / `SMOOTH_RELAY_LABEL` pin the
+//! identity (the env-knob precedent of `config.rs`).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -34,8 +40,13 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The production relay endpoint (SMOODEV-2828).
 const DEFAULT_RELAY_URL: &str = "wss://relay.smoo.ai/ws";
-/// The device id THIS daemon registers under (v1: one daemon per user).
-const DAEMON_DEVICE: &str = "daemon";
+/// Where the per-machine device id is persisted, under `~/.smooth/`.
+const DEVICE_ID_FILE: &str = "relay-device-id";
+/// Label fallback when the host has no usable hostname.
+const DEFAULT_LABEL: &str = "big-smooth";
+/// Labels are display-only; cap them so a junk `$SMOOTH_RELAY_LABEL` can't
+/// bloat every connect URL.
+const LABEL_MAX_CHARS: usize = 120;
 /// Reconnect backoff bounds. Exponential from `BACKOFF_MIN`, capped at
 /// `BACKOFF_MAX`; reset after a connection that survived `BACKOFF_RESET_AFTER`.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
@@ -59,6 +70,93 @@ pub fn resolve_relay_url() -> Option<String> {
     let enabled = std::env::var("SMOOTH_RELAY").ok();
     let url = std::env::var("SMOOTH_RELAY_URL").ok();
     resolve_relay_url_from(enabled.as_deref(), url.as_deref())
+}
+
+/// This daemon's STABLE relay device id, `daemon-<12 hex>`.
+///
+/// Pure over its inputs (`SMOOTH_RELAY_DEVICE_ID`, the `~/.smooth` dir) so it's
+/// testable without touching the real `$HOME`. Reads the persisted id when
+/// present, else mints and best-effort persists one (mode 600). A missing or
+/// unwritable home degrades to a process-random id — an unstable device id is
+/// worse than a stable one but far better than an unreachable daemon.
+fn resolve_device_id_from(override_env: Option<&str>, base_dir: Option<&Path>) -> String {
+    if let Some(pinned) = override_env.map(str::trim).filter(|v| !v.is_empty()) {
+        return pinned.to_string();
+    }
+    let Some(dir) = base_dir else {
+        let id = mint_device_id();
+        tracing::warn!(device = %id, "relay: no home dir — using a process-random device id (changes on restart)");
+        return id;
+    };
+    let path = dir.join(DEVICE_ID_FILE);
+    if let Some(existing) = std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return existing;
+    }
+    let id = mint_device_id();
+    let _ = std::fs::create_dir_all(dir);
+    match std::fs::write(&path, &id) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            tracing::info!(device = %id, path = %path.display(), "relay: minted this machine's device id");
+        }
+        Err(e) => tracing::warn!(error = %e, path = %path.display(), "relay: could not persist device id — it will change on restart"),
+    }
+    id
+}
+
+fn mint_device_id() -> String {
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    format!("daemon-{}", &hex[..12])
+}
+
+/// The human label for this daemon on the relay's device list.
+///
+/// Pure over (`SMOOTH_RELAY_LABEL`, the raw hostname) — the env override wins,
+/// a hostname is shortened to its first DNS label, and both are stripped of
+/// control characters and capped so the value stays URL- and UI-safe.
+fn resolve_label_from(override_env: Option<&str>, hostname: Option<&str>) -> String {
+    let from_env = override_env.map(str::trim).filter(|s| !s.is_empty()).map(sanitize_label);
+    let from_host = hostname
+        .map(str::trim)
+        // `hostname` may hand back an FQDN; the short form is what a human reads.
+        .and_then(|h| h.split('.').next())
+        .map(sanitize_label);
+    from_env
+        .into_iter()
+        .chain(from_host)
+        .find(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_LABEL.to_string())
+}
+
+fn sanitize_label(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control())
+        .take(LABEL_MAX_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// This machine's hostname, via the `hostname` binary — the same dependency-free
+/// trick `th`'s agent-handle default uses (`smooth-cli/src/main.rs`).
+fn host_name() -> Option<String> {
+    let out = std::process::Command::new("hostname").output().ok()?;
+    String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Assemble the relay connect URL. `kind=daemon` tells the relay which side of
+/// the presence list this connection belongs on (SMOODEV-2834).
+fn connect_url(relay_url: &str, token: &str, device: &str, label: &str) -> String {
+    format!(
+        "{relay_url}?token={}&device={}&label={}&kind=daemon",
+        urlencode(token),
+        urlencode(device),
+        urlencode(label)
+    )
 }
 
 /// One inbound relay message, classified. Pure parse so the protocol rules are
@@ -202,6 +300,14 @@ fn fresh_access_token() -> Option<String> {
 pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
+        // Resolved once: the id must be identical across reconnects or the
+        // relay sees a new device every backoff cycle.
+        let device = resolve_device_id_from(
+            std::env::var("SMOOTH_RELAY_DEVICE_ID").ok().as_deref(),
+            dirs_next::home_dir().map(|h| h.join(".smooth")).as_deref(),
+        );
+        let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref());
+        tracing::info!(%device, %label, "relay: this daemon's identity");
         let mut backoff = BACKOFF_MIN;
         loop {
             let Some(token) = fresh_access_token() else {
@@ -209,7 +315,7 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
                 tokio::time::sleep(SIGNED_OUT_RECHECK).await;
                 continue;
             };
-            let url = format!("{relay_url}?token={}&device={DAEMON_DEVICE}", urlencode(&token));
+            let url = connect_url(&relay_url, &token, &device, &label);
             let connected_at = std::time::Instant::now();
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
@@ -325,6 +431,118 @@ mod tests {
         assert_eq!(resolve_relay_url_from(None, Some("")), None);
     }
 
+    // ── device identity (th-764b57) ───────────────────────────────────────────
+
+    #[test]
+    fn device_id_is_minted_once_then_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = resolve_device_id_from(None, Some(dir.path()));
+        assert!(first.starts_with("daemon-"), "{first}");
+        assert_eq!(first.len(), "daemon-".len() + 12);
+        // Same dir ⇒ same id, however many times we ask.
+        assert_eq!(resolve_device_id_from(None, Some(dir.path())), first);
+        assert_eq!(resolve_device_id_from(None, Some(dir.path())), first);
+        // And it really is on disk.
+        assert_eq!(std::fs::read_to_string(dir.path().join(DEVICE_ID_FILE)).unwrap().trim(), first);
+    }
+
+    #[test]
+    fn device_id_is_unique_per_machine() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        assert_ne!(
+            resolve_device_id_from(None, Some(a.path())),
+            resolve_device_id_from(None, Some(b.path())),
+            "two daemons must not collide on one Smoo account"
+        );
+    }
+
+    #[test]
+    fn device_id_creates_a_missing_smooth_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("never").join("existed");
+        let id = resolve_device_id_from(None, Some(&nested));
+        assert_eq!(std::fs::read_to_string(nested.join(DEVICE_ID_FILE)).unwrap().trim(), id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn device_id_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        resolve_device_id_from(None, Some(dir.path()));
+        let mode = std::fs::metadata(dir.path().join(DEVICE_ID_FILE)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn device_id_env_override_wins_and_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_device_id_from(Some("  daemon-pinned  "), Some(dir.path())), "daemon-pinned");
+        assert!(!dir.path().join(DEVICE_ID_FILE).exists(), "a pinned id must not clobber the persisted one");
+        // Blank override falls through to the persisted path.
+        assert!(resolve_device_id_from(Some("   "), Some(dir.path())).starts_with("daemon-"));
+    }
+
+    #[test]
+    fn device_id_survives_a_file_with_trailing_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DEVICE_ID_FILE), "daemon-abc123def456\n").unwrap();
+        assert_eq!(resolve_device_id_from(None, Some(dir.path())), "daemon-abc123def456");
+        // An empty/blank file is treated as absent, not as an empty device id.
+        std::fs::write(dir.path().join(DEVICE_ID_FILE), " \n").unwrap();
+        assert!(resolve_device_id_from(None, Some(dir.path())).starts_with("daemon-"));
+    }
+
+    #[test]
+    fn device_id_without_a_home_falls_back_instead_of_panicking() {
+        let id = resolve_device_id_from(None, None);
+        assert!(id.starts_with("daemon-"), "{id}");
+        assert_ne!(id, resolve_device_id_from(None, None), "the homeless fallback is process-random");
+    }
+
+    // ── label ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn label_prefers_the_env_override() {
+        assert_eq!(resolve_label_from(Some(" Brent's Laptop "), Some("smoo-hub")), "Brent's Laptop");
+    }
+
+    #[test]
+    fn label_uses_the_short_hostname() {
+        assert_eq!(resolve_label_from(None, Some("smoo-hub.local")), "smoo-hub");
+        assert_eq!(resolve_label_from(None, Some("  mac-studio\n")), "mac-studio");
+    }
+
+    #[test]
+    fn label_falls_back_when_there_is_no_hostname() {
+        assert_eq!(resolve_label_from(None, None), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(None, Some("")), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(Some("  "), Some("   ")), DEFAULT_LABEL);
+        // A label that sanitizes down to nothing is not a label.
+        assert_eq!(resolve_label_from(Some("\u{7}\u{0}"), None), DEFAULT_LABEL);
+    }
+
+    #[test]
+    fn label_strips_control_chars_and_caps_length() {
+        assert_eq!(resolve_label_from(Some("big\u{0}sm\noth"), None), "bigsmoth");
+        let long = resolve_label_from(Some(&"x".repeat(500)), None);
+        assert_eq!(long.chars().count(), LABEL_MAX_CHARS);
+        // Multi-byte labels are cut on char boundaries, not bytes.
+        let emoji = resolve_label_from(Some(&"é".repeat(500)), None);
+        assert_eq!(emoji.chars().count(), LABEL_MAX_CHARS);
+    }
+
+    // ── connect URL ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn connect_url_carries_device_label_and_kind() {
+        let u = connect_url("wss://relay.smoo.ai/ws", "tok en", "daemon-abc123", "Brent's Laptop");
+        assert_eq!(
+            u,
+            "wss://relay.smoo.ai/ws?token=tok%20en&device=daemon-abc123&label=Brent%27s%20Laptop&kind=daemon"
+        );
+    }
+
     // ── inbound classification ────────────────────────────────────────────────
 
     #[test]
@@ -333,6 +551,11 @@ mod tests {
         assert_eq!(classify_relay_msg(r#"{"type":"connected"}"#), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"type":"pong"}"#), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"type":"error","message":"x"}"#), RelayMsg::Ignore);
+        // Presence control frames (SMOODEV-2834) are the phone's business, not ours.
+        assert_eq!(
+            classify_relay_msg(r#"{"type":"peers","peers":[{"device":"daemon-abc","label":"smoo-hub","kind":"daemon"}]}"#),
+            RelayMsg::Ignore
+        );
         assert_eq!(classify_relay_msg("not json"), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"unrelated":true}"#), RelayMsg::Ignore);
     }
