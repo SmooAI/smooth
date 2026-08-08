@@ -40,6 +40,8 @@ pub mod imessage;
 pub mod knowledge_search;
 pub mod path;
 pub mod permission;
+/// File-based CLI-wrapper plugins (`plugin.toml` manifests) registered as tools.
+pub mod plugin;
 pub mod read;
 pub mod remember;
 /// macOS Reminders (EventKit, in-process). Platform-specific by nature — there
@@ -69,6 +71,7 @@ pub use guard::is_circuit_breaker;
 pub use imessage::IMessageTool;
 pub use knowledge_search::KnowledgeSearchTool;
 pub use path::resolve_workspace_path;
+pub use plugin::{discover as discover_plugins, tools_for as plugin_tools, LoadedPlugin, PluginManifest, PluginScope};
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::{RecallTool, RememberTool};
 #[cfg(target_os = "macos")]
