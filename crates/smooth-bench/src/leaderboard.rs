@@ -69,6 +69,12 @@ impl Cell {
     }
 }
 
+/// Round to six decimals — enough for a sub-cent `$/pass`, few enough
+/// that f64 noise never reaches a published table.
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
 /// Cost of one additional passing scenario, in dollars.
 ///
 /// `None` when nothing passed — a free run that solves nothing has no
@@ -179,12 +185,25 @@ impl Scoreboard {
                 passed: r.passed,
                 conclusive: r.conclusive,
                 inconclusive: r.inconclusive,
-                cost_usd: r.cost_resolvable.then_some(r.cost_usd),
-                cost_per_pass_usd: cost_per_pass(r),
+                // Pre-rounded like `pass_rate_pct`, for the same reason:
+                // this is a published artefact, and raw f64 renders as
+                // "$5.249943000000227" in the table. Six decimals keeps
+                // sub-cent per-pass figures meaningful without leaking
+                // float noise into a document people read.
+                cost_usd: r.cost_resolvable.then(|| round6(r.cost_usd)),
+                cost_per_pass_usd: cost_per_pass(r).map(round6),
                 duration_s: (r.duration_ms as f64 / 100.0).round() / 10.0,
             })
             .collect();
-        let scenario_count = rows.first().map_or(0, |r| r.cells.len());
+        // DISTINCT scenarios. `cells` carries one entry per TRIAL, so a
+        // 15-scenario suite at 3 trials has 45 cells — publishing that as
+        // "45 scenarios" overstates the suite by the trial count.
+        let scenario_count = rows.first().map_or(0, |r| {
+            let mut ids: Vec<&str> = r.cells.iter().map(|(id, _)| id.as_str()).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len()
+        });
         Self {
             suite: suite.to_string(),
             trials,
@@ -386,6 +405,24 @@ mod tests {
         let rows = vec![real, noisy];
         let order: Vec<&str> = ranked(&rows).iter().map(|r| r.model.as_str()).collect();
         assert_eq!(order, ["real", "noisy"], "input order preserved; noise must not sort ahead");
+    }
+
+    #[test]
+    fn scenario_count_counts_scenarios_not_trials() {
+        // Real run: 15 scenarios x 3 trials produced 45 cells, and the
+        // published table read "45 scenario(s), 3 trial(s) each".
+        let cells: Vec<(&str, Cell)> = ["a", "a", "a", "b", "b", "b"].iter().map(|id| (*id, Cell::Pass)).collect();
+        let b = Scoreboard::from_rows("convo", 3, &[row("m", 1.0, 6, 0.1, &cells)]);
+        assert_eq!(b.scenario_count, 2, "two scenarios, three trials each — not six");
+    }
+
+    #[test]
+    fn published_money_is_rounded() {
+        // Raw f64 rendered as "$5.249943000000227" in the docs table.
+        let r = row("m", 1.0, 2, 5.249_943_000_000_227, &[("a", Cell::Pass)]);
+        let b = Scoreboard::from_rows("convo", 1, &[r]);
+        assert_eq!(b.models[0].cost_usd, Some(5.249_943));
+        assert_eq!(b.models[0].cost_per_pass_usd, Some(2.624_972), "half of the rounded total, rounded");
     }
 
     #[test]
