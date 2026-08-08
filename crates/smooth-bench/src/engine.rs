@@ -329,6 +329,30 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
 /// # Errors
 /// Errors on prep failure, spawn failure, or if the port never listens
 /// within `ready_timeout`.
+
+/// How long to let a port free up before calling it someone else's.
+///
+/// Sized for the sequential case: one scenario's engine is killed and
+/// the next boots immediately, so the socket is typically released
+/// within a second.
+const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Poll until nothing is listening on `addr`, or `timeout` elapses.
+///
+/// Returns whether the port came free.
+fn wait_for_port_free(addr: SocketAddr, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// Open `<log_dir>/<engine>.log` twice (stdout + stderr both append to
 /// it, interleaved as the process emits them).
 ///
@@ -405,11 +429,18 @@ fn spawn_engine(
     // from a stranger's, so without this check the bench would attach to
     // the wrong process and score it. That is the same class of failure
     // as benchmarking a stale binary, and just as invisible.
-    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+    // WAIT for it, then refuse. The suite boots a fresh engine per
+    // scenario and the previous one's port is still in TIME_WAIT for a
+    // moment after its guard kills it — failing fast here turned 23 of
+    // 28 scenarios into "engine boot failed" in the first run after this
+    // check landed. A few seconds of patience distinguishes "the last
+    // scenario is still letting go" from "someone else owns this".
+    if !wait_for_port_free(addr, PORT_RELEASE_TIMEOUT) {
         anyhow::bail!(
-            "{addr} is already in use, so the {} engine cannot start there. Another bench run \
-             (or a leftover daemon) owns it — the bench refuses to attach to a process it did not \
-             spawn, because it would score that one instead. Stop the other run, or wait for it.",
+            "{addr} is still in use after {PORT_RELEASE_TIMEOUT:?}, so the {} engine cannot start \
+             there. Another bench run (or a leftover daemon) owns it — the bench refuses to attach \
+             to a process it did not spawn, because it would score that one instead. Stop the \
+             other run, or wait for it.",
             engine.as_str()
         );
     }
@@ -1399,5 +1430,27 @@ mod tests {
             open_engine_log(f.path(), Engine::Rust).is_none(),
             "a file where a dir belongs must yield None, not panic"
         );
+    }
+    /// Regression: the port check originally failed fast, which turned 23
+    /// of 28 agentic scenarios into "engine boot failed" — each scenario
+    /// boots a fresh engine and the previous one's socket is still
+    /// closing.
+    #[test]
+    fn a_free_port_is_free_immediately() {
+        // Bind and drop, so the address is known-unused.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        drop(l);
+        assert!(wait_for_port_free(addr, Duration::from_secs(2)), "an unused port must not be waited on");
+    }
+
+    #[test]
+    fn an_occupied_port_is_reported_after_the_timeout_not_before() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let start = std::time::Instant::now();
+        assert!(!wait_for_port_free(addr, Duration::from_millis(900)), "a held port must not read as free");
+        assert!(start.elapsed() >= Duration::from_millis(800), "it must actually wait before giving up");
+        drop(l);
     }
 }
