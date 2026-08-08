@@ -11,6 +11,10 @@ publish:
 directories:
     output: release
     buildResources: build
+# Assembles + signs the nested TCC helper (Contents/Helpers/BigSmoothTCC.app)
+# whose main executable is smooth-daemon, so macOS shows the Calendar/Reminders
+# prompt. Runs after packaging, before signing. macOS-only inside the hook.
+afterPack: scripts/after-pack.mjs
 files:
     - dist/**
     - assets/**

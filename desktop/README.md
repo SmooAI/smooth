@@ -63,35 +63,48 @@ repo root does both in the right order.
   installer — is left untouched, never clobbered; the app logs and defers to it.
   Logic + tests in `src/installth.ts`.
 
-## TCC (macOS permissions) — known gap
+## TCC (macOS permissions)
 
-**Calendar and Reminders do not prompt yet.** Measured, not assumed:
+macOS shows the EventKit prompt only for a signed bundle whose _main executable_
+asks. Measured, not assumed:
 
 | Setup                                                                                                                 | Result                          |
 | --------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
 | `smooth-daemon tcc calendar` spawned as a child of the signed Electron app, all usage strings in the app's Info.plist | `not-determined`, **no prompt** |
 | The _identical binary_, same signature, as an app bundle's `CFBundleExecutable`, launched via `open`                  | prompt appears correctly        |
 
-The usage strings on the Electron bundle are necessary but not sufficient: a
-spawned child inherits grants the responsible app already has, but it is not
-allowed to _ask_. Asking appears to require being an app bundle's main executable
-launched through LaunchServices. Two candidate fixes, neither in this PR:
+The Electron app's main executable is Electron, and it spawns `smooth-daemon` as
+a child — a spawned child inherits grants the responsible app already has, but it
+is not allowed to _ask_.
 
-1. **Nested helper app.** Ship the daemon as `Big Smooth Helper.app` inside
-   `Contents/Resources/` — which is what `scripts/macos/make-app-bundle.sh`
-   already builds — and `open` it. Grants then attribute to the helper's bundle
-   id rather than the Electron app's, which also means the long-running server
-   has to be launched the same way in order to _use_ them, so daemon lifecycle
-   management changes.
-2. **Native module.** Call EventKit from the Electron main process. Correct
-   attribution, at the cost of a compiled native dependency.
+**The fix (nested helper app, pearl th-fd06bf).** `scripts/after-pack.mjs`
+assembles a tiny helper bundle at `Contents/Helpers/BigSmoothTCC.app` whose
+`CFBundleExecutable` IS `smooth-daemon` (a copy of the same bundled binary),
+with the Calendar/Reminders usage strings and a stable bundle id
+(`ai.smoo.smooth-daemon`, matching the native bundle's TCC key). The hook runs
+before signing, so electron-builder's `@electron/osx-sign` signs the nested
+bundle with the app's Developer ID + hardened runtime (the same recursive
+signing that already covers the bundled `smooth-daemon`/`th` under
+`Contents/Resources`), and it notarizes. The tray's **Set Up → Calendar…/Reminders…** and
+`th doctor --setup-calendar`/`--setup-reminders` launch it via
+`open -n <helper> --args tcc <what>`, which prompts. `open` can't return the
+child's stdout, so `grantEventKit()` then polls `smooth-daemon tcc <what>` (as a
+child — reading status works even though asking doesn't) for the result.
 
-Messages (Apple Events) is the same shape — it did not prompt from a spawned
-`osascript` either. Full Disk Access has no prompt by design; that tray item opens
-the System Settings pane and reveals the app.
+**Manual verification** (needs a GUI login session + a signed/notarized build —
+CI does the signing):
 
-Until this is settled, the native `Big Smooth.app` (`scripts/macos/`) still holds
-the working grants on a machine.
+1. Install the built `Big Smooth.app`.
+2. Tray → **Set Up → Calendar…** — macOS should show
+   "Big Smooth would like to access your calendar"; choose **Allow**.
+3. Confirm in System Settings → Privacy & Security → Calendars.
+4. Ask Big Smooth "what's on my calendar today?" (the daemon shells `ical`), or
+   run `ical today` — it should now return events. Repeat with **Reminders…**.
+
+Messages (Apple Events) is the same shape and is still driven by a spawned
+`osascript`; if it needs the same treatment, route it through the helper too.
+Full Disk Access has no prompt by design; that tray item opens the System
+Settings pane and reveals the app.
 
 ## Not done yet
 

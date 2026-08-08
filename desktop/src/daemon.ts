@@ -135,6 +135,26 @@ function repoRoot(): string {
     return join(import.meta.dirname, '..', '..');
 }
 
+/**
+ * Path to the nested TCC helper bundle inside a packaged Big Smooth.app, or
+ * `undefined` off macOS / when unpackaged (no `resourcesPath`). The helper's
+ * main executable is `smooth-daemon`, so launching it via `open` lets macOS
+ * attribute the EventKit prompt to Big Smooth — a spawned daemon child cannot
+ * ask (see after-pack.mjs). `resourcesPath` is `<app>/Contents/Resources`, so
+ * the helper is its sibling under `Contents/Helpers`.
+ */
+export function tccHelperApp(resourcesPath = process.resourcesPath, platform: NodeJS.Platform = process.platform): string | undefined {
+    if (platform !== 'darwin' || !resourcesPath) return undefined;
+    return join(resourcesPath, '..', 'Helpers', 'BigSmoothTCC.app');
+}
+
+/** argv for `/usr/bin/open` that launches the TCC helper to drive one grant.
+ * `-n` forces a fresh instance (the helper exits as soon as the prompt is
+ * answered); `--args` forwards the rest to the helper's `smooth-daemon`. */
+export function tccOpenArgs(helperApp: string, what: 'calendar' | 'reminders'): string[] {
+    return ['-n', helperApp, '--args', 'tcc', what];
+}
+
 export async function isHealthy(url = baseUrl()): Promise<boolean> {
     try {
         const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1500) });
