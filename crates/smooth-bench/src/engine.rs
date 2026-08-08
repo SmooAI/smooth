@@ -279,7 +279,7 @@ impl TaskRunner for EngineTaskRunner {
     async fn run_one(&self, lang: crate::PolyglotLang, task: &str, opts: &crate::BenchOpts) -> Result<TaskOutcome> {
         let setup = crate::prepare_task(lang, task)?;
         let port = self.engine.default_port();
-        let (url, token, _guard) = spawn_engine(self.engine, &self.model, &setup.work_dir, &self.repo, &self.env, self.ready_timeout, port)?;
+        let (url, token, _guard) = spawn_engine(self.engine, &self.model, &setup.work_dir, &self.repo, &self.env, self.ready_timeout, port, None)?;
         let result = crate::run_prepared(lang, task, &setup, &url, token.as_deref(), opts).await?;
         // `_guard` drops here → the engine (and its children) are reaped
         // before the next task boots on the same port.
@@ -321,6 +321,21 @@ fn apply_engine_env(command: &mut Command, model: &str, env: &EngineEnv) {
 /// Errors on prep failure, spawn failure, or if the port never listens
 /// within `ready_timeout`.
 #[allow(clippy::too_many_arguments)]
+/// Open `<log_dir>/<engine>.log` twice (stdout + stderr both append to
+/// it, interleaved as the process emits them).
+///
+/// Returns `None` on any filesystem failure: losing the log is worth a
+/// degraded run, never a failed one — the bench's job is to score the
+/// engine, not to insist on observing it.
+fn open_engine_log(log_dir: &Path, engine: Engine) -> Option<(std::fs::File, std::fs::File)> {
+    std::fs::create_dir_all(log_dir).ok()?;
+    let path = log_dir.join(format!("{}.log", engine.as_str()));
+    let out = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()?;
+    let err = out.try_clone().ok()?;
+    eprintln!("engine log: {}", path.display());
+    Some((out, err))
+}
+
 fn spawn_engine(
     engine: Engine,
     model: &str,
@@ -329,6 +344,7 @@ fn spawn_engine(
     env: &EngineEnv,
     ready_timeout: Duration,
     port: u16,
+    log_dir: Option<&Path>,
 ) -> Result<(String, Option<String>, KillOnDrop)> {
     prepare_engine(engine, repo)?;
     let cmd = engine.boot_command(repo, port, workspace);
@@ -355,7 +371,18 @@ fn spawn_engine(
     // Unix-only; windows has no equivalent (see the cfg'd import above).
     #[cfg(unix)]
     command.process_group(0);
-    command.stdout(Stdio::null()).stderr(Stdio::null());
+    // Capture the engine's output when we have somewhere to put it.
+    // Discarding it unconditionally is what made "the .NET engine returns
+    // INTERNAL_ERROR" undiagnosable — the stack trace went to /dev/null
+    // (th-901bdc). A dead engine with no log is a dead end.
+    match log_dir.and_then(|d| open_engine_log(d, engine)) {
+        Some((out, err)) => {
+            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        None => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
 
     let child = command
         .spawn()
@@ -804,9 +831,9 @@ pub trait WorkspaceBooter: Send + Sync {
 
 #[async_trait]
 impl WorkspaceBooter for ProcessBooter {
-    async fn boot_workspace(&self, engine: Engine, model: &str, workspace: &Path, _log_dir: &Path) -> Result<BootedServer> {
+    async fn boot_workspace(&self, engine: Engine, model: &str, workspace: &Path, log_dir: &Path) -> Result<BootedServer> {
         let port = engine.default_port();
-        let (url, token, guard) = spawn_engine(engine, model, workspace, &self.repo, &self.env, self.ready_timeout, port)?;
+        let (url, token, guard) = spawn_engine(engine, model, workspace, &self.repo, &self.env, self.ready_timeout, port, Some(log_dir))?;
         Ok(BootedServer {
             url,
             token,
@@ -1312,5 +1339,29 @@ mod tests {
         assert_eq!(get("SMOOAI_GATEWAY_URL").as_deref(), Some("https://llm.smoo.ai/v1"));
         assert_eq!(get("SMOOAI_GATEWAY_KEY").as_deref(), Some("k"));
         assert!(get("SMOOTH_PERSONA").is_none(), "an unset persona must not be exported");
+    }
+
+    #[test]
+    fn engine_log_is_named_after_the_engine_and_appends() {
+        // Two opens of the same log must not truncate each other —
+        // stdout and stderr both write to it, interleaved.
+        let d = tempfile::tempdir().expect("tmp");
+        let (mut a, mut b) = open_engine_log(d.path(), Engine::Dotnet).expect("opens");
+        use std::io::Write as _;
+        writeln!(a, "from stdout").expect("write");
+        writeln!(b, "from stderr").expect("write");
+        let text = std::fs::read_to_string(d.path().join("dotnet.log")).expect("read");
+        assert!(text.contains("from stdout"), "{text}");
+        assert!(text.contains("from stderr"), "stderr must append, not truncate: {text}");
+    }
+
+    #[test]
+    fn a_bad_log_dir_degrades_instead_of_failing_the_run() {
+        // Losing the log is worth a degraded run, never a failed one.
+        let f = tempfile::NamedTempFile::new().expect("tmp");
+        assert!(
+            open_engine_log(f.path(), Engine::Rust).is_none(),
+            "a file where a dir belongs must yield None, not panic"
+        );
     }
 }
