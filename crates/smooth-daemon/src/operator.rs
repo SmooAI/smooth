@@ -859,6 +859,15 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         .context("spawning the local-flavor operator")?;
     tracing::info!(addr = %server.addr(), url = %format!("http://{}/", server.addr()), "smooth local-flavor operator listening (smooth-web SPA same-origin + canonical WS protocol)");
 
+    // Advertise the bound address so a client (the desktop app) can find THIS
+    // daemon on whatever port it actually landed on — not a guessed default.
+    // Critical on hosts where the default `:8787` is taken by another service
+    // (smoo-hub runs the SmooHub dashboard there, so SMOOTH_ADDR moves us to
+    // `:8788`); without this a double-clicked app defaults to `:8787` and loads
+    // the wrong app. Best-effort: an unwritable `~/.smooth` just falls back to
+    // the client's own default. (th-8af70d)
+    persist_daemon_addr(&server.addr().to_string());
+
     // Reachability: if Tailscale is present and the node is up, expose the daemon
     // over the user's *tailnet* via `tailscale serve` (never funnel — tailnet-
     // private) so other devices reach it at https://<host>.<tailnet>.ts.net with
@@ -902,6 +911,34 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     tracing::info!("shutdown signal received");
     server.shutdown().await.context("shutting down local operator")?;
     Ok(())
+}
+
+/// Write the daemon's bound `host:port` to `~/.smooth/daemon.addr` so clients
+/// discover it on whatever port it actually landed on. Best-effort: a missing
+/// home or unwritable dir is logged, not fatal. (th-8af70d)
+fn persist_daemon_addr(addr: &str) {
+    let Some(dir) = dirs_next::home_dir().map(|h| h.join(".smooth")) else {
+        tracing::debug!("no home dir — skipping daemon.addr advertisement");
+        return;
+    };
+    match persist_daemon_addr_to(&dir, addr) {
+        Ok(path) => tracing::debug!(path = %path.display(), %addr, "advertised daemon addr for client discovery"),
+        Err(e) => tracing::warn!(error = %e, "could not write daemon.addr — clients will fall back to their default port"),
+    }
+}
+
+/// Pure over its dir so it's testable without touching the real `$HOME`. Writes
+/// `<dir>/daemon.addr` (mode 600 on unix) and returns the path.
+fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("daemon.addr");
+    std::fs::write(&path, addr)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -1583,6 +1620,29 @@ mod tests {
 
     /// `token_path` must land under the real home on every platform — the
     /// tempdir test above deliberately bypasses it, so this covers the wiring.
+    #[test]
+    fn persist_daemon_addr_writes_bound_addr_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::persist_daemon_addr_to(dir.path(), "127.0.0.1:8788").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "127.0.0.1:8788");
+        assert!(path.ends_with("daemon.addr"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn persist_daemon_addr_creates_missing_dir_and_overwrites() {
+        let base = tempfile::tempdir().unwrap();
+        let nested = base.path().join("does/not/exist/.smooth");
+        super::persist_daemon_addr_to(&nested, "127.0.0.1:8787").unwrap();
+        // A later run on a different port overwrites cleanly.
+        let path = super::persist_daemon_addr_to(&nested, "127.0.0.1:9999").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "127.0.0.1:9999");
+    }
+
     #[test]
     fn token_path_is_under_the_home_dot_smooth() {
         let p = token_path();
