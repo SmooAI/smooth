@@ -836,12 +836,199 @@ impl std::fmt::Debug for BigSmoothClient {
 }
 
 // ---------------------------------------------------------------------------
+// One-shot conversation queries (pearl th-aaa53a)
+// ---------------------------------------------------------------------------
+
+/// One row for the conversation sidebar, from the daemon's canonical
+/// `list_conversations` — the SAME wire the web SPA sidebar reads
+/// (`operator.ts::ConversationSummary`).
+#[derive(Debug, Clone)]
+pub struct RemoteConversation {
+    pub conversation_id: String,
+    pub title: String,
+    /// ISO-8601 timestamp string; parsed defensively by the caller.
+    pub updated_at: String,
+    pub message_count: u64,
+}
+
+/// Open a short-lived canonical WS connection to `url`, run `send_frames`,
+/// and scan replies until `extract` returns a value or the timeout lapses.
+/// The one-shot shape (connect → ask → parse → drop) is deliberate: sidebar
+/// queries are rare and tiny, and reusing the per-turn client would tangle
+/// its read loop with turn streaming.
+async fn one_shot_query<T>(url: &str, send_frames: Vec<serde_json::Value>, mut extract: impl FnMut(&serde_json::Value) -> Option<T>) -> anyhow::Result<T> {
+    let ws_url = url.trim_end_matches('/').replace("http://", "ws://").replace("https://", "wss://");
+    let mut ws_url = format!("{ws_url}/ws");
+    if let Some(token) = local_token() {
+        ws_url = format!("{ws_url}?token={}", percent_encode_token(&token));
+    }
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await?;
+    for frame in send_frames {
+        ws.send(tungstenite::Message::Text(frame.to_string().into())).await?;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let msg = tokio::time::timeout_at(deadline, ws.next()).await;
+        let Ok(Some(Ok(msg))) = msg else {
+            anyhow::bail!("no reply from Big Smooth within 5s");
+        };
+        let tungstenite::Message::Text(text) = msg else { continue };
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(out) = extract(&frame) {
+            let _ = ws.send(tungstenite::Message::Close(None)).await;
+            return Ok(out);
+        }
+    }
+}
+
+/// Fetch the recent-conversation list (most-recent first, non-empty only —
+/// the server filters). Sessionless: `list_conversations` needs no bound
+/// session, so nothing is minted server-side by opening the sidebar.
+pub async fn list_remote_conversations(url: &str) -> anyhow::Result<Vec<RemoteConversation>> {
+    let frame = serde_json::json!({ "action": "list_conversations", "requestId": "th-code-lc" });
+    one_shot_query(url, vec![frame], |v| {
+        let convs = v.get("data")?.get("conversations")?.as_array()?;
+        Some(
+            convs
+                .iter()
+                .filter_map(|c| {
+                    Some(RemoteConversation {
+                        conversation_id: c.get("conversationId")?.as_str()?.to_string(),
+                        title: c.get("title").and_then(serde_json::Value::as_str).unwrap_or("(untitled)").to_string(),
+                        updated_at: c.get("updatedAt").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                        message_count: c.get("messageCount").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect(),
+        )
+    })
+    .await
+}
+
+/// Fetch a conversation's stored history as oldest-first (role, text) pairs.
+///
+/// One socket, two rounds: resume-bind a throwaway session to the
+/// conversation (a RESUME server-side — no new conversation is minted, and
+/// `get_conversation_messages` is a session-scoped read), then request the
+/// messages with the sessionId that reply handed back.
+pub async fn fetch_conversation_history(url: &str, conversation_id: &str) -> anyhow::Result<Vec<PriorMessage>> {
+    let ws_url = url.trim_end_matches('/').replace("http://", "ws://").replace("https://", "wss://");
+    let mut ws_url = format!("{ws_url}/ws");
+    if let Some(token) = local_token() {
+        ws_url = format!("{ws_url}?token={}", percent_encode_token(&token));
+    }
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await?;
+    let hello = serde_json::json!({
+        "action": "create_conversation_session",
+        "requestId": "th-code-hist-cs",
+        "agentId": uuid::Uuid::new_v4().to_string(),
+        "userName": "th code",
+        "conversationId": conversation_id,
+    });
+    ws.send(tungstenite::Message::Text(hello.to_string().into())).await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut session_id: Option<String> = None;
+    let messages = loop {
+        let msg = tokio::time::timeout_at(deadline, ws.next()).await;
+        let Ok(Some(Ok(msg))) = msg else {
+            anyhow::bail!("no reply from Big Smooth within 5s");
+        };
+        let tungstenite::Message::Text(text) = msg else { continue };
+        let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(data) = frame.get("data") else { continue };
+
+        // Round 1 reply: the bound session. Fire the history request on the
+        // same socket and keep scanning.
+        if session_id.is_none() {
+            if let Some(sid) = data.get("sessionId").and_then(serde_json::Value::as_str) {
+                session_id = Some(sid.to_string());
+                let get = serde_json::json!({
+                    "action": "get_conversation_messages",
+                    "requestId": "th-code-hist-gm",
+                    "sessionId": sid,
+                    "conversationId": conversation_id,
+                });
+                ws.send(tungstenite::Message::Text(get.to_string().into())).await?;
+                continue;
+            }
+        }
+        // Round 2 reply: the stored messages.
+        if let Some(msgs) = data.get("messages").and_then(serde_json::Value::as_array) {
+            break msgs.iter().filter_map(parse_history_message).collect::<Vec<_>>();
+        }
+    };
+    let _ = ws.send(tungstenite::Message::Close(None)).await;
+    // Server returns newest-first; the transcript renders oldest-first.
+    let mut messages = messages;
+    messages.reverse();
+    Ok(messages)
+}
+
+/// One stored domain `Message` → a transcript entry. `direction`
+/// ('inbound' = user, 'outbound' = agent) with a `role` fallback; content is
+/// `{items:[{text}]}`, a bare string, or a `text` field. Empty → skipped.
+fn parse_history_message(m: &serde_json::Value) -> Option<PriorMessage> {
+    let role = match m.get("direction").and_then(serde_json::Value::as_str) {
+        Some("inbound") => "user",
+        Some("outbound") => "assistant",
+        _ => match m.get("role").and_then(serde_json::Value::as_str) {
+            Some(r @ ("user" | "assistant")) => r,
+            _ => return None,
+        },
+    };
+    let content = match m.get("content") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(obj) => obj
+            .get("items")?
+            .as_array()?
+            .iter()
+            .filter_map(|i| i.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => m.get("text")?.as_str()?.to_string(),
+    };
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(PriorMessage {
+        role: role.to_string(),
+        content,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_history_message_maps_direction_content_and_skips_noise() {
+        // Stored domain shape: direction + content.items[].text.
+        let m = serde_json::json!({"direction":"inbound","content":{"items":[{"type":"text","text":"hello"},{"type":"text","text":"there"}]}});
+        let p = parse_history_message(&m).unwrap();
+        assert_eq!(p.role, "user");
+        assert_eq!(p.content, "hello\nthere");
+
+        let m = serde_json::json!({"direction":"outbound","content":{"items":[{"type":"text","text":"hi!"}]}});
+        let p = parse_history_message(&m).unwrap();
+        assert_eq!(p.role, "assistant");
+
+        // Fallback shapes: bare-string content, role instead of direction.
+        let m = serde_json::json!({"role":"assistant","content":"plain"});
+        assert_eq!(parse_history_message(&m).unwrap().content, "plain");
+
+        // Empty content and unknown roles are skipped, not rendered.
+        assert!(parse_history_message(&serde_json::json!({"direction":"inbound","content":{"items":[]}})).is_none());
+        assert!(parse_history_message(&serde_json::json!({"direction":"system-ish","content":"x"})).is_none());
+    }
 
     #[test]
     fn client_event_task_start_serialization() {
