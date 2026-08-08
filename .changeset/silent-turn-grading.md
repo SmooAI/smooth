@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: a silent turn that did work is gradeable (build-shaped turns no longer INCONCLUSIVE)

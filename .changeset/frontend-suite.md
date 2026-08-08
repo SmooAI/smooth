@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: frontend build-and-judge suite — modern-stack API currency (Next 16 / React 19 / Tailwind 4 / TanStack v5)
