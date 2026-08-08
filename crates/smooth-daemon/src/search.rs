@@ -32,13 +32,24 @@
 //! - **paths**: `~` / `.` / `/`-anchored path expansion when the query *looks
 //!   like* a path — directory listing filtered by the partial final component.
 //!
-//! **Pearls are deferred** for v1: `smooth-daemon` does not depend on
-//! `smooth-pearls` or the registry, so wiring a pearl store in would be a new
-//! dependency + a project-resolution decision. Files + paths cover the composer's
-//! primary need; pearls are a documented follow-up.
+//! - **pearls**: open + in-progress pearls from the effective workspace's
+//!   `.smooth/dolt` store (falling back to `~/.smooth/dolt`), matched on id and
+//!   title, capped and cached with a short TTL so a keystroke never pays a Dolt
+//!   open (pearl th-8e9cf6 — resolves the v1 deferral).
+//!
+//! ## `?cwd=` — searching the CLIENT's workspace
+//!
+//! `th code` runs in its own working directory, which need not be the daemon's
+//! workspace. A client may pass `cwd=<dir>` to search there instead. Because
+//! this route is deliberately ungated (see above) and may be tailnet-exposed,
+//! the override is only honored when it canonicalizes to the daemon's own
+//! workspace or somewhere under the user's home directory — the same trust
+//! boundary the rest of the daemon already assumes for its single tenant.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -54,6 +65,14 @@ const MAX_RESULTS: usize = 20;
 /// pathological tree can't turn into an unbounded walk. The pruned walk already
 /// skips the heavy dirs; this caps the long tail.
 const WALK_BUDGET: usize = 20_000;
+
+/// Pearls shown per query — few, high-signal, never crowding out files (same
+/// cap the `th code` picker used when it read Dolt itself).
+const MAX_PEARLS: usize = 6;
+
+/// How long a loaded pearl set stays fresh. Pearls don't change mid-keystroke;
+/// this keeps the Dolt open off the per-request path.
+const PEARL_TTL: Duration = Duration::from_secs(30);
 
 /// One autocomplete suggestion. `kind` is the suggestion family the composer
 /// renders; `value` is the text inserted on accept; `label` is the display name;
@@ -74,11 +93,28 @@ pub struct SearchResponse {
     pub results: Vec<SearchResult>,
 }
 
-/// The `?q=` query string (defaulting to empty so a bare `/search` is valid).
+/// The `?q=` query string (defaulting to empty so a bare `/search` is valid),
+/// plus the optional `?cwd=` workspace override (guarded — see module docs).
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
     #[serde(default)]
     q: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// One open/in-progress pearl, pre-fetched from the Dolt store.
+#[derive(Debug, Clone)]
+pub struct PearlEntry {
+    pub id: String,
+    pub title: String,
+}
+
+/// Router state: the daemon workspace plus a per-directory TTL cache of
+/// pearl sets, so `/search` never opens Dolt on the hot path twice in a row.
+struct SearchState {
+    workspace: PathBuf,
+    pearls: tokio::sync::Mutex<HashMap<PathBuf, (Instant, Vec<PearlEntry>)>>,
 }
 
 /// A match candidate: the text ranked against the query (`haystack`) paired with
@@ -94,13 +130,99 @@ struct Candidate {
 /// (state already applied) so it merges directly into the operator's router via
 /// the `serve_routes` seam.
 pub fn search_router(workspace: PathBuf) -> Router {
-    Router::new().route("/search", get(search_handler)).with_state(Arc::new(workspace))
+    let state = SearchState {
+        workspace,
+        pearls: tokio::sync::Mutex::new(HashMap::new()),
+    };
+    Router::new().route("/search", get(search_handler)).with_state(Arc::new(state))
 }
 
-/// `GET /search?q=<query>` → ranked file + path suggestions.
-async fn search_handler(State(workspace): State<Arc<PathBuf>>, Query(query): Query<SearchQuery>) -> Json<SearchResponse> {
-    let results = search(&workspace, &query.q);
+/// `GET /search?q=<query>[&cwd=<dir>]` → ranked path + pearl + file suggestions.
+async fn search_handler(State(state): State<Arc<SearchState>>, Query(query): Query<SearchQuery>) -> Json<SearchResponse> {
+    let workspace = query
+        .cwd
+        .as_deref()
+        .and_then(|c| allowed_cwd(c, dirs_next::home_dir().as_deref(), &state.workspace))
+        .unwrap_or_else(|| state.workspace.clone());
+    let pearls = cached_pearls(&state, &workspace).await;
+    let results = search_with_pearls(&workspace, &query.q, &pearls);
     Json(SearchResponse { results })
+}
+
+/// Validate a client-supplied `cwd` override: it must canonicalize to a real
+/// directory that is the daemon's own workspace or under the user's home dir.
+/// Anything else falls back to the daemon workspace (never an error — mentions
+/// must degrade, not trap).
+fn allowed_cwd(requested: &str, home: Option<&Path>, workspace: &Path) -> Option<PathBuf> {
+    let canon = std::fs::canonicalize(requested).ok()?;
+    if !canon.is_dir() {
+        return None;
+    }
+    let ws_canon = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    if canon == ws_canon || home.is_some_and(|h| canon.starts_with(h)) {
+        Some(canon)
+    } else {
+        None
+    }
+}
+
+/// The pearl set for `workspace`, from the TTL cache or a fresh (blocking,
+/// off-runtime) Dolt load. Any failure — no store, no dolt binary — caches an
+/// empty set so a broken store doesn't retry-hammer on every keystroke.
+async fn cached_pearls(state: &SearchState, workspace: &Path) -> Vec<PearlEntry> {
+    let mut cache = state.pearls.lock().await;
+    if let Some((at, entries)) = cache.get(workspace) {
+        if at.elapsed() < PEARL_TTL {
+            return entries.clone();
+        }
+    }
+    let ws = workspace.to_path_buf();
+    let entries = tokio::task::spawn_blocking(move || load_pearls(&ws)).await.unwrap_or_default();
+    cache.insert(workspace.to_path_buf(), (Instant::now(), entries.clone()));
+    entries
+}
+
+/// Best-effort load of open + in-progress pearls: `<workspace>/.smooth/dolt`
+/// first (project store), then `~/.smooth/dolt` (global) — the same candidate
+/// order the `th code` picker used when it read Dolt itself. Empty on any
+/// failure.
+fn load_pearls(workspace: &Path) -> Vec<PearlEntry> {
+    use smooth_pearls::{PearlQuery, PearlStatus, PearlStore};
+    let candidates = [Some(workspace.join(".smooth/dolt")), dirs_next::home_dir().map(|h| h.join(".smooth/dolt"))];
+    for dir in candidates.into_iter().flatten() {
+        if !dir.exists() {
+            continue;
+        }
+        let Ok(store) = PearlStore::open(&dir) else { continue };
+        let Ok(pearls) = store.list(&PearlQuery::new()) else { continue };
+        return pearls
+            .into_iter()
+            .filter(|p| !matches!(p.status, PearlStatus::Closed))
+            .take(100)
+            .map(|p| PearlEntry { id: p.id, title: p.title })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Filter `pearls` to those whose id or title contains `query`
+/// (case-insensitive), capped at [`MAX_PEARLS`]. Pure, like [`rank_matches`].
+fn pearl_results(query: &str, pearls: &[PearlEntry]) -> Vec<SearchResult> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    pearls
+        .iter()
+        .filter(|p| p.id.to_lowercase().contains(&q) || p.title.to_lowercase().contains(&q))
+        .take(MAX_PEARLS)
+        .map(|p| SearchResult {
+            kind: "pearl",
+            value: p.id.clone(),
+            label: p.id.clone(),
+            detail: Some(p.title.clone()),
+        })
+        .collect()
 }
 
 /// Resolve `query` against `workspace`: path expansions first (when the query
@@ -108,12 +230,21 @@ async fn search_handler(State(workspace): State<Arc<PathBuf>>, Query(query): Que
 /// matches, merged and capped at [`MAX_RESULTS`]. Empty query → no results.
 #[must_use]
 pub fn search(workspace: &Path, query: &str) -> Vec<SearchResult> {
+    search_with_pearls(workspace, query, &[])
+}
+
+/// [`search`] plus pearl suggestions: path expansions first (explicit intent),
+/// then matching pearls (scarce, high-signal), then ranked files fill the
+/// remainder up to [`MAX_RESULTS`].
+#[must_use]
+pub fn search_with_pearls(workspace: &Path, query: &str, pearls: &[PearlEntry]) -> Vec<SearchResult> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
 
     let mut results = expand_path_query(trimmed);
+    results.extend(pearl_results(trimmed, pearls));
     results.extend(rank_matches(trimmed, file_candidates(workspace, WALK_BUDGET)));
     results.truncate(MAX_RESULTS);
     results
@@ -327,6 +458,66 @@ fn expand_tilde(path: &str) -> PathBuf {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    fn pearl(id: &str, title: &str) -> PearlEntry {
+        PearlEntry {
+            id: id.to_string(),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn pearl_results_match_id_and_title_case_insensitive_and_cap() {
+        let pearls: Vec<PearlEntry> = (0..10).map(|i| pearl(&format!("th-aaa{i:03}"), &format!("Fix the composer {i}"))).collect();
+        // id substring
+        let by_id = pearl_results("aaa003", &pearls);
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].kind, "pearl");
+        assert_eq!(by_id[0].value, "th-aaa003");
+        assert_eq!(by_id[0].detail.as_deref(), Some("Fix the composer 3"));
+        // title substring, case-insensitive, capped at MAX_PEARLS
+        let by_title = pearl_results("COMPOSER", &pearls);
+        assert_eq!(by_title.len(), MAX_PEARLS);
+        // no match / empty query → nothing
+        assert!(pearl_results("zzz", &pearls).is_empty());
+        assert!(pearl_results("  ", &pearls).is_empty());
+    }
+
+    #[test]
+    fn search_with_pearls_puts_pearls_before_files() {
+        let dir = std::env::temp_dir().join(format!("smooth-search-pearls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("composer.rs"), "x").unwrap();
+
+        let pearls = vec![pearl("th-8e9cf6", "one @-mention backend for the composer")];
+        let results = search_with_pearls(&dir, "composer", &pearls);
+        let kinds: Vec<&str> = results.iter().map(|r| r.kind).collect();
+        let pearl_idx = kinds.iter().position(|k| *k == "pearl").unwrap();
+        let file_idx = kinds.iter().position(|k| *k == "file").unwrap();
+        assert!(pearl_idx < file_idx, "pearl should rank before the file: {kinds:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn allowed_cwd_accepts_home_and_workspace_rejects_elsewhere() {
+        let home = dirs_next::home_dir().unwrap();
+        let ws = std::env::temp_dir().join(format!("smooth-cwd-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // The daemon's own workspace is allowed even outside home (e.g. /tmp).
+        let ws_str = ws.display().to_string();
+        assert!(allowed_cwd(&ws_str, Some(&home), &ws).is_some());
+        // A directory under home is allowed.
+        let home_str = home.display().to_string();
+        assert!(allowed_cwd(&home_str, Some(&home), &ws).is_some());
+        // Outside home and not the workspace → refused. `/` is always a dir.
+        assert!(allowed_cwd("/", Some(&home), &ws).is_none());
+        // Nonexistent → refused.
+        assert!(allowed_cwd("/definitely/not/a/dir", Some(&home), &ws).is_none());
+
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
 
     fn cand(path: &str) -> Candidate {
         Candidate {

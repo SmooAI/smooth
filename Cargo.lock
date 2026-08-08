@@ -5213,6 +5213,7 @@ dependencies = [
  "smooai-smooth-operator",
  "smooai-smooth-operator-core",
  "smooai-smooth-operator-server",
+ "smooai-smooth-pearls",
  "smooai-smooth-policy",
  "smooai-smooth-tools",
  "smooai-smooth-web",
