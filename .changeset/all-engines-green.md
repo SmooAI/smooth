@@ -1,5 +1,5 @@
 ---
-'smooth': patch
+'@smooai/smooth': patch
 ---
 
 bench: export SMOOTH_WORKSPACE for every engine, and refuse to attach to a foreign process
