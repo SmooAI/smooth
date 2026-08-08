@@ -507,7 +507,58 @@ impl ConvoRun {
     /// Whether every trial's status lets the suite exit zero.
     #[must_use]
     pub fn suite_ok(&self) -> bool {
-        self.results.iter().all(|r| r.status.suite_ok())
+        self.flaky_expected_gaps().1
+    }
+
+    /// Scenario-level verdict for `expect_fail` gaps, plus whether the
+    /// suite is green.
+    ///
+    /// `expect_fail` is a claim about a scenario, not about one trial, so
+    /// it has to be judged across the trials of that scenario. Measured
+    /// at `--trials 3`, the documented interrupt gap came back
+    /// `XFAIL, XFAIL, XPASS` — it is not broken, it is **flaky**. Judging
+    /// per-trial, that single XPASS failed the whole run (exit 1), so a
+    /// ~1-in-3 flake would turn CI red at random. A benchmark that cries
+    /// wolf gets ignored, which costs more than the gap it was reporting.
+    ///
+    /// So: an `expect_fail` scenario only counts as XPASS — "the gap is
+    /// closed, drop the flag" — when it passed on EVERY conclusive trial.
+    /// A partial pass is a flaky gap: the suite stays green and the
+    /// flakiness is reported, because "sometimes works" is real
+    /// information about the gap and not a reason to fail a build.
+    ///
+    /// Returns `(flaky gap descriptions, suite_ok)`.
+    #[must_use]
+    pub fn flaky_expected_gaps(&self) -> (Vec<String>, bool) {
+        use std::collections::BTreeMap;
+
+        let mut by_scenario: BTreeMap<&str, Vec<&ConvoOutcome>> = BTreeMap::new();
+        for r in &self.results {
+            by_scenario.entry(r.id.as_str()).or_default().push(r);
+        }
+
+        let mut flaky = Vec::new();
+        let mut ok = true;
+        for (id, trials) in by_scenario {
+            if trials.first().is_some_and(|t| t.expect_fail) {
+                let passed = trials.iter().filter(|t| t.status == ConvoStatus::XPass).count();
+                let conclusive = trials.iter().filter(|t| t.status != ConvoStatus::Inconclusive).count();
+                if conclusive > 0 && passed == conclusive {
+                    // Consistently passing: the flag is now a lie.
+                    ok = false;
+                } else if passed > 0 {
+                    flaky.push(format!("{id}: expected-fail gap passed {passed}/{conclusive} trials — flaky, not closed"));
+                }
+                // Any inconclusive trial still fails the suite: missing
+                // data must never be read as a satisfied expectation.
+                if trials.iter().any(|t| t.status == ConvoStatus::Inconclusive) {
+                    ok = false;
+                }
+            } else if !trials.iter().all(|t| t.status.suite_ok()) {
+                ok = false;
+            }
+        }
+        (flaky, ok)
     }
 
     /// Human summary table.
@@ -965,5 +1016,91 @@ mod tests {
         assert!(nothing.iter().all(|t| t.tools.is_empty()));
         let rendered = render_transcript(&nothing);
         assert!(rendered.contains("tool calls: none"));
+    }
+    fn outcome(id: &str, status: ConvoStatus, expect_fail: bool) -> ConvoOutcome {
+        ConvoOutcome {
+            id: id.to_string(),
+            trial_index: 0,
+            model: "m".into(),
+            driver_model: "d".into(),
+            judge_model: "j".into(),
+            expect_fail,
+            status,
+            reason: String::new(),
+            scores: None,
+            per_turn: Vec::new(),
+            turns: Vec::new(),
+            duration_ms: 0,
+            cost_usd: 0.0,
+        }
+    }
+
+    fn run_of(results: Vec<ConvoOutcome>) -> ConvoRun {
+        ConvoRun {
+            url: "u".into(),
+            model: "m".into(),
+            driver_model: "d".into(),
+            judge_model: "j".into(),
+            trials: 3,
+            ran_at: chrono::Utc::now(),
+            results,
+        }
+    }
+
+    /// Measured at --trials 3: the documented interrupt gap came back
+    /// XFAIL, XFAIL, XPASS. Judged per-trial that single XPASS failed the
+    /// whole run, so a ~1-in-3 flake would turn CI red at random.
+    #[test]
+    fn a_flaky_expected_gap_does_not_fail_the_suite() {
+        let run = run_of(vec![
+            outcome("rapid-correction", ConvoStatus::XFail, true),
+            outcome("rapid-correction", ConvoStatus::XFail, true),
+            outcome("rapid-correction", ConvoStatus::XPass, true),
+        ]);
+        let (flaky, ok) = run.flaky_expected_gaps();
+        assert!(ok, "a partially-passing known gap must not fail the build");
+        assert_eq!(flaky.len(), 1, "but it must be reported: {flaky:?}");
+        assert!(flaky[0].contains("1/3"), "report the rate: {}", flaky[0]);
+    }
+
+    /// The flag is only a lie when the gap is CONSISTENTLY closed.
+    #[test]
+    fn a_consistently_passing_expected_gap_fails_the_suite() {
+        let run = run_of(vec![
+            outcome("rapid-correction", ConvoStatus::XPass, true),
+            outcome("rapid-correction", ConvoStatus::XPass, true),
+            outcome("rapid-correction", ConvoStatus::XPass, true),
+        ]);
+        let (flaky, ok) = run.flaky_expected_gaps();
+        assert!(!ok, "a gap that always passes means expect_fail is stale — say so loudly");
+        assert!(flaky.is_empty(), "that is not flakiness, it is a closed gap");
+    }
+
+    #[test]
+    fn a_never_passing_expected_gap_is_green_and_quiet() {
+        let run = run_of(vec![
+            outcome("rapid-correction", ConvoStatus::XFail, true),
+            outcome("rapid-correction", ConvoStatus::XFail, true),
+        ]);
+        let (flaky, ok) = run.flaky_expected_gaps();
+        assert!(ok);
+        assert!(flaky.is_empty());
+    }
+
+    /// Missing data must never read as a satisfied expectation.
+    #[test]
+    fn an_inconclusive_trial_still_fails_even_on_an_expected_gap() {
+        let run = run_of(vec![
+            outcome("rapid-correction", ConvoStatus::XFail, true),
+            outcome("rapid-correction", ConvoStatus::Inconclusive, true),
+        ]);
+        assert!(!run.flaky_expected_gaps().1, "an inconclusive trial is missing data, not a pass");
+    }
+
+    #[test]
+    fn ordinary_scenarios_are_unaffected() {
+        assert!(run_of(vec![outcome("a", ConvoStatus::Pass, false), outcome("a", ConvoStatus::Pass, false)]).suite_ok());
+        assert!(!run_of(vec![outcome("a", ConvoStatus::Pass, false), outcome("a", ConvoStatus::Fail, false)]).suite_ok());
+        assert!(!run_of(vec![outcome("a", ConvoStatus::Inconclusive, false)]).suite_ok());
     }
 }
