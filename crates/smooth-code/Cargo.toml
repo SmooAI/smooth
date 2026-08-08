@@ -32,6 +32,8 @@ tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 dirs-next.workspace = true
+# data-URL encoding for composer attachments (same pin as smooth-daemon)
+base64 = "0.22"
 toml.workspace = true
 futures-util.workspace = true
 ignore.workspace = true

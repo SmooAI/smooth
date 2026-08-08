@@ -293,6 +293,9 @@ pub struct AppState {
     /// at indices `< committed_count` so they don't double-paint
     /// inside the viewport while also living above it as scrollback.
     pub committed_count: usize,
+    /// Attachments staged in the composer (pasted images, dragged files),
+    /// sent as data-URL `images[]` on the next turn (pearl th-d16f7c).
+    pub attachments: Vec<crate::attachments::PendingAttachment>,
     /// Current text in the input box. May contain `\n` — the box wraps,
     /// grows, and scrolls (pearl th-958e2e).
     pub input: String,
@@ -413,6 +416,7 @@ impl AppState {
             committed_count: 0,
             input_scroll: 0,
             input_user_scrolled: false,
+            attachments: Vec::new(),
             input: String::new(),
             input_cursor: 0,
             sidebar_visible: false,

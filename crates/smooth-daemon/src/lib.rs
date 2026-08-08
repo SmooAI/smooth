@@ -36,6 +36,7 @@ pub mod operator;
 mod operator_storage;
 pub mod org_auth;
 pub mod push;
+pub mod relay;
 pub mod schedule;
 pub mod scheduler;
 pub mod search;

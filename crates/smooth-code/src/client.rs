@@ -53,6 +53,12 @@ pub enum ClientEvent {
         /// or absent on the first turn.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         prior_messages: Vec<PriorMessage>,
+        /// Composer attachments as full `data:<mime>;base64,…` strings —
+        /// same wire shape the web SPA sends (`frame.images`). Empty for
+        /// text-only turns, and omitted from the frame entirely so nothing
+        /// changes there (pearl th-d16f7c).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
     TaskCancel {
         task_id: String,
@@ -305,7 +311,7 @@ fn stringify(v: Option<&serde_json::Value>) -> String {
 /// session id arrived — the caller buffers instead).
 fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id: &str) -> Option<serde_json::Value> {
     match event {
-        ClientEvent::TaskStart { message, model, .. } => {
+        ClientEvent::TaskStart { message, model, images, .. } => {
             let sid = session_id?;
             let mut frame = serde_json::json!({
                 "action": "send_message",
@@ -315,6 +321,9 @@ fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id:
             });
             if let Some(m) = model.as_ref().filter(|m| !m.is_empty()) {
                 frame["model"] = serde_json::Value::String(m.clone());
+            }
+            if !images.is_empty() {
+                frame["images"] = serde_json::json!(images);
             }
             Some(frame)
         }
@@ -655,6 +664,9 @@ impl BigSmoothClient {
     ///
     /// The returned receiver will yield events until the task completes or
     /// errors.  The caller should drain this receiver.
+    // ponytail: 8 args — fold into a TaskSpec struct when the 9th arrives
+    // (the th-d7366d epic will add more turn fields; do the struct then).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_task(
         &mut self,
         message: &str,
@@ -663,6 +675,7 @@ impl BigSmoothClient {
         working_dir: Option<&str>,
         agent: Option<&str>,
         prior_messages: Vec<PriorMessage>,
+        images: Vec<String>,
     ) -> anyhow::Result<mpsc::UnboundedReceiver<ServerEvent>> {
         let event = ClientEvent::TaskStart {
             message: message.to_string(),
@@ -671,6 +684,7 @@ impl BigSmoothClient {
             working_dir: working_dir.map(ToString::to_string),
             agent: agent.map(ToString::to_string),
             prior_messages,
+            images,
         };
         self.send(&event).await?;
 
@@ -841,6 +855,7 @@ mod tests {
                 role: "user".into(),
                 content: "what repo is this?".into(),
             }],
+            images: vec![],
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
@@ -859,6 +874,7 @@ mod tests {
             working_dir,
             agent,
             prior_messages,
+            images,
         } = parsed
         {
             assert_eq!(message, "build the thing");
@@ -869,6 +885,7 @@ mod tests {
             assert_eq!(prior_messages.len(), 1);
             assert_eq!(prior_messages[0].role, "user");
             assert_eq!(prior_messages[0].content, "what repo is this?");
+            assert!(images.is_empty());
         } else {
             panic!("unexpected variant");
         }
@@ -1007,6 +1024,7 @@ mod tests {
             working_dir: None,
             agent: None,
             prior_messages: vec![],
+            images: vec![],
         };
         client.send(&turn).await.expect("send turn");
         let received2 = rx.recv().await.expect("receive turn");
@@ -1336,6 +1354,7 @@ mod canonical_protocol_tests {
             working_dir: None,
             agent: None,
             prior_messages: vec![],
+            images: vec![],
         };
         let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
         assert_eq!(frame["action"], "send_message");
@@ -1345,6 +1364,24 @@ mod canonical_protocol_tests {
         assert_eq!(frame["requestId"], "turn-1");
         // No session yet -> nothing goes on the wire.
         assert!(to_canonical_frame(&ev, None, "turn-2").is_none());
+        // Text-only turn: no `images` key at all — wire parity with the web
+        // composer, which omits the field rather than sending [].
+        assert!(frame.get("images").is_none());
+    }
+
+    #[test]
+    fn task_start_with_attachments_carries_images_like_the_web_spa() {
+        let ev = ClientEvent::TaskStart {
+            message: "what is in this screenshot?".into(),
+            model: None,
+            budget: None,
+            working_dir: None,
+            agent: None,
+            prior_messages: vec![],
+            images: vec!["data:image/png;base64,AAAA".into()],
+        };
+        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
+        assert_eq!(frame["images"][0], "data:image/png;base64,AAAA");
     }
 
     #[test]

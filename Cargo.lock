@@ -5160,6 +5160,7 @@ version = "0.26.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "crossterm",
  "dirs-next",
