@@ -521,7 +521,14 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     // While a turn is in flight Enter won't dispatch a second one (th-426791) —
     // say so, because a swallowed keystroke otherwise reads as a broken input.
     let label = if state.thinking { "Working… send paused " } else { "Message " };
-    let title_line = Line::from(vec![Span::styled(" ▶ ", theme::title()), Span::styled(label, theme::title())]);
+    let mut title_spans = vec![Span::styled(" ▶ ", theme::title()), Span::styled(label, theme::title())];
+    // Staged attachments ride the border title — one span, no layout math,
+    // and the growing input box stays untouched (pearl th-d16f7c).
+    if !state.attachments.is_empty() {
+        let names: Vec<&str> = state.attachments.iter().map(|a| a.name.as_str()).collect();
+        title_spans.push(Span::styled(format!("· 📎 {} (⌫ on empty removes) ", names.join(", ")), theme::title()));
+    }
+    let title_line = Line::from(title_spans);
     let block = Block::default()
         .title(title_line)
         .borders(Borders::ALL)
