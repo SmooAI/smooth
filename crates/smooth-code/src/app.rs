@@ -181,11 +181,14 @@ pub async fn run_with_session(
 
     // Pick a viewport height that fits the input/status plus a
     // reasonable streaming-preview region. 14 rows (3 input + 1
-    // status + 10 preview) feels right on an 80x24 terminal; if the
-    // terminal is shorter we cap at 60% of its height so the
-    // viewport never crowds out scrollback entirely.
+    // status + 10 preview) feels right on an 80x24 terminal; shorter
+    // terminals cap at 60% of their height so the viewport never
+    // crowds out scrollback, and taller ones scale up to 40% so the
+    // composer's growth ceiling rises with them (pearl th-d5eb9f).
+    // ponytail: sized once at startup — resize re-plumbing through
+    // ratatui's inline viewport when someone actually asks.
     let term_h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
-    let viewport_h = u16::min(14, term_h.saturating_mul(3) / 5).max(4);
+    let viewport_h = u16::max(14, term_h.saturating_mul(2) / 5).min(term_h.saturating_mul(3) / 5).max(4);
     tui_debug(format!("viewport: Inline({viewport_h}), term_height={term_h}"));
 
     let stdout = io::stdout();
@@ -236,6 +239,7 @@ pub async fn run_with_session(
         initial_state.model_name.clone_from(&m);
         initial_state.model_override = Some(m);
     }
+    initial_state.viewport_h = viewport_h;
 
     let state = Arc::new(Mutex::new(initial_state));
 
@@ -470,12 +474,16 @@ fn event_loop(
                     }
                     continue;
                 }
-                // Newlines are KEPT now that the box wraps, grows and scrolls
-                // (th-958e2e). Line endings are normalized over the whole
-                // string, because terminals disagree about the separator
-                // (tmux sends bare `\r`) and CRLF can't be collapsed one char
-                // at a time.
-                s.input_insert_str(text);
+                // A LARGE paste becomes a compact `[Pasted #N — X lines]`
+                // reference instead of flooding the draft; the full text is
+                // expanded back in at send (pearl th-d5eb9f, Claude Code
+                // parity). Small pastes insert inline as before — newlines
+                // KEPT (th-958e2e), endings normalized (tmux sends bare \r).
+                if text.lines().count() > 5 || text.len() > 400 {
+                    s.stage_pasted(text);
+                } else {
+                    s.input_insert_str(text);
+                }
                 continue;
             }
             // Wheel over the input scrolls the draft. Only ever reaches us
@@ -488,7 +496,8 @@ fn event_loop(
                 };
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
-                s.input_scroll_by(delta, cols.saturating_sub(2), crate::composer::MAX_TEXT_ROWS);
+                let cap = crate::composer::max_text_rows(s.viewport_h);
+                s.input_scroll_by(delta, cols.saturating_sub(2), cap);
                 continue;
             }
             // Pearl th-f294fd: clear the screen on terminal resize so
@@ -540,6 +549,12 @@ fn event_loop(
                                 "No image on the clipboard. (Text pastes with your terminal's normal paste key.)".to_string(),
                             )),
                         },
+                        // Readline muscle memory (pearl th-d5eb9f): Ctrl+W
+                        // kills the word, Ctrl+U the line — and they double
+                        // as the reliable spelling of Alt/Cmd+Backspace,
+                        // which many terminals never deliver.
+                        KeyCode::Char('w') => s.input_backspace_word(),
+                        KeyCode::Char('u') => s.input_backspace_line(),
                         _ => {}
                     }
                     // Ctrl-chorded keys are commands, not text — don't let
@@ -579,9 +594,9 @@ fn event_loop(
 ///
 /// Pure and `pub(crate)` so the policy — *capture the mouse only when there is
 /// something to scroll* — is unit-testable without a terminal.
-pub(crate) fn input_overflows(input: &str, term_width: u16) -> bool {
+pub(crate) fn input_overflows(input: &str, term_width: u16, text_cap: u16) -> bool {
     let inner_width = term_width.saturating_sub(2);
-    crate::composer::wrap_rows(input, inner_width).len() > usize::from(crate::composer::MAX_TEXT_ROWS)
+    crate::composer::wrap_rows(input, inner_width).len() > usize::from(text_cap)
 }
 
 /// Turn mouse capture on only while the draft overflows its box, and off the
@@ -599,7 +614,7 @@ pub(crate) fn input_overflows(input: &str, term_width: u16) -> bool {
 /// cursor.
 fn sync_mouse_capture(state: &AppState, captured: &mut bool) {
     let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
-    let want = input_overflows(&state.input, cols);
+    let want = input_overflows(&state.input, cols, crate::composer::max_text_rows(state.viewport_h));
     if want == *captured {
         return;
     }
@@ -1028,6 +1043,21 @@ fn handle_input_mode(
     command_registry: &CommandRegistry,
 ) {
     // ponytail: narc TUI removed with the old-cast crate; re-home onto the new engine's NarcHook later (th-3119e3)
+
+    // Modified Backspace edits by word/line regardless of what popup is up
+    // (pearl th-d5eb9f): Alt+Backspace kills the previous word (crossterm
+    // reports terminals' ESC-DEL as ALT), Cmd+Backspace the line (SUPER/META
+    // only arrives on terminals with an enhanced keyboard protocol — Ctrl+W /
+    // Ctrl+U in the global chord block are the always-works spellings).
+    if key.code == KeyCode::Backspace && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META) {
+        if key.modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META) {
+            state.input_backspace_line();
+        } else {
+            state.input_backspace_word();
+        }
+        state.autocomplete.deactivate();
+        return;
+    }
 
     // Conversation sidebar owns the keyboard while it's visible.
     // Up/Down navigates, Enter resumes (or starts a new chat on the
@@ -1762,22 +1792,22 @@ mod mouse_capture_policy_tests {
     /// terminal keeps its own wheel, drag-select and copy.
     #[test]
     fn a_normal_draft_never_captures_the_mouse() {
-        assert!(!input_overflows("", 80));
-        assert!(!input_overflows("fix the failing test", 80));
-        assert!(!input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) - 1), 80));
+        assert!(!input_overflows("", 80, MAX_TEXT_ROWS));
+        assert!(!input_overflows("fix the failing test", 80, MAX_TEXT_ROWS));
+        assert!(!input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) - 1), 80, MAX_TEXT_ROWS));
     }
 
     #[test]
     fn an_overflowing_draft_captures_the_mouse() {
-        assert!(input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) + 2), 80));
+        assert!(input_overflows(&"line\n".repeat(usize::from(MAX_TEXT_ROWS) + 2), 80, MAX_TEXT_ROWS));
     }
 
     /// Exactly-full is not overflowing — capture must not flap on the boundary.
     #[test]
     fn a_draft_that_exactly_fills_the_box_does_not_capture() {
         let exact = (0..MAX_TEXT_ROWS).map(|i| format!("row{i}")).collect::<Vec<_>>().join("\n");
-        assert!(!input_overflows(&exact, 80));
-        assert!(input_overflows(&format!("{exact}\nmore"), 80));
+        assert!(!input_overflows(&exact, 80, MAX_TEXT_ROWS));
+        assert!(input_overflows(&format!("{exact}\nmore"), 80, MAX_TEXT_ROWS));
     }
 
     /// Soft-wrapping counts: a single long line can overflow on a narrow
@@ -1785,15 +1815,15 @@ mod mouse_capture_policy_tests {
     #[test]
     fn wrapping_is_what_decides_not_newline_count() {
         let long = "x".repeat(200);
-        assert!(!input_overflows(&long, 80), "200 cols fits in 6 rows at width 78");
-        assert!(input_overflows(&long, 22), "the same text needs 10 rows at width 20");
+        assert!(!input_overflows(&long, 80, MAX_TEXT_ROWS), "200 cols fits in 6 rows at width 78");
+        assert!(input_overflows(&long, 22, MAX_TEXT_ROWS), "the same text needs 10 rows at width 20");
     }
 
     /// A degenerate width must not panic or divide by zero.
     #[test]
     fn tiny_terminals_are_handled() {
-        assert!(!input_overflows("", 0));
-        assert!(input_overflows(&"x".repeat(50), 1));
+        assert!(!input_overflows("", 0, MAX_TEXT_ROWS));
+        assert!(input_overflows(&"x".repeat(50), 1, MAX_TEXT_ROWS));
     }
 }
 

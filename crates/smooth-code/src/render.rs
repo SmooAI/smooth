@@ -26,8 +26,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // wrap-aware Paragraph keeps the most recent rows visible.
     // The input box grows with its content, so the preview's ceiling moves
     // with it (pearl th-958e2e). Width - 2 accounts for the box border.
-    let input_text_rows = crate::composer::desired_text_rows(&state.input, area.width.saturating_sub(2));
-    let input_h = crate::inline::input_height(input_text_rows);
+    let text_cap = crate::composer::max_text_rows(area.height);
+    let input_text_rows = crate::composer::desired_text_rows(&state.input, area.width.saturating_sub(2), text_cap);
+    let input_h = crate::inline::input_height(input_text_rows, text_cap);
     let max_preview = area.height.saturating_sub(input_h + 1).max(1);
     let preview_h = crate::inline::preview_height(state, area.width, max_preview);
     let regions = crate::inline::compute_regions(area, preview_h, input_h);

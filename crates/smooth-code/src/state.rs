@@ -301,6 +301,14 @@ pub struct AppState {
     /// lands (or forever, when the daemon is unreachable); readers fall back
     /// to a local `smooth_cast::skills::discover` walk in that case.
     pub remote_skills: Option<Vec<smooth_cast::skills::Skill>>,
+    /// Large text pastes staged as `(placeholder, content)` pairs (pearl
+    /// th-d5eb9f). The composer shows only the compact placeholder token;
+    /// [`Self::take_input`] expands each token still present back into the
+    /// outgoing message. Deleting a token from the draft drops its paste.
+    pub pasted_texts: Vec<(String, String)>,
+    /// The inline-viewport height picked at startup — the composer's growth
+    /// ceiling scales from it (pearl th-d5eb9f) instead of a fixed row cap.
+    pub viewport_h: u16,
     /// Current text in the input box. May contain `\n` — the box wraps,
     /// grows, and scrolls (pearl th-958e2e).
     pub input: String,
@@ -423,6 +431,8 @@ impl AppState {
             input_user_scrolled: false,
             attachments: Vec::new(),
             remote_skills: None,
+            pasted_texts: Vec::new(),
+            viewport_h: 14,
             input: String::new(),
             input_cursor: 0,
             sidebar_visible: false,
@@ -597,6 +607,39 @@ impl AppState {
         }
     }
 
+    /// Delete the word before the cursor: trailing whitespace first, then the
+    /// word itself (Alt+Backspace / Ctrl+W — pearl th-d5eb9f).
+    pub fn input_backspace_word(&mut self) {
+        let head = &self.input[..self.input_cursor];
+        let trimmed = head.trim_end();
+        let start = trimmed
+            .rfind(|c: char| c.is_whitespace())
+            .map_or(0, |i| i + self.input[i..].chars().next().map_or(1, char::len_utf8));
+        self.input.replace_range(start..self.input_cursor, "");
+        self.input_cursor = start;
+        self.input_user_scrolled = false;
+    }
+
+    /// Delete from the cursor back to the start of the current line
+    /// (Cmd+Backspace / Ctrl+U — pearl th-d5eb9f).
+    pub fn input_backspace_line(&mut self) {
+        let start = self.input[..self.input_cursor].rfind('\n').map_or(0, |i| i + 1);
+        self.input.replace_range(start..self.input_cursor, "");
+        self.input_cursor = start;
+        self.input_user_scrolled = false;
+    }
+
+    /// Stage a large paste: store the content, insert only a compact
+    /// placeholder token at the cursor (pearl th-d5eb9f — Claude Code
+    /// parity). [`Self::take_input`] expands tokens still in the draft.
+    pub fn stage_pasted(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let lines = normalized.lines().count().max(1);
+        let placeholder = format!("[Pasted #{} — {} lines]", self.pasted_texts.len() + 1, lines);
+        self.input_insert_str(&placeholder);
+        self.pasted_texts.push((placeholder, normalized));
+    }
+
     /// Scroll the input box by `delta` rows (negative scrolls up), clamped to
     /// the draft's extent. Drives the mouse wheel; a no-op when the whole
     /// draft already fits.
@@ -628,19 +671,29 @@ impl AppState {
     }
 
     /// Take the current input, clearing it and resetting the cursor.
+    ///
+    /// Staged pastes expand here: each `[Pasted #N — …]` token still present
+    /// in the draft is replaced by its full content, so the wire carries the
+    /// real text while the composer only ever showed the compact reference
+    /// (pearl th-d5eb9f). A token the user deleted drops its paste.
     pub fn take_input(&mut self) -> String {
         self.input_cursor = 0;
         self.input_scroll = 0;
         self.input_user_scrolled = false;
-        std::mem::take(&mut self.input)
+        let mut text = std::mem::take(&mut self.input);
+        for (placeholder, content) in self.pasted_texts.drain(..) {
+            text = text.replace(&placeholder, &content);
+        }
+        text
     }
 
-    /// Clear the input buffer.
+    /// Clear the input buffer (and any pastes staged for it).
     pub fn input_clear(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
         self.input_scroll = 0;
         self.input_user_scrolled = false;
+        self.pasted_texts.clear();
     }
 
     /// Add a tool call to the last assistant message.
@@ -780,6 +833,72 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backspace_word_kills_trailing_space_and_word() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.input_insert_str("fix the tests   ");
+        s.input_backspace_word();
+        assert_eq!(s.input, "fix the ");
+        assert_eq!(s.input_cursor, 8);
+        s.input_backspace_word();
+        assert_eq!(s.input, "fix ");
+        s.input_backspace_word();
+        s.input_backspace_word();
+        assert_eq!(s.input, "");
+        s.input_backspace_word(); // empty input is a no-op, not a panic
+    }
+
+    #[test]
+    fn backspace_word_respects_utf8_boundaries() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.input_insert_str("héllo wörld");
+        s.input_backspace_word();
+        assert_eq!(s.input, "héllo ");
+        s.input_backspace_word();
+        assert_eq!(s.input, "");
+    }
+
+    #[test]
+    fn backspace_line_deletes_to_line_start_only() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.input_insert_str("first line\nsecond line");
+        s.input_backspace_line();
+        assert_eq!(s.input, "first line\n", "stops at the newline");
+        s.input_backspace_line();
+        assert_eq!(s.input, "first line\n", "empty line is a no-op");
+    }
+
+    #[test]
+    fn large_paste_stages_a_reference_and_send_expands_it() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.input_insert_str("look at this: ");
+        let blob = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        s.stage_pasted(&blob);
+        assert_eq!(s.input, "look at this: [Pasted #1 — 10 lines]");
+        assert_eq!(s.pasted_texts.len(), 1);
+        let sent = s.take_input();
+        assert_eq!(sent, format!("look at this: {blob}"), "the wire carries the real text");
+        assert!(s.pasted_texts.is_empty(), "expansion drains the store");
+    }
+
+    #[test]
+    fn deleting_the_reference_drops_the_paste() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.stage_pasted("a\nb\nc\nd\ne\nf\ng");
+        s.input_clear();
+        s.input_insert_str("just this");
+        assert!(s.pasted_texts.is_empty(), "clearing the draft drops staged pastes");
+        assert_eq!(s.take_input(), "just this");
+    }
+
+    #[test]
+    fn crlf_paste_is_normalized_before_counting_lines() {
+        let mut s = AppState::new(std::env::temp_dir());
+        s.stage_pasted("a\r\nb\r\nc");
+        assert_eq!(s.input, "[Pasted #1 — 3 lines]");
+        assert_eq!(s.take_input(), "a\nb\nc");
+    }
 
     /// Create a clean temp directory for tests instead of using `/tmp` which
     /// may contain files that cause non-deterministic sort panics on CI.
