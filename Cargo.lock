@@ -5077,6 +5077,7 @@ dependencies = [
  "smooai-smooth-code",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
+ "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -5213,6 +5214,7 @@ dependencies = [
  "smooai-smooth-operator",
  "smooai-smooth-operator-core",
  "smooai-smooth-operator-server",
+ "smooai-smooth-pearls",
  "smooai-smooth-policy",
  "smooai-smooth-tools",
  "smooai-smooth-web",
@@ -5287,7 +5289,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5317,7 +5319,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5357,7 +5359,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-ingestion"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5378,7 +5380,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-server"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=e9ce68c539c5d9966f9241e99b12fe9bb86b1885#e9ce68c539c5d9966f9241e99b12fe9bb86b1885"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
 dependencies = [
  "anyhow",
  "async-trait",

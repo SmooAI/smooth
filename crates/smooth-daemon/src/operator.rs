@@ -569,7 +569,7 @@ fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
         // coding-route default. Small token budget: it returns one JSON line.
         model: FAST_MODEL.to_owned(),
         max_tokens: 512,
-        temperature: 0.0,
+        temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
     })
@@ -596,7 +596,7 @@ fn gateway_llm_factory() -> Option<smooth_operator::cast::LlmConfigFactory> {
             api_key: key.clone(),
             model: model.clone(),
             max_tokens,
-            temperature: 0.0,
+            temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
             retry_policy: smooth_operator::llm::RetryPolicy::default(),
             api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
         })

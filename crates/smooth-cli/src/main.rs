@@ -2533,7 +2533,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 api_key: config.api_key.clone(),
                 model: model.clone(),
                 max_tokens: 32,
-                temperature: 0.0,
+                temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
                 retry_policy: smooth_operator::llm::RetryPolicy::default(),
                 api_format: config.api_format.clone(),
             });

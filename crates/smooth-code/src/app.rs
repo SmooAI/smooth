@@ -828,7 +828,42 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
 /// Refresh the autocomplete query from the current input buffer —
 /// the text between `trigger_pos + 1` and the cursor — and re-run
 /// the filter against the appropriate candidate source.
-fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry) {
+/// `GET {SMOOTH_URL}/search?q=…&cwd=…` → popup rows, or `None` on any
+/// failure (daemon down, timeout, off-contract JSON) so the caller keeps the
+/// locally-computed results. The route is ungated by design — no token.
+async fn fetch_remote_mentions(query: &str, cwd: &str) -> Option<Vec<crate::autocomplete::AutocompleteResult>> {
+    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let client = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build().ok()?;
+    let resp = client
+        .get(format!("{}/search", base.trim_end_matches('/')))
+        .query(&[("q", query), ("cwd", cwd)])
+        .send()
+        .await
+        .ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let results = body.get("results")?.as_array()?;
+    Some(
+        results
+            .iter()
+            .filter_map(|r| {
+                let value = r.get("value")?.as_str()?;
+                let label = r.get("label")?.as_str()?.to_string();
+                let kind = r.get("kind").and_then(serde_json::Value::as_str).unwrap_or("file");
+                let detail = r
+                    .get("detail")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| kind.to_string(), ToString::to_string);
+                Some(crate::autocomplete::AutocompleteResult {
+                    label,
+                    detail,
+                    insert_text: format!("@{value}"),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry, state_arc: &Arc<Mutex<AppState>>) {
     if !state.autocomplete.active {
         return;
     }
@@ -842,9 +877,28 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
     let workspace_root = state.working_dir.clone();
     match state.autocomplete.kind {
         crate::autocomplete::CompletionKind::File => {
+            // Local results first — instant popup, and the offline fallback.
             let files: Vec<_> = state.file_tree.as_ref().map(|t| t.entries.clone()).unwrap_or_default();
             let pearls = state.pearls.clone();
             state.autocomplete.update_at_query(&query, &files, &pearls, &workspace_root);
+
+            // Then ask Big Smooth's `/search` — the SAME backend the web
+            // composer uses — and overlay its ranked files+paths+pearls when
+            // the reply lands, IF the user hasn't typed since (generation
+            // guard) and the daemon actually answered (pearl th-8e9cf6).
+            if !query.trim().is_empty() {
+                state.autocomplete.generation += 1;
+                let generation = state.autocomplete.generation;
+                let q = query.clone();
+                let cwd = workspace_root.to_string_lossy().into_owned();
+                let arc = Arc::clone(state_arc);
+                tokio::spawn(async move {
+                    if let Some(results) = fetch_remote_mentions(&q, &cwd).await {
+                        let mut s = arc.lock().unwrap_or_else(|e| e.into_inner());
+                        s.autocomplete.apply_remote_results(generation, results);
+                    }
+                });
+            }
         }
         crate::autocomplete::CompletionKind::Command => {
             // Pearl th-e0f812: skills appear in the / popup so users
@@ -995,7 +1049,7 @@ fn handle_input_mode(
             }
             KeyCode::Char(c) => {
                 state.input_insert(c);
-                refresh_autocomplete(state, command_registry);
+                refresh_autocomplete(state, command_registry, &state_arc);
                 return;
             }
             KeyCode::Backspace => {
@@ -1003,7 +1057,7 @@ fn handle_input_mode(
                 if state.input_cursor <= state.autocomplete.trigger_pos {
                     state.autocomplete.deactivate();
                 } else {
-                    refresh_autocomplete(state, command_registry);
+                    refresh_autocomplete(state, command_registry, &state_arc);
                 }
                 return;
             }
@@ -1235,11 +1289,11 @@ fn handle_input_mode(
             match c {
                 '@' => {
                     state.autocomplete.activate_files(trigger_pos);
-                    refresh_autocomplete(state, command_registry);
+                    refresh_autocomplete(state, command_registry, &state_arc);
                 }
                 '/' => {
                     state.autocomplete.activate_commands(trigger_pos);
-                    refresh_autocomplete(state, command_registry);
+                    refresh_autocomplete(state, command_registry, &state_arc);
                 }
                 _ => {}
             }
