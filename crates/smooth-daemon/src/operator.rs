@@ -824,6 +824,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
                 .merge(crate::skills_route::skills_router(workspace))
+                // GET /api/mode — the model the next turn would run with, so
+                // faces can show a real name at idle instead of "unknown"
+                // (pearl th-7630a7). Name only; credentials never leave.
+                .merge(crate::mode_route::mode_router())
                 .merge(crate::push::push_router(push_state.clone()))
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
