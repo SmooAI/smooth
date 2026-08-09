@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.27.8
+
+### Patch Changes
+
+- 15aa677: th code's splash now shows Big Smooth himself instead of the SMOOTH wordmark banner. The avatar is the terminal rendering of the web SPA's `BigSmoothFace` — teal→blue gradient head (the face gradient, vertical), dark fedora with a teal hat band, sunglasses with white lens glints, and the smirk — drawn as block art with the accessories in a distinct ▓ texture so the character still reads under NO_COLOR and for colorblind users. The brand mark stays as one quiet `Smooth` wordmark line under the avatar.
+- a47f5a7: Desktop 0.1.6: auto-update improvements — check every 30 min (was 6h, so beta builds arrived late), log all update activity to `~/.smooth/desktop.log` (the console was lost under a Finder/`open` launch, making "why didn't it update?" unanswerable), and disable the differential downloader (its blockmap never reassembled byte-exact after notarization, so it always failed the checksum and fell back to a full download anyway — now it full-downloads directly, no wasted bandwidth or scary error). The update path itself was already working end-to-end.
+
 ## 0.27.7
 
 ### Patch Changes
