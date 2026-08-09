@@ -9,19 +9,63 @@
 //!
 //! Feed lives at https://downloads.smoo.ai/bigsmooth/ (S3 + CloudFront).
 
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { app, dialog } from 'electron';
 import electronUpdater from 'electron-updater';
 
 const { autoUpdater } = electronUpdater;
 
-// Check at launch, then every 6h. Unpackaged/dev runs have no feed, so skip.
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Check at launch, then every 30 min. A beta moves fast; the old 6h meant a new
+// build could sit unseen for most of a day (th-updater-fix). Unpackaged/dev runs
+// have no feed, so we skip entirely.
+const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+
+/** Where update activity is logged. Same file the daemon spawn diagnostics use,
+ * so "why didn't it update?" is answerable — the console is lost under `open`. */
+const LOG_PATH = join(homedir(), '.smooth', 'desktop.log');
+
+function logLine(level: string, ...args: unknown[]): void {
+    const parts = args.map((a) => (a instanceof Error ? (a.stack ?? a.message) : typeof a === 'string' ? a : JSON.stringify(a)));
+    const line = `${new Date().toISOString()} [updater:${level}] ${parts.join(' ')}\n`;
+    try {
+        mkdirSync(dirname(LOG_PATH), { recursive: true });
+        appendFileSync(LOG_PATH, line);
+    } catch {
+        // best-effort; never let logging break the updater
+    }
+    // Also to console for a Terminal-launched run.
+    console.log(line.trimEnd());
+}
+
+/** electron-updater's logger interface → our file logger, so every check,
+ * download, and error is visible in ~/.smooth/desktop.log. */
+const fileLogger = {
+    info: (...a: unknown[]) => logLine('info', ...a),
+    warn: (...a: unknown[]) => logLine('warn', ...a),
+    error: (...a: unknown[]) => logLine('error', ...a),
+    debug: (...a: unknown[]) => logLine('debug', ...a),
+};
 
 /** Start silent background update checks. Safe no-op in a dev/unpackaged run. */
 export function startAutoUpdates(): void {
     if (!app.isPackaged) return;
+    autoUpdater.logger = fileLogger;
     autoUpdater.autoDownload = true;
+    // The differential (delta) downloader assembles the new zip from the old one
+    // + a blockmap, then verifies the result's sha512 against latest-mac.yml. Our
+    // publish pipeline produces a blockmap that doesn't reassemble byte-exact
+    // (notarization/stapling shifts bytes after the blockmap is written), so it
+    // always fails the checksum and falls back to a full download anyway. Skip the
+    // doomed partial attempt and full-download directly — same result, no wasted
+    // bandwidth or scary error in the log. (th-updater-fix)
+    autoUpdater.disableDifferentialDownload = true;
+    autoUpdater.on('checking-for-update', () => logLine('info', 'checking for update…'));
+    autoUpdater.on('update-available', (info) => logLine('info', `update available: ${info.version}`));
+    autoUpdater.on('update-not-available', (info) => logLine('info', `up to date (${info.version})`));
     autoUpdater.on('update-downloaded', (info) => {
+        logLine('info', `update downloaded: ${info.version}`);
         void dialog
             .showMessageBox({
                 type: 'info',
@@ -36,7 +80,7 @@ export function startAutoUpdates(): void {
                 if (response === 0) autoUpdater.quitAndInstall();
             });
     });
-    autoUpdater.on('error', (err) => console.error('[updater]', err));
+    autoUpdater.on('error', (err) => logLine('error', err));
     void autoUpdater.checkForUpdates();
     setInterval(() => void autoUpdater.checkForUpdates(), CHECK_INTERVAL_MS);
 }
