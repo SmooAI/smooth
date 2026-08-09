@@ -1,5 +1,73 @@
 # @smooai/smooth
 
+## 0.27.5
+
+### Patch Changes
+
+- 9ab2543: bench: publish the first model leaderboard, and fix two reporting bugs the real data exposed
+
+  First multi-trial board with working cost measurement (2 models × 15 scenarios × 3 trials):
+  gpt-5.5 72.1% at $5.25, deepseek-v4-flash 71.1% at $0.14 — a statistical tie on quality at
+  **39× the cost per passing scenario**. That is the number the whole exercise existed to produce.
+
+  Running it for real surfaced two bugs in the publishing path: raw f64 rendered as
+  `$5.249943000000227` in the docs table, and `scenario_count` counted trials rather than
+  distinct scenarios (a 15-scenario suite at 3 trials published as "45 scenarios"). Both
+  pre-rounded/deduped at the source so the badge, table and JSON cannot disagree.
+
+- 9ab2543: Settings picker: Code and UI move to benchmarked models
+
+  `Code` was `minimax-m2.7` (superseded, and m3 scored 66.7%) → `qwen3.7-plus-direct`,
+  the best model measured at any price: 84.4% on the 15-scenario convo suite at 3 trials,
+  reached with 43% fewer tool calls than Flash.
+
+  `UI` was `glm-5.1` → `glm-5.2-direct`, the current release — it was unpriced in LiteLLM
+  until today, which is why it had never been benchable.
+
+  `Flash` stays `deepseek-v4-flash`: cheapest per passing scenario by 2.6x, and it is the
+  default every session lands on. Premium slots stay put deliberately — GPT-5.6 is newer
+  but unbenchmarked, and its one measured run scored 0/45 because every tool call 400'd.
+
+- 9ab2543: bench: wait for the port to free instead of failing fast
+
+  The "refuse to attach to a process we did not spawn" check was correct for concurrent
+  runs and wrong within a single one: the agentic suite boots a fresh engine per
+  scenario, and the previous engine's socket is still closing when the next one starts.
+  It turned 23 of 28 scenarios into "engine boot failed" on its first real run.
+
+  Now polls for up to 20s. A few seconds of patience distinguishes "the last scenario is
+  still letting go" from "someone else owns this", and the refusal still fires for a
+  genuine collision.
+
+- 6037f58: Desktop 0.1.3: the calendar/reminders TCC helper is now a foreground app (removed `LSUIElement`) so macOS actually presents the EventKit permission prompt. A background/agent helper is silently refused (returns not-determined, no prompt) — verified on macOS 26.4 (th-36da65). Set Up → Calendar…/Reminders… now works.
+- e4a5711: Desktop app reliably auto-starts its own daemon + open-at-login (th-5c2ec6, th-ccf2cf).
+
+  A stale saved `remoteUrl` used to make `startDaemon()` early-return in remote
+  mode, leaving a Mac launched via Finder/`open` with NO local daemon (phone
+  offline). Remote is now only the WINDOW's view target: the app always starts
+  this Mac's own local daemon in the background, surfaces the current mode in the
+  tray header + title, and logs the daemon's stdout/stderr and spawn errors to
+  `~/.smooth/desktop.log` (previously `inherit`ed and lost under `open`).
+
+  Also adds a first-run "Open at Login" default (`app.setLoginItemSettings`,
+  macOS `SMAppService`), user-toggleable from a tray checkbox, so the daemon
+  auto-starts on login and survives reboot without a hand-made launchd plist.
+
+- 9ab2543: bench: score tool usage, not just pass rate
+
+  Pass rate hides how a model works. Two models can both score 100% while one takes
+  three tool calls per turn and the other twelve with a third erroring — and that is the
+  difference between an agent you can leave running and one you cannot.
+
+  The leaderboard now carries a tool-use block: total calls, error rate, calls per turn,
+  the judge's 1–5 `tool_use` axis (which was already being captured and then discarded),
+  and turns that made no tool call at all. That last one catches a model answering from
+  memory on a suite whose tasks all need tools.
+
+  Objective counts sit alongside the judged axis deliberately: a grader looking at the
+  outcome can call twelve calls and four errors "good tool use". Error rate does not
+  flatter anyone.
+
 ## 0.27.4
 
 ### Patch Changes

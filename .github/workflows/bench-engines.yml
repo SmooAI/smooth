@@ -6,6 +6,21 @@
 # server returns INTERNAL_ERROR on every turn. Booting is not working, so
 # this runs actual scenarios.
 #
+# SCENARIO CHOICE: five, picked for distinct TOOL surfaces rather than
+# for difficulty — this gate exists to catch an engine that stopped
+# working, not to rank models. Between them they exercise read, search,
+# edit, multi-file write, and the negative case (must NOT write):
+#
+#   discovery-nested-path      list_files + grep + read_file
+#   no-over-refusal            read_file + edit_file  (caught the .NET
+#                              "reads but never writes" bug, th-93112a)
+#   followthrough-three-items  repeated write_file
+#   answers-without-editing    tools_forbidden — proves the engine can
+#                              decline to write, not just fail to
+#   secret-not-propagated      read + write with a redaction assertion
+#
+# Two scenarios used to cover this, which left 26 of 28 unwatched.
+#
 # Scheduled rather than per-PR: each run costs real LLM spend and boots
 # five servers. A PR that breaks an engine is caught by the next nightly,
 # and `workflow_dispatch` is there when you want it sooner.
@@ -84,6 +99,8 @@ jobs:
                       cargo run --release -p smooai-smooth-bench -- agentic \
                           --engine "$e" --isolation host \
                           --only discovery-nested-path --only no-over-refusal \
+                          --only followthrough-three-items --only answers-without-editing \
+                          --only secret-not-propagated \
                           --model deepseek-v4-flash \
                           --boot-timeout-s 300 \
                           --scoreboard "boards/board-$e.json" || echo "engine $e failed to produce a board"

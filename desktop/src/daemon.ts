@@ -6,9 +6,9 @@
 //! spawn — and therefore only ever kill — a daemon we started ourselves.
 
 import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 
 const BIN = process.platform === 'win32' ? 'smooth-daemon.exe' : 'smooth-daemon';
 const TH = process.platform === 'win32' ? 'th.exe' : 'th';
@@ -17,6 +17,43 @@ const TH = process.platform === 'win32' ? 'th.exe' : 'th';
  * smooth-daemon's `persist_daemon_addr`). Lets us find it on whatever port it
  * landed on instead of guessing. */
 const DAEMON_ADDR_FILE = join(homedir(), '.smooth', 'daemon.addr');
+
+/** Where the desktop shell logs — the daemon child's stdout/stderr AND our own
+ * spawn diagnostics. Under `open`/Finder there is no terminal, so inherited stdio
+ * is lost; a file is the only place the real startup error survives (th-5c2ec6). */
+const DESKTOP_LOG_FILE = join(homedir(), '.smooth', 'desktop.log');
+
+export function desktopLogPath(): string {
+    return DESKTOP_LOG_FILE;
+}
+
+/** Append one timestamped line to the desktop log; never throws (best-effort). */
+export function desktopLog(line: string): void {
+    try {
+        mkdirSync(dirname(DESKTOP_LOG_FILE), { recursive: true });
+        appendFileSync(DESKTOP_LOG_FILE, `${new Date().toISOString()} ${line}\n`);
+    } catch {
+        // Logging must never take the app down.
+    }
+}
+
+/** stdio for the spawned daemon: redirect its output to the desktop log so it
+ * survives a Finder launch, falling back to inherit if the file can't be opened. */
+function daemonStdio(): ['ignore', number | 'inherit', number | 'inherit'] {
+    try {
+        mkdirSync(dirname(DESKTOP_LOG_FILE), { recursive: true });
+        const fd = openSync(DESKTOP_LOG_FILE, 'a');
+        return ['ignore', fd, fd];
+    } catch {
+        return ['ignore', 'inherit', 'inherit'];
+    }
+}
+
+/** The local daemon's base URL — always `http://<resolved addr>`, independent of
+ * any remote view target. The app owns its own daemon at this address. */
+function localUrl(): string {
+    return `http://${resolveAddr()}`;
+}
 
 /**
  * `host:port` the daemon binds. Resolution order:
@@ -167,17 +204,16 @@ export async function isHealthy(url = baseUrl()): Promise<boolean> {
 let child: ChildProcess | undefined;
 
 /**
- * Ensure a daemon is serving at {@link baseUrl}. Returns how that came to be so
- * the caller can report a failure to the user.
+ * Ensure THIS Mac's own daemon is serving locally, spawning it if nothing already
+ * answers `/health`. Always targets the LOCAL address ({@link localUrl}) — a remote
+ * view target must never suppress the local agent, because the phone/relay and any
+ * scheduled turns talk to the local daemon regardless of what the window shows
+ * (th-5c2ec6). Returns how the daemon came to be so the caller can react.
  */
 export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; error?: string }> {
-    // Remote mode: never spawn a local daemon — just confirm the remote one answers.
-    if (isRemote()) {
-        return (await isHealthy())
-            ? { ok: true, spawned: false }
-            : { ok: false, spawned: false, error: `The remote daemon at ${baseUrl()} isn’t reachable — is it running and are you on the tailnet?` };
-    }
-    if (await isHealthy()) return { ok: true, spawned: false };
+    const url = localUrl();
+    // Already up (a launchd/login-item instance, `th up`, or a prior spawn)? Attach.
+    if (await isHealthy(url)) return { ok: true, spawned: false };
 
     const bin = resolveDaemonBin();
     if (!bin) {
@@ -186,9 +222,12 @@ export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; er
 
     // SMOOTH_MENUBAR=0: the bundled daemon lives in Contents/MacOS, which is the
     // daemon's own "I was launched as an app, show a status item" signal. We own
-    // the tray, so turn its one off.
-    child = spawn(bin, ['run'], { stdio: 'inherit', env: { ...process.env, SMOOTH_ADDR: resolveAddr(), SMOOTH_MENUBAR: '0' } });
-    child.on('exit', () => {
+    // the tray, so turn its one off. stdio → desktop.log so a Finder-launched
+    // daemon's startup errors aren't lost to a nonexistent terminal.
+    desktopLog(`spawning daemon: ${bin} run (addr ${resolveAddr()})`);
+    child = spawn(bin, ['run'], { stdio: daemonStdio(), env: { ...process.env, SMOOTH_ADDR: resolveAddr(), SMOOTH_MENUBAR: '0' } });
+    child.on('exit', (code, signal) => {
+        desktopLog(`daemon exited (code=${code ?? '?'} signal=${signal ?? '?'})`);
         child = undefined;
     });
 
@@ -196,11 +235,11 @@ export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; er
     // is the contract, and a 60s ceiling covers a cold sqlite migration on first run.
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
-        if (await isHealthy()) return { ok: true, spawned: true };
-        if (!child) return { ok: false, spawned: true, error: `${BIN} exited during startup.` };
+        if (await isHealthy(url)) return { ok: true, spawned: true };
+        if (!child) return { ok: false, spawned: true, error: `${BIN} exited during startup — see ${DESKTOP_LOG_FILE}.` };
         await new Promise((r) => setTimeout(r, 300));
     }
-    return { ok: false, spawned: true, error: `${BIN} did not answer ${baseUrl()}/health within 60s.` };
+    return { ok: false, spawned: true, error: `${BIN} did not answer ${url}/health within 60s — see ${DESKTOP_LOG_FILE}.` };
 }
 
 /** Terminate the daemon, but only if we were the one who started it. */

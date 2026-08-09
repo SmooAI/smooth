@@ -1,11 +1,27 @@
 {
   "suite": "convo",
-  "trials": 1,
-  "scenario_count": 9,
+  "trials": 3,
+  "scenario_count": 15,
   "models": [
-    { "model": "deepseek-v4-flash", "pass_rate_pct": 88.9, "passed": 8, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.0188, "cost_per_pass_usd": 0.0024, "duration_s": 204.1 },
-    { "model": "gpt-5.5", "pass_rate_pct": 88.9, "passed": 8, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.7948, "cost_per_pass_usd": 0.0994, "duration_s": 145.4 },
-    { "model": "claude-sonnet-5", "pass_rate_pct": 77.8, "passed": 7, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.0615, "cost_per_pass_usd": 0.0088, "duration_s": 192.4 },
-    { "model": "minimax-m2.7", "pass_rate_pct": 77.8, "passed": 7, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.0836, "cost_per_pass_usd": 0.0119, "duration_s": 195.4 }
+    {
+      "model": "gpt-5.5",
+      "pass_rate_pct": 72.1,
+      "passed": 31,
+      "conclusive": 43,
+      "inconclusive": 2,
+      "cost_usd": 5.249943,
+      "cost_per_pass_usd": 0.169353,
+      "duration_s": 974.0
+    },
+    {
+      "model": "deepseek-v4-flash",
+      "pass_rate_pct": 71.1,
+      "passed": 32,
+      "conclusive": 45,
+      "inconclusive": 0,
+      "cost_usd": 0.13767,
+      "cost_per_pass_usd": 0.004302,
+      "duration_s": 1290.6
+    }
   ]
 }
