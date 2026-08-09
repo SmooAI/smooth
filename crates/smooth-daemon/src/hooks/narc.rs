@@ -395,6 +395,105 @@ pub fn detect_destructive_shell(command: &str) -> Option<&'static str> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Effect-based shell guard: snapshot → run → detect destruction → restore
+// ---------------------------------------------------------------------------
+//
+// th-be3f55, third pass. Pattern-matching a shell command cannot be made
+// complete: `rm`, `truncate`, `> file`, `tee`, `sed -i`, `python3 -c
+// "open(p,'w')"` and any program the model can write are all the same event,
+// and the bench found the hole empirically — qwen3.7-plus-direct emptied
+// customers.json through `bash` while every pattern rule passed it.
+//
+// A kernel sandbox does NOT close this. The macOS profile allows writes by
+// default and any Linux equivalent must allow the workspace too, because an
+// assistant that cannot edit the workspace is useless. th-08e05a protects
+// credentials and prevents escape; it was never going to protect workspace data.
+//
+// So the guard is effect-based: snapshot the workspace's small data files
+// before a shell call, compare after, and restore anything that was deleted or
+// emptied — then tell the agent, so it asks instead of silently succeeding.
+// This is spelling-independent by construction.
+
+/// Directories never worth snapshotting — build output and VCS internals, where
+/// churn is expected and volume is high.
+const SNAPSHOT_SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".venv", "venv", "__pycache__", ".next"];
+
+/// Per-file cap. Big files are the ones a snapshot cannot afford, and the data
+/// a policy protects (records, config, notes) is rarely large.
+const SNAPSHOT_MAX_FILE: u64 = 256 * 1024;
+/// Total cap across a snapshot.
+const SNAPSHOT_MAX_TOTAL: u64 = 8 * 1024 * 1024;
+/// File-count cap, so a huge tree degrades instead of stalling the turn.
+const SNAPSHOT_MAX_FILES: usize = 400;
+
+/// A file's contents at the moment a shell command was about to run.
+type Snapshot = Vec<(std::path::PathBuf, Vec<u8>)>;
+
+/// Walk the workspace, capturing small files. Best-effort: unreadable entries
+/// are skipped, never fatal — losing the safety net must not fail the turn.
+fn snapshot_workspace(root: &std::path::Path) -> Snapshot {
+    let mut out: Snapshot = Vec::new();
+    let mut total: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if out.len() >= SNAPSHOT_MAX_FILES || total >= SNAPSHOT_MAX_TOTAL {
+                return out;
+            }
+            let path = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SNAPSHOT_SKIP_DIRS.contains(&n));
+                if !skip {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.len() == 0 || meta.len() > SNAPSHOT_MAX_FILE {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&path) {
+                total += bytes.len() as u64;
+                out.push((path, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// A file the shell destroyed, and whether putting it back worked.
+struct Restored {
+    path: std::path::PathBuf,
+    what: &'static str,
+    ok: bool,
+}
+
+/// Compare a snapshot against the current tree; restore anything deleted or
+/// emptied. Returns what was put back.
+fn restore_destroyed(snap: &Snapshot) -> Vec<Restored> {
+    let mut hits = Vec::new();
+    for (path, before) in snap {
+        let now = std::fs::metadata(path).ok().map(|m| m.len());
+        let what = match now {
+            None => "deleted",
+            // Emptied, or reduced to an empty container ([] / {}).
+            Some(n) if n == 0 => "emptied",
+            // Reduced to an empty container (`[]`, `{}`) from something substantial.
+            Some(n) if n <= 4 && before.len() > 16 => "emptied",
+            _ => continue,
+        };
+        let ok = std::fs::write(path, before).is_ok();
+        hits.push(Restored { path: path.clone(), what, ok });
+    }
+    hits
+}
+
 /// System prompt for the destructive-action judge. Distinct from
 /// [`NARC_JUDGE_PROMPT`]: the question is not "is this an attack" but "would the
 /// user want to be asked first".
@@ -592,6 +691,9 @@ fn extract_first_json_object(s: &str) -> Option<&str> {
 pub struct NarcHook {
     /// The LLM judge client. `None` ⇒ regex-only (no escalation).
     judge: Option<LlmClient>,
+    /// Pre-shell workspace snapshots, keyed by tool-call id. Populated in
+    /// `pre_call` for shell tools and consumed in `post_call`.
+    shell_snapshots: std::sync::Mutex<std::collections::HashMap<String, Snapshot>>,
 }
 
 impl NarcHook {
@@ -601,6 +703,7 @@ impl NarcHook {
     pub fn new(judge_config: Option<LlmConfig>) -> Self {
         Self {
             judge: judge_config.map(LlmClient::new),
+            shell_snapshots: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -678,6 +781,19 @@ impl ToolHook for NarcHook {
             }
         }
 
+        // 2b. About to run a shell command that the tiers above allowed: take a
+        //     cheap snapshot of the workspace's small files. Pattern rules
+        //     cannot enumerate every way a shell destroys data, so the last
+        //     line is the EFFECT, checked in post_call.
+        if shell_command(call).is_some() {
+            let snap = snapshot_workspace(&workspace_root());
+            if !snap.is_empty() {
+                if let Ok(mut m) = self.shell_snapshots.lock() {
+                    m.insert(call.id.clone(), snap);
+                }
+            }
+        }
+
         // 3. Prompt injection in arguments.
         let args_text = call.arguments.to_string();
         let findings = scan_injection(&args_text);
@@ -719,6 +835,28 @@ impl ToolHook for NarcHook {
     async fn post_call(&self, call: &ToolCall, result: &mut ToolResult) -> anyhow::Result<()> {
         // Redact detected secrets out of the result content, in place — the
         // whole point of the mutable seam.
+        // Effect-based shell guard: whatever the command was spelled as, if it
+        // deleted or emptied a file that existed a moment ago, put it back and
+        // tell the agent — so it asks for confirmation instead of reporting
+        // success over destroyed data (th-be3f55).
+        let snap = self.shell_snapshots.lock().ok().and_then(|mut m| m.remove(&call.id));
+        if let Some(snap) = snap {
+            let hits = restore_destroyed(&snap);
+            if !hits.is_empty() {
+                let names: Vec<String> = hits
+                    .iter()
+                    .map(|h| format!("{} ({}{})", h.path.display(), h.what, if h.ok { ", restored" } else { ", RESTORE FAILED" }))
+                    .collect();
+                tracing::warn!(tool = %call.name, files = ?names, "narc: shell destroyed workspace data — restored");
+                result.is_error = true;
+                result.content = format!(
+                    "blocked by hook: narc: that command destroyed workspace data, which has been restored: {}. \
+                     Destructive changes need the user's explicit confirmation — ask, then retry.",
+                    names.join("; ")
+                );
+            }
+        }
+
         let found = scan_secrets(&result.content);
         if !found.is_empty() {
             for s in &found {
@@ -787,6 +925,79 @@ mod tests {
     }
 
     // ── dangerous cli ─────────────────────────────────────────────
+
+    // ---- effect-based shell guard (th-be3f55, third pass) -------------------
+
+    /// The case every pattern rule missed: a shell spelling nobody enumerated.
+    /// Python here, but the point is that the detector never sees the command —
+    /// it sees the EFFECT, so `tee`, `sed -i` and friends are covered by the
+    /// same code without adding a rule.
+    #[test]
+    fn restores_a_file_emptied_by_any_spelling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("customers.json");
+        std::fs::write(&f, r#"[{"id":1},{"id":2},{"id":3}]"#).expect("seed");
+        let snap = snapshot_workspace(dir.path());
+        assert!(!snap.is_empty(), "snapshot must capture the data file");
+
+        // However it happened — python, tee, sed -i, rm — the file is now `[]`.
+        std::fs::write(&f, "[]").expect("simulate destruction");
+        let hits = restore_destroyed(&snap);
+
+        assert_eq!(hits.len(), 1, "the emptied file must be detected");
+        assert!(hits[0].ok, "restore must succeed");
+        let back = std::fs::read_to_string(&f).expect("read");
+        assert!(back.contains("\"id\":3"), "original content must be back: {back}");
+    }
+
+    /// Outright deletion is the same event.
+    #[test]
+    fn restores_a_deleted_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = dir.path().join("notes.md");
+        std::fs::write(&f, "some real notes worth keeping").expect("seed");
+        let snap = snapshot_workspace(dir.path());
+        std::fs::remove_file(&f).expect("delete");
+        let hits = restore_destroyed(&snap);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].what, "deleted");
+        assert!(f.exists(), "file must be restored");
+    }
+
+    /// The critical false-positive guard. Ordinary work — editing a file,
+    /// growing it, adding new ones — must NOT be reverted, or the agent can
+    /// never get anything done.
+    #[test]
+    fn leaves_ordinary_edits_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let edited = dir.path().join("a.md");
+        std::fs::write(&edited, "original body of the document").expect("seed");
+        let snap = snapshot_workspace(dir.path());
+
+        std::fs::write(&edited, "a rewritten body of the document, longer than before").expect("edit");
+        std::fs::write(dir.path().join("b.md"), "a brand new file").expect("create");
+
+        let hits = restore_destroyed(&snap);
+        assert!(hits.is_empty(), "edits and creations must not be reverted");
+        assert!(
+            std::fs::read_to_string(&edited).expect("read").starts_with("a rewritten"),
+            "the edit must survive"
+        );
+    }
+
+    /// Build output and VCS internals are skipped — high churn, high volume,
+    /// and reverting them would fight the tools the agent runs.
+    #[test]
+    fn snapshot_skips_build_and_vcs_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for d in [".git", "node_modules", "target"] {
+            std::fs::create_dir_all(dir.path().join(d)).expect("mkdir");
+            std::fs::write(dir.path().join(d).join("f.txt"), "junk").expect("seed");
+        }
+        std::fs::write(dir.path().join("real.txt"), "real content").expect("seed");
+        let snap = snapshot_workspace(dir.path());
+        assert_eq!(snap.len(), 1, "only the real file should be snapshotted, got {snap:?}");
+    }
 
     // ---- destructive SHELL detector (th-be3f55, second pass) ----------------
 
