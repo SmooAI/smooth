@@ -81,8 +81,12 @@ function helperPlist() {
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
-    <key>LSUIElement</key>
-    <true/>
+    <!-- NO LSUIElement: a background/agent app (LSUIElement=true) is not allowed
+         to present the EventKit TCC prompt — macOS returns not-determined with no
+         prompt. VERIFIED on macOS 26.4 (th-36da65): the identical helper WITHOUT
+         LSUIElement prompts correctly when launched via the open command. This helper is a
+         one-shot that exits as soon as the grant is answered, so the momentary
+         foreground/Dock presence is harmless. -->
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
