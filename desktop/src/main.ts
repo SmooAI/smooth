@@ -10,16 +10,30 @@ import { join } from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 
-import { loadConfig, saveConfig } from './config.js';
-import { baseUrl, isRemote, remoteUrl, resolveThBin, runDaemonCommand, startDaemon, stopDaemon, tccHelperApp, tccOpenArgs } from './daemon.js';
+import { type DesktopConfig, loadConfig, saveConfig } from './config.js';
+import {
+    baseUrl,
+    desktopLog,
+    isHealthy,
+    isRemote,
+    remoteUrl,
+    resolveThBin,
+    runDaemonCommand,
+    startDaemon,
+    stopDaemon,
+    tccHelperApp,
+    tccOpenArgs,
+} from './daemon.js';
 import { discoverDaemons, type RemoteDaemon } from './discovery.js';
 import { linkThOnPath } from './installth.js';
+import { firstRunLoginItem, trayModeLabel } from './loginitem.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let quitting = false;
 let spawnedDaemon = false;
+let lastDaemons: RemoteDaemon[] = [];
 
 if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -29,8 +43,9 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function main(): Promise<void> {
-    // Pick the daemon target BEFORE anything reads it: the saved remote URL (a
-    // tailnet daemon like smoo-hub) or the local one. daemon.ts reads this env.
+    // The remote URL (a tailnet daemon like smoo-hub) is only the WINDOW's view
+    // target — it must be read before baseUrl(), but it no longer gates whether we
+    // run our own daemon. daemon.ts reads this env.
     const cfg = loadConfig();
     if (cfg.remoteUrl) process.env.SMOOTH_REMOTE_URL = cfg.remoteUrl;
 
@@ -38,32 +53,68 @@ async function main(): Promise<void> {
     // an unpackaged run would otherwise show the stock Electron icon.
     if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(asset('icon.png'));
     registerIpc();
+    applyLoginItemDefault(cfg); // th-ccf2cf: open-at-login on first run
     createTray();
     installThCli();
+
+    // th-5c2ec6: ALWAYS start this Mac's own daemon. A stale saved remoteUrl used
+    // to early-return here and leave the machine with no local daemon (phone
+    // offline). Remote is a view target, not a reason to skip the local agent.
     const result = await startDaemon();
     spawnedDaemon = result.spawned;
-    if (!result.ok) {
-        // A dead LOCAL daemon is fatal; a dead REMOTE one shouldn't strand the app —
-        // offer to fall back to This Mac (the tray stays alive either way to reconnect).
-        if (isRemote()) {
+    if (!result.ok) desktopLog(`local daemon not running: ${result.error ?? 'unknown error'}`);
+
+    if (isRemote()) {
+        // The window points at a remote daemon; the local one runs in the
+        // background (best-effort — a thin client may not even have the binary).
+        if (!(await isHealthy(baseUrl()))) {
             const { response } = await dialog.showMessageBox({
                 type: 'warning',
                 buttons: ['Switch to This Mac', 'Quit'],
                 defaultId: 0,
                 cancelId: 1,
                 message: 'Can’t reach the remote Big Smooth',
-                detail: result.error ?? '',
+                detail: `${baseUrl()} isn’t reachable — is it running and are you on the tailnet?`,
             });
             if (response === 0) connectTo(null);
             else app.quit();
             return;
         }
+    } else if (!result.ok) {
+        // Local mode: the window has nothing to load without the local daemon.
         dialog.showErrorBox('Big Smooth could not start', result.error ?? 'The daemon failed to start.');
         app.quit();
         return;
     }
     showWindow();
     startAutoUpdates();
+}
+
+/**
+ * First-run only: turn on "open at login" so the daemon comes back after a reboot,
+ * then never touch it again — the tray checkbox (and System Settings) own it from
+ * there. Persisted via `loginItemConfigured` so it's applied exactly once.
+ */
+function applyLoginItemDefault(cfg: DesktopConfig): void {
+    const decision = firstRunLoginItem(cfg.loginItemConfigured);
+    if (!decision) return;
+    try {
+        app.setLoginItemSettings({ openAtLogin: decision.setOpenAtLogin });
+    } catch (err) {
+        desktopLog(`login item: could not set openAtLogin: ${String(err)}`);
+    }
+    saveConfig({ loginItemConfigured: true });
+}
+
+/** Flip "open at login" from the tray, then repaint so the checkbox reflects it. */
+function toggleOpenAtLogin(): void {
+    try {
+        const current = app.getLoginItemSettings().openAtLogin;
+        app.setLoginItemSettings({ openAtLogin: !current });
+    } catch (err) {
+        desktopLog(`login item: could not toggle openAtLogin: ${String(err)}`);
+    }
+    applyTrayMenu(lastDaemons);
 }
 
 function showWindow(): void {
@@ -117,6 +168,25 @@ function windowTitle(): string {
     }
 }
 
+/** Short hostname of a daemon URL for display (`https://smoo-hub…:8443` → `smoo-hub`). */
+function hostOf(url: string): string {
+    try {
+        return new URL(url).hostname.split('.')[0];
+    } catch {
+        return 'remote';
+    }
+}
+
+/** `openAtLogin` state, never throwing (setLoginItemSettings is unsupported on
+ * some platforms/dev runs); defaults to false so the checkbox stays coherent. */
+function safeOpenAtLogin(): boolean {
+    try {
+        return app.getLoginItemSettings().openAtLogin;
+    } catch {
+        return false;
+    }
+}
+
 function createTray(): void {
     const icon = nativeImage.createFromPath(asset('tray.png'));
     // Template image: macOS renders the black silhouette in the menu-bar colour —
@@ -132,7 +202,9 @@ function createTray(): void {
 
 /** (Re)build the tray menu, including the Connect submenu from `daemons`. */
 function applyTrayMenu(daemons: RemoteDaemon[]): void {
+    lastDaemons = daemons; // so toggles (e.g. Open at Login) can repaint without re-discovering
     const active = remoteUrl(); // '' = local
+    const openAtLogin = safeOpenAtLogin();
     const connect: Electron.MenuItemConstructorOptions[] = [{ label: 'This Mac (local)', type: 'radio', checked: active === '', click: () => connectTo(null) }];
     if (daemons.length > 0) {
         connect.push({ type: 'separator' });
@@ -149,7 +221,12 @@ function applyTrayMenu(daemons: RemoteDaemon[]): void {
 
     tray?.setContextMenu(
         Menu.buildFromTemplate([
+            // Current mode, unmissable at a glance — remote mode used to be visible
+            // only in the (nested) Connect submenu and the title bar (th-5c2ec6).
+            { label: trayModeLabel(active === '' ? null : hostOf(active)), enabled: false },
+            { type: 'separator' },
             { label: 'Open Big Smooth', click: showWindow },
+            { label: 'Open at Login', type: 'checkbox', checked: openAtLogin, click: toggleOpenAtLogin },
             { label: 'Check for Updates…', click: () => void checkForUpdatesInteractive() },
             { type: 'separator' },
             { label: 'Connect', submenu: connect },
