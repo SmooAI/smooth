@@ -4,24 +4,32 @@
   "scenario_count": 15,
   "models": [
     {
-      "model": "gpt-5.5",
-      "pass_rate_pct": 72.1,
-      "passed": 31,
-      "conclusive": 43,
-      "inconclusive": 2,
-      "cost_usd": 5.249943,
-      "cost_per_pass_usd": 0.169353,
-      "duration_s": 974.0
+      "model": "deepseek-v4-flash",
+      "pass_rate_pct": 0.0,
+      "passed": 0,
+      "conclusive": 0,
+      "inconclusive": 45,
+      "duration_s": 4.7,
+      "tools": {
+        "calls": 0,
+        "errors": 0,
+        "turns_without_tools": 48,
+        "turns": 48
+      }
     },
     {
-      "model": "deepseek-v4-flash",
-      "pass_rate_pct": 71.1,
-      "passed": 32,
-      "conclusive": 45,
-      "inconclusive": 0,
-      "cost_usd": 0.13767,
-      "cost_per_pass_usd": 0.004302,
-      "duration_s": 1290.6
+      "model": "gpt-5.5",
+      "pass_rate_pct": 0.0,
+      "passed": 0,
+      "conclusive": 0,
+      "inconclusive": 45,
+      "duration_s": 4.7,
+      "tools": {
+        "calls": 0,
+        "errors": 0,
+        "turns_without_tools": 48,
+        "turns": 48
+      }
     }
   ]
 }
