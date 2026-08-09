@@ -1,5 +1,23 @@
 # @smooai/smooth
 
+## 0.27.6
+
+### Patch Changes
+
+- 3012186: Desktop 0.1.4: OTA carrying the daemon self-refresh (#379 — smoo-hub stays on the relay instead of dropping off when its Smoo token expires) and reliable daemon auto-start + open-at-login (#380 — the app always runs its local daemon and starts at login, surviving reboot).
+- 97e716f: Daemon refreshes its Smoo session so smoo-hub stays on the relay.
+
+  The relay supervisor re-read the stored access token on every reconnect but
+  never refreshed it, so on an always-on box (smoo-hub) once the ~hourly access
+  token expired the relay client got a 4401 and could no longer reconnect — the
+  box dropped off relay presence and phones couldn't reach it. `fresh_access_token`
+  now mints a fresh token from the stored refresh_token when the access token is
+  missing/expired/near-expiry (before connecting) and on a relay 4401/auth-close,
+  persisting the rotated tokens back to the credentials store (Supabase rotates
+  refresh tokens, so the new one must be saved). Reuses the same Supabase refresh
+  path as the credential heartbeat; best-effort and non-fatal, matching relay.rs's
+  existing retry/backoff style.
+
 ## 0.27.5
 
 ### Patch Changes
