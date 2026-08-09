@@ -45,6 +45,11 @@ iana-time-zone = "0.1"
 # resilient client (retries/timeout/backoff); urlencoding builds query strings.
 smooai-fetch.workspace = true
 urlencoding.workspace = true
+# th-52ec01: the MCP client. `mcp.rs` spawns each configured mcp.toml server as a
+# stdio child process and surfaces its tools on the operator's ToolRegistry so
+# Big Smooth can call them like built-ins (behind the same permission + Narc
+# hooks). Client role only — the CLI keeps the `server` features for `th mcp serve`.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 
 # th-1665ed: the `imessage` tool reads ~/Library/Messages/chat.db over a
 # READ-ONLY rusqlite connection, in-process by design — a `sqlite3` subprocess

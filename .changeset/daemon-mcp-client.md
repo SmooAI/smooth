@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+Big Smooth's daemon now actually loads `~/.smooth/mcp.toml` MCP servers and surfaces their tools to the operator (th-52ec01). Previously `th mcp add` registered config but nothing in the daemon path consumed it, so no MCP tool ever appeared. The daemon now spawns each non-disabled server (global + project config, project shadowing global on name collision) as a stdio child process via `rmcp`, performs the MCP `initialize` handshake, lists each server's tools, and registers them on the operator's per-turn `ToolRegistry` — namespaced `<server>__<tool>` and gateway-name-legal. Because they sit on that registry like any built-in, MCP tools pass through the same permission gate + Narc hooks. Sessions are spawned once at startup and held for the daemon's lifetime; a server that fails to start or handshake is logged and skipped, never fatal. The `McpConfig` loader moved from `smooth-cli` into the shared `smooth-tools` crate so both the CLI and the daemon consume the same TOML shape.

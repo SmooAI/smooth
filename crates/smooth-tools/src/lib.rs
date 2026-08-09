@@ -38,6 +38,8 @@ pub mod guard;
 #[cfg(target_os = "macos")]
 pub mod imessage;
 pub mod knowledge_search;
+pub mod mcp;
+pub mod mcp_config;
 pub mod path;
 pub mod permission;
 /// File-based CLI-wrapper plugins (`plugin.toml` manifests) registered as tools.

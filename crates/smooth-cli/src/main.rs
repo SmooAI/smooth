@@ -21,7 +21,7 @@ mod hooks;
 /// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
 #[cfg(target_os = "macos")]
 mod imessage_setup;
-mod mcp_config;
+use smooth_tools::mcp_config;
 mod mcp_serve;
 mod operator_serve;
 /// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
