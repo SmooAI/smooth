@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { baseUrl, isRemote, remoteUrl, resolveAddr, resolveDaemonBin, tccHelperApp, tccOpenArgs } from './daemon.js';
+import { baseUrl, desktopLogPath, isRemote, remoteUrl, resolveAddr, resolveDaemonBin, tccHelperApp, tccOpenArgs } from './daemon.js';
 
 // A path that does not exist → resolveAddr falls through to its default. Pinning
 // the addrFile keeps these deterministic regardless of any real ~/.smooth/daemon.addr.
@@ -63,4 +63,8 @@ test('tccHelperApp resolves the sibling helper under Contents/Helpers on macOS',
 test('tccOpenArgs builds a fresh-instance `open` invocation forwarding the tcc verb', () => {
     assert.deepEqual(tccOpenArgs('/x/BigSmoothTCC.app', 'calendar'), ['-n', '/x/BigSmoothTCC.app', '--args', 'tcc', 'calendar']);
     assert.deepEqual(tccOpenArgs('/x/BigSmoothTCC.app', 'reminders'), ['-n', '/x/BigSmoothTCC.app', '--args', 'tcc', 'reminders']);
+});
+
+test('desktopLogPath lives under ~/.smooth so a Finder-launched daemon logs somewhere findable', () => {
+    assert.match(desktopLogPath(), /[/\\]\.smooth[/\\]desktop\.log$/);
 });

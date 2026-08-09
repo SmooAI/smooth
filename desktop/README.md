@@ -43,16 +43,31 @@ repo root does both in the right order.
 
 ## What it does
 
-- **Daemon lifecycle.** On launch it probes `http://127.0.0.1:8787/health` (or
-  `$SMOOTH_ADDR`). If a daemon already answers — `th up`, a launchd unit — it
-  attaches and never touches it. Otherwise it spawns the bundled
-  `smooth-daemon run` and terminates that child on Quit. Resolution order:
+- **Daemon lifecycle.** On launch it **always** probes the LOCAL daemon
+  (`http://127.0.0.1:8787/health`, or `$SMOOTH_ADDR` / the addr in
+  `~/.smooth/daemon.addr`). If one already answers — `th up`, a launchd unit, a
+  login-item instance — it attaches and never touches it. Otherwise it spawns the
+  bundled `smooth-daemon run` and terminates that child on Quit. Resolution order:
   bundled resources → `$SMOOTH_DAEMON_BIN` → `~/.smooth/bin` → `PATH` → the cargo
-  target dir.
+  target dir. The spawned daemon's stdout/stderr and the app's own spawn
+  diagnostics go to `~/.smooth/desktop.log` — a Finder/`open` launch has no
+  terminal, so that file is where a startup failure actually shows up (th-5c2ec6).
+- **Local vs remote is a view target, not a daemon switch (th-5c2ec6).** Connecting
+  to a remote daemon (tray → Connect → a tailnet peer) only changes what the
+  **window** loads; this Mac still runs its own local daemon in the background, so
+  the phone/relay and scheduled turns keep working. A stale saved `remoteUrl` can
+  no longer silently leave the machine with no local daemon. The current mode is
+  shown as the first (disabled) line of the tray menu and in the window title.
+- **Open at Login (th-ccf2cf).** On first run the app enables
+  `app.setLoginItemSettings({ openAtLogin: true })` (macOS `SMAppService`) so the
+  daemon comes back after a reboot without a hand-made plist. It's applied exactly
+  once (tracked by `loginItemConfigured` in the userData `config.json`); after
+  that the tray's **Open at Login** checkbox (or System Settings) owns it.
 - **Window.** A `BrowserWindow` on the daemon's `/`. The daemon serves smooth-web
   with its local auth token already injected into `index.html`, so there is no
   renderer, preload, or IPC code here. Closing hides to the tray; Quit exits.
-- **Tray.** The `th` mark, with Open / Set Up / Quit.
+- **Tray.** The `th` mark, with the current-mode header, Open / Open at Login /
+  Set Up / Connect / Quit.
 - **`th` on PATH.** The DMG bundles the `th` CLI next to the daemon. On launch the
   app symlinks it into a PATH dir (`/usr/local/bin/th`, falling back to
   `~/.local/bin/th`) so `th` works from a terminal. Because the link points **into
