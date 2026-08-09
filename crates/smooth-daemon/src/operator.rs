@@ -126,6 +126,12 @@ struct SandboxedToolProvider {
     /// saved in one session survives a daemon restart and is retrievable in the
     /// next (th-6d1692). Shared with the storage db in `serve_local_flavor`.
     memory: Arc<dyn Memory>,
+    /// Live MCP sessions + their tools (th-52ec01). Spawned ONCE at daemon
+    /// startup from the merged `mcp.toml` and held for the daemon's lifetime;
+    /// each turn we clone the tool `Arc`s onto the per-turn registry so remote
+    /// MCP tools sit behind the same permission gate + Narc hooks as built-ins.
+    /// `None` for the ephemeral/test providers that don't wire MCP.
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
 }
 
 #[async_trait]
@@ -213,6 +219,14 @@ impl ToolProvider for SandboxedToolProvider {
         // than the next daemon restart. Cache behind an mtime check if someone
         // ever ships hundreds of plugins.
         tools.extend(smooth_tools::plugin_tools(&dir, self.proxy.as_deref()));
+        // MCP servers (th-52ec01): the tools from every `mcp.toml` server that
+        // came up at startup. Cloned onto the per-turn registry here — BEFORE the
+        // sidekick snapshot below — so (a) they pass through the permission gate +
+        // Narc like any built-in, and (b) a dispatched sidekick inherits them too.
+        // The child processes are long-lived; this is just an `Arc` clone per turn.
+        if let Some(mcp) = &self.mcp {
+            tools.extend(mcp.tools());
+        }
         // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
         // lets Big Smooth fan a self-contained subtask out to a `scout`
         // (read-only) or `runner` (full) sidekick — each runs in its own
@@ -276,7 +290,22 @@ pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> A
 /// sqlite-backed store here so cross-session memory persists (th-6d1692).
 #[must_use]
 pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, memory: Arc<dyn Memory>) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider { cwd, proxy, memory })
+    local_tool_provider_full(cwd, proxy, memory, None)
+}
+
+/// The full seam, additionally taking the daemon's live [`McpManager`].
+///
+/// So remote MCP-server tools (`mcp.toml`) surface on every turn (th-52ec01).
+/// `serve_local_flavor` builds the manager once and passes it here; the simpler
+/// constructors pass `None`.
+#[must_use]
+pub fn local_tool_provider_full(
+    cwd: SessionCwd,
+    proxy: Option<String>,
+    memory: Arc<dyn Memory>,
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
+) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider { cwd, proxy, memory, mcp })
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -774,7 +803,14 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
     // `/cd`). Rooted at the workspace; every conversation defaults to it.
     let session_cwd = SessionCwd::new(workspace.clone());
-    let provider = local_tool_provider_with_memory(session_cwd.clone(), egress_proxy, memory);
+    // MCP servers (th-52ec01): spawn every non-disabled server from the merged
+    // global+project `mcp.toml` ONCE here, keep the sessions alive for the
+    // daemon's lifetime, and hand the manager to the tool provider so their tools
+    // appear on every turn (behind the permission + Narc hooks). Best-effort — a
+    // server that won't start is logged and skipped, never fatal.
+    let mcp = Arc::new(smooth_tools::mcp::McpManager::discover(&workspace).await);
+    tracing::info!(mcp_tools = mcp.len(), "mcp: servers loaded");
+    let provider = local_tool_provider_full(session_cwd.clone(), egress_proxy, memory, Some(mcp));
 
     // Web-push state, built ONCE and shared: the /push/* router and the turn
     // notifier (th-b9a636) — the trigger layer push never had.

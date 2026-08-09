@@ -50,11 +50,18 @@ impl McpConfig {
     /// Project-scoped config: `<repo_root>/.smooth/mcp.toml`. Walks up
     /// from `cwd` to find the nearest `.smooth/` or `.git/` directory.
     /// If neither is found, uses `cwd/.smooth/mcp.toml` verbatim.
+    ///
+    /// # Errors
+    /// Returns an error if the current working directory can't be read.
     pub fn project_path() -> std::io::Result<PathBuf> {
         let cwd = std::env::current_dir()?;
         Ok(find_project_root(&cwd).unwrap_or(cwd).join(".smooth").join("mcp.toml"))
     }
 
+    /// Load config from `path`, or the default (empty) config if it doesn't exist.
+    ///
+    /// # Errors
+    /// Returns an error if the file exists but can't be read or parsed as TOML.
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -63,6 +70,11 @@ impl McpConfig {
         toml::from_str(&contents).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))
     }
 
+    /// Serialize and write this config to `path`, creating parent dirs.
+    ///
+    /// # Errors
+    /// Returns an error if the parent dirs can't be created, serialization
+    /// fails, or the file can't be written.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -194,12 +206,15 @@ pub enum DefaultOutcome {
 }
 
 /// Insert any shipped defaults that are not yet in the given config file.
-/// Returns one outcome per default in the order from [`default_mcp_servers`].
 ///
+/// Returns one outcome per default in the order from [`default_mcp_servers`].
 /// The function is intentionally idempotent and conservative: if a default
 /// name is already in the config — even if its command/args differ from the
 /// shipped version — we treat it as user-owned and never touch it. That
 /// makes this safe to call on every `th up` boot.
+///
+/// # Errors
+/// Returns an error if the config file can't be written after adding defaults.
 pub fn ensure_default_mcp_servers(path: &std::path::Path) -> anyhow::Result<Vec<(String, DefaultOutcome)>> {
     let mut cfg = McpConfig::load(path).unwrap_or_default();
     let mut changed = false;
@@ -220,6 +235,7 @@ pub fn ensure_default_mcp_servers(path: &std::path::Path) -> anyhow::Result<Vec<
 }
 
 /// Check whether the shipped-default runtime (`npx`, `uvx`, …) is on PATH.
+///
 /// Used by the `th up` startup banner to log a clear install hint when the
 /// default would otherwise fail at spawn time. Returns `true` if reachable.
 pub fn host_probe_on_path(probe: &str) -> bool {
@@ -249,6 +265,12 @@ pub fn host_probe_on_path(probe: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::literal_string_with_formatting_args,
+    reason = "unwrap/expect are the test idiom; the `${env:...}` literals are intentional test inputs, not format args"
+)]
 mod tests {
     use super::*;
 
