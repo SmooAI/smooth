@@ -59,6 +59,15 @@ export const MODES: SmoothMode[] = [
     { id: 'ui+', label: 'UI+', emoji: '🎨', model: 'gpt-5.5', tier: 'premium' },
     { id: 'plan+', label: 'Plan+', emoji: '🧠', model: 'gpt-5.4', tier: 'premium' },
     { id: 'max', label: 'Max', emoji: '💎', model: 'gpt-5.5-pro', tier: 'premium' },
+    // Smoo Jr (ADR-008, th-12d875) — the kid-safe family mode. This entry is a
+    // UX affordance + model pin ONLY; it is EXPLICITLY NOT a security boundary.
+    // The child guardrail (allowlist-only tools, no shell/writes/egress) is
+    // enforced by the daemon from the connection's PRINCIPAL (a Jr device's own
+    // token → `role:child`), not from the selected mode — so a client picking or
+    // un-picking this mode changes nothing about what tools are reachable. A
+    // safety-tuned model keeps answers age-appropriate; the hard limits are the
+    // principal-derived tool narrowing in the daemon.
+    { id: 'smoo-jr', label: 'Smoo Jr', emoji: '🧒', model: 'deepseek-v4-flash', tier: 'budget' },
 ];
 
 /** The mode a fresh session lands on. */
