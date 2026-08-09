@@ -5289,7 +5289,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ba8e00d#ba8e00dc0d43fc0833c5a7884b994ce72e30bae5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5319,7 +5319,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ba8e00d#ba8e00dc0d43fc0833c5a7884b994ce72e30bae5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5359,7 +5359,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-ingestion"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ba8e00d#ba8e00dc0d43fc0833c5a7884b994ce72e30bae5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5380,7 +5380,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-server"
 version = "1.23.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b8acb3b#b8acb3b46eb07f75711d7c39d2d8f4db183dddd4"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=ba8e00d#ba8e00dc0d43fc0833c5a7884b994ce72e30bae5"
 dependencies = [
  "anyhow",
  "async-trait",

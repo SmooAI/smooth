@@ -752,7 +752,22 @@ fn default_deny_policy() -> smooth_operator::deny_policy::DenyPolicy {
 fn permission_mode() -> smooth_operator::permission::AutoMode {
     match std::env::var("SMOOTH_AUTO_MODE") {
         Ok(v) if !v.trim().is_empty() => smooth_operator::permission::AutoMode::from_env_value(Some(&v)),
-        _ => smooth_operator::permission::AutoMode::Bypass,
+        // th-be3f55: was Bypass — "allow everything except the circuit-breakers".
+        // That was never a considered posture, it was the only mode that worked:
+        // with no approver wired, an `Ask` verdict failed closed, so any mode
+        // that could ask would have bricked the assistant. Now that
+        // `permission_hook_with_approver` routes `Ask` to the human over the
+        // chat HITL, the classifier can actually be used.
+        //
+        // AcceptEdits rather than Ask: file edits are the assistant's normal
+        // work and prompting for each one makes it unusable, while everything
+        // else — bash especially — goes through the engine's classifier.
+        // Mirrors Claude Code's `acceptEdits`, which is the posture Brent
+        // reports works well in practice.
+        //
+        // Escape hatch unchanged: SMOOTH_AUTO_MODE=bypass restores the old
+        // behavior for a headless box where nobody can answer a prompt.
+        _ => smooth_operator::permission::AutoMode::AcceptEdits,
     }
 }
 
@@ -760,8 +775,32 @@ fn permission_mode() -> smooth_operator::permission::AutoMode {
 /// default) + the embedded [`default_deny_policy`] as the circuit-breaker deny
 /// tier. Installed FIRST on the operator's tool registry so a policy deny
 /// short-circuits before narc or the tool itself runs.
-fn permission_hook() -> smooth_operator::permission::PermissionHook {
-    smooth_operator::permission::PermissionHook::new(permission_mode()).with_deny_policy(Arc::new(default_deny_policy()))
+/// How long a parked tool waits for the human before the engine gives up.
+/// Generous: Big Smooth is always-on and the operator may be away from the tab.
+const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Build the permission gate WITH a live approver, and hand back the receiving
+/// ends for the server to bridge (th-be3f55).
+///
+/// Before this, the hook was built with no approver, so an `Ask` verdict failed
+/// closed — which is why the daemon had to run in `Bypass` and never asked
+/// about anything. The bench measured the cost: models emptied a
+/// policy-protected customers.json 11 times in 15 trials with nothing to stop
+/// them.
+fn permission_hook_with_approver() -> (smooth_operator::permission::PermissionHook, smooth_operator_server::runner::HostApprover) {
+    let pair = smooth_operator::human_channel();
+    // NOTE: `with_grants` (the "approve always" allow-list, Claude Code's
+    // don't-ask-again) is NOT wired: `SharedGrants` is private in the published
+    // core crate, so it needs a core release before the daemon can pass one.
+    // Until then every approval is one-shot — safe, just more prompting.
+    let hook = smooth_operator::permission::PermissionHook::new(permission_mode())
+        .with_deny_policy(Arc::new(default_deny_policy()))
+        .with_approver(pair.request_tx, pair.response_rx, APPROVAL_TIMEOUT);
+    let approver = smooth_operator_server::runner::HostApprover {
+        request_rx: Arc::new(tokio::sync::Mutex::new(pair.request_rx)),
+        response_tx: pair.response_tx,
+    };
+    (hook, approver)
 }
 
 /// Boot the operator's local deployment flavor on `addr`, gated by an
@@ -784,6 +823,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // persona (progressive disclosure — the agent `read_file`s a SKILL.md body
     // only when a request matches). Empty discovery leaves the persona untouched.
     let persona = persona_with_skills(&workspace);
+    // The permission gate + the receiving ends the server bridges (th-be3f55).
+    let (permission_gate, host_approver) = permission_hook_with_approver();
     let egress_proxy = crate::start_egress_proxy();
     // Keep the signed-in Smoo AI session alive. The access token lives ~1h;
     // without this the daemon holds a dead token and every api.smoo.ai call
@@ -857,9 +898,14 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // ahead of the per-agent auth + confirmation hooks, so they get first say
         // on every call. narc degrades to regex-only when no gateway key is set.
         .tool_hooks(vec![
-            Arc::new(permission_hook()) as Arc<dyn smooth_operator::tool::ToolHook>,
+            Arc::new(permission_gate) as Arc<dyn smooth_operator::tool::ToolHook>,
             Arc::new(crate::hooks::NarcHook::new(narc_judge_config())),
         ])
+        // th-be3f55: hand the server the gate's approver channel, so an `Ask`
+        // parks the turn and asks the human over the same WS the SPA already
+        // renders approve/deny for — instead of failing closed, which is what
+        // forced the Bypass default.
+        .host_approver(host_approver)
         // The agent's personality: "Big Smooth", the user's personal assistant —
         // NOT the operator's stock customer-support persona, and no reasoning
         // narration (th-5f059b) — plus the discovered "Available skills" index.
@@ -1352,17 +1398,24 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_defaults_to_bypass_and_honors_env() {
+    fn permission_mode_defaults_to_accept_edits_and_honors_env() {
         std::env::remove_var("SMOOTH_AUTO_MODE");
-        assert_eq!(permission_mode(), AutoMode::Bypass, "unset → Bypass (allow benign, block dangerous)");
+        assert_eq!(
+            permission_mode(),
+            AutoMode::AcceptEdits,
+            "unset → AcceptEdits: edits flow, everything else is classified (th-be3f55)"
+        );
         std::env::set_var("SMOOTH_AUTO_MODE", "  ");
-        assert_eq!(permission_mode(), AutoMode::Bypass, "blank → Bypass");
+        assert_eq!(permission_mode(), AutoMode::AcceptEdits, "blank → the default, not Bypass");
         std::env::set_var("SMOOTH_AUTO_MODE", "ask");
         assert_eq!(permission_mode(), AutoMode::Ask, "explicit ask honored");
         std::env::set_var("SMOOTH_AUTO_MODE", "deny");
         assert_eq!(permission_mode(), AutoMode::DenyUnmatched, "explicit deny honored");
         std::env::set_var("SMOOTH_AUTO_MODE", "accept-edits");
         assert_eq!(permission_mode(), AutoMode::AcceptEdits, "explicit accept-edits honored");
+        // The escape hatch for a box where nobody can answer a prompt.
+        std::env::set_var("SMOOTH_AUTO_MODE", "bypass");
+        assert_eq!(permission_mode(), AutoMode::Bypass, "explicit bypass still available");
         std::env::remove_var("SMOOTH_AUTO_MODE");
     }
 

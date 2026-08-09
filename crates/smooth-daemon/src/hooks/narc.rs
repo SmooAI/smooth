@@ -483,7 +483,7 @@ fn restore_destroyed(snap: &Snapshot) -> Vec<Restored> {
         let what = match now {
             None => "deleted",
             // Emptied, or reduced to an empty container ([] / {}).
-            Some(n) if n == 0 => "emptied",
+            Some(0) => "emptied",
             // Reduced to an empty container (`[]`, `{}`) from something substantial.
             Some(n) if n <= 4 && before.len() > 16 => "emptied",
             _ => continue,
