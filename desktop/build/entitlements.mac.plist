@@ -8,6 +8,12 @@
   it. `allow-dyld-environment-variables` + `disable-library-validation` let the
   bundled `smooth-daemon` and its own child processes load — the daemon is a
   separate Mach-O signed alongside the app, not linked into it.
+
+  `personal-information.calendars` / `.reminders` are REQUIRED for the EventKit
+  TCC prompt to appear: a hardened-runtime process that lacks them has its
+  `requestFullAccessToEvents` silently return not-determined with NO prompt
+  (verified on macOS 26.4, th-36da65). These are inherited by the nested
+  BigSmoothTCC.app helper (entitlementsInherit), which is what actually asks.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -21,6 +27,10 @@
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.personal-information.reminders</key>
     <true/>
 </dict>
 </plist>
