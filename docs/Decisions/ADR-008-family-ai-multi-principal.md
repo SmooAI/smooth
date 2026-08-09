@@ -150,3 +150,65 @@ owner *and delegated principals*. What holds the line:
   start in parallel, not after the engineering.
 - Direct connection and the single-owner daemon remain first-class; a family is
   an opt-in org binding, not a new default.
+
+## Implementation — M1 + M2 (pearl th-12d875)
+
+Recon (a fan-out over the daemon seams) refined the injection point from the
+original sketch. Two engine facts drove the final shape, both verified against
+`smooai-smooth-operator-1.23.2`:
+
+- The engine **drops `Principal.role`** at the connection boundary
+  (`access_context()`), but **preserves `Principal.groups`**. So the role must
+  ride as a `role:<name>` **group tag**, not the role field.
+- `ToolHook` sees only `&ToolCall` (no principal), and the two security hooks are
+  process-global singletons. So the permission *hook* cannot branch on caller —
+  but the per-turn **`ToolProvider` can**, because it receives `ctx.access`
+  (which carries `groups`) on every turn.
+
+**Result: enforcement is tool-set narrowing in `SandboxedToolProvider::tools_for`,
+with ZERO engine changes.**
+
+- `crates/smooth-policy/src/family.rs` — pure policy: `FamilyConfig`
+  (`members` + `roles`), `from_toml` (fail-closed), `member_for_token`
+  (constant-time), `tool_allowed(role, tool)` = `PermissionRules.decide(tool,"")
+  != Deny` (deny-by-default; unknown role → deny-all). Rules match **engine tool
+  names** (lowercase `bash`, `write_file`, `read_file`, …), not Claude-Code labels.
+- `crates/smooth-daemon/src/org_auth.rs` — `SmooOrgVerifier` gains an optional
+  `FamilyConfig`. Owner secret → `Admin` (unchanged, checked first). Else a family
+  member token → a `Basic` principal with `groups = ["role:<role>"]`, sharing the
+  owner's org. Unknown token → `InvalidToken` (fail-closed).
+- `crates/smooth-daemon/src/operator.rs` — after all tools are pushed and
+  **before** the sidekick snapshot, `tools_for` reads the `role:` group and
+  `retain`s only `tool_allowed` tools; `send_sidekick` (delegation) is gated the
+  same way, closing the "delegate to a full-clearance runner" escape. Owner (no
+  `role:` group) is never filtered. Loaded from `~/.smooth/family.toml`
+  (`SMOOTH_FAMILY_FILE` override); absent/malformed ⇒ single-tenant, fail-closed.
+
+**Smoo Jr = the `child` role** in `~/.smooth/family.toml`:
+
+```toml
+[[members]]
+token = "<the Jr device's own local bearer token>"
+id = "kid-alex"
+role = "child"
+display_name = "Alex"
+
+[roles.child]
+allow = ["read_file", "list_files", "grep", "recall", "current_datetime"]
+default = "deny"   # everything else — bash, writes, web, th, MCP, delegation — is dropped
+```
+
+Jr's **no-egress** guarantee comes from denying every egressing *tool* at this
+filter (goalie's proxy allowlist is process-wide, so a per-principal proxy isn't
+possible) — with `default = "deny"` there is no code path from a Jr turn to the
+network. **Smoo Jr also surfaces as a selectable mode** (`modes.ts`, id
+`smoo-jr`) — UX + model pin only; the guardrail is the principal-derived tool
+narrowing, independent of the mode.
+
+**Scope landed:** M1 (per-principal RBAC) + M2 (Smoo Jr role + mode).
+**Still deferred** (unchanged from above): M3 per-principal *memory* partition
+(M2 stopgap: `remember` is denied for Jr, so nothing writes to shared memory —
+`recall` reads only), M4 org-scoped **relay** routing (until then, distinct
+principals exist only for locally-provisioned direct tokens; the relay still
+collapses remote callers to one shared token) and per-role child-safety **Narc**,
+and the **COPPA** gate before any public under-13 account.

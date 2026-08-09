@@ -16,8 +16,11 @@
 //! daemon restart to notice). Logged out, unreadable, or no org → falls back to
 //! `"local"`, so the signed-out UX is exactly what it is today.
 
+use std::sync::Arc;
+
 use smooai_client_shared::auth::storage::CredentialsStore;
 use smooth_operator_svc::auth::{AuthError, AuthVerifier, Principal, Role};
+use smooth_policy::family::FamilyConfig;
 
 /// The org id used when there is no signed-in Smoo session — same placeholder
 /// the engine's `LocalTokenVerifier` always used.
@@ -27,6 +30,11 @@ pub const LOCAL_ORG: &str = "local";
 pub struct SmooOrgVerifier {
     secret: String,
     store: Option<CredentialsStore>,
+    /// Optional family roster (ADR-008, th-12d875). When present, a bearer that
+    /// isn't the owner secret but matches a family member's token authenticates as
+    /// that member — a `Basic` principal carrying a `role:<role>` group the tool
+    /// provider reads to narrow the tool set. Absent ⇒ single-tenant as before.
+    family: Option<Arc<FamilyConfig>>,
 }
 
 impl SmooOrgVerifier {
@@ -39,6 +47,7 @@ impl SmooOrgVerifier {
         Self {
             secret: secret.into(),
             store: CredentialsStore::default_user().ok(),
+            family: None,
         }
     }
 
@@ -48,7 +57,16 @@ impl SmooOrgVerifier {
         Self {
             secret: secret.into(),
             store: Some(store),
+            family: None,
         }
+    }
+
+    /// Attach a family roster so non-owner member tokens authenticate as their
+    /// role (ADR-008). `None` leaves the verifier single-tenant.
+    #[must_use]
+    pub fn with_family(mut self, family: Option<Arc<FamilyConfig>>) -> Self {
+        self.family = family;
+        self
     }
 
     /// `(org_id, user_id, display_name)` from the stored session, read fresh.
@@ -72,15 +90,32 @@ impl AuthVerifier for SmooOrgVerifier {
         if bearer_token.is_empty() {
             return Err(AuthError::Unauthenticated);
         }
-        if !local_token_eq(bearer_token.as_bytes(), self.secret.as_bytes()) {
-            return Err(AuthError::InvalidToken("local token mismatch".to_string()));
+        // Owner FIRST: the operator secret → Admin, unchanged. Every candidate is
+        // still a full constant-time compare (no early-length leak beyond
+        // `local_token_eq`), and a family token can never satisfy this branch.
+        if local_token_eq(bearer_token.as_bytes(), self.secret.as_bytes()) {
+            // Read per-verify, not per-construct: the heartbeat rotates the session
+            // and `th api orgs switch` moves the org under a running daemon.
+            let (org_id, user_id, display_name) = self.identity();
+            tracing::debug!(%org_id, %user_id, "chat connection authenticated (owner)");
+            // Single-user local daemon — the operator is always their own admin.
+            return Ok(Principal::new(user_id, org_id, Role::Admin, display_name));
         }
-        // Read per-verify, not per-construct: the heartbeat rotates the session
-        // and `th api orgs switch` moves the org under a running daemon.
-        let (org_id, user_id, display_name) = self.identity();
-        tracing::debug!(%org_id, %user_id, "chat connection authenticated");
-        // Single-user local daemon — the operator is always their own admin.
-        Ok(Principal::new(user_id, org_id, Role::Admin, display_name))
+        // Then family (ADR-008, th-12d875): a member token → a scoped principal
+        // carrying `role:<role>` in `groups`, which the tool provider reads to
+        // narrow the tool set. The engine drops `Principal.role` at connect
+        // (`access_context()`), so the ROLE MUST ride in `groups`, not the role
+        // field. Family members share the owner's org (they're one Smoo family).
+        if let Some(family) = &self.family {
+            if let Some(member) = family.member_for_token(bearer_token) {
+                let (org_id, _, _) = self.identity();
+                tracing::debug!(%org_id, member = %member.id, role = %member.role, "chat connection authenticated (family member)");
+                let mut principal = Principal::new(member.id.clone(), org_id, Role::Basic, member.display_name.clone());
+                principal.groups = vec![format!("role:{}", member.role)];
+                return Ok(principal);
+            }
+        }
+        Err(AuthError::InvalidToken("local token mismatch".to_string()))
     }
 
     fn mode(&self) -> &'static str {
@@ -208,6 +243,89 @@ mod tests {
         let v = SmooOrgVerifier::new("s3cret-local");
         assert_eq!(v.mode(), "local-token-smoo-org");
         assert!(!v.mode().contains("s3cret"));
+    }
+
+    fn family(toml: &str) -> std::sync::Arc<FamilyConfig> {
+        std::sync::Arc::new(FamilyConfig::from_toml(toml).unwrap())
+    }
+
+    const FAM: &str = r#"
+        [[members]]
+        token = "jr-token-aaaa"
+        id = "kid-alex"
+        role = "child"
+        display_name = "Alex"
+
+        [roles.child]
+        allow = ["read_file"]
+        default = "deny"
+    "#;
+
+    #[test]
+    fn family_token_authenticates_as_a_scoped_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tmp_store(&dir);
+        store.save(&creds(Some("fam-org"), Some("dev@smoo.ai"))).unwrap();
+        let v = SmooOrgVerifier::with_store("owner-secret", store).with_family(Some(family(FAM)));
+
+        let p = v.verify("jr-token-aaaa").expect("family token authenticates");
+        assert_eq!(p.user_id, "kid-alex");
+        assert_eq!(p.display_name.as_deref(), Some("Alex"));
+        // Role rides in groups (the engine drops the role field), and the member
+        // shares the owner's org.
+        assert_eq!(p.groups, vec!["role:child".to_string()]);
+        assert_eq!(p.org_id, "fam-org");
+        assert_eq!(p.role, Role::Basic, "a family member is never Admin");
+    }
+
+    #[test]
+    fn owner_token_is_unchanged_by_a_family_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tmp_store(&dir);
+        store.save(&creds(Some("fam-org"), Some("dev@smoo.ai"))).unwrap();
+        let v = SmooOrgVerifier::with_store("owner-secret", store).with_family(Some(family(FAM)));
+
+        let p = v.verify("owner-secret").expect("owner token still works");
+        assert_eq!(p.role, Role::Admin);
+        assert!(p.groups.is_empty(), "owner carries no role group → unfiltered tools");
+    }
+
+    #[test]
+    fn no_role_escalation_from_a_family_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tmp_store(&dir);
+        store.save(&creds(Some("fam-org"), Some("dev@smoo.ai"))).unwrap();
+        let v = SmooOrgVerifier::with_store("owner-secret", store).with_family(Some(family(FAM)));
+
+        // A family token can never satisfy the owner branch (distinct bytes), and a
+        // prefix/altered owner token is rejected outright — never downgraded to a
+        // family match either.
+        assert_eq!(v.verify("jr-token-aaaa").unwrap().role, Role::Basic);
+        assert!(matches!(v.verify("owner"), Err(AuthError::InvalidToken(_))));
+        assert!(matches!(v.verify("jr-token"), Err(AuthError::InvalidToken(_))), "member-token prefix must miss");
+    }
+
+    #[test]
+    fn unknown_token_fails_closed_even_with_a_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tmp_store(&dir);
+        store.save(&creds(Some("fam-org"), Some("dev@smoo.ai"))).unwrap();
+        let v = SmooOrgVerifier::with_store("owner-secret", store).with_family(Some(family(FAM)));
+
+        assert!(matches!(v.verify(""), Err(AuthError::Unauthenticated)));
+        assert!(matches!(v.verify("stranger"), Err(AuthError::InvalidToken(_))));
+    }
+
+    #[test]
+    fn without_a_family_behavior_is_byte_for_byte_as_before() {
+        // No family attached: owner works, everything else is InvalidToken —
+        // identical to the pre-ADR-008 verifier.
+        let dir = tempfile::tempdir().unwrap();
+        let store = tmp_store(&dir);
+        store.save(&creds(Some("org"), Some("dev@smoo.ai"))).unwrap();
+        let v = SmooOrgVerifier::with_store("owner-secret", store);
+        assert_eq!(v.verify("owner-secret").unwrap().role, Role::Admin);
+        assert!(matches!(v.verify("jr-token-aaaa"), Err(AuthError::InvalidToken(_))));
     }
 
     #[test]
