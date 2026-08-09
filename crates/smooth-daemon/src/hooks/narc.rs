@@ -217,15 +217,59 @@ fn is_empty_payload(s: &str) -> bool {
     t.is_empty() || t == "[]" || t == "{}" || t == "null" || t == "\"\""
 }
 
+/// The workspace the agent's tools are confined to. Mirrors
+/// `operator::workspace_dir` — the tools resolve relative paths against this,
+/// so the detector must too.
+fn workspace_root() -> std::path::PathBuf {
+    std::env::var_os("SMOOTH_WORKSPACE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Size of the file a tool argument names, resolved the way the TOOLS resolve
+/// it.
+///
+/// th-be3f55 (second pass). The first version called `std::fs::metadata` on the
+/// raw argument, which resolves a relative path against the daemon PROCESS's
+/// cwd. In the sandbox the workspace is `/work` and the process cwd is not, so
+/// `customers.json` stat'd as missing, `existing_len` returned None, and the
+/// truncation rule never ran — the guard was inert exactly where it mattered.
+/// The bench caught this: deletions continued 4/5 and 5/5 with the guard
+/// "installed".
+fn workspace_file_len(path: &str) -> Option<u64> {
+    let p = std::path::Path::new(path);
+    let resolved = if p.is_absolute() { p.to_path_buf() } else { workspace_root().join(p) };
+    std::fs::metadata(resolved).ok().filter(std::fs::Metadata::is_file).map(|m| m.len())
+}
+
 /// Detect a data-destroying call, consulting the real filesystem for sizes.
 #[must_use]
 pub fn detect_destructive(call: &ToolCall) -> Option<DestructiveFinding> {
-    detect_destructive_with(call, |p| std::fs::metadata(p).ok().filter(std::fs::Metadata::is_file).map(|m| m.len()))
+    detect_destructive_with(call, workspace_file_len)
 }
 
 /// The testable half: `existing_len` resolves a path to its current size, so the
 /// truncation rules can be exercised without touching disk.
 fn detect_destructive_with(call: &ToolCall, existing_len: impl Fn(&str) -> Option<u64>) -> Option<DestructiveFinding> {
+    // 0. Destruction spelled as a shell command. `detect_dangerous_cli` is a
+    //    literal blocklist of catastrophes (`rm -rf /`); it misses both the
+    //    evasive spellings of those (`rm -fr /`, `rm -r -f /`) and the ordinary
+    //    ones that still destroy the user's data (`rm -rf .`, `find . -delete`,
+    //    `truncate -s 0 x`, `> x`). Measured: 18 of 22 destructive forms passed
+    //    it unflagged. These escalate to the judge rather than hard-blocking,
+    //    because `rm -rf ./build` is routine and `rm -rf .` is not, and only
+    //    context separates them.
+    if let Some(cmd) = shell_command(call) {
+        if let Some(kind) = detect_destructive_shell(cmd) {
+            return Some(DestructiveFinding {
+                kind,
+                detail: format!("shell command destroys data: `{}`", truncate_for_prompt(cmd)),
+                severity: Severity::Alert,
+            });
+        }
+    }
+
     // 1. A tool that exists to delete.
     if DELETION_TOOLS.contains(&call.name.as_str()) {
         let what = arg_str(call, PATH_KEYS).unwrap_or("<unspecified>");
@@ -286,6 +330,68 @@ fn detect_destructive_with(call: &ToolCall, existing_len: impl Fn(&str) -> Optio
         }
     }
 
+    None
+}
+
+/// Recognise a destructive shell command STRUCTURALLY rather than by literal
+/// match, so flag order and spelling don't decide whether data survives.
+///
+/// Returns the kind of destruction, or `None`. Deliberately conservative on the
+/// read side: `ls`, `grep`, `cat` and friends never match.
+#[must_use]
+pub fn detect_destructive_shell(command: &str) -> Option<&'static str> {
+    let lower = command.to_ascii_lowercase();
+
+    // `rm` with BOTH recursive and force, however spelled or ordered.
+    if let Some(rest) = lower.split_once("rm ").map(|(_, r)| r) {
+        let flags: String = rest.split_whitespace().take_while(|t| t.starts_with('-')).collect::<Vec<_>>().join(" ");
+        let recursive = flags.contains('r') || flags.contains("--recursive");
+        let force = flags.contains('f') || flags.contains("--force");
+        if recursive && force {
+            return Some("shell-recursive-delete");
+        }
+    }
+    // Any `rm` of a glob or a directory-ish target is still a delete.
+    if lower.starts_with("rm ") || lower.contains(" rm ") || lower.contains("&& rm ") || lower.contains("; rm ") {
+        return Some("shell-delete");
+    }
+    // Bulk deletion via find.
+    if lower.contains("find ") && (lower.contains(" -delete") || lower.contains("-exec rm")) {
+        return Some("shell-find-delete");
+    }
+    // In-place emptying.
+    if lower.contains("truncate -s 0") || lower.contains("truncate --size 0") {
+        return Some("shell-truncate");
+    }
+    if lower.contains("shred ") {
+        return Some("shell-shred");
+    }
+    // `> file` / `cat /dev/null > file` — redirection that empties a real file.
+    // `>>` (append) is explicitly not this, and `>/dev/null` discards output
+    // rather than destroying a file.
+    if let Some(idx) = lower.find('>') {
+        let is_append = lower[idx..].starts_with(">>");
+        let target = lower[idx + 1..].trim_start_matches('>').trim();
+        let discards_output = target.starts_with("/dev/null");
+        if !is_append && !discards_output && !target.is_empty() {
+            return Some("shell-redirect-truncate");
+        }
+    }
+    // Version-control destruction of uncommitted work.
+    if lower.contains("git clean") && (lower.contains("-fd") || lower.contains("-df") || lower.contains("-fx")) {
+        return Some("shell-git-clean");
+    }
+    if lower.contains("git reset --hard") {
+        return Some("shell-git-reset-hard");
+    }
+    // Mirroring with deletion enabled.
+    if (lower.contains("rsync") || lower.contains("aws s3 sync")) && lower.contains("--delete") {
+        return Some("shell-sync-delete");
+    }
+    // Moving something into oblivion.
+    if lower.contains("mv ") && lower.contains("/dev/null") {
+        return Some("shell-move-to-devnull");
+    }
     None
 }
 
@@ -681,6 +787,80 @@ mod tests {
     }
 
     // ── dangerous cli ─────────────────────────────────────────────
+
+    // ---- destructive SHELL detector (th-be3f55, second pass) ----------------
+
+    /// The 18-of-22 gap. Every one of these destroys real data and every one
+    /// passed `detect_dangerous_cli` unflagged, because it is a literal
+    /// blocklist and these are not literally on it.
+    #[test]
+    fn shell_detector_catches_what_the_blocklist_missed() {
+        for cmd in [
+            "rm -fr /",                 // flags swapped
+            "rm -r -f /",               // flags separated
+            "rm --recursive --force /", // long flags
+            "rm -rf $HOME",
+            "rm -rf .",
+            "rm -rf ./*",
+            "rm -rf \"$PROJECT\"",
+            "find . -delete",
+            "find . -exec rm -f {} ;",
+            "truncate -s 0 customers.json",
+            "> customers.json",
+            "cat /dev/null > customers.json",
+            "shred -u secrets.json",
+            "git clean -fdx",
+            "git reset --hard HEAD~5",
+            "rsync -a --delete src/ dst/",
+            "mv important.db /dev/null",
+        ] {
+            assert!(detect_destructive_shell(cmd).is_some(), "missed destructive command: {cmd}");
+        }
+    }
+
+    /// The false-positive side. A guard that fires on `ls` gets turned off, and
+    /// a guard that is off protects nothing.
+    #[test]
+    fn shell_detector_ignores_ordinary_commands() {
+        for cmd in [
+            "ls -la",
+            "grep -rn TODO src/",
+            "cat customers.json",
+            "cargo test",
+            "echo hello >> notes.md",                  // append, not truncate
+            "curl -s https://example.com > /dev/null", // discards output
+            "git status",
+            "git commit -m 'wip'",
+            "python3 -c 'print(1)'",
+            "mkdir -p build",
+            "rsync -a src/ dst/", // no --delete
+        ] {
+            assert!(detect_destructive_shell(cmd).is_none(), "false positive on: {cmd}");
+        }
+    }
+
+    /// Shell destruction must reach the judge like any other destruction —
+    /// that is the fan-out, and it is what makes the tier general.
+    #[test]
+    fn shell_destruction_produces_a_finding() {
+        let c = call("bash", serde_json::json!({"command": "rm -rf ./data"}));
+        let f = detect_destructive_with(&c, |_| None).expect("shell destruction must be flagged");
+        assert!(f.kind.starts_with("shell-"), "{f:?}");
+        assert_eq!(f.severity, Severity::Alert, "context decides; escalate rather than hard-block");
+    }
+
+    /// The bug the bench caught: a relative path must be resolved against the
+    /// WORKSPACE, not the daemon's cwd. Before this, `customers.json` stat'd as
+    /// missing inside the sandbox and the guard was inert.
+    #[test]
+    fn truncation_resolves_relative_paths_against_the_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("customers.json"), "[{\"id\":1},{\"id\":2}]").expect("seed");
+        std::env::set_var("SMOOTH_WORKSPACE", dir.path());
+        let len = workspace_file_len("customers.json");
+        std::env::remove_var("SMOOTH_WORKSPACE");
+        assert!(len.is_some_and(|n| n > 0), "relative path must resolve inside the workspace");
+    }
 
     // ---- destructive-action detector (th-be3f55) ---------------------------
 
