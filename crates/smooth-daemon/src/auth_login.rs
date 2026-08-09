@@ -118,11 +118,15 @@ const DEFAULT_SUPABASE_URL: &str = "https://db.smoo.ai";
 /// bundle ships. Not a secret; the service-role key is never touched here.
 const DEFAULT_SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhycWJxZ290Z2hpdGNmdW91a2RrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDEwNDEyODksImV4cCI6MjA1NjYxNzI4OX0.KHwbyjdrBhCiP6Na8aY8b3fA6RNkCqJ4m-dmY4AOdmw";
 
-fn supabase_url() -> String {
+/// Supabase session-refresh endpoint. `pub(crate)` so the relay supervisor
+/// ([`crate::relay`]) refreshes against the exact same endpoint the heartbeat
+/// uses (th-c6a542).
+pub(crate) fn supabase_url() -> String {
     std::env::var("SMOOAI_SUPABASE_URL").unwrap_or_else(|_| DEFAULT_SUPABASE_URL.to_string())
 }
 
-fn supabase_anon_key() -> String {
+/// The anon key for the Supabase refresh call — see [`supabase_url`].
+pub(crate) fn supabase_anon_key() -> String {
     std::env::var("SMOOAI_SUPABASE_ANON_KEY").unwrap_or_else(|_| DEFAULT_SUPABASE_ANON_KEY.to_string())
 }
 

@@ -32,9 +32,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use smooai_client_shared::auth::storage::CredentialsStore;
+use smooai_client_shared::auth::refresh;
+use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -54,6 +56,14 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 /// How long a signed-out daemon waits before checking for credentials again.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(60);
+/// Refresh the Smoo session when the access token is inside this window of
+/// expiry (or already past). ~60s beats a connect round-trip without
+/// refreshing on every reconnect (th-c6a542).
+const REFRESH_MARGIN_SECS: i64 = 60;
+/// The relay's application close code for "your token was rejected" — the
+/// relay accepts the WS upgrade, then closes with this if auth fails. Seeing
+/// it tells the supervisor to force a refresh and reconnect.
+const RELAY_AUTH_CLOSE_CODE: u16 = 4401;
 
 /// Resolve the relay endpoint from env. Pure (args, not env reads) so it's
 /// hermetically testable: `enabled` = `SMOOTH_RELAY`, `url` = `SMOOTH_RELAY_URL`.
@@ -283,12 +293,57 @@ fn spawn_bridge(
     })
 }
 
-/// Read the freshest Smoo access token from the stored session. `None` when
-/// signed out / no store — the supervisor waits and retries.
-fn fresh_access_token() -> Option<String> {
+/// Pure "should we refresh?" decision over (expiry, now) — refresh when the
+/// token is within [`REFRESH_MARGIN_SECS`] of expiry or already past. A `None`
+/// expiry means we can't tell, so don't (a bad token surfaces as a 4401, which
+/// forces one anyway). Pure so the window logic is testable without a clock.
+fn needs_refresh(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    matches!(expires_at, Some(exp) if now >= exp - ChronoDuration::seconds(REFRESH_MARGIN_SECS))
+}
+
+/// Read the freshest USABLE Smoo access token from the stored session,
+/// refreshing it first when it's expired/near-expiry (or `force`d after a
+/// 4401) and persisting the rotated tokens. `None` when signed out / no store —
+/// the supervisor waits and retries. Best-effort: a failed refresh still
+/// returns the existing token so the connect is attempted, never crashing the
+/// daemon (th-c6a542).
+async fn fresh_access_token(http: &reqwest::Client, force: bool) -> Option<String> {
     let store = CredentialsStore::default_user().ok()?;
     let creds = store.load().ok().flatten()?;
+    let creds = if force || needs_refresh(creds.expires_at, Utc::now()) {
+        refresh_and_persist(http, &store, creds).await
+    } else {
+        creds
+    };
     Some(creds.access_token).filter(|t| !t.is_empty())
+}
+
+/// Refresh the session against Supabase and persist the rotated tokens, reusing
+/// the exact mechanism the credential heartbeat uses ([`crate::auth_login`]).
+/// Best-effort: on any failure logs and returns the ORIGINAL creds so the
+/// caller still attempts a connect. Supabase ROTATES the refresh token, so a
+/// successful refresh MUST be saved or the next refresh presents a revoked one.
+async fn refresh_and_persist(http: &reqwest::Client, store: &CredentialsStore, creds: Credentials) -> Credentials {
+    if creds.refresh_token.is_none() {
+        tracing::warn!("relay: Smoo session is near expiry with no refresh token — sign in again (`th auth login`)");
+        return creds;
+    }
+    match refresh::refresh_session(http, &crate::auth_login::supabase_url(), &crate::auth_login::supabase_anon_key(), &creds).await {
+        Ok(renewed) => {
+            if let Err(e) = store.save(&renewed) {
+                // Use the fresh token for THIS connect even if the save failed;
+                // the next reconnect will just refresh again.
+                tracing::error!(error = %format!("{e:#}"), "relay: refreshed the Smoo session but persisting it failed");
+                return renewed;
+            }
+            tracing::info!(expires_at = ?renewed.expires_at, "relay: refreshed the Smoo session");
+            renewed
+        }
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "relay: could not refresh the Smoo session — trying the existing token");
+            creds
+        }
+    }
 }
 
 /// Spawn the relay supervisor.
@@ -299,6 +354,7 @@ fn fresh_access_token() -> Option<String> {
 /// is a log line and a retry.
 pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let http = reqwest::Client::default();
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
         // Resolved once: the id must be identical across reconnects or the
         // relay sees a new device every backoff cycle.
@@ -309,22 +365,38 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
         let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref());
         tracing::info!(%device, %label, "relay: this daemon's identity");
         let mut backoff = BACKOFF_MIN;
+        // Set after an auth rejection (4401 close / 401 handshake): the next
+        // read forces a token refresh before reconnecting. Normal backoff still
+        // applies, so a persistently-dead refresh token can't hammer the relay.
+        let mut force_refresh = false;
         loop {
-            let Some(token) = fresh_access_token() else {
+            let Some(token) = fresh_access_token(&http, force_refresh).await else {
+                force_refresh = false;
                 tracing::debug!("relay: no Smoo session (signed out) — retrying in {SIGNED_OUT_RECHECK:?}");
                 tokio::time::sleep(SIGNED_OUT_RECHECK).await;
                 continue;
             };
+            force_refresh = false;
             let url = connect_url(&relay_url, &token, &device, &label);
             let connected_at = std::time::Instant::now();
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
                     tracing::info!(relay = %relay_url, "relay: connected — Big Smooth is reachable without tailscale");
-                    run_connection(stream, &local_ws_url).await;
-                    tracing::warn!("relay: connection ended; reconnecting");
+                    match run_connection(stream, &local_ws_url).await {
+                        ConnEnd::AuthRejected => {
+                            tracing::warn!("relay: token rejected (4401) — refreshing the Smoo session and reconnecting");
+                            force_refresh = true;
+                        }
+                        ConnEnd::Normal => tracing::warn!("relay: connection ended; reconnecting"),
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, relay = %relay_url, "relay: connect failed");
+                    if is_auth_handshake_error(&e) {
+                        tracing::warn!(error = %e, relay = %relay_url, "relay: handshake rejected (401) — refreshing the Smoo session and reconnecting");
+                        force_refresh = true;
+                    } else {
+                        tracing::warn!(error = %e, relay = %relay_url, "relay: connect failed");
+                    }
                 }
             }
             // A connection that lived a while earns a fresh backoff.
@@ -337,13 +409,29 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
     })
 }
 
+/// Whether a WS handshake error is an auth rejection (HTTP 401) — the relay
+/// normally 4401-closes after upgrade, but a 401 at handshake is the same
+/// signal: refresh the token and retry.
+fn is_auth_handshake_error(e: &tokio_tungstenite::tungstenite::Error) -> bool {
+    matches!(e, tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status().as_u16() == 401)
+}
+
+/// How a relay connection ended — normally, or because the relay rejected our
+/// token (4401), which the supervisor answers with a refresh + reconnect.
+#[derive(Debug, PartialEq, Eq)]
+enum ConnEnd {
+    Normal,
+    AuthRejected,
+}
+
 /// One live relay connection: pump relay ⇄ bridges until the socket ends.
-async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, local_ws_url: &str) {
+async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, local_ws_url: &str) -> ConnEnd {
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
     // writer to the relay socket.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     let mut bridges: HashMap<String, Bridge> = HashMap::new();
+    let mut end = ConnEnd::Normal;
 
     loop {
         tokio::select! {
@@ -360,7 +448,15 @@ async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungste
             msg = source.next() => {
                 let text = match msg {
                     Some(Ok(Message::Text(t))) => t,
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        // A 4401 close means the relay rejected our token — flag
+                        // it so the supervisor refreshes before reconnecting.
+                        if frame.as_ref().is_some_and(|f| u16::from(f.code) == RELAY_AUTH_CLOSE_CODE) {
+                            end = ConnEnd::AuthRejected;
+                        }
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
                         tracing::debug!(error = %e, "relay: socket error");
@@ -398,6 +494,7 @@ async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungste
     }
     // Dropping the map aborts every bridge task (Bridge::drop).
     bridges.clear();
+    end
 }
 
 #[cfg(test)]
@@ -610,6 +707,64 @@ mod tests {
     fn urlencode_reserves() {
         assert_eq!(urlencode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
         assert_eq!(urlencode("a b+c"), "a%20b%2Bc");
+    }
+
+    // ── session refresh: decision + persistence (th-c6a542) ───────────────────
+
+    fn creds_expiring(expires_at: Option<DateTime<Utc>>, refresh_token: Option<&str>) -> Credentials {
+        use smooai_client_shared::auth::storage::CredentialKind;
+        Credentials {
+            access_token: "acc".into(),
+            refresh_token: refresh_token.map(str::to_string),
+            expires_at,
+            user: Some("brent@smoo.ai".into()),
+            active_org_id: Some("org_1".into()),
+            client_id: None,
+            client_secret: None,
+            kind: CredentialKind::User,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn needs_refresh_when_expired_or_near() {
+        let now = Utc::now();
+        assert!(needs_refresh(Some(now - ChronoDuration::hours(1)), now), "past expiry");
+        assert!(needs_refresh(Some(now + ChronoDuration::seconds(30)), now), "inside 60s margin");
+        assert!(needs_refresh(Some(now), now), "exactly at expiry");
+    }
+
+    #[test]
+    fn no_refresh_when_token_has_runway() {
+        let now = Utc::now();
+        assert!(!needs_refresh(Some(now + ChronoDuration::minutes(5)), now), "plenty of runway");
+        // Unknown expiry ⇒ can't tell ⇒ don't refresh (a 4401 forces it).
+        assert!(!needs_refresh(None, now));
+    }
+
+    #[tokio::test]
+    async fn refresh_and_persist_without_a_refresh_token_keeps_the_session() {
+        // No refresh token ⇒ no network hit, original creds returned unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai-user.json"));
+        let creds = creds_expiring(Some(Utc::now() - ChronoDuration::hours(1)), None);
+        let out = refresh_and_persist(&reqwest::Client::default(), &store, creds.clone()).await;
+        assert_eq!(out.access_token, creds.access_token);
+        assert!(out.refresh_token.is_none());
+    }
+
+    #[test]
+    fn store_round_trips_a_rotated_refresh_token() {
+        // The invariant the refresh path relies on: save() then load() preserves
+        // the rotated refresh_token — skip persisting it and the next refresh 400s.
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai-user.json"));
+        let mut creds = creds_expiring(Some(Utc::now() + ChronoDuration::hours(1)), Some("rot-abc"));
+        creds.access_token = "new-access".into();
+        store.save(&creds).unwrap();
+        let loaded = store.load().unwrap().expect("present");
+        assert_eq!(loaded.access_token, "new-access");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("rot-abc"));
     }
 
     // ── bridge integration: fake operator + fake relay channel ───────────────
