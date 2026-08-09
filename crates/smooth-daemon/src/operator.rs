@@ -796,10 +796,7 @@ fn permission_hook_with_approver() -> (smooth_operator::permission::PermissionHo
     let hook = smooth_operator::permission::PermissionHook::new(permission_mode())
         .with_deny_policy(Arc::new(default_deny_policy()))
         .with_approver(pair.request_tx, pair.response_rx, APPROVAL_TIMEOUT);
-    let approver = smooth_operator_server::runner::HostApprover {
-        request_rx: Arc::new(tokio::sync::Mutex::new(pair.request_rx)),
-        response_tx: pair.response_tx,
-    };
+    let approver = smooth_operator_server::runner::HostApprover::new(pair.request_rx, pair.response_tx);
     (hook, approver)
 }
 
