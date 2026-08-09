@@ -110,6 +110,7 @@ use smooth_operator_server::ServerConfig;
 use smooth_operator_svc::{ToolProvider, ToolProviderContext};
 
 use crate::org_auth::SmooOrgVerifier;
+use smooai_client_shared::auth::storage::CredentialsStore;
 use smooth_tools::SessionCwd;
 
 /// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
@@ -337,11 +338,58 @@ multi-step workflow, scan this list. When a user request matches a skill, READ i
 /// builtins. Discovery is resilient — a malformed SKILL.md is skipped with a
 /// warning inside `discover`, never crashing. When no skills are found the base
 /// persona is returned unchanged (no noise).
+/// Render the "Smoo AI account" persona section — who the daemon is signed in
+/// as and which org it acts on.
+///
+/// th-0b488d: asked "what are my biggest smoo deals", Big Smooth answered "I'm
+/// not logged in yet. You'd need to run `th auth login`" while holding a valid
+/// session for brent@smoo.ai. Its own identity was reachable only by spending a
+/// tool call, so it guessed — and guessed wrong, in the direction that makes it
+/// look broken. Identity is cheap, stable, and needed by every org-scoped
+/// request; it belongs in the prompt, not behind a lookup.
+///
+/// Deliberately NOT asserting the signed-out case as fact. The credentials are
+/// read once, at agent-build time, and a user who signs in mid-run would
+/// otherwise be told they are signed out with the same false confidence this
+/// pearl is about — so the signed-out branch points at `th auth whoami` instead
+/// of claiming anything.
+fn render_smoo_identity_section() -> String {
+    let creds = CredentialsStore::default_user().ok().and_then(|s| s.load().ok().flatten());
+    smoo_identity_section(
+        creds.as_ref().and_then(|c| c.user.as_deref()),
+        creds.as_ref().and_then(|c| c.active_org_id.as_deref()),
+    )
+}
+
+/// The pure half of [`render_smoo_identity_section`] — credentials in, persona
+/// prose out. Split so the branches are testable without a real credentials
+/// file on disk.
+///
+/// Blank-or-whitespace is treated as absent: a credentials file can carry an
+/// empty `user` / `active_org_id`, and "acting on org ``" is worse than saying
+/// nothing at all.
+fn smoo_identity_section(user: Option<&str>, org: Option<&str>) -> String {
+    let user = user.map(str::trim).filter(|u| !u.is_empty());
+    let org = org.map(str::trim).filter(|o| !o.is_empty());
+    match (user, org) {
+        (Some(user), Some(org)) => format!(
+            "\n\n## Smoo AI account\nYou are signed in to Smoo AI as {user}, acting on org `{org}`. Use that org id directly for org-scoped work (`th api …`, CRM, knowledge) instead of asking for it or claiming you are signed out. Verify with `th auth whoami` if a request implies a different org, or if a call unexpectedly 401s."
+        ),
+        (None, Some(org)) => format!(
+            "\n\n## Smoo AI account\nYou are signed in to Smoo AI, acting on org `{org}`. Use that org id directly for org-scoped work instead of asking for it. `th auth whoami` for the full picture."
+        ),
+        _ => "\n\n## Smoo AI account\nNo Smoo AI session was readable when this session started. Before telling the user they are signed out — which is wrong often enough to be worth the check — run `th auth whoami`; they may have signed in since. If it confirms no session, `th auth login` is the fix.".to_owned(),
+    }
+}
+
+/// Build the effective persona: [`BIG_SMOOTH_PERSONA`] + the Smoo AI identity
+/// block + the discovered skills index.
 fn persona_with_skills(workspace: &Path) -> String {
     let skills = smooth_cast::skills::discover(workspace);
+    let identity = render_smoo_identity_section();
     match render_skills_section(&skills) {
-        Some(section) => format!("{BIG_SMOOTH_PERSONA}{section}"),
-        None => BIG_SMOOTH_PERSONA.to_owned(),
+        Some(section) => format!("{BIG_SMOOTH_PERSONA}{identity}{section}"),
+        None => format!("{BIG_SMOOTH_PERSONA}{identity}"),
     }
 }
 
@@ -1320,6 +1368,55 @@ mod tests {
 
     const SAMPLE_SKILL: &str =
         "---\nname: add-show\ndescription: Add a show to the watchlist\ntriggers:\n  - add show\n  - add movie\n---\n\n# add-show\n\nDo the thing.\n";
+
+    /// th-0b488d: the whole point — a signed-in daemon states its org instead
+    /// of making the model discover it. The org id must appear literally, since
+    /// that is the string the agent will paste into `th api` calls.
+    #[test]
+    fn identity_section_states_user_and_org_when_signed_in() {
+        let s = smoo_identity_section(Some("brent@smoo.ai"), Some("8be5f5fd-cf71-43ba-9df9-01e15acdaf8e"));
+        assert!(s.contains("brent@smoo.ai"), "user missing: {s}");
+        assert!(s.contains("8be5f5fd-cf71-43ba-9df9-01e15acdaf8e"), "org id missing: {s}");
+        assert!(!s.contains("th auth login"), "signed-in persona must not suggest logging in: {s}");
+    }
+
+    /// A session with an org but no readable user still gets the org — the org
+    /// id is the part org-scoped calls actually need.
+    #[test]
+    fn identity_section_states_org_without_user() {
+        let s = smoo_identity_section(None, Some("org-abc"));
+        assert!(s.contains("org-abc"), "org id missing: {s}");
+        assert!(!s.contains("th auth login"), "must not claim signed out when an org is known: {s}");
+    }
+
+    /// The regression this pearl is about, in reverse. Credentials are read
+    /// ONCE at build time, so "no session at startup" must never be asserted to
+    /// the user as fact — a mid-run sign-in would make that a confident lie of
+    /// exactly the kind th-0b488d filed.
+    #[test]
+    fn identity_section_does_not_assert_signed_out_as_fact() {
+        let s = smoo_identity_section(None, None);
+        assert!(s.contains("th auth whoami"), "signed-out branch must send the agent to re-check: {s}");
+        let claims_signed_out = s.contains("You are not signed in") || s.contains("you are signed out");
+        assert!(!claims_signed_out, "must not state signed-out as fact: {s}");
+    }
+
+    /// Blank strings in the credentials file are absence, not a user named "".
+    #[test]
+    fn identity_section_treats_blank_credentials_as_absent() {
+        assert_eq!(smoo_identity_section(Some("   "), Some("")), smoo_identity_section(None, None));
+        // A blank user with a real org still yields the org.
+        assert!(smoo_identity_section(Some(" "), Some("org-abc")).contains("org-abc"));
+    }
+
+    /// The identity block must actually reach the persona the agent runs under
+    /// — the bug was ambient knowledge being absent, not prose being unwritten.
+    #[test]
+    fn persona_carries_the_smoo_identity_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let persona = persona_with_skills(tmp.path());
+        assert!(persona.contains("## Smoo AI account"), "persona is missing the identity section");
+    }
 
     #[test]
     fn skills_section_indexes_discovered_project_skill() {
