@@ -283,66 +283,56 @@ pub fn welcome_banner_lines() -> Vec<Line<'static>> {
 /// content (e.g. a fixed-screen mode rebuild) don't have to
 /// allocate twice.
 fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
-    /// Box-drawing SMOOTH wordmark — figlet "ANSI Shadow" font. Solid
-    /// blocks with double-line outlines; reads as a chunky brand
-    /// statement when colored with the smooth-web logo gradient.
+    /// Big Smooth's AVATAR — the terminal rendering of the web SPA's
+    /// `BigSmoothFace.tsx` (pearl th-a67752): teal→blue gradient head, dark
+    /// fedora with a teal hat band, dark sunglasses with white glints, and a
+    /// smirk. One char per column; the legend maps chars to Presence styles:
     ///
-    /// Stored as `(smoo_chunk, th_chunk)` tuples — the explicit split
-    /// means each half gets its own gradient applied uniformly across
-    /// only its own letters, with no boundary math. If the banner art
-    /// is ever swapped, the split point is right here in source for
-    /// review (no fraction-of-width to recompute).
-    const BANNER_ROWS: [(&str, &str); 6] = [
-        (
-            " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}",
-            " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
-        ),
-        (
-            " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}",
-            "\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
-        ),
-        (
-            " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}",
-            "   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
-        ),
-        (
-            " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}",
-            "   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}",
-        ),
-        (
-            " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}",
-            "   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
-        ),
-        (
-            " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}",
-            "    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
-        ),
+    ///   `h` hat (FACE_DARK) · `b` hat band (face teal) · `x` head (vertical
+    ///   th gradient) · `g` glasses (FACE_DARK) · `w` lens glint (white) ·
+    ///   `m` smirk (FACE_DARK) · space = terminal ground.
+    ///
+    /// The face gradient is RESERVED for Big Smooth's presence — this splash
+    /// is his introduction, the one place the avatar belongs at full size.
+    const AVATAR_ROWS: [&str; 12] = [
+        "       hhhhhhhhhhhh       ",
+        "       hhhhhhhhhhhh       ",
+        "       bbbbbbbbbbbb       ",
+        "    hhhhhhhhhhhhhhhhhh    ",
+        "      xxxxxxxxxxxxxx      ",
+        "     xxxxxxxxxxxxxxxx     ",
+        "    xggggggggggggggggx    ",
+        "    xgggggwggxxggggwgx    ",
+        "     xxxxxxxxxxxxxxxx     ",
+        "     xxxxxxxxxxmmmxxx     ",
+        "      xxxxxxxmmmxxxx      ",
+        "       xxxxxxxxxxxx       ",
     ];
+    // First row of the head — the vertical gradient runs from here to the
+    // chin so the teal→blue sweep covers the FACE, not the hat.
+    const HEAD_TOP: usize = 4;
+
     // Blank line at the top for spacing
     lines.push(Line::from(""));
-    // Each row is split into a (smoo, th) pair. The Smoo chunk gets
-    // the orange→coral→pink gradient over only its own length; the
-    // th chunk gets teal→blue over its own. This is structural —
-    // no boundary math, no fraction of total width — so the
-    // gradients always fit their letters exactly regardless of how
-    // wide the banner is or how the split lands.
-    for (smoo_chunk, th_chunk) in &BANNER_ROWS {
-        let smoo_chars: Vec<char> = smoo_chunk.chars().collect();
-        let th_chars: Vec<char> = th_chunk.chars().collect();
-        let smoo_total = smoo_chars.len().max(1);
-        let th_total = th_chars.len().max(1);
-
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(smoo_chars.len() + th_chars.len());
-        for (i, ch) in smoo_chars.into_iter().enumerate() {
-            let color = theme::smoo_gradient_color(i, smoo_total);
-            spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
-        }
-        for (i, ch) in th_chars.into_iter().enumerate() {
-            let color = theme::th_gradient_color(i, th_total);
-            spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
-        }
+    let head_rows = AVATAR_ROWS.len() - HEAD_TOP;
+    for (row, art) in AVATAR_ROWS.iter().enumerate() {
+        let head_color = theme::th_gradient_color(row.saturating_sub(HEAD_TOP), head_rows);
+        let spans: Vec<Span<'static>> = art
+            .chars()
+            .map(|c| match c {
+                'h' | 'g' | 'm' => Span::styled("\u{2593}", Style::default().fg(theme::FACE_DARK)),
+                'b' => Span::styled("\u{2588}", Style::default().fg(theme::th_gradient_color(0, 1)).add_modifier(Modifier::BOLD)),
+                'x' => Span::styled("\u{2588}", Style::default().fg(head_color).add_modifier(Modifier::BOLD)),
+                'w' => Span::styled("\u{2580}", Style::default().fg(theme::SMOO_WHITE)),
+                _ => Span::raw(" "),
+            })
+            .collect();
         lines.push(Line::from(spans).alignment(Alignment::Center));
     }
+    lines.push(Line::from(""));
+    // The brand mark stays, one quiet line under the avatar: the "Smooth"
+    // wordmark gradient text (smoo orange→red + th teal→blue).
+    lines.push(Line::from(theme::smooth_wordmark()).alignment(Alignment::Center));
     lines.push(Line::from(""));
     // This is Big Smooth's face, not a platform brochure (pearl th-7630a7):
     // the subtitle names WHO you're talking to, and the hint names the
@@ -981,6 +971,25 @@ mod relative_time_tests {
 mod glow_tests {
     use super::{health_glyph, status_gap};
     use crate::state::HealthStatus;
+
+    /// smooth-glow-up: the avatar must survive monochrome. The fedora, shades
+    /// and smirk are TEXTURE (▓ / ▀) against the █ head — if an art edit
+    /// flattens everything back to one glyph, the face becomes a blob under
+    /// NO_COLOR and this fails (pearl th-a67752).
+    #[test]
+    fn avatar_reads_in_shape_not_just_color() {
+        let lines = super::welcome_banner_lines();
+        let rendered: Vec<String> = lines.iter().map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect::<String>()).collect();
+        let art: Vec<&String> = rendered.iter().filter(|r| r.contains('\u{2588}') || r.contains('\u{2593}')).collect();
+        assert!(art.len() >= 12, "the 12-row avatar renders ({} block rows found)", art.len());
+        assert!(art.iter().any(|r| r.contains('\u{2593}')), "accessories keep their ▓ texture");
+        assert!(art.iter().any(|r| r.contains('\u{2580}')), "the lens glints keep their ▀ shape");
+        let widths: Vec<usize> = art.iter().map(|r| r.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "avatar rows are equal width so centering can't skew: {widths:?}"
+        );
+    }
 
     /// smooth-glow-up: state must be readable without color. Three dots that
     /// differ only by hue are invisible under NO_COLOR / to a colorblind user.

@@ -21,6 +21,12 @@ pub const SMOO_DARK_BLUE: Color = Color::Rgb(2, 6, 24);
 /// Smoo AI white (#f8fafc) — --color-smooai-white
 pub const SMOO_WHITE: Color = Color::Rgb(248, 250, 252);
 
+/// Big Smooth's dark accessories — the fedora and sunglasses from the web
+/// avatar (`BigSmoothFace.tsx` lensMat/hatMat, ~#080812). Dark-on-gradient
+/// reads as shades on ANY terminal ground because the bright head surrounds
+/// it, exactly like the web face on its dark canvas (pearl th-a67752).
+pub const FACE_DARK: Color = Color::Rgb(0x08, 0x08, 0x12);
+
 // ── Extended palette ──────────────────────────────────────────
 
 pub const SMOO_ORANGE_400: Color = Color::Rgb(248, 190, 87); // #f8be57
