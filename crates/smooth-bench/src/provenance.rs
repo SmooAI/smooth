@@ -23,6 +23,65 @@ use std::process::Command;
 
 use serde::Serialize;
 
+/// Which upstream build a model alias actually resolved to.
+///
+/// Model ids are ALIASES that float. DeepSeek repointed
+/// `deepseek-v4-flash` at V4-Flash-0731 on 2026-07-31 without changing
+/// the id — the calling convention is identical and nothing downstream
+/// notices. That is the same failure as benchmarking a stale binary,
+/// pointed the other way: the published board says "deepseek-v4-flash"
+/// while the thing behind the name changes underneath it, and two runs
+/// a month apart are silently not comparable.
+///
+/// The provider hands us the answer for free. One ~5-token call returns
+/// a `system_fingerprint` naming the exact served build, e.g.
+/// `fp_a18b46594c_prod0820_fp8_kvcache_20260402`. Cheap enough to do
+/// once per model per run; a run nobody can attribute to a build is
+/// worth less than the tenth of a cent it costs to pin.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ModelBuild {
+    pub model: String,
+    /// The provider's build identifier, when it sends one. Absent for
+    /// providers that do not — recorded as unknown rather than invented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+}
+
+impl ModelBuild {
+    /// Ask the gateway which build serves `model`, with the smallest
+    /// call that gets an answer.
+    ///
+    /// # Errors
+    /// Errors if the gateway is unreachable or rejects the request.
+    pub async fn probe(gateway_url: &str, key: &str, model: &str) -> anyhow::Result<Self> {
+        let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        });
+        let text = reqwest::Client::new().post(&url).bearer_auth(key).json(&body).send().await?.text().await?;
+        let v: serde_json::Value = serde_json::from_str(&text)?;
+        Ok(Self {
+            model: model.to_string(),
+            system_fingerprint: v
+                .get("system_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(ToString::to_string),
+        })
+    }
+
+    /// One line for the run header.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match &self.system_fingerprint {
+            Some(fp) => format!("  model build:   {} -> {fp}", self.model),
+            None => format!("  model build:   {} -> (provider sends no fingerprint)", self.model),
+        }
+    }
+}
+
 /// The binaries a run actually executed.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct Provenance {
@@ -162,6 +221,30 @@ mod tests {
         // warning — an unknown is not a staleness claim.
         assert!(Provenance::default().staleness_warning().is_none());
         assert!(p("th 1.0", "").staleness_warning().is_none(), "an empty HEAD cannot prove staleness");
+    }
+
+    #[test]
+    fn a_model_build_renders_its_fingerprint() {
+        let b = ModelBuild {
+            model: "deepseek-v4-flash".into(),
+            system_fingerprint: Some("fp_a18b46594c_prod0820".into()),
+        };
+        let t = b.render();
+        assert!(t.contains("deepseek-v4-flash"), "{t}");
+        assert!(t.contains("fp_a18b46594c_prod0820"), "{t}");
+    }
+
+    #[test]
+    fn a_missing_fingerprint_says_so_rather_than_inventing_one() {
+        // Not every provider sends one. "unknown" is a fact; a fabricated
+        // build id would be worse than the gap it papers over.
+        let b = ModelBuild {
+            model: "some-model".into(),
+            system_fingerprint: None,
+        };
+        assert!(b.render().contains("no fingerprint"), "{}", b.render());
+        let json = serde_json::to_string(&b).expect("serialises");
+        assert!(!json.contains("system_fingerprint"), "an absent build must be omitted, not null: {json}");
     }
 
     #[test]
