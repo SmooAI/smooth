@@ -1,50 +1,45 @@
 #!/usr/bin/env bash
-# th-mail watcher — blocks until unread `th msg` mail arrives, prints the unread
-# messages as JSON, and EXITS. Designed to run as a Claude Code background Bash
-# task: when it exits, the harness re-invokes the main agent, which surfaces the
-# mail to the user and re-arms the watcher.
+# th-mail watcher — blocks until unread `th msg` mail arrives, prints it as JSON,
+# and EXITS. Designed to run as a Claude Code background Bash task: when it
+# exits, the harness re-invokes the main agent, which surfaces the mail and
+# re-arms the watcher.
 #
-# Usage: watch-once.sh <agent-name> [interval-secs] [max-lifetime-secs] [pull]
-#   agent-name        whose inbox to watch (the handle you registered)
-#   interval-secs     seconds between polls (default 15)
-#   max-lifetime-secs safety cap; exit quietly after this with no mail (default 86400 = 24h)
-#   pull              "1" to `--pull` the Dolt remote each poll (cross-machine). DEFAULT "0":
-#                     do NOT pull. `--pull` WRITES to the shared Dolt store (fetch/merge) and
-#                     contends on the write lock — it caused a store-wide "Error 1105: database
-#                     is read only" that blocked every agent's writes. For same-machine agents
-#                     the mailbox is the same local store, so reads see new mail without pulling.
+# Since pearl th-374f85 this is a thin wrapper around `th msg watch --once
+# --json` — the blocking poll lives in the binary, against the machine-level
+# mail store (`~/.smooth/mail.db`). There is no remote to pull from and no
+# single-writer lock to contend for, so the old `pull` argument is gone.
 #
-# Exit 0 with a non-"[]" JSON array on stdout  => new mail (re-arm after handling).
-# Exit 0 with "[]" on stdout                   => timed out, no mail (optionally re-arm).
+# Usage: watch-once.sh <agent-name> [interval-secs] [max-lifetime-secs]
 #
-# Note: this does NOT mark messages read. The main agent consumes + marks read via
-# `th msg inbox --unread --mark-read` after surfacing, so nothing is lost if a
-# watcher cycle's output is missed.
+# Exit 0 with a non-"[]" JSON array on stdout => new mail (re-arm after handling).
+# Exit 0 with "[]" on stdout                  => timed out, no mail.
+#
+# It does NOT acknowledge anything: the main agent consumes via
+# `th msg inbox --unread --mark-read` (or `th msg ack`) after surfacing, so
+# nothing is lost if a watcher cycle's output is missed.
 
 AGENT="${1:-${SMOOTH_AGENT:-}}"
 INTERVAL="${2:-15}"
 MAX="${3:-86400}"
-PULL="${4:-0}"
 
-poll_flags=()
+flags=(--once --json --interval "$INTERVAL")
 if [ -n "$AGENT" ]; then
-    poll_flags=(--agent "$AGENT")
-fi
-if [ "$PULL" = "1" ]; then
-    poll_flags+=(--pull)
+    flags+=(--agent "$AGENT")
 fi
 
-elapsed=0
-while [ "$elapsed" -lt "$MAX" ]; do
-    out="$(th msg inbox --unread --json "${poll_flags[@]}" 2>/dev/null || true)"
-    compact="$(printf '%s' "$out" | tr -d '[:space:]')"
-    if [ -n "$compact" ] && [ "$compact" != "[]" ] && [ "$compact" != "null" ]; then
-        printf '%s\n' "$out"
-        exit 0
-    fi
-    sleep "$INTERVAL"
-    elapsed=$((elapsed + INTERVAL))
-done
+# `th msg watch --once` blocks until mail arrives; the outer timeout is the
+# lifetime cap. No `timeout` binary on stock macOS, so background + wait.
+th msg watch "${flags[@]}" &
+watcher=$!
+( sleep "$MAX"; kill "$watcher" 2>/dev/null ) &
+reaper=$!
 
-echo "[]"
+wait "$watcher"
+status=$?
+kill "$reaper" 2>/dev/null
+
+# Killed by the lifetime cap (or otherwise produced nothing) => no mail.
+if [ "$status" -ne 0 ]; then
+    echo "[]"
+fi
 exit 0
