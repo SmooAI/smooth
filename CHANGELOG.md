@@ -1,5 +1,59 @@
 # @smooai/smooth
 
+## 0.28.2
+
+### Patch Changes
+
+- d5eaa46: ADR-009: Scoped cloud memory & knowledge — personal/shared tiers (one nullable owner column, family=org), guardian visibility for children, and within-tool resource RBAC (per-role calendar allowlist). Extends ADR-008 as its deferred M3. Cloud sync is optional + entitlement-gated (Family AI subscription + 14-day trial) and degrades to local.
+
+## 0.28.1
+
+### Patch Changes
+
+- e0e214b: Big Smooth's auto mode now asks instead of bypassing.
+
+  The daemon wires an approver into the engine's permission gate, so an `Ask`
+  verdict parks the turn and requests approval over the same WS the web UI already
+  renders approve/deny for. With that in place the default mode moves off
+  `Bypass` (allow-everything-but-circuit-breakers) to `AcceptEdits` — edits flow,
+  everything else is classified. `SMOOTH_AUTO_MODE=bypass` restores the old
+  behavior for headless hosts.
+
+- e0e214b: The bench pins the headless permission posture explicitly.
+
+  The daemon now defaults to `AcceptEdits`, which asks a human before anything
+  that isn't a known-safe command. A bench has no human, so every bash call would
+  have parked and stalled for the approval timeout — measuring the gate instead of
+  the model. Both spawn paths now set `SMOOTH_AUTO_MODE=bypass`; circuit-breakers
+  and narc's destructive guard still apply.
+
+- e0e214b: Big Smooth knows which Smoo org it is signed in as, and tool calls collapse by default.
+
+  The daemon folds its signed-in Smoo AI identity (user + active org id) into the
+  persona, alongside the skills index. It previously had no ambient knowledge of
+  its own identity and answered "I'm not logged in yet, you'd need to run
+  `th auth login`" while holding a valid session.
+
+  Tool calls in the web UI now render collapsed to a one-line header, with output
+  behind a disclosure. Failed calls open themselves, so a silent failure does not
+  read as a success.
+
+- e0e214b: Destructive shell commands are now caught by effect, not by pattern.
+
+  Narc snapshots the workspace's small files before a shell call and, after it
+  runs, restores anything that was deleted or emptied — then reports it, so the
+  agent asks for confirmation instead of succeeding over destroyed data. This
+  covers spellings no pattern list can enumerate (`tee`, `sed -i`, `python3 -c`),
+  which the agentic bench found empirically.
+
+- e0e214b: Narc now judges destructive actions in any tool, not just shell commands.
+
+  `detect_dangerous_cli` only ever inspected shell commands, so destruction done
+  through a structured tool — a `write_file` that empties a data file, a delete
+  tool, a `calendar delete` — reached no detector and never escalated to the LLM
+  judge. A new detector keys on the effect (data that exists stops existing) and
+  routes those calls through a purpose-built judge prompt, failing closed.
+
 ## 0.28.0
 
 ### Minor Changes
