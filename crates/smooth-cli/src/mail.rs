@@ -154,6 +154,13 @@ pub enum MsgCommands {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Print just the number of unread messages. Nothing else on stdout, so a
+    /// statusline or prompt can inline it without parsing.
+    UnreadCount {
+        /// Whose inbox (defaults to the resolved handle).
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Reply to a message (threads automatically).
     Reply {
         /// Message id being replied to.
@@ -543,6 +550,11 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 println!("{} acknowledged {}", "✓".green().bold(), ids.join(", ").dimmed());
             }
         }
+        MsgCommands::UnreadCount { agent } => {
+            let who = agent.unwrap_or_else(resolve_handle);
+            // Bare number, no decoration — the statusline hook embeds this.
+            println!("{}", s.unread_count(&who)?);
+        }
         MsgCommands::Reply {
             id,
             body,
@@ -625,14 +637,15 @@ pub fn cmd_inbox() -> Result<()> {
     })
 }
 
+/// Serializes every test in this binary that reads or writes the agent-handle
+/// env vars — they are process-global, and the test harness runs threads in
+/// parallel. `mcp_serve`'s identity tests take the same lock.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// `resolve_handle` and `rewrite_session_handles` both read process-global
-    /// env vars, so these tests must not interleave with each other.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// The vars these tests own. `$HOME` is deliberately NOT among them: it is
     /// read by unrelated tests in this binary, which run in parallel.

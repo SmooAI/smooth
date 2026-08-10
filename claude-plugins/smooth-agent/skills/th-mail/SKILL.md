@@ -18,7 +18,7 @@ Your handle is resolved by `th agent whoami` (`$SMOOTH_AGENT_HANDLE` → `$SMOOT
 2. **Show current mail** so nothing already waiting is missed:
    `th msg inbox --agent <handle>`  (surface any unread to the user)
 3. **Arm the background watcher** — run with `run_in_background: true`:
-   `bash .claude/skills/th-mail/watch-once.sh <handle> 15`
+   `bash "${CLAUDE_PLUGIN_ROOT}/skills/th-mail/watch-once.sh" <handle> 15`
    (args: handle, poll-interval-secs; optional 3rd = max lifetime secs, default 24h)
 4. Tell the user: *online as `<handle>`, listening in the background — continuing with <current work>.* Then **go back to your primary task.**
 
@@ -51,3 +51,5 @@ Kill the background watcher task (via the harness's background-task controls), t
 - **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (so old scripts don't break) and print a deprecation note, but they do nothing: the mailbox is machine-local, there is no remote to sync and no Dolt write lock to contend for. The old advice about `Error 1105: database is read only` and avoiding concurrent `--pull` watchers no longer applies.
 - **Don't double-arm:** keep exactly one watcher background task alive.
 - **`th msg inbox` vs `th inbox`:** this skill is `th msg` (agent-to-agent mail). `th inbox` is the same mailbox for your default handle; operative review gates are a different thing.
+- **MCP tools do the same thing without shelling out.** If `th mcp install --harness claude-code` has been run (or you're using this plugin's bundled `smooth` MCP server), `agent_identity` / `agent_status` / `agent_list` / `mail_inbox` / `mail_send` / `mail_ack` are available as tools. They hit the same `~/.smooth/mail.db`. Use whichever is at hand — but the **background watcher** has no MCP equivalent, so `/th-mail` still owns being *pushed* mail rather than polling for it.
+- **Cloud sync is optional.** Everything above works with no Smoo account. `th agent backend set cloud` (see `th agent backend status`) moves the mailbox to api.smoo.ai so agents on *different machines* share it; that one is a paid feature with a 14-day trial. Nothing local depends on it.

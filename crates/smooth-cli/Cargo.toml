@@ -57,6 +57,9 @@ chrono.workspace = true
 chrono-tz.workspace = true
 dirs-next.workspace = true
 toml.workspace = true
+# th-2f33b6: `th mcp install --harness codex` rewrites one table in the user's
+# ~/.codex/config.toml without eating their comments.
+toml_edit.workspace = true
 anstream.workspace = true
 owo-colors.workspace = true
 indicatif.workspace = true

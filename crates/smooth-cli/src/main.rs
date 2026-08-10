@@ -28,6 +28,7 @@ use smooth_tools::mcp_config;
 /// th-374f85: `th agent` / `th msg` / `th inbox` on the machine-level
 /// SQLite mail store (ADR-010), off the per-repo Dolt pearl store.
 mod mail;
+mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
 /// Reclaimable-disk findings reported by `th doctor` (pearl th-91de11).
@@ -37,6 +38,7 @@ mod reclaim;
 mod reminders_setup;
 mod service;
 mod smooai;
+mod statusline_setup;
 
 use smooai::cmd_orgs;
 
@@ -670,6 +672,13 @@ enum Commands {
         /// a GUI login session.
         #[arg(long)]
         setup_reminders: bool,
+        /// Set up the Claude Code statusline that shows this session's th-mail
+        /// handle and unread count (`⚙ th:fix-auth ✉3`). Writes the `statusLine`
+        /// entry into `~/.claude/settings.json` — and NEVER over an existing
+        /// one: if you already run a statusline (ponytail's, say) it prints the
+        /// wrapper that renders both, for you to opt into.
+        #[arg(long)]
+        setup_statusline: bool,
         /// Run the health check, then walk every setup step that isn't ready
         /// (LLM providers, Smoo AI sign-in, Full Disk Access, Calendar,
         /// Reminders, Messages) in order, driving each one's `--setup-*` path.
@@ -1061,9 +1070,20 @@ enum McpCommands {
     Defaults,
     /// Register a shipped-default MCP server into `~/.smooth/mcp.toml`
     /// (idempotent — never touches an existing entry of the same name).
+    ///
+    /// With `--harness`, runs the OTHER direction instead: registers
+    /// `th mcp serve` (this binary) with a coding harness, so Claude Code,
+    /// Codex and OpenCode all reach the same agent mailbox and pearl store.
     Install {
         /// Default name (`budget-aware-mcp`, …). Omit to install every default.
         name: Option<String>,
+        /// Register `th mcp serve` with a coding harness instead:
+        /// `claude-code` | `codex` | `opencode` | `all`.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Print what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run `th` ITSELF as an MCP server over stdio, exposing th's
     /// high-value surfaces (pearls, memory, …) as MCP tools so Claude
@@ -1610,9 +1630,12 @@ async fn main() -> Result<()> {
             setup_calendar,
             setup_imessage,
             setup_reminders,
+            setup_statusline,
             onboard,
         }) => {
-            if init_home_repo {
+            if setup_statusline {
+                statusline_setup::run()
+            } else if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
             } else if onboard {
                 cmd_doctor_onboard().await
@@ -7666,8 +7689,15 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
             Ok(())
         }
 
-        McpCommands::Install { name } => {
+        McpCommands::Install { name, harness, dry_run } => {
             use mcp_config::{default_mcp_servers, ensure_default_mcp_servers, host_probe_on_path, DefaultOutcome, McpConfig, McpServerConfig};
+
+            // `--harness` is the inverse operation: register THIS binary with a
+            // coding harness, rather than registering a third-party server with
+            // the operator.
+            if let Some(ref h) = harness {
+                return cmd_mcp_install_harness(h, dry_run);
+            }
             // Targeted install: only one default by name. Implement as a
             // pre-filter on the shared `ensure_default_mcp_servers` helper.
             if let Some(ref n) = name {
@@ -7744,6 +7774,52 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
         // this sync path.
         McpCommands::Serve => unreachable!("`th mcp serve` is dispatched asynchronously"),
     }
+}
+
+/// `th mcp install --harness <claude-code|codex|opencode|all>` — register
+/// `th mcp serve` with a coding harness so its sessions join the agent bus.
+fn cmd_mcp_install_harness(spec: &str, dry_run: bool) -> Result<()> {
+    use mcp_install::{harness_home, install_into, Harness, Outcome};
+
+    let all = spec.trim().eq_ignore_ascii_case("all");
+    let targets: Vec<Harness> = if all { Harness::ALL.to_vec() } else { vec![Harness::parse(spec)?] };
+    let home = harness_home()?;
+
+    println!();
+    if dry_run {
+        println!("  {} nothing will be written\n", "dry run —".yellow().bold());
+    }
+    let mut wrote = 0;
+    for h in targets {
+        let path = h.config_path(&home);
+        let outcome = install_into(h, &home, dry_run)?;
+        let line = match &outcome {
+            Outcome::Added => format!("  {} {} — registered `th mcp serve`", "✓".green().bold(), h.to_string().bold()),
+            Outcome::Updated => format!("  {} {} — repointed at `th mcp serve`", "✓".green().bold(), h.to_string().bold()),
+            Outcome::AlreadyPresent => format!("  {} {} — already registered", "·".dimmed(), h.to_string().bold()),
+            // Only worth calling out when the user asked for everything; if
+            // they named one harness explicitly, say it plainly instead.
+            Outcome::NotInstalled if all => format!("  {} {} — not installed here, skipped", "○".dimmed(), h.to_string().dimmed()),
+            Outcome::NotInstalled => format!(
+                "  {} {} is not installed here (no {})",
+                "!".yellow().bold(),
+                h.to_string().bold(),
+                h.marker_dir(&home).display()
+            ),
+        };
+        println!("{line}");
+        if !matches!(outcome, Outcome::NotInstalled) {
+            println!("    {}", path.display().to_string().dimmed());
+        }
+        if outcome.wrote() {
+            wrote += 1;
+        }
+    }
+    if wrote > 0 && !dry_run {
+        println!("\n  {} restart the harness to pick up the new server.", "→".dimmed());
+    }
+    println!();
+    Ok(())
 }
 
 fn plugins_dir() -> Result<std::path::PathBuf> {
