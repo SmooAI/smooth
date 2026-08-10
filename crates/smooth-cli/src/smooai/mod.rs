@@ -82,6 +82,22 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
     Ok(client)
 }
 
+/// Build an authed client from the signed-in **user** session only — no M2M
+/// fallback.
+///
+/// For platform surfaces scoped to a person rather than an org (agent mail,
+/// th-b02f63): an org machine token carries no user identity, so those routes
+/// 403 it. Failing here with the real fix beats a server error the caller has
+/// to decode.
+///
+/// # Errors
+/// Returns an error naming `th auth login` when there is no usable user session.
+pub(crate) async fn require_user_session() -> Result<SmoothApiClient> {
+    try_user_session()
+        .await
+        .context("not signed in as a Smoo user — run `th auth login` (an org M2M key won't do: this surface is user-scoped)")
+}
+
 /// Build an authed client from the user JWT at `~/.smooth/auth/smooai-user.json`,
 /// or `None` if it's absent/unreadable, or expired with no way to refresh — in
 /// which case the caller falls back to M2M.

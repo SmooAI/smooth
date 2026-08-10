@@ -63,7 +63,11 @@ pulldown-cmark = "0.13"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: `th mcp install` edits the user's own ~/.claude.json and
+# opencode.json. Without it serde_json's map is a BTreeMap, so writing one key
+# back reorders every key in their file — a surgical edit that reads as a total
+# rewrite. IndexMap keeps the file byte-stable apart from what we changed.
+serde_json = { version = "1", features = ["preserve_order"] }
 # YAML — used for skills/SKILL.md frontmatter parsing (pearl
 # th-e0f812). serde_yml is the maintained fork of serde_yaml.
 serde_yml = "0.0.12"
@@ -133,6 +137,11 @@ rust-embed = "8"
 
 # TOML + glob
 toml = "0.8"
+# `th mcp install --harness codex` edits the USER's ~/.codex/config.toml. Going
+# through `toml`'s value tree round-trips away their comments and layout;
+# toml_edit keeps the document and rewrites one table. Already in the tree — it
+# is what `toml` itself is built on — so this costs no extra compile.
+toml_edit = "0.22"
 globset = "0.4"
 
 # Proxy

@@ -11,12 +11,28 @@ Code worker sessions in tmux, coordinate them over
   `manual`, `mail`, `status`, `ls`, `attach`. Drives the `th claude` engine.
 - **`agent-comms`** skill — teaches a worker session to report status, answer
   pings, and hand off work over `th msg`/`th agent`.
+- **`th-mail`** skill — `/th-mail` arms a background `th msg watch --once`
+  watcher so an arriving message *pulls the session back in* instead of it
+  polling. The only surface that gets you *pushed* mail rather than checking for
+  it.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
 - **`smooth-operator`** skill — drives the org's dashboard agent from the CLI
   (`th api smooth-operator chat|confirm|history`) for org actions (email, CRM,
   analytics, knowledge) rather than code changes. Needs a `th auth login` user
   session; it 401s under an M2M client.
+- **The `smooth` MCP server** — the plugin manifest registers `th mcp serve`,
+  so every session gets the agent bus as *tools* rather than shell calls:
+  `agent_identity`, `agent_status`, `agent_list`, `mail_inbox`, `mail_send`,
+  `mail_ack` (plus `pearls_ready`/`pearls_create`, `remember`/`recall`, and the
+  org tier behind `th auth login`). Codex and OpenCode reach the same mailbox
+  via `th mcp install --harness codex|opencode|all`.
+- **`smooth-statusline.sh`** — shows which agent this session is and how much
+  mail is waiting: `⚙ th:fix-auth ✉3`. Not wired automatically (Claude Code
+  allows exactly one `statusLine` and clobbering yours would be rude) — run
+  **`th doctor --setup-statusline`**, which installs it only if the slot is free
+  and otherwise offers `smooth-statusline-with-ponytail.sh`, which renders
+  ponytail's statusline and ours on one line.
 - **Auto-onboarding to th-mail** — **every** Claude Code session lands on the
   bus so Big Smooth and other agents can reach it, via two hooks:
     - `register-agent.sh` (SessionStart) registers the session. `th claude run`
@@ -29,10 +45,11 @@ Code worker sessions in tmux, coordinate them over
       prompt, nudging a placeholder session to rename itself to a task-meaningful
       handle: `th agent rename --from <placeholder> --to <new>` (carries its mail
       over). Workers are never nudged.
-  Registration is always-on and safe; the hooks do **not** auto-start a
-  background `th msg watch` (Dolt is single-writer — many always-on watchers
-  cause "database is read only"). Background mail-watching stays **opt-in** via
-  the `/th-mail` skill. No `th` on PATH → the hooks are a no-op and the rest of
+  Registration is always-on and safe — since pearl th-374f85 the mailbox is a
+  machine-level SQLite file, so a register is a millisecond-scale local write.
+  The hooks still do **not** auto-start a background `th msg watch`: a watcher
+  per session is a lot of processes for something most sessions never need.
+  Background mail-watching stays **opt-in** via the `/th-mail` skill. No `th` on PATH → the hooks are a no-op and the rest of
   the plugin still works.
 - **Shared repo guardrail hooks** — the SmooAI worktree/pearls guardrails that
   used to be hand-copied into every repo's `.claude/hooks/`, now one source of
@@ -47,6 +64,11 @@ Code worker sessions in tmux, coordinate them over
       footguns.
     - `enforce-pearls-labels.sh` (PostToolUse Bash) — reminds to label a
       `th pearls create`.
+    - `attest-push-hint.sh` (PreToolUse Bash) — in any repo with executable
+      `scripts/ci/<check>.sh` files, asks for `th attest <checks>` INSTEAD of a
+      bare `git push` (it runs the checks, THEN pushes, THEN credits the
+      `ci-attest/*` statuses, so each credited CI row skips in ~8s). Override
+      with `# attest:ack reason=...`.
     - `pearls-store-guard.sh` (PreToolUse Bash) — nudges away from the patterns
       that wedge the Dolt pearl store read-only (hand-deleting `.smooth/dolt`
       internals, raw `dolt` writes that bypass the single-writer server,
@@ -75,6 +97,13 @@ control live in `th claude` (the binary).
 
 Then `th claude run "<task>"` launches a supervised, plugin-active worker, and
 `/smooth status` shows the farm.
+
+**Codex users:** Codex consumes this plugin from the same `smooth` marketplace
+but pins its own copy, and that pin has been sitting at **0.4.0** — run Codex's
+plugin update to pick up anything newer, including the MCP server and the
+`th attest` hint. Codex has no statusline surface, so that piece is Claude Code
+only; `th mcp install --harness codex` gets it the mail tools regardless of the
+plugin pin.
 
 ## How control works
 

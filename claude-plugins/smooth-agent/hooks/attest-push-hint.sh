@@ -1,8 +1,14 @@
 #!/bin/bash
 # attest-push-hint: PreToolUse Bash hook that nudges the agent toward
-# `scripts/ci/attest.sh` instead of a bare `git push`, in any repo that has one.
+# `th attest` instead of a bare `git push`, in any repo that defines CI checks.
 #
-# Why a hook and not a git hook: `attest.sh` PUSHES (that ordering is what stops
+# Repointed from smooai's bash `scripts/ci/attest.sh` to `th attest` (pearl
+# th-2f33b6): the runner is now generic and lives in the binary, so the hook
+# fires on the CONVENTION (a repo with executable `scripts/ci/<name>.sh` checks)
+# rather than on one repo's copy of the runner script. The check definitions stay
+# repo-specific and in each repo, which is what makes this portable.
+#
+# Why a hook and not a git hook: `th attest` PUSHES (that ordering is what stops
 # the credit losing the race against the runner), so a git `pre-push` hook calling
 # it would re-enter itself forever. And the repo's own pre-commit chain
 # deliberately "drops the full test suite (PR Checks owns that)" — attestation IS
@@ -16,7 +22,7 @@
 # is often the WRONG call and the agent has to be able to say no. Measured
 # 2026-08-08, that theory was wrong: of 18 Claude transcripts that ran a `git push`
 # that day, 7 had this hook fire — its stderr is right there in the transcript — and
-# ZERO ran attest.sh or used the ack below. The last 15 merged smooai PRs carried 0
+# ZERO ran the attest runner or used the ack below. The last 15 merged smooai PRs carried 0
 # ci-attest statuses and paid full CI. An ask is something an agent running in auto
 # mode approves for itself, so `exit 1` was a log line with extra steps.
 #
@@ -75,18 +81,37 @@ resolve_dir() {
 # Repo-agnostic by design: the hook fires only where the convention exists, so
 # copying scripts/ci/ into another repo turns this on there with no extra wiring.
 ROOT=$(cd "$(resolve_dir)" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)
-[[ -n "$ROOT" && -x "$ROOT/scripts/ci/attest.sh" ]] || exit 0
+[[ -n "$ROOT" && -d "$ROOT/scripts/ci" ]] || exit 0
 
-# What could be credited here, straight from the directory — no list to keep in sync.
-CHECKS=$(cd "$ROOT/scripts/ci" 2>/dev/null && ls *.sh 2>/dev/null | sed 's/\.sh$//' | grep -vE '^_|^attest$' | tr '\n' ' ')
+# Nothing to suggest if the runner isn't installed. Better a silent allow than a
+# block whose fix the user can't run.
+command -v th >/dev/null 2>&1 || exit 0
+
+# What could be credited here, straight from the directory — no list to keep in
+# sync. Same discovery rule `th attest` uses: EXECUTABLE scripts/ci/<name>.sh,
+# excluding `_*` helpers and `*.test.sh` suites. (`attest` itself is excluded too
+# — smooai still carries the legacy bash runner beside its checks, and listing it
+# would suggest attesting the attester.)
+CHECKS=$(
+    cd "$ROOT/scripts/ci" 2>/dev/null || exit 0
+    for f in *.sh; do
+        [[ -x "$f" ]] || continue
+        case "$f" in _* | *.test.sh | attest.sh) continue ;; esac
+        printf '%s ' "${f%.sh}"
+    done
+)
+
+# A repo with a scripts/ci/ but no runnable checks has nothing to attest.
+[[ -n "$CHECKS" ]] || exit 0
 
 cat >&2 <<EOF
 ⚠️  attest-push-hint: bare \`git push\` — CI will redo work this machine can do.
 
-Run \`bash scripts/ci/attest.sh <checks>\` INSTEAD of \`git push\`. It runs the
-same scripts/ci/<check>.sh the workflow runs, THEN pushes, THEN posts a
+Run \`th attest <checks>\` INSTEAD of \`git push\`. It runs the same
+scripts/ci/<check>.sh the workflow runs, THEN pushes, THEN posts a
 ci-attest/<check> commit status. Each credited row skips in ~8s instead of
-5-38 minutes.
+5-38 minutes. \`th attest --all\` runs every check; \`th attest --status\` reads
+back what is already credited for HEAD.
 
   available: ${CHECKS:-none}
 
@@ -100,8 +125,8 @@ Two things to weigh before attesting:
   · a red local check may be the MACHINE, not the code. Check \`uptime\` first —
     timing-sensitive tests fail under load and pass quiet.
 
-The order matters: attest.sh pushes for you. Pushing first loses the race, because
-every row reads the statuses once, ~20s into the job.
+The order matters: \`th attest\` pushes for you. Pushing first loses the race,
+because every row reads the statuses once, ~20s into the job.
 
 If a bare push is right here (WIP branch, docs-only, no PR yet, or you already
 attested), append \` # attest:ack reason=...\` and re-run.
