@@ -100,6 +100,14 @@ th jira sync [--dry-run] [--pull] [--push] / status
 # Pearls (the only spelling — no `th issues` / `th beads` aliases)
 th pearls create / ready / list / show / update / close / push / pull
 
+# Run a repo's CI checks here (or on a build box) and credit the passes as
+# `ci-attest/<check>` commit statuses, so the workflow skips those rows.
+# Run it INSTEAD of `git push`. Checks are the repo's own scripts/ci/<name>.sh —
+# `th attest` knows nothing about any particular repo's checks. Three outcomes:
+# pass → success, fail → failure, COULD-NOT-RUN (exit 97) → nothing posted,
+# because a status is a claim about the COMMIT, not about your laptop.
+th attest <check>… | --all | --status | --no-push | --remote <host> | --local
+
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
 th daemon · th up / down / status

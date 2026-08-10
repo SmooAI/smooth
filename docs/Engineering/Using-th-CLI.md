@@ -799,6 +799,129 @@ th worktree remove SMOODEV-XX-desc
 
 Both repos enforce worktree usage via a `PreToolUse` hook. `th worktree create` is the path of least resistance.
 
+### CI attestation — `th attest` (pearl th-b27ed0)
+
+Run a repo's CI checks on your own machine (or a build box) and credit the ones
+that pass, so the workflow skips them. **Run it INSTEAD of `git push`.**
+
+```bash
+th attest lint typecheck        # run these, push, credit the ones that pass
+th attest --all                 # every check the repo defines
+th attest --status              # what's credited for HEAD right now
+th attest --no-push lint        # never push; fail if HEAD is local-only
+th attest --remote smoo-hub rust   # delegate to a build box
+th attest --local --all         # ignore any remote routing
+th attest --all --json          # machine-readable summary
+```
+
+**Checks are the repo's, not `th`'s.** An executable `scripts/ci/<name>.sh` in
+the repo root *is* a check called `<name>`; that file name is the whole
+interface. Files starting with `_` are helpers and `*.test.sh` are the checks'
+own tests, so neither is discovered. `th attest` contains no knowledge of any
+particular repo's checks — see `smooai/scripts/ci/README.md` for the reference
+implementation of the check side.
+
+Each passing check posts a `ci-attest/<name>` commit status on HEAD, which the
+workflow reads to skip that row. Freshness is free: the status is bound to a
+SHA, so pushing a new commit un-credits everything.
+
+#### Three outcomes, not two
+
+| Local outcome     | Exit   | Posted      | CI does       |
+| ----------------- | ------ | ----------- | ------------- |
+| passed            | 0      | `success`   | skips the row |
+| failed            | 1..96, 98+ | `failure` | runs the row |
+| **could not run** | **97** | **nothing** | runs the row  |
+
+The third row is the point, and it was paid for: `ci-attest/rust` went red twice
+on a perfectly healthy tree because a laptop's Docker daemon was off, which
+red-flagged both PRs *and* sent the 37-minute job to CI anyway. A status is a
+claim about the **commit**; "your Docker daemon is off" is a claim about the
+**laptop**. The governing rule:
+
+> **A precondition you can repair, repair. One you cannot, report as 97 — never
+> as a verdict on the commit.**
+
+`th attest` repairs three preconditions itself before running anything local:
+
+1. **Container runtime down** → starts it (`orbctl`, then `colima`) and polls up
+   to 120s. Only ever starts a runtime the machine already has, never stops one.
+   A machine with no `docker` at all is skipped, not blocked.
+2. **Missing `node_modules`** (in a repo with a `package.json`) → `pnpm install
+   --frozen-lockfile`, which can never rewrite the lockfile behind you. A
+   lockfile it cannot satisfy *is* a broken precondition → 97.
+3. **Stripped `PATH`** — launchd, cron and `ssh host cmd` never source the
+   profile that puts Homebrew and cargo on `PATH`. The four well-known dirs are
+   **appended** (so an explicitly-set `PATH` still wins) and the same prelude is
+   prepended to every remote script.
+
+Opt out with `SMOOAI_CI_NO_DOCKER_START=1` / `SMOOAI_CI_NO_INSTALL=1`, tune with
+`SMOOAI_CI_DOCKER_WAIT=<seconds>`. The `SMOOTH_CI_*` spellings work too.
+
+There is a fourth condition that can only be distrusted, never repaired: the
+1-minute **load average is sampled before each check**, and a failure on a
+machine above 2× its core count lands in the 97 bucket instead of on the PR — a
+test with a sub-second timeout on an oversubscribed box is measuring the
+scheduler. Sampling *before* is load-bearing: on a machine dedicated to
+attesting the check IS the load (cargo on 10 cores takes smoo-hub to 62), so
+sampling afterwards would swallow every genuine failure. A **pass** under load
+is still a pass.
+
+#### Ordering — why it pushes for you
+
+Pushing starts the workflow, and every row reads the statuses **once**, ~20s
+into the job. Push first and a five-minute local run loses that race every time.
+So the order is **run the checks → push → credit**, and crediting is one API
+call that lands seconds after the push. If you pushed by hand anyway, `th
+attest` notices the in-flight run and prints the `gh run cancel … && gh run
+rerun …` you'll need.
+
+It refuses outright — posting nothing — when the SHA is already on the default
+branch (a status there marks shared history no `pr-checks` run will ever
+consult), and `--no-push` on an unpushed HEAD fails before running anything,
+since a status can only attach to a commit the remote has.
+
+#### Remote delegation
+
+Route the expensive rows to a build box, concurrently with the cheap local ones.
+Per-repo config in `<repo>/.smooth/attest.toml`:
+
+```toml
+[remote]
+host = "smoo-hub"
+checks = ["rust"]
+worktree = "/Volumes/smoo-ext/ci-attest/smooai"
+target_dir = "/Volumes/smoo-ext/ci-attest/target"
+# optional
+min_free_gib = 5
+[remote.env]
+CARGO_BUILD_JOBS = "4"
+```
+
+`SMOOTH_ATTEST_REMOTE=<host>` or `--remote <host>` overrides the host and forces
+every named check remote; `--local` ignores the routing entirely.
+
+The commit travels as `refs/attest/<sha>` — a namespace no workflow triggers on
+— which the host fetches into its detached worktree. Output streams back live,
+prefixed with the hostname. **The local process keeps both the GitHub
+credentials and the decision**: the remote never posts a status, so a
+misconfigured build box cannot credit anything. Everything that is about the
+*host* rather than the *commit* maps to 97 — a failed `cd`/fetch/checkout, less
+than `min_free_gib` free on the host's system volume, and ssh's own failures
+(unreachable, auth refused, exit 255). A remote 97 stays 97. The ref is deleted
+afterwards, best effort.
+
+#### Reading `--status`
+
+`th attest --status` lists every discovered check as `success` / `failure` /
+`absent` for HEAD. Attestations attach to the **PR head commit (`headRefOid`)**,
+not the squash-merge commit that lands on the default branch — checking a merged
+SHA always shows every check absent.
+
+This trades verification for speed on purpose. A status says "someone ran this
+and it passed"; it does not prove what ran. That is the intended bargain for a
+team that trusts its own machines, not a supply-chain control.
+
 ### Audit
 
 ```bash
@@ -1181,6 +1304,11 @@ th pearls close <id1> <id2>
 th worktree create SMOODEV-XX-desc
 th worktree list
 th worktree merge SMOODEV-XX-desc
+
+# CI attestation (run INSTEAD of git push)
+th attest --all                                                     # run every check, push, credit the passes
+th attest lint typecheck                                            # just these two
+th attest --status                                                  # what's credited for HEAD
 
 # Jira (avoid curling rest/api/3 directly)
 th jira sync
