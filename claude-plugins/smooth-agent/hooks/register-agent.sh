@@ -13,9 +13,12 @@
 #     (`cc-<cwd-basename>-<sid4>`) so it is addressable immediately, then is
 #     nudged once (on-first-prompt.sh) to rename itself to something meaningful.
 #
-# Registration is always safe. We deliberately do NOT auto-start `th msg watch`
-# here — Dolt is single-writer, and many always-on watchers cause "database is
-# read only". Push-watching stays opt-in via the /th-mail skill.
+# Registration is always safe and cheap: as of pearl th-374f85 the mailbox is a
+# machine-level SQLite file (`~/.smooth/mail.db`), not the per-repo Dolt store,
+# so a register is a millisecond-scale local write with no remote to push and no
+# single-writer lock to contend for. `--pid "$PPID"` hands the store THIS claude
+# process, which is what lets `th agent list` reap the row when the session dies.
+# Push-watching still stays opt-in via the /th-mail skill.
 #
 # SessionStart delivers a JSON payload on stdin (session_id, cwd, source). We
 # read it once and parse defensively: a missing jq or empty stdin degrades to a
@@ -39,11 +42,8 @@ fi
 # --- Worker path: an explicit handle was provided. Preserve today's behavior. ---
 worker_handle="${SMOOTH_AGENT_HANDLE:-${SMOOTH_AGENT:-}}"
 if [ -n "$worker_handle" ]; then
-    # Push-by-default so other clones' `th agent list` see this worker.
-    # Detached (`( … & )`): a `th agent register` cold-boots Dolt (~0.7s) — we must
-    # not add that to session-start latency. Fire-and-forget; the echo below is
-    # what the session actually needs synchronously.
-    ( th agent register --name "$worker_handle" --harness claude-code >/dev/null 2>&1 || true ) &
+    # Detached (`( … & )`) purely so nothing can add latency to session start.
+    ( th agent register --name "$worker_handle" --harness claude-code --pid "$PPID" >/dev/null 2>&1 || true ) &
     disown 2>/dev/null || true
     echo "th-mail: online as agent '$worker_handle'. You are reachable by Big Smooth and other agents — answer pings and coordinate with the agent-comms skill; check your inbox with 'th msg inbox --agent $worker_handle'. Track work as pearls (pearls-flow skill)."
     exit 0
@@ -60,10 +60,8 @@ fi
 handle="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' || true)"
 [ -n "$handle" ] || handle="cc-session-$$"
 
-# Idempotent registration. --no-push: this fires on EVERY session start, so we
-# skip the Dolt remote push (expensive + contends) on the auto path. Detached
-# (`( … & )`) so the ~0.7s Dolt cold-boot never blocks session start.
-( th agent register --name "$handle" --harness claude-code --no-push >/dev/null 2>&1 || true ) &
+# Idempotent registration. Detached (`( … & )`) so nothing blocks session start.
+( th agent register --name "$handle" --harness claude-code --pid "$PPID" >/dev/null 2>&1 || true ) &
 disown 2>/dev/null || true
 
 # Persist the handle so on-first-prompt.sh knows what this session registered as.
@@ -75,5 +73,5 @@ if [ -n "$session_id" ]; then
     printf '%s' "$handle" >"$state_dir/$session_id" 2>/dev/null || true
 fi
 
-echo "th-mail: online as agent '$handle' (a placeholder). You are on the bus and reachable by Big Smooth and other agents — check your inbox with 'th msg inbox --agent $handle'. Once your task is clear, rename yourself to something task-meaningful with 'th agent rename --from $handle --to <new-handle>'. Push-watching for incoming mail stays opt-in via the /th-mail skill."
+echo "th-mail: online as agent '$handle' (a placeholder). You are on the bus and reachable by Big Smooth and other agents — check your inbox with 'th msg inbox --agent $handle'. Once your task is clear, claim a task-meaningful handle with 'th agent claim <new-handle>' (carries your mail over). Push-watching for incoming mail stays opt-in via the /th-mail skill."
 exit 0

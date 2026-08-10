@@ -614,24 +614,61 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 **Scheduling — pearls that speak up when due (pearl th-01aa6a).** `th pearls schedule <id> <when>` sets an optional `scheduled_at` on a pearl; omit `<when>` to clear it. `<when>` is relative (`+2h`, `30m`, `2d`, `1w`, `tomorrow`, `now`) or absolute (`2026-07-10`, `2026-07-10 09:00`, RFC3339; parsed as UTC). `th pearls due` lists pearls whose time has arrived (`scheduled_at <= now`, not closed, soonest-first). The **prime hook** surfaces a `⏰ Scheduled & due` section above `Ready to work`, so a scheduled pearl automatically "speaks up" at the next session start / compaction once it comes due. `th pearls show` and the `ready`/`list`/`due` lines render a `⏰` marker for scheduled pearls.
 
-### Agent messaging — `th agent` / `th msg` (pearl th-70aaef)
+### Agent messaging — `th agent` / `th msg` (pearls th-70aaef, th-374f85)
 
-A harness-agnostic, Dolt-backed mailbox: **any** agent (Claude Code, opencode, pi, a shell loop) in **any** session — same machine or not — registers a name and messages other agents. It's all plain `th` calls layered on the pearl store, so it rides the repo's `refs/dolt/data` git ref. Two sessions sharing one checkout's `.smooth/dolt` see each other instantly; **different clones/machines of the same repo sync automatically** — `send`/`register` push and `watch` pulls each poll (`--no-push`/`--no-pull` for a purely local, offline mailbox).
+A harness-agnostic mailbox: **any** agent (Claude Code, opencode, pi, a shell
+loop) in **any** session on this host registers a name and messages the others.
+Since th-374f85 it lives in **one SQLite file per machine** — `~/.smooth/mail.db`
+(`$SMOOTH_MAIL_DB` overrides) — not the per-repo Dolt pearl store. That is what
+makes it reliable: the mailbox no longer depends on which worktree you happen to
+be standing in, a send is an instant local write instead of a ~0.7s Dolt boot
+plus a git push, and concurrent agents queue on SQLite's lock instead of wedging
+a shared store with `Error 1105: database is read only`. The trade is that mail
+no longer crosses machines — see [[../Decisions/ADR-010-centralized-agent-mail]].
 
 ```bash
-th agent register --name <handle>          # idempotent; pushes so other clones see you. identity → $SMOOTH_AGENT, else user@host
-th agent list                              # who can I reach (online/last-seen)
-th msg send --to <name|all> --body "…"     # direct or broadcast; pushes to the repo remote
-th msg inbox [--pull] [--unread] [--mark-read] [--json]   # --pull fetches remote first
-th msg reply <id> --body "…"               # threads automatically; pushes
+th agent register --name <handle> [--pid $PPID]  # idempotent; resuming a handle keeps its mail
+th agent whoami [--json]                   # what handle am I, which store, how much unread
+th agent claim <handle>                    # take a durable name; carries your mail over
+th agent list                              # who can I reach (presence, branch, current task)
+th agent status --status working --task "…"   # publish presence: idle|working|waiting|offline
+th msg send <name|all> "…" [--type request] [--priority 2] [--re <id>]
+th msg inbox [--unread] [--mark-read] [--limit N] [--json]
+th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
+th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
-th msg watch [--interval 5] [--no-pull]    # blocking poll loop, pulls each poll — the "continuously check" primitive
+th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
 th inbox                                   # alias for `th msg inbox` (default identity)
 ```
 
-For agents collaborating across **different clones/machines** of the same repo, that repo needs a git remote with `refs/dolt/data` (`th pearls push` once to seed it). For agents not tied to any repo, the fallback is the global `~/.smooth/dolt` store (single-machine).
+`th agent`/`th msg` also answer to `th agents`/`th msgs`.
 
-`th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
+**Identity** resolves `$SMOOTH_AGENT_HANDLE` → `$SMOOTH_AGENT` → the handle the
+SessionStart hook recorded for `$CLAUDE_SESSION_ID` (in
+`~/.smooth/agent-sessions/`) → `user@short-hostname`. Set `$SMOOTH_HARNESS` so
+`th agent list` shows what tool each agent is. `th agent claim` and `th agent
+rename` both rewrite the recorded session handle, so the hook and the store stay
+in agreement.
+
+**Message types** (`note|request|result|handoff|cancel`) let a recipient triage
+without reading; `--priority N` sorts higher first in the inbox. **Read state is
+per-recipient**, so acking a `to = all` broadcast consumes only your copy —
+the old first-reader-wins behaviour is gone.
+
+**Presence** is `idle|working|waiting|offline` plus a free-form `--task`, and
+`th agent list` reaps first: an agent whose recorded pid is dead flips to
+`offline`. The pid has to be supplied (`--pid $PPID` from a long-lived
+supervisor, or `$SMOOTH_AGENT_PID`) — `th` never records its own, since it exits
+immediately and would mark every agent offline a second after registering.
+
+**Dead flags.** `--no-push`, `--pull` and `--no-pull` still parse (the
+SessionStart hook and old scripts pass them) but do nothing and print a
+deprecation note: there is no remote to sync with. Old per-repo Dolt mailboxes
+are not migrated.
+
+`th pearls init` injects an **Agent Messaging** section into the repo's
+`AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any
+harness that reads `AGENTS.md` learns to register + poll without bespoke wiring.
 
 ### `th` as an MCP server — `th mcp serve` (epic th-63e572)
 

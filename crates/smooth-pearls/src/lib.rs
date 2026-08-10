@@ -15,6 +15,7 @@ pub mod dolt_server;
 #[cfg(not(unix))]
 #[path = "dolt_server_stub.rs"]
 pub mod dolt_server;
+pub mod mail_store;
 pub mod memory;
 pub mod memory_tools;
 pub mod messaging;
@@ -28,6 +29,7 @@ pub mod types;
 pub use agents::{Agent, AgentRegistry};
 pub use dolt::{sql_escape, PushOpts, SmoothDolt};
 pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
+pub use mail_store::{AgentStatus, MailAgent, MailMessage, MailStore, MessageKind};
 pub use memory::{Memory, MemoryStore};
 pub use memory_tools::register_memory_tools;
 pub use messaging::{Mailbox, Message};

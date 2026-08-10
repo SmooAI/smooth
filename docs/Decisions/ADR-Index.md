@@ -30,6 +30,7 @@ Write one when a decision:
 | [[ADR-007-smoo-relay-remote-control]]                    | Smoo Relay: phone remote control without tailscale (relay.smoo.ai)  | Accepted | 2026-08 |
 | [[ADR-008-family-ai-multi-principal]]                    | Family AI: multi-principal Big Smooth (per-member RBAC, Smoo Jr guardrails) | Proposed | 2026-08 |
 | [[ADR-009-scoped-cloud-memory-knowledge]]                | Scoped cloud memory & knowledge (personal/shared tiers, guardian visibility, within-tool resource RBAC) | Proposed | 2026-08 |
+| [[ADR-010-centralized-agent-mail]]                        | Agent mail moves from per-repo Dolt to a machine-level SQLite store | Accepted | 2026-08 |
 
 > [!todo] More to backfill
 > Older decisions worth ADRing once we have time: Dolt over SQLite for pearls (2025), microsandbox over Firecracker (2025), single Rust binary over multi-binary CLI (2024), pearls naming over beads/issues (2025), workflow phases as the default agent loop (2026), gRPC + UDS for in-VM cast comms (2026; see `single_process.rs`).
