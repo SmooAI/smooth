@@ -264,7 +264,7 @@ pub fn load_summary(sys: &Sys) -> String {
 /// suite stubbed `docker` / `orbctl` / `pnpm` / `uptime` / `ssh` this way; the
 /// Rust tests do the same, pointing a [`Sys`] field at the result instead of
 /// shadowing a process-global `PATH`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(
     clippy::expect_used,
     clippy::redundant_pub_crate,
@@ -278,7 +278,11 @@ pub(crate) fn test_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     p
 }
 
-#[cfg(test)]
+// Unix-gated: every case here drives a real subprocess through a bash stub, the
+// same way the bash suite did. `th attest` itself shells out to bash/ssh/df, so
+// there is no Windows behaviour for these to assert — the module still compiles
+// there, it just has nothing to run.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::test_script as script;

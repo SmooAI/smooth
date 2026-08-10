@@ -587,7 +587,8 @@ fn on_remote(root: &Path, sha: &str) -> bool {
     git(root, &["branch", "-r", "--contains", sha]).is_ok_and(|s| !s.trim().is_empty())
 }
 
-#[cfg(test)]
+// Unix-gated — see the note on `env::tests`.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::env::test_script;

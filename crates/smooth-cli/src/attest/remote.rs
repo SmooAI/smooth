@@ -179,7 +179,8 @@ fn stream(from: impl Read + Send + 'static, prefix: String, to_stderr: bool) -> 
     })
 }
 
-#[cfg(test)]
+// Unix-gated — see the note on `env::tests`.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
