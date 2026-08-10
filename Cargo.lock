@@ -5013,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-api-client"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5041,7 +5041,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-bench"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5068,7 +5068,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-cast"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -5084,7 +5084,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-cli"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anstream",
  "anyhow",
@@ -5136,7 +5136,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-code"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5167,7 +5167,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-daemon"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5211,7 +5211,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-diver"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -5231,7 +5231,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-goalie"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5252,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-menubar"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "block2",
@@ -5383,7 +5383,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-pearls"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5403,7 +5403,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-policy"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5419,7 +5419,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-tmux"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "tempfile",
@@ -5428,7 +5428,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-tools"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5458,7 +5458,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-web"
-version = "0.31.0"
+version = "0.31.1"
 dependencies = [
  "axum 0.8.8",
  "axum-extra",
