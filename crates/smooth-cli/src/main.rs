@@ -91,9 +91,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run this repo's CI checks and credit the ones that pass, so the
-    /// workflow can skip them. Run it INSTEAD of `git push`.
+    /// workflow can skip them.
     ///
-    /// Checks are whatever the repo defines as `scripts/ci/<name>.sh`; each
+    /// Run it INSTEAD of `git push`. Checks are whatever the repo defines as `scripts/ci/<name>.sh`; each
     /// passing one posts a `ci-attest/<name>` commit status on HEAD. A check
     /// that could not START posts nothing at all — that is not the same as a
     /// check that failed (pearl th-b27ed0).
