@@ -33,9 +33,17 @@ use tokio_tungstenite::tungstenite::Message;
 /// What one canonical turn surfaced back to the bench.
 #[derive(Debug, Clone, Default)]
 pub struct CanonicalOutput {
-    /// Best-effort LLM spend for the turn. `0.0` when the engine doesn't
-    /// emit cost (all polyglot servers today).
+    /// Best-effort LLM spend for the turn as reported by the engine. `0.0`
+    /// when the engine doesn't emit cost — which is MOST models, because
+    /// the gateway only returns a cost header for some routes (th-11f9bb).
+    /// Prefer pricing [`Self::prompt_tokens`]/[`Self::completion_tokens`]
+    /// when this is 0; see `smooth_bench::pricing`.
     pub cost: f64,
+    /// Prompt (input) tokens the engine accumulated over the turn, from
+    /// the `usage` object on `eventual_response`. `0` if absent.
+    pub prompt_tokens: u64,
+    /// Completion (output) tokens for the turn. `0` if absent.
+    pub completion_tokens: u64,
     /// One record per tool *result* observed on the stream (success is
     /// the negation of the engine's `isError` flag).
     pub tool_calls: Vec<CanonicalToolCall>,
@@ -171,6 +179,13 @@ impl CanonicalSession {
                     if let Some(c) = find_cost(&v) {
                         out.cost = c;
                     }
+                    // Token accounting is what makes cost MEASURABLE: the
+                    // gateway omits its cost header on most routes, so the
+                    // engine reports 0 and a leaderboard built on it is
+                    // silently blank (th-adf614).
+                    let (pt, ct) = find_tokens(&v);
+                    out.prompt_tokens = pt;
+                    out.completion_tokens = ct;
                     out.completed = true;
                     break;
                 }
@@ -291,6 +306,31 @@ fn find_cost(v: &Value) -> Option<f64> {
         Value::Array(arr) => arr.iter().find_map(find_cost),
         _ => None,
     }
+}
+
+/// Pull `promptTokens` / `completionTokens` out of the terminal event's
+/// `usage` object. Recursive for the same reason [`find_cost`] is: the
+/// payload is double-nested (`data.data.usage`) and the exact depth is the
+/// protocol's business, not ours.
+fn find_tokens(v: &Value) -> (u64, u64) {
+    fn dig(v: &Value) -> Option<(u64, u64)> {
+        match v {
+            Value::Object(map) => {
+                if let Some(u) = map.get("usage").and_then(Value::as_object) {
+                    let get = |k: &str, alt: &str| u.get(k).or_else(|| u.get(alt)).and_then(Value::as_u64).unwrap_or(0);
+                    let p = get("promptTokens", "prompt_tokens");
+                    let c = get("completionTokens", "completion_tokens");
+                    if p > 0 || c > 0 {
+                        return Some((p, c));
+                    }
+                }
+                map.values().find_map(dig)
+            }
+            Value::Array(arr) => arr.iter().find_map(dig),
+            _ => None,
+        }
+    }
+    dig(v).unwrap_or((0, 0))
 }
 
 /// Percent-encode a token for a `?token=` query param (RFC 3986
