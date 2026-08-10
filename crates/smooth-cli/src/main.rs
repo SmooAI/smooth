@@ -5,6 +5,9 @@
 mod active_org;
 #[cfg(feature = "admin")]
 mod admin;
+/// `th attest` — run a repo's CI checks here (or on a build box) and credit them
+/// on GitHub so the workflow can skip what already ran. Pearl th-b27ed0.
+mod attest;
 mod auth;
 mod boot_ui;
 /// macOS calendar setup driven by `th doctor --setup-calendar` (pearl th-94cc4a).
@@ -75,6 +78,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run this repo's CI checks and credit the ones that pass, so the
+    /// workflow can skip them. Run it INSTEAD of `git push`.
+    ///
+    /// Checks are whatever the repo defines as `scripts/ci/<name>.sh`; each
+    /// passing one posts a `ci-attest/<name>` commit status on HEAD. A check
+    /// that could not START posts nothing at all — that is not the same as a
+    /// check that failed (pearl th-b27ed0).
+    Attest(attest::AttestArgs),
     /// Run / control the chat-first Big Smooth daemon (epic th-c89c2a) on the
     /// smooth-operator LocalServer engine. Thin passthrough to the standalone
     /// `smooth-daemon` binary — `th daemon --help` shows its full CLI
@@ -1753,6 +1764,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
+        Some(Commands::Attest(args)) => attest::cmd(&args),
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Agent { cmd }) => cmd_agent(cmd).await,
