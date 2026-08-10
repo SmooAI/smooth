@@ -196,3 +196,14 @@ body {
     background: radial-gradient(circle at 50% 42%, var(--color-th-teal), var(--color-th-blue) 78%);
     box-shadow: 0 8px 40px -8px color-mix(in oklch, var(--color-th-blue) 60%, transparent);
 }
+
+/* Tool-call disclosure (th-0b488d). Collapsed by default so the transcript
+   reads as conversation, with the call's output one click away. Safari renders
+   a default marker on <summary> even with list-none, so it is cleared here. */
+.tool-chip > summary::-webkit-details-marker {
+    display: none;
+}
+
+.tool-chip[open] .tool-chevron {
+    transform: rotate(90deg);
+}

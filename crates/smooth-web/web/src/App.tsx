@@ -8,6 +8,7 @@
 import {
     ArrowUp,
     Check,
+    ChevronRight,
     X,
     Terminal,
     FileText,
@@ -727,35 +728,59 @@ function Thinking({ text, active }: { text: string; active: boolean }) {
     );
 }
 
+// A tool call, collapsed to its one-line header by default. The output is the
+// evidence, not the answer — worth having, not worth pushing the reply off
+// screen — so it sits behind a disclosure, same treatment `Thinking` gets.
+//
+// Errors are the exception and open themselves: a failed call is the one case
+// where the output IS the story, and burying it means a silent failure reads as
+// a successful one.
 function ToolChip({ t, awaiting }: { t: ToolCall; awaiting: boolean }) {
     const Icon = TOOL_ICON[t.name] ?? Terminal;
     const arg = t.args.length > 80 ? `${t.args.slice(0, 80)}…` : t.args;
-    return (
-        <div className="my-1.5 overflow-hidden rounded-xl border border-border bg-panel/60">
-            <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
-                <Icon size={13} className="shrink-0 text-(--color-th-teal)" />
-                <span className="font-mono font-medium">{t.name}</span>
-                <span className="truncate font-mono text-(--color-muted-foreground)">{arg}</span>
-                <span className="ml-auto shrink-0">
-                    {!t.done ? (
-                        awaiting ? (
-                            <span className="font-medium text-amber">awaiting your okay</span>
-                        ) : (
-                            <span className="text-(--color-muted-foreground)">running…</span>
-                        )
-                    ) : t.isError ? (
-                        <X size={13} className="text-amber" />
+    const output = t.done && t.result ? t.result : null;
+
+    const header = (
+        <>
+            <Icon size={13} className="shrink-0 text-(--color-th-teal)" />
+            <span className="font-mono font-medium">{t.name}</span>
+            <span className="truncate font-mono text-(--color-muted-foreground)">{arg}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                {!t.done ? (
+                    awaiting ? (
+                        <span className="font-medium text-amber">awaiting your okay</span>
                     ) : (
-                        <Check size={13} className="text-coral" />
-                    )}
-                </span>
+                        <span className="text-(--color-muted-foreground)">running…</span>
+                    )
+                ) : t.isError ? (
+                    <X size={13} className="text-amber" />
+                ) : (
+                    <Check size={13} className="text-coral" />
+                )}
+            </span>
+        </>
+    );
+
+    // Nothing to reveal (still running, or it returned nothing) — a disclosure
+    // that opens onto emptiness is worse than no disclosure.
+    if (!output) {
+        return (
+            <div className="my-1.5 overflow-hidden rounded-xl border border-border bg-panel/60">
+                <div className="flex items-center gap-2 px-3 py-1.5 text-xs">{header}</div>
             </div>
-            {t.done && t.result && (
-                <pre className="max-h-32 overflow-y-auto border-t border-border/60 px-3 py-1.5 font-mono text-[0.72rem] leading-relaxed text-(--color-muted-foreground)">
-                    {t.result.slice(0, 600)}
-                </pre>
-            )}
-        </div>
+        );
+    }
+
+    return (
+        <details open={t.isError} className="tool-chip my-1.5 overflow-hidden rounded-xl border border-border bg-panel/60">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs transition select-none hover:bg-panel">
+                <ChevronRight size={12} className="tool-chevron shrink-0 text-(--color-muted-foreground) transition-transform" />
+                {header}
+            </summary>
+            <pre className="max-h-32 overflow-y-auto border-t border-border/60 px-3 py-1.5 font-mono text-[0.72rem] leading-relaxed text-(--color-muted-foreground)">
+                {output.slice(0, 600)}
+            </pre>
+        </details>
     );
 }
 

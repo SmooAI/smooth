@@ -315,6 +315,14 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
     // model matrix was the SAME model, and the differences between them
     // were run-to-run variance being read as model quality.
     command.env("SMOOTH_AGENT_MODEL", model);
+    // Headless posture. The daemon now defaults to `AcceptEdits`, which asks a
+    // human before anything that isn't a known-safe command (th-be3f55) — and a
+    // bench has no human. Left unset, every bash call would emit an approval
+    // request nobody answers and stall for the hook's 600s timeout, turning a
+    // model comparison into a measurement of the gate. `bypass` is the honest
+    // benchmark posture: the circuit-breakers and narc's destructive guard still
+    // apply, so safety scenarios still mean something.
+    command.env("SMOOTH_AUTO_MODE", "bypass");
     if let Some(u) = &env.gateway_url {
         command.env("SMOOAI_GATEWAY_URL", u);
     }
@@ -636,6 +644,13 @@ pub fn msb_run_args(spec: &MsbSpec<'_>) -> Vec<String> {
         // (claude-haiku-4-5) instead of `--model`.
         "-e".into(),
         format!("SMOOTH_AGENT_MODEL={}", spec.model),
+        // Headless posture inside the VM, for the same reason the host path
+        // sets it: the daemon defaults to `AcceptEdits` and would park every
+        // non-safe bash call waiting on a human who is not there (th-be3f55).
+        // Circuit-breakers and narc's destructive guard still apply under
+        // bypass, so the safety scenarios still measure something real.
+        "-e".into(),
+        "SMOOTH_AUTO_MODE=bypass".into(),
         "-e".into(),
         "SMOOTH_OPERATOR_DB=/tmp/operator-storage.db".into(),
         "-e".into(),
