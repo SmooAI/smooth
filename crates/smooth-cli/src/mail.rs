@@ -17,7 +17,9 @@ use anstream::{eprintln, println};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
-use smooth_pearls::{AgentStatus, MailMessage, MailStore, MessageKind};
+use smooth_pearls::{AgentStatus, MailMessage, MessageKind};
+
+use crate::mail_backend::{load_config, save_config, Backend, CloudMailStore, Mail, MailConfig};
 
 #[derive(Subcommand)]
 pub enum AgentCommands {
@@ -88,6 +90,33 @@ pub enum AgentCommands {
     Offline {
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Choose where mail lives: this machine (default, free, offline) or your
+    /// Smoo account (shared across machines, paid after a 14-day trial).
+    Backend {
+        #[command(subcommand)]
+        cmd: BackendCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BackendCommands {
+    /// Show the current backend — and, on cloud, who you are signed in as and
+    /// how your trial/subscription stands.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Switch backends.
+    ///
+    /// `sqlite` (the default) keeps mail in `~/.smooth/mail.db` on this machine:
+    /// no account, no network, and every `th msg` / `th agent` command works.
+    /// `cloud` puts it on your Smoo account so agents on OTHER machines join the
+    /// same bus — that needs `th auth login`, and is a paid feature after a
+    /// 14-day trial. Mail is NOT migrated between the two.
+    Set {
+        /// sqlite | cloud
+        backend: String,
     },
 }
 
@@ -285,8 +314,8 @@ fn rewrite_session_handles(old: &str, new: &str) -> usize {
     n
 }
 
-fn store() -> Result<MailStore> {
-    MailStore::open_default()
+async fn store() -> Result<Mail> {
+    Mail::open().await
 }
 
 fn cwd() -> PathBuf {
@@ -343,8 +372,14 @@ fn print_messages(msgs: &[MailMessage], json: bool) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the store can't be opened or the operation fails.
-pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
-    let s = store()?;
+pub async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
+    // Handled before the store is opened, deliberately: if `cloud` is selected
+    // and you're signed out, opening it fails — and `backend set sqlite` is
+    // exactly the command you need to get out of that.
+    if let AgentCommands::Backend { cmd } = cmd {
+        return cmd_backend(cmd).await;
+    }
+    let s = store().await?;
     match cmd {
         AgentCommands::Register { name, harness, pid, no_push } => {
             if no_push {
@@ -352,12 +387,12 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             }
             let name = name.unwrap_or_else(resolve_handle);
             let harness = harness.unwrap_or_else(default_harness);
-            s.register(&name, &harness, pid.or_else(supervised_pid), &cwd())?;
+            s.register(&name, &harness, pid.or_else(supervised_pid), &cwd()).await?;
             println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
             println!("  {} continuously check: {}", "→".dimmed(), format!("th msg watch --agent {name}").cyan());
         }
         AgentCommands::List { json } => {
-            let agents = s.list_agents()?;
+            let agents = s.list_agents().await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&agents)?);
             } else if agents.is_empty() {
@@ -385,14 +420,15 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
         }
         AgentCommands::Whoami { json } => {
             let handle = resolve_handle();
-            let registered = s.get_agent(&handle)?;
-            let unread = s.unread_count(&handle)?;
+            let registered = s.get_agent(&handle).await?;
+            let unread = s.unread_count(&handle).await?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "handle": handle,
-                        "store": smooth_pearls::mail_store::default_path().display().to_string(),
+                        "store": s.location(),
+                        "backend": s.backend().as_str(),
                         "registered": registered.is_some(),
                         "agent": registered,
                         "unread": unread,
@@ -400,11 +436,7 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
                 );
             } else {
                 println!("{} {}", "handle".dimmed(), handle.green().bold());
-                println!(
-                    "{}  {}",
-                    "store ".dimmed(),
-                    smooth_pearls::mail_store::default_path().display().to_string().dimmed()
-                );
+                println!("{}  {} {}", "store ".dimmed(), s.location().dimmed(), format!("({})", s.backend()).dimmed());
                 match &registered {
                     Some(a) => println!("{} {} ({})", "status".dimmed(), a.status, a.task.as_deref().unwrap_or("no task")),
                     None => println!("{} {}", "status".dimmed(), "not registered — run `th agent register`".yellow()),
@@ -415,7 +447,7 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
         AgentCommands::Status { status, task, name } => {
             let name = name.unwrap_or_else(resolve_handle);
             let status: AgentStatus = status.parse()?;
-            s.set_status(&name, status, task.as_deref())?;
+            s.set_status(&name, status, task.as_deref()).await?;
             println!(
                 "{} {} is {}{}",
                 "✓".green().bold(),
@@ -433,8 +465,8 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             // Rename only when the old handle exists and the new one is free —
             // that's the path that carries the mail. Otherwise just register,
             // which resumes `name` if it already exists.
-            if previous != name && s.get_agent(&previous)?.is_some() && s.get_agent(&name)?.is_none() {
-                s.rename(&previous, &name)?;
+            if previous != name && s.get_agent(&previous).await?.is_some() && s.get_agent(&name).await?.is_none() {
+                s.rename(&previous, &name).await?;
                 println!(
                     "{} claimed {} (was {}, mail carried over)",
                     "✓".green().bold(),
@@ -442,7 +474,7 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
                     previous.dimmed()
                 );
             } else {
-                s.register(&name, &default_harness(), supervised_pid(), &cwd())?;
+                s.register(&name, &default_harness(), supervised_pid(), &cwd()).await?;
                 println!("{} claimed {}", "✓".green().bold(), name.green().bold());
             }
             let rewritten = rewrite_session_handles(&previous, &name);
@@ -454,14 +486,127 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             if no_push {
                 deprecated("--no-push");
             }
-            s.rename(&from, &to)?;
+            s.rename(&from, &to).await?;
             rewrite_session_handles(&from, &to);
             println!("{} {} renamed to {}", "✓".green().bold(), from.dimmed(), to.green().bold());
         }
+        // Peeled off above, before the store is opened.
+        AgentCommands::Backend { .. } => unreachable!("handled before the store is opened"),
         AgentCommands::Offline { name } => {
             let name = name.unwrap_or_else(resolve_handle);
-            s.set_status(&name, AgentStatus::Offline, None)?;
+            s.set_status(&name, AgentStatus::Offline, None).await?;
             println!("{} {} marked offline", "✓".green().bold(), name);
+        }
+    }
+    Ok(())
+}
+
+// ── th agent backend ───────────────────────────────────────────────
+
+/// Fetch the cloud entitlement, or `None` when we can't (signed out, offline) —
+/// `backend status` must still print WHICH backend is selected in that case,
+/// since that's the state the user is trying to diagnose.
+async fn cloud_entitlement() -> (Option<String>, Option<crate::mail_backend::Entitlement>) {
+    match CloudMailStore::connect().await {
+        Ok(c) => match c.entitlement().await {
+            Ok(e) => (None, Some(e)),
+            Err(e) => (Some(format!("{e:#}")), None),
+        },
+        Err(e) => (Some(format!("{e:#}")), None),
+    }
+}
+
+async fn cmd_backend(cmd: BackendCommands) -> Result<()> {
+    match cmd {
+        BackendCommands::Status { json } => {
+            let backend = load_config().backend;
+            let (problem, ent) = if backend == Backend::Cloud { cloud_entitlement().await } else { (None, None) };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "backend": backend.as_str(),
+                        "config": crate::mail_backend::config_path().display().to_string(),
+                        "store": match backend {
+                            Backend::Sqlite => smooth_pearls::mail_store::default_path().display().to_string(),
+                            Backend::Cloud => format!("{}/user/agent-mail", smooth_api_client::base_url()),
+                        },
+                        "entitled": ent.as_ref().map(|e| e.entitled),
+                        "entitlement": ent.as_ref().map(crate::mail_backend::Entitlement::summary),
+                        "problem": problem,
+                    }))?
+                );
+                return Ok(());
+            }
+            println!("{} {}", "backend".dimmed(), backend.to_string().green().bold());
+            match backend {
+                Backend::Sqlite => {
+                    println!(
+                        "{}   {}",
+                        "store".dimmed(),
+                        smooth_pearls::mail_store::default_path().display().to_string().dimmed()
+                    );
+                    println!("{}   {}", "cost ".dimmed(), "free — no account, works offline".dimmed());
+                    println!(
+                        "\n  {} share one bus with agents on OTHER machines: {}",
+                        "→".dimmed(),
+                        "th agent backend set cloud".cyan()
+                    );
+                }
+                Backend::Cloud => {
+                    println!(
+                        "{}   {}",
+                        "store".dimmed(),
+                        format!("{}/user/agent-mail", smooth_api_client::base_url()).dimmed()
+                    );
+                    match (&ent, &problem) {
+                        (Some(e), _) => {
+                            let line = e.summary();
+                            println!(
+                                "{}  {}",
+                                "access".dimmed(),
+                                if e.entitled { line.green().to_string() } else { line.yellow().to_string() }
+                            );
+                        }
+                        (None, Some(p)) => {
+                            println!("{}  {}", "access".dimmed(), p.yellow());
+                            println!(
+                                "\n  {} the free local mailbox is always there: {}",
+                                "→".dimmed(),
+                                "th agent backend set sqlite".cyan()
+                            );
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            println!("{}  {}", "config".dimmed(), crate::mail_backend::config_path().display().to_string().dimmed());
+        }
+        BackendCommands::Set { backend } => {
+            let backend = Backend::parse(&backend)?;
+            save_config(&MailConfig { backend })?;
+            println!("{} mail backend is now {}", "✓".green().bold(), backend.to_string().green().bold());
+            match backend {
+                Backend::Sqlite => println!(
+                    "  {}",
+                    format!("{} — free, offline, this machine only", smooth_pearls::mail_store::default_path().display()).dimmed()
+                ),
+                Backend::Cloud => {
+                    // Reading the entitlement is what STARTS the trial, so this
+                    // doubles as "your 14 days begin now" and gets the days-left
+                    // number in front of the user immediately.
+                    let (problem, ent) = cloud_entitlement().await;
+                    match (ent, problem) {
+                        (Some(e), _) => println!("  {}", e.summary().dimmed()),
+                        (None, Some(p)) => {
+                            println!("  {} {p}", "!".yellow().bold());
+                            println!("  {} fix that, or go back with {}", "→".dimmed(), "th agent backend set sqlite".cyan());
+                        }
+                        (None, None) => {}
+                    }
+                    println!("  {}", "existing local mail is NOT migrated — it stays in ~/.smooth/mail.db".dimmed());
+                }
+            }
         }
     }
     Ok(())
@@ -474,8 +619,8 @@ pub fn cmd_agent(cmd: AgentCommands) -> Result<()> {
 /// # Errors
 /// Returns an error if the store can't be opened, arguments are missing, or
 /// the operation fails.
-pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
-    let s = store()?;
+pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
+    let s = store().await?;
     match cmd {
         MsgCommands::Send {
             to_pos,
@@ -502,10 +647,10 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let kind: MessageKind = kind.parse()?;
             // Replies inherit the original message's thread root.
             let thread_id = match re {
-                Some(ref rid) => s.get_message(rid)?.map(|m| m.thread_root().to_string()),
+                Some(ref rid) => s.get_message(rid).await?.map(|m| m.thread_root().to_string()),
                 None => None,
             };
-            let id = s.send(&from, &to, &body, kind, priority, thread_id.as_deref())?;
+            let id = s.send(&from, &to, &body, kind, priority, thread_id.as_deref()).await?;
             println!("{} sent {} to {}", "✓".green().bold(), id.dimmed(), to.green());
         }
         MsgCommands::Inbox {
@@ -520,8 +665,8 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 deprecated("--pull");
             }
             let who = agent.unwrap_or_else(resolve_handle);
-            let _ = s.touch(&who); // heartbeat (best-effort)
-            let msgs = s.inbox(&who, unread, limit)?;
+            let _ = s.touch(&who).await; // heartbeat (best-effort)
+            let msgs = s.inbox(&who, unread, limit).await?;
             if json {
                 print_messages(&msgs, true)?;
             } else if msgs.is_empty() {
@@ -532,20 +677,20 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             }
             if mark_read {
                 for m in &msgs {
-                    s.ack(&who, &m.id)?;
+                    s.ack(&who, &m.id).await?;
                 }
             }
         }
         MsgCommands::Ack { ids, all, agent } => {
             let who = agent.unwrap_or_else(resolve_handle);
             if all {
-                let n = s.ack_all(&who)?;
+                let n = s.ack_all(&who).await?;
                 println!("{} acknowledged {n} message(s) for {who}", "✓".green().bold());
             } else if ids.is_empty() {
                 bail!("nothing to acknowledge — pass message ids or --all");
             } else {
                 for id in &ids {
-                    s.ack(&who, id)?;
+                    s.ack(&who, id).await?;
                 }
                 println!("{} acknowledged {}", "✓".green().bold(), ids.join(", ").dimmed());
             }
@@ -553,7 +698,7 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
         MsgCommands::UnreadCount { agent } => {
             let who = agent.unwrap_or_else(resolve_handle);
             // Bare number, no decoration — the statusline hook embeds this.
-            println!("{}", s.unread_count(&who)?);
+            println!("{}", s.unread_count(&who).await?);
         }
         MsgCommands::Reply {
             id,
@@ -563,21 +708,21 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             priority,
         } => {
             let from = from.unwrap_or_else(resolve_handle);
-            let Some(orig) = s.get_message(&id)? else {
+            let Some(orig) = s.get_message(&id).await? else {
                 bail!("no message {id}");
             };
             let root = orig.thread_root().to_string();
             let to = orig.from_agent;
-            let new_id = s.send(&from, &to, &body, kind.parse()?, priority, Some(&root))?;
+            let new_id = s.send(&from, &to, &body, kind.parse()?, priority, Some(&root)).await?;
             // Replying is reading: don't leave the message we just answered unread.
-            s.ack(&from, &id)?;
+            s.ack(&from, &id).await?;
             println!("{} replied {} to {}", "✓".green().bold(), new_id.dimmed(), to.green());
         }
         MsgCommands::Thread { id } => {
-            let Some(m) = s.get_message(&id)? else {
+            let Some(m) = s.get_message(&id).await? else {
                 bail!("no message {id}");
             };
-            let thread = s.thread(m.thread_root())?;
+            let thread = s.thread(m.thread_root()).await?;
             println!("{}", format!("Thread {} ({} message(s)):", m.thread_root(), thread.len()).bold());
             print_messages(&thread, false)?;
         }
@@ -598,8 +743,8 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             }
             let interval = std::time::Duration::from_secs(interval.max(1));
             loop {
-                let _ = s.touch(&who);
-                match s.inbox(&who, true, 200) {
+                let _ = s.touch(&who).await;
+                match s.inbox(&who, true, 200).await {
                     Ok(msgs) if !msgs.is_empty() => {
                         print_messages(&msgs, json)?;
                         if once {
@@ -609,13 +754,13 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                             return Ok(());
                         }
                         for m in &msgs {
-                            s.ack(&who, &m.id)?; // consume so it doesn't repeat
+                            s.ack(&who, &m.id).await?; // consume so it doesn't repeat
                         }
                     }
                     Ok(_) => {}
                     Err(e) => eprintln!("{} inbox poll failed: {e}", "!".yellow()),
                 }
-                std::thread::sleep(interval);
+                tokio::time::sleep(interval).await;
             }
         }
     }
@@ -626,7 +771,7 @@ pub fn cmd_msg(cmd: MsgCommands) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the store can't be opened or the query fails.
-pub fn cmd_inbox() -> Result<()> {
+pub async fn cmd_inbox() -> Result<()> {
     cmd_msg(MsgCommands::Inbox {
         agent: None,
         unread: false,
@@ -635,6 +780,7 @@ pub fn cmd_inbox() -> Result<()> {
         json: false,
         pull: false,
     })
+    .await
 }
 
 /// Serializes every test in this binary that reads or writes the agent-handle

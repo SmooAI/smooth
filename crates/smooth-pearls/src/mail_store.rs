@@ -135,6 +135,11 @@ pub struct MailAgent {
     pub name: String,
     /// Harness/tool tag (`claude-code`, `opencode`, `shell`, …).
     pub harness: String,
+    /// Short hostname the agent registered from. Constant for the local SQLite
+    /// backend (everything is on this machine) and the whole point of the cloud
+    /// one, where `list` spans boxes.
+    #[serde(default)]
+    pub machine: Option<String>,
     /// OS process id of the registering process, if known.
     pub pid: Option<i64>,
     /// Main repository directory the agent registered from.
@@ -261,7 +266,26 @@ fn git_context(cwd: &Path) -> (Option<String>, Option<String>, Option<String>) {
     (repo, worktree, branch)
 }
 
-const AGENT_COLS: &str = "name, harness, pid, repo, worktree, branch, task, status, registered_at, last_seen";
+/// This machine's short hostname, resolved once.
+///
+/// ponytail: one `hostname` fork per process, memoised. Only used to stamp
+/// `machine` at register time, so it is never on a hot path.
+pub fn short_hostname() -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        let raw = std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "local".to_string());
+        raw.split('.').next().unwrap_or(&raw).to_string()
+    })
+    .clone()
+}
+
+const AGENT_COLS: &str = "name, harness, pid, repo, worktree, branch, task, status, registered_at, last_seen, machine";
 
 fn row_to_agent(row: &Row<'_>) -> rusqlite::Result<MailAgent> {
     let status: String = row.get(7)?;
@@ -276,6 +300,7 @@ fn row_to_agent(row: &Row<'_>) -> rusqlite::Result<MailAgent> {
         status: status.parse().unwrap_or(AgentStatus::Idle),
         registered_at: parse_dt(&row.get::<_, String>(8)?),
         last_seen: parse_dt(&row.get::<_, String>(9)?),
+        machine: row.get(10)?,
     })
 }
 
@@ -365,6 +390,11 @@ impl MailStore {
              );",
         )
         .context("apply mail schema")?;
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`, and `CREATE TABLE IF NOT
+        // EXISTS` won't widen a table that already exists — so a column added
+        // after the first release has to heal on open. Ignoring the duplicate
+        // error is the whole migration.
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN machine TEXT", []);
         Ok(Self { conn })
     }
 
@@ -388,17 +418,18 @@ impl MailStore {
         let ts = now();
         self.conn
             .execute(
-                "INSERT INTO agents (name, harness, pid, repo, worktree, branch, status, registered_at, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?7)
+                "INSERT INTO agents (name, harness, pid, repo, worktree, branch, status, registered_at, last_seen, machine)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?7, ?8)
                  ON CONFLICT(name) DO UPDATE SET
                      harness   = excluded.harness,
                      pid       = excluded.pid,
                      repo      = excluded.repo,
                      worktree  = excluded.worktree,
                      branch    = excluded.branch,
+                     machine   = excluded.machine,
                      last_seen = excluded.last_seen,
                      status    = CASE WHEN agents.status = 'offline' THEN 'idle' ELSE agents.status END",
-                params![name, harness.trim(), pid, repo, worktree, branch, ts],
+                params![name, harness.trim(), pid, repo, worktree, branch, ts, short_hostname()],
             )
             .context("register agent")?;
         Ok(())
@@ -697,6 +728,40 @@ mod tests {
         // Running inside the smooth repo, so git context should resolve.
         assert!(a.worktree.is_some(), "worktree should be sniffed from cwd");
         assert!(a.branch.is_some(), "branch should be sniffed from cwd");
+        assert_eq!(a.machine.as_deref(), Some(short_hostname().as_str()));
+    }
+
+    /// A store created before `machine` existed must widen on open, not die —
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, and `CREATE TABLE IF NOT
+    /// EXISTS` silently leaves an existing narrow table alone.
+    #[test]
+    fn an_older_store_gains_the_machine_column_on_open() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("mail.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agents (
+                     name TEXT PRIMARY KEY, harness TEXT, pid INTEGER, repo TEXT, worktree TEXT,
+                     branch TEXT, task TEXT, status TEXT NOT NULL DEFAULT 'idle',
+                     registered_at TEXT NOT NULL, last_seen TEXT NOT NULL);
+                 INSERT INTO agents (name, harness, status, registered_at, last_seen)
+                 VALUES ('legacy', 'shell', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let s = MailStore::open(&db).expect("open must heal the schema");
+        let legacy = s.get_agent("legacy").unwrap().expect("existing row survives");
+        assert_eq!(legacy.machine, None, "pre-existing rows have no machine, and that is fine");
+        reg(&s, "fresh");
+        assert!(s.get_agent("fresh").unwrap().unwrap().machine.is_some());
+    }
+
+    #[test]
+    fn short_hostname_has_no_domain_and_is_never_empty() {
+        let h = short_hostname();
+        assert!(!h.is_empty());
+        assert!(!h.contains('.'), "should be the short name, got {h}");
     }
 
     #[test]

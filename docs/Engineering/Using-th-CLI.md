@@ -623,8 +623,9 @@ Since th-374f85 it lives in **one SQLite file per machine** — `~/.smooth/mail.
 makes it reliable: the mailbox no longer depends on which worktree you happen to
 be standing in, a send is an instant local write instead of a ~0.7s Dolt boot
 plus a git push, and concurrent agents queue on SQLite's lock instead of wedging
-a shared store with `Error 1105: database is read only`. The trade is that mail
-no longer crosses machines — see [[../Decisions/ADR-010-centralized-agent-mail]].
+a shared store with `Error 1105: database is read only`. Cross-machine mail is
+the **optional** cloud backend below — see
+[[../Decisions/ADR-010-centralized-agent-mail]].
 
 ```bash
 th agent register --name <handle> [--pid $PPID]  # idempotent; resuming a handle keeps its mail
@@ -637,8 +638,11 @@ th msg inbox [--unread] [--mark-read] [--limit N] [--json]
 th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
 th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
+th msg unread-count [--agent <h>]          # just the number, for a statusline/prompt
 th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
 th inbox                                   # alias for `th msg inbox` (default identity)
+th agent backend status [--json]           # which mailbox am I on, and (cloud) my trial state
+th agent backend set sqlite|cloud          # local (default, free) or cross-machine (paid)
 ```
 
 `th agent`/`th msg` also answer to `th agents`/`th msgs`.
@@ -661,6 +665,21 @@ the old first-reader-wins behaviour is gone.
 supervisor, or `$SMOOTH_AGENT_PID`) — `th` never records its own, since it exits
 immediately and would mark every agent offline a second after registering.
 
+**Optional cloud backend (pearl th-b02f63).** Everything above works with no
+Smoo account, forever, on the local SQLite mailbox. `th agent backend set cloud`
+moves it to your Smoo **user** account (`/user/agent-mail` on api.smoo.ai) so
+agents on *different machines* share one bus — a laptop and a build box seeing
+each other in `th agent list`, which is the one thing local SQLite cannot do. It
+needs `th auth login` (a user session; an org M2M key is rejected, since the
+routes are user-scoped) and is a paid feature after a **14-day trial** that
+starts on first use. The selection lives in `~/.smooth/mail.toml`
+(`$SMOOTH_MAIL_CONFIG` overrides); `th agent backend status` shows the backend
+and, on cloud, days left. Two things it deliberately does not do: **no silent
+fallback** to SQLite when you are signed out or offline (a command fails with
+the one-line fix instead of quietly writing to a different mailbox), and **no
+offline queue**. Mail is not migrated in either direction — switching backends
+switches mailboxes.
+
 **Dead flags.** `--no-push`, `--pull` and `--no-pull` still parse (the
 SessionStart hook and old scripts pass them) but do nothing and print a
 deprecation note: there is no remote to sync with. Old per-repo Dolt mailboxes
@@ -680,10 +699,32 @@ harness that reads `AGENTS.md` learns to register + poll without bespoke wiring.
 // VS Code (Copilot) uses "servers" (not "mcpServers") — otherwise identical.
 ```
 
-`th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes two tiers:
+**`th mcp install --harness claude-code|codex|opencode|all`** registers that
+server with a coding harness for you, so all three reach the same agent mailbox
+and pearl store (pearl th-2f33b6). It is idempotent and preserving: JSON configs
+keep their key order, `~/.codex/config.toml` keeps its comments, keys you added
+to the `smooth` entry yourself (`env`, `timeout`) survive, and a config it can't
+parse is an error rather than being replaced. `--dry-run` reports what it would
+change. A harness with no config directory is skipped, not conjured. Users of
+the `smooth-agent` Claude Code plugin get the server automatically — it ships in
+the plugin manifest's `mcpServers`.
+
+| Harness | File | Entry |
+|---|---|---|
+| `claude-code` | `~/.claude.json` | `mcpServers.smooth` (`type: "stdio"`) |
+| `codex` | `~/.codex/config.toml` | `[mcp_servers.smooth]` |
+| `opencode` | `~/.config/opencode/opencode.json` | `mcp.smooth` (`type: "local"`, one argv array) |
+
+`th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes three tiers:
 
 - **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
 - **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `th api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
+
+- **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else `$SMOOTH_AGENT_HANDLE` on the server process; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
+
+### Statusline — which agent am I? (pearl th-2f33b6)
+
+A session's th-mail handle scrolls off the top of the transcript within a minute, after which agents guess it and mail the void. The `smooth-agent` plugin ships a Claude Code statusline that keeps it on screen with the unread count: `⚙ th:fix-auth ✉3`. Set it up with **`th doctor --setup-statusline`**, which writes `statusLine` into `~/.claude/settings.json` — and never over an existing one. Claude Code allows exactly one `statusLine`, and ponytail's installer has the same "only if absent" rule, so whoever installs second silently loses; when the slot is taken, the command prints `smooth-statusline-with-ponytail.sh`, which renders both on one line, for you to opt into.
 
 The `.mcpb` **Desktop Extension** for one-click install lives in `packaging/mcpb/` (`build-mcpb.sh` stages the `th` binary + manifest and runs `npx @anthropic-ai/mcpb pack`). The same tool layer is what a hosted Streamable-HTTP server at `mcp.smoo.ai` will reuse for the zero-install Claude Desktop connector (pearl th-794b1e).
 

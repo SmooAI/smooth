@@ -109,16 +109,44 @@ running is a mailbox that is down when you need it.
 indexing, atomic read-state, and ordering — more code than the SQLite schema,
 for less.
 
-## Follow-up (not in this change)
+## Addendum — the optional cloud backend (pearls th-b02f63, th-2f33b6)
 
-A **cloud backend on api.smoo.ai** as an **opt-in** second `MailStore` backend:
-user-scoped, so an operator's agents can reach each other across machines. It is
-explicitly opt-in and Smoo hosting is **never required** — local SQLite stays
-the default and works fully offline, forever. There will be **no Dolt mail
-backend**; that door is closed.
+The follow-up above shipped. Three things about it are decisions, not details:
+
+**It is a second backend, not a replacement.** Local SQLite stays the default
+and every `th msg` / `th agent` command and every MCP tool works against it with
+no account, no network, and no configuration — forever. The cloud backend
+(`/user/agent-mail` on api.smoo.ai) buys exactly one thing SQLite cannot give
+us: agents on **different machines** on one bus. Selection lives in
+`~/.smooth/mail.toml` (`th agent backend set sqlite|cloud`). Mail is not
+migrated in either direction; switching backends switches mailboxes.
+
+**No silent fallback and no offline queue.** If `cloud` is selected and the user
+is signed out or offline, commands fail with the fix on one line. The tempting
+alternative — quietly writing to the local store instead — is worse than an
+error, because it looks exactly like success while the mail goes somewhere
+nobody is reading. Same reasoning for the queue: a send either landed or it did
+not.
+
+**Dispatch is an enum, not a trait.** `Mail` in `crates/smooth-cli/src/
+mail_backend.rs` matches on two variants. Two implementations behind one call
+site do not need dynamic dispatch or a generic threaded through `cmd_msg` /
+`cmd_agent`; a third backend would be the moment to reach for a trait, and there
+is no third backend planned (a Dolt mail backend remains closed). The cloud
+side calls api.smoo.ai through `smooth-api-client`'s existing untyped
+`get`/`post`/`patch` — the same layer every other `th api` command uses — rather
+than regenerating the 180KB progenitor spec for nine endpoints.
+
+Cloud is **user-scoped** (identity is the `th auth login` user session; an org
+M2M token is rejected, since it carries no user identity) and gated on the
+`cloud_agent_features` entitlement: a 14-day trial that starts on first use, then
+a subscription. That gate applies to the cloud backend only — nothing local is
+ever gated, and the marketing framing is "optional cloud sync".
 
 ## Related
 
 - Pearl th-374f85 (this change), th-70aaef (the original Dolt mailbox)
+- Pearls th-b02f63 (cloud backend), th-2f33b6 (MCP tools, tri-harness install, statusline)
+- SMOODEV-2871 (the smooai-side Agent Mail API + trial entitlement)
 - [[ADR-Index]]
 - [[../Engineering/Using-th-CLI]]

@@ -687,7 +687,7 @@ fn render_message(m: &MailMessage) -> String {
     if let Some(t) = &m.thread_id {
         let _ = write!(head, " (thread {t})");
     }
-    let _ = write!(head, " {}\n", m.created_at.format("%Y-%m-%d %H:%M"));
+    let _ = writeln!(head, " {}", m.created_at.format("%Y-%m-%d %H:%M"));
     for line in m.body.lines() {
         let _ = writeln!(head, "  {line}");
     }

@@ -28,6 +28,7 @@ use smooth_tools::mcp_config;
 /// th-374f85: `th agent` / `th msg` / `th inbox` on the machine-level
 /// SQLite mail store (ADR-010), off the per-repo Dolt pearl store.
 mod mail;
+mod mail_backend;
 mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
@@ -1715,7 +1716,7 @@ async fn main() -> Result<()> {
         Some(Commands::Heypage { cmd }) => smooai::heypage::cmd(cmd).await,
         Some(Commands::Files { cmd }) => smooai::files::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
-        Some(Commands::Inbox) => mail::cmd_inbox(),
+        Some(Commands::Inbox) => mail::cmd_inbox().await,
         Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
@@ -1725,8 +1726,8 @@ async fn main() -> Result<()> {
         Some(Commands::Attest(args)) => attest::cmd(&args),
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
-        Some(Commands::Agent { cmd }) => mail::cmd_agent(cmd),
-        Some(Commands::Msg { cmd }) => mail::cmd_msg(cmd),
+        Some(Commands::Agent { cmd }) => mail::cmd_agent(cmd).await,
+        Some(Commands::Msg { cmd }) => mail::cmd_msg(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
