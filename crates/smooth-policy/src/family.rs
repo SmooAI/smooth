@@ -63,6 +63,15 @@ pub struct RoleProfile {
     pub rules: PermissionRules,
     /// A model to pin for this role. Advisory in M1/M2 — recorded for M4.
     pub model: Option<String>,
+    /// Within-tool resource RBAC for the local `calendar` tool (M2.5, th-716243):
+    /// which macOS calendars this role may see/touch, matched on calendar NAME.
+    /// - `None` ⇒ unrestricted (adult default — every calendar).
+    /// - `Some([...])` ⇒ ONLY those; `Some([])` ⇒ none.
+    ///
+    /// Fail-closed, exactly like [`FamilyConfig::tool_allowed`]. The set is bound
+    /// onto the tool at construction from the authenticated principal, so a child
+    /// can never widen it through tool arguments.
+    pub calendars: Option<Vec<String>>,
 }
 
 /// The whole family: the member roster and the role → profile table.
@@ -97,6 +106,10 @@ struct RoleProfileRaw {
     default: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Per-role calendar allowlist for the local `calendar` tool (M2.5). Absent ⇒
+    /// unrestricted; `[]` ⇒ no calendars. See [`RoleProfile::calendars`].
+    #[serde(default)]
+    calendars: Option<Vec<String>>,
 }
 
 impl FamilyConfig {
@@ -124,6 +137,7 @@ impl FamilyConfig {
                 RoleProfile {
                     rules: role_rules,
                     model: raw_role.model,
+                    calendars: raw_role.calendars,
                 },
             );
         }
@@ -158,6 +172,21 @@ impl FamilyConfig {
     pub fn tool_allowed(&self, role: &str, tool: &str) -> bool {
         // `None` (unknown role) ⇒ false: deny-by-default.
         self.roles.get(role).is_some_and(|p| p.rules.decide(tool, "") != Decision::Deny)
+    }
+
+    /// Which calendars `role` may see/touch via the local `calendar` tool (M2.5,
+    /// th-716243). Matched on calendar NAME.
+    ///
+    /// - `None` ⇒ unrestricted (adult default — the role gets every calendar).
+    /// - `Some([...])` ⇒ ONLY those names; `Some([])` ⇒ none.
+    ///
+    /// **Fail-closed on an unknown role**: returns `Some(&[])` (nothing), never
+    /// unrestricted — mirroring [`FamilyConfig::tool_allowed`]. In practice an
+    /// unknown role has already had the `calendar` tool dropped by
+    /// `tool_allowed`, but this stays safe if called directly.
+    #[must_use]
+    pub fn calendars_allowed(&self, role: &str) -> Option<&[String]> {
+        self.roles.get(role).map_or(Some(&[]), |p| p.calendars.as_deref())
     }
 
     /// Number of configured members (for a startup log line).
@@ -336,6 +365,43 @@ mod tests {
         .unwrap();
         assert!(cfg.tool_allowed("child", "read_file"));
         assert!(!cfg.tool_allowed("child", "bash"), "no default ⇒ deny unlisted");
+    }
+
+    #[test]
+    fn calendars_allowed_parses_absent_empty_and_populated() {
+        let cfg = FamilyConfig::from_toml(
+            r#"
+            [roles.adult]
+            allow = ["calendar"]
+            default = "deny"
+
+            [roles.child]
+            allow = ["calendar"]
+            default = "deny"
+            calendars = ["Family", "Kids Sports"]
+
+            [roles.nocal]
+            allow = ["calendar"]
+            default = "deny"
+            calendars = []
+        "#,
+        )
+        .unwrap();
+        // Absent key ⇒ unrestricted (adult default).
+        assert_eq!(cfg.calendars_allowed("adult"), None);
+        // Populated ⇒ exactly those names, order preserved.
+        assert_eq!(cfg.calendars_allowed("child"), Some(&["Family".to_owned(), "Kids Sports".to_owned()][..]));
+        // Explicit empty ⇒ Some([]) (none), NOT None (unrestricted).
+        assert_eq!(cfg.calendars_allowed("nocal"), Some(&[][..]));
+    }
+
+    #[test]
+    fn calendars_allowed_is_fail_closed_for_unknown_role() {
+        let cfg = FamilyConfig::from_toml(JR).unwrap();
+        // An unknown role must get nothing — never unrestricted (`None`).
+        assert_eq!(cfg.calendars_allowed("bogus"), Some(&[][..]));
+        // The JR roles set no `calendars` key ⇒ unrestricted.
+        assert_eq!(cfg.calendars_allowed("child"), None);
     }
 
     #[test]

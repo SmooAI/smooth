@@ -205,7 +205,36 @@ network. **Smoo Jr also surfaces as a selectable mode** (`modes.ts`, id
 `smoo-jr`) — UX + model pin only; the guardrail is the principal-derived tool
 narrowing, independent of the mode.
 
-**Scope landed:** M1 (per-principal RBAC) + M2 (Smoo Jr role + mode).
+## Implementation — M2.5 within-tool resource RBAC (pearl th-716243)
+
+M1/M2 RBAC is **whole-tool**: a role either has the `calendar` tool or it
+doesn't. M2.5 adds the next grain down — **which calendars** a role that *does*
+have the tool may see and touch — the first *within-tool resource* allowlist.
+
+- **Config:** `RoleProfile.calendars: Option<Vec<String>>`, parsed from
+  `[roles.<name>] calendars = ["Family", "Kids Sports"]` in `family.toml`.
+  Semantics match `tool_allowed`, **fail-closed**: absent ⇒ unrestricted (adult
+  default), `Some([...])` ⇒ only those names, `Some([])` ⇒ none; an unknown role ⇒
+  `Some([])`. Accessor: `FamilyConfig::calendars_allowed(role)`.
+- **Binding:** the allowlist is injected onto the `CalendarTool` /
+  `CalendarDeleteTool` instances in `tools_for` **at construction**, from the
+  authenticated `role:` group — never a tool argument. Same un-settable-by-caller
+  property as the M2 tool narrowing: a child cannot widen it.
+- **Enforcement** (`smooth_tools::calendar`, the `ical` seam): reads
+  (`today`/`list`/`upcoming`/`search`) with no caller-named calendar are **bound**
+  to the allowed set with injected `-c` flags; any caller `-c/--calendar <name>`
+  must be in the set; `--calendar-id`/`--exclude-calendar` are refused (can't be
+  checked by name); `add` must target an allowed calendar (the default calendar
+  may be outside the set); the `calendars` listing is post-filtered to allowed
+  names, and calendar *management* (create/rename/delete) is refused. An empty
+  allowlist hard-denies every event-touching verb.
+- **Ceiling** (documented, not a hole): `ical delete`/`show`/`update`-in-place
+  carry no verifiable calendar target, so gating there leans on the read boundary
+  — a scoped member can only have learned event ids from allowed calendars.
+  Tighten by resolving each event's calendar via a `show` first if it ever bites.
+
+**Scope landed:** M1 (per-principal RBAC) + M2 (Smoo Jr role + mode) + M2.5
+(per-role calendar allowlist).
 **Still deferred** (unchanged from above): M3 per-principal *memory* partition
 (M2 stopgap: `remember` is denied for Jr, so nothing writes to shared memory —
 `recall` reads only), M4 org-scoped **relay** routing (until then, distinct
