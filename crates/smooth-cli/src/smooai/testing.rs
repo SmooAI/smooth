@@ -99,6 +99,9 @@ pub enum DeploymentsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a single deployment by id.
     Show {
@@ -145,6 +148,9 @@ pub enum CasesCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a single test case by id.
     Show {
@@ -191,6 +197,9 @@ pub enum EnvironmentsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Create a test environment from an optional JSON body.
     Create {
@@ -229,6 +238,9 @@ pub enum RunsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a single test run by id.
     Show {
@@ -328,15 +340,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
     };
     match cmd {
         Cmd::Deployments { cmd } => match cmd {
-            DeploymentsCmd::List { org } => {
+            DeploymentsCmd::List { org, json } => {
                 let o = require_active_org(&client, org)?;
-                print_list_envelope(
-                    &client
-                        .get(&format!("/organizations/{o}/testing/deployments"))
-                        .await
-                        .context("GET deployments")?,
-                    "deployments",
-                );
+                let body = client
+                    .get(&format!("/organizations/{o}/testing/deployments"))
+                    .await
+                    .context("GET deployments")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    print_list_envelope(&body, "deployments");
+                }
             }
             DeploymentsCmd::Show { deployment_id, org } => {
                 let o = require_active_org(&client, org)?;
@@ -378,9 +392,14 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Cases { cmd } => match cmd {
-            CasesCmd::List { org } => {
+            CasesCmd::List { org, json } => {
                 let o = require_active_org(&client, org)?;
-                print_list_envelope(&client.get(&format!("/organizations/{o}/testing/cases")).await.context("GET cases")?, "cases");
+                let body = client.get(&format!("/organizations/{o}/testing/cases")).await.context("GET cases")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    print_list_envelope(&body, "cases");
+                }
             }
             CasesCmd::Show { case_id, org } => {
                 let o = require_active_org(&client, org)?;
@@ -417,15 +436,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Environments { cmd } => match cmd {
-            EnvironmentsCmd::List { org } => {
+            EnvironmentsCmd::List { org, json } => {
                 let o = require_active_org(&client, org)?;
-                print_list_envelope(
-                    &client
-                        .get(&format!("/organizations/{o}/testing/environments"))
-                        .await
-                        .context("GET test environments")?,
-                    "environments",
-                );
+                let body = client
+                    .get(&format!("/organizations/{o}/testing/environments"))
+                    .await
+                    .context("GET test environments")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    print_list_envelope(&body, "environments");
+                }
             }
             EnvironmentsCmd::Create { body, org } => {
                 let o = require_active_org(&client, org)?;
@@ -458,9 +479,14 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Runs { cmd } => match cmd {
-            RunsCmd::List { org } => {
+            RunsCmd::List { org, json } => {
                 let o = require_active_org(&client, org)?;
-                print_list_envelope(&client.get(&format!("/organizations/{o}/testing/runs")).await.context("GET runs")?, "runs");
+                let body = client.get(&format!("/organizations/{o}/testing/runs")).await.context("GET runs")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    print_list_envelope(&body, "runs");
+                }
             }
             RunsCmd::Show { run_id, org } => {
                 let o = require_active_org(&client, org)?;
@@ -1087,5 +1113,61 @@ mod tests {
         let head = vec![cov_row("empty", 0, 0)];
         let md = render_coverage_diff(&head, &[], "feat", "main", true);
         assert!(md.contains("| `empty` | — | new |"), "zero-total row: {md}");
+    }
+
+    /// Pearl th-91de11: all four `list` verbs printed only the decorated
+    /// envelope. Each gained `--json`; parse them all so a future variant
+    /// can't quietly drop the flag.
+    #[test]
+    fn every_list_accepts_json_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let cases = Wrap::try_parse_from(["t", "cases", "list", "--json"]).expect("cases list --json");
+        assert!(matches!(
+            cases.cmd,
+            Cmd::Cases {
+                cmd: CasesCmd::List { json: true, .. }
+            }
+        ));
+
+        let runs = Wrap::try_parse_from(["t", "runs", "list", "--json"]).expect("runs list --json");
+        assert!(matches!(
+            runs.cmd,
+            Cmd::Runs {
+                cmd: RunsCmd::List { json: true, .. }
+            }
+        ));
+
+        let deployments = Wrap::try_parse_from(["t", "deployments", "list", "--json"]).expect("deployments list --json");
+        assert!(matches!(
+            deployments.cmd,
+            Cmd::Deployments {
+                cmd: DeploymentsCmd::List { json: true, .. }
+            }
+        ));
+
+        let envs = Wrap::try_parse_from(["t", "environments", "list", "--json"]).expect("environments list --json");
+        assert!(matches!(
+            envs.cmd,
+            Cmd::Environments {
+                cmd: EnvironmentsCmd::List { json: true, .. }
+            }
+        ));
+
+        let bare = Wrap::try_parse_from(["t", "runs", "list"]).expect("bare runs list");
+        assert!(
+            matches!(
+                bare.cmd,
+                Cmd::Runs {
+                    cmd: RunsCmd::List { json: false, .. }
+                }
+            ),
+            "--json must default to off"
+        );
     }
 }

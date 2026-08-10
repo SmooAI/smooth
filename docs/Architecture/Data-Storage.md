@@ -22,7 +22,7 @@ Engine: the `smooth-dolt` Go binary (built from `scripts/build-smooth-dolt.sh`).
 | `plugins/<name>/plugin.toml` | CLI-wrapper plugin manifests                                |
 | `smooth.pid`             | Big Smooth daemon pid (`th up` writes it, `th down` reads it)   |
 | `smooth.log`             | Big Smooth daemon stdout+stderr                                 |
-| `smooth.db`              | Legacy SQLite (no longer read after migration; safe to delete after `pearls migrate-from-sqlite`) |
+| `smooth.db`              | Legacy SQLite — unread, and no migration command ships any more; safe to delete |
 
 ## Project: `<repo>/.smooth/`
 

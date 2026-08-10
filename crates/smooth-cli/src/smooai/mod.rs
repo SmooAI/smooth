@@ -207,6 +207,19 @@ pub fn print_json(body: &serde_json::Value) {
 /// list. Each entry shows whichever of `id`, `name`, `email`,
 /// `status` are present. Falls back to full JSON when the shape
 /// doesn't match the envelope.
+/// Trailing discriminator for one row of a list envelope: `[status]` when the
+/// item has one, else `(slug)`. Orgs carry a slug and no status, which is the
+/// only reason `th orgs list` used to need its own printer.
+fn envelope_suffix(item: &serde_json::Value) -> String {
+    match item.get("status").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => format!(" [{s}]"),
+        _ => match item.get("slug").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => format!(" ({s})"),
+            _ => String::new(),
+        },
+    }
+}
+
 pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
     let items = body.get("data").and_then(|v| v.as_array()).or_else(|| body.as_array());
     let Some(items) = items else {
@@ -226,8 +239,7 @@ pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
             .and_then(|v| v.as_str())
             .or_else(|| item.get("email").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let suffix = if status.is_empty() { String::new() } else { format!(" [{status}]") };
+        let suffix = envelope_suffix(item);
         println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), suffix.dimmed());
     }
     println!();
@@ -243,7 +255,7 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
     match cmd {
         super::OrgsCommands::List => {
             let body = client.get("/organizations").await.context("GET /organizations")?;
-            print_orgs_list(&body);
+            print_list_envelope(&body, "organizations");
         }
         super::OrgsCommands::Show { org_id } => {
             // Use the shared resolver so `th api orgs show` honors
@@ -457,28 +469,6 @@ fn resolve_org_query(orgs: &[OrgRef], query: &str) -> Result<OrgRef> {
     }
 }
 
-/// Pretty-print the org-list response. Accepts both the
-/// `{data: [...]}` envelope and a bare array, because the API surface
-/// is in flux.
-fn print_orgs_list(body: &serde_json::Value) {
-    let items = body.get("data").and_then(|v| v.as_array()).or_else(|| body.as_array());
-    let Some(items) = items else {
-        println!("{}", serde_json::to_string_pretty(body).unwrap_or_default());
-        return;
-    };
-    if items.is_empty() {
-        println!("  {} {}", "●".dimmed(), "No organizations".dimmed());
-        return;
-    }
-    for org in items {
-        let id = org.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
-        let slug = org.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-        let slug_part = if slug.is_empty() { String::new() } else { format!(" ({slug})") };
-        println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), slug_part.dimmed());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +559,19 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("matches"), "{msg}");
         assert!(msg.contains("be more specific"), "{msg}");
+    }
+
+    /// Pearl th-91de11: `print_orgs_list` was a near-copy of
+    /// `print_list_envelope` that existed only to show a `slug` where the
+    /// shared helper showed a `status`. Teaching the helper to fall back to
+    /// `slug` let the copy go — this pins the fallback so deleting it is a
+    /// test failure, not a silent regression in `th orgs list`.
+    #[test]
+    fn envelope_suffix_prefers_status_then_falls_back_to_slug() {
+        assert_eq!(envelope_suffix(&serde_json::json!({ "status": "active", "slug": "acme" })), " [active]");
+        assert_eq!(envelope_suffix(&serde_json::json!({ "slug": "acme" })), " (acme)");
+        assert_eq!(envelope_suffix(&serde_json::json!({ "status": "", "slug": "acme" })), " (acme)");
+        assert_eq!(envelope_suffix(&serde_json::json!({ "slug": "" })), "");
+        assert_eq!(envelope_suffix(&serde_json::json!({ "id": "x" })), "");
     }
 }

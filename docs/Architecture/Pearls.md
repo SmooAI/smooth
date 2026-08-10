@@ -86,14 +86,17 @@ Requires Go 1.21+ and ICU (macOS: `brew install icu4c`). The binary is mirrored 
 
 ## Migrating from older stores
 
-Legacy state lives in `~/.smooth/smooth.db` (SQLite). One-time migration:
+Legacy state lives in `~/.smooth/smooth.db` (SQLite). It is no longer read
+by anything, and the `th pearls migrate-from-sqlite` command that used to
+convert it has been removed — the file is safe to delete.
+
+Migration from the `bd` CLI is still supported:
 
 ```bash
-th pearls migrate-from-sqlite
-th pearls migrate-from-beads   # if you used the bd CLI
+th pearls migrate-from-beads
 ```
 
-After migration, the SQLite file is no longer read. Dolt is the only store.
+Dolt is the only store.
 
 ## Related
 

@@ -60,7 +60,6 @@ toml.workspace = true
 anstream.workspace = true
 owo-colors.workspace = true
 indicatif.workspace = true
-atty.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 futures-util.workspace = true
 # SMOODEV-1164: th observability sourcemaps upload needs to walk a build dir

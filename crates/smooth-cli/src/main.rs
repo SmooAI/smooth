@@ -30,6 +30,8 @@ use smooth_tools::mcp_config;
 mod mail;
 mod mcp_serve;
 mod operator_serve;
+/// Reclaimable-disk findings reported by `th doctor` (pearl th-91de11).
+mod reclaim;
 /// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
 #[cfg(target_os = "macos")]
 mod reminders_setup;
@@ -39,7 +41,7 @@ mod smooai;
 use smooai::cmd_orgs;
 
 use anstream::{eprintln, print, println};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
@@ -53,28 +55,35 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Resume a saved session. With no value, picks the most recently
-    /// updated one. With a value, matches by id prefix or title
-    /// substring. Pair with `--list` to inspect saved sessions first.
-    /// Only takes effect when no subcommand is given (top-level `th`
-    /// launches the TUI). Same as `th code --resume`. Pearl
-    /// th-resume-top-level (2026-05-12).
+    /// Resume a saved session.
+    ///
+    /// With no value, picks the most recently updated one. With a value,
+    /// matches by id prefix or title substring. Pair with `--list` to
+    /// inspect saved sessions first. Only takes effect when no subcommand
+    /// is given (top-level `th` launches the TUI). Same as
+    /// `th code --resume`. Pearl th-resume-top-level (2026-05-12).
     #[arg(long, value_name = "QUERY", num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
-    /// List saved sessions and exit. Only takes effect when no
-    /// subcommand is given. Same as `th code --list`.
+    /// List saved sessions and exit.
+    ///
+    /// Only takes effect when no subcommand is given. Same as
+    /// `th code --list`.
     #[arg(long)]
     list: bool,
 
-    /// Pin the lead role for this session (fixer / oracle / mapper /
-    /// scout / heckler). Same as `th code --agent <name>`.
+    /// Pin the lead role for this session.
+    ///
+    /// One of fixer / oracle / mapper / scout / heckler. Same as
+    /// `th code --agent <name>`.
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
 
-    /// Auth profile to use for this command (overrides the active profile
-    /// and `SMOOAI_PROFILE`). Profiles bundle a user + M2M session under
-    /// `~/.config/smooth/auth/profiles/<name>/`. See `th auth profile`.
+    /// Auth profile to use for this command.
+    ///
+    /// Overrides the active profile and `SMOOAI_PROFILE`. Profiles bundle a
+    /// user + M2M session under `~/.config/smooth/auth/profiles/<name>/`.
+    /// See `th auth profile`.
     #[arg(long, global = true, value_name = "NAME")]
     profile: Option<String>,
 }
@@ -90,9 +99,11 @@ enum Commands {
     /// check that failed (pearl th-b27ed0).
     Attest(attest::AttestArgs),
     /// Run / control the chat-first Big Smooth daemon (epic th-c89c2a) on the
-    /// smooth-operator LocalServer engine. Thin passthrough to the standalone
-    /// `smooth-daemon` binary — `th daemon --help` shows its full CLI
-    /// (`run` foreground / `operator` / `status` / `audit` / `schedule`).
+    /// smooth-operator LocalServer engine.
+    ///
+    /// Thin passthrough to the standalone `smooth-daemon` binary — `th daemon --help`
+    /// shows its full CLI (`run` foreground / `operator` / `status` / `audit` /
+    /// `schedule`).
     Daemon {
         /// Args forwarded verbatim to the `smooth-daemon` binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -103,9 +114,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: OperatorCommands,
     },
-    /// Start Smooth platform — boots Big Smooth on the host and runs
-    /// dispatched tasks in-process. (The microVM sandbox mode was
-    /// removed 2026-07, pearl th-f4a801; see git history.)
+    /// Start Smooth platform — boots Big Smooth on the host and runs dispatched tasks
+    /// in-process.
+    ///
+    /// (The microVM sandbox mode was removed 2026-07, pearl th-f4a801; see git
+    /// history.)
     Up {
         /// Skip starting Big Smooth (API + web UI)
         #[arg(long)]
@@ -139,8 +152,10 @@ enum Commands {
     Down,
     /// Show system health
     Status,
-    /// LLM provider credential management (Anthropic, Smoo AI Gateway,
-    /// OpenRouter, OpenAI, …). Edits `~/.smooth/providers.json`.
+    /// LLM provider credential management (Anthropic, Smoo AI Gateway, OpenRouter,
+    /// OpenAI, …).
+    ///
+    /// Edits `~/.smooth/providers.json`.
     ///
     /// Was `th auth` before 2026-05 — that name now belongs to Smoo
     /// AI identity (`th auth login` for user/email-password, `th auth
@@ -150,35 +165,40 @@ enum Commands {
         #[command(subcommand)]
         cmd: ModelCommands,
     },
-    /// Smoo AI identity — log in to the Smoo AI platform as a user
-    /// (email + password) or service account (M2M client_credentials).
-    /// Used by `th admin *`, `th api *`, and (soon) llm.smoo.ai's
-    /// user-attributed LLM session exchange.
+    /// Smoo AI identity — log in to the Smoo AI platform.
+    ///
+    /// As a user (email + password) or a service account (M2M
+    /// client_credentials). Used by `th admin *`, `th api *`, and (soon) llm.smoo.ai's user-attributed LLM
+    /// session exchange.
     Auth {
         #[command(subcommand)]
         cmd: auth::AuthCommands,
     },
-    /// Smoo AI superadmin operations against the /admin/* endpoints
-    /// on api.smoo.ai. Requires a `th auth login` user session whose
-    /// account has the requireSuperAdmin role (403 otherwise).
+    /// Smoo AI superadmin operations against the /admin/* endpoints on api.smoo.ai.
+    ///
+    /// Requires a `th auth login` user session whose account has the
+    /// requireSuperAdmin role (403 otherwise).
     #[cfg(feature = "admin")]
     Admin {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
     },
     /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
-    /// Login + orgs + agents + keys + members + knowledge + jobs +
-    /// products + profile + testing live under here. Config has its
-    /// own top-level subcommand (`th config`) for the daily surface,
-    /// `th admin config` for the platform-admin surface.
+    ///
+    /// Login + orgs + agents + keys + members + knowledge + jobs + products +
+    /// profile + testing live under here. Config has its own top-level
+    /// subcommand (`th config`) for the daily surface, `th admin config` for
+    /// the platform-admin surface.
     Api {
         #[command(subcommand)]
         cmd: ApiCommands,
     },
-    /// Smoo AI organizations — `list` the orgs you belong to, `switch`
-    /// the active org (persisted across all credential stores), or
-    /// `show` one. Top-level alias for `th api orgs`, promoted for
-    /// discoverability alongside `th config` / `th testing`.
+    /// Smoo AI organizations — `list`, `switch` the active org, or `show` one.
+    ///
+    /// `switch` persists across all credential stores.
+    ///
+    /// Top-level alias for `th api orgs`, promoted for discoverability alongside
+    /// `th config` / `th testing`.
     ///
     /// Note: `switch` flips the *active org* that user-JWT commands
     /// default to. The user JWT can act cross-org (a master admin is
@@ -191,10 +211,10 @@ enum Commands {
         cmd: OrgsCommands,
     },
     /// Smoo AI `@smooai/config` — the daily-developer config surface.
-    /// `get` / `set` / `list` for single values; `feature-flag` to
-    /// evaluate a flag; `push` / `pull` / `diff` to sync the
-    /// `.smooai-config/schema.json` document with the org's remote
-    /// schema; `init` to scaffold a fresh local schema package;
+    ///
+    /// `get` / `set` / `list` for single values; `feature-flag` to evaluate a flag;
+    /// `push` / `pull` / `diff` to sync the `.smooai-config/schema.json` document
+    /// with the org's remote schema; `init` to scaffold a fresh local schema package;
     /// `delete` to remove a value record.
     ///
     /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
@@ -206,59 +226,67 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Scaffold + verify SmooAI dashboard widgets. `th widgets new`
-    /// scaffolds all 5 touchpoints across the smooai monorepo,
-    /// `th widgets list` enumerates the registry, `th widgets check`
-    /// is the TS↔Rust↔renderer parity gate, `th widgets preview`
-    /// (best-effort) scaffolds a temp render route + screenshot command.
+    /// Scaffold + verify SmooAI dashboard widgets.
+    ///
+    /// `th widgets new` scaffolds all 5 touchpoints across the smooai monorepo,
+    /// `th widgets list` enumerates the registry, `th widgets check` is the
+    /// TS↔Rust↔renderer parity gate, `th widgets preview` (best-effort) scaffolds a
+    /// temp render route + screenshot command.
     #[command(visible_alias = "widget")]
     Widgets {
         #[command(subcommand)]
         cmd: smooai::widgets::Cmd,
     },
-    /// Smoo AI main-dashboard widget layout — get / add / remove widgets on
-    /// your `/apps` dashboard (per user + org; widget ids from `th widgets
-    /// list`). First-class front door for `th api dashboard`.
+    /// Smoo AI main-dashboard widget layout — get / add / remove widgets.
+    ///
+    /// Acts on your `/apps` dashboard (per user + org; widget ids from
+    /// `th widgets list`). First-class front door for `th api dashboard`.
     Dashboard {
         #[command(subcommand)]
         cmd: smooai::dashboard::Cmd,
     },
-    /// Smoo AI in-house web crawler (ADR-035) — `th crawl scrape <url>`
-    /// turns a page into clean markdown through the authed crawler
-    /// service (real browser UA + JS render), so it gets pages a plain
-    /// fetch 403s on. Any authenticated org member can use it.
+    /// Smoo AI in-house web crawler (ADR-035) — a page as clean markdown.
+    ///
+    /// `th crawl scrape <url>` turns a page into clean markdown through the
+    /// authed crawler service (real browser UA + JS render), so it gets pages
+    /// a plain fetch 403s on. Any authenticated org member can use it.
     Crawl {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
     },
-    /// Edit an org's RBAC roles (SMOODEV-2368 / ADR-105) — `th roles list`,
-    /// `show`, `create` (optionally `--template`), `grant`/`revoke`/
-    /// `set-permissions` on a role's permission keys, and `assign`/`unassign`
-    /// roles to members. System roles are immutable. User-authed (`th auth login`).
+    /// Edit an org's RBAC roles (SMOODEV-2368 / ADR-105).
+    ///
+    /// `th roles list`, `show`, `create` (optionally `--template`),
+    /// `grant`/`revoke`/`set-permissions` on a role's permission keys, and
+    /// `assign`/`unassign` roles to members. System roles are immutable.
+    /// User-authed (`th auth login`).
     #[command(visible_alias = "role")]
     Roles {
         #[command(subcommand)]
         cmd: smooai::roles::Cmd,
     },
-    /// Smoo AI agentic web search (ADR-088) — `th search <query>` returns
-    /// ranked results (+ optional `--answer`), served by our own search stack
-    /// (self-hosted SearXNG + in-house crawler + LLM answer synthesis). Full
-    /// options when logged in; an anonymous free tier (basic depth, capped
+    /// Smoo AI agentic web search (ADR-088) — `th search <query>` for ranked results.
+    ///
+    /// Optionally `--answer`. Served by our own search stack (self-hosted
+    /// SearXNG + in-house crawler + LLM answer synthesis). Full options when logged in; an anonymous free tier (basic depth, capped
     /// results) otherwise. A companion to `th crawl` for agentic coding.
     Search {
         #[command(flatten)]
         args: smooai::websearch::SearchArgs,
     },
     /// Deprecated alias for `th search` — kept for the form shipped in v0.18.0
-    /// (`th web-search search <query>`). Use `th search` instead.
+    /// (`th web-search search <query>`).
+    ///
+    /// Use `th search` instead.
     #[command(name = "web-search", hide = true)]
     WebSearch {
         #[command(subcommand)]
         cmd: smooai::websearch::Cmd,
     },
-    /// Smoo AI LLM gateway keys — mint / rotate / list the org's
-    /// `llm.smoo.ai` keys and inspect spend. `th llm create-key`
-    /// provisions the org's persistent key (a LiteLLM virtual key
+    /// Smoo AI LLM gateway keys — mint / rotate / list the org's `llm.smoo.ai` keys
+    /// and inspect spend.
+    ///
+    /// `th llm create-key` provisions the org's persistent key (a LiteLLM virtual key
     /// scoped to the org budget) and prints it once.
     ///
     /// Authenticates as the user (Supabase JWT) and is org-admin-gated
@@ -268,13 +296,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::llm_gateway::Cmd,
     },
-    /// Ping the human on their own phone. Designed to be called BY an
-    /// agent (Big Smooth / claude-driver) as a notify-the-human
-    /// primitive — "blocked, need input", "done", "approve this" — it
-    /// sends a PUSH + in-app notification to the logged-in user's own
-    /// devices via `api.smoo.ai`. The message is the positional words
-    /// joined with spaces, so `th notify done, review the PR` works
-    /// unquoted.
+    /// Ping the human on their own phone.
+    ///
+    /// Designed to be called BY an agent (Big Smooth / claude-driver) as a
+    /// notify-the-human primitive — "blocked, need input", "done", "approve this" —
+    /// it sends a PUSH + in-app notification to the logged-in user's own devices via
+    /// `api.smoo.ai`. The message is the positional words joined with spaces, so
+    /// `th notify done, review the PR` works unquoted.
     Notify {
         /// The message body — the positional words, joined with spaces.
         #[arg(value_name = "MESSAGE", required = true)]
@@ -293,84 +321,93 @@ enum Commands {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Smoo AI testing platform — the daily-developer surface for
-    /// reporting test results and managing runs / cases / environments /
-    /// deployments. `runs report <file>` is the high-level entry point:
-    /// it creates a run and submits a CTRF (or, with `--junit`, a
-    /// converted JUnit) report in one call. Same commands as
-    /// `th api testing`, promoted to the top level alongside `th config`.
+    /// Smoo AI testing platform — report test results and manage runs.
+    ///
+    /// The daily-developer surface for runs / cases / environments /
+    /// deployments. `runs report <file>` is the high-level entry point: it creates a run and
+    /// submits a CTRF (or, with `--junit`, a converted JUnit) report in one call.
+    /// Same commands as `th api testing`, promoted to the top level alongside
+    /// `th config`.
     Testing {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
     /// Smoo AI referrals — the org's partner / advocate program.
-    /// `show` / `create` / `update` the program economics, `partners`
-    /// to manage who gets paid, `link` for a partner's shareable
-    /// `api.smoo.ai/r/<code>` URL, plus `attributions` / `visits` /
-    /// `commissions`. Same commands as `th api referrals`, promoted to
-    /// the top level alongside `th config`.
+    ///
+    /// `show` / `create` / `update` the program economics, `partners` to manage who
+    /// gets paid, `link` for a partner's shareable `api.smoo.ai/r/<code>` URL, plus
+    /// `attributions` / `visits` / `commissions`. Same commands as
+    /// `th api referrals`, promoted to the top level alongside `th config`.
     #[command(visible_alias = "referral")]
     Referrals {
         #[command(subcommand)]
         cmd: smooai::referrals::Cmd,
     },
     /// Smoo AI booking — the org's Google-Calendar booking page.
-    /// `config get/set` availability + link handle, `types` for named
-    /// event types, `slots` to see open times, `bookings` to list them,
-    /// `block add/list/rm` for manual busy time, `link` for the public
-    /// URL. Same commands as `th api booking`, promoted to the top level
-    /// alongside `th config`.
+    ///
+    /// `config get/set` availability + link handle, `types` for named event types,
+    /// `slots` to see open times, `bookings` to list them, `block add/list/rm` for
+    /// manual busy time, `link` for the public URL. Same commands as
+    /// `th api booking`, promoted to the top level alongside `th config`.
     #[command(visible_alias = "bookings")]
     Booking {
         #[command(subcommand)]
         cmd: smooai::booking::Cmd,
     },
-    /// HeyPage — dogfood the AI website builder through the real product
-    /// API: `build` (generate → create → publish → live URL), plus
-    /// `generate` / `publish` / `get`.
+    /// HeyPage — dogfood the AI website builder through the real product API.
+    ///
+    /// `build` (generate → create → publish → live URL), plus `generate` /
+    /// `publish` / `get`.
     Heypage {
         #[command(subcommand)]
         cmd: smooai::heypage::Cmd,
     },
-    /// Smoo AI org file system — `ls`, `mkdir`, `upload`, `download`, `mv`,
-    /// `rm`, `lock`, `share`. Same commands as `th api files`, promoted to
-    /// the top level alongside `th config`.
+    /// Smoo AI org file system.
+    ///
+    /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
+    /// commands as `th api files`, promoted to the top level alongside
+    /// `th config`.
     #[command(visible_alias = "file")]
     Files {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
     },
-    /// Smoo AI knowledge base — `th knowledge search <query>` runs the SAME
-    /// semantic retrieval an agent does over the org's OWN documents (scope to one
-    /// with `--doc`), plus `list` / `show` / `content` / `upload` / `website` /
-    /// `process` / `update` / `delete`. Same commands as `th api knowledge`,
-    /// promoted to the top level as an agentic-coding primitive alongside
-    /// `th search` (the web) and `th crawl` (a page).
+    /// Smoo AI knowledge base — semantic retrieval over the org's own documents.
+    ///
+    /// `th knowledge search <query>` runs the SAME retrieval an agent does
+    /// (scope to one doc with `--doc`), plus `list` / `show` / `content` /
+    /// `upload` / `website` / `process` / `update` / `delete`. Same commands as `th api knowledge`, promoted to the top level as an
+    /// agentic-coding primitive alongside `th search` (the web) and `th crawl` (a
+    /// page).
     #[command(visible_alias = "kb")]
     Knowledge {
         #[command(subcommand)]
         cmd: smooai::knowledge::Cmd,
     },
-    /// Smoo AI CRM — contacts, companies, deals (with `--value` / `--mrr` /
-    /// `--upfront` economics), tasks, notes, stages, pipeline forecast, and
-    /// import. Same commands as `th api crm`, promoted to the top level
-    /// alongside `th config` / `th testing`.
+    /// Smoo AI CRM — contacts, companies, deals, tasks, notes, and pipeline.
+    ///
+    /// Deals carry `--value` / `--mrr` / `--upfront` economics; also stages,
+    /// pipeline forecast, and import. Same commands as `th api crm`, promoted to the top level alongside `th config`
+    /// / `th testing`.
     Crm {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
-    /// White-label a Smoo AI org — app name, chrome colors, and logos (local
-    /// path or remote URL, always re-hosted on our CDN). `from-url` derives a
-    /// theme from the partner's website; `enable` is the live switch and
-    /// refuses a theme that fails WCAG AA contrast. The Aurora meaning tokens
-    /// (heat / ai / gradients) are never white-labeled.
+    /// White-label a Smoo AI org — app name, chrome colors, and logos.
+    ///
+    /// Logos come from a local path or a remote URL, always re-hosted on our
+    /// CDN. `from-url` derives a theme from the partner's website; `enable` is the live
+    /// switch and refuses a theme that fails WCAG AA contrast. The Aurora meaning
+    /// tokens (heat / ai / gradients) are never white-labeled.
     #[command(visible_alias = "brand")]
     Branding {
         #[command(subcommand)]
         cmd: smooai::branding::Cmd,
     },
-    /// Run a pearl through a Smooth operative — dispatches to Big Smooth
-    /// (`th up` must be running) and streams agent events to stdout.
+    /// Run a pearl through a Smooth operative.
+    ///
+    /// Dispatches to Big Smooth (`th up` must be running) and streams agent
+    /// events to stdout.
     Run {
         /// Pearl id, or a task description prefixed with a space
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
@@ -418,8 +455,9 @@ enum Commands {
         #[arg(value_name = "OPERATIVE_ID")]
         bead_id: String,
     },
-    /// Show operative reviews + notifications needing your attention
-    /// (distinct from `th msg inbox`, which is agent-to-agent mail).
+    /// Show operative reviews + notifications needing your attention.
+    ///
+    /// Distinct from `th msg inbox`, which is agent-to-agent mail.
     Inbox,
     /// Smooth operative management
     #[command(visible_alias = "operative")]
@@ -427,9 +465,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<OperativesCommands>,
     },
-    /// Pearl projects in the global registry (`~/.smooth/registry.json`)
-    /// — `create` to register one, `list` to see all tracked projects.
-    /// For per-pearl work use `th pearls`.
+    /// Pearl projects in the global registry (`~/.smooth/registry.json`) — `list`
+    /// shows every tracked project.
+    ///
+    /// Register one by running `th pearls init` inside it. For per-pearl work use
+    /// `th pearls`.
     #[command(visible_alias = "projects")]
     Project {
         #[command(subcommand)]
@@ -454,9 +494,10 @@ enum Commands {
     },
     /// Open the Smooth web dashboard in your browser.
     Web,
-    /// Supervise Claude Code sessions running inside tmux: launch, send a
-    /// prompt, and keep the session alive until it exits or the account
-    /// hits its usage limit. `run` / `ls` / `attach`.
+    /// Supervise Claude Code sessions running inside tmux.
+    ///
+    /// Launch, send a prompt, and keep the session alive until it exits or the
+    /// account hits its usage limit. `run` / `ls` / `attach`.
     Claude {
         #[command(subcommand)]
         cmd: claude::ClaudeCommands,
@@ -533,18 +574,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: PearlCommands,
     },
-    /// Agent registry — register this session as a named agent so other
-    /// agents (any harness: claude-code, opencode, pi, a shell loop) can
-    /// message it. Machine-level: one roster per host (`~/.smooth/mail.db`).
+    /// Agent registry — make this session addressable by other agents.
+    ///
+    /// Registers it under a name so any harness (claude-code, opencode, pi, a
+    /// shell loop) can message it. Machine-level: one roster per host
+    /// (`~/.smooth/mail.db`).
     #[command(visible_alias = "agents")]
     Agent {
         #[command(subcommand)]
         cmd: mail::AgentCommands,
     },
     /// Agent messaging — send and receive messages between agents.
+    ///
     /// `th msg send <name|all> <body...>` to send, `th msg inbox` to read,
-    /// `th msg watch` to continuously poll. Harness-agnostic: any process
-    /// that can run `th` can participate.
+    /// `th msg watch` to continuously poll. Harness-agnostic: any process that
+    /// can run `th` can participate.
     #[command(visible_alias = "msgs")]
     Msg {
         #[command(subcommand)]
@@ -566,8 +610,9 @@ enum Commands {
         #[command(subcommand)]
         cmd: PluginCommands,
     },
-    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension
-    /// Protocol). Install a local extension, list/trust/remove installed ones.
+    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension Protocol).
+    ///
+    /// Install a local extension, list/trust/remove installed ones.
     Ext {
         #[command(subcommand)]
         cmd: ext::ExtCommands,
@@ -577,9 +622,10 @@ enum Commands {
         #[command(subcommand)]
         cmd: ServiceCommands,
     },
-    /// Print workflow-rules + current-state context block (for Claude
-    /// Code SessionStart / PreCompact hooks; the `th` equivalent of
-    /// `bd prime`)
+    /// Print the workflow-rules + current-state context block.
+    ///
+    /// For Claude Code SessionStart / PreCompact hooks; the `th` equivalent
+    /// of `bd prime`.
     Prime,
     /// System health check and auto-fix
     Doctor {
@@ -633,10 +679,10 @@ enum Commands {
         #[arg(long)]
         onboard: bool,
     },
-    /// List skills available in the current workspace. Reads
-    /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
-    /// and `~/.opencode/skills/` — first hit wins on name. Pearl
-    /// th-e0f812.
+    /// List skills available in the current workspace.
+    ///
+    /// Reads `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`, and
+    /// `~/.opencode/skills/` — first hit wins on name. Pearl th-e0f812.
     #[command(visible_alias = "skill")]
     Skills {
         #[command(subcommand)]
@@ -648,9 +694,10 @@ enum Commands {
         #[command(subcommand)]
         cmd: CastCommands,
     },
-    /// Bring-your-own LLM providers — add an OpenAI-compatible server
-    /// (Ollama, LM Studio, llama.cpp, …) by URL, list what's
-    /// configured, remove one, or auto-detect a local server.
+    /// Bring-your-own LLM providers.
+    ///
+    /// Add an OpenAI-compatible server (Ollama, LM Studio, llama.cpp, …) by
+    /// URL, list what's configured, remove one, or auto-detect a local server.
     ///
     /// Edits `~/.smooth/providers.json` field-preservingly: the typed
     /// loader drops any key it doesn't know (including per-provider
@@ -1100,9 +1147,9 @@ enum OperatorCommands {
 
 #[derive(Subcommand)]
 enum ProjectCommands {
-    /// Create a project
+    /// Not implemented — run `th pearls init` inside the project instead.
     Create { name: String, description: Option<String> },
-    /// List projects
+    /// List every project in `~/.smooth/registry.json`.
     List,
 }
 
@@ -1679,11 +1726,47 @@ async fn main() -> Result<()> {
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
         Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
         Some(Commands::Prime) => cmd_prime(),
-        Some(_) => {
-            println!("Command not yet implemented. Coming soon!");
-            Ok(())
+        Some(Commands::Project { cmd }) => cmd_project(cmd),
+    }
+}
+
+/// `th project *` — the global registry view. `list` is the same data
+/// `th pearls projects` prints; `create` never had an implementation and
+/// can't have a sensible one (registration needs a real `.smooth/dolt/`
+/// store, which is what `th pearls init` makes).
+fn cmd_project(cmd: ProjectCommands) -> Result<()> {
+    match cmd {
+        ProjectCommands::List => print_registered_projects(),
+        ProjectCommands::Create { .. } => {
+            bail!("`th project create` is not implemented — run `th pearls init` inside the project to register it")
         }
     }
+}
+
+/// Print every project in `~/.smooth/registry.json`. Shared by
+/// `th pearls projects` and `th project list`.
+fn print_registered_projects() -> Result<()> {
+    let registry = smooth_pearls::Registry::load()?;
+    let projects = registry.list();
+    if projects.is_empty() {
+        println!("No pearl projects registered yet.");
+        println!("Run {} in a project to register it.", "th pearls init".bold());
+        return Ok(());
+    }
+    println!("{}", "Registered Pearl Projects".bold().cyan());
+    println!();
+    for entry in &projects {
+        let exists = entry.path.join(".smooth").join("dolt").exists();
+        let status = if exists {
+            "✓".green().bold().to_string()
+        } else {
+            "✗".red().bold().to_string()
+        };
+        println!("  {} {} {}", status, entry.name.bold(), entry.path.display().to_string().dimmed());
+        println!("    Last accessed: {}", entry.last_accessed.format("%Y-%m-%d %H:%M").to_string().dimmed());
+    }
+    println!("\n{} project(s)", projects.len());
+    Ok(())
 }
 
 // ── Command implementations ────────────────────────────────
@@ -2878,9 +2961,9 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
 
 /// Read all bytes from stdin if data is available (piped input).
 fn read_stdin() -> Option<String> {
-    use std::io::Read;
+    use std::io::{IsTerminal, Read};
     // Only read if stdin is not a terminal (i.e. data is piped in)
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         return None;
     }
     let mut buf = String::new();
@@ -3459,14 +3542,16 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         }
     }
 
-    // 7. Check for stale SQLite pearls that could be migrated
+    // 7. Flag the legacy SQLite store. Nothing reads it and the
+    // `migrate-from-sqlite` command it used to point at no longer exists
+    // (pearl th-91de11), so the only honest advice is "delete it".
     let sqlite_path = dirs_next::home_dir().map(|h| h.join(".smooth/smooth.db"));
     if let Some(ref path) = sqlite_path {
         if path.exists() && find_dolt_dir().is_ok() {
             println!(
                 "  {} SQLite: {}",
                 "○".dimmed(),
-                "legacy smooth.db found — run: th pearls migrate-from-sqlite (to migrate to Dolt)".dimmed()
+                format!("legacy smooth.db is unread — safe to delete: rm {}", path.display()).dimmed()
             );
         }
     }
@@ -3599,6 +3684,21 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
             }
             Err(e) => {
                 println!("    {} could not auto-install hooks: {e}", "✗".red().bold());
+            }
+        }
+    }
+
+    // 12. Reclaimable disk in ~/.smooth (pearl th-91de11). Reported, never
+    // deleted — these are the user's build caches, logs and credential
+    // backups, and doctor only ever auto-fixes config it owns.
+    if let Some(ref dir) = smooth_home {
+        let found = reclaim::findings(dir, &smooth_policy::auth_paths::auth_dir());
+        if !found.is_empty() {
+            let total: u64 = found.iter().map(|f| f.bytes).sum();
+            println!("\n  {} ({} reclaimable)", "Disk".bold(), reclaim::human_bytes(total).yellow().bold());
+            for f in &found {
+                println!("    {} {} {}", "○".dimmed(), f.what, format!("({})", reclaim::human_bytes(f.bytes)).dimmed());
+                println!("      {} {}", "→".cyan(), f.hint.bold());
             }
         }
     }
@@ -5066,28 +5166,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             commit_and_push_pearl_state(&dolt_dir, "migrate from beads")?;
         }
 
-        PearlCommands::Projects => {
-            let registry = smooth_pearls::Registry::load()?;
-            let projects = registry.list();
-            if projects.is_empty() {
-                println!("No pearl projects registered yet.");
-                println!("Run {} in a project to register it.", "th pearls init".bold());
-            } else {
-                println!("{}", "Registered Pearl Projects".bold().cyan());
-                println!();
-                for entry in &projects {
-                    let exists = entry.path.join(".smooth").join("dolt").exists();
-                    let status = if exists {
-                        "✓".green().bold().to_string()
-                    } else {
-                        "✗".red().bold().to_string()
-                    };
-                    println!("  {} {} {}", status, entry.name.bold(), entry.path.display().to_string().dimmed());
-                    println!("    Last accessed: {}", entry.last_accessed.format("%Y-%m-%d %H:%M").to_string().dimmed());
-                }
-                println!("\n{} project(s)", projects.len());
-            }
-        }
+        PearlCommands::Projects => print_registered_projects()?,
 
         // ── Memory + prime (pearl th-202885) ─────────────────────────
         PearlCommands::Remember { text, source } => {
@@ -8634,6 +8713,90 @@ mod org_cli_tests {
                 },
             }) => assert_eq!(client_type, ClientType::M2m),
             _ => panic!("expected Api/Keys/Create"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is the idiom for test assertions")]
+mod cli_dispatch_tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::{Cli, Commands, ProjectCommands};
+
+    /// clap's own derive validator — catches malformed `#[arg]`/`#[command]`
+    /// definitions (duplicate long flags, bad defaults) that otherwise only
+    /// panic at runtime on the affected subcommand.
+    #[test]
+    fn command_definitions_are_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    /// Pearl th-91de11: `main`'s dispatch used to end in a `Some(_) =>` arm that
+    /// printed "Command not yet implemented. Coming soon!" and returned `Ok`.
+    /// That wildcard defeated match exhaustiveness — `th project` was unwired
+    /// and exited 0 — so a new `Commands` variant could ship dead and silent.
+    /// The arm is gone; this test pins the two `project` verbs that it hid.
+    #[test]
+    fn project_subcommands_parse_to_their_own_variant() {
+        let list = Cli::try_parse_from(["th", "project", "list"]).expect("th project list");
+        assert!(matches!(list.command, Some(Commands::Project { cmd: ProjectCommands::List })));
+
+        let create = Cli::try_parse_from(["th", "project", "create", "demo"]).expect("th project create");
+        assert!(matches!(
+            create.command,
+            Some(Commands::Project {
+                cmd: ProjectCommands::Create { .. }
+            })
+        ));
+    }
+
+    /// `th projects` is the documented alias and must reach the same variant.
+    #[test]
+    fn projects_alias_reaches_the_project_variant() {
+        let aliased = Cli::try_parse_from(["th", "projects", "list"]).expect("th projects list");
+        assert!(matches!(aliased.command, Some(Commands::Project { cmd: ProjectCommands::List })));
+    }
+
+    /// `th project create` has no implementation and must say so with a
+    /// non-zero exit, not the old "Coming soon!" + success.
+    #[test]
+    fn project_create_fails_loudly_instead_of_succeeding_silently() {
+        let err = super::cmd_project(ProjectCommands::Create {
+            name: "demo".to_string(),
+            description: None,
+        })
+        .expect_err("`th project create` must not report success");
+        let msg = err.to_string();
+        assert!(msg.contains("not implemented"), "{msg}");
+        assert!(msg.contains("th pearls init"), "the error must point at the working path: {msg}");
+    }
+
+    /// Every top-level command's SHORT help (`th -h`) must be one sentence.
+    /// Pearl th-91de11: without a blank `///` line clap dumps the entire doc
+    /// comment into short help, which turned `th -h` into a ~300-line wall.
+    /// A multi-sentence `about` is the exact symptom, so assert on it.
+    #[test]
+    fn short_help_for_every_command_is_a_single_sentence() {
+        for sub in Cli::command().get_subcommands() {
+            let Some(about) = sub.get_about().map(ToString::to_string) else {
+                continue;
+            };
+            // A sentence-ending period is one followed by a space. Abbreviations
+            // ("e.g. ") and decimals are the only legitimate interior hits.
+            let sentences = about
+                .match_indices(". ")
+                .filter(|(i, _)| {
+                    let head = &about[..*i];
+                    !head.ends_with("e.g") && !head.ends_with("i.e") && !head.ends_with("etc")
+                })
+                .count();
+            assert_eq!(
+                sentences,
+                0,
+                "`th {} -h` summary runs to multiple sentences — add a blank `///` line after the first:\n  {about}",
+                sub.get_name()
+            );
         }
     }
 }
