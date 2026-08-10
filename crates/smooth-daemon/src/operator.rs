@@ -957,7 +957,22 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // adapter (via the operator's `storage()` seam) so the always-on daemon
     // persists across restarts — no Postgres (EPIC th-c89c2a, th-558df1).
     let storage_path = operator_storage_path();
-    let storage = Arc::new(crate::operator_storage::SqliteStorageAdapter::open(&storage_path)?);
+    let mut storage_adapter = crate::operator_storage::SqliteStorageAdapter::open(&storage_path)?;
+    // Family AI M3 B.2 (pearl th-5189f0): opt-in cloud memory routing. OFF by
+    // default → local store, zero behavior change. When SMOOTH_CLOUD_MEMORY is
+    // set, route remember/recall to the platform memory home (Phase B.1) with the
+    // local store as fail-soft fallback. Requires the B.1 deploy + a live Smoo AI
+    // user session (the credential heartbeat above keeps it fresh).
+    if crate::config::cloud_memory_enabled() {
+        match crate::cloud_memory::CloudMemoryDeps::from_env(tokio::runtime::Handle::current()) {
+            Ok(deps) => {
+                tracing::info!("cloud memory routing ENABLED (Family AI M3 B.2); local store is the fail-soft fallback");
+                storage_adapter = storage_adapter.with_cloud_memory(deps);
+            }
+            Err(e) => tracing::warn!(error = %e, "SMOOTH_CLOUD_MEMORY set but cloud deps unavailable; staying on local memory"),
+        }
+    }
+    let storage = Arc::new(storage_adapter);
     tracing::info!(db = %storage_path.display(), "operator durable storage");
     // Kept for the Stats route (`/api/stats` reads activity counts from the same
     // store); the original Arc is moved into `.storage(...)` below.
