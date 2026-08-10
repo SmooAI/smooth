@@ -303,6 +303,35 @@ Global config lives at `~/.smooth/`; project config at
 `<repo>/.smooth/`. Project entries shadow global on name collision.
 See [`docs/extending.md`](docs/extending.md) for the full guide.
 
+### Agent tools — search, crawl, knowledge
+
+Three ways to feed an agent real context — the open web, a specific
+page, and your org's own knowledge. Each is one command, each usable by
+`th code` or by you, each with a bundled free tier (authenticate with
+`th auth login` for the full tier).
+
+```bash
+# Search the web → ranked results (+ a synthesized, cited answer).
+# Our own search stack (self-hosted SearXNG + in-house crawler + LLM
+# synthesis) — no vendor. --answer / --depth advanced / --max are the
+# authed tier.
+th search "rust async traits"
+th search "postgres upsert on conflict" --answer --max 8
+
+# Read a single page as clean markdown, through a real browser (JS render
+# + browser UA) — gets pages a plain fetch 403s on.
+th crawl scrape https://example.com/some/article
+
+# Search your ORG's knowledge base — the SAME semantic retrieval your
+# agents run over your own documents (embed → dense+sparse hybrid → RRF).
+# Scope to one document with --doc. (Authed; knowledge is org-private.)
+th knowledge search "refund policy"
+th knowledge search "pricing" --doc <document-id>
+
+# The rest of the knowledge surface (alias: th kb):
+th knowledge list | show <id> | content <id> | upload | website | process | delete
+```
+
 ### Run a pearl (`th run`)
 
 Dispatch a pearl (or ad-hoc prompt) to a Smooth operative. Big Smooth
