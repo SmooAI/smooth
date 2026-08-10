@@ -543,6 +543,10 @@ fn convo_row(run: &ConvoRun, measured: Option<smooth_bench::spend::Measured>, no
         inconclusive,
         cost_usd: measured.map_or_else(|| run.results.iter().map(|r| r.cost_usd).sum(), smooth_bench::spend::Measured::agent),
         cost_resolvable: measured.is_some_and(|m| m.is_resolvable(noise, duration_ms)),
+        // The convo suite has no per-assert safety invariants — it scores
+        // conversation, not workspace state. Reported clean rather than
+        // faked, so the column can't imply a check that never ran.
+        safety_violations: 0,
         duration_ms,
         cells,
     }
@@ -632,6 +636,26 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         None => None,
     };
 
+    // Gateway list prices. This — not the shared key's spend delta — is
+    // what costs a run now: tokens are attributable to the model that
+    // burned them, a key delta is attributable to whoever else was
+    // spending at the time (th-adf614).
+    let prices = match smooth_bench::pricing::PriceBook::fetch(&gateway_url, gateway_key.as_deref()).await {
+        Ok(b) => {
+            eprintln!("cost: loaded list prices for {} models from the gateway", b.len());
+            for m in &models {
+                if b.get(m).is_none() {
+                    eprintln!("cost: WARNING {m} has no published price — its cost will read UNKNOWN, not $0");
+                }
+            }
+            b
+        }
+        Err(e) => {
+            eprintln!("cost: could not load list prices ({e:#}) — costs will read UNKNOWN");
+            smooth_bench::pricing::PriceBook::default()
+        }
+    };
+
     // One suite run per model, sequentially: every trial boots an engine
     // and grabs a port, so overlapping models would fight over both.
     let mut runs = Vec::with_capacity(models.len());
@@ -651,6 +675,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             gateway_url: gateway_url.clone(),
             gateway_key: gateway_key.clone(),
             trials: args.trials as usize,
+            prices: prices.get(model),
         };
         let (run, measured) = smooth_bench::spend::measure(&gateway_url, gateway_key.as_deref(), run_agentic(&scenarios, booter.as_ref(), &opts)).await;
         runs.push((run?, measured));
@@ -670,7 +695,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     for (run, _) in &runs {
         print!("{}", run.render_table());
     }
-    let rows: Vec<_> = runs.iter().map(|(r, m)| agentic_row(r, *m, noise)).collect();
+    let rows: Vec<_> = runs.iter().map(|(r, _)| agentic_row(r)).collect();
     if runs.len() > 1 {
         print!("{}", leaderboard::render("agentic", &rows));
     }
@@ -702,7 +727,7 @@ fn write_scoreboard(path: Option<&std::path::Path>, suite: &str, trials: usize, 
 }
 
 /// Flatten one agentic run into a leaderboard row.
-fn agentic_row(run: &AgenticRun, measured: Option<smooth_bench::spend::Measured>, noise: Option<smooth_bench::spend::NoiseFloor>) -> leaderboard::ModelRow {
+fn agentic_row(run: &AgenticRun) -> leaderboard::ModelRow {
     let cells = run
         .aggregates()
         .iter()
@@ -722,11 +747,14 @@ fn agentic_row(run: &AgenticRun, measured: Option<smooth_bench::spend::Measured>
         passed: run.passed(),
         conclusive: run.conclusive(),
         inconclusive: run.inconclusive(),
-        // Prefer the gateway-measured figure: the protocol reports $0
-        // until th-11f9bb lands, and the polyglot engines never report
-        // cost at all.
-        cost_usd: measured.map_or_else(|| run.total_cost_usd(), smooth_bench::spend::Measured::agent),
-        cost_resolvable: measured.is_some_and(|m| m.is_resolvable(noise, duration_ms)),
+        // The run's own figure — engine-reported cost, or its tokens at the
+        // gateway's list price. The key-spend delta (`measured`) is NOT a
+        // cost source any more: it is a shared key, so it measured other
+        // people's traffic, once at 1,324x the real number (th-adf614).
+        // It stays plumbed only as a sanity note at the end of the run.
+        cost_usd: run.total_cost_usd(),
+        cost_resolvable: run.has_cost(),
+        safety_violations: run.safety_violations(),
         duration_ms,
         // The agentic runner records tool NAMES per trial, not per-call
         // outcomes, so an error rate is unavailable here — reported as 0

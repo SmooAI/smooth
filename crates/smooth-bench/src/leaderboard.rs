@@ -46,6 +46,14 @@ pub struct ModelRow {
     /// column that ranks a premium model below a budget one is worse
     /// than an empty one — someone will act on it.
     pub cost_resolvable: bool,
+    /// Trials in which the agent breached a SAFETY invariant — destroyed
+    /// data it was told to protect, or leaked a secret. Deliberately its
+    /// own column and not folded into `pass_rate`: a sweep once rendered
+    /// 12 of 13 models as failing a safety scenario when every one of them
+    /// had protected the data and merely skipped the note (th-170c67).
+    /// Pass rate answers "did it finish the job"; this answers "is it
+    /// safe to leave running", and they are not the same question.
+    pub safety_violations: usize,
 }
 
 /// How a model handled its tools, across every trial.
@@ -205,6 +213,11 @@ pub struct PublishedModel {
     pub cost_per_pass_usd: Option<f64>,
     pub duration_s: f64,
     pub tools: ToolUsage,
+    /// Trials where the agent breached a safety invariant. Published
+    /// alongside the pass rate because the two answer different questions
+    /// and a reader who sees only the rate will get the safety one wrong
+    /// (th-170c67).
+    pub safety_violations: usize,
 }
 
 /// The whole scoreboard, ready to serialise into `docs/model-scores.json`.
@@ -242,6 +255,7 @@ impl Scoreboard {
                 cost_per_pass_usd: cost_per_pass(r).map(round6),
                 duration_s: (r.duration_ms as f64 / 100.0).round() / 10.0,
                 tools: r.tools,
+                safety_violations: r.safety_violations,
             })
             .collect();
         // DISTINCT scenarios. `cells` carries one entry per TRIAL, so a
@@ -281,11 +295,11 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
 
     let _ = writeln!(out, "\nsmooth-bench {suite} — model leaderboard");
     let _ = writeln!(out);
-    let _ = writeln!(out, "  model                       pass    rate    $cost     $/pass    time");
+    let _ = writeln!(out, "  model                       pass    rate    $cost     $/pass    time  safety");
     for r in ranked(rows) {
         let _ = writeln!(
             out,
-            "  {model:<25} {passed:>3}/{conclusive:<3} {rate:>5.1}%  {cost:>8}  {per:>8}  {secs:>5.1}s{inc}",
+            "  {model:<25} {passed:>3}/{conclusive:<3} {rate:>5.1}%  {cost:>8}  {per:>8}  {secs:>5.1}s  {safety:>6}{inc}",
             model = r.model,
             passed = r.passed,
             conclusive = r.conclusive,
@@ -293,10 +307,18 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
             cost = if r.cost_resolvable {
                 format!("{:.4}", r.cost_usd)
             } else {
-                "<noise".to_string()
+                // Not "0.0000" and not "<noise": the figure is ABSENT.
+                // Rendering an unmeasured cost as a number put a model at
+                // the top of a value ranking it had not earned.
+                "unknown".to_string()
             },
             per = cost_per_pass(r).map_or_else(|| "-".to_string(), |c| format!("{c:.4}")),
             secs = r.duration_ms as f64 / 1000.0,
+            safety = if r.safety_violations == 0 {
+                "clean".to_string()
+            } else {
+                format!("{} BREACH", r.safety_violations)
+            },
             inc = if r.inconclusive > 0 {
                 format!("  ({} INCONCLUSIVE)", r.inconclusive)
             } else {
@@ -388,6 +410,7 @@ mod tests {
             duration_ms: 1000,
             tools: ToolUsage::default(),
             cost_resolvable: true,
+            safety_violations: 0,
             cells: cells.iter().map(|(id, c)| ((*id).to_string(), *c)).collect(),
         }
     }
@@ -459,13 +482,36 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_cost_renders_as_noise_and_suppresses_per_pass() {
+    fn an_unmeasured_cost_renders_as_unknown_and_suppresses_per_pass() {
         let mut r = row("noisy", 1.0, 1, 0.002, &[("a", Cell::Pass)]);
         r.cost_resolvable = false;
-        assert!(cost_per_pass(&r).is_none(), "dividing noise does not make it a measurement");
+        assert!(cost_per_pass(&r).is_none(), "dividing an absent number does not make it a measurement");
         let t = render("convo", std::slice::from_ref(&r));
-        assert!(t.contains("<noise"), "an unresolvable cost must not print as a precise figure: {t}");
+        assert!(t.contains("unknown"), "an unmeasured cost must not print as a precise figure: {t}");
         assert!(!t.contains("0.0020"));
+    }
+
+    /// A safety breach must be visible in the table even when the model
+    /// passed everything else — the regression that made a 13-model sweep
+    /// report the opposite of the truth (th-170c67).
+    #[test]
+    fn a_safety_breach_is_rendered_next_to_a_perfect_pass_rate() {
+        let mut r = row("reckless", 1.0, 1, 0.002, &[("a", Cell::Pass)]);
+        r.safety_violations = 2;
+        let t = render("agentic", std::slice::from_ref(&r));
+        assert!(t.contains("2 BREACH"), "a breach must be shown beside the rate: {t}");
+        let clean = render("agentic", &[row("careful", 1.0, 1, 0.002, &[("a", Cell::Pass)])]);
+        assert!(clean.contains("clean"), "no breach reads as clean: {clean}");
+    }
+
+    /// The published artefact carries the breach count too, so a consumer
+    /// reading only `docs/model-scores.json` cannot miss it.
+    #[test]
+    fn the_scoreboard_publishes_safety_violations() {
+        let mut r = row("reckless", 1.0, 1, 0.002, &[("a", Cell::Pass)]);
+        r.safety_violations = 3;
+        let b = Scoreboard::from_rows("agentic", 1, std::slice::from_ref(&r));
+        assert_eq!(b.models[0].safety_violations, 3);
     }
 
     #[test]

@@ -79,5 +79,29 @@ else
     pass=$((pass + 1))
 fi
 
+# An all-inconclusive run is an outage, not a 0% score. Publishing it put
+# "deepseek-v4-flash 0.0%" on the README badge (th-adf614 follow-on).
+outage="$work/outage.json"
+cat >"$outage" <<'JSON'
+{
+  "suite": "convo", "trials": 3, "scenario_count": 15,
+  "models": [
+    { "model": "deepseek-v4-flash", "pass_rate_pct": 0.0, "passed": 0, "conclusive": 0, "inconclusive": 45, "duration_s": 4.7 }
+  ]
+}
+JSON
+if bash "$render" "$outage" "$work/docs" >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "FAIL: an all-inconclusive run must not publish as 0%"
+else
+    pass=$((pass + 1))
+fi
+
+# The safety column must reach the rendered table.
+if grep -q "safety" "$work/docs/Model-Leaderboard.md" 2>/dev/null; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1)); echo "FAIL: the leaderboard table must carry a safety column"
+fi
+
 echo "model-scores: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

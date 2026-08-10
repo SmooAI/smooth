@@ -34,6 +34,18 @@ command -v jq >/dev/null 2>&1 || { echo "render-model-scores: jq not found on PA
 count=$(jq -r '.models | length' "$board")
 [[ "$count" -gt 0 ]] || { echo "render-model-scores: scoreboard has no models" >&2; exit 1; }
 
+# A run where nothing was CONCLUSIVE has no scores — it has an outage. The
+# scoreboard still lists its models at `pass_rate_pct: 0.0`, and publishing
+# that put "deepseek-v4-flash 0.0%" on the README badge for a run in which
+# all 45 scenarios were inconclusive. Nobody reading a 0% badge concludes
+# "the harness never got an answer"; they conclude the model is broken.
+conclusive=$(jq -r '[.models[].conclusive] | add // 0' "$board")
+[[ "$conclusive" -gt 0 ]] || {
+    echo "render-model-scores: refusing to publish — every scenario was INCONCLUSIVE (0 conclusive across $count model(s))." >&2
+    echo "render-model-scores: that is an outage, not a 0% score. Fix the run and re-render." >&2
+    exit 1
+}
+
 cp "$board" "$docs/model-scores.json"
 
 suite=$(jq -r '.suite' "$board")
@@ -65,13 +77,14 @@ jq -n --arg m "$best_model ${best_pct}%" --arg c "$color" \
     echo "> Regenerate with \`smooth-bench $suite --model A --model B --scoreboard board.json\`"
     echo "> then \`scripts/the-line/render-model-scores.sh board.json\`."
     echo
-    echo "| model | pass | rate | cost | \$/pass | time |"
-    echo "| --- | --- | --- | --- | --- | --- |"
+    echo "| model | pass | rate | cost | \$/pass | time | safety |"
+    echo "| --- | --- | --- | --- | --- | --- | --- |"
     jq -r '.models[] |
         "| `\(.model)` | \(.passed)/\(.conclusive) | \(.pass_rate_pct)% | " +
         (if .cost_usd  then "$\(.cost_usd)"  else "—" end) + " | " +
         (if .cost_per_pass_usd then "$\(.cost_per_pass_usd)" else "—" end) + " | " +
-        "\(.duration_s)s |"' "$board"
+        "\(.duration_s)s | " +
+        (if (.safety_violations // 0) == 0 then "clean" else "⚠️ \(.safety_violations)" end) + " |"' "$board"
     echo
     echo "## Reading this"
     echo
@@ -82,8 +95,14 @@ jq -n --arg m "$best_model ${best_pct}%" --arg c "$color" \
         echo "  one-scenario gap between two models is noise, not a ranking. Re-run with"
         echo "  \`--trials 3\` before acting on a close result."
     fi
-    echo "- **A missing cost (—)** means the run could not resolve spend above the"
-    echo "  shared gateway key's background traffic. It is not \$0."
+    echo "- **A missing cost (—)** means the run could not price the model at all"
+    echo "  (the gateway publishes no rate for it). It is not \$0 — a zero would"
+    echo "  sort first and win a value ranking it never earned."
+    echo "- **safety** counts trials where the agent breached a safety invariant:"
+    echo "  destroyed data it was told to protect, or leaked a secret. It is"
+    echo "  deliberately separate from the pass rate. A model can fail a scenario"
+    echo "  for skipping a required note while having protected the data perfectly"
+    echo "  — reading the rate as a safety score gets that exactly backwards."
     echo "- Cheap models have repeatedly matched expensive ones here. Check \`\$/pass\`,"
     echo "  not just the rate, before promoting anything into the premium tier."
     echo
