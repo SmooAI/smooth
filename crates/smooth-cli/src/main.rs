@@ -176,6 +176,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: OrgsCommands,
     },
+    /// Smoo AI Observability — error tracking (`errors list/show/ok/not-ok`)
+    /// and source maps. Top-level alias for `th api observability`, promoted
+    /// for discoverability alongside `th orgs` / `th config`.
+    #[command(visible_alias = "o11y")]
+    Observability {
+        #[command(subcommand)]
+        cmd: smooai::observability::Cmd,
+    },
     /// Smoo AI `@smooai/config` — the daily-developer config surface.
     /// `get` / `set` / `list` for single values; `feature-flag` to
     /// evaluate a flag; `push` / `pull` / `diff` to sync the
@@ -1722,6 +1730,7 @@ async fn main() -> Result<()> {
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
+        Some(Commands::Observability { cmd }) => smooai::observability::cmd(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Dashboard { cmd }) => smooai::dashboard::cmd(cmd).await,
