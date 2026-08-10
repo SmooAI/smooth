@@ -17,6 +17,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one agent's full record (config, status, metadata).
     Show {
@@ -251,10 +254,14 @@ impl MintVisibility {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
-        Cmd::List { org } => {
+        Cmd::List { org, json } => {
             let org = require_active_org(&client, org)?;
             let body = client.get(&format!("/organizations/{org}/agents")).await.context("GET agents")?;
-            print_list_envelope(&body, "agents");
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "agents");
+            }
         }
         Cmd::Show { agent_id, org } => {
             let org = require_active_org(&client, org)?;
@@ -958,5 +965,24 @@ mod tests {
     fn embed_snippet_omits_empty_colors_block() {
         let snip = render_embed_snippet("a", "n", "c", "s", &[]);
         assert!(!snip.contains("colors: {"));
+    }
+
+    /// Pearl th-91de11: `th api agents list` had no machine-readable form,
+    /// so scripts had to parse the decorated table. Guard the flag's
+    /// existence + default — losing it silently re-breaks every caller.
+    #[test]
+    fn list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, Cmd::List { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, Cmd::List { json: false, .. }), "--json must default to off");
     }
 }

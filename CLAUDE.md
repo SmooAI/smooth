@@ -21,7 +21,7 @@ Twelve crates. `ls crates/` is the source of truth; this list is kept in sync wi
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary `th` — clap entry point (54 top-level commands)
+│   ├── smooth-cli/          # Binary `th` — clap entry point (57 top-level commands)
 │   ├── smooth-daemon/       # Binary + lib — Big Smooth: the always-on personal-agent daemon
 │   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the kernel OS sandbox
 │   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
@@ -42,7 +42,7 @@ smooth/
 
 ### Key Crates
 
-- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 54 top-level commands. Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
+- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 57 top-level commands (59 enum variants: `web-search` is hidden, `admin` is behind the non-default `admin` feature). Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
 - **smooth-daemon** (`crates/smooth-daemon/`): **Big Smooth.** The always-on, single-tenant personal-agent daemon (EPIC th-c89c2a). It hosts smooth-operator's `LocalServer` in-process — canonical WS protocol, no bespoke agent loop — with durable SQLite storage, scheduled/proactive turns, web push, tailnet exposure, and the security hooks. `th daemon` runs it directly; `th up` also launches it.
 - **smooth-operator**: the agent engine (LLM client, agent loop, tool registry + hooks, conversation, checkpointing, cast, permissions, `DenyPolicy`). **It is not in this workspace** — it's a git/crates.io dependency from the separate `SmooAI/smooth-operator` repo. Don't look for `crates/smooth-operator/`.
 - **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` runs only inside `sandbox.rs`'s kernel OS sandbox. `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
@@ -342,7 +342,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 
 ### Global (`~/.smooth/`)
 - `registry.json` — Multi-project registry (auto-updated on pearl store open)
-- `smooth.db` — Legacy SQLite (migrate with `th pearls migrate-from-sqlite`)
+- `smooth.db` — Legacy SQLite. No migration command ships any more (`th pearls migrate-from-sqlite` was removed); the file is unread and safe to delete.
 - `mail.db` — Agent mail + the agent roster (SQLite; `$SMOOTH_MAIL_DB` overrides). Machine-level on purpose — see [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)
 - `agent-sessions/<session_id>` — Handle each harness session registered under (written by the smooth-agent SessionStart hook, rewritten by `th agent claim`/`rename`)
 - `audit/` — Rotating tool usage logs per actor
@@ -398,7 +398,6 @@ th pearls log                         # Dolt commit history
 th pearls push                        # Push to Dolt remote
 th pearls pull                        # Pull from Dolt remote
 th pearls projects                    # List all registered pearl projects
-th pearls migrate-from-sqlite         # Migrate legacy SQLite data to Dolt
 th pearls migrate-from-beads          # Migrate from beads (bd CLI)
 ```
 

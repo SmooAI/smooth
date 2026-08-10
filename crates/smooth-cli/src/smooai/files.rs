@@ -41,6 +41,9 @@ pub enum Cmd {
         folder: Option<String>,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the listing.
+        #[arg(long)]
+        json: bool,
     },
     /// Create a folder.
     Mkdir {
@@ -198,7 +201,7 @@ pub enum Cmd {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
-        Cmd::Ls { folder, org } => {
+        Cmd::Ls { folder, org, json } => {
             let o = require_active_org(&client, org)?;
             let folders_path = match &folder {
                 Some(f) => format!("/organizations/{o}/folders?parentFolderId={f}"),
@@ -210,7 +213,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             };
             let folders = client.get(&folders_path).await.context("GET folders")?;
             let files = client.get(&files_path).await.context("GET files")?;
-            print_listing(&folders, &files);
+            if json {
+                // Two GETs, one document — a script shouldn't have to run `ls` twice.
+                print_json(&serde_json::json!({ "folders": folders, "files": files }));
+            } else {
+                print_listing(&folders, &files);
+            }
         }
         Cmd::Mkdir { name, parent, org } => {
             let o = require_active_org(&client, org)?;
@@ -588,5 +596,26 @@ mod tests {
         assert_eq!(find_file_name(Some(&listing), "b").as_deref(), Some("two.pdf"));
         assert_eq!(find_file_name(Some(&listing), "missing"), None);
         assert_eq!(find_file_name(None, "b"), None);
+    }
+
+    /// Pearl th-91de11: `th files ls` rendered a decorated tree and nothing
+    /// else; `--json` is the scriptable form. Every other `files` verb
+    /// already prints raw JSON, so `ls` is the only one that needed it.
+    #[test]
+    fn ls_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        use super::Cmd;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let on = Wrap::try_parse_from(["t", "ls", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, Cmd::Ls { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "ls"]).expect("bare ls must still parse");
+        assert!(matches!(off.cmd, Cmd::Ls { json: false, .. }), "--json must default to off");
     }
 }

@@ -31,6 +31,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Create the org's referral program.
     Create {
@@ -92,6 +95,9 @@ pub enum Cmd {
         /// Override the active org.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Attributed signups (who came in through a partner link).
     Attributions {
@@ -132,6 +138,9 @@ pub enum PartnersCmd {
         /// Override the active org.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Add a partner. They are `active` and paid at `--payout-email` (defaults to their email).
     Add {
@@ -184,10 +193,14 @@ pub enum PartnersCmd {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
-        Cmd::Show { org } => {
+        Cmd::Show { org, json } => {
             let o = require_active_org(&client, org)?;
             let program = load_program(&client, &o).await?;
-            render_program(&program);
+            if json {
+                print_json(&program);
+            } else {
+                render_program(&program);
+            }
         }
         Cmd::Create {
             name,
@@ -235,16 +248,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             render_program(&updated);
         }
         Cmd::Partners { cmd } => partners(cmd).await?,
-        Cmd::Link { partner, org } => {
+        Cmd::Link { partner, org, json } => {
             let o = require_active_org(&client, org)?;
             let id = program_id(&load_program(&client, &o).await?)?;
             let found = find_partner(&client, &o, &id, &partner).await?;
             let code = found.get("partnerCode").and_then(Value::as_str).unwrap_or("?");
             let name = found.get("displayName").and_then(Value::as_str).unwrap_or("");
-            println!();
-            println!("  {}  {}", name.bold(), code.dimmed());
-            println!("  {}", referral_link(code).cyan());
-            println!();
+            if json {
+                // The link itself is derived, so hand it back rather than
+                // making the caller re-implement `referral_link`.
+                print_json(&serde_json::json!({ "partner": found, "link": referral_link(code) }));
+            } else {
+                println!();
+                println!("  {}  {}", name.bold(), code.dimmed());
+                println!("  {}", referral_link(code).cyan());
+                println!();
+            }
         }
         Cmd::Attributions { limit, org } => {
             let o = require_active_org(&client, org)?;
@@ -274,14 +293,18 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
 async fn partners(cmd: PartnersCmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
-        PartnersCmd::List { org } => {
+        PartnersCmd::List { org, json } => {
             let o = require_active_org(&client, org)?;
             let id = program_id(&load_program(&client, &o).await?)?;
             let list = client
                 .get(&format!("/organizations/{o}/referral-programs/{id}/partners"))
                 .await
                 .context("GET partners")?;
-            render_partners(&list);
+            if json {
+                print_json(&list);
+            } else {
+                render_partners(&list);
+            }
         }
         PartnersCmd::Add {
             name,
@@ -689,5 +712,35 @@ mod tests {
     fn truncate_adds_ellipsis_past_the_width() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("aaaaaaaaaa", 5), "aaaa…");
+    }
+
+    /// Pearl th-91de11: `show`, `link` and `partners list` rendered
+    /// human-only tables. Each gained `--json`; the rest of the module
+    /// already emitted raw JSON.
+    #[test]
+    fn read_commands_accept_json_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let show = Wrap::try_parse_from(["t", "show", "--json"]).expect("show --json");
+        assert!(matches!(show.cmd, Cmd::Show { json: true, .. }));
+
+        let link = Wrap::try_parse_from(["t", "link", "jane@acme.com", "--json"]).expect("link --json");
+        assert!(matches!(link.cmd, Cmd::Link { json: true, .. }));
+
+        let partners = Wrap::try_parse_from(["t", "partners", "list", "--json"]).expect("partners list --json");
+        assert!(matches!(
+            partners.cmd,
+            Cmd::Partners {
+                cmd: PartnersCmd::List { json: true, .. }
+            }
+        ));
+
+        let bare = Wrap::try_parse_from(["t", "show"]).expect("bare show");
+        assert!(matches!(bare.cmd, Cmd::Show { json: false, .. }), "--json must default to off");
     }
 }

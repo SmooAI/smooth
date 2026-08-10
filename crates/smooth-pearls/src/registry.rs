@@ -37,9 +37,20 @@ impl Registry {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let contents = std::fs::read_to_string(&path)?;
-        let registry: Registry = serde_json::from_str(&contents)?;
-        Ok(registry)
+        Self::parse(&std::fs::read_to_string(&path)?)
+    }
+
+    /// Parse registry JSON, treating an empty or whitespace-only file as an
+    /// empty registry rather than a hard error. A zero-byte `registry.json`
+    /// is a real state on disk — an interrupted `save()` truncates before it
+    /// writes — and failing to parse it made every `auto_register` a silent
+    /// no-op, so no project ever re-registered itself. The next `save()`
+    /// heals the file.
+    fn parse(contents: &str) -> Result<Self> {
+        if contents.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        Ok(serde_json::from_str(contents)?)
     }
 
     /// Save the registry to `~/.smooth/registry.json`.
@@ -164,8 +175,7 @@ pub fn auto_register_at(project_root: &Path, registry_path: &Path) -> Result<()>
         .unwrap_or_else(|| "unknown".to_string());
 
     let mut registry = if registry_path.exists() {
-        let contents = std::fs::read_to_string(registry_path)?;
-        serde_json::from_str(&contents)?
+        Registry::parse(&std::fs::read_to_string(registry_path)?)?
     } else {
         Registry::default()
     };
@@ -230,6 +240,36 @@ mod tests {
         let deser: Registry = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.projects.len(), 1);
         assert_eq!(deser.projects["/tmp/project-a"].name, "project-a");
+    }
+
+    /// Pearl `th-91de11`: a zero-byte `~/.smooth/registry.json` (left by an
+    /// interrupted `save()`) used to fail JSON parsing, so `Registry::load`
+    /// and every `auto_register` errored out and no project re-registered.
+    /// An empty or whitespace-only file must read as an empty registry.
+    #[test]
+    fn parse_treats_empty_file_as_empty_registry() {
+        for blank in ["", "   ", "\n\t \n"] {
+            let reg = Registry::parse(blank).expect("blank registry.json must parse as empty");
+            assert!(reg.projects.is_empty());
+        }
+        assert!(Registry::parse("{ not json").is_err(), "genuinely corrupt JSON must still error");
+    }
+
+    /// The healing half: `auto_register_at` against a zero-byte registry
+    /// must register the project and leave valid JSON behind.
+    #[test]
+    fn auto_register_heals_a_zero_byte_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry_file = tmp.path().join("registry.json");
+        std::fs::write(&registry_file, "").expect("write empty registry");
+
+        let project_root = tmp.path().join("proj");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        auto_register_at(&project_root, &registry_file).expect("auto_register_at must heal an empty file");
+
+        let contents = std::fs::read_to_string(&registry_file).expect("read registry");
+        let registry: Registry = serde_json::from_str(&contents).expect("healed registry must be valid JSON");
+        assert_eq!(registry.projects.len(), 1);
     }
 
     /// Pearl `th-96e525`: prior to the process-wide mutex in
