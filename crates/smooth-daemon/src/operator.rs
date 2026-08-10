@@ -189,10 +189,23 @@ impl ToolProvider for SandboxedToolProvider {
         // tool and listed in [`CONFIRM_TOOLS`] — a call parks the turn on
         // `write_confirmation_required` until the user approves. Reads and
         // `add`/`update` stay unprompted.
+        //
+        // Within-tool resource RBAC (M2.5, th-716243): a family role can further
+        // scope WHICH calendars this principal may see/touch. The allowlist is
+        // bound onto the tool instance HERE, from the authenticated role — never
+        // the caller — so a child can't widen it via tool args. `None` (owner /
+        // no-role / a role with no `calendars` key) leaves the tool unrestricted.
+        // Whether the `calendar` tool exists at all for this role is still decided
+        // by the deny-by-default tool filter below.
         #[cfg(target_os = "macos")]
-        tools.push(Arc::new(smooth_tools::CalendarTool) as Arc<dyn Tool>);
-        #[cfg(target_os = "macos")]
-        tools.push(Arc::new(smooth_tools::CalendarDeleteTool) as Arc<dyn Tool>);
+        {
+            let cal_allow = match (self.family.as_ref(), role_from_ctx(ctx).as_deref()) {
+                (Some(family), Some(role)) => family.calendars_allowed(role).map(<[String]>::to_vec),
+                _ => None,
+            };
+            tools.push(Arc::new(smooth_tools::CalendarTool::new(cal_allow.clone())) as Arc<dyn Tool>);
+            tools.push(Arc::new(smooth_tools::CalendarDeleteTool::new(cal_allow)) as Arc<dyn Tool>);
+        }
         // The macOS Reminders tool (pearl th-94cc4a, reminders slice) — same
         // deal, and a SEPARATE TCC grant from Calendar. It registers even when
         // that grant is missing so the tool can answer with "run
