@@ -801,9 +801,16 @@ mod tests {
 
         let agents = s.list_agents().unwrap();
         let by = |n: &str| agents.iter().find(|a| a.name == n).unwrap().status;
+        // Never reap what's alive — the half that must hold on every platform,
+        // since a false-positive reap silently unlists a working agent.
         assert_eq!(by("live"), AgentStatus::Idle);
-        assert_eq!(by("dead"), AgentStatus::Offline);
         assert_eq!(by("pidless"), AgentStatus::Idle, "no pid = nothing to reap");
+        // Reaping itself needs `kill -0`, which is unix-only; [`pid_alive`]
+        // deliberately errs "alive" elsewhere, so Windows just never reaps.
+        #[cfg(unix)]
+        assert_eq!(by("dead"), AgentStatus::Offline);
+        #[cfg(not(unix))]
+        assert_eq!(by("dead"), AgentStatus::Idle, "non-unix errs alive rather than reaping");
     }
 
     #[test]
