@@ -31,6 +31,26 @@ pub fn resolve_auth_token() -> Option<String> {
 /// Default loopback address the egress proxy binds to when the boundary is on.
 pub const DEFAULT_EGRESS_PROXY_ADDR: &str = "127.0.0.1:4419";
 
+/// Whether cloud-backed memory routing is enabled (Family AI M3 Phase B.2, ADR-009).
+///
+/// **Opt-in, default OFF** — the feature is per-ADR opt-in and the platform memory
+/// home (Phase B.1) must be deployed for it to work. With it off, `remember`/
+/// `recall` stay on the daemon's local sqlite store exactly as before (zero
+/// behavior change). Enabling ALSO requires the B.1 deploy and a live Smoo AI user
+/// session (personal scope needs a human identity); a Family AI subscription gate
+/// is a separate stream (th-74e0f8), not enforced here.
+///
+/// Set `SMOOTH_CLOUD_MEMORY` to `1`/`true`/`yes`/`on` to enable.
+#[must_use]
+pub fn cloud_memory_enabled() -> bool {
+    cloud_memory_enabled_inner(std::env::var("SMOOTH_CLOUD_MEMORY").ok().as_deref())
+}
+
+/// Pure core (no env read) so the truthiness policy is unit-testable.
+fn cloud_memory_enabled_inner(raw: Option<&str>) -> bool {
+    matches!(raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
 /// A curated default egress allowlist.
 ///
 /// The hosts an agent's shell legitimately reaches for routine dev work
@@ -186,6 +206,22 @@ fn resolve_llm_inner(
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_memory_toggle_is_opt_in() {
+        // Default (unset) and empty → OFF.
+        assert!(!cloud_memory_enabled_inner(None));
+        assert!(!cloud_memory_enabled_inner(Some("")));
+        assert!(!cloud_memory_enabled_inner(Some("   ")));
+        // A random / false-y value stays OFF (fail-safe: only explicit truthy on).
+        assert!(!cloud_memory_enabled_inner(Some("0")));
+        assert!(!cloud_memory_enabled_inner(Some("false")));
+        assert!(!cloud_memory_enabled_inner(Some("maybe")));
+        // Explicit truthy values → ON (case/whitespace-insensitive).
+        for v in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(cloud_memory_enabled_inner(Some(v)), "{v:?} should enable");
+        }
+    }
 
     #[test]
     fn resolve_egress_is_opt_in_and_parses_hosts() {

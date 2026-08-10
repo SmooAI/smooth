@@ -55,6 +55,12 @@ pub struct SqliteStorageAdapter {
     memories: Arc<RwLock<Vec<MemoryEntry>>>,
     checkpoints: Arc<MemoryCheckpointStore>,
     knowledge: AclKnowledgeStore,
+    /// When set (Family AI M3 B.2, pearl th-5189f0), `memory_for_access` returns a
+    /// [`CloudMemory`](crate::cloud_memory::CloudMemory) bound to the turn's org +
+    /// principal, wrapping the local sqlite store as a fail-soft fallback. `None`
+    /// (the default) keeps every `remember`/`recall` on the local store — today's
+    /// behavior. Gated by `SMOOTH_CLOUD_MEMORY` at construction (see `operator.rs`).
+    cloud: Option<crate::cloud_memory::CloudMemoryDeps>,
 }
 
 impl SqliteStorageAdapter {
@@ -116,7 +122,19 @@ impl SqliteStorageAdapter {
             memories: Arc::new(RwLock::new(memories)),
             checkpoints: Arc::new(MemoryCheckpointStore::new()),
             knowledge: AclKnowledgeStore::new(Arc::new(InMemoryKnowledge::new())),
+            cloud: None,
         })
+    }
+
+    /// Enable cloud-backed memory routing (Family AI M3 B.2, pearl th-5189f0).
+    /// With `deps` set, [`memory_for_access`](StorageAdapter::memory_for_access)
+    /// returns a [`CloudMemory`](crate::cloud_memory::CloudMemory) bound to the
+    /// turn's org + principal (local sqlite as fail-soft fallback). Called from
+    /// `operator.rs` only when `SMOOTH_CLOUD_MEMORY` is set.
+    #[must_use]
+    pub fn with_cloud_memory(mut self, deps: crate::cloud_memory::CloudMemoryDeps) -> Self {
+        self.cloud = Some(deps);
+        self
     }
 
     /// Write-through one entity as a JSON blob (idempotent replace on `entity,id`).
@@ -464,13 +482,35 @@ impl StorageAdapter for SqliteStorageAdapter {
         self.knowledge.reader(access.clone())
     }
 
-    fn memory_for_access(&self, _access: &AccessContext) -> Option<Arc<dyn Memory>> {
-        // Single-tenant daemon: one durable memory store, unscoped by access.
-        // Returning it here is what makes the engine auto-recall remembered
-        // preferences into every turn (th-7a9832) — the `remember` tool already
-        // writes through the same store, so recall sees them immediately and
-        // across restarts.
-        Some(self.memory())
+    fn memory_for_access(&self, access: &AccessContext) -> Option<Arc<dyn Memory>> {
+        let local = self.memory();
+        // Cloud routing OFF (default): one durable local store, unscoped by
+        // access. Returning it is what makes the engine auto-recall remembered
+        // preferences into every turn (th-7a9832) — the `remember` tool writes
+        // through the same store, so recall sees them immediately and across
+        // restarts.
+        let Some(deps) = &self.cloud else {
+            return Some(local);
+        };
+        // Cloud routing ON (Family AI M3 B.2): route to the platform memory home
+        // scoped to the turn's org, attributed to the acting principal, with the
+        // local store as the fail-soft fallback. Need an org to build the REST
+        // path — prefer the turn's, else the signed-in session's active org; with
+        // neither we can't address the API, so stay local.
+        let org_id = access
+            .organization_id
+            .clone()
+            .or_else(|| deps.store.load().ok().flatten().and_then(|c| c.active_org_id));
+        let Some(org_id) = org_id else {
+            tracing::warn!("cloud memory enabled but no org resolved for this turn; using local store");
+            return Some(local);
+        };
+        Some(Arc::new(crate::cloud_memory::CloudMemory::new(
+            deps.clone(),
+            org_id,
+            access.user_id.clone(),
+            local,
+        )))
     }
 }
 
@@ -723,5 +763,64 @@ mod tests {
             recalled.iter().any(|e| e.content.contains("smoo-hub watchlist")),
             "the seam must recall a stored memory relevant to the message"
         );
+    }
+
+    // ── Family AI M3 B.2: cloud-memory toggle (pearl th-5189f0) ──────────────
+
+    fn cloud_deps_for(base_url: &str, dir: &std::path::Path) -> crate::cloud_memory::CloudMemoryDeps {
+        // No session saved → CloudMemory's bearer() errors and it falls back to
+        // local without any network — enough to exercise the seam's ON branch.
+        crate::cloud_memory::CloudMemoryDeps {
+            http: reqwest::Client::builder().build().unwrap(),
+            base_url: base_url.to_owned(),
+            handle: tokio::runtime::Handle::current(),
+            store: smooai_client_shared::auth::storage::CredentialsStore::at(dir.join("smooai-user.json")),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_for_access_toggle_off_returns_local_store() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        // No cloud deps → OFF (today's behavior).
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db")).unwrap();
+        a.memory().store(MemoryEntry::new("the user's dog is Rex", MemoryType::User)).unwrap();
+        let mem = a.memory_for_access(&AccessContext::for_user("dad")).expect("seam returns a store");
+        let hits = mem.recall("user dog", 5).unwrap();
+        assert!(hits.iter().any(|e| e.content.contains("Rex")), "off → the local store answers recall");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_for_access_toggle_on_wraps_local_as_fallback() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db"))
+            .unwrap()
+            // ON, but no session on disk + org supplied → CloudMemory is built and
+            // falls back to local (fail-soft), never hard-failing the turn.
+            .with_cloud_memory(cloud_deps_for("http://127.0.0.1:0", dir.path()));
+        a.memory().store(MemoryEntry::new("garage code is 4242", MemoryType::User)).unwrap();
+        let access = AccessContext::for_user("dad").with_organization_id("org-1");
+        let mem = a.memory_for_access(&access).expect("seam returns a store");
+        let hits = mem.recall("garage code", 5).unwrap();
+        assert!(
+            hits.iter().any(|e| e.content.contains("4242")),
+            "on → cloud unavailable, local fallback answers recall"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_for_access_on_without_org_stays_local() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db"))
+            .unwrap()
+            .with_cloud_memory(cloud_deps_for("http://127.0.0.1:0", dir.path()));
+        a.memory().store(MemoryEntry::new("wifi is hunter2", MemoryType::Reference)).unwrap();
+        // No org on the access context and no active org in the (empty) session →
+        // can't address the API → local store is returned directly.
+        let mem = a.memory_for_access(&AccessContext::anonymous()).expect("seam returns a store");
+        let hits = mem.recall("wifi", 5).unwrap();
+        assert!(hits.iter().any(|e| e.content.contains("hunter2")), "no org → local store");
     }
 }

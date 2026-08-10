@@ -28,6 +28,7 @@
 //! permission/sqlite modules were deleted once the operator path reached parity.
 
 pub mod auth_login;
+pub mod cloud_memory;
 pub mod config;
 pub mod cwd_route;
 pub mod hooks;

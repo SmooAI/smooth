@@ -202,7 +202,16 @@ Named now so the schema doesn't need re-migration:
 3. **M2.5** (th-716243) — calendar allowlist, local, no deploy. Independent of
    A/B; can land any time after this ADR.
 4. **Platform family roles** (th-95eff9) — unblocks the guardian clause in A + B.
-5. **Phase B** (th-b6602f) — memory cloud home reusing A's owner/guardian pattern
-   + daemon `remember`/`recall` routing with local fallback. Brent-gated deploy.
+5. **Phase B**
+   - **B.1** (th-b6602f) — memory cloud home reusing A's owner/guardian pattern
+     (`memories` REST: create/search/list/delete, owner-tiered). **Shipped to
+     smooai main.** Brent-gated deploy.
+   - **B.2** (th-5189f0) — daemon `remember`/`recall` routing to B.1 with a
+     **fail-soft local fallback** (`smooth-daemon`: `CloudMemory` +
+     `StorageAdapter::memory_for_access`). **Opt-in, default OFF** behind the
+     `SMOOTH_CLOUD_MEMORY` env toggle (`1`/`true`/`yes`/`on`) so there is zero
+     behavior change until it is enabled AND B.1 is deployed. Writes default to
+     the personal tier; an entry opts into shared via a `scope="shared"` memory
+     metadata key. No entitlement gate here (that is step 6).
 6. **Subscription** (th-74e0f8) — Family AI bundle + 14-day trial; the
    entitlement gate + local-fallback wiring. Brent/billing-owned deploy.
