@@ -1,7 +1,7 @@
 {
     "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
     "name": "smooth-agent",
-    "version": "0.31.1",
+    "version": "0.32.0",
     "description": "Big Smooth orchestration for Claude Code: tmux-supervised worker sessions that run in parallel, coordinate over th-mail, and track work in pearls. Auto-onboards every Claude Code session to the th-mail bus at startup, then nudges it to self-rename to a task-meaningful handle. Ships the `smooth` MCP server (th mcp serve) so agent mail, pearls and memory are tools rather than shell calls, plus a statusline showing your handle and unread count. Provides the /smooth command and a windows-build-box skill (throwaway Windows EC2 over SSM). Also ships the shared SmooAI repo guardrails as hooks (worktree enforcement, th-over-curl nudges, pearls-label reminder, pearl-store read-only-wedge guard, th-attest push hint) so the SmooAI repos stop hand-copying .claude/hooks.",
     "mcpServers": {
         "smooth": {
