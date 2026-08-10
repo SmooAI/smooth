@@ -396,9 +396,25 @@ pub async fn run_with_session(
     let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
     disable_raw_mode()?;
     terminal.show_cursor()?;
-    // Move the cursor below the viewport so the user's next shell
-    // prompt doesn't land on top of the (now-final) input row.
-    println!();
+    // ratatui leaves the hardware cursor on the input row INSIDE the composer,
+    // so a bare println!() only reached the bottom-border row — and the next
+    // shell prompt overwrote it, visibly amputating the box on every quit
+    // (pearl th-9d66ba). Walk the exact number of rows from the cursor's row
+    // past the bottom border (same wrap arithmetic the renderer used), with
+    // newlines so it still works when the box sits on the terminal's last row.
+    let rows_past_border = {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        let width = cols.saturating_sub(2);
+        let cap = crate::composer::max_text_rows(s.viewport_h);
+        let visible_rows = crate::composer::desired_text_rows(&s.input, width, cap);
+        let (cursor_row, _) = crate::composer::cursor_position(&s.input, s.input_cursor, width);
+        let visible_cursor = cursor_row.saturating_sub(s.input_scroll).min(visible_rows.saturating_sub(1));
+        visible_rows - visible_cursor + 1
+    };
+    let _ = crossterm::execute!(io::stdout(), crossterm::cursor::MoveToColumn(0));
+    print!("{}", "\n".repeat(usize::from(rows_past_border)));
+    let _ = std::io::Write::flush(&mut io::stdout());
     tui_debug("terminal restored, app::run exit");
 
     result

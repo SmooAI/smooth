@@ -1,5 +1,37 @@
 # @smooai/smooth
 
+## 0.28.0
+
+### Minor Changes
+
+- 7b56c33: Family AI M1+M2 (ADR-008, th-12d875): per-principal tool RBAC + Smoo Jr mode. Big Smooth can now be a family agent — each member authenticates with their own local token and the daemon narrows the per-turn tool set to that member's role (deny-by-default, enforced in the tool provider from the principal's `role:` group, zero engine changes). Smoo Jr is the hardened child role: allowlist-only tools (no shell/writes/egress/delegation), enforced from the connection's token (not the mode picker), and surfaced as a selectable `smoo-jr` mode. Config lives in `~/.smooth/family.toml`; absent/malformed is fail-closed (single-tenant, member tokens rejected). Deferred to later milestones: per-principal memory partition, org-scoped relay routing, per-role child-safety Narc, and the COPPA gate before any public under-13 account.
+
+## 0.27.11
+
+### Patch Changes
+
+- 055cc71: docs: ADR-008 — Family AI, multi-principal Big Smooth. Records the trust-model shift from single-tenant to per-member RBAC (family = Smoo org, each member authenticated by their own JWT), the Smoo Jr hardened child role (allowlist tools + egress, safety model, child-safety Narc, per-persona memory isolation, parent audit), and the COPPA gate. Proposed; no code yet (epic th-c5b97c).
+
+## 0.27.10
+
+### Patch Changes
+
+- 504aba1: Quitting th code no longer amputates the composer's bottom border. ratatui leaves the hardware cursor on the input row inside the box, and the teardown's single newline only reached the border row — so the next shell prompt overwrote it on every quit. Teardown now walks the exact number of rows from the cursor past the border (the same wrap arithmetic the renderer uses), emitting newlines so it also works when the box sits on the terminal's last row.
+
+## 0.27.9
+
+### Patch Changes
+
+- 4e8bd6f: Big Smooth's daemon now actually loads `~/.smooth/mcp.toml` MCP servers and surfaces their tools to the operator (th-52ec01). Previously `th mcp add` registered config but nothing in the daemon path consumed it, so no MCP tool ever appeared. The daemon now spawns each non-disabled server (global + project config, project shadowing global on name collision) as a stdio child process via `rmcp`, performs the MCP `initialize` handshake, lists each server's tools, and registers them on the operator's per-turn `ToolRegistry` — namespaced `<server>__<tool>` and gateway-name-legal. Because they sit on that registry like any built-in, MCP tools pass through the same permission gate + Narc hooks. Sessions are spawned once at startup and held for the daemon's lifetime; a server that fails to start or handshake is logged and skipped, never fatal. The `McpConfig` loader moved from `smooth-cli` into the shared `smooth-tools` crate so both the CLI and the daemon consume the same TOML shape.
+- fb71ff0: Desktop 0.1.7: the daemon now loads `~/.smooth/mcp.toml` and surfaces MCP servers' tools to Big Smooth (th-52ec01) — unlocking Outlook (via the registered Big Smooth Desktop app), and any MCP server (Gmail, Slack, GitHub, Playwright…) as a one-line `th mcp add`. MCP tools pass through the same permission gate + Narc as built-ins.
+
+## 0.27.8
+
+### Patch Changes
+
+- 15aa677: th code's splash now shows Big Smooth himself instead of the SMOOTH wordmark banner. The avatar is the terminal rendering of the web SPA's `BigSmoothFace` — teal→blue gradient head (the face gradient, vertical), dark fedora with a teal hat band, sunglasses with white lens glints, and the smirk — drawn as block art with the accessories in a distinct ▓ texture so the character still reads under NO_COLOR and for colorblind users. The brand mark stays as one quiet `Smooth` wordmark line under the avatar.
+- a47f5a7: Desktop 0.1.6: auto-update improvements — check every 30 min (was 6h, so beta builds arrived late), log all update activity to `~/.smooth/desktop.log` (the console was lost under a Finder/`open` launch, making "why didn't it update?" unanswerable), and disable the differential downloader (its blockmap never reassembled byte-exact after notarization, so it always failed the checksum and fell back to a full download anyway — now it full-downloads directly, no wasted bandwidth or scary error). The update path itself was already working end-to-end.
+
 ## 0.27.7
 
 ### Patch Changes

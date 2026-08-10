@@ -111,6 +111,7 @@ use smooth_operator_svc::{ToolProvider, ToolProviderContext};
 
 use crate::org_auth::SmooOrgVerifier;
 use smooai_client_shared::auth::storage::CredentialsStore;
+use smooth_policy::family::FamilyConfig;
 use smooth_tools::SessionCwd;
 
 /// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
@@ -127,6 +128,25 @@ struct SandboxedToolProvider {
     /// saved in one session survives a daemon restart and is retrievable in the
     /// next (th-6d1692). Shared with the storage db in `serve_local_flavor`.
     memory: Arc<dyn Memory>,
+    /// Live MCP sessions + their tools (th-52ec01). Spawned ONCE at daemon
+    /// startup from the merged `mcp.toml` and held for the daemon's lifetime;
+    /// each turn we clone the tool `Arc`s onto the per-turn registry so remote
+    /// MCP tools sit behind the same permission gate + Narc hooks as built-ins.
+    /// `None` for the ephemeral/test providers that don't wire MCP.
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
+    /// Family roster (ADR-008, th-12d875). When a turn's principal carries a
+    /// `role:<role>` group (a family member authenticated via their own token),
+    /// the tool set is narrowed to that role's allowlist — deny-by-default, a
+    /// dropped tool never even appears in the schema the model sees. `None` (no
+    /// family configured) or an owner caller (no `role:` group) ⇒ the full set,
+    /// unchanged.
+    family: Option<Arc<FamilyConfig>>,
+}
+
+/// The role a turn runs as, extracted from the principal's groups. `None` for the
+/// owner (no `role:` group) — which means "no family filtering, full tool set".
+fn role_from_ctx(ctx: &ToolProviderContext) -> Option<String> {
+    ctx.access.groups.iter().find_map(|g| g.strip_prefix("role:").map(str::to_string))
 }
 
 #[async_trait]
@@ -214,6 +234,43 @@ impl ToolProvider for SandboxedToolProvider {
         // than the next daemon restart. Cache behind an mtime check if someone
         // ever ships hundreds of plugins.
         tools.extend(smooth_tools::plugin_tools(&dir, self.proxy.as_deref()));
+        // MCP servers (th-52ec01): the tools from every `mcp.toml` server that
+        // came up at startup. Cloned onto the per-turn registry here — BEFORE the
+        // sidekick snapshot below — so (a) they pass through the permission gate +
+        // Narc like any built-in, and (b) a dispatched sidekick inherits them too.
+        // The child processes are long-lived; this is just an `Arc` clone per turn.
+        if let Some(mcp) = &self.mcp {
+            tools.extend(mcp.tools());
+        }
+        // Family RBAC (ADR-008, th-12d875): if this turn's principal carries a
+        // `role:<role>` group — a family member authenticated via their OWN token
+        // — narrow the tool set to that role's allowlist, deny-by-default. This
+        // runs AFTER every tool (built-ins, plugins, MCP) is pushed and BEFORE the
+        // sidekick snapshot below, so a Smoo Jr turn can neither call a denied
+        // tool (it isn't in the schema the model sees) NOR delegate around the
+        // limit (the snapshot is taken from the already-filtered set, and the
+        // sidekick tool itself is gated below). An owner turn has no `role:` group
+        // and is never filtered. An unknown role is denied everything except what
+        // its (absent) rules allow — i.e. nothing (`tool_allowed` fails closed).
+        //
+        // This is also Smoo Jr's no-egress guarantee: goalie's proxy allowlist is
+        // process-wide (one list for the whole daemon), so we can't give Jr a
+        // narrower proxy — instead we DENY every egressing TOOL (web_search,
+        // crawl, knowledge_search, th, bash, MCP, send_sidekick) at this filter, so
+        // there is no code path from a Jr turn to the network.
+        let role = role_from_ctx(ctx);
+        if let (Some(family), Some(role)) = (self.family.as_ref(), role.as_deref()) {
+            let before = tools.len();
+            tools.retain(|t| family.tool_allowed(role, &t.schema().name));
+            tracing::debug!(role, kept = tools.len(), dropped = before - tools.len(), "family: narrowed tool set");
+        }
+        // Whether this turn may delegate to a sidekick. A family role that isn't
+        // allowed `send_sidekick` (Smoo Jr) never gets the dispatch tool — closing
+        // the "delegate to a full-clearance runner" escape. Owner/no-family: yes.
+        let allow_sidekick = match (self.family.as_ref(), role.as_deref()) {
+            (Some(family), Some(role)) => family.tool_allowed(role, "send_sidekick"),
+            _ => true,
+        };
         // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
         // lets Big Smooth fan a self-contained subtask out to a `scout`
         // (read-only) or `runner` (full) sidekick — each runs in its own
@@ -233,16 +290,18 @@ impl ToolProvider for SandboxedToolProvider {
         // gap for a first cut (the kernel layer is the load-bearing one); wire
         // those onto the sidekick registry via the engine's hook seam if it
         // grows teeth.
-        if let Some(factory) = gateway_llm_factory() {
-            let mut snapshot = smooth_operator::tool::ToolRegistry::new();
-            for tool in &tools {
-                snapshot.register_arc(Arc::clone(tool));
+        if allow_sidekick {
+            if let Some(factory) = gateway_llm_factory() {
+                let mut snapshot = smooth_operator::tool::ToolRegistry::new();
+                for tool in &tools {
+                    snapshot.register_arc(Arc::clone(tool));
+                }
+                tools.push(Arc::new(smooth_operator::cast::DispatchSubagentTool::new(
+                    Arc::new(smooth_operator::cast::Cast::builtin()),
+                    snapshot,
+                    factory,
+                )) as Arc<dyn Tool>);
             }
-            tools.push(Arc::new(smooth_operator::cast::DispatchSubagentTool::new(
-                Arc::new(smooth_operator::cast::Cast::builtin()),
-                snapshot,
-                factory,
-            )) as Arc<dyn Tool>);
         }
         tools
     }
@@ -277,7 +336,29 @@ pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> A
 /// sqlite-backed store here so cross-session memory persists (th-6d1692).
 #[must_use]
 pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, memory: Arc<dyn Memory>) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider { cwd, proxy, memory })
+    local_tool_provider_full(cwd, proxy, memory, None, None)
+}
+
+/// The full seam, additionally taking the daemon's live [`McpManager`].
+///
+/// So remote MCP-server tools (`mcp.toml`) surface on every turn (th-52ec01).
+/// `serve_local_flavor` builds the manager once and passes it here; the simpler
+/// constructors pass `None`.
+#[must_use]
+pub fn local_tool_provider_full(
+    cwd: SessionCwd,
+    proxy: Option<String>,
+    memory: Arc<dyn Memory>,
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
+    family: Option<Arc<FamilyConfig>>,
+) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider {
+        cwd,
+        proxy,
+        memory,
+        mcp,
+        family,
+    })
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -809,6 +890,32 @@ fn permission_hook_with_approver() -> (smooth_operator::permission::PermissionHo
 ///
 /// # Errors
 /// Returns an error if the token can't be provisioned or the server can't bind.
+/// Load the family roster (ADR-008, th-12d875) from `SMOOTH_FAMILY_FILE` or
+/// `~/.smooth/family.toml`.
+///
+/// - **Absent file** ⇒ `None` — the normal single-tenant case (owner = Admin).
+/// - **Malformed file** ⇒ `None` + an error log — FAIL-CLOSED: a broken roster
+///   must never fall back to "everyone is the owner". With `None`, family tokens
+///   simply don't match the verifier and are rejected, so members are locked out
+///   (denied), never promoted. The owner token is unaffected.
+fn load_family_config() -> Option<Arc<FamilyConfig>> {
+    let path = std::env::var_os("SMOOTH_FAMILY_FILE")
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".smooth").join("family.toml")))?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    match FamilyConfig::from_toml(&raw) {
+        Ok(cfg) if cfg.is_empty() => None,
+        Ok(cfg) => {
+            tracing::info!(members = cfg.member_count(), roles = cfg.role_count(), path = %path.display(), "family: roster loaded");
+            Some(Arc::new(cfg))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, path = %path.display(), "family: roster is malformed — member tokens will be REJECTED (fail-closed); fix and restart the daemon");
+            None
+        }
+    }
+}
+
 pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let token = provision_local_token()?;
     // The local flavor's tools: the workspace-confined fs/grep set + an
@@ -860,7 +967,18 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
     // `/cd`). Rooted at the workspace; every conversation defaults to it.
     let session_cwd = SessionCwd::new(workspace.clone());
-    let provider = local_tool_provider_with_memory(session_cwd.clone(), egress_proxy, memory);
+    // MCP servers (th-52ec01): spawn every non-disabled server from the merged
+    // global+project `mcp.toml` ONCE here, keep the sessions alive for the
+    // daemon's lifetime, and hand the manager to the tool provider so their tools
+    // appear on every turn (behind the permission + Narc hooks). Best-effort — a
+    // server that won't start is logged and skipped, never fatal.
+    let mcp = Arc::new(smooth_tools::mcp::McpManager::discover(&workspace).await);
+    tracing::info!(mcp_tools = mcp.len(), "mcp: servers loaded");
+    // Family roster (ADR-008, th-12d875): shared by the tool provider (narrows the
+    // per-turn tool set by role) and the auth verifier (maps a member token → its
+    // `role:` group). Absent/malformed ⇒ single-tenant, fail-closed.
+    let family = load_family_config();
+    let provider = local_tool_provider_full(session_cwd.clone(), egress_proxy, memory, Some(mcp), family.clone());
 
     // Web-push state, built ONCE and shared: the /push/* router and the turn
     // notifier (th-b9a636) — the trigger layer push never had.
@@ -878,7 +996,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // `"local"` placeholder — org-scoped tools (web search, knowledge,
         // scraping) need a real org to work at all (th-0c63cc). Signed out, it
         // falls back to `"local"` and behaves exactly as before.
-        .auth(Arc::new(SmooOrgVerifier::new(token.clone())))
+        .auth(Arc::new(SmooOrgVerifier::new(token.clone()).with_family(family.clone())))
         // Reject (don't degrade to anonymous) any `/ws` connection without a
         // valid token — so a stray local process / tailnet peer can't drive the
         // agent. The widget + SDK clients carry the token, so they're unaffected.
@@ -1267,6 +1385,101 @@ mod tests {
         // Didn't clobber the rest of the sandboxed set.
         assert!(names.iter().any(|n| n == "bash"), "bash still registered: {names:?}");
         assert!(names.iter().any(|n| n == "remember"), "remember still registered: {names:?}");
+        std::env::remove_var("SMOOAI_GATEWAY_URL");
+        std::env::remove_var("SMOOAI_GATEWAY_KEY");
+    }
+
+    /// Smoo Jr (ADR-008, th-12d875): a `role:child` principal gets ONLY its
+    /// allowlist — no writes, no shell, no egress, and crucially no delegation
+    /// (the escape hatch is closed at the same filter).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn family_child_role_narrows_tools_and_blocks_delegation() {
+        use smooth_operator_svc::access_control::AccessContext;
+        use smooth_policy::family::FamilyConfig;
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Gateway resolvable, so send_sidekick WOULD register for an owner — proving
+        // its absence for Jr is the filter, not a missing gateway.
+        std::env::set_var("SMOOAI_GATEWAY_URL", "http://gateway.test/v1");
+        std::env::set_var("SMOOAI_GATEWAY_KEY", "test-key");
+
+        let family = Arc::new(
+            FamilyConfig::from_toml(
+                r#"
+                [roles.child]
+                allow = ["read_file", "list_files", "grep", "recall"]
+                default = "deny"
+            "#,
+            )
+            .unwrap(),
+        );
+        let provider = local_tool_provider_full(
+            SessionCwd::new(std::env::temp_dir()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            Some(family),
+        );
+        let jr = ToolProviderContext::new(Some("org-1".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c1");
+        let names: Vec<String> = provider.tools_for(&jr).await.iter().map(|t| t.schema().name).collect();
+        for keep in ["read_file", "list_files", "grep", "recall"] {
+            assert!(names.iter().any(|n| n == keep), "Jr keeps {keep}: {names:?}");
+        }
+        for deny in ["bash", "write_file", "edit_file", "web_search", "crawl", "remember", "send_sidekick"] {
+            assert!(!names.iter().any(|n| n == deny), "Jr must NOT get {deny}: {names:?}");
+        }
+        std::env::remove_var("SMOOAI_GATEWAY_URL");
+        std::env::remove_var("SMOOAI_GATEWAY_KEY");
+    }
+
+    /// The owner is never filtered; an unknown role gets nothing (fail-closed);
+    /// and the tool set depends only on the role, never on message/conversation
+    /// (no escalation via a different turn input).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn family_owner_unfiltered_unknown_denied_and_no_escalation() {
+        use smooth_operator_svc::access_control::AccessContext;
+        use smooth_policy::family::FamilyConfig;
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOAI_GATEWAY_URL", "http://gateway.test/v1");
+        std::env::set_var("SMOOAI_GATEWAY_KEY", "test-key");
+        let family = Arc::new(
+            FamilyConfig::from_toml(
+                r#"
+                [roles.child]
+                allow = ["read_file"]
+                default = "deny"
+            "#,
+            )
+            .unwrap(),
+        );
+        let provider = local_tool_provider_full(
+            SessionCwd::new(std::env::temp_dir()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            Some(family),
+        );
+
+        // Owner: no role group → full set (regression guard).
+        let owner = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("c");
+        let owner_names: Vec<String> = provider.tools_for(&owner).await.iter().map(|t| t.schema().name).collect();
+        assert!(owner_names.iter().any(|n| n == "bash"), "owner keeps bash: {owner_names:?}");
+        assert!(owner_names.iter().any(|n| n == "send_sidekick"), "owner keeps delegation: {owner_names:?}");
+
+        // Unknown role → deny everything (fail-closed), NOT the full set.
+        let bogus = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("x".into()), vec!["role:bogus".into()])).with_conversation_id("c");
+        let bogus_names: Vec<String> = provider.tools_for(&bogus).await.iter().map(|t| t.schema().name).collect();
+        assert!(bogus_names.is_empty(), "unknown role gets nothing: {bogus_names:?}");
+
+        // Anti-escalation: same role, different conversation → identical set.
+        let jr1 = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c1");
+        let jr2 = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c2");
+        let mut n1: Vec<String> = provider.tools_for(&jr1).await.iter().map(|t| t.schema().name).collect();
+        let mut n2: Vec<String> = provider.tools_for(&jr2).await.iter().map(|t| t.schema().name).collect();
+        n1.sort();
+        n2.sort();
+        assert_eq!(n1, n2, "the tool set depends only on the role, not the conversation");
         std::env::remove_var("SMOOAI_GATEWAY_URL");
         std::env::remove_var("SMOOAI_GATEWAY_KEY");
     }
