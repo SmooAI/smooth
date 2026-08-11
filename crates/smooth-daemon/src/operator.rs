@@ -930,6 +930,10 @@ fn load_family_config() -> Option<Arc<FamilyConfig>> {
 }
 
 pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
+    // ONE Big Smooth per machine — every launch path (th up, th daemon run,
+    // the app bundle) funnels through here, so this is the choke point. Held
+    // to shutdown; the OS releases it if we die (pearl th-c71e6f).
+    let _instance = crate::single_instance::acquire_default().await?;
     let token = provision_local_token()?;
     // The local flavor's tools: the workspace-confined fs/grep set + an
     // OS-sandboxed `bash` whose egress is routed through the goalie proxy (when

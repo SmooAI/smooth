@@ -43,6 +43,7 @@ pub mod relay;
 pub mod schedule;
 pub mod scheduler;
 pub mod search;
+pub mod single_instance;
 pub mod skills_route;
 pub mod tailscale;
 pub mod usage_route;

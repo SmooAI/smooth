@@ -1805,6 +1805,16 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
+/// The `host:port` (plus parsed port) a running daemon advertised in
+/// `~/.smooth/daemon.addr`, regardless of which launcher started it.
+/// None when the file is missing/blank or the port doesn't parse.
+fn advertised_daemon_addr() -> Option<(String, u16)> {
+    let addr = std::fs::read_to_string(dirs_next::home_dir()?.join(".smooth").join("daemon.addr")).ok()?;
+    let addr = addr.trim().to_owned();
+    let port = addr.rsplit(':').next()?.parse::<u16>().ok()?;
+    Some((addr, port))
+}
+
 async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
@@ -1864,6 +1874,23 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
     // caller until ctrl-c, breaking shell chains like
     // `th down && th up && th`.
     if !foreground {
+        // A daemon from ANY launcher (the Big Smooth app bundle, a bare
+        // `smooth-daemon run`) advertises itself in ~/.smooth/daemon.addr.
+        // Probe it FIRST so `th up` says "already running" up front instead
+        // of spawning a child that loses the ~/.smooth/daemon.lock race and
+        // buries the refusal in the log (pearl th-c71e6f).
+        if let Some((addr, advertised_port)) = advertised_daemon_addr() {
+            if daemon_health::probe(advertised_port).await.is_up() {
+                println!();
+                println!();
+                println!("  {} {} {}", "●".yellow(), gradient::smooth(), format!("is already running at {addr}").yellow());
+                println!();
+                println!("    {}  {}", "Web UI".dimmed(), format!("http://{addr}").cyan().bold());
+                println!("    {}  {}", "Stop  ".dimmed(), "th down (or quit the Big Smooth app)".dimmed());
+                println!();
+                return Ok(());
+            }
+        }
         // Check if already running
         let pid_path = pid_file_path();
         if pid_path.exists() {
