@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 /* ── Presence theme ──────────────────────────────────────────────────────────
  * A warm ink palette for a personal agent you cohabit with — not a corporate
@@ -6,25 +6,25 @@
  * an amber that only ever means "Big Smooth needs you". The teal→blue brand
  * gradient (the face) is reserved for his presence, never chrome. (th-f1a1f0) */
 @theme {
-    --color-background: oklch(0.165 0.012 55);   /* warm near-black */
-    --color-foreground: oklch(0.93 0.014 70);    /* warm off-white */
-    --color-panel: oklch(0.205 0.014 58);        /* raised surfaces */
+    --color-background: oklch(0.165 0.012 55); /* warm near-black */
+    --color-foreground: oklch(0.93 0.014 70); /* warm off-white */
+    --color-panel: oklch(0.205 0.014 58); /* raised surfaces */
     --color-panel-2: oklch(0.235 0.015 58);
     --color-muted-foreground: oklch(0.66 0.02 65);
-    --color-border: oklch(0.30 0.014 60);
+    --color-border: oklch(0.3 0.014 60);
 
-    --color-coral: oklch(0.74 0.15 32);          /* primary / "yes" */
+    --color-coral: oklch(0.74 0.15 32); /* primary / "yes" */
     --color-coral-ink: oklch(0.2 0.04 32);
-    --color-amber: oklch(0.79 0.15 72);          /* "needs you" only */
+    --color-amber: oklch(0.79 0.15 72); /* "needs you" only */
     --color-amber-ink: oklch(0.24 0.06 72);
-    --color-online: oklch(0.74 0.17 152);        /* "awake / alive" status */
+    --color-online: oklch(0.74 0.17 152); /* "awake / alive" status */
 
-    --color-th-teal: #00a6a6;                    /* the face — presence */
+    --color-th-teal: #00a6a6; /* the face — presence */
     --color-th-blue: #1238dd;
 
     --radius: 1rem;
-    --font-display: "Bricolage Grotesque", ui-rounded, "Segoe UI", system-ui, sans-serif;
-    --font-sans: ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
+    --font-display: 'Bricolage Grotesque', ui-rounded, 'Segoe UI', system-ui, sans-serif;
+    --font-sans: ui-rounded, 'SF Pro Rounded', 'Segoe UI', system-ui, sans-serif;
 }
 
 * {
@@ -53,8 +53,7 @@ body {
     margin: 0;
     background:
         radial-gradient(1100px 700px at 78% -8%, color-mix(in oklch, var(--color-th-teal) 11%, transparent), transparent 60%),
-        radial-gradient(900px 600px at 12% 108%, color-mix(in oklch, var(--color-th-blue) 13%, transparent), transparent 62%),
-        var(--color-background);
+        radial-gradient(900px 600px at 12% 108%, color-mix(in oklch, var(--color-th-blue) 13%, transparent), transparent 62%), var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -98,23 +97,42 @@ body {
     animation: halo-breathe 4.8s ease-in-out infinite;
     transition: background 360ms ease;
 }
-.halo-strong { inset: -42%; }
-@keyframes halo-breathe {
-    0%, 100% { transform: scale(0.94); opacity: 0.55; }
-    50%      { transform: scale(1.07); opacity: 0.92; }
+.halo-strong {
+    inset: -42%;
 }
-.face-stage { position: relative; display: grid; place-items: center; isolation: isolate; }
-.face-stage > :not(.halo) { position: relative; z-index: 1; }
+@keyframes halo-breathe {
+    0%,
+    100% {
+        transform: scale(0.94);
+        opacity: 0.55;
+    }
+    50% {
+        transform: scale(1.07);
+        opacity: 0.92;
+    }
+}
+.face-stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    isolation: isolate;
+}
+.face-stage > :not(.halo) {
+    position: relative;
+    z-index: 1;
+}
 
 /* The blinking caret on a streaming reply. */
 .caret::after {
-    content: "▌";
+    content: '▌';
     margin-left: 1px;
     color: var(--color-th-teal);
     animation: caret 1s steps(1) infinite;
 }
 @keyframes caret {
-    50% { opacity: 0; }
+    50% {
+        opacity: 0;
+    }
 }
 
 /* "Needs you" — the approval card breathes amber so it can't be missed. */
@@ -124,8 +142,17 @@ body {
     animation: needs-you 2.4s ease-in-out infinite;
 }
 @keyframes needs-you {
-    0%, 100% { box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-amber) 18%, transparent), 0 8px 30px -12px color-mix(in oklch, var(--color-amber) 30%, transparent); }
-    50%      { box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-amber) 40%, transparent), 0 10px 40px -10px color-mix(in oklch, var(--color-amber) 55%, transparent); }
+    0%,
+    100% {
+        box-shadow:
+            0 0 0 1px color-mix(in oklch, var(--color-amber) 18%, transparent),
+            0 8px 30px -12px color-mix(in oklch, var(--color-amber) 30%, transparent);
+    }
+    50% {
+        box-shadow:
+            0 0 0 1px color-mix(in oklch, var(--color-amber) 40%, transparent),
+            0 10px 40px -10px color-mix(in oklch, var(--color-amber) 55%, transparent);
+    }
 }
 
 /* The thinking dots under his status line. */
@@ -134,16 +161,32 @@ body {
     animation: bs-dot 1.05s ease-in-out infinite;
     font-weight: 700;
 }
-.bs-dot:nth-child(2) { animation-delay: 0.14s; }
-.bs-dot:nth-child(3) { animation-delay: 0.28s; }
+.bs-dot:nth-child(2) {
+    animation-delay: 0.14s;
+}
+.bs-dot:nth-child(3) {
+    animation-delay: 0.28s;
+}
 @keyframes bs-dot {
-    0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
-    40%           { opacity: 1; transform: translateY(-2px); }
+    0%,
+    80%,
+    100% {
+        opacity: 0.25;
+        transform: translateY(0);
+    }
+    40% {
+        opacity: 1;
+        transform: translateY(-2px);
+    }
 }
 
 /* Markdown bubbles read as prose, not a form. */
-.prose-msg p { margin: 0 0 0.6em; }
-.prose-msg p:last-child { margin-bottom: 0; }
+.prose-msg p {
+    margin: 0 0 0.6em;
+}
+.prose-msg p:last-child {
+    margin-bottom: 0;
+}
 .prose-msg pre {
     background: var(--color-background);
     border: 1px solid var(--color-border);
@@ -152,13 +195,19 @@ body {
     overflow-x: auto;
     font-size: 0.85em;
 }
-.prose-msg code { font-family: ui-monospace, "SF Mono", monospace; font-size: 0.88em; }
+.prose-msg code {
+    font-family: ui-monospace, 'SF Mono', monospace;
+    font-size: 0.88em;
+}
 .prose-msg :not(pre) > code {
     background: color-mix(in oklch, var(--color-th-teal) 14%, transparent);
     padding: 0.1em 0.35em;
     border-radius: 0.4rem;
 }
-.prose-msg a { color: var(--color-th-teal); text-decoration: underline; }
+.prose-msg a {
+    color: var(--color-th-teal);
+    text-decoration: underline;
+}
 
 /* The greeting headline on the empty state — his voice, set in the display face. */
 .greeting {
@@ -176,12 +225,22 @@ body {
 /* Respect reduced-motion: keep the presence alive but calm — no breathing,
  * no bobbing, just the colour shifts that carry meaning. */
 @media (prefers-reduced-motion: reduce) {
-    .halo, .needs-you, .bs-dot, .caret::after { animation: none; }
-    .halo { opacity: 0.7; }
+    .halo,
+    .needs-you,
+    .bs-dot,
+    .caret::after {
+        animation: none;
+    }
+    .halo {
+        opacity: 0.7;
+    }
 }
 
 /* Thin, warm scrollbars. */
-*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
 *::-webkit-scrollbar-thumb {
     background: color-mix(in oklch, var(--color-foreground) 14%, transparent);
     border-radius: 999px;

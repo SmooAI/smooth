@@ -20,54 +20,100 @@ export interface SmoothMode {
 
 /** The full lineup, budget first then premium — also the picker order. */
 export const MODES: SmoothMode[] = [
-    // Budget — the everyday tier.
+    // ── Every model here is BENCHMARKED. ────────────────────────────────
     //
-    // Model choices here are BENCHMARKED, not picked by version number.
-    // `smooth-bench convo`, 15 scenarios, 2026-08-08 (3 trials for the top
-    // two, 1 for the screening field):
+    // `smooth-bench agentic`, 28 scenarios, **3 trials each**, 2026-08-11.
+    // A scenario counts as passed only when every trial passed, so these
+    // rates are lower and far harder than the old single-trial numbers —
+    // one run is an anecdote, three is a rate.
     //
-    //   qwen3.7-plus-direct  84.4%   $0.0105/pass   1.3 tool calls/turn
-    //   deepseek-v4-flash    77.5%   $0.0040/pass   2.4 tool calls/turn
-    //   gpt-5.5              72.1%   $0.1694/pass
-    //   glm-5.2-direct       66.7%   $0.0012/pass
-    //   minimax-m3-direct    66.7%   $0.0098/pass
-    //   kimi-k2.7-code       60.0%   $0.0216/pass
+    //   model                  rate    $/pass   passes/$1  safety
+    //   gpt-5.6-luna          89.3%   0.0005      1,876      3
+    //   deepseek-v4-pro       89.3%   0.0005      1,828      2
+    //   gemini-3.6-flash      85.7%   0.0002      6,250      2
+    //   gpt-5.6-sol-high      85.7%   0.0199         50      1
+    //   gpt-5.5               85.7%   0.4255          2      2
+    //   qwen-3.7-max-direct   82.1%   0.0045        222      2
+    //   gpt-5.4               82.1%   0.2006          5      2
+    //   gemini-3.5-flash      78.6%   0.0002      5,435      4
+    //   glm-5.2-direct        78.6%   0.0043        232      2
+    //   claude-fable-5        76.0%   0.0395         25      4
+    //   deepseek-v4-flash     75.0%   0.0012        846      2
+    //   kimi-k2.7-code-direct 75.0%   0.0023        437      3
+    //   claude-sonnet-5       75.0%   0.0083        120  clean
+    //   groq-gpt-oss-20b      17.9%  unknown          —      5
     //
-    // Flash stays deepseek-v4-flash: it is the cheapest per passing
-    // scenario by 2.6x and this is the default every session lands on.
-    // Code moves to the measured leader. See docs/Model-Leaderboard.md.
-    { id: 'flash', label: 'Flash', emoji: '⚡', model: 'deepseek-v4-flash', tier: 'budget' },
-    // th-d326cb: was minimax-m2.7 (superseded by m3, and m3 scored 66.7%).
-    // qwen3.7-plus-direct is the best model we have measured at any price
-    // — 84.4%, and it gets there with 43% fewer tool calls than Flash.
-    { id: 'code', label: 'Code', emoji: '💻', model: 'qwen3.7-plus-direct', tier: 'budget' },
-    // th-d326cb: was glm-5.1. 5.2 is the current release and was unpriced
-    // in LiteLLM until today, which is why it had never been benchable.
-    { id: 'ui', label: 'UI', emoji: '🎨', model: 'glm-5.2-direct', tier: 'budget' },
-    { id: 'plan', label: 'Plan', emoji: '🧠', model: 'deepseek-v4-pro', tier: 'budget' },
-    { id: 'fast', label: 'Fast', emoji: '🏎️', model: 'groq-gpt-oss-20b', tier: 'budget' },
-    // Premium — the "spend real money" tier.
-    // Premium slots stay on gpt-5.5/5.4/5.5-pro DELIBERATELY. GPT-5.6 is
-    // newer, but it only works with tools at all as of today's config
-    // change (th-8d4ec4 routes it through the Responses API), and it has
-    // not been benchmarked yet — its one measured run scored 0/45 because
-    // every tool call 400'd. "Newer" is a hypothesis; these three are
-    // verified working with tools right now. They move when the bench
-    // says to, not before.
-    { id: 'flash+', label: 'Flash+', emoji: '⚡', model: 'gemini-3.5-flash', tier: 'premium' },
-    { id: 'code+', label: 'Code+', emoji: '💻', model: 'claude-opus-4-8', tier: 'premium' },
+    // `safety` counts trials that breached a safety invariant — destroyed
+    // data the scenario told it to protect, or leaked a secret. It is NOT
+    // the pass rate and must not be read as one: a model can fail a
+    // scenario for skipping a required note while having protected the
+    // data perfectly. Most breaches across the field are one scenario,
+    // `cancel-without-approval`, where the agent flips a subscription's
+    // status without the approval ticket the policy requires.
+    //
+    // Cost is the run's own tokens at the gateway's published rate. The
+    // previous figures were a SHARED key's spend delta and were wrong by
+    // up to 1,324x (th-adf614) — do not compare these against them.
+
+    // Budget — the everyday tier, and now also the best tier.
+    // The headline result: the two highest-scoring models in the entire
+    // lineup cost half a cent per passing scenario.
+    { id: 'flash', label: 'Flash', emoji: '⚡', model: 'gpt-5.6-luna', tier: 'budget' },
+    // th-170c67: was deepseek-v4-flash (75.0%). Luna scores 89.3% at
+    // roughly half the cost per pass — better AND cheaper, which is why
+    // it takes the default every session lands on.
+    { id: 'code', label: 'Code', emoji: '💻', model: 'deepseek-v4-pro', tier: 'budget' },
+    // Was qwen3.7-plus-direct, which this round did not measure. Pro ties
+    // luna at 89.3% and is the fastest of the leaders (~14s/scenario).
+    { id: 'ui', label: 'UI', emoji: '🎨', model: 'gemini-3.6-flash', tier: 'budget' },
+    // Was glm-5.2-direct (78.6%). Gemini 3.6 Flash is both higher-scoring
+    // and the cheapest model measured per passing scenario, at 6,250
+    // passes per dollar.
+    { id: 'plan', label: 'Plan', emoji: '🧠', model: 'qwen-3.7-max-direct', tier: 'budget' },
+    { id: 'fast', label: 'Fast', emoji: '🏎️', model: 'gemini-3.5-flash', tier: 'budget' },
+    // th-170c67: was groq-gpt-oss-20b, which is retired outright. It
+    // scored 17.9% — a quarter of the next-worst model — breached safety
+    // in 5 trials, and, for a slot literally named Fast, was the SLOWEST
+    // model in the lineup by 3.5x (67s/scenario against gemini's 15s).
+    // It was picked for Groq's reputation for speed and never measured.
+
+    // Premium — the "spend real money" tier, now three slots instead of
+    // five, because only three survived contact with a real cost column.
+    //
+    // Read this before promoting anything back in: on THIS suite, premium
+    // buys nothing. gpt-5.5 scores 85.7% — BELOW the free-tier default —
+    // and costs $10.21 against luna's $0.013 for the same 28 scenarios.
+    // That is 785x for a worse result, and it is now a measured number
+    // rather than a shared-key artefact. What premium may still buy is
+    // robustness on work harder than this suite models: long-horizon
+    // tasks, big refactors, ambiguous specs. That is a hypothesis the
+    // bench does not yet test — which is exactly why these three are kept
+    // and the other two were dropped, not the other way round.
+    { id: 'code+', label: 'Code+', emoji: '💻', model: 'claude-fable-5', tier: 'premium' },
+    // Replaces claude-opus-4-8 (never benchmarked at 3 trials). Fable
+    // reads at 76.0% here, but 3 of its turns were terminated by the
+    // provider's content filter on scenarios carrying prompt-injection
+    // fixtures — those are scored INCONCLUSIVE, not failed (th-05edac).
+    // Its measured rate is a floor, not a ceiling.
     { id: 'ui+', label: 'UI+', emoji: '🎨', model: 'gpt-5.5', tier: 'premium' },
-    { id: 'plan+', label: 'Plan+', emoji: '🧠', model: 'gpt-5.4', tier: 'premium' },
-    { id: 'max', label: 'Max', emoji: '💎', model: 'gpt-5.5-pro', tier: 'premium' },
-    // Smoo Jr (ADR-008, th-12d875) — the kid-safe family mode. This entry is a
-    // UX affordance + model pin ONLY; it is EXPLICITLY NOT a security boundary.
-    // The child guardrail (allowlist-only tools, no shell/writes/egress) is
-    // enforced by the daemon from the connection's PRINCIPAL (a Jr device's own
-    // token → `role:child`), not from the selected mode — so a client picking or
-    // un-picking this mode changes nothing about what tools are reachable. A
-    // safety-tuned model keeps answers age-appropriate; the hard limits are the
-    // principal-derived tool narrowing in the daemon.
-    { id: 'smoo-jr', label: 'Smoo Jr', emoji: '🧒', model: 'deepseek-v4-flash', tier: 'budget' },
+    { id: 'max', label: 'Max', emoji: '💎', model: 'gpt-5.6-sol-high', tier: 'premium' },
+    // Replaces gpt-5.5-pro (never benchmarked). Sol-high matches gpt-5.5's
+    // 85.7% at 1/21st the cost per pass, and carries the best safety
+    // record of any high scorer (1 breach). If you want the expensive
+    // option, this is the one with evidence behind it.
+    //
+    // Dropped: `flash+` (gemini-3.5-flash moved down to budget `fast`,
+    // where its price belongs) and `plan+` (gpt-5.4, dominated by
+    // sol-high on both score and cost at 10x the price). `modeById`
+    // falls back to the default for an unknown id, so a saved preference
+    // pointing at a retired slot lands on Flash rather than breaking.
+    { id: 'smoo-jr', label: 'Smoo Jr', emoji: '🧒', model: 'claude-sonnet-5', tier: 'budget' },
+    // th-170c67: was deepseek-v4-flash. claude-sonnet-5 is the ONLY model
+    // in the lineup with a clean safety record across 84 trials — zero
+    // breaches — which is the property this mode is actually about. It
+    // also scores lowest of the working models (75.0%), and the two facts
+    // are related: it refuses and asks where the others act. For a child's
+    // session that trade is the right way round.
 ];
 
 /** The mode a fresh session lands on. */
