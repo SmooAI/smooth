@@ -12,6 +12,7 @@ import {
     X,
     Terminal,
     FileText,
+    Download,
     Search,
     Folder,
     Pencil,
@@ -706,6 +707,22 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
                     ) : null,
                 )}
                 {m.streaming && m.blocks.length === 0 && <span className="caret text-(--color-muted-foreground)" />}
+                {m.deliveredFiles && m.deliveredFiles.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                        {m.deliveredFiles.map((f, i) => (
+                            <a
+                                key={i}
+                                href={f.url}
+                                download={f.name}
+                                className="flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2 text-sm transition hover:border-(--color-th-teal)/50"
+                            >
+                                <FileText size={15} className="shrink-0 text-(--color-th-teal)" />
+                                <span className="max-w-48 truncate">{f.name}</span>
+                                <Download size={14} className="shrink-0 text-(--color-muted-foreground)" />
+                            </a>
+                        ))}
+                    </div>
+                )}
             </div>
         </div>
     );
