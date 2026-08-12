@@ -235,6 +235,15 @@ impl ToolProvider for SandboxedToolProvider {
         // hook see it like any other.
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::IMessageTool) as Arc<dyn Tool>);
+        // send_file (file transfer, EPIC th-2e39fe): deliver a workspace file to
+        // the user as a download. It needs `ctx.directive_sink` — the per-turn
+        // channel the engine drains onto `eventual_response.directive` — which
+        // only the provider sees, so the tool is injected HERE (like the calendar
+        // allowlist above) with the sink captured. A turn with no directive sink
+        // (nothing to drain into) simply doesn't get the tool.
+        if let Some(sink) = ctx.directive_sink.clone() {
+            tools.push(Arc::new(smooth_tools::SendFileTool::new(dir.clone(), sink)) as Arc<dyn Tool>);
+        }
         // CLI-wrapper plugins (th-262e5f): `~/.smooth/plugins/<name>/plugin.toml`
         // plus this session's workspace `.smooth/plugins/`, project shadowing
         // global. Registered HERE — on the per-turn registry — so each plugin
