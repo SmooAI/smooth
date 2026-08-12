@@ -1772,14 +1772,14 @@ mod tests {
         p.reload_slots();
 
         let coding = p.slots.iter().find(|s| s.slot == PickerSlot::Coding).expect("coding");
-        assert_eq!(coding.current_model, "deepseek-v4-flash", "coding slot post-migration");
+        assert_eq!(coding.current_model, "gpt-5.6-luna", "coding slot post-migration");
         let fast = p.slots.iter().find(|s| s.slot == PickerSlot::Fast).expect("fast");
-        assert_eq!(fast.current_model, "groq-gpt-oss-20b", "fast slot post-migration");
+        assert_eq!(fast.current_model, "gemini-3.5-flash", "fast slot post-migration");
 
         // The on-disk file must also be rewritten so the migration
         // only runs once per user.
         let reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
-        assert_eq!(reloaded.routing.coding.model, "deepseek-v4-flash");
+        assert_eq!(reloaded.routing.coding.model, "gpt-5.6-luna");
         assert_eq!(reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
     }
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "label": "model bench",
-  "message": "deepseek-v4-flash 0.0%",
-  "color": "orange"
+  "message": "gpt-5.6-luna 89.3%",
+  "color": "brightgreen"
 }

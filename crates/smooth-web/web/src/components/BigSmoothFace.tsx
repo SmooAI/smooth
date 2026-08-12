@@ -98,7 +98,7 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         const mouthGeom = new THREE.TorusGeometry(0.26, 0.046, 12, 48, Math.PI * 0.85);
         const mouthMat = new THREE.MeshBasicMaterial({ color: 0x020618 });
         const mouth = new THREE.Mesh(mouthGeom, mouthMat);
-        mouth.position.set(0.04, -0.30, 0.86);
+        mouth.position.set(0.04, -0.3, 0.86);
         // Arc opens upward (smirk) with a tilt for personality.
         mouth.rotation.z = Math.PI - 0.28;
         faceGroup.add(mouth);
@@ -107,7 +107,7 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         // black with a teal-tinted highlight.
         const sunglasses = new THREE.Group();
         // Lens: a flattened disk facing forward.
-        const lensGeom = new THREE.CircleGeometry(0.20, 28);
+        const lensGeom = new THREE.CircleGeometry(0.2, 28);
         const lensMat = new THREE.MeshBasicMaterial({ color: 0x080812 });
         const leftLens = new THREE.Mesh(lensGeom, lensMat);
         const rightLens = new THREE.Mesh(lensGeom, lensMat);
@@ -126,13 +126,13 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         const bridgeGeom = new THREE.BoxGeometry(0.18, 0.04, 0.04);
         const bridgeMat = new THREE.MeshBasicMaterial({ color: 0x080812 });
         const bridge = new THREE.Mesh(bridgeGeom, bridgeMat);
-        bridge.position.set(0, 0.20, 0.92);
+        bridge.position.set(0, 0.2, 0.92);
         sunglasses.add(bridge);
 
         // Top frame line — a single thin slab that visually unites the lenses.
         const topFrameGeom = new THREE.BoxGeometry(1.05, 0.035, 0.04);
         const topFrame = new THREE.Mesh(topFrameGeom, bridgeMat);
-        topFrame.position.set(0, 0.30, 0.92);
+        topFrame.position.set(0, 0.3, 0.92);
         sunglasses.add(topFrame);
 
         // Lens highlights — one short white-ish slash on each lens for
@@ -145,7 +145,7 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         });
         const leftGlint = new THREE.Mesh(glintGeom, glintMat);
         const rightGlint = new THREE.Mesh(glintGeom, glintMat);
-        leftGlint.position.set(-0.30, 0.24, 0.97);
+        leftGlint.position.set(-0.3, 0.24, 0.97);
         rightGlint.position.set(0.38, 0.24, 0.97);
         leftGlint.rotation.z = -0.55;
         rightGlint.rotation.z = -0.55;
