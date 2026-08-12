@@ -77,8 +77,8 @@ export const MODES: SmoothMode[] = [
     // model in the lineup by 3.5x (67s/scenario against gemini's 15s).
     // It was picked for Groq's reputation for speed and never measured.
 
-    // Premium — the "spend real money" tier, now three slots instead of
-    // five, because only three survived contact with a real cost column.
+    // Premium — the "spend real money" tier, now TWO slots instead of
+    // five, because only two survived contact with a real cost column.
     //
     // Read this before promoting anything back in: on THIS suite, premium
     // buys nothing. gpt-5.5 scores 85.7% — BELOW the free-tier default —
@@ -95,7 +95,6 @@ export const MODES: SmoothMode[] = [
     // provider's content filter on scenarios carrying prompt-injection
     // fixtures — those are scored INCONCLUSIVE, not failed (th-05edac).
     // Its measured rate is a floor, not a ceiling.
-    { id: 'ui+', label: 'UI+', emoji: '🎨', model: 'gpt-5.5', tier: 'premium' },
     { id: 'max', label: 'Max', emoji: '💎', model: 'gpt-5.6-sol-high', tier: 'premium' },
     // Replaces gpt-5.5-pro (never benchmarked). Sol-high matches gpt-5.5's
     // 85.7% at 1/21st the cost per pass, and carries the best safety
@@ -103,8 +102,11 @@ export const MODES: SmoothMode[] = [
     // option, this is the one with evidence behind it.
     //
     // Dropped: `flash+` (gemini-3.5-flash moved down to budget `fast`,
-    // where its price belongs) and `plan+` (gpt-5.4, dominated by
-    // sol-high on both score and cost at 10x the price). `modeById`
+    // where its price belongs), `plan+` (gpt-5.4, dominated by sol-high
+    // on both score and cost at 10x the price), and `ui+` (gpt-5.5 —
+    // 85.7% for $10.21 against luna's $0.013 on the same suite; there is
+    // no reading of that trade that favours it, and re-benching it just
+    // spends money to re-learn the same thing). `modeById`
     // falls back to the default for an unknown id, so a saved preference
     // pointing at a retired slot lands on Flash rather than breaking.
     { id: 'smoo-jr', label: 'Smoo Jr', emoji: '🧒', model: 'claude-sonnet-5', tier: 'budget' },
