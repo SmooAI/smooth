@@ -49,6 +49,17 @@ export interface ChatMessage {
     streaming: boolean;
     /** Images/PDFs sent with a user message. */
     attachments?: Attachment[];
+    /** Files the agent delivered this turn (the `send_file` directive). Rendered
+     * as downloads on the assistant message. */
+    deliveredFiles?: DeliveredFile[];
+}
+
+/** One file the agent handed to the user via the `send_file` directive. */
+export interface DeliveredFile {
+    name: string;
+    mimeType?: string;
+    /** `data:<mime>;base64,...` (or an https URL) — the download target. */
+    url: string;
 }
 
 /** A parked write-tool the agent needs a human verdict on. */
@@ -449,6 +460,14 @@ export function useOperator(): OperatorApi {
                     if (costUsd > 0 || promptTokens > 0 || completionTokens > 0) {
                         recordUsage({ conversationId: activeConvRef.current, model: modeRef.current.model, promptTokens, completionTokens, costUsd });
                     }
+                    // Files the agent delivered this turn ride the opaque `directive`
+                    // as `{ type: 'send_file', files: [...] }`. Attach them to the
+                    // assistant message just landing so it renders download links.
+                    const directive = v?.data?.data?.directive;
+                    if (directive?.type === 'send_file' && Array.isArray(directive.files)) {
+                        const files: DeliveredFile[] = directive.files.filter((f: DeliveredFile) => f?.url && f?.name);
+                        if (files.length) patchStreaming((m) => ({ ...m, deliveredFiles: files }));
+                    }
                     // The turn just landed — refresh the sidebar so this chat appears/updates.
                     send({ action: 'list_conversations', requestId: nextId('lc') });
                     break;
@@ -599,7 +618,10 @@ export function useOperator(): OperatorApi {
                 message: body,
                 model: modeRef.current.model,
             };
-            if (attachments.length) frame.images = attachments.map((a) => a.dataUrl);
+            // The engine parses `images` as `[{ url, detail? }]` objects (UserImage)
+            // and fail-soft DROPS anything else — bare strings were silently
+            // discarded, so the model never saw the attachment. Send objects.
+            if (attachments.length) frame.images = attachments.map((a) => ({ url: a.dataUrl }));
             send(frame);
         },
         [send, cwdCommand],

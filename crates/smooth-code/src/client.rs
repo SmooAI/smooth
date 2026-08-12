@@ -323,7 +323,11 @@ fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id:
                 frame["model"] = serde_json::Value::String(m.clone());
             }
             if !images.is_empty() {
-                frame["images"] = serde_json::json!(images);
+                // The engine parses `images` as `[{ url, detail? }]` objects
+                // (UserImage) and fail-soft DROPS anything else — bare data-URL
+                // strings were silently discarded, so the model never saw the
+                // attachment. Wrap each in `{ "url": … }`.
+                frame["images"] = serde_json::Value::Array(images.iter().map(|u| serde_json::json!({ "url": u })).collect());
             }
             Some(frame)
         }
@@ -1568,7 +1572,9 @@ mod canonical_protocol_tests {
             images: vec!["data:image/png;base64,AAAA".into()],
         };
         let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
-        assert_eq!(frame["images"][0], "data:image/png;base64,AAAA");
+        // Engine UserImage shape: `{ url }` objects, not bare strings (bare
+        // strings fail-soft-drop and the model never sees the image).
+        assert_eq!(frame["images"][0]["url"], "data:image/png;base64,AAAA");
     }
 
     #[test]
