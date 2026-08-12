@@ -52,6 +52,8 @@ pub mod remember;
 pub mod reminders;
 pub mod sandbox;
 pub mod search_native;
+/// `send_file` — deliver a workspace file to the user (agent → user download).
+pub mod send_file;
 pub mod th;
 mod util;
 pub mod walk;
@@ -79,6 +81,7 @@ pub use remember::{RecallTool, RememberTool};
 #[cfg(target_os = "macos")]
 pub use reminders::RemindersTool;
 pub use sandbox::{SandboxPolicy, SandboxedCommand};
+pub use send_file::SendFileTool;
 pub use th::ThTool;
 pub use web_search::WebSearchTool;
 pub use write::{EditFileTool, WriteFileTool};

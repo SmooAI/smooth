@@ -28,6 +28,8 @@ serde_yml.workspace = true
 toml.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+# send_file: base64 the delivered file bytes into a data: URL for the directive.
+base64 = "0.22"
 tokio.workspace = true
 ignore.workspace = true
 globset.workspace = true

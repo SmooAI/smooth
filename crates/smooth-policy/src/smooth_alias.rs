@@ -13,16 +13,16 @@
 //! external deps** — every consumer crate that loads a provider registry
 //! can wire it in without pulling new transitive deps.
 //!
-//! ## Mapping table (June 2026)
+//! ## Mapping table (August 2026)
 //!
 //! | Old slot                      | Concrete model_name        |
 //! |-------------------------------|----------------------------|
-//! | `smooth-coding`               | `deepseek-v4-flash`        |
+//! | `smooth-coding`               | `gpt-5.6-luna`             |
 //! | `smooth-reasoning`            | `deepseek-v4-pro`          |
 //! | `smooth-reviewing`            | `minimax-m2.7-direct`      |
 //! | `smooth-judge`                | `groq-gpt-oss-120b`        |
 //! | `smooth-summarize`            | `gemini-2.5-flash`         |
-//! | `smooth-fast`                 | `groq-gpt-oss-20b`         |
+//! | `smooth-fast`                 | `gemini-3.5-flash`         |
 //! | `smooth-default`              | (alias of coding)          |
 //! | `smooth-planning` (deprecated)| (alias of reasoning)       |
 //! | `smooth-thinking` (deprecated)| (alias of reasoning)       |
@@ -57,7 +57,12 @@ impl SmoothSlot {
             // `default` is the wire-compat fallback served by the coding
             // route — keep it pinned to the same concrete model so the
             // two stay in sync.
-            Self::Coding | Self::Default => "deepseek-v4-flash",
+            // th-170c67: was deepseek-v4-flash. On `smooth-bench agentic`
+            // (28 scenarios x 3 trials, 2026-08-11) luna scores 89.3% to
+            // flash's 75.0%, at roughly half the cost per passing
+            // scenario — better and cheaper, so the default route follows
+            // the Settings picker's Flash slot.
+            Self::Coding | Self::Default => "gpt-5.6-luna",
             Self::Reasoning => "deepseek-v4-pro",
             Self::Reviewing => "minimax-m2.7-direct",
             // Pearl th-3468bd: judge runs once per dispatch and gates
@@ -71,10 +76,17 @@ impl SmoothSlot {
             // Summarize needs the 1M context window — gemini-2.5-flash
             // stays.
             Self::Summarize => "gemini-2.5-flash",
-            // Fast is utility (titles, autocomplete) — sub-300ms first
-            // token and cheap. (Replaces the deprecated groq-llama-3.1-8b
-            // alias removed at the gateway.)
-            Self::Fast => "groq-gpt-oss-20b",
+            // Fast is utility (titles, autocomplete) — cheap, and it has
+            // to actually be fast.
+            //
+            // th-170c67: was groq-gpt-oss-20b, retired. It was chosen for
+            // Groq's reputation for speed and never measured; when it
+            // finally was, it scored 17.9% (a quarter of the next-worst
+            // model), breached safety in 5 trials, and was the SLOWEST
+            // model in the lineup by 3.5x — 67s/scenario against
+            // gemini-3.5-flash's 15s. The slot named Fast was the slowest
+            // thing we shipped.
+            Self::Fast => "gemini-3.5-flash",
         }
     }
 
@@ -171,7 +183,11 @@ fn migrate_deprecated_concrete(lower: &str) -> Option<&'static str> {
         // Judge slot — the removed 70B Llama → gpt-oss-120B.
         "groq-llama-3.3-70b" => Some("groq-gpt-oss-120b"),
         // Fast slot — the removed 8B Llama → gpt-oss-20B.
-        "groq-llama-3.1-8b" => Some("groq-gpt-oss-20b"),
+        // th-170c67: retargeted from groq-gpt-oss-20b, which is no longer
+        // routed anywhere — it scored 17.9% and was the slowest model
+        // measured. A legacy config should land on the CURRENT fast
+        // default, not on a model we just stopped shipping.
+        "groq-llama-3.1-8b" => Some("gemini-3.5-flash"),
         _ => None,
     }
 }
@@ -215,13 +231,13 @@ mod tests {
 
     #[test]
     fn exact_slot_aliases_map_to_concrete_defaults() {
-        assert_eq!(migrate_alias("smooth-coding"), Some("deepseek-v4-flash"));
+        assert_eq!(migrate_alias("smooth-coding"), Some("gpt-5.6-luna"));
         assert_eq!(migrate_alias("smooth-reasoning"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reviewing"), Some("minimax-m2.7-direct"));
         assert_eq!(migrate_alias("smooth-judge"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-summarize"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast"), Some("groq-gpt-oss-20b"));
-        assert_eq!(migrate_alias("smooth-default"), Some("deepseek-v4-flash"));
+        assert_eq!(migrate_alias("smooth-fast"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("smooth-default"), Some("gpt-5.6-luna"));
     }
 
     #[test]
@@ -233,19 +249,19 @@ mod tests {
 
     #[test]
     fn sub_aliases_map_to_slot_concrete_default() {
-        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("groq-gpt-oss-20b"));
-        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("groq-gpt-oss-20b"));
-        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("groq-gpt-oss-20b"));
+        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("gemini-3.5-flash"));
         assert_eq!(migrate_alias("smooth-judge-gemini"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-judge-haiku"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-judge-gpt"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-summarize-gemini"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-gpt"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-qwen"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-coding-qwen"), Some("deepseek-v4-flash"));
-        assert_eq!(migrate_alias("smooth-coding-glm"), Some("deepseek-v4-flash"));
-        assert_eq!(migrate_alias("smooth-coding-kimi"), Some("deepseek-v4-flash"));
-        assert_eq!(migrate_alias("smooth-coding-minimax"), Some("deepseek-v4-flash"));
+        assert_eq!(migrate_alias("smooth-coding-qwen"), Some("gpt-5.6-luna"));
+        assert_eq!(migrate_alias("smooth-coding-glm"), Some("gpt-5.6-luna"));
+        assert_eq!(migrate_alias("smooth-coding-kimi"), Some("gpt-5.6-luna"));
+        assert_eq!(migrate_alias("smooth-coding-minimax"), Some("gpt-5.6-luna"));
         assert_eq!(migrate_alias("smooth-reasoning-kimi"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reasoning-deepseek"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reasoning-qwen"), Some("deepseek-v4-pro"));
@@ -254,13 +270,13 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_concrete_groq_models_migrate_to_gpt_oss() {
+    fn deprecated_concrete_groq_models_migrate_to_current_defaults() {
         // SMOODEV-2097: the gateway removed the Groq Llama models that
         // earlier migrations had already pinned configs onto. A config
         // holding the literal dead name (no `smooth-` prefix) must still
         // get bumped to the live gpt-oss alias.
         assert_eq!(migrate_alias("groq-llama-3.3-70b"), Some("groq-gpt-oss-120b"));
-        assert_eq!(migrate_alias("groq-llama-3.1-8b"), Some("groq-gpt-oss-20b"));
+        assert_eq!(migrate_alias("groq-llama-3.1-8b"), Some("gemini-3.5-flash"));
         // Case-insensitive, matching the rest of the lookup.
         assert_eq!(migrate_alias("GROQ-LLAMA-3.3-70B"), Some("groq-gpt-oss-120b"));
         // The live gpt-oss names are not themselves deprecated.
@@ -293,7 +309,7 @@ mod tests {
     fn migrate_in_place_rewrites_only_legacy_aliases() {
         let mut s = "smooth-coding".to_string();
         assert!(migrate_in_place(&mut s));
-        assert_eq!(s, "deepseek-v4-flash");
+        assert_eq!(s, "gpt-5.6-luna");
 
         let mut s = "deepseek-v4-flash".to_string();
         assert!(!migrate_in_place(&mut s));
@@ -316,7 +332,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_prefix_match() {
-        assert_eq!(migrate_alias("SMOOTH-CODING"), Some("deepseek-v4-flash"));
+        assert_eq!(migrate_alias("SMOOTH-CODING"), Some("gpt-5.6-luna"));
         assert_eq!(migrate_alias("Smooth-Reasoning"), Some("deepseek-v4-pro"));
     }
 

@@ -242,13 +242,13 @@ mod tests {
         // 7 slots (coding, reasoning, reviewing, judge, summarize,
         // default, fast) — all start out as legacy aliases.
         assert_eq!(rewrites.len(), 7, "rewrites = {rewrites:?}");
-        assert_eq!(r.routing.coding.model, "deepseek-v4-flash");
+        assert_eq!(r.routing.coding.model, "gpt-5.6-luna");
         assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(r.routing.reviewing.model, "minimax-m2.7-direct");
         assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
         assert_eq!(r.routing.summarize.model, "gemini-2.5-flash");
-        assert_eq!(r.routing.default.model, "deepseek-v4-flash");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
+        assert_eq!(r.routing.default.model, "gpt-5.6-luna");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
             planning: None,
         });
         migrate_provider_registry(&mut r);
-        assert_eq!(r.routing.coding.model, "deepseek-v4-flash");
+        assert_eq!(r.routing.coding.model, "gpt-5.6-luna");
         assert_eq!(r.routing.coding.fallback.as_ref().unwrap().model, "deepseek-v4-pro");
     }
 
@@ -322,13 +322,13 @@ mod tests {
 
         // Load via the wrapper: should rewrite + save back.
         let loaded = load_providers_with_migration(&path).expect("load");
-        assert_eq!(loaded.routing.coding.model, "deepseek-v4-flash");
-        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
+        assert_eq!(loaded.routing.coding.model, "gpt-5.6-luna");
+        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
 
         // Read again with raw load_from_file — the file on disk must
         // now hold the concrete names too.
         let raw_reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
-        assert_eq!(raw_reloaded.routing.coding.model, "deepseek-v4-flash");
+        assert_eq!(raw_reloaded.routing.coding.model, "gpt-5.6-luna");
         assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(raw_reloaded.routing.judge.model, "groq-gpt-oss-120b");
     }
@@ -362,7 +362,7 @@ mod tests {
 
         let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         // Alias got rewritten...
-        assert_eq!(on_disk["routing"]["coding"]["model"], "deepseek-v4-flash");
+        assert_eq!(on_disk["routing"]["coding"]["model"], "gpt-5.6-luna");
         // ...and max_tokens survived.
         assert_eq!(on_disk["providers"][0]["max_tokens"], 8192);
     }
@@ -374,8 +374,8 @@ mod tests {
             "routing": { "coding": { "provider": "g", "model": "smooth-coding", "fallback": { "provider": "g", "model": "smooth-reasoning" } } }
         });
         assert!(migrate_value_in_place(&mut root));
-        assert_eq!(root["providers"][0]["default_model"], "deepseek-v4-flash");
-        assert_eq!(root["routing"]["coding"]["model"], "deepseek-v4-flash");
+        assert_eq!(root["providers"][0]["default_model"], "gpt-5.6-luna");
+        assert_eq!(root["routing"]["coding"]["model"], "gpt-5.6-luna");
         assert_eq!(root["routing"]["coding"]["fallback"]["model"], "deepseek-v4-pro");
         // Non-model field untouched.
         assert_eq!(root["providers"][0]["max_tokens"], 4096);
@@ -404,10 +404,10 @@ mod tests {
         let rewrites = migrate_provider_registry(&mut r);
         let coding = rewrites.iter().find(|r| r.slot == "coding").expect("coding rewrite");
         assert_eq!(coding.old, "smooth-coding");
-        assert_eq!(coding.new, "deepseek-v4-flash");
+        assert_eq!(coding.new, "gpt-5.6-luna");
         let fast = rewrites.iter().find(|r| r.slot == "fast").expect("fast rewrite");
         assert_eq!(fast.old, "smooth-fast");
-        assert_eq!(fast.new, "groq-gpt-oss-20b");
+        assert_eq!(fast.new, "gemini-3.5-flash");
     }
 
     /// SMOODEV-2097: a config that already ran the smooth-* migration is
@@ -415,14 +415,14 @@ mod tests {
     /// removed those models, so the second migration step must bump them
     /// to gpt-oss — even though they carry no `smooth-` prefix.
     #[test]
-    fn migrate_bumps_already_migrated_groq_llama_to_gpt_oss() {
+    fn migrate_bumps_already_migrated_groq_llama_to_current_defaults() {
         let mut r = ProviderRegistry::new().with_routing(ModelRouting {
-            coding: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            coding: ModelSlot::new("smooai-gateway", "gpt-5.6-luna"),
             reasoning: Some(ModelSlot::new("smooai-gateway", "deepseek-v4-pro")),
             reviewing: ModelSlot::new("smooai-gateway", "minimax-m2.7-direct"),
             judge: ModelSlot::new("smooai-gateway", "groq-llama-3.3-70b"),
             summarize: ModelSlot::new("smooai-gateway", "gemini-2.5-flash"),
-            default: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            default: ModelSlot::new("smooai-gateway", "gpt-5.6-luna"),
             fast: Some(ModelSlot::new("smooai-gateway", "groq-llama-3.1-8b")),
             planning: None,
         });
@@ -431,7 +431,7 @@ mod tests {
         // names.
         assert_eq!(rewrites.len(), 2, "rewrites = {rewrites:?}");
         assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
         let judge = rewrites.iter().find(|r| r.slot == "judge").expect("judge rewrite");
         assert_eq!(judge.old, "groq-llama-3.3-70b");
         assert_eq!(judge.new, "groq-gpt-oss-120b");

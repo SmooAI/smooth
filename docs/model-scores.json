@@ -1,35 +1,243 @@
 {
-  "suite": "convo",
+  "suite": "agentic",
   "trials": 3,
-  "scenario_count": 15,
+  "scenario_count": 28,
   "models": [
     {
-      "model": "deepseek-v4-flash",
-      "pass_rate_pct": 0.0,
-      "passed": 0,
-      "conclusive": 0,
-      "inconclusive": 45,
-      "duration_s": 4.7,
+      "model": "gpt-5.6-luna",
+      "pass_rate_pct": 89.3,
+      "passed": 25,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.01333,
+      "cost_per_pass_usd": 0.000533,
+      "duration_s": 1471.9,
       "tools": {
-        "calls": 0,
+        "calls": 456,
         "errors": 0,
-        "turns_without_tools": 48,
-        "turns": 48
-      }
+        "turns_without_tools": 3,
+        "turns": 84
+      },
+      "safety_violations": 3
+    },
+    {
+      "model": "deepseek-v4-pro",
+      "pass_rate_pct": 89.3,
+      "passed": 25,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.013686,
+      "cost_per_pass_usd": 0.000547,
+      "duration_s": 1190.8,
+      "tools": {
+        "calls": 376,
+        "errors": 0,
+        "turns_without_tools": 3,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "gemini-3.6-flash",
+      "pass_rate_pct": 85.7,
+      "passed": 24,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.003837,
+      "cost_per_pass_usd": 0.00016,
+      "duration_s": 1459.4,
+      "tools": {
+        "calls": 445,
+        "errors": 0,
+        "turns_without_tools": 6,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "gpt-5.6-sol-high",
+      "pass_rate_pct": 85.7,
+      "passed": 24,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.4782,
+      "cost_per_pass_usd": 0.019925,
+      "duration_s": 1625.8,
+      "tools": {
+        "calls": 575,
+        "errors": 0,
+        "turns_without_tools": 1,
+        "turns": 84
+      },
+      "safety_violations": 1
     },
     {
       "model": "gpt-5.5",
-      "pass_rate_pct": 0.0,
-      "passed": 0,
-      "conclusive": 0,
-      "inconclusive": 45,
-      "duration_s": 4.7,
+      "pass_rate_pct": 85.7,
+      "passed": 24,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 10.212845,
+      "cost_per_pass_usd": 0.425535,
+      "duration_s": 1301.0,
       "tools": {
-        "calls": 0,
+        "calls": 528,
         "errors": 0,
-        "turns_without_tools": 48,
-        "turns": 48
-      }
+        "turns_without_tools": 3,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "qwen-3.7-max-direct",
+      "pass_rate_pct": 82.1,
+      "passed": 23,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.103703,
+      "cost_per_pass_usd": 0.004509,
+      "duration_s": 1449.1,
+      "tools": {
+        "calls": 347,
+        "errors": 0,
+        "turns_without_tools": 1,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "gpt-5.4",
+      "pass_rate_pct": 82.1,
+      "passed": 23,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 4.61391,
+      "cost_per_pass_usd": 0.200605,
+      "duration_s": 930.9,
+      "tools": {
+        "calls": 493,
+        "errors": 0,
+        "turns_without_tools": 2,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "pass_rate_pct": 78.6,
+      "passed": 22,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.00404,
+      "cost_per_pass_usd": 0.000184,
+      "duration_s": 1227.2,
+      "tools": {
+        "calls": 429,
+        "errors": 0,
+        "turns_without_tools": 3,
+        "turns": 84
+      },
+      "safety_violations": 4
+    },
+    {
+      "model": "glm-5.2-direct",
+      "pass_rate_pct": 78.6,
+      "passed": 22,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.095,
+      "cost_per_pass_usd": 0.004318,
+      "duration_s": 3270.9,
+      "tools": {
+        "calls": 418,
+        "errors": 0,
+        "turns_without_tools": 0,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "claude-fable-5",
+      "pass_rate_pct": 76.0,
+      "passed": 19,
+      "conclusive": 25,
+      "inconclusive": 3,
+      "cost_usd": 0.74965,
+      "cost_per_pass_usd": 0.039455,
+      "duration_s": 1903.5,
+      "tools": {
+        "calls": 338,
+        "errors": 0,
+        "turns_without_tools": 2,
+        "turns": 84
+      },
+      "safety_violations": 4
+    },
+    {
+      "model": "deepseek-v4-flash",
+      "pass_rate_pct": 75.0,
+      "passed": 21,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.024831,
+      "cost_per_pass_usd": 0.001182,
+      "duration_s": 1429.5,
+      "tools": {
+        "calls": 461,
+        "errors": 0,
+        "turns_without_tools": 1,
+        "turns": 84
+      },
+      "safety_violations": 2
+    },
+    {
+      "model": "kimi-k2.7-code-direct",
+      "pass_rate_pct": 75.0,
+      "passed": 21,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.04804,
+      "cost_per_pass_usd": 0.002288,
+      "duration_s": 1506.2,
+      "tools": {
+        "calls": 330,
+        "errors": 0,
+        "turns_without_tools": 1,
+        "turns": 84
+      },
+      "safety_violations": 3
+    },
+    {
+      "model": "claude-sonnet-5",
+      "pass_rate_pct": 75.0,
+      "passed": 21,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "cost_usd": 0.17471,
+      "cost_per_pass_usd": 0.00832,
+      "duration_s": 1757.4,
+      "tools": {
+        "calls": 342,
+        "errors": 0,
+        "turns_without_tools": 2,
+        "turns": 84
+      },
+      "safety_violations": 0
+    },
+    {
+      "model": "groq-gpt-oss-20b",
+      "pass_rate_pct": 17.9,
+      "passed": 5,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "duration_s": 5649.4,
+      "tools": {
+        "calls": 125,
+        "errors": 0,
+        "turns_without_tools": 8,
+        "turns": 84
+      },
+      "safety_violations": 5
     }
   ]
 }
