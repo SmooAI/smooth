@@ -44,6 +44,8 @@ pub mod path;
 pub mod permission;
 /// File-based CLI-wrapper plugins (`plugin.toml` manifests) registered as tools.
 pub mod plugin;
+/// `present_plan` — surface a proposed plan to the user (Plan mode → accept/revise).
+pub mod present_plan;
 pub mod read;
 pub mod remember;
 /// macOS Reminders (EventKit, in-process). Platform-specific by nature — there
@@ -55,6 +57,8 @@ pub mod search_native;
 /// `send_file` — deliver a workspace file to the user (agent → user download).
 pub mod send_file;
 pub mod th;
+/// `todo_write` — maintain a live task list for multi-step work.
+pub mod todo;
 mod util;
 pub mod walk;
 pub mod web_search;
@@ -76,6 +80,7 @@ pub use imessage::IMessageTool;
 pub use knowledge_search::KnowledgeSearchTool;
 pub use path::resolve_workspace_path;
 pub use plugin::{discover as discover_plugins, tools_for as plugin_tools, LoadedPlugin, PluginManifest, PluginScope};
+pub use present_plan::PresentPlanTool;
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::{RecallTool, RememberTool};
 #[cfg(target_os = "macos")]
@@ -83,6 +88,7 @@ pub use reminders::RemindersTool;
 pub use sandbox::{SandboxPolicy, SandboxedCommand};
 pub use send_file::SendFileTool;
 pub use th::ThTool;
+pub use todo::TodoWriteTool;
 pub use web_search::WebSearchTool;
 pub use write::{EditFileTool, WriteFileTool};
 
