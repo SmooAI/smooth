@@ -27,6 +27,9 @@ import {
     BarChart3,
     Settings,
     MessagesSquare,
+    ClipboardList,
+    Zap,
+    ListChecks,
 } from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
@@ -43,6 +46,8 @@ import {
     type Approval,
     type Status,
     type ConversationSummary,
+    type SessionMode,
+    type TodoItem,
 } from './operator';
 import SettingsPage from './SettingsPage';
 import { SmooSignIn } from './SmooSignIn';
@@ -195,8 +200,14 @@ export default function App() {
         resumeConversation,
         newConversation,
         renameConversation,
+        sessionMode,
+        setSessionMode,
+        todos,
     } = useOperator();
     const push = usePush();
+    // A handle the plan card's "Revise" uses to focus the composer; the Composer
+    // registers its textarea-focus fn here on mount.
+    const composerFocus = useRef<(() => void) | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     // Top-level surface: the chat, or the Stats / Settings tabs. No router — the
     // app has exactly these three views, so a state switch is lighter than one.
@@ -236,6 +247,35 @@ export default function App() {
         },
         [mode.id, setMode],
     );
+
+    const toggleSessionMode = () => void setSessionMode(sessionMode === 'plan' ? 'auto' : 'plan');
+    // Accept a presented plan: switch to Auto (awaited so the server has it
+    // before the turn runs), then send a normal turn to execute.
+    const acceptPlan = async () => {
+        await setSessionMode('auto');
+        sendMessage('Proceed with the plan.');
+    };
+    // Revise: keep Plan mode; the user's next message is a normal turn — just
+    // put the cursor back in the composer.
+    const revisePlan = () => composerFocus.current?.();
+
+    // ⇧⌥ (Shift+Alt) toggles Plan/Auto — a modifier-only chord, so it fires when
+    // the second of the two modifiers goes down. ponytail: this collides with
+    // starting an Option+Shift+<char> combo on macOS (rare in chat); the spec
+    // asked for exactly this chord. Chat view only.
+    useEffect(() => {
+        if (view !== 'chat') return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.repeat) return;
+            if (e.shiftKey && e.altKey && (e.key === 'Alt' || e.key === 'Shift')) {
+                e.preventDefault();
+                toggleSessionMode();
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [view, sessionMode]);
 
     return (
         <>
@@ -307,8 +347,9 @@ export default function App() {
                                     />
                                     <div className="presence-rule shrink-0" />
                                     <main className="flex min-h-0 flex-1 flex-col">
+                                        <TodoPanel todos={todos} />
                                         <ApprovalDeck approvals={approvals} respond={respond} />
-                                        <Conversation messages={messages} approvals={approvals} />
+                                        <Conversation messages={messages} approvals={approvals} onAcceptPlan={acceptPlan} onRevisePlan={revisePlan} />
                                     </main>
                                 </>
                             ) : (
@@ -329,6 +370,9 @@ export default function App() {
                                 mode={mode}
                                 setMode={guardedSetMode}
                                 modelCosts={modelCosts}
+                                sessionMode={sessionMode}
+                                onToggleSessionMode={toggleSessionMode}
+                                focusRef={composerFocus}
                             />
                         </>
                     )}
@@ -643,7 +687,99 @@ function ApprovalDeck({ approvals, respond }: { approvals: Approval[]; respond: 
     );
 }
 
-function Conversation({ messages, approvals }: { messages: ChatMessage[]; approvals: Approval[] }) {
+// The plan the agent presents in PLAN mode (the `present_plan` directive). It
+// borrows the ApprovalDeck's "needs you" treatment — this is the other moment he
+// waits on you. Accept flips to Auto + sends "Proceed"; Revise keeps Plan and
+// hands the composer back so the next message refines it.
+function PlanCard({ plan, onAccept, onRevise }: { plan: string; onAccept: () => void; onRevise: () => void }) {
+    return (
+        <div className="needs-you rounded-2xl bg-panel/90 p-4 backdrop-blur">
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-amber">
+                <span className="grid size-5 place-items-center rounded-full bg-amber/15">
+                    <ClipboardList size={13} />
+                </span>
+                Plan ready — review before he runs it
+            </div>
+            <div className="prose-msg mb-3 max-h-80 overflow-y-auto text-[0.92rem] leading-relaxed text-foreground/95">
+                <Markdown remarkPlugins={[remarkGfm]}>{plan}</Markdown>
+            </div>
+            <div className="flex gap-2">
+                <button
+                    onClick={onAccept}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-coral px-4 py-1.5 text-sm font-semibold text-(--color-coral-ink) transition hover:brightness-110"
+                >
+                    <Check size={15} /> Accept &amp; proceed
+                </button>
+                <button
+                    onClick={onRevise}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-sm font-medium text-foreground/80 transition hover:bg-panel-2"
+                >
+                    <Pencil size={15} /> Revise
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// The agent's live checklist (the `todos` directive) — a lightweight panel that
+// sits above the transcript and is replaced wholesale each turn.
+const TODO_GLYPH: Record<TodoItem['status'], string> = { completed: '✔', in_progress: '▶', pending: '○' };
+function TodoPanel({ todos }: { todos: TodoItem[] }) {
+    if (!todos.length) return null;
+    const done = todos.filter((t) => t.status === 'completed').length;
+    return (
+        <div className="mt-3 rounded-2xl border border-border bg-panel/70 p-3 backdrop-blur">
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-wide text-(--color-muted-foreground) uppercase">
+                <ListChecks size={13} className="text-(--color-th-teal)" /> Plan · {done}/{todos.length}
+            </div>
+            <ul className="space-y-1">
+                {todos.map((t, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm">
+                        <span
+                            aria-hidden
+                            className={`shrink-0 ${t.status === 'completed' ? 'text-coral' : t.status === 'in_progress' ? 'text-(--color-th-teal)' : 'text-(--color-muted-foreground)'}`}
+                        >
+                            {TODO_GLYPH[t.status]}
+                        </span>
+                        <span className={t.status === 'completed' ? 'text-foreground/60 line-through' : 'text-foreground/90'}>{t.text}</span>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+}
+
+// The Plan/Auto chip in the composer. Amber in Plan (he's read-only, waiting to
+// be turned loose); neutral in Auto (he executes). ⇧⌥ toggles it too.
+function ModeChip({ mode, onToggle }: { mode: SessionMode; onToggle: () => void }) {
+    const plan = mode === 'plan';
+    return (
+        <button
+            type="button"
+            onClick={onToggle}
+            aria-pressed={plan}
+            title="Plan / Auto  (⇧⌥ to toggle)"
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition ${
+                plan ? 'border-amber/50 bg-amber/10 text-amber' : 'border-border bg-panel-2 text-foreground/70 hover:text-foreground'
+            }`}
+        >
+            {plan ? <ClipboardList size={13} /> : <Zap size={13} />}
+            {plan ? 'Plan' : 'Auto'}
+        </button>
+    );
+}
+
+function Conversation({
+    messages,
+    approvals,
+    onAcceptPlan,
+    onRevisePlan,
+}: {
+    messages: ChatMessage[];
+    approvals: Approval[];
+    onAcceptPlan: () => void;
+    onRevisePlan: () => void;
+}) {
     const ref = useRef<HTMLDivElement>(null);
     // Tools whose name has a pending approval are parked, not running.
     const awaiting = new Set(approvals.map((a) => a.tool));
@@ -654,13 +790,23 @@ function Conversation({ messages, approvals }: { messages: ChatMessage[]; approv
     return (
         <div ref={ref} className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2">
             {messages.map((m) => (
-                <MessageRow key={m.id} m={m} awaiting={awaiting} />
+                <MessageRow key={m.id} m={m} awaiting={awaiting} onAcceptPlan={onAcceptPlan} onRevisePlan={onRevisePlan} />
             ))}
         </div>
     );
 }
 
-function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) {
+function MessageRow({
+    m,
+    awaiting,
+    onAcceptPlan,
+    onRevisePlan,
+}: {
+    m: ChatMessage;
+    awaiting: Set<string>;
+    onAcceptPlan: () => void;
+    onRevisePlan: () => void;
+}) {
     if (m.role === 'system') {
         return <div className="rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-sm text-amber/90">{m.content}</div>;
     }
@@ -707,6 +853,7 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
                     ) : null,
                 )}
                 {m.streaming && m.blocks.length === 0 && <span className="caret text-(--color-muted-foreground)" />}
+                {m.plan && <PlanCard plan={m.plan} onAccept={onAcceptPlan} onRevise={onRevisePlan} />}
                 {m.deliveredFiles && m.deliveredFiles.length > 0 && (
                     <div className="flex flex-wrap gap-2 pt-1">
                         {m.deliveredFiles.map((f, i) => (
@@ -866,6 +1013,9 @@ function Composer({
     mode,
     setMode,
     modelCosts,
+    sessionMode,
+    onToggleSessionMode,
+    focusRef,
 }: {
     onSend: (t: string, attachments: Attachment[]) => void;
     disabled: boolean;
@@ -876,6 +1026,12 @@ function Composer({
     mode: SmoothMode;
     setMode: (id: string) => void;
     modelCosts: ModelCosts;
+    /** The active conversation's Plan/Auto execution mode. */
+    sessionMode: SessionMode;
+    /** Flip Plan⇄Auto for the active conversation. */
+    onToggleSessionMode: () => void;
+    /** App registers a composer-focus fn here (the plan card's Revise uses it). */
+    focusRef: React.MutableRefObject<(() => void) | null>;
 }) {
     const [text, setText] = useState('');
     const [caret, setCaret] = useState(0);
@@ -885,6 +1041,14 @@ function Composer({
     const [dragging, setDragging] = useState(false);
     const taRef = useRef<HTMLTextAreaElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
+
+    // Expose "focus the composer" to App (the plan card's Revise calls it).
+    useEffect(() => {
+        focusRef.current = () => taRef.current?.focus();
+        return () => {
+            focusRef.current = null;
+        };
+    }, [focusRef]);
 
     // Auto-grow fallback for browsers without CSS `field-sizing` (Firefox).
     // Where it IS supported the class does the work and this never runs, so the
@@ -1145,6 +1309,14 @@ function Composer({
                     e.target.value = '';
                 }}
             />
+            {/* Plan/Auto toggle — sits above the input, alongside where the active
+                model reads out. Plan makes him read-only until you accept a plan. */}
+            <div className="mb-2 flex items-center gap-2 px-1">
+                <ModeChip mode={sessionMode} onToggle={onToggleSessionMode} />
+                <span className="text-xs text-(--color-muted-foreground)">
+                    {sessionMode === 'plan' ? 'planning — he proposes, you approve' : 'auto — he executes'}
+                </span>
+            </div>
             <div
                 className={`rounded-2xl border bg-panel/70 p-2 backdrop-blur focus-within:border-(--color-th-teal)/50 ${dragging ? 'border-(--color-th-teal) bg-(--color-th-teal)/5' : 'border-border'}`}
             >
