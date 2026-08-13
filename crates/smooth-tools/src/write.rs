@@ -26,7 +26,7 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".into(),
-            description: "Create or overwrite a file in the workspace with the given content (parent dirs are created).".into(),
+            description: "Create a NEW file, or fully overwrite an existing one, with the given content (parent dirs are created). For a small change to a file that already exists, read_file then edit_file instead — write_file replaces the WHOLE file, so it's the wrong tool for a tweak. When you've written a file the user asked you to make, send_file it to hand it over.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

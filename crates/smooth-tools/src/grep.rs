@@ -38,7 +38,7 @@ impl Tool for GrepTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "grep".into(),
-            description: "Search file contents in the workspace with a regex (respects .gitignore). Returns file:line:match.".into(),
+            description: "Search file contents in the workspace with a regex (respects .gitignore) — returns file:line:match. Use this to find WHERE something is — a symbol, string, config key, or TODO — across many files, before you read or edit. To find files by NAME use list_files; to read a file you already know, use read_file.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

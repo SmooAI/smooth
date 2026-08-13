@@ -67,9 +67,10 @@ impl Tool for ArtifactTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "create_artifact".into(),
-            description: "Write a self-contained HTML report/artifact (like Claude Code Artifacts) into the workspace's .smooth-artifacts/ directory \
-                          and return its absolute path and a clickable file:// URL. The `html` must be a complete, self-contained document \
-                          (inline all CSS/JS; no external assets)."
+            description: "Write a self-contained HTML report/artifact (like Claude Code Artifacts) into the workspace's .smooth-artifacts/ directory. \
+                          Use this for something visual or shareable — a report, dashboard, or web page. The `html` must be a complete, self-contained \
+                          document (inline all CSS/JS; no external assets). This only WRITES the file onto this machine — it is NOT delivered to the user. \
+                          To hand it over, call `send_file` with the path it returns, so it arrives in their chat as a download they can open."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -104,8 +105,13 @@ impl Tool for ArtifactTool {
             .map_err(|e| anyhow::anyhow!("cannot write artifact `{rel}`: {e}"))?;
 
         let abs = path.display();
+        // The result nudges toward delivery: writing the artifact is not handing
+        // it over, and the `file://` path is on THIS machine (useless to a user on
+        // a phone/laptop). send_file is what actually delivers it.
         Ok(format!(
-            "Wrote {} bytes to artifact {filename}.\nPath: {abs}\nOpen: {}",
+            "Wrote {} bytes to artifact {filename} (on this machine only — not yet delivered to the user).\n\
+             To hand it over, call send_file with this path so it lands in their chat as a download:\n{abs}\n\
+             (Local preview only: {})",
             html.len(),
             file_url(&path)
         ))
