@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::state::{AppState, ChatRole, FocusPanel, HealthStatus, ToolStatus};
+use crate::state::{AppState, ChatRole, ExecMode, FocusPanel, HealthStatus, TodoStatus, ToolStatus};
 use crate::theme;
 
 /// Render the full TUI frame from the current application state.
@@ -62,6 +62,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_input(frame, state, regions.input);
     render_status(frame, state, regions.status);
+
+    if !state.todos.is_empty() {
+        render_todos(frame, state, area);
+    }
 
     if state.autocomplete.active && !state.autocomplete.results.is_empty() {
         render_autocomplete_popup(frame, state, regions.input, area);
@@ -638,22 +642,86 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         model_label,
         usage_segment(state.total_tokens, state.total_cost_usd),
     );
-    let status_right = "Ctrl+B chats · Ctrl+C quit ";
+    // Plan⇄Auto badge — PLAN is amber (attention: the agent is held read-only),
+    // AUTO rides the normal status color. When a plan is on the table the right
+    // chrome flips to the accept/revise affordance instead of the usual hints.
+    let (mode_style, mode_seg) = match state.exec_mode {
+        ExecMode::Plan => (
+            Style::default().fg(theme::SMOO_ORANGE).add_modifier(Modifier::BOLD),
+            format!("{} · ", ExecMode::Plan.label()),
+        ),
+        ExecMode::Auto => (theme::status_style(), format!("{} · ", ExecMode::Auto.label())),
+    };
+    let status_right = if state.pending_plan.is_some() {
+        "Enter accept · type to revise ".to_string()
+    } else {
+        format!("shift+tab {} · Ctrl+C quit ", state.exec_mode.toggled().label())
+    };
 
     // Right-align the chrome by padding the gap. Status text is ASCII plus a
     // couple of 1-column glyphs, so a char count is an accurate width here.
-    let gap = status_gap(area.width, 1, &status_left, status_right);
+    // The mode badge is part of the right-hand chrome for width purposes.
+    let gap = status_gap(area.width, 1, &status_left, &format!("{mode_seg}{status_right}"));
 
     let line = Line::from(vec![
         Span::styled(health_dot, health_style),
         Span::styled(status_left, theme::status_style()),
         Span::raw(" ".repeat(gap)),
+        Span::styled(mode_seg, mode_style),
         Span::styled(status_right, theme::muted()),
     ]);
 
     let paragraph = Paragraph::new(line).alignment(Alignment::Left);
 
     frame.render_widget(paragraph, area);
+}
+
+/// Render the live task checklist (the `todos` directive) as a small boxed
+/// panel anchored top-right. Redrawn from `state.todos` each frame, so a fresh
+/// `todos` directive that replaced the vec shows up immediately.
+///
+/// Glyphs: ✔ completed (green) · ▶ in_progress (amber) · ○ pending (muted).
+fn render_todos(frame: &mut Frame, state: &AppState, area: Rect) {
+    let width = 52u16.min(area.width.saturating_sub(2));
+    if width < 12 || area.height < 4 {
+        return; // too small to render a usable panel
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let rows = state.todos.len().min(usize::from(u16::MAX) - 3) as u16;
+    // +2 border, +1 title padding; cap to the frame.
+    let height = (rows + 2).min(area.height.saturating_sub(1)).max(3);
+
+    // Top-right anchor — out of the way of the composer at the bottom.
+    let [row] = Layout::vertical([Constraint::Length(height)]).flex(Flex::Start).areas(area);
+    let [panel] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::End).areas(row);
+
+    frame.render_widget(Clear, panel);
+    let done = state.todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    let block = Block::default()
+        .title(Span::styled(format!(" Tasks ({done}/{}) ", state.todos.len()), theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::panel_border(true));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let lines: Vec<Line<'_>> = state
+        .todos
+        .iter()
+        .map(|t| {
+            let (glyph, glyph_style, text_style) = match t.status {
+                TodoStatus::Completed => (
+                    "\u{2714}",
+                    Style::default().fg(theme::SMOO_GREEN),
+                    theme::muted().add_modifier(Modifier::CROSSED_OUT),
+                ),
+                TodoStatus::InProgress => ("\u{25b6}", Style::default().fg(theme::SMOO_ORANGE), Style::default().fg(theme::SMOO_ORANGE)),
+                TodoStatus::Pending => ("\u{25cb}", theme::muted(), theme::status_style()),
+            };
+            Line::from(vec![Span::styled(format!("{glyph} "), glyph_style), Span::styled(t.text.clone(), text_style)])
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Render the sidebar panel with the file tree.

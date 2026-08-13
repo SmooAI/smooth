@@ -198,6 +198,65 @@ pub enum Mode {
     Input,
 }
 
+/// Execution mode for the bound conversation — the Plan⇄Auto toggle.
+///
+/// Separate from [`Mode`] (which is vim-style Input/Normal focus): this is the
+/// per-conversation contract with the daemon. `Plan` = the agent is read-only
+/// (the daemon strips mutating tools server-side and proposes a plan); `Auto` =
+/// the agent executes. Flipped with shift+tab and POSTed to
+/// `/api/session/mode`. Default `Auto` mirrors the daemon's unset default.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ExecMode {
+    Plan,
+    #[default]
+    Auto,
+}
+
+impl ExecMode {
+    /// Wire value for `/api/session/mode` (`"plan"` / `"auto"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Uppercase status-bar label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Plan => "PLAN",
+            Self::Auto => "AUTO",
+        }
+    }
+
+    /// The mode shift+tab would switch to.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Plan => Self::Auto,
+            Self::Auto => Self::Plan,
+        }
+    }
+}
+
+/// Status of a single item in the `todos` directive checklist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One task in the live `todos` directive checklist rendered by `render.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    pub status: TodoStatus,
+}
+
 /// Role of a chat message sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
@@ -412,6 +471,17 @@ pub struct AppState {
     /// Conversation sidebar overlay state — lists saved sessions for
     /// resume / new-chat. Toggled with Ctrl+B.
     pub session_picker: crate::session_picker::SessionPickerState,
+    /// Plan⇄Auto execution mode for the bound conversation (shift+tab).
+    /// Kept in sync with the daemon via `POST /api/session/mode`.
+    pub exec_mode: ExecMode,
+    /// A plan the agent proposed this turn (the `present_plan` directive),
+    /// awaiting the user's accept (empty-draft Enter) or revise (typed
+    /// feedback). `None` when there's no plan on the table.
+    pub pending_plan: Option<String>,
+    /// Live task checklist from the latest `todos` directive. Replaced
+    /// wholesale each time a new `todos` directive arrives; rendered as a
+    /// boxed panel while non-empty.
+    pub todos: Vec<TodoItem>,
 }
 
 impl AppState {
@@ -459,6 +529,9 @@ impl AppState {
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
             session_picker: crate::session_picker::SessionPickerState::new(),
+            exec_mode: ExecMode::default(),
+            pending_plan: None,
+            todos: Vec::new(),
         }
     }
 
