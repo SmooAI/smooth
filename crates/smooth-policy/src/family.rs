@@ -249,7 +249,7 @@ mod tests {
         role = "teen"
 
         [roles.child]
-        allow = ["read_file", "list_files", "grep", "recall", "current_datetime"]
+        allow = ["read_file", "list_files", "grep", "recall", "get_current_datetime"]
         default = "deny"
 
         [roles.teen]
@@ -271,7 +271,7 @@ mod tests {
     fn deny_by_default_holds_for_the_child_role() {
         let cfg = FamilyConfig::from_toml(JR).unwrap();
         // Allowed: exactly the allowlist.
-        for t in ["read_file", "list_files", "grep", "recall", "current_datetime"] {
+        for t in ["read_file", "list_files", "grep", "recall", "get_current_datetime"] {
             assert!(cfg.tool_allowed("child", t), "child should keep {t}");
         }
         // Denied: everything else, especially anything that writes, shells, or egresses.

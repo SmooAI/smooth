@@ -1102,7 +1102,7 @@ Once granted, Big Smooth can read and adjust the user's real Reminders:
 
 Due dates are **absolute** — `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Natural language
 ("tomorrow 2pm") is deliberately refused: the model resolves relative dates with
-the `current_datetime` tool first, rather than a half-working parser booking
+the `get_current_datetime` tool first, rather than a half-working parser booking
 things on the wrong day. There is **no delete verb** — the reversible answer to a
 reminder the agent shouldn't have made is completing it.
 

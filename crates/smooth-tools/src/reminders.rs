@@ -62,7 +62,7 @@ impl Tool for RemindersTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "reminders".into(),
-            description: "Read AND adjust the user's real macOS Reminders — todos, tasks, shopping lists. Use it for anything about what they have to do (what's on my list, what's due, is X on there) and to change it (add a todo, mark one done). Verbs: list, add, complete. Examples: {\"verb\":\"list\"}, {\"verb\":\"list\",\"list\":\"Groceries\"}, {\"verb\":\"list\",\"status\":\"all\"}, {\"verb\":\"add\",\"title\":\"Buy milk\",\"due\":\"2026-08-05 09:00\",\"list\":\"Groceries\"}, {\"verb\":\"complete\",\"id\":\"<id-from-a-list>\"}. Due dates are absolute — \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\", no natural language (use the current_datetime tool to resolve \"tomorrow\" first). Output is JSON.".into(),
+            description: "Read AND adjust the user's real macOS Reminders — todos, tasks, shopping lists. Use it for anything about what they have to do (what's on my list, what's due, is X on there) and to change it (add a todo, mark one done). Verbs: list, add, complete. Examples: {\"verb\":\"list\"}, {\"verb\":\"list\",\"list\":\"Groceries\"}, {\"verb\":\"list\",\"status\":\"all\"}, {\"verb\":\"add\",\"title\":\"Buy milk\",\"due\":\"2026-08-05 09:00\",\"list\":\"Groceries\"}, {\"verb\":\"complete\",\"id\":\"<id-from-a-list>\"}. Due dates are absolute — \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\", no natural language (use the get_current_datetime tool to resolve \"tomorrow\" first). Output is JSON.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -227,7 +227,7 @@ fn format_due(d: Due) -> String {
 ///
 /// ponytail: deliberately NO natural-language parsing. `ical` gets "tomorrow
 /// 2pm" from a Go library we don't have here, and the model already has the
-/// `current_datetime` tool to resolve relative dates itself — one honest format
+/// `get_current_datetime` tool to resolve relative dates itself — one honest format
 /// beats a half-working date guesser that books things on the wrong day.
 fn parse_due(s: &str) -> anyhow::Result<Due> {
     use chrono::{Datelike, Timelike};
@@ -251,7 +251,7 @@ fn parse_due(s: &str) -> anyhow::Result<Due> {
         }
     }
     anyhow::bail!(
-        "`{s}` isn't a due date I can read — use \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\" (resolve relative dates with the current_datetime tool first)"
+        "`{s}` isn't a due date I can read — use \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\" (resolve relative dates with the get_current_datetime tool first)"
     )
 }
 
@@ -351,7 +351,7 @@ mod tests {
         // date at all, or worse, on a wrong day.
         for bad in ["tomorrow", "tomorrow 2pm", "friday", "next week", "08/05/2026"] {
             let err = Call::parse(&json!({"verb": "add", "title": "x", "due": bad})).unwrap_err().to_string();
-            assert!(err.contains("current_datetime"), "{bad}: {err}");
+            assert!(err.contains("get_current_datetime"), "{bad}: {err}");
         }
     }
 
