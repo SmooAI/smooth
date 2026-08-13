@@ -225,6 +225,15 @@ export default function App() {
         closeOnMobile();
     };
 
+    // Desktop (Electron): Cmd/Ctrl+N from the window starts a new chat. The main
+    // process claims the chord and forwards a `new-chat` IPC via the preload
+    // bridge; we run the same action as the sidebar's "New chat". A ref keeps the
+    // (once-only) subscription pointed at the latest handler. No-op in the browser
+    // PWA, where the bridge is absent.
+    const onNewRef = useRef(onNew);
+    onNewRef.current = onNew;
+    useEffect(() => window.bigSmooth?.onNewChat?.(() => onNewRef.current()), []);
+
     // Switching into the ❤️ `max` mode is a one-time, deliberate spend — confirm it.
     const guardedSetMode = useMemo(
         () => (id: string) => {
