@@ -10,6 +10,8 @@ import { join } from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 
+import { isNewChatChord } from './newchat.js';
+
 import { type DesktopConfig, loadConfig, saveConfig } from './config.js';
 import {
     baseUrl,
@@ -154,6 +156,18 @@ function showWindow(): void {
     win.webContents.setWindowOpenHandler(({ url }) => {
         shell.openExternal(url);
         return { action: 'deny' };
+    });
+    // Cmd+N (macOS) / Ctrl+N (Windows/Linux) → new chat (th-6ab65a). Handled at
+    // the window level rather than via an application Menu: adding a Menu would
+    // replace Electron's default one and we'd have to re-declare the standard
+    // Edit roles or lose copy/paste. `before-input-event` claims the chord before
+    // the page sees it and forwards it to the SPA, which starts a fresh
+    // conversation (the same action as the sidebar's "New chat").
+    win.webContents.on('before-input-event', (event, input) => {
+        if (isNewChatChord(input)) {
+            event.preventDefault();
+            win?.webContents.send('new-chat');
+        }
     });
 }
 
