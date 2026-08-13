@@ -194,7 +194,7 @@ role = "child"
 display_name = "Alex"
 
 [roles.child]
-allow = ["read_file", "list_files", "grep", "recall", "current_datetime"]
+allow = ["read_file", "list_files", "grep", "recall", "get_current_datetime"]
 default = "deny"   # everything else — bash, writes, web, th, MCP, delegation — is dropped
 ```
 

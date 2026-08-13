@@ -1,4 +1,4 @@
-//! `current_datetime` — the agent's clock (pearl th-4c6271).
+//! `get_current_datetime` — the agent's clock (pearl th-4c6271).
 //!
 //! Big Smooth had no clock, so it hallucinated "today" from whatever date its
 //! training data suggested (observed: "Fri May 22", "December 19, 2024"). This
@@ -7,20 +7,27 @@
 //!
 //! Cross-platform by construction — `chrono::Local` and `iana_time_zone` both
 //! handle macOS/Linux/Windows, so there is no `#[cfg]` here.
+//!
+//! The `get_` prefix is load-bearing, not cosmetic: the engine's permission
+//! classifier (`smooth_operator::permission::tool_category`) buckets a tool by
+//! its *name*, and `get_*` / `read_*` / `list_*` are the read-only-safe
+//! prefixes it auto-allows. The bare name `current_datetime` fell into the
+//! `Unknown` bucket, so `AcceptEdits` prompted the user for every clock read
+//! (pearl th-a78e1e). Don't rename it back to `current_datetime`.
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use serde_json::{json, Value};
 use smooth_operator::{Tool, ToolSchema};
 
-/// `current_datetime` — what time is it, right now, on this machine.
+/// `get_current_datetime` — what time is it, right now, on this machine.
 pub struct CurrentDatetimeTool;
 
 #[async_trait]
 impl Tool for CurrentDatetimeTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "current_datetime".into(),
+            name: "get_current_datetime".into(),
             description: "Get the CURRENT date and time (local, UTC, ISO-8601, weekday, IANA timezone). You have no internal clock, so call this before answering anything that depends on \"now\" — today's date, the day of the week, how long ago something was, scheduling, or dating a document. Takes no arguments."
                 .into(),
             parameters: json!({ "type": "object", "properties": {}, "required": [] }),
@@ -95,9 +102,24 @@ mod tests {
     #[test]
     fn schema_takes_no_arguments() {
         let s = CurrentDatetimeTool.schema();
-        assert_eq!(s.name, "current_datetime");
+        assert_eq!(s.name, "get_current_datetime");
         assert_eq!(s.parameters["required"].as_array().unwrap().len(), 0);
         assert!(CurrentDatetimeTool.is_concurrent_safe());
+    }
+
+    /// The reason the tool is named `get_*` (pearl th-a78e1e): the engine's
+    /// permission classifier must treat it as a read-only-safe tool so the
+    /// daemon's `AcceptEdits` mode auto-allows it instead of prompting the user.
+    /// If this fails, the clock tool is prompting on every call again — either
+    /// the name lost its `get_` prefix or the engine heuristic moved.
+    #[test]
+    fn tool_name_is_classified_safe_and_auto_allowed() {
+        use smooth_operator::permission::{decide, AutoMode, Verdict};
+        let name = CurrentDatetimeTool.schema().name;
+        assert!(
+            matches!(decide(AutoMode::AcceptEdits, &name, &json!({})), Verdict::Allow),
+            "{name} must be auto-allowed under AcceptEdits — it is a pure, argument-free read"
+        );
     }
 
     #[tokio::test]

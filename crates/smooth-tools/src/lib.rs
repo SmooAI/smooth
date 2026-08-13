@@ -160,7 +160,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
-            "current_datetime",
+            "get_current_datetime",
             "create_artifact",
             "bash",
         ] {
@@ -183,7 +183,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
-            "current_datetime",
+            "get_current_datetime",
             "create_artifact",
             "bash",
         ] {
