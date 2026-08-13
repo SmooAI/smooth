@@ -82,32 +82,12 @@ jobs:
             - name: Install uv
               run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
-            # A missing gateway key does NOT look like a missing gateway key:
-            # every engine boots fine, then scores 0% with zero tool calls, and
-            # the baseline check reports five simultaneous REGRESSIONs. That
-            # sent two separate investigations after engine bugs that did not
-            # exist (th-e73f0d). Two seconds of curl buys an unambiguous error.
-            - name: Preflight — the gateway key must exist and work
-              env:
-                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
-              run: |
-                  if [ -z "$SMOOAI_GATEWAY_KEY" ]; then
-                      echo "::error::SMOOAI_GATEWAY_API_KEY is unset. Every engine will score 0% with no tool calls and the baseline check will report five false regressions. Add the secret to SmooAI/smooth (or the SmooAI org) before this gate can mean anything."
-                      exit 1
-                  fi
-                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
-                      -H "Authorization: Bearer $SMOOAI_GATEWAY_KEY")
-                  if [ "$code" != "200" ]; then
-                      echo "::error::llm.smoo.ai rejected SMOOAI_GATEWAY_API_KEY (HTTP $code). The key is set but not usable — rotate it rather than reading the engine scores as real."
-                      exit 1
-                  fi
-                  echo "gateway key accepted (HTTP 200)"
-
             # The rust engine's LocalServer IS the daemon, spawned as bare
             # `th daemon` (see Engine::boot_command). Nothing else in this job
             # builds it, so without this the rust row is `No such file or
             # directory` — an empty log and a 0% board that reads exactly like
-            # a broken engine.
+            # a broken engine. It is built BEFORE the credential step because
+            # that step resolves the gateway key through `th config`.
             - name: Build th (the rust engine boots via `th daemon`)
               working-directory: smooth
               run: |
@@ -117,12 +97,51 @@ jobs:
             - name: Verify th is on PATH
               run: th --version
 
+            # The gateway key comes from `@smooai/config`, not from a copied
+            # GitHub secret — the same rule the rest of the monorepo follows.
+            # CI holds ONE bootstrap credential (the M2M pair) and reads every
+            # value through it, so rotating the gateway key never touches CI.
+            #
+            # This runs early and fails loudly on purpose. A missing key does
+            # NOT look like a missing key: every engine boots fine, scores 0%
+            # with zero tool calls, and the baseline check reports five
+            # simultaneous REGRESSIONs. That sent two separate investigations
+            # after engine bugs that did not exist (th-e73f0d).
+            - name: Resolve the gateway key from @smooai/config
+              env:
+                  SMOOAI_CLIENT_ID: ${{ secrets.SMOOAI_CLIENT_ID }}
+                  SMOOAI_CLIENT_SECRET: ${{ secrets.SMOOAI_CLIENT_SECRET }}
+              run: |
+                  if [ -z "$SMOOAI_CLIENT_ID" ] || [ -z "$SMOOAI_CLIENT_SECRET" ]; then
+                      echo "::error::SMOOAI_CLIENT_ID / SMOOAI_CLIENT_SECRET are unset. They are the ONE bootstrap credential this job needs; every other value (including the gateway key) is read from @smooai/config through them. Mint an M2M pair in Org Settings → API Keys and add both to SmooAI/smooth."
+                      exit 1
+                  fi
+                  th auth login --m2m >/dev/null 2>&1 || {
+                      echo "::error::th auth login --m2m failed. The M2M pair is set but auth.smoo.ai rejected it — rotate it."
+                      exit 1
+                  }
+                  key=$(th config get smooaiLlmKey --environment=production --m2m 2>/dev/null || true)
+                  if [ -z "$key" ]; then
+                      echo "::error::@smooai/config returned no value for smooaiLlmKey in production. Without it every engine scores 0% and the baseline check reports five false regressions."
+                      exit 1
+                  fi
+                  # Mask before anything can echo it — including a later failure.
+                  echo "::add-mask::$key"
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
+                      -H "Authorization: Bearer $key")
+                  if [ "$code" != "200" ]; then
+                      echo "::error::llm.smoo.ai rejected smooaiLlmKey (HTTP $code). The key resolved but is not usable — rotate it rather than reading the engine scores as real."
+                      exit 1
+                  fi
+                  echo "SMOOAI_GATEWAY_KEY=$key" >> "$GITHUB_ENV"
+                  echo "gateway key resolved from @smooai/config and accepted (HTTP 200)"
+
             - name: Run the agentic suite per engine
               id: run
               continue-on-error: true
               working-directory: smooth
               env:
-                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+                  # SMOOAI_GATEWAY_KEY comes from the config step above, via $GITHUB_ENV.
                   SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
               run: |
                   mkdir -p boards
