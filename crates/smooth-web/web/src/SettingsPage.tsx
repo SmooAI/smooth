@@ -21,6 +21,9 @@ interface RemoteDaemon {
 interface BigSmoothBridge {
     listDaemons: () => Promise<{ current: string | null; daemons: RemoteDaemon[] }>;
     connectTo: (url: string | null) => Promise<void>;
+    /** Cmd/Ctrl+N from the desktop window → new chat. Returns an unsubscribe fn.
+     * Absent in the browser PWA (Electron-only). */
+    onNewChat?: (cb: () => void) => () => void;
 }
 declare global {
     interface Window {
