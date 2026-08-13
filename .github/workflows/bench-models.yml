@@ -24,7 +24,7 @@ on:
             models:
                 description: 'Space-separated models to score'
                 required: false
-                default: 'deepseek-v4-flash gpt-5.5'
+                default: 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5'
             trials:
                 description: 'Trials per scenario (1 is an anecdote, not a rate)'
                 required: false
@@ -50,11 +50,31 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
 
+            # Without this, a missing key publishes a leaderboard where every
+            # model scores 0% with zero tool calls — which reads as "these
+            # models are broken" rather than "CI has no credentials". The
+            # committed docs/model-scores.json carried exactly that for weeks.
+            - name: Preflight — the gateway key must exist and work
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+              run: |
+                  if [ -z "$SMOOAI_GATEWAY_KEY" ]; then
+                      echo "::error::SMOOAI_GATEWAY_API_KEY is unset. Every model would score 0% with no tool calls. Add the secret to SmooAI/smooth (or the SmooAI org) before scoring."
+                      exit 1
+                  fi
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
+                      -H "Authorization: Bearer $SMOOAI_GATEWAY_KEY")
+                  if [ "$code" != "200" ]; then
+                      echo "::error::llm.smoo.ai rejected SMOOAI_GATEWAY_API_KEY (HTTP $code). Rotate the key; do not read the scores as real."
+                      exit 1
+                  fi
+                  echo "gateway key accepted (HTTP 200)"
+
             - name: Score the models
               env:
                   SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
                   SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
-                  MODELS: ${{ inputs.models || 'deepseek-v4-flash gpt-5.5' }}
+                  MODELS: ${{ inputs.models || 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5' }}
                   TRIALS: ${{ inputs.trials || '3' }}
               run: |
                   args=()

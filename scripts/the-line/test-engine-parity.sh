@@ -50,10 +50,21 @@ out=$(bash "$check" "$work/boards" "$work/baseline.json"); rc=$?
 [[ "$out" == *"not as passing"* ]] && ok || no "a missing board must be called out explicitly"
 
 # An all-INCONCLUSIVE board (no models) counts as 0, not as absent data.
-printf '{"suite":"agentic","trials":1,"scenario_count":2,"models":[]}\n' >"$work/boards/board-ts.json"
-board rust 0.0
+# ts scores here so this exercises the single-engine regression path rather
+# than the all-zero systemic one below.
+printf '{"suite":"agentic","trials":1,"scenario_count":2,"models":[]}\n' >"$work/boards/board-rust.json"
+board ts 90.0
 out=$(bash "$check" "$work/boards" "$work/baseline.json"); rc=$?
 [[ $rc -eq 1 ]] && ok || no "a crashing rust engine must regress (rc=$rc)"
+[[ "$out" != *"harness or credential fault"* ]] && ok || no "one dead engine is a regression, not a systemic fault"
+
+# Every engine at zero is one shared cause, not N regressions. Five engines in
+# five languages do not break on the same night — an absent gateway key does.
+board rust 0.0; board ts 0.0
+out=$(bash "$check" "$work/boards" "$work/baseline.json"); rc=$?
+[[ $rc -eq 1 ]] && ok || no "an all-zero board must still fail (rc=$rc)"
+[[ "$out" == *"harness or credential fault"* ]] && ok || no "an all-zero board must name the shared cause"
+[[ "$out" == *"SMOOAI_GATEWAY_API_KEY"* ]] && ok || no "an all-zero board must point at the key to check first"
 
 # Bad inputs are errors, not silent passes.
 bash "$check" "$work/nope" "$work/baseline.json" >/dev/null 2>&1 && no "missing dir should fail" || ok
