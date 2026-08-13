@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.34.2"
+version = "0.35.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/SmooAI/smooth"
@@ -230,19 +230,19 @@ smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git"
 smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "c893323", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
-smooth-cast = { version = "0.34.2", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
-smooth-policy = { path = "crates/smooth-policy", version = "0.34.2", package = "smooai-smooth-policy" }
-smooth-web = { version = "0.34.2", path = "crates/smooth-web", package = "smooai-smooth-web" }
-smooth-code = { version = "0.34.2", path = "crates/smooth-code", package = "smooai-smooth-code" }
-smooth-pearls = { path = "crates/smooth-pearls", version = "0.34.2", package = "smooai-smooth-pearls" }
-smooth-diver = { version = "0.34.2", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
-smooth-tmux = { version = "0.34.2", path = "crates/smooth-tmux", package = "smooai-smooth-tmux" }
-smooth-api-client = { version = "0.34.2", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
+smooth-cast = { version = "0.35.0", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
+smooth-policy = { path = "crates/smooth-policy", version = "0.35.0", package = "smooai-smooth-policy" }
+smooth-web = { version = "0.35.0", path = "crates/smooth-web", package = "smooai-smooth-web" }
+smooth-code = { version = "0.35.0", path = "crates/smooth-code", package = "smooai-smooth-code" }
+smooth-pearls = { path = "crates/smooth-pearls", version = "0.35.0", package = "smooai-smooth-pearls" }
+smooth-diver = { version = "0.35.0", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
+smooth-tmux = { version = "0.35.0", path = "crates/smooth-tmux", package = "smooai-smooth-tmux" }
+smooth-api-client = { version = "0.35.0", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
 # Chat-first Big Smooth daemon on the smooth-operator LocalServer engine (th-7225f9).
-smooth-daemon = { version = "0.34.2", path = "crates/smooth-daemon", package = "smooai-smooth-daemon" }
-smooth-tools = { version = "0.34.2", path = "crates/smooth-tools", package = "smooai-smooth-tools" }
-smooth-goalie = { version = "0.34.2", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
-smooth-menubar = { version = "0.34.2", path = "crates/smooth-menubar", package = "smooai-smooth-menubar" }
+smooth-daemon = { version = "0.35.0", path = "crates/smooth-daemon", package = "smooai-smooth-daemon" }
+smooth-tools = { version = "0.35.0", path = "crates/smooth-tools", package = "smooai-smooth-tools" }
+smooth-goalie = { version = "0.35.0", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
+smooth-menubar = { version = "0.35.0", path = "crates/smooth-menubar", package = "smooai-smooth-menubar" }
 # Cross-runtime client shared library (github.com/SmooAI/client-shared).
 # SMOODEV-1464: switched from a local `path = "../client-shared/rust"` dep to
 # a rev-pinned git dep. The path form only resolved on a dev laptop, so every
