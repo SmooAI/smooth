@@ -10,4 +10,12 @@ contextBridge.exposeInMainWorld('bigSmooth', {
     listDaemons: (): Promise<unknown> => ipcRenderer.invoke('daemons:list'),
     /** Switch target and relaunch. `null` ⇒ This Mac (local). */
     connectTo: (url: string | null): Promise<void> => ipcRenderer.invoke('daemons:connect', url),
+    /** Cmd/Ctrl+N from the window → start a new chat. The main process claims the
+     * chord and forwards a `new-chat` IPC; the SPA runs its "New chat" action.
+     * Returns an unsubscribe fn so the renderer can detach on unmount. */
+    onNewChat: (cb: () => void): (() => void) => {
+        const handler = (): void => cb();
+        ipcRenderer.on('new-chat', handler);
+        return () => ipcRenderer.removeListener('new-chat', handler);
+    },
 });
