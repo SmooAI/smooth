@@ -28,6 +28,8 @@ command -v jq >/dev/null 2>&1 || { echo "check-engine-parity: jq not found" >&2;
 regressions=0
 improvements=0
 missing=0
+zeroes=0
+engines=0
 
 printf '%-8s %8s %8s   %s\n' engine actual baseline status
 for engine in $(jq -r '.engines | keys[]' "$baseline"); do
@@ -53,6 +55,8 @@ for engine in $(jq -r '.engines | keys[]' "$baseline"); do
     printf '%-8s %7s%% %7s%%   %s\n' "$engine" "$got" "$want" "$verdict"
     [[ "$verdict" == "REGRESSION" ]] && regressions=$((regressions + 1))
     [[ "$verdict" == "IMPROVED"   ]] && improvements=$((improvements + 1))
+    awk -v g="$got" 'BEGIN { exit !(g + 0 == 0) }' && zeroes=$((zeroes + 1))
+    engines=$((engines + 1))
 done
 
 echo
@@ -61,6 +65,17 @@ if [[ "$improvements" -gt 0 ]]; then
 fi
 if [[ "$missing" -gt 0 ]]; then
     echo "$missing engine(s) produced no scoreboard; treated as not-run, not as passing."
+fi
+# EVERY engine at a flat zero is not an engine finding. Five independent
+# implementations do not break on the same night; one shared input did —
+# usually an absent SMOOAI_GATEWAY_API_KEY, which lets every server boot
+# happily and then answer nothing. Reporting that as N regressions cost two
+# investigations before anyone read the logs (th-e73f0d), so say the real
+# thing instead.
+if [[ "$engines" -gt 1 && "$zeroes" -eq "$engines" ]]; then
+    echo "FAIL: all $engines engine(s) scored 0% — that is a harness or credential fault, not $engines simultaneous regressions."
+    echo "      Check SMOOAI_GATEWAY_API_KEY first, then the per-engine logs in the run artifact."
+    exit 1
 fi
 if [[ "$regressions" -gt 0 ]]; then
     echo "FAIL: $regressions engine(s) below baseline."

@@ -82,6 +82,41 @@ jobs:
             - name: Install uv
               run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
+            # A missing gateway key does NOT look like a missing gateway key:
+            # every engine boots fine, then scores 0% with zero tool calls, and
+            # the baseline check reports five simultaneous REGRESSIONs. That
+            # sent two separate investigations after engine bugs that did not
+            # exist (th-e73f0d). Two seconds of curl buys an unambiguous error.
+            - name: Preflight — the gateway key must exist and work
+              env:
+                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+              run: |
+                  if [ -z "$SMOOAI_GATEWAY_KEY" ]; then
+                      echo "::error::SMOOAI_GATEWAY_API_KEY is unset. Every engine will score 0% with no tool calls and the baseline check will report five false regressions. Add the secret to SmooAI/smooth (or the SmooAI org) before this gate can mean anything."
+                      exit 1
+                  fi
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
+                      -H "Authorization: Bearer $SMOOAI_GATEWAY_KEY")
+                  if [ "$code" != "200" ]; then
+                      echo "::error::llm.smoo.ai rejected SMOOAI_GATEWAY_API_KEY (HTTP $code). The key is set but not usable — rotate it rather than reading the engine scores as real."
+                      exit 1
+                  fi
+                  echo "gateway key accepted (HTTP 200)"
+
+            # The rust engine's LocalServer IS the daemon, spawned as bare
+            # `th daemon` (see Engine::boot_command). Nothing else in this job
+            # builds it, so without this the rust row is `No such file or
+            # directory` — an empty log and a 0% board that reads exactly like
+            # a broken engine.
+            - name: Build th (the rust engine boots via `th daemon`)
+              working-directory: smooth
+              run: |
+                  cargo build --release -p smooai-smooth-cli --bin th
+                  echo "$GITHUB_WORKSPACE/smooth/target/release" >> "$GITHUB_PATH"
+
+            - name: Verify th is on PATH
+              run: th --version
+
             - name: Run the agentic suite per engine
               id: run
               continue-on-error: true
