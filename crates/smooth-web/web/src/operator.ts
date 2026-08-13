@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
+import { normalizeTodos, type TodoItem } from './todos';
 
 /** The agent's live presence — what the face reflects. */
 export type AgentState = 'connecting' | 'offline' | 'awake' | 'thinking' | 'speaking' | 'awaiting';
@@ -52,6 +53,9 @@ export interface ChatMessage {
     /** Files the agent delivered this turn (the `send_file` directive). Rendered
      * as downloads on the assistant message. */
     deliveredFiles?: DeliveredFile[];
+    /** A plan the agent presented this turn (the `present_plan` directive).
+     * Rendered as an accept/revise card on the assistant message. */
+    plan?: string;
 }
 
 /** One file the agent handed to the user via the `send_file` directive. */
@@ -61,6 +65,14 @@ export interface DeliveredFile {
     /** `data:<mime>;base64,...` (or an https URL) — the download target. */
     url: string;
 }
+
+/** Per-conversation execution mode. PLAN = the agent is read-only (enforced
+ * server-side, we just reflect it); AUTO = it executes. Default AUTO. */
+export type SessionMode = 'plan' | 'auto';
+
+// Re-exported so consumers keep importing todo bits from `./operator`.
+export { normalizeTodos };
+export type { TodoItem };
 
 /** A parked write-tool the agent needs a human verdict on. */
 export interface Approval {
@@ -171,6 +183,14 @@ interface OperatorApi {
     sessionCostUsd: number;
     /** Per-model cost table from `GET /admin/model-costs` (empty on failure). */
     modelCosts: ModelCosts;
+    /** The active conversation's Plan/Auto execution mode (default 'auto'). */
+    sessionMode: SessionMode;
+    /** Set the active conversation's mode; POSTs `/api/session/mode`. Resolves
+     * once the server has stored it (so `accept plan` can await it before the
+     * next turn runs). */
+    setSessionMode: (mode: SessionMode) => Promise<void>;
+    /** The agent's live checklist (the `todos` directive), replaced each turn. */
+    todos: TodoItem[];
 }
 
 /** Globals the daemon injects into `index.html` when it serves this SPA
@@ -283,6 +303,8 @@ export function useOperator(): OperatorApi {
     const [modelCosts, setModelCosts] = useState<ModelCosts>({});
     const [conversations, setConversations] = useState<ConversationSummary[]>([]);
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+    const [sessionMode, setSessionModeState] = useState<SessionMode>('auto');
+    const [todos, setTodos] = useState<TodoItem[]>([]);
     // When set, the create_conversation_session reply should trigger a history
     // load for this conversationId (resume can't fetch messages until it has a
     // sessionId from the create reply).
@@ -468,6 +490,16 @@ export function useOperator(): OperatorApi {
                         const files: DeliveredFile[] = directive.files.filter((f: DeliveredFile) => f?.url && f?.name);
                         if (files.length) patchStreaming((m) => ({ ...m, deliveredFiles: files }));
                     }
+                    // A plan the agent wants a verdict on (PLAN mode). Attach it to
+                    // the landing message so it renders an accept/revise card.
+                    if (directive?.type === 'present_plan' && typeof directive.plan === 'string' && directive.plan.trim()) {
+                        const plan = directive.plan as string;
+                        patchStreaming((m) => ({ ...m, plan }));
+                    }
+                    // The live checklist — replaces the previous one wholesale.
+                    if (directive?.type === 'todos') {
+                        setTodos(normalizeTodos(directive.items));
+                    }
                     // The turn just landed — refresh the sidebar so this chat appears/updates.
                     send({ action: 'list_conversations', requestId: nextId('lc') });
                     break;
@@ -585,6 +617,44 @@ export function useOperator(): OperatorApi {
         [pushSystem],
     );
 
+    // Plan/Auto — the per-conversation execution mode. Keyed by conversation id
+    // (the operator's per-turn key), same store the cwd route uses; empty id =
+    // the default bucket. Optimistic locally; the sync effect reconciles on
+    // conversation switch/reconnect. Resolves once stored so `accept plan` can
+    // await it before sending the proceed turn.
+    const setSessionMode = useCallback(async (next: SessionMode) => {
+        setSessionModeState(next);
+        const { http, token } = targetRef.current;
+        const session = activeConvRef.current ?? '';
+        try {
+            await fetch(`${http}/api/session/mode`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+                body: JSON.stringify({ session, mode: next }),
+            });
+        } catch {
+            /* keep the optimistic state; the next sync reconciles it */
+        }
+    }, []);
+
+    // Sync the mode from the server on conversation switch / (re)connect, so a
+    // resumed conversation shows the mode it was left in.
+    useEffect(() => {
+        if (!connected) return;
+        const { http, token } = targetRef.current;
+        const session = activeConversationId ?? '';
+        let cancelled = false;
+        fetch(`${http}/api/session/mode?session=${encodeURIComponent(session)}`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+                if (!cancelled && (d?.mode === 'plan' || d?.mode === 'auto')) setSessionModeState(d.mode);
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+        };
+    }, [activeConversationId, connected]);
+
     const sendMessage = useCallback(
         (text: string, attachments: Attachment[] = []) => {
             const body = text.trim();
@@ -657,6 +727,7 @@ export function useOperator(): OperatorApi {
             setActiveConversationId(conversationId);
             setMessages([]);
             setApprovals([]);
+            setTodos([]);
             pendingResumeRef.current = conversationId;
             sessionRef.current = null;
             send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), conversationId, userName: 'console' });
@@ -683,6 +754,7 @@ export function useOperator(): OperatorApi {
         setActiveConversationId(null);
         setMessages([]);
         setApprovals([]);
+        setTodos([]);
         sessionRef.current = null;
         send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
     }, [send]);
@@ -714,5 +786,8 @@ export function useOperator(): OperatorApi {
         resumeConversation,
         newConversation,
         renameConversation,
+        sessionMode,
+        setSessionMode,
+        todos,
     };
 }
