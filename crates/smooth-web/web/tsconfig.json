@@ -5,6 +5,7 @@
         "module": "ESNext",
         "moduleResolution": "bundler",
         "allowImportingTsExtensions": true,
+        "resolveJsonModule": true,
         "jsx": "react-jsx",
         "strict": true,
         "noEmit": true,
