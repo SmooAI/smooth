@@ -933,22 +933,27 @@ fn default_deny_policy() -> smooth_operator::deny_policy::DenyPolicy {
 fn permission_mode() -> smooth_operator::permission::AutoMode {
     match std::env::var("SMOOTH_AUTO_MODE") {
         Ok(v) if !v.trim().is_empty() => smooth_operator::permission::AutoMode::from_env_value(Some(&v)),
-        // th-be3f55: was Bypass — "allow everything except the circuit-breakers".
-        // That was never a considered posture, it was the only mode that worked:
-        // with no approver wired, an `Ask` verdict failed closed, so any mode
-        // that could ask would have bricked the assistant. Now that
-        // `permission_hook_with_approver` routes `Ask` to the human over the
-        // chat HITL, the classifier can actually be used.
+        // th-946ba0: back to Bypass. The interim AcceptEdits default (th-be3f55)
+        // made the gate ask for EVERY bash + unknown-category tool call — which,
+        // for an assistant that lives in bash and custom tools, meant a constant
+        // stream of approvals for entirely benign work ("every tool call is an
+        // approval"). Brent's stated posture is the one this daemon was designed
+        // around: *allow benign, block/flag dangerous* — don't gate by tool
+        // CATEGORY, gate by JUDGEMENT.
         //
-        // AcceptEdits rather than Ask: file edits are the assistant's normal
-        // work and prompting for each one makes it unusable, while everything
-        // else — bash especially — goes through the engine's classifier.
-        // Mirrors Claude Code's `acceptEdits`, which is the posture Brent
-        // reports works well in practice.
+        // Bypass allows a call past the category classifier, but the two safety
+        // layers still run and are the real gate:
+        //   1. the embedded `DenyPolicy` circuit-breakers hard-deny catastrophes
+        //      (rm -rf /, credential-store reads, .git/hooks writes, …);
+        //   2. the Narc hook detects destruction / secret-exfil / prompt-injection
+        //      and escalates ambiguous hits to a fail-closed LLM judge — the same
+        //      detector that catches the "empty customers.json" case that
+        //      motivated th-be3f55, through a structured tool call OR bash.
+        // So benign calls run unprompted and only a judged-dangerous call stops.
         //
-        // Escape hatch unchanged: SMOOTH_AUTO_MODE=bypass restores the old
-        // behavior for a headless box where nobody can answer a prompt.
-        _ => smooth_operator::permission::AutoMode::AcceptEdits,
+        // Escape hatch unchanged: SMOOTH_AUTO_MODE=accept-edits (or ask/deny)
+        // restores the stricter category-gating for anyone who wants it.
+        _ => smooth_operator::permission::AutoMode::Bypass,
     }
 }
 
@@ -1866,24 +1871,24 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_defaults_to_accept_edits_and_honors_env() {
+    fn permission_mode_defaults_to_bypass_and_honors_env() {
         std::env::remove_var("SMOOTH_AUTO_MODE");
         assert_eq!(
             permission_mode(),
-            AutoMode::AcceptEdits,
-            "unset → AcceptEdits: edits flow, everything else is classified (th-be3f55)"
+            AutoMode::Bypass,
+            "unset → Bypass: benign runs unprompted; DenyPolicy + Narc gate the dangerous (th-946ba0)"
         );
         std::env::set_var("SMOOTH_AUTO_MODE", "  ");
-        assert_eq!(permission_mode(), AutoMode::AcceptEdits, "blank → the default, not Bypass");
+        assert_eq!(permission_mode(), AutoMode::Bypass, "blank → the default (Bypass)");
         std::env::set_var("SMOOTH_AUTO_MODE", "ask");
         assert_eq!(permission_mode(), AutoMode::Ask, "explicit ask honored");
         std::env::set_var("SMOOTH_AUTO_MODE", "deny");
         assert_eq!(permission_mode(), AutoMode::DenyUnmatched, "explicit deny honored");
+        // The stricter category-gating posture is still available on request.
         std::env::set_var("SMOOTH_AUTO_MODE", "accept-edits");
         assert_eq!(permission_mode(), AutoMode::AcceptEdits, "explicit accept-edits honored");
-        // The escape hatch for a box where nobody can answer a prompt.
         std::env::set_var("SMOOTH_AUTO_MODE", "bypass");
-        assert_eq!(permission_mode(), AutoMode::Bypass, "explicit bypass still available");
+        assert_eq!(permission_mode(), AutoMode::Bypass, "explicit bypass honored");
         std::env::remove_var("SMOOTH_AUTO_MODE");
     }
 
