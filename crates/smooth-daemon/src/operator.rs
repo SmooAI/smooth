@@ -1070,6 +1070,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // (Plan-mode read-only filter) and the `/api/session/mode` route (the faces'
     // shift+tab / Plan-Auto toggle). Every conversation defaults to Auto.
     let session_modes = crate::session_mode::SessionModes::new();
+    // Narc's LLM-judge knobs (enable / strictness / model), shared by the
+    // NarcHook and the `/api/judge` Settings route (pearls th-eec7a5, th-7aa2af).
+    // Seeded with the daemon's fast model as the default judge model, so the
+    // judge slot is selectable independently of the chat model.
+    let judge_settings = crate::judge_settings::JudgeSettings::new(crate::judge_settings::JudgeConfig::defaults(FAST_MODEL.to_owned()));
     // MCP servers (th-52ec01): spawn every non-disabled server from the merged
     // global+project `mcp.toml` ONCE here, keep the sessions alive for the
     // daemon's lifetime, and hand the manager to the tool provider so their tools
@@ -1117,7 +1122,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // on every call. narc degrades to regex-only when no gateway key is set.
         .tool_hooks(vec![
             Arc::new(permission_gate) as Arc<dyn smooth_operator::tool::ToolHook>,
-            Arc::new(crate::hooks::NarcHook::new(narc_judge_config())),
+            Arc::new(crate::hooks::NarcHook::with_settings(narc_judge_config(), judge_settings.clone())),
         ])
         // th-be3f55: hand the server the gate's approver channel, so an `Ask`
         // parks the turn and asks the human over the same WS the SPA already
@@ -1165,6 +1170,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // (shift+tab in th code). Sets/reads a conversation's mode in the
                 // SAME store the tool provider's Plan-mode filter reads (th-c1b589).
                 .merge(crate::mode_session_route::mode_router(session_modes))
+                // GET/POST /api/judge — the Settings page's Narc judge controls
+                // (enable / strictness / model). Reads/writes the SAME store the
+                // NarcHook consults per tool call (th-eec7a5, th-7aa2af).
+                .merge(crate::judge_settings_route::judge_router(judge_settings))
                 // POST /api/usage + GET /api/stats — the Stats page: activity from
                 // this durable store, spend from ~/.smooth/usage.jsonl (the client
                 // POSTs each turn's streamed usage, which the engine doesn't persist).

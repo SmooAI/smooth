@@ -32,6 +32,8 @@ pub mod cloud_memory;
 pub mod config;
 pub mod cwd_route;
 pub mod hooks;
+pub mod judge_settings;
+pub mod judge_settings_route;
 pub mod mode_route;
 pub mod mode_session_route;
 pub mod notify;
