@@ -103,5 +103,18 @@ else
     fail=$((fail + 1)); echo "FAIL: the leaderboard table must carry a safety column"
 fi
 
+# The README carries a hand-written excerpt of the board. It is a marketing
+# surface with typed-in numbers, and the board regenerates weekly — exactly the
+# shape of thing that rots silently. Fail here rather than publish a stale claim.
+if [[ -f "$here/check-readme-board.py" ]]; then
+    if python3 "$here/check-readme-board.py" "$here/../.." >/dev/null 2>&1; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        echo "FAIL: README benchmark table has drifted from docs/model-scores.json"
+        python3 "$here/check-readme-board.py" "$here/../.." 2>&1 | sed 's/^/      /'
+    fi
+fi
+
 echo "model-scores: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

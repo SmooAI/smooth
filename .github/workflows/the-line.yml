@@ -91,14 +91,55 @@ jobs:
                   sudo apt-get update
                   sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev protobuf-compiler
 
-            - name: Build smooth-bench
+            - name: Build smooth-bench and th
               if: env.DRY_RUN != '1'
-              run: cargo build --release -p smooai-smooth-bench
+              # th is built here because the credential step below reads the
+              # gateway key out of @smooai/config rather than a GitHub secret.
+              run: |
+                  cargo build --release -p smooai-smooth-bench
+                  cargo build --release -p smooai-smooth-cli --bin th
+
+            # Two bugs lived here. The secret referenced below never existed,
+            # AND it was spelled SMOOAI_GATEWAY_API_KEY while smooth-bench reads
+            # SMOOAI_GATEWAY_KEY — so The Line would have scored keyless even
+            # with the secret set. `score` only *warns* on a missing key and
+            # then reports every scenario as failing, which is indistinguishable
+            # from a real regression. Fail here instead.
+            - name: Resolve the gateway key from @smooai/config
+              if: env.DRY_RUN != '1'
+              env:
+                  SMOOAI_CLIENT_ID: ${{ secrets.SMOOAI_CLIENT_ID }}
+                  SMOOAI_CLIENT_SECRET: ${{ secrets.SMOOAI_CLIENT_SECRET }}
+              run: |
+                  export PATH="$PWD/target/release:$PATH"
+                  if [ -z "$SMOOAI_CLIENT_ID" ] || [ -z "$SMOOAI_CLIENT_SECRET" ]; then
+                      echo "::error::SMOOAI_CLIENT_ID / SMOOAI_CLIENT_SECRET are unset. They are the ONE bootstrap credential this job needs; the gateway key is read from @smooai/config through them."
+                      exit 1
+                  fi
+                  th auth login --m2m >/dev/null 2>&1 || {
+                      echo "::error::th auth login --m2m failed — rotate the M2M pair."
+                      exit 1
+                  }
+                  key=$(th config get smooaiLlmKey --environment=production --m2m 2>/dev/null || true)
+                  if [ -z "$key" ]; then
+                      echo "::error::@smooai/config returned no value for smooaiLlmKey in production. Every scenario would fail and read as a regression."
+                      exit 1
+                  fi
+                  echo "::add-mask::$key"
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
+                      -H "Authorization: Bearer $key")
+                  if [ "$code" != "200" ]; then
+                      echo "::error::llm.smoo.ai rejected smooaiLlmKey (HTTP $code) — rotate it rather than reading the score as real."
+                      exit 1
+                  fi
+                  echo "SMOOAI_GATEWAY_KEY=$key" >> "$GITHUB_ENV"
+                  echo "SMOOAI_GATEWAY_URL=https://llm.smoo.ai/v1" >> "$GITHUB_ENV"
+                  echo "gateway key resolved from @smooai/config and accepted (HTTP 200)"
 
             - name: Run smooth-bench score --release
               if: env.DRY_RUN != '1'
-              env:
-                  SMOOAI_GATEWAY_API_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+              # SMOOAI_GATEWAY_KEY / _URL come from the config step above, via
+              # $GITHUB_ENV — and under the names smooth-bench actually reads.
               run: |
                   set -o pipefail
                   ./target/release/smooth-bench score \
