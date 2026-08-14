@@ -1,5 +1,0 @@
----
-'@smooai/smooth': patch
----
-
-Big Smooth: Auto mode stops prompting for every tool call. The permission gate's default posture moves from `AcceptEdits` (which asked for **every** `bash` and unknown-category tool call, so an assistant that lives in bash and custom tools produced a constant stream of approvals for benign work) back to `Bypass` — *allow benign, block/flag dangerous*. Bypass lets a call past the tool-category classifier, but the two real safety layers still run: the embedded `DenyPolicy` circuit-breakers hard-deny catastrophes (rm -rf /, credential-store reads, .git/hooks writes), and the Narc hook detects destruction / secret-exfil / prompt-injection and escalates ambiguous hits to a fail-closed LLM judge. So routine calls run unprompted and only a judged-dangerous call stops. `SMOOTH_AUTO_MODE=accept-edits` (or `ask`/`deny`) restores the stricter category-gating for anyone who wants it. This also completes the Plan/Auto story: Plan mode stays read-only (tools filtered), Auto mode executes freely under the judge.
