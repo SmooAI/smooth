@@ -36,6 +36,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
+import { dequeue, enqueue, queuedLabel, removeAt, submitAction, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
 import { costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
 import { replyToNotify } from './notify-relay';
@@ -54,7 +55,6 @@ import {
 import SettingsPage from './SettingsPage';
 import { SmooSignIn } from './SmooSignIn';
 import StatsPage from './StatsPage';
-import { canSend } from './turn-guard';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 import { usePush } from './usePush';
 
@@ -1044,6 +1044,10 @@ function Composer({
     const [sel, setSel] = useState(0);
     const [dismissed, setDismissed] = useState(false);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
+    // Messages typed while a turn is in flight (th-0a079c). Held here in React
+    // state only — a refresh clears them, which is fine for v1. Drained one at a
+    // time when the active turn ends (the effect below).
+    const [queue, setQueue] = useState<QueuedMessage[]>([]);
     const [dragging, setDragging] = useState(false);
     const taRef = useRef<HTMLTextAreaElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -1189,18 +1193,37 @@ function Composer({
         taRef.current?.focus();
     };
 
-    const sendable = canSend({ text, attachments: attachments.length, disabled, turnActive });
+    // A draft that can leave the box: has content AND the operator is reachable.
+    // Whether it SENDS or QUEUES depends on turnActive (submitAction, below).
+    const canDispatch = !disabled && (text.trim().length > 0 || attachments.length > 0);
+
+    // Drain the queue when the active turn ends. onSend flips turnActive back on
+    // (batched with our setQueue), so the effect re-runs, sees turnActive true,
+    // and holds until the next completion — one message at a time, in order.
+    // Gated on !disabled so a dropped connection holds the queue instead of
+    // firing every message into the void. Stop (interrupt) also ends the turn,
+    // so queued messages flow next after a Stop — that's intended (th-0a079c);
+    // only "clear queued" empties the queue.
+    useEffect(() => {
+        if (turnActive || disabled || queue.length === 0) return;
+        const next = dequeue(queue);
+        if (!next) return;
+        setQueue(next.rest);
+        onSend(next.head.text, next.head.attachments);
+    }, [turnActive, disabled, queue, onSend]);
 
     const submit = () => {
         if (menu && selItem) {
             applyItem(selItem);
             return;
         }
-        // th-426791: sending during a turn spawns a SECOND concurrent turn and
-        // the two replies come back swapped. The draft is left in the box so
-        // the keystroke costs nothing — Stop is the way through.
-        if (!sendable) return;
-        onSend(text, attachments);
+        const action = submitAction(turnActive, canDispatch);
+        if (action === 'noop') return;
+        if (action === 'enqueue') {
+            setQueue((q) => enqueue(q, { id: crypto.randomUUID(), text, attachments }));
+        } else {
+            onSend(text, attachments);
+        }
         setAttachments([]);
         update('');
     };
@@ -1293,6 +1316,34 @@ function Composer({
                     {sessionMode === 'plan' ? 'planning — he proposes, you approve' : 'auto — he executes'}
                 </span>
             </div>
+            {/* Queued messages (th-0a079c): what you typed while he's working, in
+                send order. Each drains automatically after the current turn's
+                reply lands. "Clear queued" empties them WITHOUT stopping the
+                running turn — distinct from Stop, which interrupts the turn. */}
+            {queue.length > 0 && (
+                <div className="mb-2 flex flex-col gap-1 px-1">
+                    <div className="flex items-center justify-between px-1 pb-0.5">
+                        <span className="text-xs text-(--color-muted-foreground)">Queued · sends after this turn ({queue.length})</span>
+                        <button type="button" onClick={() => setQueue([])} className="text-xs text-(--color-muted-foreground) transition hover:text-foreground">
+                            Clear queued
+                        </button>
+                    </div>
+                    {queue.map((q, i) => (
+                        <div key={q.id} className="flex items-center gap-2 rounded-xl border border-border bg-panel-2/60 py-1 pl-3 pr-1.5 text-sm">
+                            {q.attachments.length > 0 && <Paperclip size={13} className="shrink-0 text-(--color-th-teal)" />}
+                            <span className="min-w-0 flex-1 truncate text-foreground/80">{queuedLabel(q)}</span>
+                            <button
+                                type="button"
+                                onClick={() => setQueue((prev) => removeAt(prev, i))}
+                                aria-label="Remove queued message"
+                                className="grid size-6 shrink-0 place-items-center rounded-lg text-(--color-muted-foreground) transition hover:text-foreground"
+                            >
+                                <X size={13} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
             <div
                 className={`rounded-2xl border bg-panel/70 p-2 backdrop-blur focus-within:border-(--color-th-teal)/50 ${dragging ? 'border-(--color-th-teal) bg-(--color-th-teal)/5' : 'border-border'}`}
             >
@@ -1400,7 +1451,7 @@ function Composer({
                             disabled
                                 ? 'Waiting for your operator…'
                                 : turnActive
-                                  ? 'Big Smooth is working — Stop to interrupt'
+                                  ? 'Big Smooth is working — Enter to queue your next message'
                                   : 'Talk to Big Smooth…  (/ for commands · @ to mention)'
                         }
                         disabled={disabled}
@@ -1410,13 +1461,13 @@ function Composer({
                         // `rows={1}` pinned the height forever.
                         className="max-h-40 flex-1 resize-none overflow-y-auto bg-transparent px-2 py-1.5 text-[0.95rem] outline-none field-sizing-content placeholder:text-(--color-muted-foreground)"
                     />
-                    {turnActive ? (
-                        // While a turn is in flight the primary button becomes Stop
-                        // (th-3a912a) — the one affordance for "he's being weird,
-                        // stop". Send is blocked outright meanwhile (th-426791),
-                        // so this is the only way forward.
-                        // Deliberately neutral, not amber: amber is reserved for
-                        // "he needs you", and stopping is you acting on him.
+                    {/* During a turn, Stop (th-3a912a) stays the "he's being weird,
+                        stop" affordance — it interrupts the RUNNING turn only, never
+                        the queue. Deliberately neutral, not amber: amber is reserved
+                        for "he needs you", and stopping is you acting on him.
+                        Alongside it, once there's a draft, the send button QUEUES
+                        instead of sending (th-0a079c). */}
+                    {turnActive && (
                         <button
                             type="button"
                             onClick={onStop}
@@ -1426,24 +1477,20 @@ function Composer({
                         >
                             <Square size={14} fill="currentColor" />
                         </button>
-                    ) : (
+                    )}
+                    {(!turnActive || canDispatch) && (
                         <button
                             onClick={submit}
-                            disabled={!sendable}
+                            disabled={!canDispatch}
                             className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
-                            aria-label="Send"
+                            aria-label={turnActive ? 'Queue message' : 'Send'}
+                            title={turnActive ? 'Queue — sends after this turn' : undefined}
                         >
                             <ArrowUp size={18} />
                         </button>
                     )}
                 </div>
             </div>
-            {/* Only once there's a draft that CAN'T go out — the Stop button and
-                the thinking face already say "he's working", so this line exists
-                purely to explain the swallowed Enter (th-426791). */}
-            {turnActive && !!text.trim() && (
-                <div className="mt-2 px-1 text-xs text-(--color-muted-foreground)">Turn in progress — Stop to interrupt, or wait; your draft is kept.</div>
-            )}
             {expensive && (
                 <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-amber/30 bg-amber/5 px-3 py-1.5 text-xs font-medium text-amber">
                     <span aria-hidden>⚠</span>
