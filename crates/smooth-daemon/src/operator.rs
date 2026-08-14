@@ -83,6 +83,7 @@ When given a task, drive it to completion before yielding. Don't stop at the fir
 - `web_search`/`crawl` for current or external facts; `knowledge_search` only when the user asks about org/SmooAI knowledge; the `th` CLI for the SmooAI platform, pearls, and worktrees.
 - DELIVERING FILES: when the user asks you to MAKE something — a document, report, spreadsheet, chart, image, or web page — writing it to disk is NOT handing it over. After you create it (`write_file` for raw files, `create_artifact` for a self-contained HTML page, or `bash`), call `send_file` with its path so it arrives in the chat as a download they can open on their phone or laptop. A `file://` path or a location on this machine is not delivery. If a file they want already exists, `send_file` it. For something visual or shareable, prefer `create_artifact` (rich HTML) then `send_file`; for raw data, `write_file` then `send_file`; otherwise just answer inline.
 - You also have, for the right request: `create_artifact` (build a self-contained HTML page/report), `calendar` + `reminders` + `imessage` (their Mac — schedule events, set reminders, read/send texts), and `get_current_datetime` (you have no internal clock — call it before anything that depends on "now"). They won't always be listed above, so reach for them when the intent matches.
+- `notify` pushes a notification to the user's devices even when the chat is closed. Use it sparingly and only when it earns the interruption: a reminder they asked for coming due, a long-running job finishing, or a genuinely useful proactive heads-up. NEVER use it for a chatty update, to acknowledge a message, or to restate something you already answered inline.
 
 ## Memory — remember across sessions
 At the start of a task, `recall` what you already know about the user — their preferences, where things live, ongoing projects. Use `remember` to persist durable facts the moment you learn them: where their vault is, how they like things done, decisions made, project state. Don't re-ask for something you could recall. Your memory survives restarts — use it.
@@ -153,6 +154,10 @@ struct SandboxedToolProvider {
     /// guarantee (th-c1b589). Shared with the `/api/session/mode` route so a
     /// face's `shift+tab` / Plan-Auto toggle takes effect on the next turn.
     modes: crate::session_mode::SessionModes,
+    /// Backs the `notify` tool (th-c29d34) — the daemon's web-push + phone
+    /// self-notify fan-out. `None` for the ephemeral/test providers that don't
+    /// wire push; the always-on daemon passes the shared [`crate::notify::TurnNotifier`].
+    notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
 }
 
 /// The tools a **Plan-mode** turn may keep — a strict read-only allowlist
@@ -203,6 +208,18 @@ impl ToolProvider for SandboxedToolProvider {
         tools.push(Arc::new(smooth_tools::RecallTool {
             memory: Arc::clone(&self.memory),
         }) as Arc<dyn Tool>);
+        // notify (th-c29d34): proactively push to the user's devices via the
+        // daemon's web-push + phone fan-out. Injected here (like the calendar
+        // allowlist / send_file) because it needs the daemon's notify sink, which
+        // only the provider holds. `owner` (no family `role:` group) may aim the
+        // notification at anyone; a family/child principal is bound to itself —
+        // clearance comes from the authenticated role, never tool args. Whether
+        // this role gets the tool AT ALL is still decided by the deny-by-default
+        // family filter below (and Plan mode drops it — no outward actions).
+        if let Some(sink) = &self.notify_sink {
+            let owner = role_from_ctx(ctx).is_none();
+            tools.push(Arc::new(smooth_tools::NotifyTool::new(Arc::clone(sink), owner)) as Arc<dyn Tool>);
+        }
         // Platform-specific tools (pearl th-94cc4a). The macOS Calendar tool
         // exists only where EventKit does, so it's cfg-gated — Linux/Windows
         // never see it. It registers even when `ical` isn't installed or the TCC
@@ -414,7 +431,8 @@ pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> A
 pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, memory: Arc<dyn Memory>) -> Arc<dyn ToolProvider> {
     // A fresh, unshared mode store: the simple constructors (tests, ad-hoc) have
     // no `/api/session/mode` route to share with, so every conversation is Auto.
-    local_tool_provider_full(cwd, proxy, memory, None, None, crate::session_mode::SessionModes::new())
+    // No notify sink either — the `notify` tool is daemon-only.
+    local_tool_provider_full(cwd, proxy, memory, None, None, crate::session_mode::SessionModes::new(), None)
 }
 
 /// The full seam, additionally taking the daemon's live [`McpManager`].
@@ -430,6 +448,7 @@ pub fn local_tool_provider_full(
     mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
     family: Option<Arc<FamilyConfig>>,
     modes: crate::session_mode::SessionModes,
+    notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
 ) -> Arc<dyn ToolProvider> {
     Arc::new(SandboxedToolProvider {
         cwd,
@@ -438,6 +457,7 @@ pub fn local_tool_provider_full(
         mcp,
         family,
         modes,
+        notify_sink,
     })
 }
 
@@ -1091,11 +1111,22 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // per-turn tool set by role) and the auth verifier (maps a member token → its
     // `role:` group). Absent/malformed ⇒ single-tenant, fail-closed.
     let family = load_family_config();
-    let provider = local_tool_provider_full(session_cwd.clone(), egress_proxy, memory, Some(mcp), family.clone(), session_modes.clone());
 
-    // Web-push state, built ONCE and shared: the /push/* router and the turn
-    // notifier (th-b9a636) — the trigger layer push never had.
+    // Web-push state, built ONCE and shared: the /push/* router, the scheduler's
+    // turn notifier (th-b9a636), and the agent's `notify` tool (th-c29d34). The
+    // notifier is the shared web+phone fan-out; the tool provider takes it as a
+    // `NotifySink` so `notify` reaches the same devices as scheduled turns.
     let push_state = crate::push::PushState::from_env();
+    let turn_notifier = Arc::new(crate::notify::TurnNotifier::new(push_state.clone()));
+    let provider = local_tool_provider_full(
+        session_cwd.clone(),
+        egress_proxy,
+        memory,
+        Some(mcp),
+        family.clone(),
+        session_modes.clone(),
+        Some(turn_notifier.clone() as Arc<dyn smooth_tools::NotifySink>),
+    );
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
@@ -1225,8 +1256,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // the loop without taking the daemon down.
     let _scheduler = match crate::schedule::SqliteScheduleStore::open(&schedule_store_path()) {
         Ok(store) => {
-            let driver = crate::scheduler::OperatorTurnDriver::new(format!("http://{}", server.addr()), token.clone())
-                .with_notifier(Arc::new(crate::notify::TurnNotifier::new(push_state.clone())));
+            let driver = crate::scheduler::OperatorTurnDriver::new(format!("http://{}", server.addr()), token.clone()).with_notifier(turn_notifier.clone());
             let handle = crate::scheduler::spawn_scheduler(Arc::new(store), Arc::new(driver), std::time::Duration::from_secs(30));
             tracing::info!("scheduler armed (30s tick) — proactive schedules fire into the operator");
             Some(handle)
@@ -1541,6 +1571,7 @@ mod tests {
             None,
             Some(family),
             crate::session_mode::SessionModes::new(),
+            None,
         );
         let jr = ToolProviderContext::new(Some("org-1".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c1");
         let names: Vec<String> = provider.tools_for(&jr).await.iter().map(|t| t.schema().name).collect();
@@ -1582,6 +1613,7 @@ mod tests {
             None,
             Some(family),
             crate::session_mode::SessionModes::new(),
+            None,
         );
 
         // Owner: no role group → full set (regression guard).
@@ -1607,6 +1639,63 @@ mod tests {
         std::env::remove_var("SMOOAI_GATEWAY_KEY");
     }
 
+    /// The `notify` tool (th-c29d34): injected only when a sink is wired, present
+    /// for the owner, and gated by the deny-by-default family filter — a scoped
+    /// role gets it only when its allowlist names `notify`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn notify_tool_owner_present_child_gated() {
+        use smooth_operator_svc::access_control::AccessContext;
+        use smooth_policy::family::FamilyConfig;
+
+        struct NoopSink;
+        #[async_trait::async_trait]
+        impl smooth_tools::NotifySink for NoopSink {
+            async fn deliver(&self, _t: &str, _b: &str, _d: Option<&str>) -> usize {
+                0
+            }
+        }
+
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let family = Arc::new(
+            FamilyConfig::from_toml(
+                r#"
+                [roles.child]
+                allow = ["read_file"]
+                default = "deny"
+
+                [roles.teen]
+                allow = ["read_file", "notify"]
+                default = "deny"
+            "#,
+            )
+            .unwrap(),
+        );
+        let sink: Arc<dyn smooth_tools::NotifySink> = Arc::new(NoopSink);
+        let provider = local_tool_provider_full(
+            SessionCwd::new(std::env::temp_dir()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            Some(family),
+            crate::session_mode::SessionModes::new(),
+            Some(sink),
+        );
+
+        let has = |names: &[String], t: &str| names.iter().any(|n| n == t);
+        let owner = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("c");
+        let owner_names: Vec<String> = provider.tools_for(&owner).await.iter().map(|t| t.schema().name).collect();
+        assert!(has(&owner_names, "notify"), "owner gets notify: {owner_names:?}");
+
+        let child = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c");
+        let child_names: Vec<String> = provider.tools_for(&child).await.iter().map(|t| t.schema().name).collect();
+        assert!(!has(&child_names, "notify"), "child without a notify grant does NOT get it: {child_names:?}");
+
+        let teen = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("t".into()), vec!["role:teen".into()])).with_conversation_id("c");
+        let teen_names: Vec<String> = provider.tools_for(&teen).await.iter().map(|t| t.schema().name).collect();
+        assert!(has(&teen_names, "notify"), "teen granted notify gets it: {teen_names:?}");
+    }
+
     /// Plan mode (th-c1b589) is a hard read-only guarantee: a Plan conversation's
     /// per-turn tool set contains ONLY the read-only allowlist (+ present_plan /
     /// todo_write) — never a mutating tool — while an Auto conversation on the
@@ -1626,6 +1715,7 @@ mod tests {
             None,
             None,
             modes,
+            None,
         );
 
         // A directive sink so present_plan/todo_write are injected this turn.
