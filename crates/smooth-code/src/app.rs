@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
 use crate::render;
 use crate::session::SessionManager;
-use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
+use crate::state::{AppState, ChatMessage, ChatRole, ExecMode, HealthStatus, Mode};
 
 /// Log a diagnostic line to `~/.smooth/logs/smooth-code.log` when
 /// `SMOOTH_TUI_DEBUG=1` is set. Used to diagnose the
@@ -580,6 +580,27 @@ fn event_loop(
                     }
                 }
 
+                // shift+tab (crossterm delivers it as BackTab) flips the
+                // conversation's Plan⇄Auto execution mode and syncs it to the
+                // daemon. Skipped while the model picker owns the keyboard so it
+                // can keep BackTab for its own navigation if it ever wants it.
+                if key.code == KeyCode::BackTab && !s.model_picker.active {
+                    let new_mode = s.exec_mode.toggled();
+                    s.exec_mode = new_mode;
+                    let conv = s.conversation_id.clone();
+                    s.add_message(ChatMessage::system(format!(
+                        "Mode: {} — {}",
+                        new_mode.label(),
+                        if new_mode == ExecMode::Plan {
+                            "read-only, the agent proposes a plan"
+                        } else {
+                            "the agent executes"
+                        }
+                    )));
+                    tokio::spawn(set_session_mode(conv, new_mode));
+                    continue;
+                }
+
                 if s.should_quit {
                     break;
                 }
@@ -917,6 +938,33 @@ async fn fetch_daemon_mode() -> Option<String> {
     }
 }
 
+/// `POST {SMOOTH_URL}/api/session/mode {session, mode}` → set the conversation's
+/// Plan⇄Auto execution mode on the daemon (the same conversation id `th code`
+/// sends turns with). Best-effort: the UI has already flipped its local
+/// `ExecMode`, so a failure here just means the daemon keeps its prior mode
+/// until the next sync. A no-op without a conversation id (first turn of a
+/// session, before the daemon has bound one).
+async fn set_session_mode(conversation_id: Option<String>, mode: ExecMode) {
+    let Some(conv) = conversation_id.filter(|c| !c.trim().is_empty()) else {
+        return;
+    };
+    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() else {
+        return;
+    };
+    let _ = client
+        .post(format!("{}/api/session/mode", base.trim_end_matches('/')))
+        .json(&session_mode_body(&conv, mode))
+        .send()
+        .await;
+}
+
+/// The `POST /api/session/mode` request body: `{ "session": …, "mode": … }`.
+/// Factored out so the wire shape is unit-testable without a live daemon.
+fn session_mode_body(session: &str, mode: ExecMode) -> serde_json::Value {
+    serde_json::json!({ "session": session, "mode": mode.as_str() })
+}
+
 /// `GET {SMOOTH_URL}/search?q=…&cwd=…` → popup rows, or `None` on any
 /// failure (daemon down, timeout, off-contract JSON) so the caller keeps the
 /// locally-computed results. The route is ungated by design — no token.
@@ -1169,6 +1217,39 @@ fn handle_input_mode(
     }
 
     match key.code {
+        KeyCode::Enter if state.pending_plan.is_some() => {
+            // A proposed plan owns the next Enter. An empty draft ACCEPTS:
+            // switch the conversation to Auto (locally + on the daemon) and
+            // dispatch "Proceed with the plan." so the agent executes it. A
+            // non-empty draft REVISES: send it as an ordinary turn while mode
+            // stays Plan, so the agent produces a fresh (still read-only) plan.
+            let feedback = state.take_input();
+            state.pending_plan = None;
+            let (message, accept) = if feedback.trim().is_empty() {
+                ("Proceed with the plan.".to_string(), true)
+            } else {
+                (feedback, false)
+            };
+            if accept {
+                state.exec_mode = ExecMode::Auto;
+                let conv = state.conversation_id.clone();
+                tokio::spawn(set_session_mode(conv, ExecMode::Auto));
+                state.add_message(ChatMessage::system("Plan accepted — switching to Auto and executing."));
+            } else {
+                state.add_message(ChatMessage::system("Revising the plan…"));
+            }
+            state.add_message(ChatMessage::user(&message));
+            state.thinking = true;
+            let images: Vec<String> = state.attachments.drain(..).map(|a| a.data_url).collect();
+            let agent = state.agent_name.clone();
+            let tx = event_tx;
+            let state_for = Arc::clone(&state_arc);
+            tokio::spawn(async move {
+                if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent), state_for, images).await {
+                    let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+                }
+            });
+        }
         KeyCode::Enter => {
             // th-426791: a second agent turn dispatched while one is still in
             // flight runs CONCURRENTLY — the two responses stream back
@@ -1751,6 +1832,24 @@ async fn run_agent_streaming(
                 s.add_message(crate::state::ChatMessage::system(format!("⚠ {message}")));
                 None
             }
+            // The agent proposed a plan (Plan mode). Stash it for the
+            // accept/revise prompt and render it as a system card. The daemon
+            // ran this turn read-only, so we're already in Plan mode locally.
+            ServerEvent::PresentPlan { plan } => {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                s.exec_mode = ExecMode::Plan;
+                s.pending_plan = Some(plan.clone());
+                s.add_message(crate::state::ChatMessage::system(format!(
+                    "📋 Proposed plan — press Enter to accept & run (switches to Auto), or type feedback to revise:\n\n{plan}"
+                )));
+                None
+            }
+            // Live task checklist — replace the previous list wholesale.
+            ServerEvent::Todos { items } => {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                s.todos = items;
+                None
+            }
             _ => None,
         };
         if let Some(e) = agent_event {
@@ -1944,5 +2043,31 @@ mod duration_truth_tests {
     #[test]
     fn instant_tool_reports_zero_from_measurement() {
         assert_eq!(resolve_duration_ms(None, Instant::now()), 0);
+    }
+}
+
+#[cfg(test)]
+mod exec_mode_tests {
+    use super::session_mode_body;
+    use crate::state::ExecMode;
+
+    /// shift+tab flips the mode, and flipping twice is the identity.
+    #[test]
+    fn backtab_flips_exec_mode() {
+        assert_eq!(ExecMode::Auto.toggled(), ExecMode::Plan);
+        assert_eq!(ExecMode::Plan.toggled(), ExecMode::Auto);
+        assert_eq!(ExecMode::Auto.toggled().toggled(), ExecMode::Auto);
+    }
+
+    /// The `/api/session/mode` body carries the conversation id and the wire
+    /// mode string — exactly the contract the daemon parses.
+    #[test]
+    fn mode_post_body_serializes_to_the_contract() {
+        let body = session_mode_body("conv-123", ExecMode::Plan);
+        assert_eq!(body["session"], "conv-123");
+        assert_eq!(body["mode"], "plan");
+
+        let body = session_mode_body("conv-123", ExecMode::Auto);
+        assert_eq!(body["mode"], "auto");
     }
 }

@@ -136,6 +136,15 @@ pub enum ServerEvent {
         id: String,
         title: String,
     },
+    /// The agent's proposed plan (Plan mode `present_plan` directive). Rendered
+    /// as an accept/revise prompt; merges off `eventual_response.directive`.
+    PresentPlan {
+        plan: String,
+    },
+    /// A live task checklist (`todos` directive). Replaces the previous list.
+    Todos {
+        items: Vec<crate::state::TodoItem>,
+    },
     NarcAlert {
         severity: String,
         category: String,
@@ -291,6 +300,44 @@ fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
             request_id: v.get("requestId").and_then(serde_json::Value::as_str).map(str::to_string),
         }),
         "pong" => Some(ServerEvent::Pong),
+        _ => None,
+    }
+}
+
+/// Pull a `present_plan` / `todos` directive off an `eventual_response` frame.
+///
+/// Both ride the SAME `data.data.directive` field the `send_file` directive uses
+/// (the web SPA reads the identical path — `operator.ts`). Returns `None` for
+/// any other frame, a missing directive, or a directive type this face doesn't
+/// render (e.g. `send_file`, which `th code` doesn't surface). Emitted as its
+/// own event BEFORE the terminal `TaskComplete` so the UI applies it first.
+fn directive_event(frame: &serde_json::Value) -> Option<ServerEvent> {
+    if frame.get("type")?.as_str()? != "eventual_response" {
+        return None;
+    }
+    let directive = frame.get("data")?.get("data")?.get("directive")?;
+    match directive.get("type")?.as_str()? {
+        "present_plan" => Some(ServerEvent::PresentPlan {
+            plan: directive.get("plan")?.as_str()?.to_string(),
+        }),
+        "todos" => {
+            let items = directive
+                .get("items")?
+                .as_array()?
+                .iter()
+                .filter_map(|it| {
+                    Some(crate::state::TodoItem {
+                        text: it.get("text")?.as_str()?.to_string(),
+                        status: match it.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending") {
+                            "in_progress" => crate::state::TodoStatus::InProgress,
+                            "completed" => crate::state::TodoStatus::Completed,
+                            _ => crate::state::TodoStatus::Pending,
+                        },
+                    })
+                })
+                .collect();
+            Some(ServerEvent::Todos { items })
+        }
         _ => None,
     }
 }
@@ -542,6 +589,14 @@ impl BigSmoothClient {
                         *conversation_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
                     }
                     connected_read.store(true, Ordering::SeqCst);
+                }
+                // A `present_plan` / `todos` directive rides the terminal
+                // `eventual_response`; surface it as its own event FIRST so the
+                // UI applies it before the `TaskComplete` that ends the turn.
+                if let Some(dir) = directive_event(&frame) {
+                    if event_tx.send(dir).is_err() {
+                        break;
+                    }
                 }
                 if event_tx.send(event).is_err() {
                     break;
@@ -1461,6 +1516,58 @@ mod canonical_protocol_tests {
     fn unknown_frames_are_ignored() {
         assert!(translate_frame(&json!({"type":"otp_sent"})).is_none());
         assert!(translate_frame(&json!({"nope":1})).is_none());
+    }
+
+    #[test]
+    fn present_plan_directive_yields_a_plan_event() {
+        let ev = directive_event(&json!({
+            "type": "eventual_response",
+            "data": { "data": { "directive": { "type": "present_plan", "plan": "1. do X\n2. do Y" } } }
+        }));
+        match ev {
+            Some(ServerEvent::PresentPlan { plan }) => assert_eq!(plan, "1. do X\n2. do Y"),
+            other => panic!("expected PresentPlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn todos_directive_maps_every_status() {
+        let ev = directive_event(&json!({
+            "type": "eventual_response",
+            "data": { "data": { "directive": { "type": "todos", "items": [
+                { "text": "a", "status": "completed" },
+                { "text": "b", "status": "in_progress" },
+                { "text": "c", "status": "pending" },
+                { "text": "d" }
+            ] } } }
+        }));
+        match ev {
+            Some(ServerEvent::Todos { items }) => {
+                use crate::state::TodoStatus;
+                assert_eq!(items.len(), 4);
+                assert_eq!(items[0].status, TodoStatus::Completed);
+                assert_eq!(items[1].status, TodoStatus::InProgress);
+                assert_eq!(items[2].status, TodoStatus::Pending);
+                // Missing status defaults to pending.
+                assert_eq!(items[3].status, TodoStatus::Pending);
+                assert_eq!(items[3].text, "d");
+            }
+            other => panic!("expected Todos, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directive_event_ignores_send_file_and_non_terminal_frames() {
+        // send_file is a directive `th code` doesn't surface here.
+        assert!(directive_event(&json!({
+            "type": "eventual_response",
+            "data": { "data": { "directive": { "type": "send_file", "files": [] } } }
+        }))
+        .is_none());
+        // No directive present.
+        assert!(directive_event(&json!({ "type": "eventual_response", "data": { "data": {} } })).is_none());
+        // Not a terminal frame.
+        assert!(directive_event(&json!({ "type": "stream_token", "token": "x" })).is_none());
     }
 
     /// **The th-472012 regression test.**
