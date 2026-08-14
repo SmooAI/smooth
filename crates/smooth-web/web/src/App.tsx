@@ -37,6 +37,7 @@ import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
+import { replyToNotify } from './notify-relay';
 import {
     useOperator,
     type AgentState,
@@ -244,6 +245,22 @@ export default function App() {
     const onNewRef = useRef(onNew);
     onNewRef.current = onNew;
     useEffect(() => window.bigSmooth?.onNewChat?.(() => onNewRef.current()), []);
+
+    // Native notifications (th-6af4b1): when a reply finishes while the window is
+    // unfocused, relay it to the OS. `push.notify` is a no-op unless the user has
+    // enabled notifications on a device with the native bridge (Electron desktop),
+    // so this is inert in the browser PWA (where the daemon pushes via the SW).
+    const lastNotifiedId = useRef<string | null>(null);
+    useEffect(() => {
+        if (!push.enabled) return;
+        const decision = replyToNotify(messages, { focused: document.hasFocus(), lastNotifiedId: lastNotifiedId.current });
+        if (decision) {
+            lastNotifiedId.current = decision.id;
+            push.notify(decision.title, decision.body);
+        }
+        // push.notify is stable (useCallback); depend on messages so it fires per reply.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [messages, push.enabled]);
 
     // Switching into the ❤️ `max` mode is a one-time, deliberate spend — confirm it.
     const guardedSetMode = useMemo(

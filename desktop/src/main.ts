@@ -8,9 +8,10 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron';
 
 import { isNewChatChord } from './newchat.js';
+import { buildNotification, type NotifyPayload } from './notify.js';
 
 import { type DesktopConfig, loadConfig, saveConfig } from './config.js';
 import {
@@ -277,6 +278,18 @@ function registerIpc(): void {
     ipcMain.handle('daemons:list', async () => ({ current: remoteUrl() || null, daemons: await discoverDaemons() }));
     ipcMain.handle('daemons:connect', (_event, url: unknown) => {
         connectTo(typeof url === 'string' && url !== '' ? url : null);
+    });
+    // Native notifications (th-6af4b1): the Electron webview can't receive Web
+    // Push, so the SPA's `usePush` posts here and we show a real OS notification.
+    // Clicking it surfaces the window. Returns whether it was shown.
+    ipcMain.handle('notify:show', (_event, payload: unknown) => {
+        if (!Notification.isSupported()) return false;
+        const n = buildNotification((payload ?? {}) as NotifyPayload);
+        if (!n) return false;
+        const notif = new Notification({ title: n.title, body: n.body });
+        notif.on('click', showWindow);
+        notif.show();
+        return true;
     });
 }
 

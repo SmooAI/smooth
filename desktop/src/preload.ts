@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('bigSmooth', {
     listDaemons: (): Promise<unknown> => ipcRenderer.invoke('daemons:list'),
     /** Switch target and relaunch. `null` ⇒ This Mac (local). */
     connectTo: (url: string | null): Promise<void> => ipcRenderer.invoke('daemons:connect', url),
+    /** Show a native OS notification (th-6af4b1). The Electron webview can't do
+     * Web Push, so `usePush` calls this instead. Resolves to whether it showed. */
+    notify: (payload: { title?: string; body?: string; deepLink?: string }): Promise<boolean> => ipcRenderer.invoke('notify:show', payload),
     /** Cmd/Ctrl+N from the window → start a new chat. The main process claims the
      * chord and forwards a `new-chat` IPC; the SPA runs its "New chat" action.
      * Returns an unsubscribe fn so the renderer can detach on unmount. */
