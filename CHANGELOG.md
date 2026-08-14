@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.35.6
+
+### Patch Changes
+
+- cec6640: Desktop/web: New Chat (button or Cmd/Ctrl+N) now focuses the composer so you can type immediately, instead of leaving focus nowhere.
+
 ## 0.35.5
 
 ### Patch Changes
