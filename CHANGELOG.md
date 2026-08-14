@@ -1,5 +1,73 @@
 # @smooai/smooth
 
+## 0.35.1
+
+### Patch Changes
+
+- 8f12e02: Show the benchmark board in the README instead of only linking to it.
+
+  The README carried a shields badge pointing at `docs/Model-Leaderboard.md`, so the numbers were a
+  click away and invisible on the landing page. This is a public repo and the measured cost-vs-capability
+  table is the strongest thing on it: `gpt-5.6-luna` finishes more scenarios than `gpt-5.5` for 1/766th
+  the cost.
+
+  Adds a compact 9-model table to the Model routing section — pass rate, cost per run, cost per pass,
+  and safety violations — with the three caveats that keep it honest: cost-per-pass is the column that
+  decides routing, safety is scored independently of pass rate, and an unpriced model renders as
+  unknown rather than free.
+
+  Hand-typed numbers in a file that regenerates weekly rot silently, so `check-readme-board.py`
+  verifies the table against `docs/model-scores.json` (comparing at the precision the README prints,
+  since the values span four orders of magnitude) and runs as part of `test-model-scores.sh`.
+
+## 0.35.0
+
+### Minor Changes
+
+- e63392d: Big Smooth: real Plan ⇄ Auto execution modes (daemon + tools foundation). Adds a per-conversation `SessionModes` store and a `GET`/`POST /api/session/mode` route so a face can flip a conversation between **Plan** (read-only) and **Auto** (execute). In Plan mode the daemon's tool provider filters every mutating tool out of the per-turn set (deny-by-default, mirroring the family RBAC filter) — the model literally cannot obtain `edit_file`/`bash`/`send_file`/… — so Plan mode is a hard read-only guarantee. Two new tools ride the existing directive sink: `present_plan` (surface a proposed plan for the user to accept → flips to Auto and executes, or revise) and `todo_write` (maintain a live task list). Persona updated to teach both modes and tools. Face wiring (shift+tab in th code, Plan/Auto chip on desktop + mobile, present-plan/todo rendering) follows in subsequent PRs. Part 1 of the coding-harness glow-up.
+
+### Patch Changes
+
+- d1be78a: Read the bench gateway key from `@smooai/config` instead of a GitHub secret that never existed.
+
+  Three workflows — `bench-engines.yml`, `bench-models.yml`, `the-line.yml` — referenced
+  `secrets.SMOOAI_GATEWAY_API_KEY`, which is present in neither the repo nor the org. All three have
+  been scoring with an empty key. `the-line.yml` carried a second, independent bug: it spelled the
+  variable `SMOOAI_GATEWAY_API_KEY` while `smooth-bench` reads `SMOOAI_GATEWAY_KEY`, so it would have
+  run keyless even once the secret existed.
+
+  Copying a gateway key into CI was the wrong fix anyway. All three now authenticate with one M2M
+  bootstrap pair (`SMOOAI_CLIENT_ID` / `SMOOAI_CLIENT_SECRET`) and resolve `smooaiLlmKey` through
+  `th config` — the same source of truth the rest of the monorepo uses. Rotating the gateway key no
+  longer touches CI, and the key is masked before it can reach a log.
+
+  Each workflow now fails in seconds with the real reason when the credential is missing, rather than
+  producing a full run of zeros that reads as five broken engines or a model regression.
+
+- ecdc664: Big Smooth desktop: Cmd+N (macOS) / Ctrl+N (Windows/Linux) from the app window starts a new chat. The Electron main claims the chord at the window level (`before-input-event`, so no application-menu rebuild that would drop the standard Edit roles) and forwards a `new-chat` IPC through the preload bridge; the SPA runs the same action as the sidebar's "New chat". No-op in the browser PWA, where the bridge is absent.
+- 3770c12: Engine Parity CI: fail on the real cause instead of five false regressions.
+
+  The nightly gate had been red for days reporting "5 engine(s) below baseline". The boards say
+  every engine scored 0% with zero tool calls, and the logs say why: the Go server reports
+  `no chat engine configured` and the .NET server gets `HTTP 401` from the gateway.
+  `SMOOAI_GATEWAY_API_KEY` does not exist as a repo secret or an org secret, so both bench
+  workflows have been running with an empty key. Five implementations in five languages do not
+  regress on the same night — one shared input did.
+
+  - Both bench workflows now preflight the key (present, and accepted by `llm.smoo.ai`) and fail
+    in seconds with an unambiguous message rather than after an hour of meaningless scoring.
+  - `check-engine-parity.sh` calls an all-zero board what it is — a harness or credential fault —
+    and names the key to check first.
+  - `bench-engines.yml` builds `th` and puts it on PATH. The rust engine's LocalServer is spawned
+    as bare `th daemon`, which nothing in that job built, so its log was empty and its 0% board
+    read exactly like a broken engine.
+  - `bench-models.yml` defaulted to `deepseek-v4-flash gpt-5.5`, both retired in #420; it now
+    scores the routed lineup.
+
+  The gate still cannot go green until the secret exists — but it now says so.
+
+- aec62d5: Big Smooth SPA: Plan⇄Auto mode support in the web control surface (Part 2 of the coding-harness glow-up; the daemon side is #430). A Plan/Auto toggle chip sits above the composer (amber in Plan, neutral in Auto) and POSTs `/api/session/mode` for the active conversation; Shift+Alt (⇧⌥) toggles it, and the mode re-syncs on conversation switch/reconnect via `GET /api/session/mode`. The turn's terminal `eventual_response.directive` now also carries `present_plan` (rendered as an accept/revise card — Accept flips to Auto and sends "Proceed with the plan.", Revise keeps Plan and refocuses the composer) and `todos` (rendered as a live ✔/▶/○ checklist panel above the transcript, replaced each turn), parsed the same way the existing `send_file` directive is. Todo normalization is a pure, unit-tested helper.
+
 ## 0.34.2
 
 ### Patch Changes

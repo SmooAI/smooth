@@ -24,7 +24,7 @@ on:
             models:
                 description: 'Space-separated models to score'
                 required: false
-                default: 'deepseek-v4-flash gpt-5.5'
+                default: 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5'
             trials:
                 description: 'Trials per scenario (1 is an anecdote, not a rate)'
                 required: false
@@ -50,19 +50,55 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
 
+            # `convo` spawns a daemon per model, so th has to exist anyway —
+            # and building it first is what lets the next step read the gateway
+            # key out of @smooai/config instead of a copied GitHub secret.
+            - name: Install th and smooth-daemon
+              run: |
+                  cargo install --path crates/smooth-cli --bin th --locked
+                  cargo install --path crates/smooth-daemon --bin smooth-daemon --locked
+
+            # Without this, a missing key publishes a leaderboard where every
+            # model scores 0% with zero tool calls — which reads as "these
+            # models are broken" rather than "CI has no credentials". The
+            # committed docs/model-scores.json carried exactly that for weeks.
+            - name: Resolve the gateway key from @smooai/config
+              env:
+                  SMOOAI_CLIENT_ID: ${{ secrets.SMOOAI_CLIENT_ID }}
+                  SMOOAI_CLIENT_SECRET: ${{ secrets.SMOOAI_CLIENT_SECRET }}
+              run: |
+                  if [ -z "$SMOOAI_CLIENT_ID" ] || [ -z "$SMOOAI_CLIENT_SECRET" ]; then
+                      echo "::error::SMOOAI_CLIENT_ID / SMOOAI_CLIENT_SECRET are unset. They are the ONE bootstrap credential this job needs; the gateway key is read from @smooai/config through them. Mint an M2M pair in Org Settings → API Keys and add both to SmooAI/smooth."
+                      exit 1
+                  fi
+                  th auth login --m2m >/dev/null 2>&1 || {
+                      echo "::error::th auth login --m2m failed. The M2M pair is set but auth.smoo.ai rejected it — rotate it."
+                      exit 1
+                  }
+                  key=$(th config get smooaiLlmKey --environment=production --m2m 2>/dev/null || true)
+                  if [ -z "$key" ]; then
+                      echo "::error::@smooai/config returned no value for smooaiLlmKey in production. Every model would score 0% with no tool calls."
+                      exit 1
+                  fi
+                  echo "::add-mask::$key"
+                  code=$(curl -sS -o /dev/null -w '%{http_code}' https://llm.smoo.ai/v1/models \
+                      -H "Authorization: Bearer $key")
+                  if [ "$code" != "200" ]; then
+                      echo "::error::llm.smoo.ai rejected smooaiLlmKey (HTTP $code). Rotate the key; do not read the scores as real."
+                      exit 1
+                  fi
+                  echo "SMOOAI_GATEWAY_KEY=$key" >> "$GITHUB_ENV"
+                  echo "gateway key resolved from @smooai/config and accepted (HTTP 200)"
+
             - name: Score the models
               env:
-                  SMOOAI_GATEWAY_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+                  # SMOOAI_GATEWAY_KEY comes from the config step above, via $GITHUB_ENV.
                   SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
-                  MODELS: ${{ inputs.models || 'deepseek-v4-flash gpt-5.5' }}
+                  MODELS: ${{ inputs.models || 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5' }}
                   TRIALS: ${{ inputs.trials || '3' }}
               run: |
                   args=()
                   for m in $MODELS; do args+=(--model "$m"); done
-                  # `convo` spawns its own daemon per model, so `th` must be
-                  # on PATH — it launches the separate smooth-daemon binary.
-                  cargo install --path crates/smooth-cli --bin th --locked
-                  cargo install --path crates/smooth-daemon --bin smooth-daemon --locked
                   cargo run --release -p smooai-smooth-bench -- convo \
                       "${args[@]}" --trials "$TRIALS" --turn-timeout-s 300 \
                       --scoreboard board.json | tee leaderboard.txt

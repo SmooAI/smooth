@@ -87,8 +87,13 @@ When given a task, drive it to completion before yielding. Don't stop at the fir
 ## Memory — remember across sessions
 At the start of a task, `recall` what you already know about the user — their preferences, where things live, ongoing projects. Use `remember` to persist durable facts the moment you learn them: where their vault is, how they like things done, decisions made, project state. Don't re-ask for something you could recall. Your memory survives restarts — use it.
 
+## Modes — Plan and Auto
+You run in one of two modes, which the user toggles (shift+tab in the terminal, a Plan/Auto switch on desktop and phone).
+- **Auto** (default): you act — edit, run commands, deliver files — as described above.
+- **Plan** (read-only): your mutating tools are removed, so you CANNOT edit files, run shell commands, send files, or message anyone even if you try. Use this to investigate and think. Read the code, `grep`, `web_search`, and when you have a concrete plan call `present_plan` with it as markdown (what you'll change, which files, how you'll verify). The user then accepts — which switches you to Auto so you carry it out — or sends revisions to refine. Don't announce the plan in prose and stop; call `present_plan` so they get an accept/revise card. If they ask you to DO something while in Plan mode, present the plan for it rather than apologising that you can't act.
+
 ## Skills & tracking
-When a request matches one of your Available skills (listed below), READ its SKILL.md and follow it exactly rather than improvising. For multi-step or ongoing work, track it as pearls via `th pearls` so nothing gets lost between sessions.
+When a request matches one of your Available skills (listed below), READ its SKILL.md and follow it exactly rather than improvising. For any task with more than a couple of steps, call `todo_write` with the full checklist and keep it current (one item in_progress at a time) so the user can follow along on-screen; for longer-lived or cross-session work, also track it as pearls via `th pearls` so nothing gets lost.
 
 ## Environment
 You run always-on on the user's machine. Your filesystem and shell tools are confined to their workspace (the `~/dev` tree — their repos and Obsidian vault live under it). Be proactive when it clearly helps (a heads-up, a follow-up you promised) but never noisy.
@@ -143,7 +148,32 @@ struct SandboxedToolProvider {
     /// family configured) or an owner caller (no `role:` group) ⇒ the full set,
     /// unchanged.
     family: Option<Arc<FamilyConfig>>,
+    /// Per-conversation execution mode (Plan/Auto). In **Plan** mode `tools_for`
+    /// filters every mutating tool out of the per-turn set — a read-only
+    /// guarantee (th-c1b589). Shared with the `/api/session/mode` route so a
+    /// face's `shift+tab` / Plan-Auto toggle takes effect on the next turn.
+    modes: crate::session_mode::SessionModes,
 }
+
+/// The tools a **Plan-mode** turn may keep — a strict read-only allowlist
+/// (deny-by-default, mirroring the family RBAC filter). Everything else
+/// (`write_file`, `edit_file`, `bash`, `send_file`, `create_skill`, calendar/
+/// reminders/imessage writes, `th`, `remember`, plugins, MCP, `send_sidekick`)
+/// is dropped from the schema the model sees, so a Plan turn *cannot* mutate.
+/// `present_plan` + `todo_write` are here so the agent can propose and track.
+const PLAN_READONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "list_files",
+    "grep",
+    "web_search",
+    "knowledge_search",
+    "crawl",
+    "get_current_datetime",
+    "recall",
+    "cd",
+    "present_plan",
+    "todo_write",
+];
 
 /// The role a turn runs as, extracted from the principal's groups. `None` for the
 /// owner (no `role:` group) — which means "no family filtering, full tool set".
@@ -162,7 +192,7 @@ impl ToolProvider for SandboxedToolProvider {
         let session = ctx.conversation_id.clone().unwrap_or_default();
         let dir = self.cwd.get(&session);
         let mut tools = smooth_tools::default_tools_with_proxy(dir.clone(), self.proxy.clone());
-        tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session, dir.clone())) as Arc<dyn Tool>);
+        tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session.clone(), dir.clone())) as Arc<dyn Tool>);
         // Durable cross-session memory: `remember` writes, `recall` reads — both
         // over the same shared backend, injected here (not in the generic
         // `default_tools_with_proxy`) because they need the daemon's `Memory`
@@ -244,7 +274,12 @@ impl ToolProvider for SandboxedToolProvider {
         // allowlist above) with the sink captured. A turn with no directive sink
         // (nothing to drain into) simply doesn't get the tool.
         if let Some(sink) = ctx.directive_sink.clone() {
-            tools.push(Arc::new(smooth_tools::SendFileTool::new(dir.clone(), sink)) as Arc<dyn Tool>);
+            tools.push(Arc::new(smooth_tools::SendFileTool::new(dir.clone(), Arc::clone(&sink))) as Arc<dyn Tool>);
+            // present_plan (th-c1b589): the Plan-mode → accept/revise handoff.
+            // todo_write: the live task list. Both ride the same directive sink
+            // send_file uses, so they're injected here alongside it.
+            tools.push(Arc::new(smooth_tools::PresentPlanTool::new(Arc::clone(&sink))) as Arc<dyn Tool>);
+            tools.push(Arc::new(smooth_tools::TodoWriteTool::new(sink)) as Arc<dyn Tool>);
         }
         // CLI-wrapper plugins (th-262e5f): `~/.smooth/plugins/<name>/plugin.toml`
         // plus this session's workspace `.smooth/plugins/`, project shadowing
@@ -327,6 +362,23 @@ impl ToolProvider for SandboxedToolProvider {
                 )) as Arc<dyn Tool>);
             }
         }
+        // Plan mode (th-c1b589): a read-only guarantee. When THIS conversation is
+        // in Plan, drop every tool not on the read-only allowlist — deny-by-
+        // default, exactly like the family RBAC filter above, and applied LAST so
+        // it also strips `send_sidekick` (no delegating around the limit). The
+        // model never sees a mutating tool, so a Plan turn cannot edit, run bash,
+        // send a file, or text anyone. The agent calls `present_plan`; the user
+        // accepts (flipping to Auto, then it executes) or revises.
+        if self.modes.get(&session) == crate::session_mode::Mode::Plan {
+            let before = tools.len();
+            tools.retain(|t| PLAN_READONLY_TOOLS.contains(&t.schema().name.as_str()));
+            tracing::debug!(
+                session,
+                kept = tools.len(),
+                dropped = before - tools.len(),
+                "plan mode: filtered to read-only tools"
+            );
+        }
         tools
     }
 }
@@ -360,7 +412,9 @@ pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> A
 /// sqlite-backed store here so cross-session memory persists (th-6d1692).
 #[must_use]
 pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, memory: Arc<dyn Memory>) -> Arc<dyn ToolProvider> {
-    local_tool_provider_full(cwd, proxy, memory, None, None)
+    // A fresh, unshared mode store: the simple constructors (tests, ad-hoc) have
+    // no `/api/session/mode` route to share with, so every conversation is Auto.
+    local_tool_provider_full(cwd, proxy, memory, None, None, crate::session_mode::SessionModes::new())
 }
 
 /// The full seam, additionally taking the daemon's live [`McpManager`].
@@ -375,6 +429,7 @@ pub fn local_tool_provider_full(
     memory: Arc<dyn Memory>,
     mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
     family: Option<Arc<FamilyConfig>>,
+    modes: crate::session_mode::SessionModes,
 ) -> Arc<dyn ToolProvider> {
     Arc::new(SandboxedToolProvider {
         cwd,
@@ -382,6 +437,7 @@ pub fn local_tool_provider_full(
         memory,
         mcp,
         family,
+        modes,
     })
 }
 
@@ -1015,6 +1071,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
     // `/cd`). Rooted at the workspace; every conversation defaults to it.
     let session_cwd = SessionCwd::new(workspace.clone());
+    // One per-conversation mode store (th-c1b589), shared by the tool provider
+    // (Plan-mode read-only filter) and the `/api/session/mode` route (the faces'
+    // shift+tab / Plan-Auto toggle). Every conversation defaults to Auto.
+    let session_modes = crate::session_mode::SessionModes::new();
     // MCP servers (th-52ec01): spawn every non-disabled server from the merged
     // global+project `mcp.toml` ONCE here, keep the sessions alive for the
     // daemon's lifetime, and hand the manager to the tool provider so their tools
@@ -1026,7 +1086,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // per-turn tool set by role) and the auth verifier (maps a member token → its
     // `role:` group). Absent/malformed ⇒ single-tenant, fail-closed.
     let family = load_family_config();
-    let provider = local_tool_provider_full(session_cwd.clone(), egress_proxy, memory, Some(mcp), family.clone());
+    let provider = local_tool_provider_full(session_cwd.clone(), egress_proxy, memory, Some(mcp), family.clone(), session_modes.clone());
 
     // Web-push state, built ONCE and shared: the /push/* router and the turn
     // notifier (th-b9a636) — the trigger layer push never had.
@@ -1106,6 +1166,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
                 // a conversation's cwd in the SAME store the tool provider reads.
                 .merge(crate::cwd_route::cwd_router(session_cwd))
+                // GET/POST /api/session/mode — the faces' Plan/Auto toggle
+                // (shift+tab in th code). Sets/reads a conversation's mode in the
+                // SAME store the tool provider's Plan-mode filter reads (th-c1b589).
+                .merge(crate::mode_session_route::mode_router(session_modes))
                 // POST /api/usage + GET /api/stats — the Stats page: activity from
                 // this durable store, spend from ~/.smooth/usage.jsonl (the client
                 // POSTs each turn's streamed usage, which the engine doesn't persist).
@@ -1467,6 +1531,7 @@ mod tests {
             Arc::new(smooth_operator::InMemoryMemory::new()),
             None,
             Some(family),
+            crate::session_mode::SessionModes::new(),
         );
         let jr = ToolProviderContext::new(Some("org-1".into()), AccessContext::new(Some("kid".into()), vec!["role:child".into()])).with_conversation_id("c1");
         let names: Vec<String> = provider.tools_for(&jr).await.iter().map(|t| t.schema().name).collect();
@@ -1507,6 +1572,7 @@ mod tests {
             Arc::new(smooth_operator::InMemoryMemory::new()),
             None,
             Some(family),
+            crate::session_mode::SessionModes::new(),
         );
 
         // Owner: no role group → full set (regression guard).
@@ -1530,6 +1596,65 @@ mod tests {
         assert_eq!(n1, n2, "the tool set depends only on the role, not the conversation");
         std::env::remove_var("SMOOAI_GATEWAY_URL");
         std::env::remove_var("SMOOAI_GATEWAY_KEY");
+    }
+
+    /// Plan mode (th-c1b589) is a hard read-only guarantee: a Plan conversation's
+    /// per-turn tool set contains ONLY the read-only allowlist (+ present_plan /
+    /// todo_write) — never a mutating tool — while an Auto conversation on the
+    /// SAME provider keeps the full set. This is the security-critical assertion:
+    /// the model cannot obtain `edit_file` / `bash` / `send_file` in Plan mode.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_mode_filters_the_tool_set_to_read_only() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let modes = crate::session_mode::SessionModes::new();
+        modes.set("plan-conv", crate::session_mode::Mode::Plan);
+        // "auto-conv" is left unset → Auto.
+        let provider = local_tool_provider_full(
+            SessionCwd::new(std::env::temp_dir()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            None,
+            modes,
+        );
+
+        // A directive sink so present_plan/todo_write are injected this turn.
+        let sink = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let mut plan_ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("plan-conv");
+        plan_ctx.directive_sink = Some(Arc::clone(&sink));
+        let plan_names: Vec<String> = provider.tools_for(&plan_ctx).await.iter().map(|t| t.schema().name).collect();
+
+        // Every mutating tool is gone — the model never sees it.
+        for mutating in [
+            "write_file",
+            "edit_file",
+            "bash",
+            "send_file",
+            "create_skill",
+            "remember",
+            "th",
+            "send_sidekick",
+        ] {
+            assert!(!plan_names.iter().any(|n| n == mutating), "Plan mode must DROP {mutating}: {plan_names:?}");
+        }
+        // The read-only + planning tools remain.
+        for keep in ["read_file", "list_files", "grep", "recall", "present_plan", "todo_write"] {
+            assert!(plan_names.iter().any(|n| n == keep), "Plan mode keeps {keep}: {plan_names:?}");
+        }
+        // Nothing outside the allowlist survived.
+        assert!(
+            plan_names.iter().all(|n| PLAN_READONLY_TOOLS.contains(&n.as_str())),
+            "Plan mode leaves only allowlisted tools: {plan_names:?}"
+        );
+
+        // Same provider, an Auto conversation keeps the mutating tools.
+        let mut auto_ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("auto-conv");
+        auto_ctx.directive_sink = Some(sink);
+        let auto_names: Vec<String> = provider.tools_for(&auto_ctx).await.iter().map(|t| t.schema().name).collect();
+        for m in ["write_file", "edit_file", "bash"] {
+            assert!(auto_names.iter().any(|n| n == m), "Auto mode keeps {m}: {auto_names:?}");
+        }
     }
 
     #[test]
