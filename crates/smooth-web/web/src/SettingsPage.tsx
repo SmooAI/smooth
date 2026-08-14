@@ -4,11 +4,11 @@
 //! Presence styling: teal marks the *active* choice (a live selection is the one
 //! "present" thing on the page); amber is never used — settings never demand you.
 
-import { Bell, KeyRound, Link2, ShieldCheck } from 'lucide-react';
+import { Bell, KeyRound, Link2, Scale, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
 import { ModelPicker } from './ModelSelector';
-import { type ModelCosts, type SmoothMode } from './modes';
+import { MODES, type ModelCosts, type SmoothMode } from './modes';
 import { resolveTarget, type Status } from './operator';
 import type { PushApi } from './usePush';
 
@@ -132,6 +132,133 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
     );
 }
 
+/** Narc's safety-judge config (mirrors the daemon's `/api/judge` reply). */
+interface JudgeState {
+    enabled: boolean;
+    strictness: 'lenient' | 'normal' | 'strict';
+    model: string;
+}
+
+const STRICTNESS: { id: JudgeState['strictness']; label: string; hint: string }[] = [
+    { id: 'lenient', label: 'Lenient', hint: 'Only hard signals (secret exfil, delete tools) are judged.' },
+    { id: 'normal', label: 'Normal', hint: 'Ambiguous hits also go to the judge; the default.' },
+    { id: 'strict', label: 'Strict', hint: 'Fails closed — blocks ambiguous hits when the judge is unreachable.' },
+];
+
+/** The safety-judge controls (pearls th-eec7a5, th-7aa2af). Enable/disable the
+ * LLM judge, pick how strict it is, and pick the model it runs as (independent
+ * of the chat model). Disabling only turns off the LLM escalation — the
+ * hard-signal detectors and the permission circuit-breakers still run. */
+function JudgeSection() {
+    const { http, token } = resolveTarget();
+    const authHeaders: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+    const [state, setState] = useState<JudgeState | null>(null);
+    const [busy, setBusy] = useState(false);
+
+    useEffect(() => {
+        let live = true;
+        fetch(`${http}/api/judge`, { headers: authHeaders })
+            .then((r) => (r.ok ? (r.json() as Promise<JudgeState>) : null))
+            .then((j) => {
+                if (live && j) setState(j);
+            })
+            .catch(() => {});
+        return () => {
+            live = false;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [http]);
+
+    const patch = useCallback(
+        async (body: Partial<JudgeState>) => {
+            setBusy(true);
+            try {
+                const r = await fetch(`${http}/api/judge`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', ...authHeaders },
+                    body: JSON.stringify(body),
+                });
+                if (r.ok) setState((await r.json()) as JudgeState);
+            } finally {
+                setBusy(false);
+            }
+        },
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [http],
+    );
+
+    if (!state) return <p className="text-sm text-(--color-muted-foreground)">Checking…</p>;
+
+    // The models the judge can run as: the mode lineup, plus whatever is set now
+    // (so a custom/fast model that isn't a Smooth Mode still shows selected).
+    const models = Array.from(new Set([state.model, ...MODES.map((m) => m.model)]));
+
+    return (
+        <div className="space-y-4">
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border bg-panel/60 px-4 py-3">
+                <div className="min-w-0">
+                    <div className="text-sm text-foreground">LLM safety judge</div>
+                    <div className="text-xs text-(--color-muted-foreground)">
+                        {state.enabled
+                            ? 'On — ambiguous tool calls are adjudicated before they run.'
+                            : 'Off — detectors and circuit-breakers still block clear threats; no LLM second opinion.'}
+                    </div>
+                </div>
+                <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void patch({ enabled: !state.enabled })}
+                    role="switch"
+                    aria-checked={state.enabled}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition disabled:opacity-60 ${
+                        state.enabled ? 'bg-(--color-th-teal)' : 'bg-(--color-muted-foreground)/30'
+                    }`}
+                >
+                    <span className={`absolute top-0.5 size-5 rounded-full bg-white transition ${state.enabled ? 'left-[22px]' : 'left-0.5'}`} />
+                </button>
+            </div>
+
+            <div className={state.enabled ? '' : 'pointer-events-none opacity-50'}>
+                <div className="mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Strictness</div>
+                <div className="grid grid-cols-3 gap-2">
+                    {STRICTNESS.map((s) => (
+                        <button
+                            key={s.id}
+                            type="button"
+                            disabled={busy || !state.enabled}
+                            title={s.hint}
+                            onClick={() => void patch({ strictness: s.id })}
+                            className={`rounded-xl border px-3 py-2 text-sm transition ${
+                                s.id === state.strictness
+                                    ? 'border-transparent bg-(--color-th-teal)/12 text-foreground ring-1 ring-(--color-th-teal)/40'
+                                    : 'border-border bg-panel/60 text-foreground/80 hover:bg-panel-2'
+                            }`}
+                        >
+                            {s.label}
+                        </button>
+                    ))}
+                </div>
+                <p className="mt-2 text-xs text-(--color-muted-foreground)">{STRICTNESS.find((s) => s.id === state.strictness)?.hint}</p>
+
+                <div className="mt-4 mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Judge model</div>
+                <select
+                    value={state.model}
+                    disabled={busy || !state.enabled}
+                    onChange={(e) => void patch({ model: e.target.value })}
+                    className="w-full rounded-xl border border-border bg-panel/60 px-3 py-2 font-mono text-xs text-foreground/90"
+                >
+                    {models.map((m) => (
+                        <option key={m} value={m}>
+                            {m}
+                        </option>
+                    ))}
+                </select>
+                <p className="mt-2 text-xs text-(--color-muted-foreground)">The judge is a cheap classifier; a fast model is fine and keeps it snappy.</p>
+            </div>
+        </div>
+    );
+}
+
 export default function SettingsPage({
     mode,
     setMode,
@@ -158,6 +285,10 @@ export default function SettingsPage({
                 <div className="overflow-hidden rounded-2xl border border-border bg-panel/60">
                     <ModelPicker current={mode.model} onPick={setMode} costs={modelCosts} />
                 </div>
+            </Section>
+
+            <Section icon={<Scale className="size-4" />} title="Safety judge">
+                <JudgeSection />
             </Section>
 
             <Section icon={<Bell className="size-4" />} title="Notifications">
