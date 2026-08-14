@@ -230,6 +230,10 @@ export default function App() {
         setView('chat');
         newConversation();
         closeOnMobile();
+        // Focus the chat bar so you can type immediately after New Chat / Cmd+N.
+        // Deferred past the render so the Composer has (re)mounted and registered
+        // its focus fn when we're switching in from Stats/Settings.
+        requestAnimationFrame(() => composerFocus.current?.());
     };
     // Sidebar tab pick → switch surface; on mobile the drawer dismisses like a resume.
     const onNavigate = (v: 'chat' | 'stats' | 'settings') => {
