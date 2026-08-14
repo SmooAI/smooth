@@ -1255,7 +1255,7 @@ mod tests {
             api_key: "unused".into(),
             model: "fast-judge".into(),
             max_tokens: 128,
-            temperature: 0.0,
+            temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
             retry_policy: smooth_operator::llm::RetryPolicy::default(),
             api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
         }

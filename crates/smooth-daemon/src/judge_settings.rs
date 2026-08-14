@@ -54,7 +54,8 @@ impl Strictness {
     /// Parse a wire value (`"lenient"`/`"normal"`/`"strict"`, case-insensitive).
     /// Anything else ⇒ `None`, so a bad value is rejected rather than silently
     /// coerced (which could weaken the safety posture).
-    #[must_use]
+    // No `#[must_use]`: the `Option` return is already `#[must_use]` (clippy
+    // `double_must_use` — CI's clippy is stricter than the local toolchain).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "lenient" => Some(Self::Lenient),
