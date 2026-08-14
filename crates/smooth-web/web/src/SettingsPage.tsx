@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ModelPicker } from './ModelSelector';
 import { MODES, type ModelCosts, type SmoothMode } from './modes';
 import { resolveTarget, type Status } from './operator';
+import type { PushApi } from './usePush';
 
 /** A Big Smooth daemon discovered on the tailnet (mirrors the Electron shape). */
 interface RemoteDaemon {
@@ -25,6 +26,9 @@ interface BigSmoothBridge {
     /** Cmd/Ctrl+N from the desktop window → new chat. Returns an unsubscribe fn.
      * Absent in the browser PWA (Electron-only). */
     onNewChat?: (cb: () => void) => () => void;
+    /** Show a native OS notification (th-6af4b1). Electron-only — the webview
+     * can't do Web Push, so `usePush` falls back to this. Resolves to shown. */
+    notify?: (payload: { title?: string; body?: string; deepLink?: string }) => Promise<boolean>;
 }
 declare global {
     interface Window {
@@ -105,15 +109,6 @@ function ConnectionSwitcher() {
             {busy && <p className="mt-2 text-xs text-(--color-muted-foreground)">Reconnecting — the app will relaunch.</p>}
         </div>
     );
-}
-
-interface PushApi {
-    supported: boolean;
-    enabled: boolean;
-    busy: boolean;
-    /** Whether the daemon has push (VAPID) configured. null = still checking. */
-    configured: boolean | null;
-    enable: () => void | Promise<void>;
 }
 
 function Section({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
