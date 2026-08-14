@@ -40,6 +40,9 @@ pub mod imessage;
 pub mod knowledge_search;
 pub mod mcp;
 pub mod mcp_config;
+/// `notify` — proactively push a notification to the user's devices (via the
+/// daemon's web-push infra). See [`notify::NotifyTool`] / [`notify::NotifySink`].
+pub mod notify;
 pub mod path;
 pub mod permission;
 /// File-based CLI-wrapper plugins (`plugin.toml` manifests) registered as tools.
@@ -78,6 +81,7 @@ pub use guard::is_circuit_breaker;
 #[cfg(target_os = "macos")]
 pub use imessage::IMessageTool;
 pub use knowledge_search::KnowledgeSearchTool;
+pub use notify::{NotifySink, NotifyTool};
 pub use path::resolve_workspace_path;
 pub use plugin::{discover as discover_plugins, tools_for as plugin_tools, LoadedPlugin, PluginManifest, PluginScope};
 pub use present_plan::PresentPlanTool;

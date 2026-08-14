@@ -85,16 +85,26 @@ impl TurnNotifier {
     /// Notify that a scheduled/proactive turn finished. `title` is the schedule's
     /// prompt gist; `body` the response gist. Best-effort on both channels.
     pub async fn turn_completed(&self, title: &str, body: &str) {
+        self.notify(title, body, None).await;
+    }
+
+    /// Fan a notification out to every reachable channel (web push + phone
+    /// self-notify), best-effort. `deep_link` overrides the default app link.
+    /// Returns the number of device legs reached (web + phone). Used by both
+    /// scheduled-turn completion and the agent's `notify` tool (th-c29d34).
+    pub async fn notify(&self, title: &str, body: &str, deep_link: Option<&str>) -> usize {
         let title = if title.trim().is_empty() { "Big Smooth" } else { title.trim() };
         let body = clamp_body(body);
+        let link = deep_link.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEEP_LINK);
         let web_sent = self.web.send_to_all(title, &body).await;
-        let phone_sent = self.phone_notify(title, &body).await;
-        tracing::info!(web = web_sent, phone = ?phone_sent, "turn notification fanned out");
+        let phone_sent = self.phone_notify(title, &body, link).await;
+        tracing::info!(web = web_sent, phone = ?phone_sent, "notification fanned out");
+        web_sent + usize::try_from(phone_sent.unwrap_or(0)).unwrap_or(usize::MAX)
     }
 
     /// The phone leg: self-notify through the platform (in-app + FCM). Returns
     /// the device count pushed, or `None` when skipped (signed out) / failed.
-    async fn phone_notify(&self, title: &str, body: &str) -> Option<u64> {
+    async fn phone_notify(&self, title: &str, body: &str, deep_link: &str) -> Option<u64> {
         // Fresh read every call — the credential heartbeat rotates the session.
         let creds = self.store.as_ref()?.load().ok().flatten()?;
         let org = creds.active_org_id.filter(|o| !o.trim().is_empty())?;
@@ -105,7 +115,7 @@ impl TurnNotifier {
             .http
             .post(self_notify_url(&self.api_base, &org))
             .bearer_auth(&creds.access_token)
-            .json(&json!({ "title": title, "body": body, "deepLink": DEEP_LINK }))
+            .json(&json!({ "title": title, "body": body, "deepLink": deep_link }))
             .send()
             .await;
         match resp {
@@ -122,6 +132,16 @@ impl TurnNotifier {
                 None
             }
         }
+    }
+}
+
+/// Back the agent's `notify` tool with the same web + phone fan-out the
+/// scheduler uses (th-c29d34). The tool crate owns the trait; the daemon owns
+/// the delivery.
+#[async_trait::async_trait]
+impl smooth_tools::NotifySink for TurnNotifier {
+    async fn deliver(&self, title: &str, body: &str, deep_link: Option<&str>) -> usize {
+        self.notify(title, body, deep_link).await
     }
 }
 

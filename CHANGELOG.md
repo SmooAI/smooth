@@ -1,5 +1,24 @@
 # @smooai/smooth
 
+## 0.35.2
+
+### Patch Changes
+
+- c0b04b5: Big Smooth: Auto mode stops prompting for every tool call. The permission gate's default posture moves from `AcceptEdits` (which asked for **every** `bash` and unknown-category tool call, so an assistant that lives in bash and custom tools produced a constant stream of approvals for benign work) back to `Bypass` — _allow benign, block/flag dangerous_. Bypass lets a call past the tool-category classifier, but the two real safety layers still run: the embedded `DenyPolicy` circuit-breakers hard-deny catastrophes (rm -rf /, credential-store reads, .git/hooks writes), and the Narc hook detects destruction / secret-exfil / prompt-injection and escalates ambiguous hits to a fail-closed LLM judge. So routine calls run unprompted and only a judged-dangerous call stops. `SMOOTH_AUTO_MODE=accept-edits` (or `ask`/`deny`) restores the stricter category-gating for anyone who wants it. This also completes the Plan/Auto story: Plan mode stays read-only (tools filtered), Auto mode executes freely under the judge.
+- 26df307: Fix the desktop "Enable notifications" button doing nothing. The Electron webview can't do Web Push (Chromium ships no push service, so `pushManager.subscribe()` rejects and the click silently no-ops). `usePush` now detects the Electron bridge and falls back to native OS notifications over a new preload IPC channel: Enable fires a confirmation notification, and finished replies are relayed natively when the window is unfocused. The browser PWA path is unchanged.
+- 0bfa46f: Add a `notify` tool so Big Smooth can proactively push to the user's devices. The agent calls `notify({title, body, deepLink?, audience?})` and the daemon fans it out over the existing web-push + platform self-notify infra (`TurnNotifier`, the same path scheduled turns use). It's injected per-turn in `tools_for` and gated by the deny-by-default family filter (ADR-008): a scoped/child principal only gets the tool if its role allowlists `notify`, and even then may only notify itself — the audience clearance is bound from the authenticated role, never tool args. A persona line steers the model to notify only for reminders, long-job completion, and genuinely useful heads-ups, never chatter. (Mobile APNs/FCM receive side is out of scope — smooai repo.)
+- 61fce3b: Big Smooth web/desktop SPA: replace the fixed Smooth Mode preset chips (Flash/Code/UI/Plan/Fast/Code+/Max/Smoo-Jr) with a searchable model selector. Every model is derived from the published `docs/model-scores.json` benchmark and shows capability badges (🏆 top score, 💚 best value, 🛡️ safest, 💎 premium), its pass rate, and $/pass. Default is gpt-5.6-luna; the pick persists to localStorage and falls back to luna for a saved unknown id. Null-cost models render "unknown" (never $0), claude-fable-5's rate uses its provided conclusive-denominator value, and the benchmark run date is surfaced in the picker.
+- 59fe39c: `th code` TUI: Plan⇄Auto mode support. shift+tab now toggles the bound
+  conversation between Plan (agent held read-only, proposes a plan) and Auto
+  (agent executes), POSTing the change to the daemon's `/api/session/mode` for the
+  same conversation the TUI sends turns with. The status line shows a PLAN (amber)
+  / AUTO badge with a shift+tab hint. The `present_plan` directive renders as an
+  accept/revise card — an empty-draft Enter accepts (flips to Auto and sends
+  "Proceed with the plan."), typed feedback revises while staying in Plan. The
+  `todos` directive renders as a live boxed checklist (✔/▶/○) that replaces the
+  previous one. Both directives ride the existing `eventual_response.directive`
+  field.
+
 ## 0.35.1
 
 ### Patch Changes
