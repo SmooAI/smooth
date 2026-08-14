@@ -36,7 +36,8 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
-import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
+import { ModelSelectorButton } from './ModelSelector';
+import { costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
 import {
     useOperator,
     type AgentState,
@@ -171,10 +172,9 @@ function CostBar({ mode, costs, sessionCostUsd, className }: { mode: SmoothMode;
     const expensive = modeExpensive(mode, costs);
     return (
         <div className={`flex items-center gap-2 text-xs text-(--color-muted-foreground) ${className ?? ''}`}>
-            <span className="font-medium text-foreground/80">
-                {mode.emoji} {mode.label}
+            <span className="font-mono font-medium text-foreground/80">
+                {mode.emoji} {mode.model}
             </span>
-            <span className="hidden font-mono opacity-70 sm:inline">{mode.model}</span>
             {badge && <span aria-hidden>{badge}</span>}
             <span className={`font-mono font-semibold ${expensive ? 'text-amber' : 'text-foreground/70'}`}>{fmtUsd(sessionCostUsd)}</span>
         </div>
@@ -341,7 +341,7 @@ export default function App() {
                     {view === 'stats' ? (
                         <StatsPage />
                     ) : view === 'settings' ? (
-                        <SettingsPage mode={mode} setMode={guardedSetMode} status={status} push={push} />
+                        <SettingsPage mode={mode} setMode={guardedSetMode} modelCosts={modelCosts} status={status} push={push} />
                     ) : (
                         <>
                             {inConversation ? (
@@ -959,12 +959,10 @@ function ToolChip({ t, awaiting }: { t: ToolCall; awaiting: boolean }) {
 
 // ── Slash commands ───────────────────────────────────────────────────────────
 // A small popup above the composer, mirroring the TUI's slash UX: type `/`,
-// arrow + enter to pick, Esc to dismiss. The only command today is
-// `/smooth-mode <preset>` (bare → lists presets with cost badges); it switches
-// the active model and never sends a chat message. (th-f512b1)
+// arrow + enter to pick, Esc to dismiss. Model switching moved out of here into
+// the searchable ModelSelectorButton (th-3a5d22); what's left scopes the cwd.
 
 const SLASH_COMMANDS = [
-    { name: 'smooth-mode', hint: 'switch the active model' },
     { name: 'cd', hint: 'scope the working directory' },
     { name: 'pwd', hint: 'show the working directory' },
 ];
@@ -981,37 +979,19 @@ const MENTION_GLYPH: Record<MentionResult['kind'], string> = {
     pearl: '◍',
 };
 
-type MenuItem = { kind: 'command'; name: string; hint: string } | { kind: 'preset'; mode: SmoothMode; badge: string | null };
+type MenuItem = { kind: 'command'; name: string; hint: string };
 
 interface SlashMenu {
     items: MenuItem[];
-    /** Whether we're choosing the command itself or its preset argument. */
-    stage: 'command' | 'preset';
 }
 
-function buildSlashMenu(text: string, costs: ModelCosts): SlashMenu | null {
+function buildSlashMenu(text: string): SlashMenu | null {
     if (!text.startsWith('/')) return null;
     const rest = text.slice(1);
-    const spaceIdx = rest.indexOf(' ');
-    if (spaceIdx === -1) {
-        const q = rest.toLowerCase();
-        const items: MenuItem[] = SLASH_COMMANDS.filter((c) => c.name.startsWith(q)).map((c) => ({ kind: 'command', name: c.name, hint: c.hint }));
-        return items.length ? { items, stage: 'command' } : null;
-    }
-    const cmd = rest.slice(0, spaceIdx);
-    if (cmd === 'smooth-mode') {
-        const arg = rest
-            .slice(spaceIdx + 1)
-            .trim()
-            .toLowerCase();
-        const items: MenuItem[] = MODES.filter((m) => m.id.toLowerCase().startsWith(arg) || m.label.toLowerCase().startsWith(arg)).map((m) => ({
-            kind: 'preset',
-            mode: m,
-            badge: modeBadge(m, costs),
-        }));
-        return items.length ? { items, stage: 'preset' } : null;
-    }
-    return null;
+    if (rest.includes(' ')) return null;
+    const q = rest.toLowerCase();
+    const items: MenuItem[] = SLASH_COMMANDS.filter((c) => c.name.startsWith(q)).map((c) => ({ kind: 'command', name: c.name, hint: c.hint }));
+    return items.length ? { items } : null;
 }
 
 function Composer({
@@ -1104,7 +1084,7 @@ function Composer({
     const mentionVisible = !!mention && !dismissed && mentionResults.length > 0;
     const mentionSel = Math.min(sel, Math.max(0, mentionResults.length - 1));
 
-    const menu = useMemo(() => (dismissed || mention ? null : buildSlashMenu(text, modelCosts)), [text, modelCosts, dismissed, mention]);
+    const menu = useMemo(() => (dismissed || mention ? null : buildSlashMenu(text)), [text, dismissed, mention]);
     const selItem = menu ? menu.items[Math.min(sel, menu.items.length - 1)] : null;
 
     const cost = modeCost(mode, modelCosts);
@@ -1187,15 +1167,9 @@ function Composer({
     };
 
     const applyItem = (item: MenuItem) => {
-        if (item.kind === 'command') {
-            // Autocomplete to the argument stage; keep the menu open.
-            update(`/${item.name} `);
-            taRef.current?.focus();
-        } else {
-            // Switch modes — this is NOT a chat message.
-            setMode(item.mode.id);
-            update('');
-        }
+        // Autocomplete to the argument stage; keep the menu open.
+        update(`/${item.name} `);
+        taRef.current?.focus();
     };
 
     const sendable = canSend({ text, attachments: attachments.length, disabled, turnActive });
@@ -1258,17 +1232,11 @@ function Composer({
             )}
             {menu && (
                 <div className="absolute right-0 bottom-full left-0 mb-2 overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
-                    {menu.stage === 'preset' && (
-                        <div className="border-b border-border/60 px-3 py-1.5 text-[0.7rem] font-semibold tracking-wide text-(--color-muted-foreground) uppercase">
-                            Smooth Modes
-                        </div>
-                    )}
                     <ul className="max-h-72 overflow-y-auto py-1">
                         {menu.items.map((item, i) => {
                             const active = i === Math.min(sel, menu.items.length - 1);
-                            const key = item.kind === 'command' ? `c-${item.name}` : `m-${item.mode.id}`;
                             return (
-                                <li key={key}>
+                                <li key={`c-${item.name}`}>
                                     <button
                                         type="button"
                                         onMouseDown={(e) => {
@@ -1278,28 +1246,8 @@ function Composer({
                                         onMouseEnter={() => setSel(i)}
                                         className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm transition ${active ? 'bg-panel-2' : ''}`}
                                     >
-                                        {item.kind === 'command' ? (
-                                            <>
-                                                <span className="font-mono font-medium text-(--color-th-teal)">/{item.name}</span>
-                                                <span className="text-xs text-(--color-muted-foreground)">{item.hint}</span>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <span aria-hidden className="w-5 text-center">
-                                                    {item.mode.emoji}
-                                                </span>
-                                                <span className="font-medium">{item.mode.label}</span>
-                                                <span className="font-mono text-xs text-(--color-muted-foreground)">{item.mode.model}</span>
-                                                {item.badge && (
-                                                    <span aria-hidden className="ml-auto">
-                                                        {item.badge}
-                                                    </span>
-                                                )}
-                                                {item.mode.id === mode.id && (
-                                                    <span className={`text-xs text-(--color-th-teal) ${item.badge ? '' : 'ml-auto'}`}>active</span>
-                                                )}
-                                            </>
-                                        )}
+                                        <span className="font-mono font-medium text-(--color-th-teal)">/{item.name}</span>
+                                        <span className="text-xs text-(--color-muted-foreground)">{item.hint}</span>
                                     </button>
                                 </li>
                             );
@@ -1318,11 +1266,13 @@ function Composer({
                     e.target.value = '';
                 }}
             />
-            {/* Plan/Auto toggle — sits above the input, alongside where the active
-                model reads out. Plan makes him read-only until you accept a plan. */}
+            {/* Model selector + Plan/Auto toggle — sit above the input. The selector
+                is the searchable model list (th-3a5d22); Plan makes him read-only
+                until you accept a plan. */}
             <div className="mb-2 flex items-center gap-2 px-1">
+                <ModelSelectorButton current={mode.model} onPick={setMode} costs={modelCosts} />
                 <ModeChip mode={sessionMode} onToggle={onToggleSessionMode} />
-                <span className="text-xs text-(--color-muted-foreground)">
+                <span className="hidden text-xs text-(--color-muted-foreground) sm:inline">
                     {sessionMode === 'plan' ? 'planning — he proposes, you approve' : 'auto — he executes'}
                 </span>
             </div>
@@ -1434,7 +1384,7 @@ function Composer({
                                 ? 'Waiting for your operator…'
                                 : turnActive
                                   ? 'Big Smooth is working — Stop to interrupt'
-                                  : 'Talk to Big Smooth…  (/ for modes · @ to mention)'
+                                  : 'Talk to Big Smooth…  (/ for commands · @ to mention)'
                         }
                         disabled={disabled}
                         // `field-sizing-content` grows the box with what you type; `max-h-40`
