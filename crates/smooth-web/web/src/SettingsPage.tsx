@@ -7,7 +7,8 @@
 import { Bell, KeyRound, Link2, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import { MODES, type SmoothMode } from './modes';
+import { ModelPicker } from './ModelSelector';
+import { type ModelCosts, type SmoothMode } from './modes';
 import { resolveTarget, type Status } from './operator';
 
 /** A Big Smooth daemon discovered on the tailnet (mirrors the Electron shape). */
@@ -136,31 +137,20 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
     );
 }
 
-function ModeButton({ m, active, onPick }: { m: SmoothMode; active: boolean; onPick: () => void }) {
-    return (
-        <button
-            type="button"
-            onClick={onPick}
-            title={m.model}
-            className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-left text-sm transition ${
-                active
-                    ? 'border-transparent bg-(--color-th-teal)/12 ring-1 ring-(--color-th-teal)/40 text-foreground'
-                    : 'border-border bg-panel/60 text-foreground/80 hover:bg-panel-2'
-            }`}
-        >
-            <span aria-hidden>{m.emoji}</span>
-            <span className="min-w-0">
-                <span className="block truncate">{m.label}</span>
-                <span className="block truncate font-mono text-[10px] text-(--color-muted-foreground)">{m.model}</span>
-            </span>
-        </button>
-    );
-}
-
-export default function SettingsPage({ mode, setMode, status, push }: { mode: SmoothMode; setMode: (id: string) => void; status: Status; push: PushApi }) {
+export default function SettingsPage({
+    mode,
+    setMode,
+    modelCosts,
+    status,
+    push,
+}: {
+    mode: SmoothMode;
+    setMode: (id: string) => void;
+    modelCosts: ModelCosts;
+    status: Status;
+    push: PushApi;
+}) {
     const { http, token } = resolveTarget();
-    const budget = MODES.filter((m) => m.tier === 'budget');
-    const premium = MODES.filter((m) => m.tier === 'premium');
 
     return (
         <main className="flex min-h-0 flex-1 flex-col overflow-y-auto py-6">
@@ -168,19 +158,10 @@ export default function SettingsPage({ mode, setMode, status, push }: { mode: Sm
 
             <Section icon={<KeyRound className="size-4" />} title="Model">
                 <p className="mb-3 text-xs text-(--color-muted-foreground)">
-                    Smooth Mode pins each turn to a model. Currently: {mode.emoji} {mode.label}.
+                    Each turn is pinned to one model. Currently: {mode.emoji} {mode.model}.
                 </p>
-                <div className="mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Budget</div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {budget.map((m) => (
-                        <ModeButton key={m.id} m={m} active={m.id === mode.id} onPick={() => setMode(m.id)} />
-                    ))}
-                </div>
-                <div className="mt-3 mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Premium</div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {premium.map((m) => (
-                        <ModeButton key={m.id} m={m} active={m.id === mode.id} onPick={() => setMode(m.id)} />
-                    ))}
+                <div className="overflow-hidden rounded-2xl border border-border bg-panel/60">
+                    <ModelPicker current={mode.model} onPick={setMode} costs={modelCosts} />
                 </div>
             </Section>
 
