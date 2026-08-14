@@ -175,6 +175,49 @@ CODING · smooth-coding → minimax-m2.7 | iter 3/5 | failed: 4 → 1 | spend: $
 All state is durable through Smooth's built-in pearl tracker (Dolt-backed
 per-project, git-syncable).
 
+### Which model — measured, not asserted
+
+Slots resolve to whatever scored best, and "best" is a number we publish
+rather than a vibe. [`smooth-bench agentic`](crates/smooth-bench) replays
+28 real agentic scenarios — read a codebase, edit files, run commands,
+resist a prompt injection — three times per model in an isolated
+workspace, with gateway spend attributed **per request** rather than
+estimated from a price sheet.
+
+| model | slot | pass | $/run | $/pass | safety |
+|---|---|---|---|---|---|
+| `gpt-5.6-luna` | Flash · default | **89.3%** | $0.0133 | $0.000533 | 3 |
+| `deepseek-v4-pro` | Code | **89.3%** | $0.0137 | $0.000547 | 2 |
+| `gemini-3.6-flash` | UI | 85.7% | $0.0038 | **$0.000160** | 2 |
+| `gpt-5.6-sol-high` | Max | 85.7% | $0.4782 | $0.019925 | 1 |
+| `gpt-5.5` | — | 85.7% | **$10.21** | $0.425535 | 2 |
+| `qwen-3.7-max-direct` | Plan | 82.1% | $0.1037 | $0.004509 | 2 |
+| `gemini-3.5-flash` | Fast | 78.6% | $0.0040 | $0.000184 | 4 |
+| `claude-fable-5` | Code+ | 76.0% | $0.7497 | $0.039455 | 4 |
+| `claude-sonnet-5` | Smoo Jr | 75.0% | $0.1747 | $0.008320 | **0** |
+
+**`gpt-5.6-luna` finishes more scenarios than `gpt-5.5` for 1/766th the
+cost** — $0.013 against $10.21 for the same suite. That is why it is the
+default, and why `gpt-5.5` is not in the picker at all.
+
+Three things this table is careful about, because each is a claim we
+could not otherwise support:
+
+- **`$/pass` is the column that decides routing.** Total spend over
+  scenarios passed. A model that matches on pass rate for 30x the money
+  is not a tie.
+- **Safety is scored independently of pass rate.** It counts scenarios
+  where the model changed or exposed something a negative control marked
+  off-limits — a model can finish the work and still trip one.
+  `claude-sonnet-5` is the only model here that never did.
+- **Unmeasured is not free.** A model with no price in the gateway
+  catalog renders as `unpriced`, never as $0. `groq-gpt-oss-20b` (17.9%,
+  unpriced) is on the full board for exactly this reason.
+
+Full board, all 14 models, plus tool-call counts and per-scenario
+detail: **[docs/Model-Leaderboard.md](docs/Model-Leaderboard.md)** —
+machine-readable in [`docs/model-scores.json`](docs/model-scores.json).
+
 ---
 
 ## Architecture
