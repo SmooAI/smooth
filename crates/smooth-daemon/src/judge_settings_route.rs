@@ -70,7 +70,8 @@ async fn get_judge(State(settings): State<JudgeSettings>) -> Json<JudgeReply> {
 }
 
 /// The `/api/judge` router, backed by the shared [`JudgeSettings`] store.
-#[must_use]
+// No `#[must_use]`: axum's `Router` is already `#[must_use]` (clippy
+// `double_must_use` — the sibling cwd_router/mode_router omit it too).
 pub fn judge_router(settings: JudgeSettings) -> Router {
     Router::new().route("/api/judge", post(set_judge).get(get_judge)).with_state(settings)
 }
