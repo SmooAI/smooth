@@ -50,7 +50,9 @@ impl Tool for WeatherTool {
 
         let (lat, lon, label) = match place {
             Some(p) => geocode(p).await.ok_or_else(|| anyhow::anyhow!("couldn't find a place called `{p}`"))?,
-            None => ip_locate().await.ok_or_else(|| anyhow::anyhow!("no location given and couldn't detect one — pass a `location`"))?,
+            None => ip_locate()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no location given and couldn't detect one — pass a `location`"))?,
         };
 
         let (temp_unit, wind_unit) = if imperial { ("fahrenheit", "mph") } else { ("celsius", "kmh") };
@@ -60,7 +62,9 @@ impl Tool for WeatherTool {
              &daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max\
              &temperature_unit={temp_unit}&wind_speed_unit={wind_unit}&timezone=auto&forecast_days=3"
         );
-        let data = get_json(&url).await.ok_or_else(|| anyhow::anyhow!("weather service didn't respond for {label}"))?;
+        let data = get_json(&url)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("weather service didn't respond for {label}"))?;
         Ok(render(&label, &data, imperial))
     }
 }
@@ -115,7 +119,10 @@ async fn ip_locate() -> Option<(f64, f64, String)> {
 async fn get_json(url: &str) -> Option<Value> {
     let mut headers = HashMap::new();
     headers.insert("accept".to_owned(), "application/json".to_owned());
-    headers.insert("user-agent".to_owned(), concat!("smooth-th/", env!("CARGO_PKG_VERSION"), " (https://smoo.ai)").to_owned());
+    headers.insert(
+        "user-agent".to_owned(),
+        concat!("smooth-th/", env!("CARGO_PKG_VERSION"), " (https://smoo.ai)").to_owned(),
+    );
     let init = RequestInit {
         method: Method::GET,
         headers,
