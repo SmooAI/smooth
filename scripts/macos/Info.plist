@@ -61,5 +61,10 @@
          granted by hand in System Settings. -->
     <key>NSAppleEventsUsageDescription</key>
     <string>Big Smooth sends messages through Messages.app when you ask it to.</string>
+    <!-- th-ecdf4d: the `get_location` tool asks CoreLocation where the Mac is.
+         Without this string macOS refuses to raise the prompt at all, so the
+         grant could never land — the same silent-denial trap as EventKit. -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Big Smooth uses your location to answer questions about where you are and what's nearby, like the local weather.</string>
 </dict>
 </plist>

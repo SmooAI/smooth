@@ -30,6 +30,11 @@ pub mod crawl;
 pub mod create_skill;
 pub mod cwd;
 pub mod datetime;
+/// macOS Location Services (CoreLocation, in-process). Platform-specific by
+/// nature — CoreLocation exists nowhere else, so Linux/Windows never see the
+/// tool.
+#[cfg(target_os = "macos")]
+pub mod get_location;
 pub mod grep;
 pub mod guard;
 /// macOS Messages — reads `chat.db` and sends via Messages.app. Platform-specific
@@ -78,6 +83,8 @@ pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;
 pub use cwd::SessionCwd;
 pub use datetime::CurrentDatetimeTool;
+#[cfg(target_os = "macos")]
+pub use get_location::GetLocationTool;
 pub use grep::GrepTool;
 pub use guard::is_circuit_breaker;
 #[cfg(target_os = "macos")]
@@ -127,7 +134,8 @@ pub fn register_default_tools_with_proxy(registry: &mut ToolRegistry, workspace:
 /// [`register_default_tools_with_proxy`].
 #[must_use]
 pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Vec<Arc<dyn Tool>> {
-    vec![
+    #[allow(unused_mut, reason = "only the macOS arm below pushes onto it")]
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool { workspace: workspace.clone() }) as Arc<dyn Tool>,
         Arc::new(ListFilesTool { workspace: workspace.clone() }),
         Arc::new(GrepTool { workspace: workspace.clone() }),
@@ -151,7 +159,13 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         // Self-contained HTML report/artifact tool (Claude Code Artifacts style).
         Arc::new(ArtifactTool { workspace: workspace.clone() }),
         Arc::new(BashTool { workspace, proxy }),
-    ]
+    ];
+    // th-ecdf4d: the device's real position, which `get_weather` prefers over
+    // its IP guess. Registered even when the TCC grant is missing — the tool
+    // answers with how to grant it (see the module docs).
+    #[cfg(target_os = "macos")]
+    tools.push(Arc::new(GetLocationTool));
+    tools
 }
 
 #[cfg(test)]
@@ -182,6 +196,11 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
+        // Platform-specific: CoreLocation exists only on macOS.
+        #[cfg(target_os = "macos")]
+        assert!(names.iter().any(|n| n == "get_location"), "missing get_location in {names:?}");
+        #[cfg(not(target_os = "macos"))]
+        assert!(!names.iter().any(|n| n == "get_location"), "get_location must not register off macOS");
     }
 
     #[test]
@@ -206,6 +225,8 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
+        #[cfg(target_os = "macos")]
+        assert!(names.iter().any(|n| n == "get_location"), "missing get_location in {names:?}");
         // The bash tool carries the proxy so its egress routes through goalie.
         let bash = BashTool {
             workspace: PathBuf::from("/tmp"),

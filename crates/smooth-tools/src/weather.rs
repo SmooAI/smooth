@@ -50,7 +50,7 @@ impl Tool for WeatherTool {
 
         let (lat, lon, label) = match place {
             Some(p) => geocode(p).await.ok_or_else(|| anyhow::anyhow!("couldn't find a place called `{p}`"))?,
-            None => ip_locate()
+            None => here()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no location given and couldn't detect one — pass a `location`"))?,
         };
@@ -101,7 +101,42 @@ fn place_label(r: &Value) -> String {
     }
 }
 
-/// The daemon's own location via a keyless IP lookup — the no-`location` default.
+/// How a device fix is labelled. CoreLocation hands back coordinates, not a
+/// place name — reverse geocoding them would mean CLGeocoder (deprecated in the
+/// SDK, "use MapKit") for a string nobody asked for.
+const DEVICE_LABEL: &str = "your location";
+
+/// Coordinates for "here" — the device's real position first, the IP guess
+/// second (th-ecdf4d).
+///
+/// The IP lookup answers "where does this machine's traffic surface", which a
+/// VPN moves to another country and a rural ISP moves to the nearest metro.
+/// macOS Location Services answers "where is this Mac", so it wins whenever the
+/// grant exists. Off macOS, or ungranted, the IP fallback is unchanged.
+async fn here() -> Option<(f64, f64, String)> {
+    let device = device_fix().await;
+    // ponytail: only pay for the IP round-trip when the device had nothing.
+    let ip = if device.is_none() { ip_locate().await } else { None };
+    best(device, ip)
+}
+
+/// Device fix wins; otherwise the IP guess, label and all. Split out from
+/// [`here`] so the preference order is testable without a TCC grant or a network.
+fn best(device: Option<(f64, f64)>, ip: Option<(f64, f64, String)>) -> Option<(f64, f64, String)> {
+    device.map(|(lat, lon)| (lat, lon, DEVICE_LABEL.to_owned())).or(ip)
+}
+
+/// The Mac's own position via macOS Location Services, or `None` when that isn't
+/// available — no grant, no fix, or not a Mac at all.
+async fn device_fix() -> Option<(f64, f64)> {
+    #[cfg(target_os = "macos")]
+    if let Ok(c) = crate::get_location::coordinates().await {
+        return Some((c.lat, c.lon));
+    }
+    None
+}
+
+/// The daemon's own location via a keyless IP lookup — the fallback for [`here`].
 async fn ip_locate() -> Option<(f64, f64, String)> {
     let v = get_json("https://ipapi.co/json/").await?;
     let lat = v.get("latitude")?.as_f64()?;
@@ -281,6 +316,29 @@ mod tests {
         assert!(out.contains("Tomorrow: 74°F / 60°F 🌧️ Rain · 80% precip"), "{out}");
         // Day index 2 uses the date, not a relative word.
         assert!(out.contains("2026-08-17: 82°F / 65°F ☀️ Clear · 5% precip"), "{out}");
+    }
+
+    #[test]
+    fn a_device_fix_beats_the_ip_guess() {
+        // th-ecdf4d: the whole point — an IP guess two hours away must not win
+        // over Location Services.
+        let ip = Some((41.878, -87.629, "Chicago, IL".to_owned()));
+        assert_eq!(best(Some((39.955, -86.013)), ip.clone()), Some((39.955, -86.013, DEVICE_LABEL.to_owned())));
+        // No device fix (ungranted, or not a Mac) → the IP guess, unchanged.
+        assert_eq!(best(None, ip.clone()), ip);
+        // Neither → the caller's "pass a location" error, not a silent (0, 0).
+        assert_eq!(best(None, None), None);
+    }
+
+    #[tokio::test]
+    async fn an_ungranted_device_fix_is_none_rather_than_an_error() {
+        // A test binary is never TCC-granted, so this is the ungranted path on
+        // macOS and the always-path everywhere else. It must fall through to the
+        // IP lookup instead of failing the whole weather call.
+        if let Some((lat, lon)) = device_fix().await {
+            // Granted on this machine — then at least it must be a real place.
+            assert!((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon), "{lat},{lon}");
+        }
     }
 
     #[test]

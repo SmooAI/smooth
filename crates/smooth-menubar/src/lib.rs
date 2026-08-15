@@ -32,6 +32,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMen
 use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSSize, NSString};
 
 pub mod eventkit;
+pub mod location;
 pub mod reminders;
 pub mod setup;
 

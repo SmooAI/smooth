@@ -51,6 +51,7 @@ mac:
         NSRemindersFullAccessUsageDescription: Big Smooth reads and edits your reminders when you ask it to.
         NSAppleEventsUsageDescription: Big Smooth sends messages through Messages.app when you ask it to.
         NSRemovableVolumesUsageDescription: Big Smooth works in a workspace that may live on an external volume.
+        NSLocationWhenInUseUsageDescription: Big Smooth uses your location to answer questions about where you are and what's nearby, like the local weather.
 
 dmg:
     title: Big Smooth
