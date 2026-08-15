@@ -16,6 +16,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::eventkit::{self, Access};
+use crate::location;
 
 /// A macOS access grant Big Smooth can drive from in-process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub enum Grant {
     FullDiskAccess,
     /// Apple Events → Messages.app, for sending.
     MessagesAutomation,
+    /// CoreLocation — where the Mac actually is (th-ecdf4d).
+    Location,
 }
 
 /// One bit per [`Grant`], set the first time it is initiated in this process:
@@ -68,6 +71,12 @@ pub fn initiate(grant: Grant) -> Option<&'static str> {
             crate::open_url(crate::FDA_SETTINGS_URL);
             "I just opened System Settings → Privacy & Security → Full Disk Access — switch Big Smooth on there, then ask me again."
         }),
+        // Same "never re-prompts" rule as EventKit, so the same guard: only claim
+        // to have opened a prompt when one can actually appear.
+        Grant::Location => (location::location_access() == Access::NotDetermined && claim(grant)).then(|| {
+            location::initiate_location();
+            "I just opened the macOS Location permission prompt — click Allow, then ask me again."
+        }),
         Grant::MessagesAutomation => claim(grant).then(|| {
             std::thread::spawn(|| {
                 let _ = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(crate::MESSAGES_PROBE).output();
@@ -85,11 +94,17 @@ mod tests {
     fn each_grant_claims_its_own_bit_exactly_once() {
         // ponytail: the only test that touches the process-global claim state,
         // so no reset and no lock — it would fight itself if a second one grew.
-        for grant in [Grant::Calendar, Grant::Reminders, Grant::FullDiskAccess, Grant::MessagesAutomation] {
+        for grant in [
+            Grant::Calendar,
+            Grant::Reminders,
+            Grant::FullDiskAccess,
+            Grant::MessagesAutomation,
+            Grant::Location,
+        ] {
             assert!(claim(grant), "{grant:?}: first claim starts the flow");
             assert!(!claim(grant), "{grant:?}: second claim is the anti-spam guard");
         }
-        // All four bits distinct — a collision would silently mute one grant.
-        assert_eq!(INITIATED.load(Ordering::Relaxed), 0b1111);
+        // All five bits distinct — a collision would silently mute one grant.
+        assert_eq!(INITIATED.load(Ordering::Relaxed), 0b1_1111);
     }
 }

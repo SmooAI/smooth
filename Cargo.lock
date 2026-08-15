@@ -5260,6 +5260,7 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-location",
  "objc2-event-kit",
  "objc2-foundation",
  "tempfile",
