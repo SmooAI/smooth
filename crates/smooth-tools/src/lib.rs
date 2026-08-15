@@ -64,6 +64,8 @@ pub mod th;
 pub mod todo;
 mod util;
 pub mod walk;
+/// `get_weather` — current conditions + short forecast (keyless Open-Meteo).
+pub mod weather;
 pub mod web_search;
 pub mod write;
 
@@ -93,6 +95,7 @@ pub use sandbox::{SandboxPolicy, SandboxedCommand};
 pub use send_file::SendFileTool;
 pub use th::ThTool;
 pub use todo::TodoWriteTool;
+pub use weather::WeatherTool;
 pub use web_search::WebSearchTool;
 pub use write::{EditFileTool, WriteFileTool};
 
@@ -143,6 +146,8 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         // th-4c6271: without a clock the model invents "today" from its
         // training data. Argument-free and cheap, so always registered.
         Arc::new(CurrentDatetimeTool),
+        // th-40fcd6: keyless current + short-forecast weather (Open-Meteo).
+        Arc::new(WeatherTool),
         // Self-contained HTML report/artifact tool (Claude Code Artifacts style).
         Arc::new(ArtifactTool { workspace: workspace.clone() }),
         Arc::new(BashTool { workspace, proxy }),
@@ -171,6 +176,7 @@ mod tests {
             "th",
             "create_skill",
             "get_current_datetime",
+            "get_weather",
             "create_artifact",
             "bash",
         ] {
@@ -194,6 +200,7 @@ mod tests {
             "th",
             "create_skill",
             "get_current_datetime",
+            "get_weather",
             "create_artifact",
             "bash",
         ] {
