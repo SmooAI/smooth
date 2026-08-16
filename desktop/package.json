@@ -1,35 +1,35 @@
 {
-  "name": "@smooai/smooth-desktop",
-  "version": "0.1.10",
-  "private": true,
-  "description": "Big Smooth desktop shell — Electron window + tray around the native smooth-daemon",
-  "type": "module",
-  "main": "dist/main.js",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc && electron .",
-    "dist": "pnpm stage-daemon && electron-builder",
-    "dist:mac": "pnpm stage-daemon && CSC_NAME=\"${SIGN_IDENTITY:-Smoo LLC (DTX9733844)}\" electron-builder --mac",
-    "notarize": "bash ../scripts/macos/notarize-and-staple.sh release/*.dmg",
-    "stage-daemon": "tsc && node scripts/stage-daemon.mjs",
-    "format": "oxfmt .",
-    "lint": "oxlint .",
-    "test": "tsc && node --test dist/*.test.js",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "electron-updater": "^6.8.9"
-  },
-  "devDependencies": {
-    "@types/node": "^25.5.2",
-    "electron": "^40.0.0",
-    "electron-builder": "^26.0.12",
-    "typescript": "^5.8.3"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "esbuild"
-    ]
-  }
+    "name": "@smooai/smooth-desktop",
+    "version": "0.1.10",
+    "private": true,
+    "description": "Big Smooth desktop shell — Electron window + tray around the native smooth-daemon",
+    "type": "module",
+    "main": "dist/main.js",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc && electron .",
+        "dist": "pnpm stage-daemon && electron-builder",
+        "dist:mac": "pnpm stage-daemon && CSC_NAME=\"${SIGN_IDENTITY:-Smoo LLC (DTX9733844)}\" electron-builder --mac",
+        "notarize": "bash ../scripts/macos/notarize-and-staple.sh release/*.dmg",
+        "stage-daemon": "tsc && node scripts/stage-daemon.mjs",
+        "format": "oxfmt .",
+        "lint": "oxlint .",
+        "test": "tsc && node --test dist/*.test.js",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "electron-updater": "^6.8.9"
+    },
+    "devDependencies": {
+        "@types/node": "^25.5.2",
+        "electron": "^40.0.0",
+        "electron-builder": "^26.0.12",
+        "typescript": "^5.8.3"
+    },
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "electron",
+            "esbuild"
+        ]
+    }
 }

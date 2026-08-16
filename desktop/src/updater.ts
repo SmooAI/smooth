@@ -12,8 +12,11 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+
 import { app, dialog } from 'electron';
 import electronUpdater from 'electron-updater';
+
+import { stopDaemon } from './daemon.js';
 
 const { autoUpdater } = electronUpdater;
 
@@ -75,9 +78,17 @@ export function startAutoUpdates(): void {
                 message: `Big Smooth ${info.version} is ready.`,
                 detail: 'Restart to finish updating. Your session is preserved.',
             })
-            .then(({ response }) => {
-                // before-quit stops the daemon; quitAndInstall relaunches into the new app.
-                if (response === 0) autoUpdater.quitAndInstall();
+            .then(async ({ response }) => {
+                if (response !== 0) return;
+                // th-79416c: fully stop the daemon and WAIT for it to exit BEFORE
+                // handing the bundle to Squirrel. A fire-and-forget SIGTERM raced
+                // the installer — the daemon was still holding files inside
+                // Big Smooth.app when the ditto/copy ran, so the swap failed
+                // intermittently and rolled back. Awaiting frees the bundle first.
+                logLine('info', 'stopping daemon before install…');
+                await stopDaemon();
+                logLine('info', 'daemon stopped; quitAndInstall');
+                autoUpdater.quitAndInstall();
             });
     });
     autoUpdater.on('error', (err) => logLine('error', err));
