@@ -242,10 +242,55 @@ export async function startDaemon(): Promise<{ ok: boolean; spawned: boolean; er
     return { ok: false, spawned: true, error: `${BIN} did not answer ${url}/health within 60s — see ${DESKTOP_LOG_FILE}.` };
 }
 
-/** Terminate the daemon, but only if we were the one who started it. */
-export function stopDaemon(): void {
-    child?.kill('SIGTERM');
+/** Terminate the daemon (only if we started it) and RESOLVE once it has actually
+ * exited. Fire-and-forget SIGTERM used to race the OTA installer: `quitAndInstall`
+ * handed the bundle to Squirrel while the daemon was still shutting down and
+ * holding files inside `Big Smooth.app`, so the ditto/copy failed intermittently
+ * ("couldn't copy bundle … no such file") and the update silently rolled back
+ * (th-79416c). Awaiting the exit — with a SIGKILL fallback — frees the bundle
+ * before the swap.
+ *
+ * `graceMs` is how long we wait for a clean SIGTERM exit before escalating to
+ * SIGKILL; the returned promise always resolves (never rejects) so a quit path
+ * can't hang on it. */
+export async function stopDaemon(graceMs = 4000): Promise<void> {
+    const proc = child;
     child = undefined;
+    if (!proc || proc.exitCode !== null || proc.killed) return;
+    await killAndWait(proc, graceMs);
+}
+
+/** The minimal process surface `killAndWait` needs — lets it be unit-tested with
+ * a fake instead of spawning a real daemon. */
+export interface KillableProc {
+    once(event: 'exit', listener: () => void): unknown;
+    kill(signal: 'SIGTERM' | 'SIGKILL'): unknown;
+}
+
+/** SIGTERM `proc`, resolve once it emits `exit`, and escalate to SIGKILL if it
+ * hasn't exited within `graceMs`. Always resolves (never rejects) so a quit path
+ * can't hang. Extracted from `stopDaemon` so the OTA-critical logic is testable
+ * (th-79416c). */
+export async function killAndWait(proc: KillableProc, graceMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve();
+        };
+        proc.once('exit', finish);
+        proc.kill('SIGTERM');
+        const timer = setTimeout(() => {
+            try {
+                proc.kill('SIGKILL');
+            } catch {
+                // already gone
+            }
+            finish();
+        }, graceMs);
+    });
 }
 
 /**
