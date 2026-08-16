@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.36.2
+
+### Patch Changes
+
+- 3fca2b6: `th api observability` gains `monitors` (open uptime incidents) and `audit` (platform audit trail) — the two query functions that only the MCP tools could reach. Both routes accept a USER session only, which the help text now says. The group help no longer claims the surface is "source maps, traces, LLM telemetry".
+
 ## 0.36.1
 
 ### Patch Changes
