@@ -9,22 +9,22 @@ description: Bring this Claude Code session online as a `th` agent and listen fo
 
 **The core mechanism:** `th msg watch --once --json` blocks until unread mail appears, prints it, and **exits**. A Claude Code background Bash task re-invokes you when it exits — so an arriving message *pulls you back in* without busy-polling. You handle it, **re-arm the watcher**, and return to whatever you were doing. Listening is ancillary; it must never block your primary work.
 
-Your handle is resolved by `th agent whoami` (`$SMOOTH_AGENT_HANDLE` → `$SMOOTH_AGENT` → the handle the SessionStart hook recorded for this session → `user@host`). Shell env does **not** persist between Bash calls in this harness, so pass `--agent <handle>` explicitly, or claim a durable one with `th agent claim <handle>`.
+**Start by finding out who you are — never assume a handle.** `th agent whoami` prints it, resolved as `$SMOOTH_AGENT_HANDLE` → `$SMOOTH_AGENT` → the handle the SessionStart hook recorded for this session → `user@host`. Every `th msg` / `th agent` command with no `--agent` / `--from` resolves it the same way, so **bare commands read your own mailbox** — you no longer have to thread `--agent` through every call. A handle taken from a doc, an example, or a previous session is a guess, and guessing is how a session reads an empty inbox while its real mail piles up under the name it actually registered (pearl th-fa9f40).
 
 ## `/th-mail` or `/th-mail start [handle]` — go online and listen
 
-1. **Claim a task-meaningful handle** (carries any mail from your startup placeholder):
-   `th agent claim <handle>`  — or `th agent register --name <handle> --harness claude-code` if you just want to register.
-2. **Show current mail** so nothing already waiting is missed:
-   `th msg inbox --agent <handle>`  (surface any unread to the user)
-3. **Arm the background watcher** — run with `run_in_background: true`:
+1. **Read your handle first:** `th agent whoami` (`--json` to parse). The SessionStart hook already registered you, under a placeholder like `cc-<repo>-<sid4>` unless you were launched with one.
+2. **Claim a task-meaningful handle:** `th agent claim <handle>` — it renames you and carries your mail across. Use `claim`, never `th agent register --name <something-else>`: registering a different name gives this session a *second* mailbox that nobody watches, which `register` now refuses without `--force`.
+3. **Show current mail** so nothing already waiting is missed:
+   `th msg inbox`  (surface any unread to the user)
+4. **Arm the background watcher** — run with `run_in_background: true`:
    `bash "${CLAUDE_PLUGIN_ROOT}/skills/th-mail/watch-once.sh" <handle> 15`
-   (args: handle, poll-interval-secs; optional 3rd = max lifetime secs, default 24h)
-4. Tell the user: *online as `<handle>`, listening in the background — continuing with <current work>.* Then **go back to your primary task.**
+   (args: handle — pass the one from step 1/2, poll-interval-secs; optional 3rd = max lifetime secs, default 24h)
+5. Tell the user: *online as `<handle>`, listening in the background — continuing with <current work>.* Then **go back to your primary task.**
 
 ### When the watcher background task completes (you get re-invoked)
 
-1. Read the task's output. `[]` → timed out, just **re-arm** and continue.
+1. Read the task's output. `[]` **with exit 0** → timed out, just **re-arm** and continue. A **non-zero exit** means the mail store failed (full disk, unreadable `~/.smooth/mail.db`): your mail state is *unknown*, not empty — say so and fix it rather than re-arming into the same failure.
 2. Otherwise, for each message:
    - **Surface it** concisely: from, type, body, thread id.
    - **Triage & respond**: answer what you can (`th msg reply <msg-id> --from <handle> --body "..."`, or `th msg send <sender> "..." --from <handle>`); surface and ask when it needs the user's decision. `th msg thread <id>` gets the full conversation.

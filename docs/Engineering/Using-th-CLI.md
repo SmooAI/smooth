@@ -697,11 +697,26 @@ th agent backend set sqlite|cloud          # local (default, free) or cross-mach
 `th agent`/`th msg` also answer to `th agents`/`th msgs`.
 
 **Identity** resolves `$SMOOTH_AGENT_HANDLE` → `$SMOOTH_AGENT` → the handle the
-SessionStart hook recorded for `$CLAUDE_SESSION_ID` (in
-`~/.smooth/agent-sessions/`) → `user@short-hostname`. Set `$SMOOTH_HARNESS` so
-`th agent list` shows what tool each agent is. `th agent claim` and `th agent
-rename` both rewrite the recorded session handle, so the hook and the store stay
-in agreement.
+SessionStart hook recorded for this session id (`$CLAUDE_CODE_SESSION_ID`, else
+`$CLAUDE_SESSION_ID`, looked up in `~/.smooth/agent-sessions/`) →
+`user@short-hostname`. **Every** `--agent` / `--from` / `--name` defaults to it,
+so bare `th msg inbox` reads your own mailbox — and the MCP mail tools resolve
+identically, minus the `user@host` fallback (they refuse instead). Set
+`$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. `th agent
+claim` and `th agent rename` both rewrite the recorded session handle, so the
+hook and the store stay in agreement.
+
+> Until th-fa9f40 only `$CLAUDE_SESSION_ID` was consulted, and Claude Code
+> exports `$CLAUDE_CODE_SESSION_ID` — so the session tier never fired, every
+> no-flag command silently answered for `user@host`, and a session that took a
+> handle from a doc instead of `th agent whoami` read an empty inbox while its
+> real mail piled up elsewhere. Never hardcode a handle; ask `whoami`.
+
+**Registering a second identity is refused.** A session that already resolves to
+a handle cannot `th agent register --name <something-else>` without `--force`:
+that split is invisible (mail keeps arriving at the first mailbox) and looks
+exactly like "no mail". Use `th agent claim <new>`, which renames and carries the
+mail across.
 
 **Message types** (`note|request|result|handoff|cancel`) let a recipient triage
 without reading; `--priority N` sorts higher first in the inbox. **Read state is
@@ -769,7 +784,7 @@ the plugin manifest's `mcpServers`.
 - **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
 - **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `th api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
 
-- **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else `$SMOOTH_AGENT_HANDLE` on the server process; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
+- **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else the CLI's own resolver (the handle env vars, then the SessionStart hook's record for this session) — one shared chain, so a tool call and a `th msg` call can never answer for different mailboxes; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
 
 ### Statusline — which agent am I? (pearl th-2f33b6)
 
