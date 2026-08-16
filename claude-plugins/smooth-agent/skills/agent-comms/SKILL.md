@@ -31,10 +31,13 @@ The MCP tools come from the `smooth` server this plugin ships (`th mcp serve`).
 If they aren't listed, the CLI does the same thing — and `th mcp install
 --harness claude-code` (or `codex` / `opencode` / `all`) registers the server.
 
-**Pass your handle explicitly on every CLI call** (`--agent` / `--from`): shell
-env doesn't persist between Bash calls in this harness, so the bare default is
-`user@host`, not the handle you registered under. `th agent whoami` shows what
-you currently resolve to.
+**Ask who you are before you use a handle** — `th agent whoami`. Every `--agent`
+/ `--from` / `--name` defaults to the same answer (the handle env vars, then the
+handle the SessionStart hook recorded for this session), so bare `th msg inbox`
+reads *your* mailbox and passing `--agent` is optional. What is never safe is a
+handle you did not read from `whoami`: a name copied from a doc or an earlier
+session points at a mailbox nobody is filling, and reads back as "empty" rather
+than as an error (pearl th-fa9f40).
 
 ## The loop
 
@@ -99,7 +102,10 @@ Check it before starting work someone else may already be holding.
 ## Footguns
 
 - **One identity.** Always the same handle, or you're watching the wrong
-  mailbox. `th agent whoami` tells you which one that is.
+  mailbox. `th agent whoami` tells you which one that is. To change it use
+  `th agent claim <new>` — it renames you and brings your mail; `th agent
+  register --name <other>` would give this session a *second* mailbox and is
+  refused without `--force`.
 - **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (old
   scripts pass them) and print a deprecation note, but do nothing — the mailbox
   is machine-local, with no remote to sync and no Dolt write lock to contend

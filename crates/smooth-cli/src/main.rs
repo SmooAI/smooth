@@ -6161,8 +6161,8 @@ pi, or a shell loop.\n\
 \n\
 **On session start:**\n\
 ```bash\n\
-th agent register --name <your-handle>     # idempotent; pick a stable name\n\
-th agent whoami                            # what handle am I, what's waiting\n\
+th agent whoami                            # who am I already — ALWAYS ask first\n\
+th agent claim <your-handle>               # take a stable name, carrying your mail\n\
 ```\n\
 \n\
 **Continuously check for messages** (do this every few turns, or run it in the\n\
