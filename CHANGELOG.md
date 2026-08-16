@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.35.9
+
+### Patch Changes
+
+- 18b47f6: Desktop OTA never ships a stale daemon again (th-76a353). The daemon binary now bakes its build commit into `--version` (`smooth-daemon 0.35.8 (sha)`) via a new build.rs with `rerun-if-changed=.git/HEAD` — the same mechanism `th` already had, which the daemon lacked, so a cached target dir had been serving an old daemon stamped with the new version (every OTA silently re-shipped old code). Plus a desktop-publish guard step that refuses to bundle if the built `smooth-daemon`/`th` commit != HEAD, so a stale build fails loudly in CI instead of shipping.
+- 7315358: Desktop OTA installs reliably now (th-79416c). The updater used to hand the bundle to Squirrel while the daemon was still shutting down — `stopDaemon()` was a fire-and-forget SIGTERM — so the copy raced a daemon still holding files inside Big Smooth.app and failed intermittently ("couldn't copy bundle … no such file"), silently rolling back the update. `stopDaemon()` now awaits the process's actual exit (SIGKILL fallback after a grace period), and the update-downloaded handler awaits it before `quitAndInstall`, so the bundle is free when the swap runs. Pairs with th-76a353 (fresh, non-stale daemon) for a self-installing OTA.
+
 ## 0.35.8
 
 ### Patch Changes
