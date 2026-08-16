@@ -87,6 +87,23 @@ jobs:
                   cp target/release/smooth-daemon desktop/resources/current/smooth-daemon
                   cp target/release/th desktop/resources/current/th
 
+            # th-76a353: the OTA has shipped STALE daemons — a cached target dir
+            # served an old binary stamped with the new version, so `--version`
+            # lied and every update silently re-shipped old code. Both binaries now
+            # bake their build commit (smooth-cli always did; smooth-daemon does as
+            # of this pearl). Refuse to bundle anything whose commit != HEAD, so a
+            # stale build fails LOUD here instead of shipping.
+            - name: Guard against a stale bundled binary (th-76a353)
+              run: |
+                  HEAD_SHA="$(git rev-parse --short HEAD)"
+                  DAEMON_VER="$(desktop/resources/current/smooth-daemon --version 2>&1 || true)"
+                  TH_VER="$(desktop/resources/current/th --version 2>&1 || true)"
+                  echo "HEAD=$HEAD_SHA | daemon='$DAEMON_VER' | th='$TH_VER'"
+                  fail=0
+                  case "$DAEMON_VER" in *"($HEAD_SHA)"*) echo "smooth-daemon @ HEAD ✓";; *) echo "::error::bundled smooth-daemon ('$DAEMON_VER') is NOT built from HEAD ($HEAD_SHA) — stale build cache (th-76a353); refusing to ship."; fail=1;; esac
+                  case "$TH_VER" in *"($HEAD_SHA)"*) echo "th @ HEAD ✓";; *) echo "::error::bundled th ('$TH_VER') is NOT built from HEAD ($HEAD_SHA); refusing to ship."; fail=1;; esac
+                  exit $fail
+
             - name: Import signing certificate
               id: signing
               env:
