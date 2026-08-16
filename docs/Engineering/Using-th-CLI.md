@@ -454,12 +454,61 @@ th api keys rotate <id>
 th api keys revoke <id>
 ```
 
-### Observability (source maps + telemetry)
+### Observability (logs, traces, errors, LLM telemetry, source maps)
+
+Every verb takes `--json` for the raw API response and `--org-id` to target a
+different org. Time windows are **relative and unit-suffixed** — `90s`, `45m`,
+`6h`, `7d`. A bare number is rejected: `--since 24` meaning hours to one reader
+and minutes to another is how a monitoring answer ends up wrong without looking
+wrong.
 
 ```bash
+# Logs
+th api observability logs query --query="timeout" --level=ERROR --service=api-prime --since=6h
+th api observability logs facets --hours=24              # what levels/services/groups exist
+th api observability logs fields                         # structured fields discovered in parsed logs
+th api observability logs fields --key=userId            # …and that field's most common values
+th api observability logs trace <trace_id>               # every log line on one request
+
+# Traces
+th api observability traces query --status=error --since=1h
+th api observability traces query --order-by=slowest --min-duration-ms=500
+th api observability traces show <trace_id>              # that trace's spans
+
+# Error tracking
+th api observability errors top --status=unresolved
+th api observability errors show <group_id> --events=20
+
+# LLM telemetry
+th api observability llm turns --status=error --window-minutes=120
+th api observability llm tool-failures
+th api observability llm cost --group-by=model           # or agent | conversation
+
+# Is the telemetry itself alive?
+th api observability health
+
+# Source maps (SMOODEV-1164)
 th api observability sourcemaps-upload <dir> --release=<sha> --environment=production
 th api observability sourcemaps-list --release=<sha> --environment=production
 ```
+
+**Read an empty result carefully.** These commands distinguish three things
+that look alike in a terminal and must never be conflated:
+
+- *"The query ran and matched nothing"* — said in those words.
+- *"The read failed"* — a non-zero exit carrying the HTTP status, never an empty list.
+- *"I saw a full page"* — the output says there may be more; raise `--limit`.
+
+`th api observability health` is the tiebreaker: a stale or failed pipe there
+means an empty log/trace result is a broken ingest, not a quiet system.
+
+The same functions back nine `observability_*` MCP tools in `th mcp serve`
+(`logs_search`, `traces_search`, `errors_top`, `service_health`,
+`monitors_status`, `audit_search`, `llm_turns_search`, `llm_tool_failures`,
+`llm_cost_breakdown`), so an agent session and the CLI cannot disagree about
+what the system is doing. `monitors_status` and `audit_search` hit routes that
+accept a **user** session only — an org M2M key gets a 401 there even though it
+can read logs and traces.
 
 ### Testing (report results + manage runs)
 
@@ -980,11 +1029,25 @@ team that trusts its own machines, not a supply-chain control.
 
 ### Audit
 
+Local tool/egress audit streams under `~/.smooth/audit/`. Both `<actor>.log`
+and `<actor>.jsonl` count — the one live writer today is goalie's egress proxy
+(`egress-proxy.jsonl`), the daemon's egress boundary.
+
 ```bash
-th audit tail                                      # recent tool-use audit entries
-th audit list                                      # actors with audit logs
+th audit tail                                      # newest stream (usually egress-proxy)
+th audit tail egress-proxy -l 200                  # a named stream, last 200 lines
+th audit list                                      # streams with sizes
 th audit path                                      # ~/.smooth/audit/
 ```
+
+> Pearl th-f50195: `tail`/`list` used to match only `.log`, and `tail` defaulted
+> to the actor `leader`, which stopped existing when the microVM cast was
+> removed. Between them, the only real audit stream on the machine was
+> unreachable through `th audit`.
+
+This is **not** the platform audit trail (who did what in your Smoo org) — that
+lives at `th mcp serve`'s `observability_audit_search` tool and the
+`/organizations/{org}/audit/query` API.
 
 ### Doctor / cache / service
 
