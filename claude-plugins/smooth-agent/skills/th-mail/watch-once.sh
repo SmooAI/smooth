@@ -13,6 +13,9 @@
 #
 # Exit 0 with a non-"[]" JSON array on stdout => new mail (re-arm after handling).
 # Exit 0 with "[]" on stdout                  => timed out, no mail.
+# Non-zero                                    => the mail store FAILED. Mail
+#                                                state is unknown; it is NOT
+#                                                "no mail" (pearl th-ad0701).
 #
 # It does NOT acknowledge anything: the main agent consumes via
 # `th msg inbox --unread --mark-read` (or `th msg ack`) after surfacing, so
@@ -38,8 +41,17 @@ wait "$watcher"
 status=$?
 kill "$reaper" 2>/dev/null
 
-# Killed by the lifetime cap (or otherwise produced nothing) => no mail.
-if [ "$status" -ne 0 ]; then
+# 0 => mail was printed. Killed by the lifetime cap (any signal, 128+n) => the
+# watcher timed out with nothing, which is genuinely "no mail".
+[ "$status" -eq 0 ] && exit 0
+if [ "$status" -ge 128 ]; then
     echo "[]"
+    exit 0
 fi
-exit 0
+
+# Anything else is `th` itself failing — a broken/unreadable mail store, a full
+# disk, no `th` on PATH. Reporting "[]" here is what made a 100%-full disk read
+# as an empty inbox (pearl th-ad0701): a failed read must never wear the same
+# output as a successful empty one.
+echo "th msg watch failed (exit $status) — mail state UNKNOWN, not empty" >&2
+exit "$status"

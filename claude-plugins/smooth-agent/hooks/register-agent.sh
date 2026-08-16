@@ -50,15 +50,28 @@ if [ -n "$worker_handle" ]; then
 fi
 
 # --- Auto path: plain `claude` session. Derive a placeholder handle. ---
-cwd_base="$(basename "${payload_cwd:-$PWD}" 2>/dev/null || echo session)"
-if [ -n "$session_id" ]; then
-    raw="cc-${cwd_base}-${session_id:0:4}"
-else
-    raw="cc-${cwd_base}-$$"
+# On RESUME this hook fires again for a session that may have claimed a
+# meaningful handle since. Re-deriving the placeholder would announce a name
+# this session no longer answers to — and, since th-fa9f40, be refused as a
+# second identity — so an already-recorded handle wins.
+state_dir="$HOME/.smooth/agent-sessions"
+handle=""
+if [ -n "$session_id" ] && [ -r "$state_dir/$session_id" ]; then
+    handle="$(tr -d '[:space:]' <"$state_dir/$session_id" 2>/dev/null || true)"
 fi
-# Sanitize to [a-z0-9-], lowercased, stripping everything else.
-handle="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' || true)"
-[ -n "$handle" ] || handle="cc-session-$$"
+resumed=1
+if [ -z "$handle" ]; then
+    resumed=0
+    cwd_base="$(basename "${payload_cwd:-$PWD}" 2>/dev/null || echo session)"
+    if [ -n "$session_id" ]; then
+        raw="cc-${cwd_base}-${session_id:0:4}"
+    else
+        raw="cc-${cwd_base}-$$"
+    fi
+    # Sanitize to [a-z0-9-], lowercased, stripping everything else.
+    handle="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' || true)"
+    [ -n "$handle" ] || handle="cc-session-$$"
+fi
 
 # Idempotent registration. Detached (`( … & )`) so nothing blocks session start.
 ( th agent register --name "$handle" --harness claude-code --pid "$PPID" >/dev/null 2>&1 || true ) &
@@ -68,10 +81,13 @@ disown 2>/dev/null || true
 # Written synchronously (not in the background job) so the first-prompt hook can
 # rely on it existing immediately.
 if [ -n "$session_id" ]; then
-    state_dir="$HOME/.smooth/agent-sessions"
     mkdir -p "$state_dir" 2>/dev/null || true
     printf '%s' "$handle" >"$state_dir/$session_id" 2>/dev/null || true
 fi
 
-echo "th-mail: online as agent '$handle' (a placeholder). You are on the bus and reachable by Big Smooth and other agents — check your inbox with 'th msg inbox --agent $handle'. Once your task is clear, claim a task-meaningful handle with 'th agent claim <new-handle>' (carries your mail over). Push-watching for incoming mail stays opt-in via the /th-mail skill."
+if [ "$resumed" = 1 ]; then
+    echo "th-mail: back online as agent '$handle'. Bare 'th msg inbox' / 'th agent status' resolve to it automatically — check your inbox, and never assume a handle you did not read from 'th agent whoami'."
+else
+    echo "th-mail: online as agent '$handle' (a placeholder). You are on the bus and reachable by Big Smooth and other agents — check your inbox with 'th msg inbox' (bare commands resolve to this handle automatically; 'th agent whoami' confirms it). Once your task is clear, claim a task-meaningful handle with 'th agent claim <new-handle>' (carries your mail over) — do NOT 'th agent register' a different name, that splits your identity. Push-watching for incoming mail stays opt-in via the /th-mail skill."
+fi
 exit 0

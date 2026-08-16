@@ -41,6 +41,10 @@ pub enum AgentCommands {
         /// agent read as offline a second after registering.
         #[arg(long)]
         pid: Option<i64>,
+        /// Register a SECOND identity for this session even though it already
+        /// has one. Almost always wrong — see the error this unlocks.
+        #[arg(long)]
+        force: bool,
         /// Deprecated no-op — mail is machine-local, there is nothing to push.
         #[arg(long, hide = true)]
         no_push: bool,
@@ -251,21 +255,42 @@ fn session_state_dir() -> PathBuf {
         .join("agent-sessions")
 }
 
-/// This session's handle: `$SMOOTH_AGENT_HANDLE`, else `$SMOOTH_AGENT`, else
-/// whatever the SessionStart hook recorded for `$CLAUDE_SESSION_ID`, else
-/// `user@short-hostname`.
+/// Env vars a harness may use to name the current session, in priority order.
+///
+/// `CLAUDE_CODE_SESSION_ID` is the one Claude Code actually exports to tool
+/// subprocesses. `CLAUDE_SESSION_ID` is what this resolver originally read —
+/// and it is never set, so the session-file tier never fired and every
+/// `th msg inbox` with no `--agent` silently answered for `user@host` instead
+/// of the handle the SessionStart hook registered (pearl th-fa9f40: a whole
+/// session's mail read from an inbox nobody was writing to). Both are kept; a
+/// second `getenv` is cheaper than guessing which one a harness exports.
+const SESSION_ID_VARS: [&str; 2] = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"];
+
+/// The handle identifying THIS session — `$SMOOTH_AGENT_HANDLE`, else
+/// `$SMOOTH_AGENT`, else whatever the SessionStart hook recorded for this
+/// session id — or `None` when nothing identifies the caller.
+///
+/// The one source of truth for "who am I": [`resolve_handle`] adds the
+/// `user@host` fallback for the CLI, and `mcp_serve::resolve_agent_id` refuses
+/// rather than falling back. Neither re-derives the chain.
+#[must_use]
+pub fn session_handle() -> Option<String> {
+    if let Some(h) = env_handle("SMOOTH_AGENT_HANDLE").or_else(|| env_handle("SMOOTH_AGENT")) {
+        return Some(h);
+    }
+    SESSION_ID_VARS.iter().filter_map(|v| env_handle(v)).find_map(|sid| {
+        std::fs::read_to_string(session_state_dir().join(sid))
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+    })
+}
+
+/// [`session_handle`], falling back to `user@short-hostname`.
 #[must_use]
 pub fn resolve_handle() -> String {
-    if let Some(h) = env_handle("SMOOTH_AGENT_HANDLE").or_else(|| env_handle("SMOOTH_AGENT")) {
+    if let Some(h) = session_handle() {
         return h;
-    }
-    if let Some(sid) = env_handle("CLAUDE_SESSION_ID") {
-        if let Ok(h) = std::fs::read_to_string(session_state_dir().join(sid)) {
-            let h = h.trim().to_string();
-            if !h.is_empty() {
-                return h;
-            }
-        }
     }
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -381,11 +406,36 @@ pub async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
     }
     let s = store().await?;
     match cmd {
-        AgentCommands::Register { name, harness, pid, no_push } => {
+        AgentCommands::Register {
+            name,
+            harness,
+            pid,
+            force,
+            no_push,
+        } => {
             if no_push {
                 deprecated("--no-push");
             }
             let name = name.unwrap_or_else(resolve_handle);
+            // A session that already has a handle registering a DIFFERENT one
+            // splits its identity in two: mail keeps arriving at the old
+            // mailbox while every later command reads the new one, and the
+            // failure looks exactly like "no mail" (pearl th-fa9f40). `claim`
+            // is the sanctioned path — it renames and carries the mail across.
+            if let Some(existing) = session_handle().filter(|e| *e != name) {
+                if !force {
+                    bail!(
+                        "this session is already agent {existing} — registering {name} would create a SECOND identity, \
+                         and mail sent to {existing} would never be seen.\n  \
+                         → rename and carry your mail over: th agent claim {name}\n  \
+                         → really want two mailboxes: th agent register --name {name} --force"
+                    );
+                }
+                eprintln!(
+                    "{} registering {name} as a second identity — {existing} keeps its own mail.",
+                    "warning:".yellow().bold()
+                );
+            }
             let harness = harness.unwrap_or_else(default_harness);
             s.register(&name, &harness, pid.or_else(supervised_pid), &cwd()).await?;
             println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
@@ -474,8 +524,21 @@ pub async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
                     previous.dimmed()
                 );
             } else {
+                // Say which of the two this was: resuming a handle that already
+                // exists hands you ITS mail, not the mail of the handle you
+                // were using a second ago.
+                let resumed = previous != name && s.get_agent(&name).await?.is_some();
                 s.register(&name, &default_harness(), supervised_pid(), &cwd()).await?;
-                println!("{} claimed {}", "✓".green().bold(), name.green().bold());
+                if resumed {
+                    println!(
+                        "{} resumed existing agent {} — you now read its mail, not {}'s",
+                        "✓".green().bold(),
+                        name.green().bold(),
+                        previous.dimmed()
+                    );
+                } else {
+                    println!("{} claimed {}", "✓".green().bold(), name.green().bold());
+                }
             }
             let rewritten = rewrite_session_handles(&previous, &name);
             if rewritten > 0 {
@@ -758,6 +821,12 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                         }
                     }
                     Ok(_) => {}
+                    // A failed poll is NOT an empty inbox. `--once` is consumed
+                    // by watch-once.sh, whose caller reads "exited without
+                    // messages" as "no mail" — so it must fail loudly instead
+                    // (pearl th-ad0701). A long-lived watcher rides out
+                    // transient errors, which is what the retry is for.
+                    Err(e) if once => return Err(e.context("inbox poll failed — mail state is unknown, not empty")),
                     Err(e) => eprintln!("{} inbox poll failed: {e}", "!".yellow()),
                 }
                 tokio::time::sleep(interval).await;
@@ -795,9 +864,10 @@ mod tests {
 
     /// The vars these tests own. `$HOME` is deliberately NOT among them: it is
     /// read by unrelated tests in this binary, which run in parallel.
-    const OWNED_VARS: [&str; 6] = [
+    const OWNED_VARS: [&str; 7] = [
         "SMOOTH_AGENT_HANDLE",
         "SMOOTH_AGENT",
+        "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_SESSION_ID",
         "SMOOTH_HARNESS",
         "SMOOTH_AGENT_PID",
@@ -835,14 +905,21 @@ mod tests {
         let fallback = resolve_handle();
         assert!(fallback.contains('@'), "fallback should be user@host, got {fallback}");
 
-        // 3. A session-state file wins over the fallback.
+        // 3. A session-state file wins over the fallback — under EITHER session
+        // id var. Regression for th-fa9f40: only `CLAUDE_SESSION_ID` was read,
+        // Claude Code exports `CLAUDE_CODE_SESSION_ID`, so this tier never
+        // fired and every no-flag `th msg` command answered for `user@host`.
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sess-1"), "cc-smooth-ab12").unwrap();
-        std::env::set_var("CLAUDE_SESSION_ID", "sess-1");
-        assert_eq!(resolve_handle(), "cc-smooth-ab12");
-        // A session id with no recorded file falls back rather than erroring.
-        std::env::set_var("CLAUDE_SESSION_ID", "sess-missing");
-        assert_eq!(resolve_handle(), fallback);
+        for var in ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"] {
+            std::env::set_var(var, "sess-1");
+            assert_eq!(resolve_handle(), "cc-smooth-ab12", "{var} must resolve the recorded handle");
+            // A session id with no recorded file falls back rather than erroring.
+            std::env::set_var(var, "sess-missing");
+            assert_eq!(resolve_handle(), fallback);
+            std::env::remove_var(var);
+        }
+        assert_eq!(session_handle(), None, "nothing to identify the caller is None, not a guess");
         std::env::set_var("CLAUDE_SESSION_ID", "sess-1");
 
         // 2. $SMOOTH_AGENT beats the session file.
@@ -888,6 +965,90 @@ mod tests {
         assert_eq!(supervised_pid(), Some(4242));
         std::env::set_var("SMOOTH_AGENT_PID", "not-a-pid");
         assert_eq!(supervised_pid(), None);
+    }
+
+    /// Point the mail store at a private sqlite file for the duration of a
+    /// test. Both vars are process-global, so callers hold `ENV_LOCK`.
+    struct StoreGuard;
+
+    impl StoreGuard {
+        fn at(dir: &std::path::Path) -> Self {
+            std::env::set_var("SMOOTH_MAIL_DB", dir.join("mail.db"));
+            // A missing config file means the default (sqlite) — this keeps a
+            // developer whose real backend is `cloud` from taking the test
+            // over the network.
+            std::env::set_var("SMOOTH_MAIL_CONFIG", dir.join("mail.toml"));
+            Self
+        }
+    }
+
+    impl Drop for StoreGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("SMOOTH_MAIL_DB");
+            std::env::remove_var("SMOOTH_MAIL_CONFIG");
+        }
+    }
+
+    fn register(name: &str, force: bool) -> AgentCommands {
+        AgentCommands::Register {
+            name: Some(name.to_string()),
+            harness: Some("test".to_string()),
+            pid: None,
+            force,
+            no_push: false,
+        }
+    }
+
+    /// th-fa9f40: the incident in one test. A session that already answers to
+    /// one handle must not quietly acquire a second one — that is how mail
+    /// went to `cc-smooai-cc9e` while the agent watched `smooai-claude`.
+    #[tokio::test]
+    async fn register_refuses_a_second_identity_for_the_session() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::clear();
+        let _s = StoreGuard::at(tmp.path());
+        std::env::set_var("SMOOTH_AGENT_HANDLE", "cc-smooai-cc9e");
+
+        let err = cmd_agent(register("smooai-claude", false)).await.expect_err("must refuse");
+        let err = err.to_string();
+        assert!(
+            err.contains("cc-smooai-cc9e") && err.contains("th agent claim"),
+            "must name the handle and the fix: {err}"
+        );
+
+        // Re-registering the SAME handle is the SessionStart hook's path and
+        // stays idempotent; --force is the deliberate escape hatch.
+        cmd_agent(register("cc-smooai-cc9e", false)).await.expect("same handle is idempotent");
+        cmd_agent(register("smooai-claude", true)).await.expect("--force proceeds");
+    }
+
+    /// th-ad0701: a store that cannot be opened is an ERROR, never an empty
+    /// inbox. `main` propagates it, so the process exits non-zero.
+    #[tokio::test]
+    async fn a_broken_store_is_an_error_not_an_empty_inbox() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::clear();
+        let _s = StoreGuard::at(tmp.path());
+        // A directory where the db file should be: open fails, exactly as a
+        // full disk fails when applying the schema.
+        std::fs::create_dir(tmp.path().join("mail.db")).unwrap();
+
+        assert!(
+            cmd_msg(MsgCommands::Inbox {
+                agent: Some("someone".into()),
+                unread: false,
+                mark_read: false,
+                limit: 50,
+                json: false,
+                pull: false,
+            })
+            .await
+            .is_err(),
+            "an unopenable mail store must fail, not print an empty inbox"
+        );
+        assert!(cmd_inbox().await.is_err(), "th inbox must fail the same way");
     }
 
     #[test]

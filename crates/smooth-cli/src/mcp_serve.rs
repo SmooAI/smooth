@@ -647,23 +647,19 @@ fn mail_err(e: anyhow::Error) -> ErrorData {
 
 /// Which agent a mail tool acts as.
 ///
-/// MCP carries no session id, so unlike the CLI there is nothing to look up:
-/// an explicit `agent_id` argument always wins, and otherwise we take
-/// `$SMOOTH_AGENT_HANDLE` (or `$SMOOTH_AGENT`) from the server process, which is
-/// what the harness's SessionStart hook exports. With neither we refuse rather
-/// than inventing a `user@host` identity — writing to the wrong mailbox looks
-/// like success and loses mail silently.
+/// An explicit `agent_id` argument always wins; otherwise this is exactly the
+/// CLI's identity chain ([`crate::mail::session_handle`] — the handle env vars,
+/// then the SessionStart hook's state file for this session id), so the MCP
+/// tools and `th msg` can never disagree about who you are. The one difference
+/// is the last step: with nothing to go on we refuse rather than falling back
+/// to `user@host`, because writing to the wrong mailbox looks like success and
+/// loses mail silently.
 fn resolve_agent_id(explicit: Option<&str>) -> Result<String, ErrorData> {
     if let Some(id) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return Ok(id.to_string());
     }
-    for var in ["SMOOTH_AGENT_HANDLE", "SMOOTH_AGENT"] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Ok(v.to_string());
-            }
-        }
+    if let Some(handle) = crate::mail::session_handle() {
+        return Ok(handle);
     }
     Err(ErrorData::invalid_params(
         "No agent handle: pass `agent_id` explicitly (see agent_list for the names in use), or launch this MCP server with $SMOOTH_AGENT_HANDLE set."
@@ -856,8 +852,11 @@ mod tests {
     /// mail db.
     #[tokio::test]
     async fn mail_tools_round_trip_identity_status_send_inbox_ack() {
+        // `SMOOTH_MAIL_DB` is process-global and the CLI's store tests set it
+        // too — without the lock they clear it out from under this one and the
+        // round trip half-lands in the developer's real ~/.smooth/mail.db.
+        let _lock = crate::mail::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Process-global, but no other test in this binary opens a MailStore.
         std::env::set_var("SMOOTH_MAIL_DB", tmp.path().join("mail.db"));
 
         let (server_t, client_t) = tokio::io::duplex(64 * 1024);
@@ -933,14 +932,27 @@ mod tests {
     #[test]
     fn agent_id_falls_back_to_env_then_refuses() {
         let _lock = crate::mail::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var("SMOOTH_AGENT_HANDLE");
-        std::env::remove_var("SMOOTH_AGENT");
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // Hermetic: the real ~/.smooth/agent-sessions belongs to whatever
+        // session is running the tests and would resolve a live handle here.
+        std::env::set_var("SMOOTH_AGENT_SESSIONS_DIR", tmp.path());
+        for v in ["SMOOTH_AGENT_HANDLE", "SMOOTH_AGENT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"] {
+            std::env::remove_var(v);
+        }
         assert_eq!(resolve_agent_id(Some("explicit")).expect("explicit wins"), "explicit");
         std::env::set_var("SMOOTH_AGENT_HANDLE", "from-env");
         assert_eq!(resolve_agent_id(None).expect("env fallback"), "from-env");
         assert_eq!(resolve_agent_id(Some("  ")).expect("blank falls through"), "from-env");
         std::env::remove_var("SMOOTH_AGENT_HANDLE");
-        std::env::remove_var("SMOOTH_AGENT");
+
+        // Shared with the CLI: the SessionStart hook's state file resolves too,
+        // so an MCP tool and `th msg` never answer for different mailboxes.
+        std::fs::write(tmp.path().join("sess-9"), "cc-mcp-9999").expect("write state file");
+        std::env::set_var("CLAUDE_CODE_SESSION_ID", "sess-9");
+        assert_eq!(resolve_agent_id(None).expect("session file"), "cc-mcp-9999");
+
+        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
         assert!(resolve_agent_id(None).is_err(), "no handle anywhere must error, not invent one");
+        std::env::remove_var("SMOOTH_AGENT_SESSIONS_DIR");
     }
 }
