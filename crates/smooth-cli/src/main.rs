@@ -961,8 +961,9 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
-    /// Smoo AI Observability — source maps, traces, LLM telemetry.
-    /// SMOODEV-1164.
+    /// Smoo AI Observability — sourcemap upload plus the read surface: logs,
+    /// traces, error groups, LLM telemetry, pipeline health, open monitor
+    /// incidents, and the platform audit trail.
     Observability {
         #[command(subcommand)]
         cmd: smooai::observability::Cmd,
