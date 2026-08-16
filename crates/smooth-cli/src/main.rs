@@ -1206,7 +1206,10 @@ enum JiraCommands {
 
 #[derive(Subcommand)]
 enum AuditCommands {
-    /// Show recent audit log entries
+    /// Show recent audit log entries.
+    ///
+    /// Omit `actor` for the most recently written stream (usually
+    /// `egress-proxy`, the goalie egress boundary).
     Tail {
         actor: Option<String>,
         #[arg(short, long, default_value = "50")]
@@ -2876,6 +2879,50 @@ async fn cmd_steer(bead_id: &str, action: &str, message: Option<&str>) -> Result
     Ok(())
 }
 
+/// Every audit stream in `dir` as `(actor, path, size_bytes)`, most recently
+/// written first.
+///
+/// Both extensions count: the pre-microVM per-actor writers used `<actor>.log`,
+/// and the one live writer today — goalie's egress proxy, wired in
+/// `smooth-daemon/src/config.rs` — writes JSON lines to `egress-proxy.jsonl`
+/// (pearl th-f50195). Matching only `.log` made the sole real audit stream
+/// invisible to `th audit`.
+fn audit_streams(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, std::path::PathBuf, u64, std::time::SystemTime)> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.extension().is_some_and(|x| x == "log" || x == "jsonl") {
+                return None;
+            }
+            let actor = path.file_stem()?.to_string_lossy().into_owned();
+            let meta = e.metadata().ok()?;
+            let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            Some((actor, path, meta.len(), modified))
+        })
+        .collect();
+    // Newest first, name as a stable tiebreak (mtime granularity ties in tests).
+    out.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    out.into_iter().map(|(a, p, n, _)| (a, p, n)).collect()
+}
+
+/// The stream `th audit tail` should read: the named actor under either
+/// extension, or — with no actor — the most recently written stream.
+///
+/// The old default was the literal actor `leader`, which no longer exists
+/// anywhere post-microVM, so a bare `th audit tail` could only ever report
+/// "No audit log for leader".
+fn resolve_audit_stream(dir: &std::path::Path, actor: Option<&str>) -> Option<(String, std::path::PathBuf)> {
+    let streams = audit_streams(dir);
+    match actor {
+        Some(name) => streams.into_iter().find(|(a, _, _)| a == name).map(|(a, p, _)| (a, p)),
+        None => streams.into_iter().next().map(|(a, p, _)| (a, p)),
+    }
+}
+
 fn cmd_audit(cmd: AuditCommands) -> Result<()> {
     // ponytail: standard local audit dir (~/.smooth/audit) — was smooth_bigsmooth::audit::get_audit_dir().
     let dir = dirs_next::home_dir()
@@ -2884,26 +2931,25 @@ fn cmd_audit(cmd: AuditCommands) -> Result<()> {
     match cmd {
         AuditCommands::Path => println!("{}", dir.display()),
         AuditCommands::List => {
-            if !dir.exists() {
+            let streams = audit_streams(&dir);
+            if streams.is_empty() {
                 println!("No audit logs yet.");
                 return Ok(());
             }
-            for entry in std::fs::read_dir(&dir)? {
-                let e = entry?;
-                if e.path().extension().is_some_and(|x| x == "log") {
-                    let name = e.file_name().to_string_lossy().replace(".log", "");
-                    println!("  {name:<24} {:.1} KB", e.metadata()?.len() as f64 / 1024.0);
-                }
+            for (actor, _, bytes) in streams {
+                println!("  {actor:<24} {:.1} KB", bytes as f64 / 1024.0);
             }
         }
         AuditCommands::Tail { actor, lines } => {
-            let actor = actor.unwrap_or_else(|| "leader".into());
-            let path = dir.join(format!("{actor}.log"));
-            if !path.exists() {
-                println!("No audit log for {actor}");
+            let Some((actor, path)) = resolve_audit_stream(&dir, actor.as_deref()) else {
+                match actor {
+                    Some(a) => println!("No audit log for {a}"),
+                    None => println!("No audit logs yet in {}", dir.display()),
+                }
                 return Ok(());
-            }
-            let content = std::fs::read_to_string(&path)?;
+            };
+            println!("{}", path.display());
+            let content = std::fs::read_to_string(&path).with_context(|| format!("read audit log for {actor}"))?;
             let all: Vec<&str> = content.lines().collect();
             for line in &all[all.len().saturating_sub(lines)..] {
                 println!("{line}");
@@ -8874,6 +8920,48 @@ mod cli_dispatch_tests {
         let msg = err.to_string();
         assert!(msg.contains("not implemented"), "{msg}");
         assert!(msg.contains("th pearls init"), "the error must point at the working path: {msg}");
+    }
+
+    /// Pearl th-f50195: `th audit list`/`tail` matched only `<actor>.log`, so
+    /// `egress-proxy.jsonl` — the ONLY audit stream anything writes today
+    /// (goalie's egress proxy) — was invisible, and a bare `th audit tail`
+    /// looked for the long-dead `leader` actor. Both halves fail without the
+    /// fix: `.jsonl` is skipped entirely, and the no-actor case resolves to
+    /// nothing.
+    #[test]
+    fn audit_streams_include_jsonl_and_default_to_the_newest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("wonk.log"), "old\n").expect("write .log");
+        // Ensure a distinct, strictly-later mtime than the .log above.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("egress-proxy.jsonl"), "{\"host\":\"api.smoo.ai\"}\n").expect("write .jsonl");
+        std::fs::write(dir.join("notes.txt"), "ignore me\n").expect("write .txt");
+
+        let actors: Vec<String> = super::audit_streams(dir).into_iter().map(|(a, _, _)| a).collect();
+        assert!(actors.contains(&"egress-proxy".to_string()), "a .jsonl stream must be listed: {actors:?}");
+        assert!(actors.contains(&"wonk".to_string()), "a .log stream must still be listed: {actors:?}");
+        assert!(!actors.iter().any(|a| a == "notes"), "unrelated extensions must be ignored: {actors:?}");
+
+        // No actor → newest stream, not the dead `leader` default.
+        let (actor, path) = super::resolve_audit_stream(dir, None).expect("a default stream must resolve");
+        assert_eq!(actor, "egress-proxy");
+        assert!(path.ends_with("egress-proxy.jsonl"), "{path:?}");
+
+        // Named actor resolves regardless of extension.
+        assert_eq!(super::resolve_audit_stream(dir, Some("egress-proxy")).expect("named .jsonl").0, "egress-proxy");
+        assert_eq!(super::resolve_audit_stream(dir, Some("wonk")).expect("named .log").0, "wonk");
+    }
+
+    /// An empty or missing directory must resolve to nothing rather than
+    /// panicking on the unreadable read_dir.
+    #[test]
+    fn audit_streams_empty_when_nothing_to_read() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(super::audit_streams(tmp.path()).is_empty());
+        assert!(super::resolve_audit_stream(tmp.path(), None).is_none());
+        assert!(super::resolve_audit_stream(&tmp.path().join("nope"), None).is_none());
+        assert!(super::resolve_audit_stream(tmp.path(), Some("leader")).is_none());
     }
 
     /// Every top-level command's SHORT help (`th -h`) must be one sentence.
