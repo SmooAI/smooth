@@ -231,6 +231,21 @@ pub fn greenfield_scenarios() -> Result<Vec<Scenario>> {
     parse_scenarios(include_str!("../greenfield-scenarios.toml"))
 }
 
+/// The new-personal-tool suite (release-hardening): `get_weather`,
+/// `get_location` (macOS only), and `present_plan`.
+///
+/// Kept SEPARATE from `agentic-scenarios.toml` because it deliberately breaks
+/// that suite's hermeticity — `get_weather` needs network egress and
+/// `get_location` needs macOS Location Services — so it is opt-in
+/// (`--scenarios crates/smooth-bench/new-tools-scenarios.toml`), not part of the
+/// default reproducible-anywhere run. See the file header for how to run it.
+///
+/// # Errors
+/// Propagates a parse/validation failure in the embedded TOML.
+pub fn new_tools_scenarios() -> Result<Vec<Scenario>> {
+    parse_scenarios(include_str!("../new-tools-scenarios.toml"))
+}
+
 /// Raw TOML wrapper: `[[scenario]]` array.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2612,5 +2627,22 @@ reason = "  "
             s.iter().any(|x| x.id == "greenfield-respects-named-stack"),
             "missing: does an explicit user instruction still win over the house default"
         );
+    }
+
+    #[test]
+    fn new_tools_suite_parses_and_targets_the_new_tools() {
+        let s = new_tools_scenarios().expect("embedded new-tools suite must parse");
+        // Every scenario asserts on a specific new tool via `tools_used` — the
+        // whole point is "did the agent reach for THIS tool".
+        let tool_of = |id: &str| -> Vec<String> {
+            let sc = s.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("missing scenario {id}"));
+            match &sc.check {
+                Check::Deterministic { tools_used, .. } => tools_used.clone(),
+                other => panic!("{id} should be deterministic, got {}", other.kind()),
+            }
+        };
+        assert_eq!(tool_of("weather-lookup"), ["get_weather"]);
+        assert_eq!(tool_of("location-where-am-i"), ["get_location"]);
+        assert_eq!(tool_of("plan-present"), ["present_plan"]);
     }
 }
