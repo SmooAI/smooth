@@ -10,9 +10,6 @@ import { join } from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron';
 
-import { isNewChatChord } from './newchat.js';
-import { buildNotification, type NotifyPayload } from './notify.js';
-
 import { type DesktopConfig, loadConfig, saveConfig } from './config.js';
 import {
     baseUrl,
@@ -30,6 +27,8 @@ import {
 import { discoverDaemons, type RemoteDaemon } from './discovery.js';
 import { linkThOnPath } from './installth.js';
 import { firstRunLoginItem, trayModeLabel } from './loginitem.js';
+import { isNewChatChord } from './newchat.js';
+import { buildNotification, type NotifyPayload } from './notify.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
@@ -402,7 +401,10 @@ function asset(name: string): string {
 
 app.on('before-quit', () => {
     quitting = true;
-    if (spawnedDaemon) stopDaemon();
+    // Normal quit: fire-and-forget is fine (the app is going away anyway). The
+    // OTA path awaits stopDaemon() itself before quitAndInstall so the bundle is
+    // free for the Squirrel swap (th-79416c).
+    if (spawnedDaemon) void stopDaemon();
 });
 
 // Staying resident with no windows is the point — the tray is the app.

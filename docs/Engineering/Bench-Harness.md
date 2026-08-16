@@ -328,7 +328,43 @@ When adding a scenario, name the transcript it came from in a comment.
 A scenario nobody can trace back to a real failure is a scenario nobody
 will trust when it goes red.
 
+## Supplementary suites (opt-in via `--scenarios`)
+
+Some suites deliberately break the default suite's "reproducible anywhere,
+no real services" rule, so they ship as separate files loaded with
+`--scenarios <path>` rather than in `agentic-scenarios.toml`:
+
+| File | What it covers | Constraints |
+|---|---|---|
+| `frontend-scenarios.toml` | current-stack React/Next code (`useReactTable` vs stale idioms) | judge/hybrid; pins a library set |
+| `greenfield-scenarios.toml` | build-from-empty steering | judge/hybrid; empty workspace |
+| `new-tools-scenarios.toml` | the personal-assistant tools shipped this cycle | see below |
+
+**`new-tools-scenarios.toml`** exercises `get_weather`, `get_location`, and
+`present_plan`:
+
+```bash
+smooth-bench agentic \
+  --scenarios crates/smooth-bench/new-tools-scenarios.toml \
+  --model gpt-5.6-luna --model deepseek-v4-pro --model gemini-3.6-flash \
+  --scoreboard board.json
+```
+
+- `weather-lookup` — needs network egress, so run with `--isolation host`
+  (the default); a default-deny microVM makes it INCONCLUSIVE.
+- `location-where-am-i` — **macOS only** (`get_location` is
+  `#![cfg(target_os = "macos")]`); off a Mac the tool doesn't exist and the
+  scenario FAILS. Ungranted Location Services still counts as a pass — the
+  tool RAN (returned setup guidance), which is all `tools_used` asserts.
+- `plan-present` — exercises the `present_plan` tool in Auto mode (portable).
+
+The bench is single-turn and does not toggle Plan/Auto mode or read the
+`present_plan` **directive**, so the full **Plan → present → accept → execute**
+flow is out of its reach. That flow is covered instead by the daemon WS smoke
+suite — see [[Daemon-WS-Smoke-Test]].
+
 ## Related
 
+- [[Daemon-WS-Smoke-Test]]
 - [[Architecture-Overview]]
 - [[../bench-history]]
