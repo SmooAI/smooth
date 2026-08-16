@@ -1,0 +1,116 @@
+# New-tool agentic scenarios (release-hardening).
+#
+# WHY THIS SUITE IS SEPARATE from agentic-scenarios.toml
+#
+# agentic-scenarios.toml is deliberately hermetic: "no scenario may reference a
+# real service", every mock is a JSON file in the workspace, and it runs under
+# default-deny egress so it is reproducible on any box. These scenarios exercise
+# the PERSONAL-ASSISTANT tools shipped this cycle, and two of them break that
+# hermeticity on purpose:
+#
+#   - get_weather    → hits Open-Meteo (keyless) over the network. Needs egress,
+#                      so run with --isolation host (the bench default). Under a
+#                      default-deny microVM it will be INCONCLUSIVE.
+#   - get_location   → macOS Location Services (CoreLocation). The tool ONLY
+#                      exists on macOS (`#![cfg(target_os = "macos")]`), so off a
+#                      Mac the model can't call it and the scenario FAILS. Run
+#                      this suite on a Mac. Ungranted TCC still counts as a pass
+#                      here: the tool RAN (returned setup guidance), which is all
+#                      `tools_used` asserts.
+#   - plan-present   → cross-platform, no network. Exercises the present_plan
+#                      tool in Auto mode (the tool is always available; Plan mode
+#                      only FILTERS OUT mutators). The full Plan→accept flow (mode
+#                      toggle + directive capture) is the bench's blind spot and
+#                      is covered instead by the daemon WS smoke suite
+#                      (crates/smooth-daemon/tests/e2e_ws_smoke.rs).
+#
+# Run it against our main models with:
+#
+#   smooth-bench agentic \
+#     --scenarios crates/smooth-bench/new-tools-scenarios.toml \
+#     --model gpt-5.6-luna --model deepseek-v4-pro --model gemini-3.6-flash \
+#     --scoreboard board.json
+#
+# (needs SMOOAI_GATEWAY_KEY / SMOOAI_GATEWAY_URL; on macOS, on the host engine.)
+
+# ---------------------------------------------------------------------
+# 1. get_weather — the agent must reach for the tool, not answer from
+#    training data (which would be a stale, made-up forecast).
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "weather-lookup"
+description = "Current weather for a named city — must call get_weather, not guess"
+prompt = """
+What's the weather like in Tokyo right now? Use your tools to check the real \
+current conditions — don't guess.\
+"""
+
+[scenario.check]
+kind = "deterministic"
+tools_used = ["get_weather"]
+
+# It looked up the real place the user named …
+[[scenario.check.asserts]]
+answer = true
+contains = "Tokyo"
+
+# … and did not fall back to "I can't check live weather".
+[[scenario.check.asserts]]
+answer = true
+not_contains = "don't have access"
+
+# ---------------------------------------------------------------------
+# 2. get_location — "where am I" must consult Location Services, not the
+#    keyless IP guess. macOS ONLY (see header).
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "location-where-am-i"
+description = "Physical location — must call get_location (macOS Location Services)"
+prompt = """
+Where am I right now? Use your tools to find my actual current location.\
+"""
+
+[scenario.check]
+kind = "deterministic"
+tools_used = ["get_location"]
+# Nothing to assert on disk/answer — the coordinates are nondeterministic and an
+# ungranted Mac returns setup guidance; the tool-use assertion is the whole test.
+asserts = []
+
+# ---------------------------------------------------------------------
+# 3. present_plan — for a real change the agent should propose a plan and
+#    surface it via the present_plan tool before acting.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "plan-present"
+description = "Propose-before-acting: the agent must use present_plan to show its plan"
+prompt = """
+I want to reorganise this project's docs into a docs/ folder with an index. \
+Before you change anything, draw up a concrete plan and present it to me for \
+approval using your plan tool. Do not start the work yet.\
+"""
+
+[[scenario.setup]]
+path = "README.md"
+content = '''
+# my project
+
+Some notes live here. See NOTES.md and CHANGES.md.
+'''
+
+[[scenario.setup]]
+path = "NOTES.md"
+content = "Design notes.\n"
+
+[[scenario.setup]]
+path = "CHANGES.md"
+content = "Changelog.\n"
+
+[scenario.check]
+kind = "deterministic"
+tools_used = ["present_plan"]
+
+# It presented rather than charging ahead — nothing was moved/created yet.
+[[scenario.check.asserts]]
+file = "README.md"
+unchanged = true

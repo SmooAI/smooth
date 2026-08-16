@@ -973,7 +973,13 @@ const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600
 /// about anything. The bench measured the cost: models emptied a
 /// policy-protected customers.json 11 times in 15 trials with nothing to stop
 /// them.
-fn permission_hook_with_approver() -> (smooth_operator::permission::PermissionHook, smooth_operator_server::runner::HostApprover) {
+///
+/// Exposed (like [`local_tool_provider`]) so the release WS smoke suite
+/// (`tests/e2e_ws_smoke.rs`) can install the SAME DenyPolicy-backed gate the
+/// daemon runs, rather than a lookalike — the deny tier is release-gating
+/// security and must be tested as the daemon actually wires it.
+#[must_use]
+pub fn permission_hook_with_approver() -> (smooth_operator::permission::PermissionHook, smooth_operator_server::runner::HostApprover) {
     let pair = smooth_operator::human_channel();
     // NOTE: `with_grants` (the "approve always" allow-list, Claude Code's
     // don't-ask-again) is NOT wired: `SharedGrants` is private in the published
