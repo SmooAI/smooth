@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "smooth-daemon", version, about = "Smoo AI always-on personal-agent daemon")]
+#[command(name = "smooth-daemon", version = env!("SMOOTH_DAEMON_VERSION"), about = "Smoo AI always-on personal-agent daemon")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
