@@ -225,7 +225,7 @@ prost-types = "0.13"
 # (th-7a9832). Keep the `th-daemon-memory-seam` remote branch alive — it anchors
 # this rev; #330 is on core-main but core-main is still 0.16.2, so the daemon
 # stays on this 1.7.0 side lineage until main absorbs the core bump.
-smooth-operator = { version = "1.7.0", package = "smooai-smooth-operator-core" }
+smooth-operator = { version = "=1.7.2", package = "smooai-smooth-operator-core" }
 smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "c893323", package = "smooai-smooth-operator-server", default-features = false }
 smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "c893323", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
