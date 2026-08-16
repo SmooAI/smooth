@@ -1003,6 +1003,9 @@ mod tests {
     /// one handle must not quietly acquire a second one — that is how mail
     /// went to `cc-smooai-cc9e` while the agent watched `smooai-claude`.
     #[tokio::test]
+    // ENV_LOCK is held across awaits ON PURPOSE: it serializes tests that
+    // mutate process-global env (SMOOTH_MAIL_DB, SMOOTH_AGENT_HANDLE).
+    #[allow(clippy::await_holding_lock)]
     async fn register_refuses_a_second_identity_for_the_session() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
@@ -1026,6 +1029,8 @@ mod tests {
     /// th-ad0701: a store that cannot be opened is an ERROR, never an empty
     /// inbox. `main` propagates it, so the process exits non-zero.
     #[tokio::test]
+    // ENV_LOCK held across awaits on purpose — see above.
+    #[allow(clippy::await_holding_lock)]
     async fn a_broken_store_is_an_error_not_an_empty_inbox() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
