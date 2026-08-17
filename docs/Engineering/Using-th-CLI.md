@@ -487,6 +487,10 @@ th api observability llm cost --group-by=model           # or agent | conversati
 # Is the telemetry itself alive?
 th api observability health
 
+# Uptime + audit trail — USER session only (`th auth login`); an org M2M key gets a 401
+th api observability monitors                            # every OPEN website-monitor incident
+th api observability audit --query="invite" --action=member.invite --since=7d --limit=100
+
 # Source maps (SMOODEV-1164)
 th api observability sourcemaps-upload <dir> --release=<sha> --environment=production
 th api observability sourcemaps-list --release=<sha> --environment=production

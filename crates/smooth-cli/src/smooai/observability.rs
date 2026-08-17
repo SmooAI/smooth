@@ -7,8 +7,9 @@
 //!   map via the backend API, and PUTs the bytes to the presigned S3 URL the
 //!   API returns, so the Error Tracking dashboard can symbolicate stack frames
 //!   by joining `error_sourcemaps` on `(release_id, file_path)`.
-//! - **Queries** (pearl th-4d4040) — logs, traces, errors, LLM turns/cost, and
-//!   the pipeline-freshness heartbeat. These are the routes the dashboard
+//! - **Queries** (pearl th-4d4040) — logs, traces, errors, LLM turns/cost, the
+//!   pipeline-freshness heartbeat, open monitor incidents, and the platform
+//!   audit trail. These are the routes the dashboard
 //!   itself reads; before this the CLI covered 1 of 37 while its help claimed
 //!   traces and telemetry.
 //!
@@ -126,6 +127,35 @@ pub enum Cmd {
         /// Emit the raw JSON response instead of the summary.
         #[arg(long)]
         json: bool,
+    },
+    /// Website monitors — every uptime incident that is OPEN right now.
+    ///
+    /// Unlike the `observability/*` verbs this route accepts only a USER
+    /// session (`th auth login`); an org M2M token gets a 401.
+    #[command(visible_alias = "monitor")]
+    Monitors {
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Platform audit trail — who did what in the org, and whether it worked.
+    ///
+    /// This is the tamper-evident org record, not the local `th audit` tool
+    /// log. USER session only, same as `monitors`.
+    Audit {
+        /// Free-text search across the audit event.
+        #[arg(long, visible_alias = "q")]
+        query: Option<String>,
+        /// Filter by action name (repeatable).
+        #[arg(long)]
+        action: Vec<String>,
+        /// Look-back window: `90s`, `45m`, `6h`, `7d`.
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// Max events.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[command(flatten)]
+        common: Common,
     },
 }
 
@@ -483,6 +513,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let org = require_active_org(&client, org)?;
             let resp = pipeline_health(&client, &org).await?;
             emit(&resp, json, render_health);
+        }
+        Cmd::Monitors { common } => {
+            let org = require_active_org(&client, common.org)?;
+            let resp = open_incidents(&client, &org).await?;
+            emit(&resp, common.json, render_incidents);
+        }
+        Cmd::Audit {
+            query,
+            action,
+            since,
+            limit,
+            common,
+        } => {
+            let org = require_active_org(&client, common.org)?;
+            let resp = audit_query(&client, &org, query.as_deref(), &action, &since, limit).await?;
+            emit(&resp, common.json, |r| render_audit(r, limit as usize));
         }
     }
     Ok(())
@@ -1743,9 +1789,48 @@ mod tests {
             vec!["th", "llm", "tool-failures", "--json"],
             vec!["th", "llm", "cost", "--group-by", "agent", "--json"],
             vec!["th", "health", "--json"],
+            vec!["th", "monitors", "--json"],
+            vec!["th", "monitor", "--json"],
+            vec![
+                "th",
+                "audit",
+                "--query",
+                "login",
+                "--action",
+                "member.invite",
+                "--since",
+                "7d",
+                "--limit",
+                "10",
+                "--json",
+            ],
+            vec!["th", "audit"],
             vec!["th", "sourcemaps-list", "--release", "v1", "--environment", "production", "--json"],
         ] {
             Harness::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
         }
+    }
+
+    /// The audit window default is load-bearing: a silently wider or narrower
+    /// one makes "nothing happened" mean something different than it says.
+    #[test]
+    fn audit_defaults_to_a_24h_window() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Harness {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let Cmd::Audit {
+            since, limit, query, action, ..
+        } = Harness::try_parse_from(["th", "audit"]).expect("parses").cmd
+        else {
+            panic!("expected the audit verb");
+        };
+        assert_eq!(since, "24h");
+        assert_eq!(limit, 50);
+        assert_eq!(query, None);
+        assert!(action.is_empty());
     }
 }
