@@ -1316,6 +1316,9 @@ mod tests {
     /// descriptions tell the model to run, exercised end to end against a temp
     /// mail db.
     #[tokio::test]
+    // ENV_LOCK is held across awaits ON PURPOSE — it serializes the
+    // process-global SMOOTH_MAIL_DB mutation with the CLI store tests.
+    #[allow(clippy::await_holding_lock)]
     async fn mail_tools_round_trip_identity_status_send_inbox_ack() {
         // `SMOOTH_MAIL_DB` is process-global and the CLI's store tests set it
         // too — without the lock they clear it out from under this one and the

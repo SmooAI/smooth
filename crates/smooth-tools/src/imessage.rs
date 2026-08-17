@@ -972,6 +972,7 @@ mod tests {
         // Apple-nanosecond timestamps, ascending.
         let base: i64 = 694_224_000_000_000_000;
         // (rowid, date, is_from_me, text, has_attach, handle, chat)
+        #[allow(clippy::type_complexity)] // test fixture tuple, shape documented above
         let rows: &[(i64, i64, i64, Option<&str>, i64, i64, i64)] = &[
             (1, base, 0, Some("hey are we still on for dinner"), 0, 1, 1),
             (2, base + 60_000_000_000, 1, Some("yes! 7pm"), 0, 1, 1),
