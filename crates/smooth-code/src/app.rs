@@ -1772,6 +1772,10 @@ async fn run_agent_streaming(
                     is_error,
                     result,
                     duration_ms: resolved.unwrap_or_default(),
+                    // ponytail: the ServerEvent this is translated from carries no
+                    // structured details, so there is nothing to forward. Populate if
+                    // the harness ever surfaces ToolResult::details over the wire.
+                    details: None,
                 })
             }
             ServerEvent::TaskComplete { iterations, usage, .. } => {
