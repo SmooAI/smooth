@@ -195,39 +195,32 @@ prost-types = "0.13"
 # in the smooth-owned `smooth-cast` crate below, built on the engine's generic
 # public API.
 #
-# SEP Phase 3 (th-f288ae): the SEP extension module (host/process/protocol +
-# ui_capabilities handshake, Phases 0–3) lives on core `main` but is NOT yet in a
-# crates.io release (the release train only bumped the TS package). Pin the git
-# rev that carries it until a version bump publishes extensions; then flip back to
-# a `version = "…"` release. Matches the SMOODEV-1787 git-rev precedent.
+# History (kept short deliberately — the long-form archaeology this block used to
+# carry described four superseded pins in a row):
 #
-# Multimodal (th-25ce5c / epic th-3be564): this rev is the `multimodal-content-model`
-# BRANCH head — `ee648d1` (engine main release #53) + the two multimodal commits
-# (Message.images / image_url wire, and AgentConfig::with_user_images). It is
-# deliberately NOT a core-`main` rev: core main also carries th-10eb50 (the
-# `post_call` redaction-seam signature change) which smooth-narc/smooth-scribe have
-# not yet consumed. Pinning the side branch gets multimodal WITHOUT forcing that
-# unrelated break. The multimodal commits are ALSO merged to core main (PRs #58/#62)
-# — flip this to a core-main rev once smooth absorbs th-10eb50. Keep the
-# `multimodal-content-model` remote branch alive until then (it anchors this rev).
-# Engine on core 0.16.2 (crates.io). The chat-first Big Smooth daemon runs on
-# smooth-operator-server @ ce2f9e3 (th-daemon-memory-seam: 9db9d319 —
-# th-daemon-denypolicy, built against published core 1.7.0 AND carrying the
-# `tool_hooks` builder seam on LocalServer — PLUS the cherry-picked
-# `StorageAdapter::memory_for_access` seam from #330/th-374b27) — so the whole
-# repo pins 1.7.0 to keep one core version across the graph. Core 1.7.0 ships the
-# permission system (`permission::PermissionHook`, `AutoMode`, `Verdict`) +
-# `DenyPolicy` circuit-breaker tier, so the daemon installs the engine's
-# PermissionHook (Bypass + a declarative DenyPolicy) as its first tool_hook and
-# retires the duplicate in-daemon AutoModeHook. narc still re-homes as the second
-# ToolHook via the same `.tool_hooks(…)` seam. memory_for_access lets the daemon's
-# SqliteStorageAdapter feed its durable memory store into every turn's auto-recall
-# (th-7a9832). Keep the `th-daemon-memory-seam` remote branch alive — it anchors
-# this rev; #330 is on core-main but core-main is still 0.16.2, so the daemon
-# stays on this 1.7.0 side lineage until main absorbs the core bump.
-smooth-operator = { version = "=1.7.2", package = "smooai-smooth-operator-core" }
-smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "c893323", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "c893323", package = "smooai-smooth-operator", default-features = false }
+# Every pin since SMOODEV-1790 has been a git rev on a SIDE BRANCH of
+# smooth-operator, each one taken to get a feature that had not reached a release
+# yet (SEP Phase 3, multimodal, then the daemon's memory/tool_hooks seams). The
+# cost compounded: a side branch also freezes the CORE version it was built
+# against, which is how this ended up pinned to core `=1.7.2` EXACTLY. Core 1.7.3
+# added `AgentEvent::ToolCallComplete.details`, and the pinned rev still had
+# exhaustive matches on that enum, so no newer core could resolve.
+#
+# That is now unwound (th-b093c7 follow-up):
+#   * smooth-operator #370 gave every `AgentEvent` match in its tree a `..`, so a
+#     future field addition can't break consumers again.
+#   * smooth-operator #372 forward-ported the last two side-branch-only commits —
+#     the host-approver seam (th-be3f55) that this daemon calls via
+#     `LocalServerBuilder::host_approver`, and its drain fix (th-2105e9).
+#
+# So both git deps now point at smooth-operator MAIN, and core is an ordinary
+# caret version again. Keep it that way: if you need something unreleased, get it
+# released rather than pinning a side branch — the branch takes the core version
+# hostage with it. The `th-daemon-memory-seam` and `multimodal-content-model`
+# branches no longer anchor anything.
+smooth-operator = { version = "1.7.10", package = "smooai-smooth-operator-core" }
+smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "b6c6b84", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "b6c6b84", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.36.3", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
