@@ -402,6 +402,21 @@ pub fn render_agent_tools(view: &AgentToolsView, registry: &[RegistryTool]) -> S
     out.trim_end().to_string()
 }
 
+/// Whether to print the "enabled X on Y" success line.
+///
+/// `applied: false` means the server wrote NOTHING (an `enable` on an
+/// unrestricted agent), so claiming success would be a lie — and it is the lie
+/// that matters here: someone told "enabled" walks away believing a tool gap is
+/// closed. An absent `change` is an older server that doesn't report the
+/// distinction; assume it applied rather than swallowing every success line.
+///
+/// Lives outside `report` on purpose: inside that async I/O function this rule
+/// was correct but untestable, which is how a rule stops being correct.
+#[must_use]
+pub fn wrote_a_change(change: Option<&ToolChange>) -> bool {
+    change.is_none_or(|c| c.applied)
+}
+
 /// What a mutation did, in words — including the loud warning when the call
 /// turned an unrestricted agent into an allowlist.
 #[must_use]
@@ -538,8 +553,7 @@ async fn report(view: &AgentToolsView, org: Option<String>, agent_id: &str, tool
         print_json(&view_json(view));
         return;
     }
-    let applied = view.change.as_ref().is_none_or(|c| c.applied);
-    if applied {
+    if wrote_a_change(view.change.as_ref()) {
         let colored = if verb == "enabled" {
             verb.green().to_string()
         } else {
@@ -823,6 +837,20 @@ mod tests {
         assert!(out.contains("DROPPED:"), "{out}");
         assert!(out.contains("verify_identity"), "{out}");
         assert!(out.contains("server: materialised the allowlist"), "{out}");
+    }
+
+    #[test]
+    fn the_success_line_is_suppressed_exactly_when_nothing_was_written() {
+        // I told tools-api the CLI relies on `applied: false` to suppress the
+        // "enabled X on Y" line, and then left that rule living inside an async
+        // I/O function where no test could reach it.
+        let applied: ToolChange = serde_json::from_value(json!({ "toolId": "a", "applied": true })).unwrap();
+        let noop: ToolChange = serde_json::from_value(json!({ "toolId": "a", "applied": false })).unwrap();
+        assert!(wrote_a_change(Some(&applied)), "a real write must print the success line");
+        assert!(!wrote_a_change(Some(&noop)), "a no-op must NOT claim success");
+        // An older server that doesn't send `change` at all: print it, rather
+        // than silently swallowing the confirmation of every real write.
+        assert!(wrote_a_change(None), "absent change must not suppress the line");
     }
 
     #[test]
