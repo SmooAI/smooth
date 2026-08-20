@@ -16,12 +16,15 @@
 //! components refreshing the same file concurrently revoke each other
 //! and kill the session. The daemon's credential heartbeat owns the
 //! background cadence; the CLI must only ever refresh in the request
-//! path.
+//! path. Convention alone did not hold that line across concurrent
+//! agent sessions, so [`refresh_locked`] now enforces it with the
+//! cross-process lock in [`crate::auth::lock`] (th-5c0189).
 
 use anyhow::{Context, Result};
 use smooai_client_shared::auth::refresh::refresh_session;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 
+use crate::auth::lock::credential_lock;
 use crate::auth::{supabase_url, PROD_SUPABASE_ANON_KEY};
 
 /// What a loaded session needs before it can be used.
@@ -70,16 +73,43 @@ pub fn decide(creds: &Credentials) -> Result<Refresh> {
 /// — each carrying a `th auth login` hint.
 pub async fn fresh_credentials_from(http: &reqwest::Client, store: &CredentialsStore, missing_hint: &str) -> Result<Credentials> {
     let creds = store.load().context("load session")?.ok_or_else(|| anyhow::anyhow!("{missing_hint}"))?;
+    // Unlocked fast path: a still-valid session needs no writer, so the
+    // overwhelmingly common `th` invocation never touches the lock.
+    if decide(&creds)? == Refresh::NotNeeded {
+        return Ok(creds);
+    }
+    refresh_locked(http, store, missing_hint).await
+}
+
+/// The refresh proper, serialized against every other `th` process
+/// through the credentials lock.
+///
+/// Re-reads the store *after* taking the lock: whoever we queued behind
+/// has already rotated the token, and Supabase revoked ours the moment
+/// theirs was issued. Using their result is both cheaper and the only
+/// thing that keeps the session alive — minting a second token would
+/// revoke the one now live on disk.
+///
+/// # Errors
+/// No session on disk (worded by `missing_hint`), no refresh material,
+/// the grant itself failing, or the rotated token failing to persist.
+pub(crate) async fn refresh_locked(http: &reqwest::Client, store: &CredentialsStore, missing_hint: &str) -> Result<Credentials> {
+    let _lock = credential_lock(store.path()).context("lock the credentials file for refresh")?;
+    let creds = store.load().context("load session")?.ok_or_else(|| anyhow::anyhow!("{missing_hint}"))?;
     let refreshed = match decide(&creds)? {
+        // Another process refreshed while we waited — its token is the
+        // live one.
         Refresh::NotNeeded => return Ok(creds),
         Refresh::M2m => refresh_m2m_session(http, &creds).await.context("auto-refresh M2M client_credentials grant")?,
         Refresh::User => refresh_user_session(http, &creds)
             .await
             .context("silent session refresh failed — run `th auth login` again")?,
     };
-    // Best-effort persist: the in-memory token still serves this run
-    // even if the write fails (read-only FS, perms).
-    let _ = store.save(&refreshed);
+    // Not best-effort. The exchange already revoked the old refresh
+    // token server-side, so dropping this write leaves the *next* run
+    // holding a dead session — reporting success here is how a broken
+    // persist stays invisible until login breaks.
+    store.save(&refreshed).context("persist the rotated session")?;
     Ok(refreshed)
 }
 
@@ -341,6 +371,115 @@ mod fresh_user_credentials_tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Same stub, serving every request and counting them. The count is
+    /// the whole point: an exchange is a *token rotation*, so "how many
+    /// times did we exchange" is exactly "how many times did we revoke
+    /// somebody's live refresh token".
+    fn stub_supabase_counting(body: &'static str, hits: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let resp = tiny_http::Response::from_string(body).with_header("Content-Type: application/json".parse::<tiny_http::Header>().unwrap());
+                let _ = req.respond(resp);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    // ── th-5c0189: concurrent `th` processes must not revoke each other ──
+
+    /// Four sessions all find the same expired credentials and all want a
+    /// refresh. Before the lock, each POSTed to Supabase and each got a
+    /// rotated token that invalidated the others' — one `rename` won and
+    /// the survivor's token was NOT the one live server-side, so the
+    /// session was dead until `th auth login`.
+    ///
+    /// Asserts on outcome, not timing: exactly one exchange happened, all
+    /// four callers came back with the same usable token, and the token on
+    /// disk is the rotated one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_refreshes_exchange_the_token_exactly_once() {
+        let _guard = ENV_LOCK.lock().await;
+        let prev = std::env::var("SMOOAI_SUPABASE_URL").ok();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::env::set_var(
+            "SMOOAI_SUPABASE_URL",
+            stub_supabase_counting(
+                r#"{"access_token":"fresh-jwt","refresh_token":"rotated-rtok","expires_in":3600,"user":{"id":"u-1","email":"u@example.com"}}"#,
+                std::sync::Arc::clone(&hits),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = write_creds(dir.path(), Some(Utc::now() - chrono::Duration::hours(1)), Some("old-rtok"));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                fresh_user_credentials_from(&http(), &store).await.map(|c| c.access_token)
+            }));
+        }
+        let mut tokens = Vec::new();
+        for h in handles {
+            tokens.push(h.await.unwrap());
+        }
+        restore("SMOOAI_SUPABASE_URL", prev);
+
+        for token in tokens {
+            assert_eq!(token.unwrap(), "fresh-jwt", "every caller must end up with the live token");
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "each extra exchange revokes the previous refresh token — that is the session-killer"
+        );
+        let on_disk = store.load().unwrap().unwrap();
+        assert_eq!(
+            on_disk.refresh_token.as_deref(),
+            Some("rotated-rtok"),
+            "the rotated token must be the one persisted"
+        );
+    }
+
+    /// A refresh that can't be persisted must not report success: the
+    /// exchange already revoked the old refresh token, so the caller is
+    /// holding the last usable copy of a session the next run can't reach.
+    /// `let _ = store.save(...)` printed "✓ session refreshed" and exited 0
+    /// in exactly that situation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_persist_is_an_error_not_a_silent_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.lock().await;
+        let prev = std::env::var("SMOOAI_SUPABASE_URL").ok();
+        std::env::set_var(
+            "SMOOAI_SUPABASE_URL",
+            stub_supabase(r#"{"access_token":"fresh-jwt","refresh_token":"rotated-rtok","expires_in":3600,"user":{"id":"u-1","email":"u@example.com"}}"#),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = write_creds(dir.path(), Some(Utc::now() - chrono::Duration::hours(1)), Some("old-rtok"));
+        // Pre-create the lock sidecar: a read-only directory still allows
+        // opening an existing file, just not creating a new one — which is
+        // precisely the seam we want (the load reads, the save can't write).
+        std::fs::File::create(dir.path().join("smooai-user.lock")).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let running_as_root = std::fs::File::create(dir.path().join("root-probe")).is_ok();
+
+        let result = refresh_locked(&http(), &store, "hint").await;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        restore("SMOOAI_SUPABASE_URL", prev);
+
+        // Root ignores directory permissions, so the seam doesn't exist there.
+        if running_as_root {
+            return;
+        }
+        let err = format!("{:#}", result.expect_err("a dropped rotated token must surface as an error"));
+        assert!(err.contains("persist the rotated session"), "got: {err}");
     }
 
     #[tokio::test]

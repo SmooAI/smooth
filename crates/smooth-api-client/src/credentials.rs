@@ -122,24 +122,36 @@ impl CredentialsStore {
 
     /// Persist `creds` atomically (write to a tempfile alongside,
     /// then rename) so a crash mid-write can't corrupt the store.
-    /// File mode is forced to `0600`.
+    /// The file is mode `0600` from the instant it exists.
+    ///
+    /// `NamedTempFile` rather than a hand-rolled `.json.tmp`, for two
+    /// reasons that both bit us:
+    /// - the name is **unique** and created `O_EXCL`, so two `th`
+    ///   processes saving at once can't scribble over each other's
+    ///   half-written temp file (th-5c0189);
+    /// - it is created `0600`, closing the window where `fs::write`
+    ///   (0644 under the usual umask) left the token world-readable
+    ///   until a follow-up `chmod` — long enough for another local user
+    ///   to open it and hold the fd across the chmod.
     ///
     /// # Errors
     /// Disk / permission failures bubble up unchanged.
     pub fn save(&self, creds: &Credentials) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
+        let parent = match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                create_private_dir(dir)?;
+                dir
+            }
+            // Bare relative filename — write the temp file beside it.
+            _ => Path::new("."),
+        };
         let json = serde_json::to_string_pretty(creds).context("serialize credentials")?;
-        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perm = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&tmp, perm).with_context(|| format!("chmod 600 {}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, &self.path).with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent).with_context(|| format!("create temp file in {}", parent.display()))?;
+        std::io::Write::write_all(&mut tmp, json.as_bytes()).context("write credentials")?;
+        tmp.as_file().sync_all().context("flush credentials to disk")?;
+        tmp.persist(&self.path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("replace {}", self.path.display()))?;
         Ok(())
     }
 
@@ -155,6 +167,22 @@ impl CredentialsStore {
             Err(e) => Err(e).with_context(|| format!("delete credentials at {}", self.path.display())),
         }
     }
+}
+
+/// `create_dir_all` that asks for mode `0700` up front on unix, so a
+/// secret-bearing directory is never even briefly group/world-traversable.
+/// Existing directories keep their mode — the file inside is `0600`
+/// regardless, and silently re-chmod'ing a path the caller pointed us at
+/// via `SMOOAI_AUTH_FILE` is not ours to do.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).with_context(|| format!("mkdir {}", dir.display()))
 }
 
 #[cfg(test)]
@@ -234,5 +262,60 @@ mod tests {
         store.save(&fixture()).expect("save");
         let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    /// th-5c0189: the old `save` wrote a **fixed** `smooai.json.tmp`, so
+    /// two savers shared one temp file and one could rename a blend of
+    /// both writers' bytes into place. Unique `O_EXCL` temp names make
+    /// every save land whole or not at all.
+    #[test]
+    fn concurrent_saves_never_blend_and_leave_no_temp_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        store.save(&fixture()).expect("seed");
+
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    let mut creds = fixture();
+                    creds.access_token = format!("tok-{i}");
+                    creds.refresh_token = Some(format!("rtok-{i}"));
+                    store.save(&creds).expect("save");
+                });
+            }
+        });
+
+        // Whichever writer won, the file must be one writer's credentials
+        // in full — a torn write would fail to parse, or pair one saver's
+        // access token with another's refresh token.
+        let loaded = store.load().expect("load").expect("present");
+        let suffix = loaded.access_token.strip_prefix("tok-").expect("intact access token");
+        assert_eq!(
+            loaded.refresh_token.as_deref(),
+            Some(format!("rtok-{suffix}").as_str()),
+            "torn write: mismatched token pair"
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name())
+            .filter(|name| name != "smooai.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked for the next writer to collide with: {leftovers:?}");
+    }
+
+    /// The parent of a credentials file is asked for 0700 at creation, so
+    /// it is never even briefly group/world-traversable.
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_its_parent_directory_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("auth").join("smooai.json"));
+        store.save(&fixture()).expect("save");
+        let mode = std::fs::metadata(dir.path().join("auth")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 }

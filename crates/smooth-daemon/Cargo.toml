@@ -85,6 +85,10 @@ rand = "0.8"
 # th-3119e3: re-homed narc surveillance detectors (secret + prompt-injection
 # regexes) run in-process as a ToolHook on the operator's registry.
 regex = "1"
+# th-5c0189: `secret_file::write_secret` writes tokens/keys through a
+# NamedTempFile so they are 0600 from creation, with no world-readable
+# window between `fs::write` and `chmod`.
+tempfile.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

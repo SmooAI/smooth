@@ -77,11 +77,12 @@ impl PushState {
 
     async fn save_subs(&self, subs: &[Subscription]) {
         let _g = self.lock.lock().await;
-        if let Some(parent) = self.subs_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(json) = serde_json::to_vec_pretty(subs) {
-            let _ = std::fs::write(&self.subs_path, json);
+            // Subscriptions carry each device's p256dh/auth keys — same
+            // trust level as the VAPID private key they pair with.
+            if let Err(e) = crate::secret_file::write_secret(&self.subs_path, json) {
+                tracing::warn!(error = %e, path = %self.subs_path.display(), "could not persist push subscriptions");
+            }
         }
     }
 
@@ -224,18 +225,12 @@ fn load_or_generate_vapid_at(path: &std::path::Path) -> (String, String) {
         public_key: pub_k.clone(),
         private_key: priv_k.clone(),
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     if let Ok(json) = serde_json::to_vec_pretty(&file) {
-        if std::fs::write(path, json).is_ok() {
-            // The private key is a signing secret — lock it down like an ssh key.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-            }
-            tracing::info!(path = %path.display(), "auto-provisioned a VAPID keypair for Web Push");
+        // The private key is a signing secret — owner-only from creation,
+        // never briefly 0644 like an `fs::write` + `chmod` (th-5c0189).
+        match crate::secret_file::write_secret(path, json) {
+            Ok(()) => tracing::info!(path = %path.display(), "auto-provisioned a VAPID keypair for Web Push"),
+            Err(e) => tracing::warn!(error = %e, path = %path.display(), "could not persist the VAPID keypair — it will be regenerated on restart"),
         }
     }
     (pub_k, priv_k)

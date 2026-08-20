@@ -5143,6 +5143,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "dirs-next",
+ "fs4",
  "futures-util",
  "indicatif",
  "open",
