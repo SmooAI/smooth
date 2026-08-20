@@ -364,6 +364,38 @@ smoo config <sub> --m2m                               # use ~/.smooth/auth/smooa
 smoo config <sub> --org-id=<id>                       # override active org
 ```
 
+#### Patching the schema from the CLI — `smoo config schema`
+
+Remote-first, one shot — no local `.smooai-config/schema.json` needed.
+Fetches the org's remote schema, applies the patch in memory, and POSTs
+a new version via the same push endpoint `smoo config push` uses:
+
+```bash
+smoo config schema show [--schema-name <n>] [--json]  # keys per tier w/ type/description/default
+smoo config schema add <key> --tier secret|public|feature_flag|limit \
+    [--type string|number|boolean|object|array] [--description <d>] [--default <v>] \
+    [--min <n> --max <n>]                             # min/max = limit clamp bounds only
+smoo config schema rm <key> [--tier <t>]              # remove a key declaration
+smoo config schema add|rm … --dry-run                 # print the would-be diff, POST nothing
+```
+
+Safety rails:
+
+- **`add` is an upsert** — re-adding a key in the same tier patches the
+  given fields onto the existing declaration (there is no separate
+  `edit-key`); adding a key already declared in a **different** tier is
+  refused, showing the existing declaration.
+- **`rm` never deletes values** — it prints a reminder to use
+  `smoo config delete <key>` for those.
+- `--type` defaults per tier: `feature_flag` → boolean, `limit` →
+  number, otherwise string.
+- On an org with more than one schema, all three verbs refuse to guess —
+  pass `--schema-name` (same rule as `pull`).
+- If a pulled (JSON-Schema-shaped) `.smooai-config/schema.json` exists in
+  the cwd, `add`/`rm` update it too so local and remote stay in sync; a
+  `config.ts`-generated manifest is left alone with a pointer to
+  `smoo config build`.
+
 The full schemas + environments + feature-flag-evaluation surface
 still lives under `smoo api config`:
 

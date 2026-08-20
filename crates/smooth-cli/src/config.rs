@@ -451,6 +451,128 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: LimitsCmd,
     },
+    /// Inspect and patch the org's REMOTE config schema in one shot — no
+    /// local `.smooai-config/schema.json` required. `show` renders the
+    /// declared keys per tier; `add` upserts a key declaration; `rm`
+    /// removes one. `add`/`rm` print the would-be change, POST a new
+    /// schema version via the same endpoint `th config push` uses, and —
+    /// if a pulled (JSON-Schema-shaped) `.smooai-config/schema.json`
+    /// exists in the cwd — update it too so local and remote stay in
+    /// sync. `--dry-run` stops after printing.
+    Schema {
+        #[command(subcommand)]
+        cmd: SchemaCmd,
+    },
+}
+
+/// JSON-Schema `type` for a schema key declaration. A clap `ValueEnum` so
+/// typos fail at parse time (mirrors [`Tier`]).
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum KeyType {
+    String,
+    Number,
+    Boolean,
+    Object,
+    Array,
+}
+
+impl KeyType {
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Object => "object",
+            Self::Array => "array",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SchemaCmd {
+    /// Render the remote schema: every declared key per tier with its
+    /// type and any description / default / clamp metadata.
+    Show {
+        /// Schema name. Optional when the org has exactly one schema;
+        /// required when it has more than one.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw jsonSchema document instead of the pretty listing.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Add a key declaration to the remote schema. An UPSERT: re-adding a
+    /// key already declared in the SAME tier patches the given fields onto
+    /// the existing declaration; a key declared in a DIFFERENT tier is
+    /// refused (rm it first if you mean to move it).
+    Add {
+        /// The config key name (e.g. `databaseUrl`).
+        key: String,
+        /// Tier to declare the key under.
+        #[arg(long, value_enum)]
+        tier: Tier,
+        /// JSON-Schema type. Defaults per tier: feature_flag → boolean,
+        /// limit → number, otherwise string.
+        #[arg(long, value_enum)]
+        r#type: Option<KeyType>,
+        /// Human description stored on the declaration.
+        #[arg(long)]
+        description: Option<String>,
+        /// Default value. Parsed as JSON when valid (`true`, `42`),
+        /// stored as a string otherwise.
+        #[arg(long)]
+        default: Option<String>,
+        /// Clamp minimum (limit tier only).
+        #[arg(long)]
+        min: Option<f64>,
+        /// Clamp maximum (limit tier only).
+        #[arg(long)]
+        max: Option<f64>,
+        /// Schema name (required only when the org has more than one).
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Print the would-be change without POSTing a new version.
+        #[arg(long)]
+        dry_run: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Remove a key declaration from the remote schema. Values already set
+    /// for the key are NOT deleted — use `th config delete` for those.
+    Rm {
+        /// The config key name.
+        key: String,
+        /// Only remove if the key is declared in this tier (errors,
+        /// naming the actual tier, otherwise).
+        #[arg(long, value_enum)]
+        tier: Option<Tier>,
+        /// Schema name (required only when the org has more than one).
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Print the would-be change without POSTing a new version.
+        #[arg(long)]
+        dry_run: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -718,6 +840,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         } => cmd_delete(key, environment, org_id, force, m2m).await,
         Cmd::Environments { cmd } => cmd_environments(cmd).await,
         Cmd::Limits { cmd } => cmd_limits(cmd).await,
+        Cmd::Schema { cmd } => cmd_schema(cmd).await,
     }
 }
 
@@ -1809,16 +1932,7 @@ fn compute_diff(local: &Value, remote: &Value) -> SchemaDiff {
 /// looks like JSON-Schema, it's returned unchanged.
 fn manifest_to_json_schema(manifest: &Value) -> Value {
     // Already JSON-Schema? Pass through untouched.
-    if manifest
-        .get("properties")
-        .map(|p| {
-            p.get("secretConfigSchema")
-                .or_else(|| p.get("publicConfigSchema"))
-                .or_else(|| p.get("featureFlagSchema"))
-                .is_some()
-        })
-        .unwrap_or(false)
-    {
+    if is_json_schema_shaped(manifest) {
         return manifest.clone();
     }
 
@@ -2474,6 +2588,438 @@ impl ConfigClient {
     async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         self.send(reqwest::Method::POST, path, Some(body)).await
     }
+}
+
+// ---------------------------------------------------------------------------
+// `th config schema …` — remote-first schema patching (no local
+// `.smooai-config/schema.json` required). Fetches the remote jsonSchema via
+// the same `/config/schemas` list endpoint push/pull use, applies the patch
+// in memory (pure, tested against fixture JSON), and POSTs a new version via
+// the same `/config/schemas/{id}/push` endpoint. `--dry-run` stops after
+// printing the would-be change.
+// ---------------------------------------------------------------------------
+
+/// All four schema tiers, in display order.
+const ALL_TIERS: [Tier; 4] = [Tier::Public, Tier::Secret, Tier::FeatureFlag, Tier::Limit];
+
+/// The JSON-Schema node name each tier's key declarations live under.
+fn tier_schema_node(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Public => "publicConfigSchema",
+        Tier::Secret => "secretConfigSchema",
+        Tier::FeatureFlag => "featureFlagSchema",
+        Tier::Limit => "limitsSchema",
+    }
+}
+
+/// Is this doc the JSON-Schema serialization (the shape the config server
+/// stores under `jsonSchema` and `pull` writes locally), as opposed to the
+/// manifest shape `th config build` generates from `config.ts`?
+fn is_json_schema_shaped(doc: &Value) -> bool {
+    doc.get("properties")
+        .is_some_and(|p| ALL_TIERS.iter().any(|t| p.get(tier_schema_node(*t)).is_some()))
+}
+
+/// Find `key`'s declaration in a JSON-Schema doc (tolerating the missing
+/// `properties` wrapper like [`flatten_schema`]): (tier, display name, spec).
+/// Matched canonically so `API_URL` finds `apiUrl`.
+fn find_schema_decl(doc: &Value, key: &str) -> Option<(Tier, String, Value)> {
+    let ck = canonical_key(key);
+    let root = doc.get("properties").unwrap_or(doc);
+    for tier in ALL_TIERS {
+        if let Some(props) = root.get(tier_schema_node(tier)).and_then(|v| v.get("properties")).and_then(Value::as_object) {
+            if let Some((k, spec)) = props.iter().find(|(k, _)| canonical_key(k) == ck) {
+                return Some((tier, k.clone(), spec.clone()));
+            }
+        }
+    }
+    None
+}
+
+/// Mutable root the tier nodes live under. Remote docs are wrapped
+/// (`properties.<tier>Schema`); a bare doc keeps its shape; anything else
+/// gets the wrapped skeleton created.
+fn schema_root_mut(doc: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !doc.is_object() {
+        *doc = serde_json::json!({});
+    }
+    let bare = ALL_TIERS.iter().any(|t| doc.get(tier_schema_node(*t)).is_some()) && doc.get("properties").is_none();
+    let map = doc.as_object_mut().expect("doc is an object");
+    if bare {
+        return map;
+    }
+    map.entry("type".to_string()).or_insert_with(|| Value::String("object".into()));
+    let props = map.entry("properties".to_string()).or_insert_with(|| serde_json::json!({}));
+    if !props.is_object() {
+        *props = serde_json::json!({});
+    }
+    props.as_object_mut().expect("properties is an object")
+}
+
+/// One applied schema patch, for rendering + tests.
+#[derive(Debug, PartialEq)]
+enum SchemaPatch {
+    Added { key: String, tier: Tier, spec: Value },
+    Updated { key: String, tier: Tier, before: Value, after: Value },
+    Removed { key: String, tier: Tier, spec: Value },
+}
+
+impl SchemaPatch {
+    /// An upsert that changed nothing — declaration already identical.
+    fn is_noop(&self) -> bool {
+        matches!(self, Self::Updated { before, after, .. } if before == after)
+    }
+}
+
+/// Apply `schema add` to a jsonSchema doc. Pure — returns the new doc and
+/// the patch that was applied. Refuses a key already declared in a
+/// DIFFERENT tier (showing the existing declaration); same tier is an
+/// upsert that overlays only the fields given. The existing spelling wins
+/// (adding `API_URL` when `apiUrl` is declared patches `apiUrl`).
+#[allow(clippy::too_many_arguments)]
+fn schema_patch_add(
+    doc: &Value,
+    key: &str,
+    tier: Tier,
+    ty: Option<KeyType>,
+    description: Option<&str>,
+    default: Option<&str>,
+    min: Option<f64>,
+    max: Option<f64>,
+) -> Result<(Value, SchemaPatch)> {
+    if (min.is_some() || max.is_some()) && tier != Tier::Limit {
+        anyhow::bail!("--min/--max are the limit tier's clamp bounds and only apply with `--tier limit`. Drop them, or use --tier limit.");
+    }
+
+    let existing = find_schema_decl(doc, key);
+    if let Some((found_tier, found_key, spec)) = &existing {
+        if *found_tier != tier {
+            anyhow::bail!(
+                "`{found_key}` is already declared in tier `{}` as {} — refusing to add it to `{}`.\n\
+                 Run `th config schema rm {found_key}` first if you mean to move it.",
+                found_tier.as_wire(),
+                serde_json::to_string(spec).unwrap_or_default(),
+                tier.as_wire()
+            );
+        }
+    }
+
+    let (display_key, before) = existing.map_or_else(|| (key.to_string(), None), |(_, k, s)| (k, Some(s)));
+    let mut spec = before.clone().unwrap_or_else(|| serde_json::json!({}));
+    if !spec.is_object() {
+        spec = serde_json::json!({});
+    }
+    let spec_obj = spec.as_object_mut().expect("spec is an object");
+    if let Some(t) = ty {
+        spec_obj.insert("type".to_string(), Value::String(t.as_wire().into()));
+    } else {
+        let default_ty = match tier {
+            Tier::FeatureFlag => "boolean",
+            Tier::Limit => "number",
+            Tier::Public | Tier::Secret => "string",
+        };
+        spec_obj.entry("type".to_string()).or_insert_with(|| Value::String(default_ty.into()));
+    }
+    if let Some(d) = description {
+        spec_obj.insert("description".to_string(), Value::String(d.into()));
+    }
+    if let Some(d) = default {
+        // Same rule as `th config set`: JSON when it parses, string otherwise.
+        let v = serde_json::from_str::<Value>(d).unwrap_or_else(|_| Value::String(d.into()));
+        spec_obj.insert("default".to_string(), v);
+    }
+    if let Some(m) = min {
+        spec_obj.insert("minimum".to_string(), serde_json::json!(m));
+    }
+    if let Some(m) = max {
+        spec_obj.insert("maximum".to_string(), serde_json::json!(m));
+    }
+
+    let mut new_doc = doc.clone();
+    let root = schema_root_mut(&mut new_doc);
+    let node = root
+        .entry(tier_schema_node(tier).to_string())
+        .or_insert_with(|| serde_json::json!({ "type": "object", "properties": {} }));
+    if !node.is_object() {
+        *node = serde_json::json!({ "type": "object", "properties": {} });
+    }
+    let node_props = node
+        .as_object_mut()
+        .expect("tier node is an object")
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !node_props.is_object() {
+        *node_props = serde_json::json!({});
+    }
+    node_props
+        .as_object_mut()
+        .expect("tier properties is an object")
+        .insert(display_key.clone(), spec.clone());
+
+    let patch = match before {
+        Some(b) => SchemaPatch::Updated {
+            key: display_key,
+            tier,
+            before: b,
+            after: spec,
+        },
+        None => SchemaPatch::Added { key: display_key, tier, spec },
+    };
+    Ok((new_doc, patch))
+}
+
+/// Apply `schema rm` to a jsonSchema doc. Pure. Errors when the key isn't
+/// declared, or when `--tier` names a tier other than the one it's in.
+fn schema_patch_rm(doc: &Value, key: &str, tier_filter: Option<Tier>) -> Result<(Value, SchemaPatch)> {
+    let Some((found_tier, found_key, spec)) = find_schema_decl(doc, key) else {
+        anyhow::bail!("`{key}` is not declared in the schema. Run `th config schema show` to see declared keys.");
+    };
+    if let Some(t) = tier_filter {
+        if t != found_tier {
+            anyhow::bail!(
+                "`{found_key}` is declared in tier `{}`, not `{}`. Drop --tier, or pass the tier it's actually in.",
+                found_tier.as_wire(),
+                t.as_wire()
+            );
+        }
+    }
+    let mut new_doc = doc.clone();
+    let root = schema_root_mut(&mut new_doc);
+    if let Some(props) = root
+        .get_mut(tier_schema_node(found_tier))
+        .and_then(|n| n.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        props.remove(&found_key);
+    }
+    Ok((
+        new_doc,
+        SchemaPatch::Removed {
+            key: found_key,
+            tier: found_tier,
+            spec,
+        },
+    ))
+}
+
+/// Render a patch for the confirmation / dry-run output. Pure so the
+/// dry-run rendering is testable.
+fn render_schema_patch(p: &SchemaPatch) -> String {
+    let compact = |v: &Value| serde_json::to_string(v).unwrap_or_default();
+    match p {
+        SchemaPatch::Added { key, tier, spec } => format!(
+            "  {} added {} {}\n      {}",
+            "+".green().bold(),
+            key.cyan().bold(),
+            format!("[{}]", tier.as_wire()).dimmed(),
+            compact(spec).dimmed()
+        ),
+        SchemaPatch::Updated { key, tier, before, after } if before == after => format!(
+            "  {} {} {} already declared identically — nothing to change",
+            "●".dimmed(),
+            key.cyan().bold(),
+            format!("[{}]", tier.as_wire()).dimmed()
+        ),
+        SchemaPatch::Updated { key, tier, before, after } => format!(
+            "  {} updated {} {}\n      {}  {}\n      {}  {}",
+            "~".yellow().bold(),
+            key.cyan().bold(),
+            format!("[{}]", tier.as_wire()).dimmed(),
+            "before".dimmed(),
+            compact(before).dimmed(),
+            "after ".dimmed(),
+            compact(after)
+        ),
+        SchemaPatch::Removed { key, tier, spec } => format!(
+            "  {} removed {} {}\n      {}",
+            "-".red().bold(),
+            key.cyan().bold(),
+            format!("[{}]", tier.as_wire()).dimmed(),
+            compact(spec).dimmed()
+        ),
+    }
+}
+
+/// Pick the single remote schema entry the `schema` verbs act on — same
+/// refuse-to-guess semantics as `pull` ([`resolve_pull_schema`]).
+fn pick_schema_entry<'a>(schemas: &'a [Value], flag: Option<&str>) -> Result<&'a Value> {
+    let names: Vec<&str> = schemas.iter().map(|s| s.get("name").and_then(Value::as_str).unwrap_or("")).collect();
+    let idx = resolve_pull_schema(&names, flag).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(&schemas[idx])
+}
+
+/// If a cwd `.smooai-config/schema.json` exists, keep it in step with the
+/// patched remote doc. Only the JSON-Schema-shaped file `pull` writes is
+/// rewritten; the manifest shape is generated from `config.ts`, so patching
+/// it would be clobbered by the next `th config build` — point at the
+/// source instead. `None` = no local file.
+fn sync_local_schema_json(new_doc: &Value) -> Result<Option<String>> {
+    let path = std::env::current_dir().context("get current dir")?.join(".smooai-config").join("schema.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let parsed = serde_json::from_str::<Value>(&raw).with_context(|| format!("parse JSON from {}", path.display()))?;
+    if is_json_schema_shaped(&parsed) {
+        let pretty = serde_json::to_string_pretty(new_doc).context("serialize patched schema")?;
+        std::fs::write(&path, format!("{pretty}\n")).with_context(|| format!("write {}", path.display()))?;
+        Ok(Some(format!("also updated {}", path.display())))
+    } else {
+        Ok(Some(format!(
+            "{} is generated from config.ts — not patched; update config.ts and run `th config build` to match",
+            path.display()
+        )))
+    }
+}
+
+async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
+    match cmd {
+        SchemaCmd::Show {
+            schema_name,
+            org_id,
+            json,
+            m2m,
+        } => cmd_schema_show(schema_name, org_id, json, m2m).await,
+        SchemaCmd::Add {
+            key,
+            tier,
+            r#type,
+            description,
+            default,
+            min,
+            max,
+            schema_name,
+            org_id,
+            dry_run,
+            m2m,
+        } => {
+            cmd_schema_patch(
+                schema_name,
+                org_id,
+                dry_run,
+                m2m,
+                format!("th config schema add {key} [{}]", tier.as_wire()),
+                move |doc| schema_patch_add(doc, &key, tier, r#type, description.as_deref(), default.as_deref(), min, max),
+            )
+            .await
+        }
+        SchemaCmd::Rm {
+            key,
+            tier,
+            schema_name,
+            org_id,
+            dry_run,
+            m2m,
+        } => {
+            println!();
+            println!(
+                "  {} values set for this key are not deleted — use `th config delete {key}` for those",
+                "!".yellow().bold()
+            );
+            cmd_schema_patch(schema_name, org_id, dry_run, m2m, format!("th config schema rm {key}"), move |doc| {
+                schema_patch_rm(doc, &key, tier)
+            })
+            .await
+        }
+    }
+}
+
+async fn cmd_schema_show(schema_name: Option<String>, org_id: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+    let picked = pick_schema_entry(&schemas, schema_name.as_deref())?;
+    let doc = picked.get("jsonSchema").context("remote schema entry has no jsonSchema field")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(doc).unwrap_or_default());
+        return Ok(());
+    }
+
+    let name = picked.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");
+    println!();
+    println!("  {} {} ({} keys)", "Schema:".dimmed(), name.cyan().bold(), flatten_schema(doc).len());
+    let root = doc.get("properties").unwrap_or(doc);
+    for tier in ALL_TIERS {
+        let Some(props) = root.get(tier_schema_node(tier)).and_then(|v| v.get("properties")).and_then(Value::as_object) else {
+            continue;
+        };
+        if props.is_empty() {
+            continue;
+        }
+        println!();
+        println!("  {} ({}):", tier.as_wire().bold(), props.len());
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        let width = keys.iter().map(|k| k.len()).max().unwrap_or(0);
+        for k in keys {
+            let spec = &props[k];
+            let ty = spec.get("type").and_then(Value::as_str).unwrap_or("?");
+            let mut extra = Vec::new();
+            if let Some(d) = spec.get("default") {
+                extra.push(format!("default={}", serde_json::to_string(d).unwrap_or_default()));
+            }
+            if let Some(m) = spec.get("minimum").and_then(Value::as_f64) {
+                extra.push(format!("min={m}"));
+            }
+            if let Some(m) = spec.get("maximum").and_then(Value::as_f64) {
+                extra.push(format!("max={m}"));
+            }
+            if let Some(d) = spec.get("description").and_then(Value::as_str) {
+                extra.push(d.to_string());
+            }
+            println!("    {:<width$}  {:<8}  {}", k.cyan(), ty, extra.join("  ").dimmed());
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Shared remote-first flow for `schema add` / `schema rm`: fetch the
+/// remote schema, apply `patch_fn` in memory, print the change, and (unless
+/// `--dry-run` or a no-op) POST the new version + sync any local copy.
+async fn cmd_schema_patch(
+    schema_name: Option<String>,
+    org_id: Option<String>,
+    dry_run: bool,
+    m2m: bool,
+    change_description: String,
+    patch_fn: impl FnOnce(&Value) -> Result<(Value, SchemaPatch)>,
+) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+    let picked = pick_schema_entry(&schemas, schema_name.as_deref())?;
+    let doc = picked.get("jsonSchema").context("remote schema entry has no jsonSchema field")?;
+    let name = picked.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");
+
+    let (new_doc, patch) = patch_fn(doc)?;
+
+    println!();
+    println!("  {} {}", "Schema:".dimmed(), name.cyan());
+    println!("{}", render_schema_patch(&patch));
+    if patch.is_noop() {
+        println!();
+        return Ok(());
+    }
+    if dry_run {
+        println!("  {} dry-run — no changes pushed", "●".dimmed());
+        println!();
+        return Ok(());
+    }
+
+    let schema_id = picked.get("id").and_then(Value::as_str).context("remote schema entry has no id")?;
+    let body = serde_json::json!({ "jsonSchema": new_doc, "changeDescription": change_description });
+    cfg.post(&format!("/organizations/{org}/config/schemas/{schema_id}/push"), &body)
+        .await
+        .context("POST /config/schemas/{id}/push")?;
+    println!("  {} pushed new version of {}", "✓".green().bold(), name.cyan().bold());
+    match sync_local_schema_json(&new_doc)? {
+        Some(line) => println!("    {}", line.dimmed()),
+        None => println!("    {}", "no local .smooai-config/schema.json in cwd — remote updated only".dimmed()),
+    }
+    println!();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3289,6 +3835,260 @@ mod tests {
         assert!(config_ts.contains("publicConfigSchema"));
         assert!(config_ts.contains("secretConfigSchema"));
         assert!(config_ts.contains("featureFlagSchema"));
+    }
+
+    // ----- `th config schema …` tests ---------------------------------------
+
+    /// Fixture in the exact shape the config server returns under `jsonSchema`
+    /// (verified against a live `th smoo config pull` of the smooai schema).
+    fn fixture_json_schema() -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "publicConfigSchema": { "type": "object", "properties": { "apiUrl": { "type": "string" } } },
+                "secretConfigSchema": { "type": "object", "properties": { "anthropicApiKey": { "type": "string" } } },
+                "featureFlagSchema": { "type": "object", "properties": { "customerService": { "type": "boolean" } } },
+                "limitsSchema": { "type": "object", "properties": {
+                    "agentMaxIterations": { "type": "number", "default": 12, "minimum": 1, "maximum": 50 }
+                } },
+            }
+        })
+    }
+
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
+        use clap::Parser;
+        TestCli::try_parse_from(std::iter::once("th").chain(args.iter().copied())).map(|c| c.cmd)
+    }
+
+    #[test]
+    fn schema_show_parses() {
+        let cmd = parse(&["schema", "show", "--schema-name", "smooai", "--json", "--org", "org_x"]).expect("parses");
+        let Cmd::Schema {
+            cmd: SchemaCmd::Show {
+                schema_name,
+                org_id,
+                json,
+                m2m,
+            },
+        } = cmd
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(schema_name.as_deref(), Some("smooai"));
+        assert_eq!(org_id.as_deref(), Some("org_x"));
+        assert!(json);
+        assert!(!m2m);
+    }
+
+    #[test]
+    fn schema_add_parses_all_flags() {
+        let cmd = parse(&[
+            "schema",
+            "add",
+            "maxSeats",
+            "--tier",
+            "limit",
+            "--type",
+            "number",
+            "--description",
+            "Seats cap",
+            "--default",
+            "5",
+            "--min",
+            "1",
+            "--max",
+            "50",
+            "--dry-run",
+        ])
+        .expect("parses");
+        let Cmd::Schema {
+            cmd:
+                SchemaCmd::Add {
+                    key,
+                    tier,
+                    r#type,
+                    description,
+                    default,
+                    min,
+                    max,
+                    dry_run,
+                    ..
+                },
+        } = cmd
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(key, "maxSeats");
+        assert_eq!(tier, Tier::Limit);
+        assert_eq!(r#type, Some(KeyType::Number));
+        assert_eq!(description.as_deref(), Some("Seats cap"));
+        assert_eq!(default.as_deref(), Some("5"));
+        assert_eq!(min, Some(1.0));
+        assert_eq!(max, Some(50.0));
+        assert!(dry_run);
+    }
+
+    #[test]
+    fn schema_add_requires_tier_and_rejects_unknown_tier() {
+        assert!(parse(&["schema", "add", "k"]).is_err(), "--tier is required");
+        // Unknown tier is a clap value_enum error at parse time.
+        assert!(parse(&["schema", "add", "k", "--tier", "secrets"]).is_err());
+    }
+
+    #[test]
+    fn schema_rm_parses() {
+        let cmd = parse(&["schema", "rm", "oldKey", "--tier", "public", "--dry-run"]).expect("parses");
+        let Cmd::Schema {
+            cmd: SchemaCmd::Rm { key, tier, dry_run, .. },
+        } = cmd
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(key, "oldKey");
+        assert_eq!(tier, Some(Tier::Public));
+        assert!(dry_run);
+    }
+
+    #[test]
+    fn schema_add_new_key_lands_in_its_tier_node() {
+        let doc = fixture_json_schema();
+        let (new_doc, patch) = schema_patch_add(&doc, "authUrl", Tier::Public, None, Some("Auth base URL"), None, None, None).expect("adds");
+        let spec = &new_doc["properties"]["publicConfigSchema"]["properties"]["authUrl"];
+        assert_eq!(spec["type"], "string", "type defaults to string for public tier");
+        assert_eq!(spec["description"], "Auth base URL");
+        assert!(matches!(patch, SchemaPatch::Added { .. }));
+        // Everything else untouched.
+        assert_eq!(new_doc["properties"]["secretConfigSchema"], doc["properties"]["secretConfigSchema"]);
+    }
+
+    #[test]
+    fn schema_add_tier_type_defaults() {
+        let doc = fixture_json_schema();
+        let (d, _) = schema_patch_add(&doc, "newFlag", Tier::FeatureFlag, None, None, Some("true"), None, None).expect("adds");
+        let spec = &d["properties"]["featureFlagSchema"]["properties"]["newFlag"];
+        assert_eq!(spec["type"], "boolean");
+        assert_eq!(spec["default"], Value::Bool(true), "--default parses as JSON");
+        let (d, _) = schema_patch_add(&doc, "maxSeats", Tier::Limit, None, None, Some("5"), Some(1.0), Some(50.0)).expect("adds");
+        let spec = &d["properties"]["limitsSchema"]["properties"]["maxSeats"];
+        assert_eq!(spec["type"], "number");
+        assert_eq!(spec["minimum"], 1.0);
+        assert_eq!(spec["maximum"], 50.0);
+    }
+
+    #[test]
+    fn schema_add_refuses_cross_tier_conflict() {
+        let doc = fixture_json_schema();
+        let err = schema_patch_add(&doc, "anthropicApiKey", Tier::Public, None, None, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already declared in tier `secret`"), "names the existing tier: {err}");
+        assert!(err.contains("schema rm"), "points at the fix: {err}");
+        // Canonical matching: SCREAMING_SNAKE spelling hits the same conflict.
+        assert!(schema_patch_add(&doc, "ANTHROPIC_API_KEY", Tier::Public, None, None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn schema_add_same_tier_is_upsert_preserving_spelling() {
+        let doc = fixture_json_schema();
+        // Re-add with the SCREAMING_SNAKE spelling + a new description: patches
+        // the existing camelCase declaration in place, keeps its type.
+        let (new_doc, patch) = schema_patch_add(&doc, "API_URL", Tier::Public, None, Some("Base URL"), None, None, None).expect("upserts");
+        let props = new_doc["properties"]["publicConfigSchema"]["properties"].as_object().unwrap();
+        assert_eq!(props.len(), 1, "no duplicate spelling inserted");
+        assert_eq!(props["apiUrl"]["description"], "Base URL");
+        assert_eq!(props["apiUrl"]["type"], "string");
+        let SchemaPatch::Updated { key, before, after, .. } = patch else {
+            panic!("expected Updated, got {patch:?}");
+        };
+        assert_eq!(key, "apiUrl");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn schema_add_identical_upsert_is_noop() {
+        let doc = fixture_json_schema();
+        let (new_doc, patch) = schema_patch_add(&doc, "apiUrl", Tier::Public, Some(KeyType::String), None, None, None, None).expect("upserts");
+        assert!(patch.is_noop(), "identical declaration must be a no-op: {patch:?}");
+        assert_eq!(new_doc, doc);
+    }
+
+    #[test]
+    fn schema_add_min_max_refused_off_limit_tier() {
+        let doc = fixture_json_schema();
+        let err = schema_patch_add(&doc, "k", Tier::Public, None, None, None, Some(1.0), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--tier limit"), "{err}");
+    }
+
+    #[test]
+    fn schema_rm_removes_and_reports() {
+        let doc = fixture_json_schema();
+        let (new_doc, patch) = schema_patch_rm(&doc, "customerService", None).expect("removes");
+        assert!(new_doc["properties"]["featureFlagSchema"]["properties"].as_object().unwrap().is_empty());
+        let SchemaPatch::Removed { key, tier, spec } = patch else {
+            panic!("expected Removed");
+        };
+        assert_eq!(key, "customerService");
+        assert_eq!(tier, Tier::FeatureFlag);
+        assert_eq!(spec["type"], "boolean");
+        // Round-trip: rm then add restores the key set.
+        let (restored, _) = schema_patch_add(&new_doc, "customerService", Tier::FeatureFlag, None, None, None, None, None).expect("re-add");
+        assert!(compute_diff(&restored, &doc).is_empty(), "rm→add must round-trip the key set");
+    }
+
+    #[test]
+    fn schema_rm_unknown_key_errors() {
+        let err = schema_patch_rm(&fixture_json_schema(), "nope", None).unwrap_err().to_string();
+        assert!(err.contains("not declared"), "{err}");
+        assert!(err.contains("schema show"), "points at discovery: {err}");
+    }
+
+    #[test]
+    fn schema_rm_tier_mismatch_errors_naming_actual_tier() {
+        let err = schema_patch_rm(&fixture_json_schema(), "apiUrl", Some(Tier::Secret)).unwrap_err().to_string();
+        assert!(err.contains("`public`"), "must name where the key actually is: {err}");
+    }
+
+    #[test]
+    fn schema_dry_run_renders_the_would_be_diff() {
+        let doc = fixture_json_schema();
+        let (_, add) = schema_patch_add(&doc, "authUrl", Tier::Public, None, None, None, None, None).expect("adds");
+        let rendered = render_schema_patch(&add);
+        assert!(rendered.contains("added"), "{rendered}");
+        assert!(rendered.contains("authUrl"), "{rendered}");
+        assert!(rendered.contains("[public]"), "{rendered}");
+        assert!(rendered.contains(r#""type":"string""#), "shows the spec: {rendered}");
+
+        let (_, rm) = schema_patch_rm(&doc, "apiUrl", None).expect("removes");
+        let rendered = render_schema_patch(&rm);
+        assert!(rendered.contains("removed") && rendered.contains("apiUrl"), "{rendered}");
+    }
+
+    #[test]
+    fn is_json_schema_shaped_distinguishes_the_two_serializations() {
+        assert!(is_json_schema_shaped(&fixture_json_schema()));
+        // Manifest shape (th config build output) is NOT JSON-Schema shaped.
+        let manifest = serde_json::json!({ "public": ["API_URL"], "secret": [], "featureFlag": [], "types": {} });
+        assert!(!is_json_schema_shaped(&manifest));
+        assert!(!is_json_schema_shaped(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn pick_schema_entry_matches_pull_semantics() {
+        let schemas = vec![serde_json::json!({"id": "1", "name": "alpha"}), serde_json::json!({"id": "2", "name": "beta"})];
+        // Two schemas + no flag → refuse to guess (same as pull).
+        assert!(pick_schema_entry(&schemas, None).is_err());
+        let picked = pick_schema_entry(&schemas, Some("beta")).expect("ok");
+        assert_eq!(picked["id"], "2");
+        let one = vec![serde_json::json!({"id": "1", "name": "only"})];
+        assert_eq!(pick_schema_entry(&one, None).expect("auto-selects")["id"], "1");
     }
 
     #[test]
