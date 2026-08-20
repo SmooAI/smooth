@@ -312,7 +312,7 @@ pub fn restriction_banner(view: &AgentToolsView) -> String {
     // in play", which is the fail-open direction.
     if !matches!(view.mode.as_str(), "restricted" | "all") {
         return format!(
-            "UNKNOWN MODE `{}` — this `th` does not understand how the server described this agent, so it will NOT guess. Assuming unrestricted here would report a restricted agent as healthy. Upgrade `th`, or read the raw shape with `--json`.",
+            "UNKNOWN MODE `{}` — this `th` does not understand how the server described this agent, so it will NOT guess. Assuming unrestricted here would report a restricted agent as healthy. DO NOT TRUST the ENABLED/MISSING lists below: their meaning depends on the mode, so \"missing\" may not mean unavailable. Upgrade `th`, or read the raw shape with `--json`.",
             view.mode
         );
     }
@@ -694,6 +694,11 @@ mod tests {
         assert!(b.starts_with("UNKNOWN MODE `partial`"), "{b}");
         assert!(!b.contains("UNRESTRICTED"), "{b}");
         assert!(b.contains("will NOT guess"), "{b}");
+        // The lists still render below the banner, and their framing
+        // ("missing = not available to this agent") is itself a mode-dependent
+        // claim. Refusing to guess in the header while the body asserts
+        // confidently would be a half-refusal.
+        assert!(b.contains("DO NOT TRUST the ENABLED/MISSING lists below"), "{b}");
     }
 
     #[test]
