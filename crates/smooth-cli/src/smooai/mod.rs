@@ -11,12 +11,18 @@
 
 pub mod agent_tools;
 pub mod agents;
+pub mod analytics;
+pub mod audiences;
 pub mod booking;
 pub mod branding;
+pub mod campaigns;
 pub mod crawl;
 pub mod crm;
 pub mod dashboard;
+pub mod drip;
 pub mod files;
+pub mod forms;
+pub mod gbp;
 pub mod heypage;
 pub mod integrations;
 pub mod jobs;
@@ -30,6 +36,8 @@ pub mod products;
 pub mod profile;
 pub mod referrals;
 pub mod roles;
+pub mod search_console;
+pub mod sheets;
 pub mod smooth_operator;
 pub mod smooth_operator_ws;
 pub mod teams;
@@ -37,6 +45,7 @@ pub mod testing;
 pub mod user_client;
 pub mod websearch;
 pub mod widgets;
+pub mod workforce;
 
 use std::io::IsTerminal;
 

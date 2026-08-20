@@ -884,6 +884,61 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
+    /// Smoo AI analytics — the catalog of queryable tables, ad-hoc SQL
+    /// (org-scoped, server-validated), and rendered reports. CLI twin of the
+    /// hosted MCP analytics_* tools.
+    Analytics {
+        #[command(subcommand)]
+        cmd: smooai::analytics::Cmd,
+    },
+    /// Smoo AI campaigns — list, per-campaign analytics, and (preview-first)
+    /// send. CLI twin of the hosted MCP campaign_* tools.
+    #[command(visible_alias = "campaign")]
+    Campaigns {
+        #[command(subcommand)]
+        cmd: smooai::campaigns::Cmd,
+    },
+    /// Smoo AI drip sequences — sequences, enrollments, test sends. CLI twin
+    /// of the hosted MCP drip_* tools.
+    Drip {
+        #[command(subcommand)]
+        cmd: smooai::drip::Cmd,
+    },
+    /// Smoo AI audiences — saved segments: list / create / members / resolve.
+    /// CLI twin of the hosted MCP audience_* tools.
+    #[command(visible_alias = "audience")]
+    Audiences {
+        #[command(subcommand)]
+        cmd: smooai::audiences::Cmd,
+    },
+    /// Smoo AI forms — list the org's forms and their submission counts.
+    #[command(visible_alias = "form")]
+    Forms {
+        #[command(subcommand)]
+        cmd: smooai::forms::Cmd,
+    },
+    /// Google Business Profile — reviews for the org's GBP location.
+    Gbp {
+        #[command(subcommand)]
+        cmd: smooai::gbp::Cmd,
+    },
+    /// Google Search Console — top queries for the org's property.
+    #[command(name = "search-console")]
+    SearchConsole {
+        #[command(subcommand)]
+        cmd: smooai::search_console::Cmd,
+    },
+    /// Smoo AI sheets — snapshots of connected spreadsheets.
+    #[command(visible_alias = "sheet")]
+    Sheets {
+        #[command(subcommand)]
+        cmd: smooai::sheets::Cmd,
+    },
+    /// Smoo AI workforce — the org's AI + human workforce directory.
+    Workforce {
+        #[command(subcommand)]
+        cmd: smooai::workforce::Cmd,
+    },
     /// Smoo AI agents — list / show / create / update / delete, the
     /// regenerate-* and per-agent knowledge endpoints, and `tools` (which
     /// tools each agent may actually use).
@@ -1763,6 +1818,15 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Search { args } => smooai::websearch::run(args).await,
         SmooCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
         SmooCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+        SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
+        SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
+        SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
+        SmooCommands::Audiences { cmd } => smooai::audiences::cmd(cmd).await,
+        SmooCommands::Forms { cmd } => smooai::forms::cmd(cmd).await,
+        SmooCommands::Gbp { cmd } => smooai::gbp::cmd(cmd).await,
+        SmooCommands::SearchConsole { cmd } => smooai::search_console::cmd(cmd).await,
+        SmooCommands::Sheets { cmd } => smooai::sheets::cmd(cmd).await,
+        SmooCommands::Workforce { cmd } => smooai::workforce::cmd(cmd).await,
         SmooCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
         SmooCommands::Branding { cmd } => smooai::branding::cmd(cmd).await,
         SmooCommands::Llm { cmd } => smooai::llm_gateway::cmd(cmd).await,
