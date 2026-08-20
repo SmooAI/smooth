@@ -24,6 +24,9 @@ pub enum Cmd {
         /// Filter by job type.
         #[arg(long, name = "type", value_name = "TYPE")]
         type_: Option<String>,
+        /// Print raw JSON instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one job's full record (status, payload, result).
     Show {
@@ -53,6 +56,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             organization_id,
             status,
             type_,
+            json,
         } => {
             let mut q: Vec<(String, String)> = Vec::new();
             if let Some(v) = limit {
@@ -62,7 +66,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 q.push(("offset".into(), v.to_string()));
             }
             if let Some(v) = organization_id {
-                q.push(("organization_id".into(), v));
+                // The API validates the camelCase spelling and 400s on `organization_id`.
+                q.push(("organizationId".into(), v));
             }
             if let Some(v) = status {
                 q.push(("status".into(), v));
@@ -75,7 +80,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             } else {
                 format!("?{}", q.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"))
             };
-            print_list_envelope(&client.get(&format!("/jobs{query}")).await.context("GET jobs")?, "jobs");
+            let body = client.get(&format!("/jobs{query}")).await.context("GET jobs")?;
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "jobs");
+            }
         }
         Cmd::Show { job_id } => {
             print_json(&client.get(&format!("/jobs/{job_id}")).await.context("GET job")?);
@@ -90,4 +100,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, Cmd::List { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, Cmd::List { json: false, .. }), "--json must default to off");
+    }
 }

@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+th-7f1da8: the Presence glow-up + codified CLI spec. Bare `th --help` now renders a branded, grouped map of the surface (wordmark gradient, sections for Platform / Big Smooth / Work / Agent mail / Coding / LLM / System, teal-accent literals, dimmed blurbs) with a two-way sync test pinning it to the clap tree; `th --help-full` keeps the native flat view, and all per-command help is themed via clap styles — everything pipe-safe and NO_COLOR-clean. Appending `ai` to any command path (`smoo org ai`, `th pearls ai`, bare `th ai`) prints a generated markdown guide (about, subcommands, flags, curated examples, house conventions) built for humans and AI agents. The interface contract is codified in docs/Engineering/CLI-Spec.md and partly test-enforced: every platform `list` verb must offer `--json` — the new conformance test found and this change backfills 19 that didn't (orgs, members, crm contacts, knowledge, jobs, products, booking, heypage, auth profiles, admin config).

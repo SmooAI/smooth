@@ -27,6 +27,8 @@ mod imessage_setup;
 use smooth_tools::mcp_config;
 /// th-19dac1: `th harness` — per-provider toolbox setup (EPIC th-1945b9).
 mod harness;
+/// th-7f1da8: the branded top-level help + the universal `ai` explainer.
+mod help;
 /// th-374f85: `th agent` / `th msg` / `th inbox` on the machine-level
 /// SQLite mail store (ADR-010), off the per-repo Dolt pearl store.
 mod mail;
@@ -55,7 +57,7 @@ use owo_colors::OwoColorize;
 /// Smooth — AI agent orchestration platform.
 /// Run with no arguments to launch the interactive coding assistant.
 #[derive(Parser)]
-#[command(name = "th", version = env!("TH_VERSION"), about, long_about = None)]
+#[command(name = "th", version = env!("TH_VERSION"), about, long_about = None, styles = brand_styles())]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -1062,7 +1064,11 @@ enum OperativesCommands {
 #[derive(Subcommand)]
 enum OrgsCommands {
     /// List organizations the logged-in user belongs to.
-    List,
+    List {
+        /// Emit the raw response JSON instead of the rendered list.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show details of an organization. Defaults to the active org.
     Show {
         /// Org id (UUID). Omit to use the active org from
@@ -1853,6 +1859,21 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
     }
 }
 
+/// Presence palette for clap's native help (pearl th-7f1da8): bold warm
+/// headers, the teal accent on literals, dimmed placeholders. clap drops the
+/// styling automatically when stdout isn't a terminal, so piped help stays
+/// plain. The teal→blue gradient itself is reserved for the wordmark and
+/// never applied here.
+fn brand_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{Color, RgbColor, Style};
+    let teal = Style::new().fg_color(Some(Color::Rgb(RgbColor(0x00, 0xa6, 0xa6))));
+    clap::builder::Styles::styled()
+        .header(Style::new().bold())
+        .usage(Style::new().bold())
+        .literal(teal.bold())
+        .placeholder(Style::new().dimmed())
+}
+
 /// When the binary is invoked as `smoo` (the symlink installed next to `th`),
 /// behave as `th smoo …`. Pearl th-fc32d9.
 fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
@@ -1875,7 +1896,29 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse_from(smoo_argv(std::env::args_os().collect()));
+    let mut argv = smoo_argv(std::env::args_os().collect());
+    // th-7f1da8: bare `th --help`/`-h`/`help` gets the branded, grouped help;
+    // `--help-full` falls through to clap's native flat tree.
+    match argv.get(1).and_then(|a| a.to_str()) {
+        Some("--help" | "-h" | "help") if argv.len() == 2 => {
+            help::print_top_level();
+            return Ok(());
+        }
+        Some("--help-full") => argv[1] = "--help".into(),
+        _ => {}
+    }
+    // Universal `ai` explainer: a trailing `ai` on any command path renders a
+    // markdown guide from the clap tree (`th smoo org ai`, `th ai`). Only
+    // fires when every path segment resolves to a real (sub)command, so a
+    // positional VALUE spelled "ai" after a leaf command still parses
+    // normally unless the leaf itself takes no matching subpath.
+    if argv.len() >= 2 && argv.last().and_then(|a| a.to_str()) == Some("ai") {
+        let path: Vec<String> = argv[1..argv.len() - 1].iter().filter_map(|a| a.to_str().map(str::to_string)).collect();
+        if path.len() == argv.len() - 2 && path.iter().all(|p| !p.starts_with('-')) && help::print_ai_explainer(&path) {
+            return Ok(());
+        }
+    }
+    let cli = Cli::parse_from(argv);
 
     // SMOODEV-1739: resolve the active auth profile (--profile flag →
     // SMOOAI_PROFILE → active-profile file) and export SMOOAI_USER_AUTH_FILE /
@@ -8873,7 +8916,12 @@ mod org_cli_tests {
     #[test]
     fn th_org_top_level_alias_parses() {
         let cli = Cli::try_parse_from(["th", "org", "list"]).expect("th org list parses");
-        assert!(matches!(cli.command, Some(Commands::Org { cmd: OrgsCommands::List })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Org {
+                cmd: OrgsCommands::List { .. }
+            })
+        ));
 
         let cli = Cli::try_parse_from(["th", "org", "switch", "ats"]).expect("th org switch parses");
         match cli.command {
