@@ -181,7 +181,11 @@ const fn yes() -> bool {
 pub struct AgentToolsView {
     /// `all` ⇒ no enabled entry ⇒ the agent gets every available tool.
     /// `restricted` ⇒ the list is an allowlist and `missing` is excluded.
-    #[serde(default)]
+    /// NOT `serde(default)`, deliberately, unlike every optional annotation
+    /// field on these types. This one carries the answer: absent would
+    /// deserialize to `""`, read as "not restricted", and report a restricted
+    /// agent as healthy — the exact failure this command exists to catch. A
+    /// missing `mode` is a loud parse error instead.
     pub mode: String,
     /// The EFFECTIVE set: in `all`, every available tool at its default auth
     /// level; in `restricted`, the configured entries.
@@ -303,6 +307,15 @@ pub fn render_registry(tools: &[RegistryTool]) -> String {
 /// the list was written is invisible to the agent until someone adds it.
 #[must_use]
 pub fn restriction_banner(view: &AgentToolsView) -> String {
+    // Three-way on purpose. `if is_restricted() { … } else { …unrestricted… }`
+    // silently files a mode this build has never heard of under "every tool is
+    // in play", which is the fail-open direction.
+    if !matches!(view.mode.as_str(), "restricted" | "all") {
+        return format!(
+            "UNKNOWN MODE `{}` — this `th` does not understand how the server described this agent, so it will NOT guess. Assuming unrestricted here would report a restricted agent as healthy. Upgrade `th`, or read the raw shape with `--json`.",
+            view.mode
+        );
+    }
     if view.is_restricted() {
         // Fail-closed, and the most alarming state there is: the agent has no
         // tools AT ALL. Reachable via an all-`enabled: false` array, which is
@@ -670,6 +683,26 @@ mod tests {
         assert!(b.starts_with("NO TOOLS AT ALL"), "{b}");
         assert!(b.contains("cannot use a single one of the 2 tool(s)"), "{b}");
         assert!(b.contains("It can only talk"), "{b}");
+    }
+
+    #[test]
+    fn a_mode_this_build_does_not_know_refuses_to_guess() {
+        // Fail loud, not fail open. If the server grows a third mode, saying
+        // "unrestricted" would report a possibly-restricted agent as healthy.
+        let v = view(json!({ "mode": "partial", "enabled": [{"toolId":"a"}], "available": ["a","b"], "missing": ["b"] }));
+        let b = restriction_banner(&v);
+        assert!(b.starts_with("UNKNOWN MODE `partial`"), "{b}");
+        assert!(!b.contains("UNRESTRICTED"), "{b}");
+        assert!(b.contains("will NOT guess"), "{b}");
+    }
+
+    #[test]
+    fn a_response_with_no_mode_is_a_parse_error_not_a_healthy_agent() {
+        // The dangerous default. Every other field on these types tolerates
+        // absence so shape drift can't break the CLI; `mode` must not, because
+        // absent-reads-as-unrestricted is silently the incident.
+        let raw = json!({ "enabled": [], "available": ["a"], "missing": ["a"] });
+        assert!(parse_agent_tools(&raw).is_err(), "a response with no `mode` must not parse");
     }
 
     #[test]
