@@ -74,6 +74,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Publish (moderate, then go live) an existing site.
     Publish {
@@ -377,12 +380,14 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 "url": live_url(&detail),
             }));
         }
-        Cmd::List { org } => {
+        Cmd::List { org, json } => {
             let o = require_active_org(&client, org)?;
-            print_list_envelope(
-                &client.get(&format!("/organizations/{o}/heypage/sites")).await.context("GET heypage/sites")?,
-                "sites",
-            );
+            let body = client.get(&format!("/organizations/{o}/heypage/sites")).await.context("GET heypage/sites")?;
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "sites");
+            }
         }
         Cmd::Publish { site, org } => {
             let o = require_active_org(&client, org)?;
@@ -524,6 +529,23 @@ mod tests {
         assert_eq!(live_url(&wrapped).unwrap(), "https://heypage.ai/p/acme");
         let bare = json!({ "slug": "beta" });
         assert_eq!(live_url(&bare).unwrap(), "https://heypage.ai/p/beta");
+    }
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, Cmd::List { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, Cmd::List { json: false, .. }), "--json must default to off");
     }
 
     /// MCP parity (pearl th-088c93): `versions`/`rollback`/`source`/`content`

@@ -163,6 +163,9 @@ pub enum TypesCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the raw types JSON instead of the rendered list.
+        #[arg(long)]
+        json: bool,
     },
     /// Create a booking type.
     Create {
@@ -270,6 +273,9 @@ pub enum BlockCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the raw blocks JSON instead of the rendered list.
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a manual busy block by its calendar event id.
     Rm {
@@ -288,6 +294,9 @@ pub enum CalendarsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the raw calendars JSON instead of the rendered list.
+        #[arg(long)]
+        json: bool,
     },
     /// Start the Google OAuth flow to add a conflict calendar. Prints an
     /// authorization URL to open in the browser signed into that account.
@@ -380,9 +389,15 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let payload = build_payload(&current, &overlay);
             print_json(&client.put(&format!("/booking/config/{o}"), &payload).await.context("PUT booking config")?);
         }
-        Cmd::Types { cmd: TypesCmd::List { org } } => {
+        Cmd::Types {
+            cmd: TypesCmd::List { org, json },
+        } => {
             let o = require_active_org(&client, org)?;
             let body = client.get(&format!("/booking/types/{o}")).await.context("GET booking types")?;
+            if json {
+                print_json(&body);
+                return Ok(());
+            }
             // Prefer the config's public handle over each type's member email
             // when building URLs — matches the `link` command's contract.
             let slug = client
@@ -529,7 +544,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             print_json(&client.post(&format!("/booking/blocks/{o}"), Some(&b)).await.context("POST block")?);
         }
         Cmd::Block {
-            cmd: BlockCmd::List { from, to, org },
+            cmd: BlockCmd::List { from, to, org, json },
         } => {
             let o = require_active_org(&client, org)?;
             let mut path = format!("/booking/blocks/{o}");
@@ -545,7 +560,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 path.push_str(&params.join("&"));
             }
             let body = client.get(&path).await.context("GET blocks")?;
-            render_blocks(&body);
+            if json {
+                print_json(&body);
+            } else {
+                render_blocks(&body);
+            }
         }
         Cmd::Block {
             cmd: BlockCmd::Rm { event_id, org },
@@ -559,11 +578,15 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Calendars {
-            cmd: CalendarsCmd::List { org },
+            cmd: CalendarsCmd::List { org, json },
         } => {
             let o = require_active_org(&client, org)?;
             let body = client.get(&format!("/booking/calendars/{o}")).await.context("GET calendars")?;
-            render_calendars(&body);
+            if json {
+                print_json(&body);
+            } else {
+                render_calendars(&body);
+            }
         }
         Cmd::Calendars {
             cmd: CalendarsCmd::Connect { tier, org },
@@ -1064,6 +1087,62 @@ mod tests {
         );
         // Email handle is url-encoded (the `@` survives, the fallback path works).
         assert_eq!(build_public_url("org1", "me@x.com", None, None), "https://smoo.ai/book/org1/me%40x.com");
+    }
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn list_verbs_accept_json_flag_and_default_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let t = Wrap::try_parse_from(["t", "types", "list", "--json"]).expect("types list --json must parse");
+        assert!(matches!(
+            t.cmd,
+            Cmd::Types {
+                cmd: TypesCmd::List { json: true, .. }
+            }
+        ));
+        let t = Wrap::try_parse_from(["t", "types", "list"]).expect("bare types list must still parse");
+        assert!(matches!(
+            t.cmd,
+            Cmd::Types {
+                cmd: TypesCmd::List { json: false, .. }
+            }
+        ));
+
+        let b = Wrap::try_parse_from(["t", "block", "list", "--json"]).expect("block list --json must parse");
+        assert!(matches!(
+            b.cmd,
+            Cmd::Block {
+                cmd: BlockCmd::List { json: true, .. }
+            }
+        ));
+        let b = Wrap::try_parse_from(["t", "block", "list"]).expect("bare block list must still parse");
+        assert!(matches!(
+            b.cmd,
+            Cmd::Block {
+                cmd: BlockCmd::List { json: false, .. }
+            }
+        ));
+
+        let c = Wrap::try_parse_from(["t", "calendars", "list", "--json"]).expect("calendars list --json must parse");
+        assert!(matches!(
+            c.cmd,
+            Cmd::Calendars {
+                cmd: CalendarsCmd::List { json: true, .. }
+            }
+        ));
+        let c = Wrap::try_parse_from(["t", "calendars", "list"]).expect("bare calendars list must still parse");
+        assert!(matches!(
+            c.cmd,
+            Cmd::Calendars {
+                cmd: CalendarsCmd::List { json: false, .. }
+            }
+        ));
     }
 
     #[test]

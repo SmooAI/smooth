@@ -10,7 +10,7 @@ use super::ProfileCommands;
 
 pub fn dispatch(cmd: ProfileCommands) -> Result<()> {
     match cmd {
-        ProfileCommands::List => list(),
+        ProfileCommands::List { json } => list(json),
         ProfileCommands::Use { name } => {
             paths::set_active(&name)?;
             println!();
@@ -52,9 +52,23 @@ fn identity_of(profile: Option<&str>) -> String {
     }
 }
 
-fn list() -> Result<()> {
+fn list(json: bool) -> Result<()> {
     let active = paths::active_profile();
     let named = paths::list_profiles();
+
+    if json {
+        // No API roundtrip here — build the same rows the rendered list shows.
+        let mut profiles = Vec::new();
+        if paths::default_profile_present() {
+            profiles.push(serde_json::json!({ "name": "default", "active": active.is_none(), "identity": identity_of(None) }));
+        }
+        for name in &named {
+            let is_active = active.as_deref() == Some(name.as_str());
+            profiles.push(serde_json::json!({ "name": name, "active": is_active, "identity": identity_of(Some(name)) }));
+        }
+        crate::smooai::print_json(&serde_json::json!({ "data": profiles }));
+        return Ok(());
+    }
 
     println!();
     if named.is_empty() && !paths::default_profile_present() {

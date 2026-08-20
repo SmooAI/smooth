@@ -279,9 +279,13 @@ pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
 pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
     let client = user_client::UserClient::from_user_session().await?;
     match cmd {
-        super::OrgsCommands::List => {
+        super::OrgsCommands::List { json } => {
             let body = client.get("/organizations").await.context("GET /organizations")?;
-            print_list_envelope(&body, "organizations");
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "organizations");
+            }
         }
         super::OrgsCommands::Show { org_id } => {
             // Use the shared resolver so `th api orgs show` honors

@@ -70,6 +70,9 @@ pub enum SchemasCmd {
     List {
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
+        /// Print raw JSON instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a schema by id.
     Show {
@@ -118,6 +121,9 @@ pub enum EnvironmentsCmd {
     List {
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
+        /// Print raw JSON instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Create an environment. Body is a JSON document or `-` for stdin.
     /// For child orgs as a parent admin, use the public path instead:
@@ -184,12 +190,14 @@ pub async fn dispatch(cmd: ConfigCommands) -> Result<()> {
 
 async fn dispatch_schemas(cmd: SchemasCmd, client: &smooth_api_client::SmoothApiClient) -> Result<()> {
     match cmd {
-        SchemasCmd::List { org } => {
+        SchemasCmd::List { org, json } => {
             let o = require_active_org(client, org)?;
-            print_list_envelope(
-                &client.get(&format!("/organizations/{o}/config/schemas")).await.context("GET schemas")?,
-                "schemas",
-            );
+            let body = client.get(&format!("/organizations/{o}/config/schemas")).await.context("GET schemas")?;
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "schemas");
+            }
         }
         SchemasCmd::Show { schema_id, org } => {
             let o = require_active_org(client, org)?;
@@ -254,15 +262,17 @@ async fn dispatch_schemas(cmd: SchemasCmd, client: &smooth_api_client::SmoothApi
 
 async fn dispatch_environments(cmd: EnvironmentsCmd, client: &smooth_api_client::SmoothApiClient) -> Result<()> {
     match cmd {
-        EnvironmentsCmd::List { org } => {
+        EnvironmentsCmd::List { org, json } => {
             let o = require_active_org(client, org)?;
-            print_list_envelope(
-                &client
-                    .get(&format!("/organizations/{o}/config/environments"))
-                    .await
-                    .context("GET environments")?,
-                "environments",
-            );
+            let body = client
+                .get(&format!("/organizations/{o}/config/environments"))
+                .await
+                .context("GET environments")?;
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "environments");
+            }
         }
         EnvironmentsCmd::Create { body, org } => {
             let o = require_active_org(client, org)?;
@@ -329,4 +339,50 @@ async fn dispatch_values(cmd: ValuesCmd, client: &smooth_api_client::SmoothApiCl
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn list_verbs_accept_json_flag_and_default_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: ConfigCommands,
+        }
+        let s = Wrap::try_parse_from(["t", "schemas", "list", "--json"]).expect("schemas list --json must parse");
+        assert!(matches!(
+            s.cmd,
+            ConfigCommands::Schemas {
+                cmd: SchemasCmd::List { json: true, .. }
+            }
+        ));
+        let s = Wrap::try_parse_from(["t", "schemas", "list"]).expect("bare schemas list must still parse");
+        assert!(matches!(
+            s.cmd,
+            ConfigCommands::Schemas {
+                cmd: SchemasCmd::List { json: false, .. }
+            }
+        ));
+
+        let e = Wrap::try_parse_from(["t", "environments", "list", "--json"]).expect("environments list --json must parse");
+        assert!(matches!(
+            e.cmd,
+            ConfigCommands::Environments {
+                cmd: EnvironmentsCmd::List { json: true, .. }
+            }
+        ));
+        let e = Wrap::try_parse_from(["t", "environments", "list"]).expect("bare environments list must still parse");
+        assert!(matches!(
+            e.cmd,
+            ConfigCommands::Environments {
+                cmd: EnvironmentsCmd::List { json: false, .. }
+            }
+        ));
+    }
 }
