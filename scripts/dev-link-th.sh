@@ -37,9 +37,25 @@ done
 # Nothing built yet — not our problem to report.
 [ -x "$CARGO_TH" ] || exit 0
 
+# th-fc32d9: `smoo` is the same binary under its platform-CLI name
+# (`smoo <resource> <verb>` == `th smoo <resource> <verb>`, argv[0] dispatch).
+# Keep a smoo -> th symlink next to the cargo binary and next to wherever
+# `th` resolves on PATH. Only ever writes a symlink; a regular file named
+# `smoo` (Homebrew, a manual copy) is left alone.
+link_smoo() {
+    _dir="$1"
+    [ -d "$_dir" ] || return 0
+    _tgt="$_dir/smoo"
+    if [ ! -e "$_tgt" ] || [ -L "$_tgt" ]; then
+        ln -sfn "$CARGO_TH" "$_tgt" 2>/dev/null || true
+    fi
+}
+link_smoo "$(dirname "$CARGO_TH")"
+
 if [ "$PATH_TH_SET" -eq 0 ]; then
     PATH_TH="$(command -v th 2>/dev/null || true)"
 fi
+[ -n "$PATH_TH" ] && link_smoo "$(cd "$(dirname "$PATH_TH")" && pwd)"
 
 # Not on PATH at all: the cargo bin dir isn't wired up. Say so once; don't
 # invent a symlink in a directory the user never asked us to write to.

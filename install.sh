@@ -48,6 +48,9 @@ tar xzf "${TMPDIR}/th.tar.gz" -C "$TMPDIR"
 mkdir -p "$INSTALL_DIR"
 mv "${TMPDIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
 chmod +x "${INSTALL_DIR}/${BIN_NAME}"
+# `smoo` is the same binary under its platform-CLI name (argv[0] dispatch,
+# pearl th-fc32d9): `smoo <resource> <verb>` == `th smoo <resource> <verb>`.
+ln -sfn "${INSTALL_DIR}/${BIN_NAME}" "${INSTALL_DIR}/smoo"
 rm -rf "$TMPDIR"
 
 echo ""
@@ -62,6 +65,6 @@ if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
 fi
 
 echo "Get started:"
-echo "  th auth login opencode-zen"
+echo "  smoo auth login    # Smoo AI platform (same binary as th)"
 echo "  th up"
 echo "  th tui"

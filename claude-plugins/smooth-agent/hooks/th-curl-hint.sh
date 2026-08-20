@@ -40,26 +40,28 @@ EOF
 # --- auth.smoo.ai token endpoint -----------------------------------------------
 if echo "$CMD" | grep -qE 'curl[^|;&]+auth\.smoo\.ai/token'; then
     emit "raw curl against auth.smoo.ai/token" \
-        "Use \`th auth login --m2m\` (or \`SMOOAI_CLIENT_ID=… SMOOAI_CLIENT_SECRET=… th auth login --m2m\`).
+        "Use \`smoo auth login --m2m\` (or \`SMOOAI_CLIENT_ID=… SMOOAI_CLIENT_SECRET=… smoo auth login --m2m\`).
 It exchanges client_credentials for a JWT and stores it at ~/.smooth/auth/smooai.json
-so subsequent \`th api …\` calls just work. For a human session run plain \`th auth login\`
-(browser OAuth2 + PKCE). \`th api login\` still resolves but is DEPRECATED."
+so subsequent \`smoo api …\` calls just work. For a human session run plain \`smoo auth login\`
+(browser OAuth2 + PKCE). (\`smoo\` is the platform half of the \`th\` binary —
+\`th smoo …\` is the same thing, and the pre-namespace \`th auth\` spelling still parses.)"
     exit 1
 fi
 
 # --- api.smoo.ai - the big one --------------------------------------------------
 if echo "$CMD" | grep -qE 'curl[^|;&]+api\.smoo\.ai'; then
     emit "raw curl against api.smoo.ai" \
-        "Use \`th api …\` — it handles auth-header injection, JWT refresh, JSON pretty-printing,
+        "Use \`smoo api …\` — it handles auth-header injection, JWT refresh, JSON pretty-printing,
 and pagination. Quick map:
-  /organizations/<id>/agents       → th api agents list [--org-id <id>]
-  /organizations/<id>/knowledge    → th api knowledge list   (or top-level th knowledge)
-  /organizations/<id>/config/…     → th config (get|set|list|feature-flag|push|pull)
-  /organizations/<id>/jobs         → th api jobs list
-  /organizations/<id>/members      → th api members list
-  /organizations/<id>/auth-clients → th api keys list        (user session required)
-  /admin/…                         → th admin … (needs a build with --features admin)
-Full surface: th api --help"
+  /organizations/<id>/agents       → smoo api agents list [--org-id <id>]   (or smoo agents)
+  /organizations/<id>/knowledge    → smoo api knowledge list   (or smoo knowledge)
+  /organizations/<id>/config/…     → smoo config (get|set|list|feature-flag|push|pull)
+  /organizations/<id>/jobs         → smoo api jobs list
+  /organizations/<id>/members      → smoo api members list
+  /organizations/<id>/auth-clients → smoo api keys list        (user session required)
+  /admin/…                         → smoo admin … (needs a build with --features admin)
+Full surface: smoo --help (same binary as th; \`th smoo …\` and the old
+top-level spellings like \`th config\` still parse)"
     exit 1
 fi
 

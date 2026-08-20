@@ -101,6 +101,18 @@ enum Commands {
     /// that could not START posts nothing at all — that is not the same as a
     /// check that failed (pearl th-b27ed0).
     Attest(attest::AttestArgs),
+    /// Smoo AI platform — everything that talks to smoo.ai lives here.
+    ///
+    /// `th smoo <resource> <verb>`, or just `smoo <resource> <verb>` — a
+    /// `smoo` symlink installed next to `th` makes this binary answer to both
+    /// names. Everything under this node authenticates via `smoo auth login`;
+    /// everything outside it is the standalone local tool and works with no
+    /// Smoo account. The old top-level spellings (`th config`, `th crm`, …)
+    /// still parse as hidden compat aliases. Pearl th-fc32d9.
+    Smoo {
+        #[command(subcommand)]
+        cmd: SmooCommands,
+    },
     /// Run / control the chat-first Big Smooth daemon (epic th-c89c2a) on the
     /// smooth-operator LocalServer engine.
     ///
@@ -168,111 +180,63 @@ enum Commands {
         #[command(subcommand)]
         cmd: ModelCommands,
     },
-    /// Smoo AI identity — log in to the Smoo AI platform.
-    ///
-    /// As a user (email + password) or a service account (M2M
-    /// client_credentials). Used by `th admin *`, `th api *`, and (soon) llm.smoo.ai's user-attributed LLM
-    /// session exchange.
+    /// Compat alias for `th smoo auth` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Auth {
         #[command(subcommand)]
         cmd: auth::AuthCommands,
     },
-    /// Smoo AI superadmin operations against the /admin/* endpoints on api.smoo.ai.
-    ///
-    /// Requires a `th auth login` user session whose account has the
-    /// requireSuperAdmin role (403 otherwise).
+    /// Compat alias for `th smoo admin` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
     #[cfg(feature = "admin")]
+    #[command(hide = true)]
     Admin {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
     },
-    /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
-    ///
-    /// Login + orgs + agents + keys + members + knowledge + jobs + products +
-    /// profile + testing live under here. Config has its own top-level
-    /// subcommand (`th config`) for the daily surface, `th admin config` for
-    /// the platform-admin surface.
+    /// Compat alias for `th smoo api` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Api {
         #[command(subcommand)]
         cmd: ApiCommands,
     },
-    /// Smoo AI organizations — `list`, `switch` the active org, or `show` one.
-    ///
-    /// `switch` persists across all credential stores.
-    ///
-    /// Top-level alias for `th api orgs`, promoted for discoverability alongside
-    /// `th config` / `th testing`.
-    ///
-    /// Note: `switch` flips the *active org* that user-JWT commands
-    /// default to. The user JWT can act cross-org (a master admin is
-    /// authorized over child orgs) — pass `--org`/`--org-id` per call,
-    /// or `switch` to change the default. M2M tokens are org-locked
-    /// server-side, so `switch` is cosmetic for the `--m2m` surface.
-    #[command(visible_alias = "orgs")]
+    /// Compat alias for `th smoo org` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "orgs")]
     Org {
         #[command(subcommand)]
         cmd: OrgsCommands,
     },
-    /// Smoo AI `@smooai/config` — the daily-developer config surface.
-    ///
-    /// `get` / `set` / `list` for single values; `feature-flag` to evaluate a flag;
-    /// `push` / `pull` / `diff` to sync the `.smooai-config/schema.json` document
-    /// with the org's remote schema; `init` to scaffold a fresh local schema package;
-    /// `delete` to remove a value record.
-    ///
-    /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
-    /// pass `--m2m` to use the M2M session instead.
-    ///
-    /// Platform-admin verbs (schemas CRUD, environments CRUD,
-    /// bulk-set) live under `th admin config`. Pearl `th-9c0c34`.
+    /// Compat alias for `th smoo config` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Config {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Scaffold + verify SmooAI dashboard widgets.
-    ///
-    /// `th widgets new` scaffolds all 5 touchpoints across the smooai monorepo,
-    /// `th widgets list` enumerates the registry, `th widgets check` is the
-    /// TS↔Rust↔renderer parity gate, `th widgets preview` (best-effort) scaffolds a
-    /// temp render route + screenshot command.
-    #[command(visible_alias = "widget")]
+    /// Compat alias for `th smoo widgets` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "widget")]
     Widgets {
         #[command(subcommand)]
         cmd: smooai::widgets::Cmd,
     },
-    /// Smoo AI main-dashboard widget layout — get / add / remove widgets.
-    ///
-    /// Acts on your `/apps` dashboard (per user + org; widget ids from
-    /// `th widgets list`). First-class front door for `th api dashboard`.
+    /// Compat alias for `th smoo dashboard` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Dashboard {
         #[command(subcommand)]
         cmd: smooai::dashboard::Cmd,
     },
-    /// Smoo AI in-house web crawler (ADR-035) — a page as clean markdown.
-    ///
-    /// `th crawl scrape <url>` turns a page into clean markdown through the
-    /// authed crawler service (real browser UA + JS render), so it gets pages
-    /// a plain fetch 403s on. Any authenticated org member can use it.
+    /// Compat alias for `th smoo crawl` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Crawl {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
     },
-    /// Edit an org's RBAC roles (SMOODEV-2368 / ADR-105).
-    ///
-    /// `th roles list`, `show`, `create` (optionally `--template`),
-    /// `grant`/`revoke`/`set-permissions` on a role's permission keys, and
-    /// `assign`/`unassign` roles to members. System roles are immutable.
-    /// User-authed (`th auth login`).
-    #[command(visible_alias = "role")]
+    /// Compat alias for `th smoo roles` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "role")]
     Roles {
         #[command(subcommand)]
         cmd: smooai::roles::Cmd,
     },
-    /// Smoo AI agentic web search (ADR-088) — `th search <query>` for ranked results.
-    ///
-    /// Optionally `--answer`. Served by our own search stack (self-hosted
-    /// SearXNG + in-house crawler + LLM answer synthesis). Full options when logged in; an anonymous free tier (basic depth, capped
-    /// results) otherwise. A companion to `th crawl` for agentic coding.
+    /// Compat alias for `th smoo search` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Search {
         #[command(flatten)]
         args: smooai::websearch::SearchArgs,
@@ -286,26 +250,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::websearch::Cmd,
     },
-    /// Smoo AI LLM gateway keys — mint / rotate / list the org's `llm.smoo.ai` keys
-    /// and inspect spend.
-    ///
-    /// `th llm create-key` provisions the org's persistent key (a LiteLLM virtual key
-    /// scoped to the org budget) and prints it once.
-    ///
-    /// Authenticates as the user (Supabase JWT) and is org-admin-gated
-    /// — a master admin can mint for a child org with `--org-id`.
-    /// Wraps `api.smoo.ai/organizations/{org_id}/llm-gateway/*`.
+    /// Compat alias for `th smoo llm` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Llm {
         #[command(subcommand)]
         cmd: smooai::llm_gateway::Cmd,
     },
-    /// Ping the human on their own phone.
-    ///
-    /// Designed to be called BY an agent (Big Smooth / claude-driver) as a
-    /// notify-the-human primitive — "blocked, need input", "done", "approve this" —
-    /// it sends a PUSH + in-app notification to the logged-in user's own devices via
-    /// `api.smoo.ai`. The message is the positional words joined with spaces, so
-    /// `th notify done, review the PR` works unquoted.
+    /// Compat alias for `th smoo notify` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Notify {
         /// The message body — the positional words, joined with spaces.
         #[arg(value_name = "MESSAGE", required = true)]
@@ -324,100 +276,56 @@ enum Commands {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Smoo AI testing platform — report test results and manage runs.
-    ///
-    /// The daily-developer surface for runs / cases / environments /
-    /// deployments. `runs report <file>` is the high-level entry point: it creates a run and
-    /// submits a CTRF (or, with `--junit`, a converted JUnit) report in one call.
-    /// Same commands as `th api testing`, promoted to the top level alongside
-    /// `th config`.
+    /// Compat alias for `th smoo testing` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Testing {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
-    /// Smoo AI referrals — the org's partner / advocate program.
-    ///
-    /// `show` / `create` / `update` the program economics, `partners` to manage who
-    /// gets paid, `link` for a partner's shareable `api.smoo.ai/r/<code>` URL, plus
-    /// `attributions` / `visits` / `commissions`. Same commands as
-    /// `th api referrals`, promoted to the top level alongside `th config`.
-    #[command(visible_alias = "referral")]
+    /// Compat alias for `th smoo referrals` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "referral")]
     Referrals {
         #[command(subcommand)]
         cmd: smooai::referrals::Cmd,
     },
-    /// Smoo AI booking — the org's Google-Calendar booking page.
-    ///
-    /// `config get/set` availability + link handle, `types` for named event types,
-    /// `slots` to see open times, `bookings` to list them, `block add/list/rm` for
-    /// manual busy time, `link` for the public URL. Same commands as
-    /// `th api booking`, promoted to the top level alongside `th config`.
-    #[command(visible_alias = "bookings")]
+    /// Compat alias for `th smoo booking` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "bookings")]
     Booking {
         #[command(subcommand)]
         cmd: smooai::booking::Cmd,
     },
-    /// HeyPage — dogfood the AI website builder through the real product API.
-    ///
-    /// `build` (generate → create → publish → live URL), plus `generate` /
-    /// `publish` / `get`.
+    /// Compat alias for `th smoo heypage` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Heypage {
         #[command(subcommand)]
         cmd: smooai::heypage::Cmd,
     },
-    /// Smoo AI org file system.
-    ///
-    /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
-    /// commands as `th api files`, promoted to the top level alongside
-    /// `th config`.
-    #[command(visible_alias = "file")]
+    /// Compat alias for `th smoo files` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "file")]
     Files {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
     },
-    /// Smoo AI knowledge base — semantic retrieval over the org's own documents.
-    ///
-    /// `th knowledge search <query>` runs the SAME retrieval an agent does
-    /// (scope to one doc with `--doc`), plus `list` / `show` / `content` /
-    /// `upload` / `website` / `process` / `update` / `delete`. Same commands as `th api knowledge`, promoted to the top level as an
-    /// agentic-coding primitive alongside `th search` (the web) and `th crawl` (a
-    /// page).
-    #[command(visible_alias = "kb")]
+    /// Compat alias for `th smoo knowledge` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "kb")]
     Knowledge {
         #[command(subcommand)]
         cmd: smooai::knowledge::Cmd,
     },
-    /// Smoo AI CRM — contacts, companies, deals, tasks, notes, and pipeline.
-    ///
-    /// Deals carry `--value` / `--mrr` / `--upfront` economics; also stages,
-    /// pipeline forecast, and import. Same commands as `th api crm`, promoted to the top level alongside `th config`
-    /// / `th testing`.
+    /// Compat alias for `th smoo crm` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Crm {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
-    /// Smoo AI agents — list / show / create / update / delete, the
-    /// regenerate-* and per-agent knowledge endpoints, and `tools` (which
-    /// tools each agent may actually use).
-    ///
-    /// Same commands as `th api agents`, promoted to the top level alongside
-    /// `th crm` / `th config` / `th testing`. `th api …` stays the thin,
-    /// route-shaped passthrough; this is the surface you reach for daily.
-    ///
-    /// NOT `th agent` (singular) — that is the local agent-messaging registry,
-    /// a different thing on a different machine-local store. The two are
-    /// deliberately not aliased to each other; see `.claude/skills/normalize`.
+    /// Compat alias for `th smoo agents` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true)]
     Agents {
         #[command(subcommand)]
         cmd: smooai::agents::Cmd,
     },
-    /// White-label a Smoo AI org — app name, chrome colors, and logos.
-    ///
-    /// Logos come from a local path or a remote URL, always re-hosted on our
-    /// CDN. `from-url` derives a theme from the partner's website; `enable` is the live
-    /// switch and refuses a theme that fails WCAG AA contrast. The Aurora meaning
-    /// tokens (heat / ai / gradients) are never white-labeled.
-    #[command(visible_alias = "brand")]
+    /// Compat alias for `th smoo branding` (hidden — the platform surface moved under the `smoo` namespace, pearl th-fc32d9).
+    #[command(hide = true, alias = "brand")]
     Branding {
         #[command(subcommand)]
         cmd: smooai::branding::Cmd,
@@ -738,6 +646,257 @@ enum Commands {
     Providers {
         #[command(subcommand)]
         cmd: ProvidersCommands,
+    },
+}
+
+/// The Smoo AI platform surface — `th smoo …`, or the `smoo` binary alias.
+#[derive(Subcommand)]
+enum SmooCommands {
+    /// Smoo AI identity — log in to the Smoo AI platform.
+    ///
+    /// As a user (email + password) or a service account (M2M
+    /// client_credentials). Used by `th admin *`, `th api *`, and (soon) llm.smoo.ai's user-attributed LLM
+    /// session exchange.
+    Auth {
+        #[command(subcommand)]
+        cmd: auth::AuthCommands,
+    },
+    /// Smoo AI superadmin operations against the /admin/* endpoints on api.smoo.ai.
+    ///
+    /// Requires a `th auth login` user session whose account has the
+    /// requireSuperAdmin role (403 otherwise).
+    #[cfg(feature = "admin")]
+    Admin {
+        #[command(subcommand)]
+        cmd: admin::AdminCommands,
+    },
+    /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
+    ///
+    /// Login + orgs + agents + keys + members + knowledge + jobs + products +
+    /// profile + testing live under here. Config has its own top-level
+    /// subcommand (`th config`) for the daily surface, `th admin config` for
+    /// the platform-admin surface.
+    Api {
+        #[command(subcommand)]
+        cmd: ApiCommands,
+    },
+    /// Smoo AI organizations — `list`, `switch` the active org, or `show` one.
+    ///
+    /// `switch` persists across all credential stores.
+    ///
+    /// Top-level alias for `th api orgs`, promoted for discoverability alongside
+    /// `th config` / `th testing`.
+    ///
+    /// Note: `switch` flips the *active org* that user-JWT commands
+    /// default to. The user JWT can act cross-org (a master admin is
+    /// authorized over child orgs) — pass `--org`/`--org-id` per call,
+    /// or `switch` to change the default. M2M tokens are org-locked
+    /// server-side, so `switch` is cosmetic for the `--m2m` surface.
+    #[command(visible_alias = "orgs")]
+    Org {
+        #[command(subcommand)]
+        cmd: OrgsCommands,
+    },
+    /// Smoo AI `@smooai/config` — the daily-developer config surface.
+    ///
+    /// `get` / `set` / `list` for single values; `feature-flag` to evaluate a flag;
+    /// `push` / `pull` / `diff` to sync the `.smooai-config/schema.json` document
+    /// with the org's remote schema; `init` to scaffold a fresh local schema package;
+    /// `delete` to remove a value record.
+    ///
+    /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
+    /// pass `--m2m` to use the M2M session instead.
+    ///
+    /// Platform-admin verbs (schemas CRUD, environments CRUD,
+    /// bulk-set) live under `th admin config`. Pearl `th-9c0c34`.
+    Config {
+        #[command(subcommand)]
+        cmd: config::Cmd,
+    },
+    /// Scaffold + verify SmooAI dashboard widgets.
+    ///
+    /// `th widgets new` scaffolds all 5 touchpoints across the smooai monorepo,
+    /// `th widgets list` enumerates the registry, `th widgets check` is the
+    /// TS↔Rust↔renderer parity gate, `th widgets preview` (best-effort) scaffolds a
+    /// temp render route + screenshot command.
+    #[command(visible_alias = "widget")]
+    Widgets {
+        #[command(subcommand)]
+        cmd: smooai::widgets::Cmd,
+    },
+    /// Smoo AI main-dashboard widget layout — get / add / remove widgets.
+    ///
+    /// Acts on your `/apps` dashboard (per user + org; widget ids from
+    /// `th widgets list`). First-class front door for `th api dashboard`.
+    Dashboard {
+        #[command(subcommand)]
+        cmd: smooai::dashboard::Cmd,
+    },
+    /// Smoo AI in-house web crawler (ADR-035) — a page as clean markdown.
+    ///
+    /// `th crawl scrape <url>` turns a page into clean markdown through the
+    /// authed crawler service (real browser UA + JS render), so it gets pages
+    /// a plain fetch 403s on. Any authenticated org member can use it.
+    Crawl {
+        #[command(subcommand)]
+        cmd: smooai::crawl::Cmd,
+    },
+    /// Edit an org's RBAC roles (SMOODEV-2368 / ADR-105).
+    ///
+    /// `th roles list`, `show`, `create` (optionally `--template`),
+    /// `grant`/`revoke`/`set-permissions` on a role's permission keys, and
+    /// `assign`/`unassign` roles to members. System roles are immutable.
+    /// User-authed (`th auth login`).
+    #[command(visible_alias = "role")]
+    Roles {
+        #[command(subcommand)]
+        cmd: smooai::roles::Cmd,
+    },
+    /// Smoo AI agentic web search (ADR-088) — `th search <query>` for ranked results.
+    ///
+    /// Optionally `--answer`. Served by our own search stack (self-hosted
+    /// SearXNG + in-house crawler + LLM answer synthesis). Full options when logged in; an anonymous free tier (basic depth, capped
+    /// results) otherwise. A companion to `th crawl` for agentic coding.
+    Search {
+        #[command(flatten)]
+        args: smooai::websearch::SearchArgs,
+    },
+    /// Smoo AI LLM gateway keys — mint / rotate / list the org's `llm.smoo.ai` keys
+    /// and inspect spend.
+    ///
+    /// `th llm create-key` provisions the org's persistent key (a LiteLLM virtual key
+    /// scoped to the org budget) and prints it once.
+    ///
+    /// Authenticates as the user (Supabase JWT) and is org-admin-gated
+    /// — a master admin can mint for a child org with `--org-id`.
+    /// Wraps `api.smoo.ai/organizations/{org_id}/llm-gateway/*`.
+    Llm {
+        #[command(subcommand)]
+        cmd: smooai::llm_gateway::Cmd,
+    },
+    /// Ping the human on their own phone.
+    ///
+    /// Designed to be called BY an agent (Big Smooth / claude-driver) as a
+    /// notify-the-human primitive — "blocked, need input", "done", "approve this" —
+    /// it sends a PUSH + in-app notification to the logged-in user's own devices via
+    /// `api.smoo.ai`. The message is the positional words joined with spaces, so
+    /// `th notify done, review the PR` works unquoted.
+    Notify {
+        /// The message body — the positional words, joined with spaces.
+        #[arg(value_name = "MESSAGE", required = true)]
+        message: Vec<String>,
+        /// Notification title (what shows as the heading).
+        #[arg(long, default_value = "Smoo AI")]
+        title: String,
+        /// Urgency: low, medium (default), high, or critical.
+        #[arg(long, value_enum, default_value_t = smooai::notify::Priority::Medium)]
+        priority: smooai::notify::Priority,
+        /// Optional deep link to open when the notification is tapped.
+        #[arg(long, value_name = "DEEPLINK")]
+        url: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then
+        /// the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Smoo AI testing platform — report test results and manage runs.
+    ///
+    /// The daily-developer surface for runs / cases / environments /
+    /// deployments. `runs report <file>` is the high-level entry point: it creates a run and
+    /// submits a CTRF (or, with `--junit`, a converted JUnit) report in one call.
+    /// Same commands as `th api testing`, promoted to the top level alongside
+    /// `th config`.
+    Testing {
+        #[command(subcommand)]
+        cmd: smooai::testing::Cmd,
+    },
+    /// Smoo AI referrals — the org's partner / advocate program.
+    ///
+    /// `show` / `create` / `update` the program economics, `partners` to manage who
+    /// gets paid, `link` for a partner's shareable `api.smoo.ai/r/<code>` URL, plus
+    /// `attributions` / `visits` / `commissions`. Same commands as
+    /// `th api referrals`, promoted to the top level alongside `th config`.
+    #[command(visible_alias = "referral")]
+    Referrals {
+        #[command(subcommand)]
+        cmd: smooai::referrals::Cmd,
+    },
+    /// Smoo AI booking — the org's Google-Calendar booking page.
+    ///
+    /// `config get/set` availability + link handle, `types` for named event types,
+    /// `slots` to see open times, `bookings` to list them, `block add/list/rm` for
+    /// manual busy time, `link` for the public URL. Same commands as
+    /// `th api booking`, promoted to the top level alongside `th config`.
+    #[command(visible_alias = "bookings")]
+    Booking {
+        #[command(subcommand)]
+        cmd: smooai::booking::Cmd,
+    },
+    /// HeyPage — dogfood the AI website builder through the real product API.
+    ///
+    /// `build` (generate → create → publish → live URL), plus `generate` /
+    /// `publish` / `get`.
+    Heypage {
+        #[command(subcommand)]
+        cmd: smooai::heypage::Cmd,
+    },
+    /// Smoo AI org file system.
+    ///
+    /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
+    /// commands as `th api files`, promoted to the top level alongside
+    /// `th config`.
+    #[command(visible_alias = "file")]
+    Files {
+        #[command(subcommand)]
+        cmd: smooai::files::Cmd,
+    },
+    /// Smoo AI knowledge base — semantic retrieval over the org's own documents.
+    ///
+    /// `th knowledge search <query>` runs the SAME retrieval an agent does
+    /// (scope to one doc with `--doc`), plus `list` / `show` / `content` /
+    /// `upload` / `website` / `process` / `update` / `delete`. Same commands as `th api knowledge`, promoted to the top level as an
+    /// agentic-coding primitive alongside `th search` (the web) and `th crawl` (a
+    /// page).
+    #[command(visible_alias = "kb")]
+    Knowledge {
+        #[command(subcommand)]
+        cmd: smooai::knowledge::Cmd,
+    },
+    /// Smoo AI CRM — contacts, companies, deals, tasks, notes, and pipeline.
+    ///
+    /// Deals carry `--value` / `--mrr` / `--upfront` economics; also stages,
+    /// pipeline forecast, and import. Same commands as `th api crm`, promoted to the top level alongside `th config`
+    /// / `th testing`.
+    Crm {
+        #[command(subcommand)]
+        cmd: smooai::crm::Cmd,
+    },
+    /// Smoo AI agents — list / show / create / update / delete, the
+    /// regenerate-* and per-agent knowledge endpoints, and `tools` (which
+    /// tools each agent may actually use).
+    ///
+    /// Same commands as `th api agents`, promoted to the top level alongside
+    /// `th crm` / `th config` / `th testing`. `th api …` stays the thin,
+    /// route-shaped passthrough; this is the surface you reach for daily.
+    ///
+    /// Inside the `smoo` namespace the singular aliases the plural (normalize
+    /// rule) — the machine-local mailbox registry owns bare `th agent`, so
+    /// there is no collision here.
+    #[command(visible_alias = "agent")]
+    Agents {
+        #[command(subcommand)]
+        cmd: smooai::agents::Cmd,
+    },
+    /// White-label a Smoo AI org — app name, chrome colors, and logos.
+    ///
+    /// Logos come from a local path or a remote URL, always re-hosted on our
+    /// CDN. `from-url` derives a theme from the partner's website; `enable` is the live
+    /// switch and refuses a theme that fails WCAG AA contrast. The Aurora meaning
+    /// tokens (heat / ai / gradients) are never white-labeled.
+    #[command(visible_alias = "brand")]
+    Branding {
+        #[command(subcommand)]
+        cmd: smooai::branding::Cmd,
     },
 }
 
@@ -1555,9 +1714,80 @@ fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
     }
 }
 
+/// Dispatch a `th smoo …` platform command — also the target every hidden
+/// top-level compat alias forwards to (pearl th-fc32d9).
+async fn run_smoo(cmd: SmooCommands) -> Result<()> {
+    match cmd {
+        SmooCommands::Auth { cmd } => auth::dispatch(cmd).await,
+        #[cfg(feature = "admin")]
+        SmooCommands::Admin { cmd } => admin::dispatch(cmd).await,
+        SmooCommands::Api { cmd } => match cmd {
+            ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
+            ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
+            ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
+            ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
+            ApiCommands::Teams { cmd } => smooai::teams::cmd(cmd).await,
+            ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+            ApiCommands::SmoothOperator { cmd } => smooai::smooth_operator::cmd(cmd).await,
+            ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
+            ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
+            ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
+            ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
+            ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
+            ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
+            ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
+            ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
+            ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
+            ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
+        },
+        SmooCommands::Org { cmd } => cmd_orgs(cmd).await,
+        SmooCommands::Config { cmd } => config::cmd(cmd).await,
+        SmooCommands::Widgets { cmd } => smooai::widgets::cmd(cmd).await,
+        SmooCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
+        SmooCommands::Crawl { cmd } => smooai::crawl::cmd(cmd).await,
+        SmooCommands::Roles { cmd } => smooai::roles::cmd(cmd).await,
+        SmooCommands::Search { args } => smooai::websearch::run(args).await,
+        SmooCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
+        SmooCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+        SmooCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
+        SmooCommands::Branding { cmd } => smooai::branding::cmd(cmd).await,
+        SmooCommands::Llm { cmd } => smooai::llm_gateway::cmd(cmd).await,
+        SmooCommands::Notify {
+            message,
+            title,
+            priority,
+            url,
+            org,
+        } => smooai::notify::cmd(message, title, priority, url, org).await,
+        SmooCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
+        SmooCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
+        SmooCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
+        SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
+        SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
+    }
+}
+
+/// When the binary is invoked as `smoo` (the symlink installed next to `th`),
+/// behave as `th smoo …`. Pearl th-fc32d9.
+fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let is_smoo = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("smoo"));
+    if is_smoo {
+        // Rewrite argv[0] too, so clap's usage lines render the canonical
+        // `th smoo …` path instead of a doubled `smoo smoo …`.
+        args[0] = "th".into();
+        args.insert(1, "smoo".into());
+    }
+    args
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(smoo_argv(std::env::args_os().collect()));
 
     // SMOODEV-1739: resolve the active auth profile (--profile flag →
     // SMOOAI_PROFILE → active-profile file) and export SMOOAI_USER_AUTH_FILE /
@@ -1692,54 +1922,45 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Model { cmd }) => cmd_model(cmd).await,
-        Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
+        Some(Commands::Auth { cmd }) => run_smoo(SmooCommands::Auth { cmd }).await,
         #[cfg(feature = "admin")]
-        Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
-        Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
-            ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
-            ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
-            ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
-            ApiCommands::Teams { cmd } => smooai::teams::cmd(cmd).await,
-            ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
-            ApiCommands::SmoothOperator { cmd } => smooai::smooth_operator::cmd(cmd).await,
-            ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
-            ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
-            ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
-            ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
-            ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
-            ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
-            ApiCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
-            ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
-            ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
-            ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
-            ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
-        },
-        Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
-        Some(Commands::Config { cmd }) => config::cmd(cmd).await,
-        Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
-        Some(Commands::Dashboard { cmd }) => smooai::dashboard::cmd(cmd).await,
-        Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
-        Some(Commands::Roles { cmd }) => smooai::roles::cmd(cmd).await,
-        Some(Commands::Search { args }) => smooai::websearch::run(args).await,
-        Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
-        Some(Commands::Crm { cmd }) => smooai::crm::cmd(cmd).await,
-        Some(Commands::Agents { cmd }) => smooai::agents::cmd(cmd).await,
-        Some(Commands::Branding { cmd }) => smooai::branding::cmd(cmd).await,
+        Some(Commands::Admin { cmd }) => run_smoo(SmooCommands::Admin { cmd }).await,
+        Some(Commands::Api { cmd }) => run_smoo(SmooCommands::Api { cmd }).await,
+        Some(Commands::Org { cmd }) => run_smoo(SmooCommands::Org { cmd }).await,
+        Some(Commands::Config { cmd }) => run_smoo(SmooCommands::Config { cmd }).await,
+        Some(Commands::Widgets { cmd }) => run_smoo(SmooCommands::Widgets { cmd }).await,
+        Some(Commands::Dashboard { cmd }) => run_smoo(SmooCommands::Dashboard { cmd }).await,
+        Some(Commands::Crawl { cmd }) => run_smoo(SmooCommands::Crawl { cmd }).await,
+        Some(Commands::Roles { cmd }) => run_smoo(SmooCommands::Roles { cmd }).await,
+        Some(Commands::Search { args }) => run_smoo(SmooCommands::Search { args }).await,
+        Some(Commands::Knowledge { cmd }) => run_smoo(SmooCommands::Knowledge { cmd }).await,
+        Some(Commands::Crm { cmd }) => run_smoo(SmooCommands::Crm { cmd }).await,
+        Some(Commands::Agents { cmd }) => run_smoo(SmooCommands::Agents { cmd }).await,
+        Some(Commands::Branding { cmd }) => run_smoo(SmooCommands::Branding { cmd }).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
-        Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
+        Some(Commands::Llm { cmd }) => run_smoo(SmooCommands::Llm { cmd }).await,
         Some(Commands::Notify {
             message,
             title,
             priority,
             url,
             org,
-        }) => smooai::notify::cmd(message, title, priority, url, org).await,
-        Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
-        Some(Commands::Referrals { cmd }) => smooai::referrals::cmd(cmd).await,
-        Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
-        Some(Commands::Heypage { cmd }) => smooai::heypage::cmd(cmd).await,
-        Some(Commands::Files { cmd }) => smooai::files::cmd(cmd).await,
+        }) => {
+            run_smoo(SmooCommands::Notify {
+                message,
+                title,
+                priority,
+                url,
+                org,
+            })
+            .await
+        }
+        Some(Commands::Testing { cmd }) => run_smoo(SmooCommands::Testing { cmd }).await,
+        Some(Commands::Referrals { cmd }) => run_smoo(SmooCommands::Referrals { cmd }).await,
+        Some(Commands::Booking { cmd }) => run_smoo(SmooCommands::Booking { cmd }).await,
+        Some(Commands::Heypage { cmd }) => run_smoo(SmooCommands::Heypage { cmd }).await,
+        Some(Commands::Files { cmd }) => run_smoo(SmooCommands::Files { cmd }).await,
+        Some(Commands::Smoo { cmd }) => run_smoo(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => mail::cmd_inbox().await,
         Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
@@ -3117,7 +3338,11 @@ fn print_explainer() {
         "th up / th down / th status".bright_cyan()
     );
     println!("  • Pearl issue tracker                       {}", "th pearls".bright_cyan());
-    println!("  • {} platform CLI                      {}", gradient::smoo_ai(), "th api".bright_cyan());
+    println!(
+        "  • {} platform CLI                      {}",
+        gradient::smoo_ai(),
+        "smoo … (= th smoo …)".bright_cyan()
+    );
     println!("  • LLM gateway aliases (smooth-coding, …)    {}", "th cast".bright_cyan());
     println!("  • MCP server roster                         {}", "th mcp".bright_cyan());
     println!();
@@ -8852,6 +9077,66 @@ mod org_cli_tests {
                 cmd: ApiCommands::Agents { .. }
             })
         ));
+    }
+
+    /// th-fc32d9: the platform surface lives under `th smoo` (and the `smoo`
+    /// argv[0] binary alias); the old top-level spellings stay as hidden
+    /// compat aliases so existing docs/hooks keep working.
+    #[test]
+    fn smoo_namespace_holds_the_platform_surface() {
+        assert!(matches!(
+            Cli::try_parse_from(["th", "smoo", "agents", "list"]).expect("th smoo agents list").command,
+            Some(Commands::Smoo {
+                cmd: SmooCommands::Agents { .. }
+            })
+        ));
+        // Inside the namespace the singular aliases the plural (normalize rule)
+        // — no mailbox collision here, bare `th agent` owns that.
+        assert!(matches!(
+            Cli::try_parse_from(["th", "smoo", "agent", "list"]).expect("th smoo agent list").command,
+            Some(Commands::Smoo {
+                cmd: SmooCommands::Agents { .. }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["th", "smoo", "api", "agents", "list"])
+                .expect("th smoo api agents list")
+                .command,
+            Some(Commands::Smoo {
+                cmd: SmooCommands::Api {
+                    cmd: ApiCommands::Agents { .. }
+                }
+            })
+        ));
+        // Hidden compat: the old top-level spellings still parse…
+        assert!(matches!(
+            Cli::try_parse_from(["th", "config", "list"]).expect("th config list").command,
+            Some(Commands::Config { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["th", "orgs", "list"]).expect("th orgs list (hidden alias)").command,
+            Some(Commands::Org { .. })
+        ));
+        // …and the mailbox still owns the bare singular.
+        assert!(matches!(
+            Cli::try_parse_from(["th", "agent", "list"]).expect("th agent list").command,
+            Some(Commands::Agent { .. })
+        ));
+    }
+
+    /// The `smoo` symlink installed next to `th` makes the binary parse as
+    /// `th smoo …`; any other argv[0] is untouched.
+    #[test]
+    fn smoo_argv0_dispatches_into_the_namespace() {
+        let rewritten = smoo_argv(vec!["/usr/local/bin/smoo".into(), "crm".into(), "contacts".into(), "list".into()]);
+        assert_eq!(rewritten[0], std::ffi::OsString::from("th"));
+        assert_eq!(rewritten[1], std::ffi::OsString::from("smoo"));
+        assert_eq!(rewritten.len(), 5);
+        let cli = Cli::try_parse_from(&rewritten).expect("smoo crm contacts list");
+        assert!(matches!(cli.command, Some(Commands::Smoo { cmd: SmooCommands::Crm { .. } })));
+
+        let untouched = smoo_argv(vec!["/usr/local/bin/th".into(), "crm".into()]);
+        assert_eq!(untouched.len(), 2);
     }
 
     /// `th llm` wraps the org llm-gateway API. create-key takes the org
