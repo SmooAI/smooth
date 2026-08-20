@@ -121,6 +121,11 @@ th pearls create / ready / list / show / update / close / push / pull
 # because a status is a claim about the COMMIT, not about your laptop.
 th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 
+# Set up this machine's coding harnesses (Claude Code / Codex / OpenCode)
+# with the smooth toolbox: MCP server, smooth-agent plugin, shared skills,
+# statusline. enable is idempotent and doubles as the update command.
+th harness enable claude-code|codex|opencode|all / status / disable
+
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
 th daemon · th up / down / status
