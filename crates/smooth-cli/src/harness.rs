@@ -105,10 +105,17 @@ fn enable(h: Harness, home: &Path) {
             statusline_step(home);
         }
         Harness::Codex => codex_plugin_step(home),
-        Harness::OpenCode => match link_skills(home) {
-            Ok((added, kept)) => println!("   skills: {added} linked, {kept} already current → {}", opencode_skills_dir(home).display()),
-            Err(e) => println!("   skills: {} {e:#}", "FAILED".bright_red()),
-        },
+        Harness::OpenCode => {
+            match link_skills(home) {
+                Ok((added, kept)) => println!("   skills: {added} linked, {kept} already current → {}", opencode_skills_dir(home).display()),
+                Err(e) => println!("   skills: {} {e:#}", "FAILED".bright_red()),
+            }
+            match link_opencode_plugin(home) {
+                Ok(true) => println!("   plugin: lifecycle plugin linked → {}", opencode_plugin_link(home).display()),
+                Ok(false) => println!("   plugin: already current"),
+                Err(e) => println!("   plugin: {} {e:#}", "FAILED".bright_red()),
+            }
+        }
     }
 }
 
@@ -210,6 +217,11 @@ fn status(h: Harness, home: &Path) {
             } else {
                 println!("   skills: {n} linked");
             }
+            if smooth_owned_link(&opencode_plugin_link(home), home) {
+                println!("   plugin: lifecycle plugin linked");
+            } else {
+                println!("   plugin: not linked — `th harness enable opencode`");
+            }
         }
     }
 }
@@ -224,6 +236,11 @@ fn disable(h: Harness, home: &Path) -> Result<()> {
             std::fs::remove_file(l).with_context(|| format!("remove {}", l.display()))?;
         }
         println!("   skills: {} smooth-owned links removed", links.len());
+        let plugin = opencode_plugin_link(home);
+        if smooth_owned_link(&plugin, home) {
+            std::fs::remove_file(&plugin).with_context(|| format!("remove {}", plugin.display()))?;
+            println!("   plugin: lifecycle plugin link removed");
+        }
     }
     if h == Harness::ClaudeCode {
         println!("   plugin: left installed — remove with `claude plugin uninstall smooth-agent@smooth` if you mean it");
@@ -265,6 +282,50 @@ fn claude_plugin_cache(home: &Path) -> Option<String> {
 // lifecycle plugin work (th-cc50cd) is where that gets reconciled.
 fn opencode_skills_dir(home: &Path) -> PathBuf {
     home.join(".opencode").join("skills")
+}
+
+/// Where the OpenCode lifecycle plugin (th-cc50cd) gets linked: OpenCode
+/// auto-loads plugin files from `~/.config/opencode/plugins/`.
+fn opencode_plugin_link(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode").join("plugins").join("smooth-agent.js")
+}
+
+/// Is this path a symlink resolving into smooth-owned sources (the Claude
+/// plugin cache / marketplace checkout)? The ownership rule for everything
+/// `disable` may remove.
+fn smooth_owned_link(path: &Path, home: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+        && std::fs::read_link(path).is_ok_and(|t| t.starts_with(home.join(".claude").join("plugins")))
+}
+
+/// Link the smooth-agent OpenCode lifecycle plugin (session registration +
+/// presence on the th-mail bus). Same never-clobber rules as skills: only a
+/// symlink is ever replaced. Returns true when the link was (re)written.
+fn link_opencode_plugin(home: &Path) -> Result<bool> {
+    let source = skill_source(home)
+        .and_then(|skills| skills.parent().map(|root| root.join("opencode").join("smooth-agent.js")))
+        .filter(|p| p.is_file())
+        .context("smooth-agent plugin checkout has no opencode/smooth-agent.js — update the plugin first (th harness enable claude-code)")?;
+    let link = opencode_plugin_link(home);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if std::fs::read_link(&link).is_ok_and(|t| t == source) {
+                return Ok(false);
+            }
+            std::fs::remove_file(&link)?;
+        }
+        Ok(_) => anyhow::bail!("{} exists and is not a symlink — left alone", link.display()),
+        Err(_) => {}
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, &link).with_context(|| format!("link {}", link.display()))?;
+    #[cfg(not(unix))]
+    anyhow::bail!("plugin link needs symlink support; copy {} manually", source.display());
+    #[cfg(unix)]
+    Ok(true)
 }
 
 /// Symlink every canonical skill into the OpenCode skills dir. Never clobbers
@@ -413,6 +474,9 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("SKILL.md"), "x").unwrap();
         }
+        let oc = tmp.path().join(".claude/plugins/marketplaces/smooth/claude-plugins/smooth-agent/opencode");
+        std::fs::create_dir_all(&oc).unwrap();
+        std::fs::write(oc.join("smooth-agent.js"), "export const SmoothAgent = 1;").unwrap();
         tmp
     }
 
@@ -510,6 +574,29 @@ mod tests {
         assert!(!claude_statusline_wired(tmp.path()));
         std::fs::write(tmp.path().join(".claude/settings.json"), r#"{"statusLine":{"type":"command","command":"x"}}"#).unwrap();
         assert!(claude_statusline_wired(tmp.path()));
+    }
+
+    #[test]
+    #[cfg(unix)] // exercises real symlinks
+    fn opencode_lifecycle_plugin_links_and_disables_cleanly() {
+        let tmp = home();
+        assert!(link_opencode_plugin(tmp.path()).unwrap(), "first run links");
+        assert!(!link_opencode_plugin(tmp.path()).unwrap(), "second run is a no-op");
+        let link = opencode_plugin_link(tmp.path());
+        assert!(smooth_owned_link(&link, tmp.path()));
+
+        // A user's own real file of the same name is refused, not clobbered.
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, "my own plugin").unwrap();
+        assert!(link_opencode_plugin(tmp.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "my own plugin");
+        assert!(!smooth_owned_link(&link, tmp.path()), "a real file is never ours to remove");
+        std::fs::remove_file(&link).unwrap();
+
+        // disable removes the link it owns.
+        link_opencode_plugin(tmp.path()).unwrap();
+        disable(Harness::OpenCode, tmp.path()).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err(), "disable must remove the plugin link");
     }
 
     #[test]
