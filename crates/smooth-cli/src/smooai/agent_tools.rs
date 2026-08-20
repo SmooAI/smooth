@@ -309,6 +309,11 @@ pub fn restriction_banner(view: &AgentToolsView) -> String {
         // non-empty (so: restricted) but resolves to nothing. Rendering that as
         // "RESTRICTED" over an "ENABLED (none)" list makes the reader infer the
         // one thing they must not have to infer.
+        //
+        // MUST stay inside the restricted branch. `mode: "all"` with an empty
+        // `enabled` means EVERY tool — the exact opposite — and it is what a
+        // raw stored toolConfig looks like, so hoisting this check would report
+        // the healthiest agent there is as mute. Pinned by test below.
         if view.enabled.is_empty() {
             return format!(
                 "NO TOOLS AT ALL — this agent is restricted to an empty effective set, so it cannot use a single one of the {} tool(s) available to this org. It can only talk. That is what a non-empty enabledTools with nothing enabled means.",
@@ -665,6 +670,19 @@ mod tests {
         assert!(b.starts_with("NO TOOLS AT ALL"), "{b}");
         assert!(b.contains("cannot use a single one of the 2 tool(s)"), "{b}");
         assert!(b.contains("It can only talk"), "{b}");
+    }
+
+    #[test]
+    fn an_unrestricted_agent_with_an_empty_enabled_list_is_not_mute() {
+        // The inversion guard. `mode: "all"` + `enabled: []` is what a raw
+        // stored toolConfig looks like, and it means EVERY tool. If the
+        // no-tools check ever escapes the restricted branch, this is the agent
+        // it would libel — the healthiest one there is.
+        let v = view(json!({ "mode": "all", "enabled": [], "available": ["a", "b"], "missing": [] }));
+        let b = restriction_banner(&v);
+        assert!(b.starts_with("UNRESTRICTED"), "{b}");
+        assert!(!b.contains("NO TOOLS"), "{b}");
+        assert!(!b.contains("only talk"), "{b}");
     }
 
     #[test]
