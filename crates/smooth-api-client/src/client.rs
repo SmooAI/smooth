@@ -137,6 +137,11 @@ impl SmoothApiClient {
         let (Some(cid), Some(csecret)) = (creds.client_id.clone(), creds.client_secret.clone()) else {
             anyhow::bail!("session expired and has no client credentials to re-mint from — run `th auth login` again");
         };
+        // Second writer to the same file as `th`'s refresh choke point and
+        // its active-org writers, so it contends for the same lock or it
+        // clobbers them (th-5c0189). Held across the grant so the re-mint
+        // and the persist are one step.
+        let lock = crate::credential_lock(self.store.path()).context("lock the credentials file")?;
         let bare = reqwest::Client::builder().user_agent(user_agent()).build()?;
         let fresh = crate::auth::client_credentials_grant(&bare, &cid, &csecret)
             .await
@@ -145,6 +150,7 @@ impl SmoothApiClient {
         // Preserve display-only fields the grant doesn't know about.
         merged.active_org_id = creds.active_org_id;
         self.set_credentials(merged.clone()).context("persist refreshed credentials")?;
+        drop(lock);
         // Rebuild http with the new bearer token. We can't mutate
         // self.http (no &mut), so we replace it via interior
         // mutability — Arc<Mutex<reqwest::Client>> would be one

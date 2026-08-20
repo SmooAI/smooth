@@ -190,7 +190,13 @@ cargo build --release -p smooth-cli  # Release binary (~10MB)
 pnpm install:th              # Build web bundle + install th FROM LOCAL SOURCE (the dev test loop)
 pnpm install:th:brew         # Install the latest RELEASED th via Homebrew (no source build; ignores local changes)
 pnpm build:web               # Just rebuild the embedded web SPA
+pnpm test:hooks              # Self-check the smooth-agent PreToolUse worktree guard
 ```
+
+> **PreToolUse hooks block on exit 2 and ONLY exit 2.** Any other non-zero exit
+> is a non-blocking hook error and Claude Code runs the tool anyway — which is
+> how `enforce-worktree.sh` sat at `exit 1` and never blocked a single edit on
+> main. `pnpm test:hooks` pins the exit codes; keep new deny paths at 2.
 
 > **`pnpm install:th` installs to `~/.cargo/bin/th`, which does NOT automatically win on `PATH`.** The menu bar's "Install th CLI…" symlinks `/usr/local/bin/th` (or `~/.local/bin/th`) at `Big Smooth.app/Contents/Resources/bin/th`, and those dirs usually come first — so a successful dev install can silently keep serving the older bundled binary while you debug a stale `th` (pearl th-fd9d98 lost real time to exactly this). `install:th` now ends with `scripts/dev-link-th.sh`, which repoints that symlink at your build; it only ever rewrites a **symlink**, warns and leaves regular files (Homebrew, manual copies) alone, and is skipped by `SMOOTH_NO_DEV_LINK=1`. Check with `bash scripts/dev-link-th.test.sh`.
 >

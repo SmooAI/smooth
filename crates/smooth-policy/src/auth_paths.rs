@@ -89,10 +89,19 @@ pub fn m2m_file(profile: Option<&str>) -> PathBuf {
     profile_dir(profile).join(M2M_FILE)
 }
 
-/// Profile names are restricted to a filesystem-safe charset.
+/// Profile names are restricted to a filesystem-safe charset, and must be a
+/// plain single path segment.
+///
+/// `.` and `..` pass the charset check (`.` is allowed for names like
+/// `tara.offsetwell`) but are directory traversal: `auth_dir()/profiles/..`
+/// resolves to `auth_dir()` itself, so `th auth profile rm ..` reached
+/// `remove_dir_all` on the whole auth tree — every profile, both session files,
+/// and the `active` pointer. Rejecting them here covers every caller
+/// (`remove_profile`, `set_active`), which is the only reason it's safe to have
+/// one guard instead of one per call site.
 #[must_use]
 pub fn valid_profile_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    !name.is_empty() && name.len() <= 64 && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// The active profile from the `active` pointer file, if any.
@@ -287,6 +296,39 @@ mod tests {
         assert!(!valid_profile_name(""));
         assert!(!valid_profile_name("has space"));
         assert!(!valid_profile_name("../etc"));
+        // `../etc` was the only traversal case tested, and it's rejected for
+        // the `/` — which meant the two names that actually resolve to the
+        // parent were never tried. `th auth profile rm ..` deleted the whole
+        // auth dir: every profile, both session files, and `active`.
+        assert!(!valid_profile_name(".."));
+        assert!(!valid_profile_name("."));
+        // Still fine: a dot INSIDE a name is not traversal.
+        assert!(valid_profile_name("..a"));
+        assert!(valid_profile_name("a.."));
+    }
+
+    /// Why `..` has to be rejected in the validator rather than trusted to the
+    /// filesystem: `remove_profile` builds `auth/profiles/<name>` and hands it
+    /// to `remove_dir_all`, and for `name = ".."` that path IS the auth dir.
+    /// Every profile, both session files and `active` live under it.
+    #[test]
+    fn traversal_profile_name_resolves_to_the_auth_dir_itself() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let auth = tmp.path().join("auth");
+        fs::create_dir_all(auth.join("profiles")).expect("mkdir");
+
+        for bad in [".", ".."] {
+            assert!(!valid_profile_name(bad), "{bad:?} must be refused before it is joined onto a path");
+            let target = auth.join("profiles").join(bad);
+            let resolved = fs::canonicalize(&target).expect("canonicalize");
+            let escapes = resolved != fs::canonicalize(auth.join("profiles")).expect("canonicalize");
+            assert_eq!(
+                escapes,
+                bad == "..",
+                "{bad:?} resolves to {} — this is what remove_dir_all would have taken",
+                resolved.display()
+            );
+        }
     }
 
     #[test]

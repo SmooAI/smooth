@@ -120,26 +120,54 @@ impl CredentialsStore {
         }
     }
 
-    /// Persist `creds` atomically (write to a tempfile alongside,
-    /// then rename) so a crash mid-write can't corrupt the store.
-    /// File mode is forced to `0600`.
+    /// Persist `creds` atomically (write to a unique tempfile alongside,
+    /// then rename) so a crash mid-write can't corrupt the store, and a
+    /// concurrent *reader* never sees a half-written file. The file is
+    /// mode `0600` from the instant it exists.
+    ///
+    /// `NamedTempFile` rather than a hand-rolled `.json.tmp`, for two
+    /// reasons that both bit us:
+    /// - the name is **unique** and created `O_EXCL`, so two savers can't
+    ///   scribble over each other's half-written temp file — the fixed
+    ///   name made the loser `rename` a file the winner had already moved
+    ///   (th-5c0189);
+    /// - it is created `0600`, closing the window where `fs::write`
+    ///   (0644 under the usual umask) left the token world-readable
+    ///   until a follow-up `chmod` — long enough for another local user
+    ///   to open it and hold the fd across the chmod.
+    ///
+    /// # Atomic, but NOT self-synchronizing
+    ///
+    /// Callers that race another writer must hold
+    /// [`crate::credential_lock`] — this method deliberately does not
+    /// take it, because the read-modify-write callers hold it across
+    /// their own load+save and a lock here would deadlock against them
+    /// (it is not re-entrant).
+    ///
+    /// Two *unsynchronized* `save` calls are a POSIX-only nicety, not a
+    /// guarantee: `rename`-over-an-open-file is fine on POSIX, while on
+    /// Windows both this and `fs::rename` compile to
+    /// `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`, which fails when another
+    /// handle has the destination open — including another in-flight
+    /// `MoveFileEx` onto the same target. Do not "fix" that with a retry
+    /// loop; take the lock.
     ///
     /// # Errors
     /// Disk / permission failures bubble up unchanged.
     pub fn save(&self, creds: &Credentials) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
+        let parent = match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                create_private_dir(dir)?;
+                dir
+            }
+            // Bare relative filename — write the temp file beside it.
+            _ => Path::new("."),
+        };
         let json = serde_json::to_string_pretty(creds).context("serialize credentials")?;
-        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perm = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&tmp, perm).with_context(|| format!("chmod 600 {}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, &self.path).with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent).with_context(|| format!("create temp file in {}", parent.display()))?;
+        std::io::Write::write_all(&mut tmp, json.as_bytes()).context("write credentials")?;
+        tmp.as_file().sync_all().context("flush credentials to disk")?;
+        persist_atomically(tmp, &self.path).with_context(|| format!("replace {}", self.path.display()))?;
         Ok(())
     }
 
@@ -155,6 +183,57 @@ impl CredentialsStore {
             Err(e) => Err(e).with_context(|| format!("delete credentials at {}", self.path.display())),
         }
     }
+}
+
+/// Rename a temp file over `dest`, retrying the one Windows conflict that
+/// is genuinely transient.
+///
+/// On Windows the rename compiles to `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
+/// which fails `ERROR_ACCESS_DENIED` while **any** other handle has the
+/// destination open — including a plain reader midway through a
+/// `read_to_string`. POSIX replace-over-an-open-file has no such conflict and
+/// returns on the first attempt every time.
+///
+/// This is not a workaround for writer-vs-writer contention: that is the
+/// [`crate::credential_lock`]'s job, and CI proves it works — eight
+/// concurrent *locked* savers pass on Windows. What it covers is a reader,
+/// which cannot take the exclusive lock without deadlocking the
+/// read-modify-write callers that hold it across their own `load`. The
+/// window is microseconds, so the first retry effectively always wins; a
+/// genuine permission error still surfaces after the attempts run out.
+fn persist_atomically(mut tmp: tempfile::NamedTempFile, dest: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 20;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        match tmp.persist(dest) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if !(cfg!(windows) && e.error.kind() == std::io::ErrorKind::PermissionDenied) {
+                    return Err(e.error);
+                }
+                tmp = e.file;
+                last = Some(e.error);
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) + 1));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("persist exhausted its attempts")))
+}
+
+/// `create_dir_all` that asks for mode `0700` up front on unix, so a
+/// secret-bearing directory is never even briefly group/world-traversable.
+/// Existing directories keep their mode — the file inside is `0600`
+/// regardless, and silently re-chmod'ing a path the caller pointed us at
+/// via `SMOOAI_AUTH_FILE` is not ours to do.
+fn create_private_dir(dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir).with_context(|| format!("mkdir {}", dir.display()))
 }
 
 #[cfg(test)]
@@ -234,5 +313,130 @@ mod tests {
         store.save(&fixture()).expect("save");
         let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    /// th-5c0189: eight savers of the same file, each holding the lock —
+    /// the way every writer in the tree now does it. All eight must
+    /// succeed and the survivor must be one writer's credentials in full.
+    ///
+    /// The lock is the load-bearing part, not decoration. Without it the
+    /// old fixed `smooai.json.tmp` made the loser `rename` a file the
+    /// winner had already moved (ENOENT), and on Windows two concurrent
+    /// `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` calls onto one target
+    /// collide no matter how the temp file is named — see `save`'s
+    /// "atomic, but NOT self-synchronizing" note.
+    #[test]
+    fn concurrent_locked_saves_lose_nothing_and_never_blend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        let mut seed = fixture();
+        seed.active_org_id = Some("0".into());
+        store.save(&seed).expect("seed");
+
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    // A real read-modify-write, not eight blind writes:
+                    // this is the shape `set_active_org` and the refresh
+                    // path both have, and the one that loses an update
+                    // when the lock is missing.
+                    let _lock = crate::credential_lock(store.path()).expect("lock");
+                    let mut creds = store.load().expect("load").expect("present");
+                    let n: u32 = creds.active_org_id.as_deref().expect("counter").parse().expect("counter parses");
+                    std::thread::yield_now();
+                    creds.active_org_id = Some((n + 1).to_string());
+                    creds.access_token = format!("tok-{i}");
+                    creds.refresh_token = Some(format!("rtok-{i}"));
+                    store.save(&creds).expect("save");
+                });
+            }
+        });
+
+        let loaded = store.load().expect("load").expect("present");
+        assert_eq!(loaded.active_org_id.as_deref(), Some("8"), "a lost update means the lock did not serialize");
+        // Whichever writer went last, the file must be one writer's
+        // credentials in full — a torn write would fail to parse, or pair
+        // one saver's access token with another's refresh token.
+        let suffix = loaded.access_token.strip_prefix("tok-").expect("intact access token");
+        assert_eq!(
+            loaded.refresh_token.as_deref(),
+            Some(format!("rtok-{suffix}").as_str()),
+            "torn write: mismatched token pair"
+        );
+
+        // Only the credentials file and its lock sidecar. A leaked temp
+        // file is the next writer's collision.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "smooai.json" && name != "smooai.lock")
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked for the next writer to collide with: {leftovers:?}");
+    }
+
+    /// The property temp-file+rename actually buys, and the one that
+    /// holds on every platform without a lock: a reader racing a writer
+    /// sees the old file or the new one, never a blend and never a
+    /// parse error.
+    #[test]
+    fn a_reader_racing_a_writer_never_sees_a_torn_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        // Seed in the same `tok-<suffix>` / `rtok-<suffix>` shape the
+        // writer uses, so a read that lands before the first save is
+        // still checked for pairing rather than tripping the parse.
+        let mut seed = fixture();
+        seed.access_token = "tok-seed".into();
+        seed.refresh_token = Some("rtok-seed".into());
+        store.save(&seed).expect("seed");
+
+        std::thread::scope(|scope| {
+            let writer = {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for i in 0..200 {
+                        let mut creds = fixture();
+                        creds.access_token = format!("tok-{i}");
+                        creds.refresh_token = Some(format!("rtok-{i}"));
+                        // Single writer: no lock needed, and none taken,
+                        // so this really is testing `save` on its own.
+                        store.save(&creds).expect("save");
+                    }
+                })
+            };
+            // Both loops are bounded and independent. A "read until the
+            // writer signals done" flag would spin forever the moment the
+            // writer panicked — a hung suite instead of a failed test,
+            // which is how this wedged Windows CI for 30 minutes.
+            for _ in 0..2_000 {
+                // Yield so the reader samples the file rather than pinning
+                // it open at 100% duty cycle — on Windows an always-open
+                // destination is a replace the writer cannot ever win.
+                std::thread::yield_now();
+                let loaded = store.load().expect("a reader must never see a partial file").expect("present");
+                let suffix = loaded.access_token.strip_prefix("tok-").expect("intact access token");
+                assert_eq!(
+                    loaded.refresh_token.as_deref(),
+                    Some(format!("rtok-{suffix}").as_str()),
+                    "reader saw a blended file"
+                );
+            }
+            writer.join().expect("writer");
+        });
+    }
+
+    /// The parent of a credentials file is asked for 0700 at creation, so
+    /// it is never even briefly group/world-traversable.
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_its_parent_directory_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("auth").join("smooai.json"));
+        store.save(&fixture()).expect("save");
+        let mode = std::fs::metadata(dir.path().join("auth")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 }

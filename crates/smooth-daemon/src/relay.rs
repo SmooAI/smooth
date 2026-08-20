@@ -103,16 +103,8 @@ fn resolve_device_id_from(override_env: Option<&str>, base_dir: Option<&Path>) -
         return existing;
     }
     let id = mint_device_id();
-    let _ = std::fs::create_dir_all(dir);
-    match std::fs::write(&path, &id) {
-        Ok(()) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-            tracing::info!(device = %id, path = %path.display(), "relay: minted this machine's device id");
-        }
+    match crate::secret_file::write_secret(&path, &id) {
+        Ok(()) => tracing::info!(device = %id, path = %path.display(), "relay: minted this machine's device id"),
         Err(e) => tracing::warn!(error = %e, path = %path.display(), "relay: could not persist device id — it will change on restart"),
     }
     id

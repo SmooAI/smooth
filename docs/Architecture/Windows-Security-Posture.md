@@ -72,7 +72,8 @@ Separately from the missing kernel layer: the daemon's embedded `DenyPolicy`
 path list (`DENY_POLICY_TOML` in `smooth-daemon/src/operator.rs`) was written
 for Unix. The home-relative globs still bite on Windows —
 
-- `**/.ssh/**`, `**/.aws/**`, `**/.smooth/auth/**` ✅
+- `**/.ssh/**`, `**/.aws/**`, `**/.smooth/auth/**`, `**/.smooth/operator-token`,
+  `**/.smooth/operator-storage.db*`, `**/.smooth/schedules.db*` ✅
 
 — but every absolute-rooted entry matches nothing there:
 

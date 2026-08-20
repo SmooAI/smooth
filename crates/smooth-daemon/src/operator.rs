@@ -605,15 +605,6 @@ pub fn schedule_store_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("schedules.db"), |h| h.join(".smooth").join("schedules.db"))
 }
 
-/// Tighten a file to owner-only (mode 600) on Unix; no-op elsewhere.
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
-
 /// Provision the local-flavor auth token, **auto-generating it on first run**.
 ///
 /// Resolution order: `SMOOTH_LOCAL_TOKEN` (env) → `~/.smooth/operator-token`
@@ -649,13 +640,10 @@ fn provision_local_token_at(path: &Path) -> Result<String> {
             return Ok(existing);
         }
     }
-    // First run: generate + persist a fresh token, owner-only.
+    // First run: generate + persist a fresh token, owner-only from the
+    // instant the file exists (th-5c0189).
     let token = uuid::Uuid::new_v4().simple().to_string();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(path);
+    crate::secret_file::write_secret(path, &token).with_context(|| format!("writing {}", path.display()))?;
     tracing::info!(path = %path.display(), "provisioned a local operator token");
     Ok(token)
 }
@@ -910,6 +898,16 @@ deny = [
     "**/.aws/**",
     "**/Library/LaunchAgents/**",
     "**/.smooth/auth/**",
+    # The daemon's own runtime state. `operator-token` is the bearer for the
+    # local WS endpoint — reading it lets a tool reconnect as the owner
+    # principal outside this conversation's permission mode — and
+    # `schedules.db` makes that persistent, the same primitive as the
+    # LaunchAgents entry above. The kernel sandbox denies these too, but only
+    # for `bash`; the fs tools (`read_file`/`write_file`) reach them through
+    # this list alone.
+    "**/.smooth/operator-token",
+    "**/.smooth/operator-storage.db*",
+    "**/.smooth/schedules.db*",
 ]
 "#;
 
@@ -1296,14 +1294,8 @@ fn persist_daemon_addr(addr: &str) {
 /// Pure over its dir so it's testable without touching the real `$HOME`. Writes
 /// `<dir>/daemon.addr` (mode 600 on unix) and returns the path.
 fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
     let path = dir.join("daemon.addr");
-    std::fs::write(&path, addr)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::secret_file::write_secret(&path, addr)?;
     Ok(path)
 }
 
@@ -1854,6 +1846,14 @@ mod tests {
             "/home/me/.ssh/id_rsa",
             "/home/me/.aws/credentials",
             "/home/me/.smooth/auth/smooai.json",
+            // The daemon's own state: the WS bearer, and the stores that would
+            // let a hijacked tool schedule itself a later turn. The kernel
+            // sandbox covers these for `bash` only — a `read_file` tool call
+            // is gated here or nowhere.
+            "/home/me/.smooth/operator-token",
+            "/home/me/.smooth/operator-storage.db",
+            "/home/me/.smooth/schedules.db",
+            "/home/me/.smooth/schedules.db-wal",
         ] {
             assert!(policy.evaluate(&write_call(path)).is_some(), "deny policy must block write to: {path}");
         }

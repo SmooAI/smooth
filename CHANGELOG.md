@@ -1,5 +1,58 @@
 # @smooai/smooth
 
+## 0.36.5
+
+### Patch Changes
+
+- 764692f: Stop concurrent `th` processes from revoking each other's session (th-5c0189).
+
+  Supabase rotates the refresh token on every exchange and revokes the old one
+  after a ~10s grace, so two agent sessions that both found an expired session,
+  both POSTed to Supabase, and both wrote `~/.smooth/auth/*.json` each ended up
+  holding a token the other had invalidated — one `rename` won and the survivor's
+  token was not the one live server-side, killing the session until
+  `th auth login`. `refresh.rs` documented the single-writer rule but enforced it
+  only by convention.
+
+  The whole load → refresh → save sequence now runs under a cross-process advisory
+  lock (`fs4`, the same primitive `smooth-pearls` locks its registry with), and the
+  waiter re-reads the file afterwards: whoever queued behind the winner uses the
+  winner's fresh token instead of minting a second one. `th auth whoami`, `th auth
+login`, every `active_org` writer, and `SmoothApiClient::ensure_fresh_token` —
+  a second M2M refresher that wrote the same file — all go through that lock now
+  rather than being unlocked second writers.
+
+  The lock lives in `smooth-api-client` and is keyed on the credentials _path_,
+  not on a store type: credentials are written from two crates against two
+  near-identical store types (one of them in another repo), and a lock only works
+  if every writer takes the same one.
+
+  A refresh that can't be persisted is now an error instead of
+  `let _ = store.save(...)` printing "✓ session refreshed" and exiting 0 — the
+  exchange has already revoked the old token at that point, so a silently dropped
+  write leaves the next run with a dead session.
+
+  Secret files are also owner-only from the instant they exist. `fs::write` +
+  `set_permissions` created them 0644 under the usual umask and only then chmod'ed,
+  leaving a window another local user could open and hold an fd across — and three
+  of the five call sites discarded the chmod result, so a failure left the file
+  0644 permanently and silently. The credentials store, the local operator token,
+  the VAPID keypair, push subscriptions, the relay device id and `daemon.addr` now
+  write through a unique `O_EXCL` temp file created 0600 and renamed into place,
+  with parent directories created 0700.
+
+## 0.36.4
+
+### Patch Changes
+
+- 91ed8a2: Three safety fixes: the worktree hook that never blocked, the operator token the sandbox let a hijacked shell read, and `th auth profile rm ..`.
+
+  `enforce-worktree.sh` exited 1 on both deny paths. Claude Code's PreToolUse treats only **exit 2** as blocking — every other non-zero exit is a non-blocking hook error and the tool call proceeds — so the hook that both repos' CLAUDE.md advertises as "will block source code edits and commits on main" has never blocked anything (18 transcripts fired it, zero acted on it; the sibling `attest-push-hint.sh` was moved to exit 2 and this one was missed). Both are exit 2 now. The Bash arm also only matched `git commit`, so `sed -i`, `cat > file`, `tee` and `rm` edited main with no hook firing at all; it now blocks a shell command whose mutation target is a file git tracks in the main worktree. `pnpm test:hooks` pins all of it, exit codes included.
+
+  The kernel sandbox denied the crown-jewel credential dirs but not the daemon's own runtime state. `~/.smooth/operator-token` is the bearer for `ws://127.0.0.1:8787/ws`, so a sandboxed shell — say, one that ate prompt injection from scraped content — could read it, open a _fresh_ connection as the owner principal outside the conversation's permission mode, and write `~/.smooth/schedules.db` to get a second turn later. That is the same persistence primitive as the already-denied `~/Library/LaunchAgents`. All three (`operator-token`, `operator-storage.db`, `schedules.db`) are now read- and write-denied, matched by regex so the SQLite `-wal`/`-shm` siblings are covered too.
+
+  `th auth profile rm ..` deleted the entire auth directory. `valid_profile_name` permitted `.` and `..` (a dot is legal inside names like `tara.offsetwell`), and `auth_dir()/profiles/..` resolves to `auth_dir()` — so `remove_dir_all` took every profile, `smooai-user.json`, `smooai.json` and the `active` pointer. The existing test pinned `"../etc"`, which is rejected for the `/`, so the two names that actually traverse were never tried. Both are refused now, in the one validator every caller routes through.
+
 ## 0.36.3
 
 ### Patch Changes

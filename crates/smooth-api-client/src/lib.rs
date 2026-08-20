@@ -23,6 +23,7 @@
 pub mod auth;
 pub mod client;
 pub mod credentials;
+pub mod lock;
 
 /// Generated progenitor code. Re-exported as `pb` (protobuf-style name
 /// for "the wire types"). Consumers shouldn't usually need to dip in
@@ -43,6 +44,7 @@ pub mod pb {
 
 pub use client::SmoothApiClient;
 pub use credentials::{Credentials, CredentialsStore};
+pub use lock::{credential_lock, CredentialLock};
 
 /// Default production base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.smoo.ai";
