@@ -1,5 +1,4 @@
-//! Cross-process lock over a credentials file — the enforcement half of
-//! the single-writer rule [`crate::auth::refresh`] documents.
+//! Cross-process lock over a credentials file.
 //!
 //! Supabase rotates the refresh token on every successful exchange and
 //! revokes the old one after a ~10s grace. Two `th` processes that both
@@ -9,6 +8,17 @@
 //! session is dead until `th auth login`. Serializing the whole
 //! load → refresh → save sequence is what makes that impossible; the
 //! waiter then re-reads and uses the winner's fresh token.
+//!
+//! # Why this lives in the *lowest* crate
+//!
+//! A lock only works if every writer takes the **same** one. Credentials
+//! are written from two crates — this one ([`crate::CredentialsStore`],
+//! via `SmoothApiClient::set_credentials`) and `smooth-cli` (which drives
+//! the near-identical store from `smooai-client-shared`). Keeping the
+//! implementation here, keyed on the credentials *path* rather than on
+//! either store type, is what lets both of them contend for one sidecar.
+//! It has to be path-keyed because the other store type lives in another
+//! repo and can't grow a method.
 //!
 //! Same primitive and same sidecar reasoning as
 //! `smooth_pearls::registry::auto_register_at`.
@@ -33,6 +43,13 @@ impl Drop for CredentialLock {
 /// Blocks until the current holder releases. A refresh is one HTTP
 /// roundtrip, and the loser of the race wants the winner's token anyway,
 /// so waiting is strictly better than racing.
+///
+/// **Not re-entrant.** Taking it twice in one thread deadlocks (`flock`
+/// and `LockFileEx` both key on the open file description, not the
+/// thread), which is why [`crate::CredentialsStore::save`] does *not*
+/// take it for you — the read-modify-write callers must hold it across
+/// their own load+save, and a lock inside `save` would deadlock against
+/// them.
 ///
 /// ponytail: blocking `lock_exclusive`, no timeout. If a wedged process
 /// ever hangs `th`, swap for `try_lock_exclusive` + a bounded retry.
@@ -61,7 +78,6 @@ pub fn credential_lock(cred_path: &Path) -> Result<CredentialLock> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
 
@@ -71,32 +87,36 @@ mod tests {
         // counter, bump it, write it back. Without the lock the
         // interleaved reads lose writes; with it every increment lands.
         // Asserts on the outcome, not on timing.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("smooai.json");
-        std::fs::write(&path, "0").unwrap();
+        std::fs::write(&path, "0").expect("seed");
 
         std::thread::scope(|s| {
             for _ in 0..8 {
                 s.spawn(|| {
-                    let _guard = credential_lock(&path).unwrap();
-                    let n: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+                    let _guard = credential_lock(&path).expect("lock");
+                    let n: u32 = std::fs::read_to_string(&path).expect("read").parse().expect("parse");
                     // Widen the window the lock has to cover.
                     std::thread::yield_now();
-                    std::fs::write(&path, (n + 1).to_string()).unwrap();
+                    std::fs::write(&path, (n + 1).to_string()).expect("write");
                 });
             }
         });
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "8", "a lost update means the lock did not serialize");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "8",
+            "a lost update means the lock did not serialize"
+        );
     }
 
     #[test]
     fn lock_creates_the_sidecar_next_to_a_missing_credentials_file() {
         // First login: the json does not exist yet, so the lock must not
         // depend on it.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("smooai-user.json");
-        let guard = credential_lock(&path).unwrap();
+        let guard = credential_lock(&path).expect("lock");
         assert!(dir.path().join("nested").join("smooai-user.lock").exists());
         drop(guard);
     }
@@ -104,11 +124,22 @@ mod tests {
     #[test]
     fn the_two_stores_take_different_locks() {
         // `th auth login --m2m` must not block on a user-session refresh.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
         let user = dir.path().join("smooai-user.json");
         let m2m = dir.path().join("smooai.json");
-        let _held = credential_lock(&user).unwrap();
+        let _held = credential_lock(&user).expect("lock user");
         // Would deadlock if both stores hashed to one sidecar.
-        let _other = credential_lock(&m2m).unwrap();
+        let _other = credential_lock(&m2m).expect("lock m2m");
+    }
+
+    #[test]
+    fn the_sidecar_is_not_the_credentials_file() {
+        // If the lock file *were* the destination, every `save` would be
+        // renaming over a file it holds open — which POSIX tolerates and
+        // Windows does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds = dir.path().join("smooai.json");
+        let _guard = credential_lock(&creds).expect("lock");
+        assert!(!creds.exists(), "locking must not create the credentials file itself");
     }
 }

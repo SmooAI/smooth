@@ -15,9 +15,15 @@ only by convention.
 The whole load → refresh → save sequence now runs under a cross-process advisory
 lock (`fs4`, the same primitive `smooth-pearls` locks its registry with), and the
 waiter re-reads the file afterwards: whoever queued behind the winner uses the
-winner's fresh token instead of minting a second one. `th auth whoami` and every
-`active_org` writer go through the same lock rather than being unlocked second
-writers to the same file.
+winner's fresh token instead of minting a second one. `th auth whoami`, `th auth
+login`, every `active_org` writer, and `SmoothApiClient::ensure_fresh_token` —
+a second M2M refresher that wrote the same file — all go through that lock now
+rather than being unlocked second writers.
+
+The lock lives in `smooth-api-client` and is keyed on the credentials *path*,
+not on a store type: credentials are written from two crates against two
+near-identical store types (one of them in another repo), and a lock only works
+if every writer takes the same one.
 
 A refresh that can't be persisted is now an error instead of
 `let _ = store.save(...)` printing "✓ session refreshed" and exiting 0 — the

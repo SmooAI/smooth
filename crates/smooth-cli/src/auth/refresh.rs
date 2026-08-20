@@ -18,14 +18,14 @@
 //! background cadence; the CLI must only ever refresh in the request
 //! path. Convention alone did not hold that line across concurrent
 //! agent sessions, so [`refresh_locked`] now enforces it with the
-//! cross-process lock in [`crate::auth::lock`] (th-5c0189).
+//! cross-process lock in [`smooth_api_client::credential_lock`] (th-5c0189).
 
 use anyhow::{Context, Result};
 use smooai_client_shared::auth::refresh::refresh_session;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 
-use crate::auth::lock::credential_lock;
 use crate::auth::{supabase_url, PROD_SUPABASE_ANON_KEY};
+use smooth_api_client::credential_lock;
 
 /// What a loaded session needs before it can be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

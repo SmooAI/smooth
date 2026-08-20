@@ -96,10 +96,6 @@ base64 = "0.22"
 # Used by `th config build` (non-test) to drop the embedded JS schema
 # generator to a temp .mjs before invoking node/tsx.
 tempfile = "3"
-# Cross-process advisory file lock over the credentials file, so two `th`
-# processes can't both refresh a session and revoke each other's rotated
-# refresh token (th-5c0189). Same crate `smooth-pearls` locks its registry with.
-fs4.workspace = true
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 schemars = "1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

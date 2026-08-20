@@ -157,7 +157,7 @@ impl OrgSource for LegacyApiClientSource {
         self.store.load().ok().flatten().and_then(|c| c.active_org_id)
     }
     fn set_active_org(&self, org_id: &str) -> Result<()> {
-        let _lock = crate::auth::lock::credential_lock(self.store.path()).context("lock the credentials file")?;
+        let _lock = smooth_api_client::credential_lock(self.store.path()).context("lock the credentials file")?;
         let mut creds = self
             .store
             .load()
@@ -193,7 +193,7 @@ impl OrgSource for ClientSharedM2mSource {
         self.store.load().ok().flatten().and_then(|c| c.active_org_id)
     }
     fn set_active_org(&self, org_id: &str) -> Result<()> {
-        let _lock = crate::auth::lock::credential_lock(self.store.path()).context("lock the credentials file")?;
+        let _lock = smooth_api_client::credential_lock(self.store.path()).context("lock the credentials file")?;
         let mut creds = self
             .store
             .load()
@@ -229,7 +229,7 @@ impl OrgSource for ClientSharedUserSource {
         self.store.load().ok().flatten().and_then(|c| c.active_org_id)
     }
     fn set_active_org(&self, org_id: &str) -> Result<()> {
-        let _lock = crate::auth::lock::credential_lock(self.store.path()).context("lock the credentials file")?;
+        let _lock = smooth_api_client::credential_lock(self.store.path()).context("lock the credentials file")?;
         let mut creds = self
             .store
             .load()

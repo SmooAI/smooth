@@ -55,7 +55,7 @@ fn set_in(store: &CredentialsStore, org_id: &str) -> Result<()> {
     // Same file a concurrent refresh rewrites: without the lock this
     // load-modify-save can clobber a freshly rotated refresh token
     // (th-5c0189).
-    let _lock = crate::auth::lock::credential_lock(store.path()).context("lock the credentials file")?;
+    let _lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
     let Some(mut creds) = store.load().context("load user credentials")? else {
         // No user credentials = no active-org slot to write to. The
         // browser-login caller always saves credentials first; if we

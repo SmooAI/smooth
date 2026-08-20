@@ -24,7 +24,6 @@ use clap::Subcommand;
 
 pub mod active_org;
 pub mod browser_login;
-pub mod lock;
 pub mod login;
 pub mod logout;
 pub mod paths;
