@@ -430,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // exercises real symlinks; on Windows link_skills refuses with guidance instead
     fn link_skills_links_repairs_and_never_clobbers() {
         let tmp = home();
         let (added, kept) = link_skills(tmp.path()).unwrap();
@@ -456,6 +457,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // exercises real symlinks; on Windows link_skills refuses with guidance instead
     fn disable_removes_only_smooth_owned_links_and_the_mcp_entry() {
         let tmp = home();
         link_skills(tmp.path()).unwrap();
