@@ -71,23 +71,23 @@ smooth/
 > that talks to smoo.ai now lives under **`th smoo <resource> <verb>`**, and a
 > `smoo → th` symlink (installed by `pnpm install:th` and install.sh) makes
 > **`smoo <resource> <verb>`** the customer-facing spelling via argv[0]
-> dispatch. The old top-level spellings (`th api …`, `th auth …`, `th config`,
-> `th crm`, …) still parse as hidden compat aliases, so the snippets below all
+> dispatch. The old top-level spellings (`smoo api …`, `smoo auth …`, `smoo config`,
+> `smoo crm`, …) still parse as hidden compat aliases, so the snippets below all
 > work — but write new docs/skills with the `smoo` spelling. Bare `th agent`
 > stays the machine-local mailbox registry; platform agents are `smoo agents`
 > (singular aliased inside the namespace).
 
 ### Auth — `auth.smoo.ai` and what to expect from login
 
-> **`th auth` is the ONE Smoo AI identity surface.** `th api login` / `logout` / `whoami` were removed (pearl th-16b0ca) — two spellings for one identity was actively confusing, and only `th auth` understands auth profiles. The `th api <resource>` verbs stay; they aren't auth.
+> **`smoo auth` is the ONE Smoo AI identity surface.** The old `th api login` / `logout` / `whoami` verbs were removed (pearl th-16b0ca) — two spellings for one identity was actively confusing, and only `smoo auth` understands auth profiles. The `smoo api <resource>` verbs stay; they aren't auth.
 
-- `th auth login` — the **user** browser flow by default on a TTY (`smoo.ai/cli-login`, Supabase session). `--no-browser` for an email + password prompt; `--m2m` to authenticate a service account via OAuth2 `client_credentials` at `https://auth.smoo.ai/token`.
+- `smoo auth login` — the **user** browser flow by default on a TTY (`smoo.ai/cli-login`, Supabase session). `--no-browser` for an email + password prompt; `--m2m` to authenticate a service account via OAuth2 `client_credentials` at `https://auth.smoo.ai/token`.
 - M2M credential resolution order: `--client-id`/`--client-secret` flags → `SMOOAI_CLIENT_ID`/`SMOOAI_CLIENT_SECRET` env → interactive prompt. Mint the pair in the web app (Org Settings → API Keys) — the secret is shown **once**.
-- `th auth whoami` shows both sessions (user + M2M), the active org, expiry, and which file each came from. `th auth logout [--m2m|--all]` clears them.
-- `th auth profile` manages named profiles — each bundles a user + M2M session so one host can hold several identities. Select per-command with `--profile <name>` / `SMOOAI_PROFILE`, or set the default with `th auth profile use <name>`.
+- `smoo auth whoami` shows both sessions (user + M2M), the active org, expiry, and which file each came from. `smoo auth logout [--m2m|--all]` clears them.
+- `smoo auth profile` manages named profiles — each bundles a user + M2M session so one host can hold several identities. Select per-command with `--profile <name>` / `SMOOAI_PROFILE`, or set the default with `smoo auth profile use <name>`.
 - **Sessions live under `~/.config/smooth/auth/`** (XDG), in `profiles/<name>/{smooai-user.json,smooai.json}` for named profiles or directly in `auth/` for the default. `~/.smooth/auth/` is the pre-SMOODEV-1739 legacy tree, kept only as a migration backup — nothing should read it.
 - Profile resolution lives in `smooth_policy::auth_paths` and is called by **both** `th` and `smooth-daemon` at startup, so the daemon reads the same credentials as the `th` tool it shells out to regardless of how it was launched (th-16b0ca).
-- `th auth login` is **not** LLM-provider auth. Provider creds (`~/.smooth/providers.json`) are a separate system — see `th cast models` / `th model`.
+- `smoo auth login` is **not** LLM-provider auth. Provider creds (`~/.smooth/providers.json`) are a separate system — see `th cast models` / `th model`.
 
 ### The high-leverage subtrees
 
@@ -98,10 +98,10 @@ smoo auth login|whoami|logout|profile · smoo agents|crm|config|orgs|knowledge|f
 
 # White-label an org — theme + logos (logo re-hosted from a path OR a remote URL).
 # `enable` is the live switch and refuses a theme that fails WCAG AA contrast.
-th branding show|from-url|set|enable|disable|preview|clear
+smoo branding show|from-url|set|enable|disable|preview|clear
 
 # Cross-org admin (planned — pearl th-feebd2, blocked on th-abc4e2)
-th admin onboard-customer / mint-key / set-secret / org list|show
+smoo admin onboard-customer / mint-key / set-secret / org list|show
 
 # Jira — replaces curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" .../rest/api/3/...
 # sync is reconcile-only by default (close pearls done in Jira, transition
@@ -139,14 +139,14 @@ th cast models
 ```
 Need to call api.smoo.ai?
 ├── Per-org resource (acts on your active org)
-│   └── th api <resource> <verb>  →  crates/smooth-cli/src/smooai/<resource>.rs
+│   └── smoo api <resource> <verb>  →  crates/smooth-cli/src/smooai/<resource>.rs
 ├── Cross-org / requires admin grants
-│   └── th admin <verb>           →  crates/smooth-cli/src/admin/   (paired API pearl required)
+│   └── smoo admin <verb>           →  crates/smooth-cli/src/admin/   (paired API pearl required)
 └── Purely local (no api.smoo.ai roundtrip)
     └── Top-level namespace        →  th pearls, th worktree, th doctor, …
 ```
 
-| Lives in `th api` | Lives in `th admin` |
+| Lives in `smoo api` | Lives in `smoo admin` |
 |---|---|
 | Acts on **your active org** | Acts **across orgs** or on the platform itself |
 | Authenticated as M2M client or regular dashboard user | Authenticated as **admin-grant dashboard user** |
@@ -163,8 +163,8 @@ Need to call api.smoo.ai?
 
 ### Adding a `th` subcommand — the checklist
 
-1. **Search** — `rg "th api <something>" crates/`; someone may have started it
-2. **Pearl** — `th pearls create --title="th api X: add Y" --type=feature --priority=2`
+1. **Search** — `rg "smoo api <something>" crates/`; someone may have started it
+2. **Pearl** — `th pearls create --title="smoo api X: add Y" --type=feature --priority=2`
 3. **Worktree** — `th worktree create th-<id>-…`
 4. **Code** — clone the nearest sibling under `crates/smooth-cli/src/smooai/` (they all follow the same shape), register in `src/smooai/mod.rs` + parent `Commands` enum
 5. **Test exhaustively** — colocated `#[cfg(test)]`, happy + error paths (§8 is non-negotiable)
@@ -178,8 +178,8 @@ Need to call api.smoo.ai?
 
 | Pattern | Suggestion |
 |---|---|
-| `curl … api.smoo.ai` | `th api …` |
-| `curl … auth.smoo.ai/token` | `th auth login` (`--m2m` for a service account) |
+| `curl … api.smoo.ai` | `smoo api …` |
+| `curl … auth.smoo.ai/token` | `smoo auth login` (`--m2m` for a service account) |
 | `curl … atlassian.net/rest/api` | `th jira sync` (or file a pearl) |
 | `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879) |
 | `pnpm sst secret list` (raw) | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
@@ -191,8 +191,8 @@ Override with ` # th-curl-hint:ack reason=…` if you genuinely need raw curl. *
 `th` is built from this repo. Every gap is a pearl waiting to happen:
 
 - Daily friction → `th pearls create --type=task --priority=3`
-- New API surface in `apps/web` → mirror under `th api <resource>` the same week + changeset
-- New admin operation → `th admin <verb>` (blocked on `th-feebd2`; file the sub-pearl now)
+- New API surface in `apps/web` → mirror under `smoo api <resource>` the same week + changeset
+- New admin operation → `smoo admin <verb>` (blocked on `th-feebd2`; file the sub-pearl now)
 - Shell-helper pattern that survives more than two uses → promote to a `th` subcommand or a `~/.smooth/plugins/` plugin
 
 ---
