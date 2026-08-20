@@ -36,6 +36,7 @@
         "changeset": "changeset",
         "aichangeset": "changeset",
         "test:dev-link": "bash scripts/dev-link-th.test.sh",
+        "test:hooks": "bash claude-plugins/smooth-agent/hooks/enforce-worktree.test.sh",
         "test:e2e:daemon": "cargo test -p smooai-smooth-daemon --test e2e_ws_smoke -- --nocapture",
         "install:bigsmooth": "bash scripts/macos/install-bigsmooth.sh"
     },

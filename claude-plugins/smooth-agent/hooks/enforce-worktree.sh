@@ -2,8 +2,14 @@
 # smooth-agent plugin — enforce the worktree workflow.
 #
 # Blocks feature work on the main branch in the MAIN worktree. Runs on
-# PreToolUse for Edit, Write, and Bash (git commit). Exit 0 = allow,
-# Exit 1 = ask the user, Exit 2 = hard block.
+# PreToolUse for Edit, Write, and Bash (git commit + shell-based file edits).
+#
+# EXIT CODES ARE THE WHOLE POINT: in Claude Code PreToolUse, ONLY exit 2 blocks
+# the tool call. Every other non-zero exit is treated as a non-blocking hook
+# error and the tool call PROCEEDS. This script shipped with `exit 1` on both
+# deny paths, so it never blocked anything — 18 transcripts fired it and zero
+# acted on it (the same bug attest-push-hint.sh already fixed). Do not "clean
+# up" these to exit 1.
 #
 # Repo-agnostic: the main worktree, its parent, and the repo name are
 # derived from git at runtime (via `git worktree list --porcelain`, whose
@@ -67,16 +73,17 @@ if [[ "$TOOL_NAME" == "Edit" || "$TOOL_NAME" == "Write" ]]; then
     if [[ -f "$MAIN_WORKTREE/.git/MERGE_HEAD" ]]; then
         exit 0
     fi
-    # Ask permission for source code edits on main
+    # Block source code edits on main
     cat >&2 <<EOF
-⚠️  You are about to edit source code directly on the main branch of $REPO_NAME.
+⚠️  BLOCKED: source code edit directly on the main branch of $REPO_NAME.
 
-ASK THE USER: "Should I make this change directly on main, or create a worktree?"
-
-If they say worktree, create one:
+Create a worktree and redo the edit there:
   git worktree add ../$REPO_NAME-SMOODEV-XX-short-desc -b SMOODEV-XX-short-desc main
+
+If the user explicitly wants this on main, they can bypass with:
+  touch $BYPASS_FILE
 EOF
-    exit 1
+    exit 2
 fi
 
 # For Bash: block git commit on main (but allow merges, pulls, pushes, and worktree commits)
@@ -101,13 +108,55 @@ if [[ "$TOOL_NAME" == "Bash" ]]; then
         BRANCH=$(git -C "$MAIN_WORKTREE" symbolic-ref --short HEAD 2>/dev/null)
         if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
             cat >&2 <<EOF
-⚠️  You are about to commit directly to the main branch of $REPO_NAME.
+⚠️  BLOCKED: commit directly to the main branch of $REPO_NAME.
 
-ASK THE USER: "Should I commit this directly on main, or use a worktree?"
-
-Commits on main typically happen via merge (git merge BRANCH --no-ff).
+Commits on main happen via merge (git merge BRANCH --no-ff). Do the work in a
+worktree and commit there instead.
 EOF
-            exit 1
+            exit 2
+        fi
+    fi
+
+    # Shell-based edits to tracked files: `cat > f`, `sed -i`, `tee`, `python -c
+    # open(...,'w')`, `rm`, `mv`. The Edit/Write arm never sees these, so main
+    # stayed editable by simply spelling the edit as a shell command.
+    #
+    # Precision over breadth: we only block when a MUTATION TARGET (a redirect
+    # destination, or an argument of an in-place/destructive command) is a file
+    # git actually tracks in the main worktree. Scanning every token instead
+    # would block `grep foo src/main.rs > /tmp/out`, which only reads.
+    # A relative path is only resolved when the session itself is in the main
+    # worktree — otherwise a feature-worktree session's `sed -i src/foo.rs`
+    # would match the same tracked path and be blocked wrongly.
+    TARGETS=$(
+        echo "$COMMAND" | grep -oE '>>?[[:space:]]*[^[:space:]|&;)]+' | sed -E 's/^>>?[[:space:]]*//'
+        echo "$COMMAND" | grep -oE '(^|[[:space:];&|])(sed|perl|ruby)[^;&|]*[[:space:]]-i[^;&|]*' | tr -c 'A-Za-z0-9_./-' ' '
+        echo "$COMMAND" | grep -oE '(^|[[:space:];&|])(tee|truncate|dd|rm|mv)[[:space:]][^;&|]*' | tr -c 'A-Za-z0-9_./-' ' '
+    )
+    if [[ -n "$TARGETS" ]]; then
+        BRANCH=$(git -C "$MAIN_WORKTREE" symbolic-ref --short HEAD 2>/dev/null)
+        if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]] && [[ ! -f "$MAIN_WORKTREE/.git/MERGE_HEAD" ]]; then
+            SESSION_IN_WORKTREE=0
+            is_in_worktree "$DIR" && SESSION_IN_WORKTREE=1
+            for TOKEN in $TARGETS; do
+                case "$TOKEN" in
+                    "$MAIN_WORKTREE"/*) REL="${TOKEN#"$MAIN_WORKTREE"/}" ;;
+                    /*) continue ;;
+                    *) [[ "$SESSION_IN_WORKTREE" == 1 ]] && continue; REL="$TOKEN" ;;
+                esac
+                # Tracker/config dirs are exempt, same as the Edit/Write arm.
+                case "$REL" in
+                    .claude/* | */.claude/* | .smooth/* | */.smooth/* | .beads/* | */.beads/* | .changeset/* | */.changeset/* | *CLAUDE.md | */memory/*) continue ;;
+                esac
+                git -C "$MAIN_WORKTREE" ls-files --error-unmatch -- "$REL" >/dev/null 2>&1 || continue
+                cat >&2 <<EOF
+⚠️  BLOCKED: this shell command edits '$REL', a tracked file on the main branch
+of $REPO_NAME. Shell edits are source edits — the worktree rule applies.
+
+  git worktree add ../$REPO_NAME-SMOODEV-XX-short-desc -b SMOODEV-XX-short-desc main
+EOF
+                exit 2
+            done
         fi
     fi
 fi
