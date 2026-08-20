@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.38.0
+
+### Minor Changes
+
+- 3dd2be9: th-cc50cd: smooth-agent OpenCode lifecycle plugin — every OpenCode session now registers on the th-mail bus (placeholder handle `oc-<dir>-<sid4>`, pid-reaped), publishes working presence from tool activity (throttled), goes idle on session.idle and offline on session.deleted, degrading to a silent no-op without `th`. `th harness enable opencode` links it into `~/.config/opencode/plugins/` from the smooth-agent plugin checkout (same never-clobber/ownership rules as skills; `disable` removes it), `status` reports it, and the node smoke test is wired into `pnpm test:hooks`.
+- 4d9b8b6: th-19dac1: `th harness enable|status|disable` — one idempotent setup/update command per coding harness (Claude Code, Codex, OpenCode), modeled on the TSX-toolbox `tsx agents enable` pattern. `enable` registers the `th mcp serve` MCP server (reusing the preserving per-format writers), installs/updates the smooth-agent plugin via the `claude` CLI where one exists, links the shared skills into `~/.opencode/skills/` for OpenCode, and checks the statusline; `status` verifies each harness (MCP ok/stale/missing via dry-run classification, plugin version, skill links); `disable` removes only what smooth wrote — the MCP entry and symlinks that resolve into smooth-owned sources, never user config. Also: `pnpm install:th` now passes `--locked` to cargo install (an unlocked install re-resolved smooth-operator-core past the lockfile and broke the build), and `smoo --version` answers as the binary instead of erroring on the namespace subcommand.
+
+### Patch Changes
+
+- f2c81f0: th-1d5ca8: `SMOOTH_MCP_ALLOW_WRITE=0` is a machine-level write kill switch for `th mcp serve` — every tool not annotated `read_only_hint` is hidden from the advertised roster and rejected if called anyway, failing closed on unannotated tools. Also annotates `pearls_ready` as read-only (the one genuine read that was missing the hint, which the fail-closed gate exposed).
+- 1c58c5b: th-845c06: sweep the in-repo docs, the smooth-operator skill, and the `th mcp serve` tool descriptions/instructions to the `smoo <resource>` spelling introduced by the namespace (th-fc32d9). ~320 command references updated; historical statements (the removed `th api login` verbs, the original `th agent`/`th agents` collision) deliberately keep their original spellings. The hidden compat aliases remain, so nothing behavioral changed.
+
 ## 0.37.0
 
 ### Minor Changes
