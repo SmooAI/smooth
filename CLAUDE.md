@@ -95,6 +95,7 @@ smooth/
 # Smoo platform — replaces every curl to api.smoo.ai (smoo == th smoo)
 smoo api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing
 smoo auth login|whoami|logout|profile · smoo agents|crm|config|orgs|knowledge|files|testing|branding
+smoo analytics|campaigns|drip|audiences|forms|gbp|search-console|sheets|workforce   # MCP-parity batch (th-739bb1…)
 
 # White-label an org — theme + logos (logo re-hosted from a path OR a remote URL).
 # `enable` is the live switch and refuses a theme that fails WCAG AA contrast.
