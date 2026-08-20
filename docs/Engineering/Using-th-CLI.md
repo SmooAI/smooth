@@ -221,7 +221,7 @@ th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowl
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
 # ⚠️ --tool-config REPLACES the whole array — read-modify-write, so two
-# concurrent edits lose one. Prefer `th api agents tools` below for one tool.
+# concurrent edits lose one. Prefer `th agents tools` below for one tool.
 th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
 # SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
 # kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
@@ -229,7 +229,7 @@ th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId
 # Read any of these back with: th api agents show <agent-id>
 ```
 
-#### Per-agent tools — `th api agents tools` (pearl th-c66db7)
+#### Per-agent tools — `th agents tools` (pearl th-c66db7)
 
 The reason this exists: `verify_identity` shipped registered, deployed and
 fail-closed on every channel, and was **invisible in production** because one
@@ -241,18 +241,24 @@ that check.
 ```bash
 # The drift view — enabled vs. available vs. MISSING. Run it after every
 # release that ships a tool; a newly registered tool shows up under MISSING.
-th api agents tools list <agent-id>
-th api agents tools list <agent-id> --json      # includes `restrictionNote`
+th agents tools list <agent-id>
+th agents tools list <agent-id> --json          # includes `restrictionNote`
 
 # What COULD this agent be given? id, description, default auth level,
 # required product feature, self-scoping flag, channel restrictions.
-th api agents tools registry
+th agents tools registry
 
 # Flip ONE tool. The merge is server-side and atomic — no array round-trip,
 # no lost update. --auth-level defaults to the tool's defaultAuthLevel.
-th api agents tools enable  <agent-id> <tool-id> [--auth-level none|end_user|admin]
-th api agents tools disable <agent-id> <tool-id>
+th agents tools enable  <agent-id> <tool-id> [--auth-level none|end_user|admin]
+th agents tools disable <agent-id> <tool-id>
 ```
+
+Every `th agents …` command is also spelled `th api agents …`, and always will
+be — `th api` is the thin, route-shaped surface (one subcommand per endpoint,
+nothing invented), so it stays complete. `th agents` is the promoted daily
+surface, alongside `th crm` / `th config` / `th testing`. Use whichever fits;
+they are the same code path, not a wrapper.
 
 `tools list` states the mode in words rather than making you infer it:
 
@@ -743,7 +749,13 @@ th agent backend status [--json]           # which mailbox am I on, and (cloud) 
 th agent backend set sqlite|cloud          # local (default, free) or cross-machine (paid)
 ```
 
-`th agent`/`th msg` also answer to `th agents`/`th msgs`.
+`th msg` also answers to `th msgs`.
+
+`th agent` is deliberately **singular-only**. The plural `th agents` is the Smoo
+AI platform agent surface (`th agents list`, `th agents tools …`) — a different
+thing on a different store, so the two are not aliases of each other. This is
+`.claude/skills/normalize` rule 4 ("skip semantic collisions"), which named this
+exact pair; the alias existed anyway until th-c66db7 removed it.
 
 **Identity** resolves `$SMOOTH_AGENT_HANDLE` → `$SMOOTH_AGENT` → the handle the
 SessionStart hook recorded for this session id (`$CLAUDE_CODE_SESSION_ID`, else
