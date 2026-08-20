@@ -131,7 +131,11 @@ pub enum AuthCommands {
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommands {
     /// List profiles and show which is active.
-    List,
+    List {
+        /// Print profiles as JSON instead of the rendered list.
+        #[arg(long)]
+        json: bool,
+    },
     /// Set the active profile (persisted in `<auth>/active`).
     Use {
         /// Profile name.
@@ -198,6 +202,23 @@ pub fn supabase_anon_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn profile_list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: ProfileCommands,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, ProfileCommands::List { json: true }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, ProfileCommands::List { json: false }), "--json must default to off");
+    }
 
     #[test]
     fn supabase_url_honors_env_override() {

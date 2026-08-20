@@ -662,6 +662,9 @@ pub enum ContactsCmd {
         /// Maximum number of contacts to return.
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Output is already raw JSON; accepted for interface consistency (CLI-Spec §flags).
+        #[arg(long)]
+        json: bool,
     },
     /// Get a single contact by id.
     Get {
@@ -851,7 +854,8 @@ pub fn resolve_org(override_org: Option<String>) -> Result<String> {
 async fn contacts(cmd: ContactsCmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
-        ContactsCmd::List { org, search, limit } => {
+        // `--json` is a no-op here — the output is already the raw response.
+        ContactsCmd::List { org, search, limit, json: _ } => {
             let org = resolve_org(org)?;
             let mut path = format!("/organizations/{org}/crm/contacts?limit={limit}");
             if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
@@ -3325,6 +3329,24 @@ mod tests {
         split_entity_ref, split_mrr, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`
+    /// (a no-op here — contacts list already prints raw JSON).
+    #[test]
+    fn contacts_list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: super::ContactsCmd,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, super::ContactsCmd::List { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, super::ContactsCmd::List { json: false, .. }), "--json must default to off");
+    }
 
     #[test]
     fn parent_row_points_up_only_for_source_direction() {

@@ -31,6 +31,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print raw JSON instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one knowledge document's metadata.
     Show {
@@ -142,12 +145,14 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 print_knowledge_results(&resp);
             }
         }
-        Cmd::List { org } => {
+        Cmd::List { org, json } => {
             let o = require_active_org(&client, org)?;
-            print_list_envelope(
-                &client.get(&format!("/organizations/{o}/knowledge")).await.context("GET knowledge")?,
-                "knowledge docs",
-            );
+            let body = client.get(&format!("/organizations/{o}/knowledge")).await.context("GET knowledge")?;
+            if json {
+                print_json(&body);
+            } else {
+                print_list_envelope(&body, "knowledge docs");
+            }
         }
         Cmd::Show { doc_id, org } => {
             let o = require_active_org(&client, org)?;
@@ -262,5 +267,27 @@ fn print_knowledge_results(resp: &serde_json::Value) {
         }
         Some(_) => println!("No matching knowledge found for that query."),
         None => print_json(resp),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI-Spec §flags: every platform `list` verb offers `--json`.
+    #[test]
+    fn list_accepts_json_flag_and_defaults_to_off() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let on = Wrap::try_parse_from(["t", "list", "--json"]).expect("--json must parse");
+        assert!(matches!(on.cmd, Cmd::List { json: true, .. }));
+
+        let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
+        assert!(matches!(off.cmd, Cmd::List { json: false, .. }), "--json must default to off");
     }
 }

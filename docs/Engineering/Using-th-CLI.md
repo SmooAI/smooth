@@ -21,7 +21,7 @@
 | **MCP / plugins / skills** | `th mcp`, `th plugin`, `th skills` | TOML manifests under `~/.smooth/` |
 | **Service ops** | `th service`, `th doctor`, `th cache`, `th audit` | local launchd / systemd, `~/.smooth/` |
 
-Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting.
+Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting. Append `ai` to any command path (`smoo org ai`, `th pearls ai`, bare `th ai`) for a generated markdown guide built for humans and AI agents alike. The full interface contract — verbs, flags, output, color — is codified in [`CLI-Spec.md`](CLI-Spec.md) and partly enforced by tests.
 
 ### 1a. The `smoo` namespace (pearl th-fc32d9)
 

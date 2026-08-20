@@ -63,7 +63,7 @@ smooth/
 
 > **Full doc**: [`docs/Engineering/Using-th-CLI.md`](docs/Engineering/Using-th-CLI.md). The bullets below are the muscle-memory summary; everything below covers what the binary built from this repo can do for you and how to extend it.
 
-`th` is **the** CLI we use across smooth and smooai. Reach for it before `curl`, before the web app, before Supabase Studio. Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting.
+`th` is **the** CLI we use across smooth and smooai. Reach for it before `curl`, before the web app, before Supabase Studio. Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting, and appending `ai` to any command path (`smoo org ai`) prints a generated markdown guide. The interface contract lives in [`docs/Engineering/CLI-Spec.md`](docs/Engineering/CLI-Spec.md) — read it before adding or reshaping a command.
 
 > 📣 **The `smoo` namespace (pearl th-fc32d9).** `th` is two products in one
 > binary: the standalone local agent tool (pearls, worktrees, mail, daemon,
