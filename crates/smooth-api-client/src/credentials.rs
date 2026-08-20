@@ -358,12 +358,10 @@ mod tests {
         seed.access_token = "tok-seed".into();
         seed.refresh_token = Some("rtok-seed".into());
         store.save(&seed).expect("seed");
-        let stop = std::sync::atomic::AtomicBool::new(false);
 
         std::thread::scope(|scope| {
             let writer = {
                 let store = store.clone();
-                let stop = &stop;
                 scope.spawn(move || {
                     for i in 0..200 {
                         let mut creds = fixture();
@@ -373,10 +371,13 @@ mod tests {
                         // so this really is testing `save` on its own.
                         store.save(&creds).expect("save");
                     }
-                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 })
             };
-            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            // Both loops are bounded and independent. A "read until the
+            // writer signals done" flag would spin forever the moment the
+            // writer panicked — a hung suite instead of a failed test,
+            // which is how this wedged Windows CI for 30 minutes.
+            for _ in 0..2_000 {
                 let loaded = store.load().expect("a reader must never see a partial file").expect("present");
                 let suffix = loaded.access_token.strip_prefix("tok-").expect("intact access token");
                 assert_eq!(
