@@ -58,6 +58,9 @@ th harness enable claude-code   # smooth-agent plugin install/update (claude CLI
                                 # MCP server, statusline check
 th harness enable codex         # MCP server + plugin state detection
 th harness enable opencode      # MCP server + shared-skill symlinks (~/.opencode/skills)
+                                # + the lifecycle plugin (~/.config/opencode/plugins/smooth-agent.js):
+                                # every OpenCode session registers on the th-mail bus with
+                                # working/idle/offline presence (pearl th-cc50cd)
 th harness enable all
 th harness status               # per-harness: MCP ok/stale/missing, plugin, skills, statusline
 th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smooth-owned links)
@@ -68,9 +71,9 @@ th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smo
 key order survive); `disable` never touches user-owned entries. The canonical
 skill source is the installed smooth-agent plugin checkout; Claude Code and
 Codex consume skills through the plugin itself, OpenCode gets symlinks.
-Lifecycle-hook parity for OpenCode (session registration, presence, inbox
-delivery) is pearl th-cc50cd; the read-only/approval-gated MCP tool split is
-pearl th-1d5ca8.
+Inbox delivery INTO a running OpenCode session (prompt-boundary context
+injection via the SDK client) is the remaining piece of pearl th-cc50cd; the
+write kill switch for `th mcp serve` is `SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
 
 ---
 
