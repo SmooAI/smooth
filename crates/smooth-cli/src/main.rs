@@ -396,6 +396,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
+    /// Smoo AI agents — list / show / create / update / delete, the
+    /// regenerate-* and per-agent knowledge endpoints, and `tools` (which
+    /// tools each agent may actually use).
+    ///
+    /// Same commands as `th api agents`, promoted to the top level alongside
+    /// `th crm` / `th config` / `th testing`. `th api …` stays the thin,
+    /// route-shaped passthrough; this is the surface you reach for daily.
+    ///
+    /// NOT `th agent` (singular) — that is the local agent-messaging registry,
+    /// a different thing on a different machine-local store. The two are
+    /// deliberately not aliased to each other; see `.claude/skills/normalize`.
+    Agents {
+        #[command(subcommand)]
+        cmd: smooai::agents::Cmd,
+    },
     /// White-label a Smoo AI org — app name, chrome colors, and logos.
     ///
     /// Logos come from a local path or a remote URL, always re-hosted on our
@@ -582,7 +597,12 @@ enum Commands {
     /// Registers it under a name so any harness (claude-code, opencode, pi, a
     /// shell loop) can message it. Machine-level: one roster per host
     /// (`~/.smooth/mail.db`).
-    #[command(visible_alias = "agents")]
+    ///
+    /// Singular on purpose. `th agents` (plural) is the Smoo AI platform agents
+    /// in your org — a different thing entirely. This used to answer to
+    /// `agents` as a visible_alias, which made the plural mean messaging; that
+    /// is the exact pairing `.claude/skills/normalize` rule 4 forbids, so it
+    /// was removed rather than kept for compatibility.
     Agent {
         #[command(subcommand)]
         cmd: mail::AgentCommands,
@@ -1704,6 +1724,7 @@ async fn main() -> Result<()> {
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
         Some(Commands::Crm { cmd }) => smooai::crm::cmd(cmd).await,
+        Some(Commands::Agents { cmd }) => smooai::agents::cmd(cmd).await,
         Some(Commands::Branding { cmd }) => smooai::branding::cmd(cmd).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
@@ -8776,6 +8797,57 @@ mod org_cli_tests {
         // The plural spelling still works too (aliases don't displace the canonical name).
         assert!(matches!(
             Cli::try_parse_from(["th", "api", "agents", "list"]).expect("api agents").command,
+            Some(Commands::Api {
+                cmd: ApiCommands::Agents { .. }
+            })
+        ));
+    }
+
+    /// `th agents …` is the Smoo AI platform agent surface at the top level,
+    /// and `th agent …` is still the machine-local messaging registry.
+    ///
+    /// These two spellings pointing at two unrelated stores is the whole reason
+    /// `.claude/skills/normalize` rule 4 calls it out. The alias that violated
+    /// it shipped anyway, so these assertions exist to keep the plural pointing
+    /// at the platform. Every one of them fails if someone re-adds
+    /// `visible_alias = "agents"` to `Commands::Agent`: clap rejects a
+    /// duplicate command name at parser-construction time, so the whole test
+    /// module panics rather than quietly resolving to whichever came first.
+    #[test]
+    fn th_agents_is_platform_agents_not_messaging() {
+        // top-level plural → platform agents
+        assert!(matches!(
+            Cli::try_parse_from(["th", "agents", "list"]).expect("th agents list").command,
+            Some(Commands::Agents { .. })
+        ));
+        // the verbs this promotion exists for
+        assert!(matches!(
+            Cli::try_parse_from(["th", "agents", "tools", "registry"])
+                .expect("th agents tools registry")
+                .command,
+            Some(Commands::Agents { .. })
+        ));
+
+        // NEGATIVE CONTROL: singular must NOT be the platform surface. Written
+        // as an explicit not-Agents assertion rather than `matches!(.., Agent)`
+        // because a future third variant should fail this too.
+        let singular = Cli::try_parse_from(["th", "agent", "list"]).expect("th agent list").command;
+        assert!(
+            !matches!(singular, Some(Commands::Agents { .. })),
+            "`th agent` (singular) must stay the local messaging registry"
+        );
+        assert!(matches!(singular, Some(Commands::Agent { .. })));
+
+        // `th api agents` is unchanged — promoting a surface must not remove the
+        // route-shaped one, which is what `th api` is for.
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "agents", "list"]).expect("api agents").command,
+            Some(Commands::Api {
+                cmd: ApiCommands::Agents { .. }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "agent", "list"]).expect("api agent").command,
             Some(Commands::Api {
                 cmd: ApiCommands::Agents { .. }
             })

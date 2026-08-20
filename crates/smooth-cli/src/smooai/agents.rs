@@ -23,7 +23,7 @@ pub enum Cmd {
     },
     /// Show one agent's full record (config, status, metadata).
     Show {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -31,7 +31,7 @@ pub enum Cmd {
     },
     /// Fetch the agent's generated summary blurb.
     Summary {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -87,8 +87,8 @@ pub enum Cmd {
         /// TRAP: empty `enabledTools` = the FULL tool set; non-empty = an
         /// ALLOWLIST, so the first tool you add silently disables every other
         /// one. This flag replaces the whole array — to flip a single tool
-        /// atomically, use `th api agents tools enable|disable` instead, and
-        /// `th api agents tools list <id>` to see what an agent is missing.
+        /// atomically, use `th agents tools enable|disable` instead, and
+        /// `th agents tools list <id>` to see what an agent is missing.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
         /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
@@ -128,7 +128,7 @@ pub enum Cmd {
     /// Patch an existing agent — a partial JSON body, or typed per-field
     /// flags (SMOODEV-590 per-agent config). Read fields with `show`.
     Update {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// JSON patch body, or `-` to read from stdin. Omit when using field flags.
         body: Option<String>,
@@ -155,8 +155,8 @@ pub enum Cmd {
         /// TRAP: empty `enabledTools` = the FULL tool set; non-empty = an
         /// ALLOWLIST, so the first tool you add silently disables every other
         /// one. This flag replaces the whole array — to flip a single tool
-        /// atomically, use `th api agents tools enable|disable` instead, and
-        /// `th api agents tools list <id>` to see what an agent is missing.
+        /// atomically, use `th agents tools enable|disable` instead, and
+        /// `th agents tools list <id>` to see what an agent is missing.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
         /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
@@ -171,7 +171,7 @@ pub enum Cmd {
     },
     /// Delete an agent permanently.
     Delete {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -179,7 +179,7 @@ pub enum Cmd {
     },
     /// Re-run one of the agent's generators.
     Regenerate {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Which generator slot to re-run.
         #[arg(value_enum)]
@@ -190,7 +190,7 @@ pub enum Cmd {
     },
     /// List the knowledge documents attached to an agent.
     ListKnowledge {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -198,7 +198,7 @@ pub enum Cmd {
     },
     /// Replace the agent's attached knowledge set (JSON body).
     SetKnowledge {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// JSON body listing the knowledge to attach, or `-` for stdin.
         body: String,
@@ -366,7 +366,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     }
                     Err(e) => {
                         println!(
-                            "  {} brand extraction failed ({e:#}) — set colors manually with `th api agents update`",
+                            "  {} brand extraction failed ({e:#}) — set colors manually with `th agents update`",
                             "!".yellow()
                         );
                     }
@@ -547,7 +547,7 @@ fn personality_value(v: String) -> Result<Value> {
 }
 
 /// Assemble a PATCH body from the typed update flags. Pure — no I/O — so
-/// it's unit-testable. Bails when no field was set so `th api agents update
+/// it's unit-testable. Bails when no field was set so `th agents update
 /// <id>` with nothing else fails loudly instead of PATCHing `{}`.
 fn build_update_body(
     instructions: Option<&str>,
@@ -637,7 +637,7 @@ fn build_mint_body(
     // `organizationId`, `summary`, and `isBuiltin` are NOT-NULL columns the
     // create route requires in the body (it only fills in authPublicClient*/
     // createdBy). summary defaults to the name; it can be regenerated later via
-    // `th api agents regenerate-summary`.
+    // `th agents regenerate-summary`.
     let mut body = json!({
         "organizationId": org,
         "name": name,
@@ -985,7 +985,7 @@ mod tests {
         assert!(!snip.contains("colors: {"));
     }
 
-    /// Pearl th-91de11: `th api agents list` had no machine-readable form,
+    /// Pearl th-91de11: `th agents list` had no machine-readable form,
     /// so scripts had to parse the decorated table. Guard the flag's
     /// existence + default — losing it silently re-breaks every caller.
     #[test]

@@ -1,7 +1,7 @@
-//! `th api agents tools …` — per-agent tool enablement.
+//! `th agents tools …` — per-agent tool enablement.
 //!
 //! Enabling one tool on one agent used to mean round-tripping the whole
-//! `AgentToolConfig` through `th api agents update --tool-config`: read →
+//! `AgentToolConfig` through `th agents update --tool-config`: read →
 //! parse → append → write back, a lost-update race that made raw SQL feel
 //! easier. It is also how `verify_identity` shipped invisible — an agent whose
 //! `enabledTools` was non-empty silently excluded every tool not on the list,
@@ -35,7 +35,7 @@ pub enum ToolsCmd {
     /// Show which tools this agent has, and — the point — which available
     /// tools it is MISSING. Says plainly whether the agent is restricted.
     List {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -61,9 +61,9 @@ pub enum ToolsCmd {
     /// already enabled implicitly, and writing a one-entry allowlist is
     /// exactly the accident that hid `verify_identity` in production.
     Enable {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
-        /// Tool id from `th api agents tools registry` (snake_case).
+        /// Tool id from `th agents tools registry` (snake_case).
         tool_id: String,
         /// Auth level required before the tool may execute. Defaults to the
         /// tool's `defaultAuthLevel`. Rejected with 409 on an unrestricted
@@ -84,9 +84,9 @@ pub enum ToolsCmd {
     /// available, minus this tool) — the agent stops picking up newly shipped
     /// tools from then on. The command says so.
     Disable {
-        /// The agent id from `th api agents list`.
+        /// The agent id from `th agents list`.
         agent_id: String,
-        /// Tool id from `th api agents tools list` (snake_case).
+        /// Tool id from `th agents tools list` (snake_case).
         tool_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -162,11 +162,22 @@ pub struct EnabledTool {
     pub tool_id: String,
     #[serde(default)]
     pub auth_level: Option<String>,
-    /// `false` ⇒ this toolId is not in the registry and binds to nothing at
-    /// runtime (SMOODEV-981: camelCase ids silently fail to bind). The server
-    /// owns this — it holds both halves, so no client should reconstruct it.
-    /// Defaults to `true`: a server that doesn't send the field must not make
-    /// the CLI accuse every working tool of being a ghost.
+    /// `false` ⇒ the server did not find this toolId in the registry it
+    /// enumerates. That has TWO causes and they need opposite responses:
+    /// SMOODEV-981's camelCase id, which genuinely binds to nothing and should
+    /// be removed — and a tool registered in a runtime the registry route does
+    /// not enumerate, which works perfectly and must NOT be touched.
+    ///
+    /// As of th-fddcc2 the route builds its list from the TypeScript registry
+    /// ONLY, so every Rust-side tool (`verify_identity`, `web_search`,
+    /// `fetch_url`, …) arrives here as `false`. Five of Smantha's eleven were
+    /// flagged in prod while working. So this flag is NOT evidence a tool is
+    /// dead, and the rendered warning must not claim it is: removing
+    /// `verify_identity` on its say-so re-causes the th-c66db7 incident.
+    ///
+    /// The server owns the value — it holds both halves, so no client should
+    /// reconstruct it. Defaults to `true`: a server that doesn't send the
+    /// field must not make the CLI accuse every working tool of being a ghost.
     #[serde(default = "yes")]
     pub registered: bool,
 }
@@ -379,7 +390,7 @@ pub fn render_agent_tools(view: &AgentToolsView, registry: &[RegistryTool]) -> S
         let ghost = if t.registered {
             ""
         } else {
-            "  ⚠ NOT IN REGISTRY — binds to nothing at runtime"
+            "  ⚠ NOT IN REGISTRY — a typo'd id binds to nothing; a Rust-side tool works fine. VERIFY before removing (th-fddcc2)"
         };
         let gist = lookup(&t.tool_id).map(|r| summarize(&r.description)).unwrap_or_default();
         let _ = writeln!(out, "  {}{auth}{ghost}{gist}", t.tool_id);
@@ -434,7 +445,7 @@ pub fn render_change(change: &ToolChange) -> String {
     if change.became_restricted {
         let _ = writeln!(
             out,
-            "{} this agent was UNRESTRICTED (every available tool, including future ones) and is now an ALLOWLIST. It will NOT pick up newly shipped tools — re-check it with `th api agents tools list` after every release.",
+            "{} this agent was UNRESTRICTED (every available tool, including future ones) and is now an ALLOWLIST. It will NOT pick up newly shipped tools — re-check it with `th agents tools list` after every release.",
             "WARNING:".yellow().bold(),
         );
     }
@@ -808,6 +819,40 @@ mod tests {
         assert!(out.contains("verifyIdentity  ⚠ NOT IN REGISTRY"), "{out}");
         assert!(out.contains("MISSING (1)"), "{out}");
         assert!(out.contains("verify_identity [auth:end_user; feature:telephony; self-scoping]"), "{out}");
+    }
+
+    /// The unregistered warning must NOT assert that the tool is dead.
+    ///
+    /// th-fddcc2: the registry route enumerates the TypeScript registry only,
+    /// so every Rust-side tool arrives with `registered: false`. In prod that
+    /// flagged 5 of Smantha's 11 — `verify_identity` among them, while it was
+    /// demonstrably serving OTP. The warning used to read "binds to nothing at
+    /// runtime", which is an assertion about the world, and the documented
+    /// response to it is deletion. Following it disables OTP auth and re-causes
+    /// th-c66db7.
+    ///
+    /// So: name both causes, tell the reader to verify, never conclude. If you
+    /// are here because this test failed, the fix is the SERVER reporting the
+    /// truth (th-fddcc2) — not re-asserting it in the client.
+    #[test]
+    fn unregistered_warning_does_not_assert_the_tool_is_dead() {
+        let v = view(json!({
+            "mode": "restricted",
+            "enabled": [{ "toolId": "verify_identity", "registered": false }],
+            "available": [], "missing": [],
+        }));
+        let out = render_agent_tools(&v, &[]);
+
+        // Still flagged — a real ghost must not become invisible.
+        assert!(out.contains("NOT IN REGISTRY"), "{out}");
+        // ...but as a question, not a verdict.
+        assert!(out.contains("VERIFY before removing"), "{out}");
+        assert!(out.contains("Rust-side tool works fine"), "{out}");
+        // The exact phrasing that made deletion look correct.
+        assert!(
+            !out.contains("— binds to nothing at runtime"),
+            "unregistered warning must not assert a runtime consequence it cannot know: {out}"
+        );
     }
 
     #[test]
