@@ -162,6 +162,17 @@ pub struct EnabledTool {
     pub tool_id: String,
     #[serde(default)]
     pub auth_level: Option<String>,
+    /// `false` ⇒ this toolId is not in the registry and binds to nothing at
+    /// runtime (SMOODEV-981: camelCase ids silently fail to bind). The server
+    /// owns this — it holds both halves, so no client should reconstruct it.
+    /// Defaults to `true`: a server that doesn't send the field must not make
+    /// the CLI accuse every working tool of being a ghost.
+    #[serde(default = "yes")]
+    pub registered: bool,
+}
+
+const fn yes() -> bool {
+    true
 }
 
 /// `GET …/agents/{agent_id}/tools` — the drift view.
@@ -334,14 +345,15 @@ pub fn render_agent_tools(view: &AgentToolsView, registry: &[RegistryTool]) -> S
     }
     for t in &view.enabled {
         let auth = t.auth_level.as_deref().map(|a| format!(" [auth:{a}]")).unwrap_or_default();
-        // A toolId with no registry entry binds to nothing at runtime
-        // (SMOODEV-981): the agent reads as configured and has no tool.
-        let gist = match lookup(&t.tool_id) {
-            Some(r) => summarize(&r.description),
-            None if registry.is_empty() => String::new(),
-            None => "  ⚠ NOT IN REGISTRY — binds to nothing at runtime".to_string(),
+        // Server-reported, so this still fires when the registry fetch failed
+        // and `lookup` can tell us nothing.
+        let ghost = if t.registered {
+            ""
+        } else {
+            "  ⚠ NOT IN REGISTRY — binds to nothing at runtime"
         };
-        let _ = writeln!(out, "  {}{auth}{gist}", t.tool_id);
+        let gist = lookup(&t.tool_id).map(|r| summarize(&r.description)).unwrap_or_default();
+        let _ = writeln!(out, "  {}{auth}{ghost}{gist}", t.tool_id);
     }
 
     let _ = writeln!(out, "\nMISSING ({}) — available to this org, not enabled on this agent", view.missing.len());
@@ -535,7 +547,7 @@ fn view_json(v: &AgentToolsView) -> Value {
         // The trap, in the machine-readable output too — an agent reading this
         // JSON should not have to know the empty/non-empty rule to be safe.
         "restrictionNote": restriction_banner(v),
-        "enabled": v.enabled.iter().map(|t| json!({ "toolId": t.tool_id, "authLevel": t.auth_level })).collect::<Vec<_>>(),
+        "enabled": v.enabled.iter().map(|t| json!({ "toolId": t.tool_id, "authLevel": t.auth_level, "registered": t.registered })).collect::<Vec<_>>(),
         "available": v.available,
         "missing": v.missing,
     });
@@ -665,21 +677,50 @@ mod tests {
     }
 
     #[test]
-    fn enabled_tool_id_absent_from_the_registry_is_flagged() {
+    fn enabled_tool_id_the_server_marks_unregistered_is_flagged() {
         // SMOODEV-981: a camelCase toolId binds to nothing at runtime, so the
-        // agent looks configured and has no tool.
+        // agent looks configured and has no tool. The server reports it.
         let v = view(json!({
             "mode": "restricted",
-            "enabled": [{ "toolId": "knowledgeSearch", "authLevel": "none" }],
+            "enabled": [{ "toolId": "knowledgeSearch", "authLevel": "none", "registered": false }],
             "available": ["knowledge_search"], "missing": ["knowledge_search"],
         }));
         assert!(render_agent_tools(&v, &incident_registry()).contains("NOT IN REGISTRY"));
     }
 
     #[test]
-    fn no_registry_means_bare_ids_not_false_ghost_warnings() {
-        // The registry fetch is best-effort; an empty one must not accuse
-        // every enabled tool of being unregistered.
+    fn ghost_warning_survives_a_failed_registry_fetch() {
+        // The whole reason to take the server's flag instead of inferring it
+        // from the registry join: the join is best-effort, and a ghost is a
+        // correctness signal that must not depend on a second call succeeding.
+        let v = view(json!({
+            "mode": "restricted",
+            "enabled": [{ "toolId": "knowledgeSearch", "registered": false }],
+            "available": [], "missing": [],
+        }));
+        assert!(render_agent_tools(&v, &[]).contains("NOT IN REGISTRY"));
+    }
+
+    #[test]
+    fn a_ghost_id_does_not_cover_for_the_real_tool() {
+        // The exact incident shape: `verifyIdentity` is configured (and dead),
+        // while `verify_identity` is still genuinely missing. Both must show,
+        // or the operator reads the ghost as the tool being handled.
+        let v = view(json!({
+            "mode": "restricted",
+            "enabled": [{ "toolId": "verifyIdentity", "registered": false }],
+            "available": ["verify_identity"], "missing": ["verify_identity"],
+        }));
+        let out = render_agent_tools(&v, &incident_registry());
+        assert!(out.contains("verifyIdentity  ⚠ NOT IN REGISTRY"), "{out}");
+        assert!(out.contains("MISSING (1)"), "{out}");
+        assert!(out.contains("verify_identity [auth:end_user; feature:telephony; self-scoping]"), "{out}");
+    }
+
+    #[test]
+    fn absent_registered_field_does_not_invent_a_ghost() {
+        // The routes are new; a server that doesn't send `registered` must not
+        // make the CLI accuse every working tool of binding to nothing.
         let v = view(json!({ "mode": "restricted", "enabled": [{ "toolId": "knowledge_search" }], "available": [], "missing": [] }));
         let out = render_agent_tools(&v, &[]);
         assert!(!out.contains("NOT IN REGISTRY"), "{out}");
