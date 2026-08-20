@@ -137,6 +137,26 @@ pub enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// Custom metrics — the catalog the org emits, one metric charted over
+    /// time, and the attribute keys it can be broken down by.
+    #[command(visible_alias = "metric")]
+    Metrics {
+        #[command(subcommand)]
+        cmd: MetricsCmd,
+    },
+    /// Real-user Core Web Vitals (LCP, FCP, INP, TTFB, CLS) at p75, overall
+    /// and per route — measured in visitors' browsers, not synthetic tests.
+    WebVitals {
+        /// Look-back window: `90s`, `45m`, `6h`, `7d`. Defaults to 24h — an
+        /// hour of real traffic is usually too thin a p75 sample.
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// Only this environment, e.g. `production`.
+        #[arg(long)]
+        environment: Option<String>,
+        #[command(flatten)]
+        common: Common,
+    },
     /// Platform audit trail — who did what in the org, and whether it worked.
     ///
     /// This is the tamper-evident org record, not the local `th audit` tool
@@ -353,6 +373,63 @@ pub enum LlmCmd {
     },
 }
 
+#[derive(Subcommand)]
+pub enum MetricsCmd {
+    /// The metrics this org actually emits — name, kind, unit, service, and
+    /// when each was last seen. Start here: `query` needs an exact name.
+    List {
+        /// Only metrics emitted by this service.
+        #[arg(long)]
+        service: Option<String>,
+        /// Only metrics from this environment, e.g. `production`.
+        #[arg(long)]
+        environment: Option<String>,
+        /// Max metrics (1–500).
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Chart one metric over a window as time buckets — mean per bucket, or
+    /// p50/p95/p99 with `--mode percentiles` (histogram metrics only).
+    Query {
+        /// Exact metric name, from `metrics list`.
+        metric_name: String,
+        /// Look-back window: `90s`, `45m`, `6h`, `7d`.
+        #[arg(long, default_value = DEFAULT_SINCE)]
+        since: String,
+        /// Bucket width in minutes (1–1440).
+        #[arg(long, default_value_t = 1)]
+        bucket_minutes: u64,
+        /// `mean` or `percentiles`.
+        #[arg(long, default_value = "mean")]
+        mode: String,
+        /// Attribute key to break the series down by (repeatable) — see
+        /// `metrics attributes`.
+        #[arg(long)]
+        group_by: Vec<String>,
+        /// Only points from this service.
+        #[arg(long)]
+        service: Option<String>,
+        /// Only points from this environment.
+        #[arg(long)]
+        environment: Option<String>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// The attribute keys recorded on one metric — the dimensions `query
+    /// --group-by` accepts.
+    Attributes {
+        /// Exact metric name, from `metrics list`.
+        metric_name: String,
+        /// How far back to sample for keys, in hours (1–168).
+        #[arg(long, default_value_t = 24)]
+        lookback_hours: u32,
+        #[command(flatten)]
+        common: Common,
+    },
+}
+
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
@@ -513,6 +590,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let org = require_active_org(&client, org)?;
             let resp = pipeline_health(&client, &org).await?;
             emit(&resp, json, render_health);
+        }
+        Cmd::Metrics { cmd } => metrics(cmd, &client).await?,
+        Cmd::WebVitals { since, environment, common } => {
+            let org = require_active_org(&client, common.org)?;
+            let resp = web_vitals(&client, &org, &since, environment.as_deref()).await?;
+            emit(&resp, common.json, |r| render_web_vitals(r, &since));
         }
         Cmd::Monitors { common } => {
             let org = require_active_org(&client, common.org)?;
@@ -686,6 +769,56 @@ async fn llm(cmd: LlmCmd, client: &SmoothApiClient) -> Result<()> {
             let org = require_active_org(client, common.org)?;
             let resp = llm_cost(client, &org, &group_by, window_minutes, limit).await?;
             emit(&resp, common.json, |r| render_llm_cost(r, limit as usize));
+        }
+    }
+    Ok(())
+}
+
+async fn metrics(cmd: MetricsCmd, client: &SmoothApiClient) -> Result<()> {
+    match cmd {
+        MetricsCmd::List {
+            service,
+            environment,
+            limit,
+            common,
+        } => {
+            let org = require_active_org(client, common.org)?;
+            let resp = metrics_list(client, &org, service.as_deref(), environment.as_deref(), limit).await?;
+            emit(&resp, common.json, |r| render_metrics(r, limit as usize));
+        }
+        MetricsCmd::Query {
+            metric_name,
+            since,
+            bucket_minutes,
+            mode,
+            group_by,
+            service,
+            environment,
+            common,
+        } => {
+            let org = require_active_org(client, common.org)?;
+            let mode = parse_mode(&mode)?;
+            let filters = MetricSeriesFilters {
+                metric_name: metric_name.clone(),
+                since,
+                bucket_minutes,
+                mode: mode.to_string(),
+                group_by,
+                service,
+                environment,
+            };
+            let resp = metrics_timeseries(client, &org, &filters).await?;
+            emit(&resp, common.json, |r| render_metric_points(r, &metric_name, mode, &filters.since));
+        }
+        MetricsCmd::Attributes {
+            metric_name,
+            lookback_hours,
+            common,
+        } => {
+            let org = require_active_org(client, common.org)?;
+            let hours = lookback_hours.clamp(1, 168);
+            let resp = metric_attributes(client, &org, &metric_name, hours).await?;
+            emit(&resp, common.json, |r| render_metric_attributes(r, &metric_name, hours));
         }
     }
     Ok(())
@@ -1027,6 +1160,122 @@ pub async fn pipeline_health(client: &SmoothApiClient, org: &str) -> Result<Valu
         .get(&format!("/organizations/{org}/observability/health"))
         .await
         .context("GET observability/health")
+}
+
+/// `GET /observability/metrics` → `{ metrics: [...] }` — the metric catalog.
+///
+/// # Errors
+/// Non-2xx from the API.
+pub async fn metrics_list(client: &SmoothApiClient, org: &str, service: Option<&str>, environment: Option<&str>, limit: u32) -> Result<Value> {
+    let query = qs(&[
+        ("serviceName", opt(service)),
+        ("environment", opt(environment)),
+        ("limit", Some(limit.clamp(1, 500).to_string())),
+    ]);
+    client
+        .get(&format!("/organizations/{org}/observability/metrics{query}"))
+        .await
+        .context("GET observability/metrics")
+}
+
+/// Filters for [`metrics_timeseries`].
+#[derive(Debug, Default)]
+pub struct MetricSeriesFilters {
+    pub metric_name: String,
+    /// Relative window (see [`parse_since`]); empty falls back to [`DEFAULT_SINCE`].
+    pub since: String,
+    /// Bucket width in minutes; clamped to 1–1440.
+    pub bucket_minutes: u64,
+    /// `mean` or `percentiles` — validate with [`parse_mode`] first.
+    pub mode: String,
+    pub group_by: Vec<String>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+}
+
+/// `GET /observability/metrics/timeseries` → `{ points: [...] }`.
+///
+/// # Errors
+/// Bad `since`, or a non-2xx from the API.
+pub async fn metrics_timeseries(client: &SmoothApiClient, org: &str, f: &MetricSeriesFilters) -> Result<Value> {
+    let since = if f.since.trim().is_empty() { DEFAULT_SINCE } else { &f.since };
+    let (since_ms, until_ms) = window_ms(since)?;
+    let group_by: Vec<&str> = f.group_by.iter().map(|k| k.trim()).filter(|k| !k.is_empty()).collect();
+    let query = qs(&[
+        ("metricName", Some(f.metric_name.clone())),
+        ("sinceMs", Some(since_ms.to_string())),
+        ("untilMs", Some(until_ms.to_string())),
+        ("bucketMs", Some((f.bucket_minutes.clamp(1, 1440) * 60_000).to_string())),
+        ("mode", Some(f.mode.clone())),
+        ("groupBy", opt(Some(&group_by.join(",")))),
+        ("serviceName", opt(f.service.as_deref())),
+        ("environment", opt(f.environment.as_deref())),
+    ]);
+    client
+        .get(&format!("/organizations/{org}/observability/metrics/timeseries{query}"))
+        .await
+        .context("GET observability/metrics/timeseries")
+}
+
+/// `GET /observability/metrics/attributes` → `{ keys: [...] }`.
+///
+/// # Errors
+/// Non-2xx from the API.
+pub async fn metric_attributes(client: &SmoothApiClient, org: &str, metric: &str, lookback_hours: u32) -> Result<Value> {
+    let query = qs(&[("metricName", Some(metric.to_string())), ("lookbackHours", Some(lookback_hours.to_string()))]);
+    client
+        .get(&format!("/organizations/{org}/observability/metrics/attributes{query}"))
+        .await
+        .context("GET observability/metrics/attributes")
+}
+
+/// `GET /observability/metrics/web-vitals` → `{ points: [...] }` — p75 Core
+/// Web Vitals per route.
+///
+/// # Errors
+/// Bad `since`, or a non-2xx from the API.
+pub async fn web_vitals(client: &SmoothApiClient, org: &str, since: &str, environment: Option<&str>) -> Result<Value> {
+    let (since_ms, until_ms) = window_ms(if since.trim().is_empty() { "24h" } else { since })?;
+    let query = qs(&[
+        ("sinceMs", Some(since_ms.to_string())),
+        ("untilMs", Some(until_ms.to_string())),
+        ("environment", opt(environment)),
+    ]);
+    client
+        .get(&format!("/organizations/{org}/observability/metrics/web-vitals{query}"))
+        .await
+        .context("GET observability/metrics/web-vitals")
+}
+
+/// `mean` or `percentiles`, case-insensitively — refused otherwise, because
+/// the rendering keys depend on it and a typo silently charting means as
+/// percentiles would be a wrong answer that looks right.
+///
+/// (`heatmap` is a real upstream mode, deliberately not offered: it returns
+/// raw bucket arrays that are a chart's input, not an answer.)
+///
+/// # Errors
+/// Anything that is not `mean` or `percentiles`.
+pub fn parse_mode(mode: &str) -> Result<&'static str> {
+    let m = mode.trim();
+    if m.is_empty() || m.eq_ignore_ascii_case("mean") {
+        Ok("mean")
+    } else if m.eq_ignore_ascii_case("percentiles") {
+        Ok("percentiles")
+    } else {
+        bail!("--mode must be mean or percentiles (got `{mode}`)")
+    }
+}
+
+/// `since` as a `(sinceMs, untilMs)` epoch-milliseconds pair ending now — the
+/// shape the metrics routes want, unlike the RFC3339 pair from [`window`].
+///
+/// # Errors
+/// Propagates [`parse_since`].
+pub fn window_ms(since: &str) -> Result<(i64, i64)> {
+    let end = Utc::now();
+    let start = end - parse_since(since)?;
+    Ok((start.timestamp_millis(), end.timestamp_millis()))
 }
 
 /// `GET /website-monitors/incidents` → `{ incidents: [...] }` — every OPEN
@@ -1390,6 +1639,105 @@ pub fn render_llm_cost(body: &Value, limit: usize) -> String {
         );
     }
     out.push_str(truncation_note(data.len(), limit, None).trim_end_matches('\n'));
+    out.trim_end().to_string()
+}
+
+/// The metric catalog.
+pub fn render_metrics(body: &Value, limit: usize) -> String {
+    let metrics = rows(body, "metrics");
+    if metrics.is_empty() {
+        return "No metrics recorded for this organization. (The query ran and returned zero rows — a metric only appears once a service exports it, so an empty catalog can also mean telemetry is not flowing yet.)".to_string();
+    }
+    let mut out = format!("{} metric(s):\n", metrics.len());
+    for m in metrics {
+        let _ = writeln!(
+            out,
+            "{}  [{}]  unit={}  {}  samples={}  last {}",
+            field(m, &["metricName", "metric_name"]),
+            field(m, &["kind"]),
+            field(m, &["unit"]),
+            field(m, &["serviceName", "service_name"]),
+            field(m, &["sampleCount", "sample_count"]),
+            field(m, &["lastSeenAt", "last_seen_at"]),
+        );
+    }
+    out.push_str(truncation_note(metrics.len(), limit, None).trim_end_matches('\n'));
+    out.trim_end().to_string()
+}
+
+/// One metric's time buckets. `mode` picks the value columns; `since` is only
+/// for the empty-result wording.
+pub fn render_metric_points(body: &Value, metric: &str, mode: &str, since: &str) -> String {
+    let points = rows(body, "points");
+    if points.is_empty() {
+        let percentile_note = if mode == "percentiles" {
+            " Note: only histogram metrics have percentiles — check the metric's kind with `metrics list`."
+        } else {
+            ""
+        };
+        return format!("No points recorded for `{metric}` in the last {since}. (The query ran and returned zero rows.){percentile_note}");
+    }
+    let value_keys: &[&str] = if mode == "percentiles" {
+        &["p50", "p95", "p99", "count"]
+    } else {
+        &["value", "count"]
+    };
+    let mut out = format!("`{metric}` over the last {since} ({mode}), {} bucket(s):\n", points.len());
+    for p in points {
+        // A raw epoch-ms column is unreadable when the question is WHEN
+        // something spiked — render it as a timestamp.
+        let at = p
+            .get("bucketMs")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map_or_else(|| "(unknown time)".to_string(), |d| d.to_rfc3339_opts(SecondsFormat::Secs, true));
+        let group = p
+            .get("groupKey")
+            .and_then(Value::as_str)
+            .filter(|g| !g.is_empty() && *g != "_default")
+            .map(|g| format!(" [{g}]"))
+            .unwrap_or_default();
+        let values: Vec<String> = value_keys.iter().map(|k| format!("{k}={}", field(p, &[k]))).collect();
+        let _ = writeln!(out, "{at}{group}  {}", values.join("  "));
+    }
+    out.trim_end().to_string()
+}
+
+/// The attribute keys on one metric.
+pub fn render_metric_attributes(body: &Value, metric: &str, hours: u32) -> String {
+    let keys: Vec<&str> = body
+        .get("keys")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if keys.is_empty() {
+        return format!("`{metric}` carries no attributes in the last {hours}h, so there is nothing to group it by. (The query ran and returned zero keys.)");
+    }
+    format!(
+        "Attributes on `{metric}` (last {hours}h) — pass to `metrics query --group-by`: {}",
+        keys.join(", ")
+    )
+}
+
+/// Core Web Vitals, p75 per route.
+pub fn render_web_vitals(body: &Value, since: &str) -> String {
+    let points = rows(body, "points");
+    if points.is_empty() {
+        return format!(
+            "No Core Web Vitals recorded in the last {since}. (The query ran and returned zero rows — vitals only appear if the site ships the browser SDK, so an empty result can also mean it is not instrumented.)"
+        );
+    }
+    let mut out = format!("Core Web Vitals (p75) over the last {since} — {} row(s):\n", points.len());
+    for p in points {
+        let route = p.get("route").and_then(Value::as_str).filter(|r| !r.is_empty()).unwrap_or("(all routes)");
+        let _ = writeln!(
+            out,
+            "{:<5} {route}  p75={}  samples={}",
+            field(p, &["metricName", "metric_name"]),
+            field(p, &["p75"]),
+            field(p, &["count"]),
+        );
+    }
     out.trim_end().to_string()
 }
 
@@ -1806,9 +2154,125 @@ mod tests {
             ],
             vec!["th", "audit"],
             vec!["th", "sourcemaps-list", "--release", "v1", "--environment", "production", "--json"],
+            vec!["th", "metrics", "list", "--service", "api-prime", "--limit", "50", "--json"],
+            vec!["th", "metric", "list"],
+            vec![
+                "th",
+                "metrics",
+                "query",
+                "http.server.duration",
+                "--since",
+                "6h",
+                "--bucket-minutes",
+                "5",
+                "--mode",
+                "percentiles",
+                "--group-by",
+                "route",
+                "--group-by",
+                "status",
+                "--json",
+            ],
+            vec!["th", "metrics", "attributes", "http.server.duration", "--lookback-hours", "48", "--json"],
+            vec!["th", "web-vitals", "--since", "7d", "--environment", "production", "--json"],
+            vec!["th", "web-vitals"],
         ] {
             Harness::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
         }
+    }
+
+    // ── Metrics + web vitals ────────────────────────────────────────────────
+
+    /// The rendering keys depend on the mode, so a typo must be refused — a
+    /// mean series silently labeled percentiles is wrong without looking wrong.
+    #[test]
+    fn mode_is_mean_or_percentiles_only() {
+        assert_eq!(parse_mode("mean").expect("mean"), "mean");
+        assert_eq!(parse_mode("PERCENTILES").expect("case-insensitive"), "percentiles");
+        assert_eq!(parse_mode("").expect("empty falls back"), "mean");
+        assert!(parse_mode("heatmap").is_err(), "heatmap is deliberately not offered");
+        assert!(parse_mode("p95").is_err());
+    }
+
+    #[test]
+    fn window_ms_brackets_now_in_epoch_millis() {
+        let (start, end) = window_ms("1h").expect("window");
+        assert_eq!(end - start, 3_600_000);
+        let now = Utc::now().timestamp_millis();
+        assert!((now - end).abs() < 5_000, "end must be ~now");
+        assert!(window_ms("24").is_err(), "bare numbers stay ambiguous here too");
+    }
+
+    #[test]
+    fn empty_metrics_results_state_that_the_query_ran() {
+        let cases = vec![
+            render_metrics(&json!({ "metrics": [] }), 200),
+            render_metric_points(&json!({ "points": [] }), "queue.depth", "mean", "1h"),
+            render_metric_attributes(&json!({ "keys": [] }), "queue.depth", 24),
+            render_web_vitals(&json!({ "points": [] }), "24h"),
+        ];
+        for text in cases {
+            let lower = text.to_lowercase();
+            assert!(lower.contains("no ") || lower.contains("nothing"), "must say it is empty: {text}");
+            assert!(
+                lower.contains("ran") || lower.contains("returned"),
+                "must make clear the query SUCCEEDED: {text}"
+            );
+        }
+    }
+
+    /// Percentiles on a non-histogram metric come back empty — the wording
+    /// must point at the real cause instead of implying the system is quiet.
+    #[test]
+    fn empty_percentiles_mention_the_histogram_caveat() {
+        let text = render_metric_points(&json!({ "points": [] }), "m", "percentiles", "1h");
+        assert!(text.contains("histogram"), "{text}");
+        let mean = render_metric_points(&json!({ "points": [] }), "m", "mean", "1h");
+        assert!(!mean.contains("histogram"), "the caveat is percentiles-only: {mean}");
+    }
+
+    #[test]
+    fn metric_points_render_timestamps_groups_and_mode_keys() {
+        let body = json!({ "points": [
+            { "bucketMs": 1_755_600_000_000_i64, "groupKey": "route:/api", "value": 12.5, "count": 4 },
+            { "bucketMs": 1_755_600_060_000_i64, "groupKey": "_default", "value": 3.0, "count": 1 },
+        ]});
+        let mean = render_metric_points(&body, "http.server.duration", "mean", "1h");
+        assert!(mean.contains("2025") || mean.contains("2026"), "epoch ms must render as a timestamp: {mean}");
+        assert!(mean.contains("[route:/api]"), "{mean}");
+        assert!(!mean.contains("_default"), "the default group is noise: {mean}");
+        assert!(mean.contains("value=12.5"), "{mean}");
+
+        let pct = json!({ "points": [{ "bucketMs": 1_755_600_000_000_i64, "p50": 1, "p95": 2, "p99": 3, "count": 9 }] });
+        let text = render_metric_points(&pct, "m", "percentiles", "1h");
+        assert!(text.contains("p95=2") && text.contains("count=9"), "{text}");
+        assert!(!text.contains("value="), "percentile rows have no mean value column: {text}");
+    }
+
+    #[test]
+    fn metric_attributes_render_as_a_group_by_hint() {
+        let text = render_metric_attributes(&json!({ "keys": ["route", "status"] }), "http.server.duration", 24);
+        assert!(text.contains("route, status") && text.contains("--group-by"), "{text}");
+    }
+
+    #[test]
+    fn web_vitals_render_routes_and_default_the_overall_row() {
+        let text = render_web_vitals(
+            &json!({ "points": [
+                { "metricName": "LCP", "route": "/pricing", "p75": 2400, "count": 120 },
+                { "metricName": "CLS", "route": null, "p75": 0.02, "count": 300 },
+            ]}),
+            "24h",
+        );
+        assert!(text.contains("/pricing") && text.contains("p75=2400"), "{text}");
+        assert!(text.contains("(all routes)"), "a null route is the site-wide row: {text}");
+    }
+
+    #[test]
+    fn a_full_metrics_page_reports_that_there_may_be_more() {
+        let body = json!({ "metrics": [{ "metricName": "a" }, { "metricName": "b" }] });
+        assert!(render_metrics(&body, 2).contains("there may be more"));
+        assert!(!render_metrics(&body, 200).contains("there may be more"));
     }
 
     /// The audit window default is load-bearing: a silently wider or narrower

@@ -6,6 +6,8 @@
 //! bearer-less client — a presigned URL carries its own auth in the query, and
 //! an extra `Authorization` header makes S3 reject the request.
 
+use std::fmt::Write as _;
+
 use anstream::println;
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
@@ -42,6 +44,36 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
         /// Print raw JSON instead of the listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find files anywhere in the org by name (case-insensitive substring).
+    Search {
+        /// Name fragment to search for, matched anywhere in the filename.
+        query: String,
+        /// Narrow by MIME-type fragment, e.g. `pdf`, `image`, `csv`.
+        #[arg(long = "type")]
+        mime_type: Option<String>,
+        /// Restrict the search to one folder id.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Max files to return (1–100, default 25).
+        #[arg(long)]
+        limit: Option<u64>,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a file's text contents (extracted markdown → raw text → a reason
+    /// when there is no text yet). Mirrors the MCP `files_summarize` tool.
+    Summarize {
+        /// The file id from `th files ls` or `th files search`.
+        file_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print the raw JSON response instead of the text.
         #[arg(long)]
         json: bool,
     },
@@ -220,6 +252,53 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 print_listing(&folders, &files);
             }
         }
+        Cmd::Search {
+            query,
+            mime_type,
+            folder,
+            limit,
+            org,
+            json,
+        } => {
+            let o = require_active_org(&client, org)?;
+            let q = query.trim();
+            if q.is_empty() {
+                bail!("query is empty — pass part of the filename to search for");
+            }
+            let mut path = format!(
+                "/organizations/{o}/files?search={}&limit={}",
+                urlencoding::encode(q),
+                limit.unwrap_or(25).clamp(1, 100)
+            );
+            if let Some(t) = &mime_type {
+                let _ = write!(path, "&type={}", urlencoding::encode(t));
+            }
+            if let Some(f) = &folder {
+                let _ = write!(path, "&folderId={}", urlencoding::encode(f));
+            }
+            let files = client.get(&path).await.context("GET files search")?;
+            if json {
+                print_json(&files);
+            } else {
+                // No folders envelope in a search — reuse the listing printer
+                // with an empty one ("empty" IS the no-match answer).
+                print_listing(&json!({}), &files);
+            }
+        }
+        Cmd::Summarize { file_id, org, json } => {
+            let o = require_active_org(&client, org)?;
+            let resp = client
+                .get(&format!("/organizations/{o}/files/{file_id}/content"))
+                .await
+                .context("GET file content")?;
+            if json {
+                print_json(&resp);
+            } else {
+                println!();
+                println!("{}", content_text(&resp));
+                println!();
+            }
+        }
         Cmd::Mkdir { name, parent, org } => {
             let o = require_active_org(&client, org)?;
             let body = json!({ "name": name, "parentFolderId": parent });
@@ -382,6 +461,30 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Human rendering of the `/files/{id}/content` response: the text itself with
+/// a truncation note when the route cut it (`totalCharacters` > what came
+/// back), or the route's `reason` when there is no readable text — that is an
+/// answer (the file exists, nobody has extracted text yet), not an error.
+fn content_text(resp: &serde_json::Value) -> String {
+    let str_field = |k: &str| resp.get(k).and_then(|v| v.as_str());
+    let name = str_field("name").unwrap_or("this file");
+    match str_field("content").filter(|c| !c.trim().is_empty()) {
+        None => str_field("reason").map_or_else(
+            || format!("\"{name}\" has no readable text. This is a confirmed read, not a read failure."),
+            std::string::ToString::to_string,
+        ),
+        Some(content) => {
+            let chars = content.chars().count() as u64;
+            let total = resp.get("totalCharacters").and_then(serde_json::Value::as_u64).unwrap_or(chars);
+            if total > chars {
+                format!("Contents of \"{name}\" — first {chars} of {total} characters (TRUNCATED by the API):\n\n{content}")
+            } else {
+                format!("Contents of \"{name}\" ({chars} characters):\n\n{content}")
+            }
+        }
+    }
 }
 
 /// `root` / empty → move to org root (null); anything else → that folder id.
@@ -569,7 +672,7 @@ fn print_listing(folders: &serde_json::Value, files: &serde_json::Value) {
 mod tests {
     use serde_json::json;
 
-    use super::{dest_folder_value, find_file_name, guess_mime};
+    use super::{content_text, dest_folder_value, find_file_name, guess_mime};
 
     #[test]
     fn dest_root_and_empty_map_to_null() {
@@ -617,5 +720,64 @@ mod tests {
 
         let off = Wrap::try_parse_from(["t", "ls"]).expect("bare ls must still parse");
         assert!(matches!(off.cmd, Cmd::Ls { json: false, .. }), "--json must default to off");
+    }
+
+    /// MCP parity (pearl th-088c93): `search` and `summarize` mirror the
+    /// hosted `files_search` / `files_summarize` tools.
+    #[test]
+    fn search_and_summarize_parse() {
+        use clap::Parser;
+
+        use super::Cmd;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let s = Wrap::try_parse_from(["t", "search", "Q3 report", "--type", "pdf", "--folder", "f1", "--limit", "5", "--json"]).expect("search must parse");
+        match s.cmd {
+            Cmd::Search {
+                query,
+                mime_type,
+                folder,
+                limit,
+                json,
+                ..
+            } => {
+                assert_eq!(query, "Q3 report");
+                assert_eq!(mime_type.as_deref(), Some("pdf"));
+                assert_eq!(folder.as_deref(), Some("f1"));
+                assert_eq!(limit, Some(5));
+                assert!(json);
+            }
+            _ => panic!("parsed the wrong variant"),
+        }
+        assert!(Wrap::try_parse_from(["t", "search"]).is_err(), "search requires a query");
+
+        let m = Wrap::try_parse_from(["t", "summarize", "file-123"]).expect("summarize must parse");
+        assert!(matches!(m.cmd, Cmd::Summarize { ref file_id, json: false, .. } if file_id == "file-123"));
+        assert!(Wrap::try_parse_from(["t", "summarize"]).is_err(), "summarize requires a file id");
+    }
+
+    #[test]
+    fn content_text_reports_truncation_and_reasons() {
+        // Exact read: no truncation note.
+        let full = json!({ "name": "a.txt", "content": "hello", "totalCharacters": 5 });
+        assert_eq!(content_text(&full), "Contents of \"a.txt\" (5 characters):\n\nhello");
+
+        // Route cut the file: the note names both numbers.
+        let cut = json!({ "name": "big.pdf", "content": "abc", "totalCharacters": 999 });
+        let text = content_text(&cut);
+        assert!(text.contains("first 3 of 999 characters"), "got: {text}");
+        assert!(text.contains("TRUNCATED"));
+
+        // No text yet: the route's reason IS the answer.
+        let none = json!({ "name": "scan.pdf", "content": "", "reason": "ingest it into knowledge first" });
+        assert_eq!(content_text(&none), "ingest it into knowledge first");
+
+        // No text and no reason: still an answer, not an error.
+        let bare = json!({ "name": "blob.bin" });
+        assert!(content_text(&bare).contains("no readable text"));
     }
 }

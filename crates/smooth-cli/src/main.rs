@@ -937,7 +937,7 @@ enum SmooCommands {
     /// Smoo AI workforce — the org's AI + human workforce directory.
     Workforce {
         #[command(subcommand)]
-        cmd: smooai::workforce::Cmd,
+        cmd: Option<smooai::workforce::Cmd>,
     },
     /// Smoo AI agents — list / show / create / update / delete, the
     /// regenerate-* and per-agent knowledge endpoints, and `tools` (which
@@ -1826,7 +1826,15 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Gbp { cmd } => smooai::gbp::cmd(cmd).await,
         SmooCommands::SearchConsole { cmd } => smooai::search_console::cmd(cmd).await,
         SmooCommands::Sheets { cmd } => smooai::sheets::cmd(cmd).await,
-        SmooCommands::Workforce { cmd } => smooai::workforce::cmd(cmd).await,
+        SmooCommands::Workforce { cmd } => {
+            // Bare `smoo workforce` reads as "show me the directory".
+            smooai::workforce::cmd(cmd.unwrap_or(smooai::workforce::Cmd::Directory {
+                view: Default::default(),
+                json: false,
+                org: None,
+            }))
+            .await
+        }
         SmooCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
         SmooCommands::Branding { cmd } => smooai::branding::cmd(cmd).await,
         SmooCommands::Llm { cmd } => smooai::llm_gateway::cmd(cmd).await,

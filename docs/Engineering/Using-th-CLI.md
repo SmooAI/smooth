@@ -43,6 +43,13 @@ explicit in the command tree:
   memory keep working, but `--help` shows the clean split. New docs and skills
   should use the `smoo …` spelling; this document was swept to it (pearl
   th-845c06). The old `th <resource>` spellings remain hidden compat aliases.
+- **CLI ↔ hosted-MCP parity**: every read surface on mcp.smoo.ai has a CLI
+  twin — `smoo analytics`, `smoo campaigns` (send is preview-first; real send
+  needs `--confirm`, suppression stays server-side), `smoo drip`,
+  `smoo audiences`, `smoo files search|summarize`, `smoo heypage
+  versions|rollback|source|content`, `smoo api observability metrics` +
+  `web-vitals`, and the one-offs (`forms`, `gbp`, `search-console`, `sheets`,
+  `workforce`). Pearl trail: th-739bb1 / th-b1f09c / th-088c93 / th-a5d991.
 - **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).
