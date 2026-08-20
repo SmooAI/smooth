@@ -13,8 +13,8 @@
 |---|---|---|
 | **Local pearl tracking** | `th pearls …` | Embedded Dolt DB at `<repo>/.smooth/dolt/` |
 | **Jira sync** | `th jira sync` | Atlassian REST + Dolt pearl store |
-| **Smoo AI platform API** | `th api …` | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
-| **Provider auth** | `th auth …` | LLM provider credentials at `~/.smooth/providers.json` |
+| **Smoo AI platform** | `smoo …` (= `th smoo …`) | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
+| **Provider auth** | `th model …` / `th providers …` | LLM provider credentials at `~/.smooth/providers.json` |
 | **Operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Big Smooth daemon; operatives as host subprocesses |
 | **Coding TUI** | `th` (no args) or `th code` | smooth-code crate, ratatui |
 | **Worktree helpers** | `th worktree create/list/merge/remove` | git plumbing |
@@ -22,6 +22,31 @@
 | **Service ops** | `th service`, `th doctor`, `th cache`, `th audit` | local launchd / systemd, `~/.smooth/` |
 
 Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting.
+
+### 1a. The `smoo` namespace (pearl th-fc32d9)
+
+`th` is two products in one binary: a standalone local agent tool that needs no
+account, and the Smoo AI platform CLI. Since th-fc32d9 the delineation is
+explicit in the command tree:
+
+- **Everything that talks to smoo.ai lives under `th smoo …`** — `auth`,
+  `api`, `admin`, `agents`, `crm`, `config`, `orgs`, `knowledge`, `files`,
+  `testing`, `branding`, `llm`, `search`, `crawl`, `notify`, and the rest of
+  the platform surface. Everything under the node authenticates via
+  `smoo auth login`; everything outside it works offline.
+- **`smoo` is the same binary under its platform name.** Installers drop a
+  `smoo → th` symlink next to the binary and `th` dispatches on argv[0], so
+  `smoo agents list`, `smoo crm contacts list`, `smoo auth login` are the
+  customer-facing spellings with zero extra keystrokes.
+- **Old top-level spellings still parse** (`th config`, `th crm`, `th api …`,
+  `th auth`, …) as *hidden* compat aliases — existing docs, hooks, and muscle
+  memory keep working, but `--help` shows the clean split. New docs and skills
+  should use the `smoo …` spelling. (The rest of this document predates the
+  namespace; read any `th api …` / `th auth …` below as `smoo api …` /
+  `smoo auth …`.)
+- **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
+  registry owns bare `th agent`, the platform agents live at `smoo agents`
+  (where the singular `smoo agent` aliases the plural, per the normalize rule).
 
 ---
 

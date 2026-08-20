@@ -65,6 +65,18 @@ smooth/
 
 `th` is **the** CLI we use across smooth and smooai. Reach for it before `curl`, before the web app, before Supabase Studio. Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting.
 
+> 📣 **The `smoo` namespace (pearl th-fc32d9).** `th` is two products in one
+> binary: the standalone local agent tool (pearls, worktrees, mail, daemon,
+> attest, code — no account needed) and the Smoo AI platform CLI. Everything
+> that talks to smoo.ai now lives under **`th smoo <resource> <verb>`**, and a
+> `smoo → th` symlink (installed by `pnpm install:th` and install.sh) makes
+> **`smoo <resource> <verb>`** the customer-facing spelling via argv[0]
+> dispatch. The old top-level spellings (`th api …`, `th auth …`, `th config`,
+> `th crm`, …) still parse as hidden compat aliases, so the snippets below all
+> work — but write new docs/skills with the `smoo` spelling. Bare `th agent`
+> stays the machine-local mailbox registry; platform agents are `smoo agents`
+> (singular aliased inside the namespace).
+
 ### Auth — `auth.smoo.ai` and what to expect from login
 
 > **`th auth` is the ONE Smoo AI identity surface.** `th api login` / `logout` / `whoami` were removed (pearl th-16b0ca) — two spellings for one identity was actively confusing, and only `th auth` understands auth profiles. The `th api <resource>` verbs stay; they aren't auth.
@@ -80,8 +92,9 @@ smooth/
 ### The high-leverage subtrees
 
 ```bash
-# Smoo platform — replaces every curl to api.smoo.ai
-th api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing
+# Smoo platform — replaces every curl to api.smoo.ai (smoo == th smoo)
+smoo api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing
+smoo auth login|whoami|logout|profile · smoo agents|crm|config|orgs|knowledge|files|testing|branding
 
 # White-label an org — theme + logos (logo re-hosted from a path OR a remote URL).
 # `enable` is the live switch and refuses a theme that fails WCAG AA contrast.

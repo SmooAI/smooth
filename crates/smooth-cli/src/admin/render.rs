@@ -397,6 +397,10 @@ mod tests {
 #[cfg(test)]
 mod visual_demo {
     use super::*;
+    // Disambiguate: `use super::*` re-imports anstream::println alongside the
+    // std prelude's, which is E0659 without an explicit pick (broke
+    // `cargo test --features admin` on main; drive-by fix on th-fc32d9).
+    use anstream::println;
     use serde_json::json;
 
     /// `cargo test -p smooai-smooth-cli admin::render::visual_demo -- --nocapture`
