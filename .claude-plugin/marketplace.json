@@ -13,7 +13,7 @@
             "name": "smooth-agent",
             "source": "./claude-plugins/smooth-agent",
             "description": "Run a Big Smooth that drives Claude Code worker sessions over tmux, coordinate agents over th-mail, drive the org's Smooth Operator, and track work in pearls. Provides the /smooth command + a windows-build-box skill (throwaway Windows EC2 over SSM). Ships the shared SmooAI repo guardrail hooks (worktree enforcement, th-over-curl nudges, pearls-label reminder, pearl-store read-only-wedge guard).",
-            "version": "0.36.5",
+            "version": "0.36.6",
             "category": "orchestration",
             "keywords": ["orchestration", "tmux", "multi-agent", "th-mail", "pearls", "smooth-operator"],
             "author": {
