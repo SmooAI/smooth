@@ -48,6 +48,30 @@ explicit in the command tree:
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).
 
+### 1b. `th harness` — per-provider toolbox setup (pearl th-19dac1)
+
+One idempotent command sets up (or updates) each coding harness with the
+smooth toolbox:
+
+```bash
+th harness enable claude-code   # smooth-agent plugin install/update (claude CLI),
+                                # MCP server, statusline check
+th harness enable codex         # MCP server + plugin state detection
+th harness enable opencode      # MCP server + shared-skill symlinks (~/.opencode/skills)
+th harness enable all
+th harness status               # per-harness: MCP ok/stale/missing, plugin, skills, statusline
+th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smooth-owned links)
+```
+
+`enable` is the install AND the update command — re-run it after upgrading
+`th` or the plugin. All writes are preserving (user config keys, comments and
+key order survive); `disable` never touches user-owned entries. The canonical
+skill source is the installed smooth-agent plugin checkout; Claude Code and
+Codex consume skills through the plugin itself, OpenCode gets symlinks.
+Lifecycle-hook parity for OpenCode (session registration, presence, inbox
+delivery) is pearl th-cc50cd; the read-only/approval-gated MCP tool split is
+pearl th-1d5ca8.
+
 ---
 
 ## 2. Auth — how `auth.smoo.ai` works

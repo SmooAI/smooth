@@ -25,6 +25,8 @@ mod hooks;
 #[cfg(target_os = "macos")]
 mod imessage_setup;
 use smooth_tools::mcp_config;
+/// th-19dac1: `th harness` — per-provider toolbox setup (EPIC th-1945b9).
+mod harness;
 /// th-374f85: `th agent` / `th msg` / `th inbox` on the machine-level
 /// SQLite mail store (ADR-010), off the per-repo Dolt pearl store.
 mod mail;
@@ -486,6 +488,17 @@ enum Commands {
         /// (asks turn into denials). Pearl th-400773.
         #[arg(long, value_name = "MODE", default_value = "deny")]
         auto_approve: String,
+    },
+    /// Set up this machine's coding harnesses (Claude Code, Codex, OpenCode)
+    /// with the smooth toolbox — MCP server, smooth-agent plugin, shared
+    /// skills, statusline.
+    ///
+    /// `enable` is idempotent and doubles as the update command; `status`
+    /// verifies each harness; `disable` removes only what smooth wrote.
+    /// Pearl th-19dac1.
+    Harness {
+        #[command(subcommand)]
+        cmd: harness::Cmd,
     },
     /// Git hook management (install, run).
     Hooks {
@@ -1776,7 +1789,10 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
         .and_then(|a| std::path::Path::new(a).file_stem())
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.eq_ignore_ascii_case("smoo"));
-    if is_smoo {
+    // `smoo --version` / `-V` should answer like the binary it is, not error
+    // because the Smoo subcommand defines no version flag (th-19dac1).
+    let version_only = args.len() == 2 && args.get(1).is_some_and(|a| a == "--version" || a == "-V");
+    if is_smoo && !version_only {
         // Rewrite argv[0] too, so clap's usage lines render the canonical
         // `th smoo …` path instead of a doubled `smoo smoo …`.
         args[0] = "th".into();
@@ -1970,6 +1986,7 @@ async fn main() -> Result<()> {
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Attest(args)) => attest::cmd(&args),
+        Some(Commands::Harness { cmd }) => harness::cmd(cmd),
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Agent { cmd }) => mail::cmd_agent(cmd).await,
@@ -9137,6 +9154,10 @@ mod org_cli_tests {
 
         let untouched = smoo_argv(vec!["/usr/local/bin/th".into(), "crm".into()]);
         assert_eq!(untouched.len(), 2);
+
+        // `smoo --version` answers as the binary, not as the subcommand.
+        let version = smoo_argv(vec!["/usr/local/bin/smoo".into(), "--version".into()]);
+        assert_eq!(version.len(), 2);
     }
 
     /// `th llm` wraps the org llm-gateway API. create-key takes the org
