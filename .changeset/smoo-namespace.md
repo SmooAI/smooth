@@ -1,5 +1,0 @@
----
-'@smooai/smooth': minor
----
-
-th-fc32d9: the `smoo` namespace — the Smoo AI platform surface now lives under `th smoo <resource> <verb>`, and a `smoo → th` symlink (installed by install.sh and `pnpm install:th`) makes `smoo <resource> <verb>` the customer-facing spelling via argv[0] dispatch. `th` is two products in one binary — the standalone local agent tool (pearls, worktrees, mail, daemon, attest, code; no account needed) and the Smoo AI platform CLI — and the command tree now shows that boundary: everything under `smoo` authenticates via `smoo auth login`, everything outside it works offline. The old top-level spellings (`th api`, `th auth`, `th config`, `th crm`, …) still parse as hidden compat aliases, so existing docs, hooks, and scripts keep working. This also permanently resolves the `th agent`/`th agents` collision: the machine-local mailbox registry owns bare `th agent`, platform agents live at `smoo agents` (with `smoo agent` aliased inside the namespace per the normalize rule). Drive-by: fixed the E0659 `println` ambiguity that broke `cargo test --features admin` in admin/render's visual_demo module.
