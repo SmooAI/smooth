@@ -396,6 +396,42 @@ Safety rails:
   `config.ts`-generated manifest is left alone with a pointer to
   `smoo config build`.
 
+#### Bringing the LOCAL schema up to date — `smoo config schema pull`
+
+The read direction: reconcile the local representation with the remote,
+correctly for **both** kinds of consumer (detected by whether
+`.smooai-config/config.ts` exists):
+
+```bash
+smoo config schema pull [--schema-name <n>] [--dry-run] [--write] [--json]
+```
+
+- **JSON consumer** (no `config.ts`): `schema.json` IS the local
+  representation, so it's overwritten with the remote doc — same effect
+  as `smoo config pull --force`.
+- **TS-source consumer** (`config.ts` present): the TypeScript is the
+  source of truth and is **never rewritten wholesale**. The diff base is
+  the built `schema.json`, so run `smoo config build` first if it's
+  stale. Keys the remote has that the local schema lacks are emitted as
+  **ready-to-paste snippets** targeted at the right tier block, in the
+  file's own conventions (`BooleanSchema`/`StringSchema`/`NumberSchema`,
+  limits as `defineLimit({ default, min, max, step })`), each headed by a
+  `// pulled from remote <date> — <remote description | TODO: describe>`
+  comment. A remote type with no clean `@smooai/config` equivalent (e.g.
+  `object`) is emitted as a fully commented-out block carrying the raw
+  remote spec instead of invented syntax.
+- `--write` appends the snippets into the matching tier blocks of
+  `config.ts` mechanically (before the block's closing brace, matching
+  indentation). All-or-nothing: it **refuses** — touching nothing — when a
+  tier block can't be located unambiguously (missing, duplicated, or
+  unbalanced braces). Default is print-only. After a write, fill in the
+  TODOs and run `smoo config build` to regenerate `schema.json`.
+- Keys that exist locally but not remotely are **reported, never
+  deleted** (a `smoo config push` would add them remotely). Tier drift
+  and declared-type drift on shared keys are reported as tables.
+- `--dry-run` prints everything and writes nothing (wins over `--write`);
+  `--json` emits the full report structured.
+
 The full schemas + environments + feature-flag-evaluation surface
 still lives under `smoo api config`:
 

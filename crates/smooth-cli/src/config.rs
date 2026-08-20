@@ -573,6 +573,44 @@ pub enum SchemaCmd {
         #[arg(long)]
         m2m: bool,
     },
+    /// Bring the LOCAL schema representation up to date with the remote —
+    /// the read direction `add`/`rm` don't cover. Two consumer kinds,
+    /// detected by whether `.smooai-config/config.ts` exists:
+    ///
+    /// - **JSON consumer** (no `config.ts`): `schema.json` IS the local
+    ///   representation, so it's overwritten with the remote doc (same as
+    ///   `th config pull --force`).
+    /// - **TS-source consumer** (`config.ts` present): the TypeScript is
+    ///   the source of truth and is NEVER rewritten wholesale. Keys the
+    ///   remote has that the built `schema.json` lacks are emitted as
+    ///   ready-to-paste snippets targeted at the right tier block;
+    ///   `--write` appends them into `config.ts` mechanically (refusing
+    ///   when a tier block can't be located unambiguously). Keys that
+    ///   exist locally but not remotely are reported (a `th config push`
+    ///   would add them) and never deleted; type/tier drift on shared
+    ///   keys is reported as a table.
+    Pull {
+        /// Schema name (required only when the org has more than one).
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Print everything, write nothing (wins over `--write`).
+        #[arg(long)]
+        dry_run: bool,
+        /// TS-source consumers: append the generated snippets into the
+        /// matching tier blocks of `config.ts`. Default is print-only.
+        #[arg(long)]
+        write: bool,
+        /// Emit the report as structured JSON.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2921,6 +2959,14 @@ async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
             })
             .await
         }
+        SchemaCmd::Pull {
+            schema_name,
+            org_id,
+            dry_run,
+            write,
+            json,
+            m2m,
+        } => cmd_schema_pull(schema_name, org_id, dry_run, write, json, m2m).await,
     }
 }
 
@@ -3017,6 +3063,464 @@ async fn cmd_schema_patch(
     match sync_local_schema_json(&new_doc)? {
         Some(line) => println!("    {}", line.dimmed()),
         None => println!("    {}", "no local .smooai-config/schema.json in cwd — remote updated only".dimmed()),
+    }
+    println!();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `th config schema pull` — remote → local, correct for BOTH local
+// representations. The pure core (`compute_pull_report`, `ts_snippet`,
+// `insert_into_tier_block`) is separated from the IO so every behavior is
+// unit-testable against fixture JSON + a fixture config.ts excerpt.
+// ---------------------------------------------------------------------------
+
+/// Flatten a schema doc into `canonical_key → (display key, tier, spec)`,
+/// covering all FOUR tiers ([`flatten_schema`] skips limits, which `pull`
+/// must not) and both doc shapes: the JSON-Schema serialization
+/// (`properties.<tier>Schema.properties.<key>: spec`) and the manifest shape
+/// `th config build` emits (tier arrays of names + a `types` map).
+fn flatten_with_specs(doc: &Value) -> std::collections::BTreeMap<String, (String, Tier, Value)> {
+    let mut out = std::collections::BTreeMap::new();
+    let root = doc.get("properties").unwrap_or(doc);
+    for tier in ALL_TIERS {
+        if let Some(props) = root.get(tier_schema_node(tier)).and_then(|v| v.get("properties")).and_then(Value::as_object) {
+            for (k, spec) in props {
+                out.entry(canonical_key(k)).or_insert_with(|| (k.clone(), tier, spec.clone()));
+            }
+        }
+    }
+    // Manifest shape. Limits aren't in the manifest's tier arrays — a manifest
+    // local simply contributes none, and every remote limit shows as missing.
+    for (label, tier) in [("public", Tier::Public), ("secret", Tier::Secret), ("featureFlag", Tier::FeatureFlag)] {
+        if let Some(arr) = doc.get(label).and_then(Value::as_array) {
+            for name in arr.iter().filter_map(Value::as_str) {
+                let ck = canonical_key(name);
+                let spec = doc
+                    .get("types")
+                    .and_then(Value::as_object)
+                    .and_then(|t| t.iter().find(|(k, _)| canonical_key(k) == ck))
+                    .map(|(_, v)| match v {
+                        Value::String(_) => serde_json::json!({ "type": v }),
+                        other => other.clone(),
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+                out.entry(ck).or_insert_with(|| (name.to_string(), tier, spec));
+            }
+        }
+    }
+    out
+}
+
+/// The `@smooai/config` value-schema name for a JSON-Schema type, when one
+/// exists. Derived from how `config.ts` → `schema.json` serializes
+/// (`StringSchema` → `{"type":"string"}` etc. — see the smooai monorepo's
+/// built artifact); `None` means emit the commented-out fallback rather than
+/// invent syntax.
+fn ts_value_schema(spec: &Value) -> Option<&'static str> {
+    match spec.get("type").and_then(Value::as_str) {
+        Some("string") => Some("StringSchema"),
+        Some("boolean") => Some("BooleanSchema"),
+        Some("number") => Some("NumberSchema"),
+        _ => None,
+    }
+}
+
+/// One remote key missing from the local representation, with its
+/// ready-to-paste TypeScript snippet.
+#[derive(Debug, serde::Serialize, PartialEq, Clone)]
+struct PullSnippet {
+    key: String,
+    /// Wire tier (`public` / `secret` / `feature_flag` / `limit`).
+    tier: String,
+    /// The `config.ts` tier block the snippet belongs in.
+    block: String,
+    /// `false` → the commented-out fallback (no clean TS equivalent).
+    mapped: bool,
+    /// Unindented snippet lines; indentation is applied at print/insert time.
+    lines: Vec<String>,
+}
+
+/// Generate the TS snippet for one remote-only key. Limits map to
+/// `defineLimit({ default, min, max, step })` (JSON-Schema spells them
+/// `default`/`minimum`/`maximum`/`multipleOf`); `defineLimit` REQUIRES a
+/// numeric `default`, so a limit without one falls back to a commented-out
+/// block instead of emitting TS that throws at definition time.
+fn ts_snippet(key: &str, tier: Tier, spec: &Value, date: &str) -> PullSnippet {
+    let header = match spec.get("description").and_then(Value::as_str) {
+        Some(d) => format!("// pulled from remote {date} — {d}"),
+        None => format!("// pulled from remote {date} — TODO: describe"),
+    };
+    let compact = |v: &Value| serde_json::to_string(v).unwrap_or_default();
+    let fallback = |why: &str| {
+        vec![
+            format!("// {why} — declare `{key}` manually:"),
+            format!("// remote spec: {}", compact(spec)),
+            format!("// {key}: <fill in>,"),
+        ]
+    };
+    let (mapped, mut lines) = match tier {
+        Tier::Limit => {
+            if spec.get("default").and_then(Value::as_f64).is_some() {
+                let mut parts = vec![format!("default: {}", compact(&spec["default"]))];
+                for (json_field, ts_field) in [("minimum", "min"), ("maximum", "max"), ("multipleOf", "step")] {
+                    if let Some(v) = spec.get(json_field) {
+                        parts.push(format!("{ts_field}: {}", compact(v)));
+                    }
+                }
+                (true, vec![format!("{key}: defineLimit({{ {} }}),", parts.join(", "))])
+            } else {
+                (false, fallback("defineLimit requires a numeric `default`, which the remote declaration lacks"))
+            }
+        }
+        _ => match ts_value_schema(spec) {
+            Some(name) => (true, vec![format!("{key}: {name},")]),
+            None => {
+                let ty = spec.get("type").and_then(Value::as_str).unwrap_or("(untyped)");
+                (false, fallback(&format!("remote type `{ty}` has no @smooai/config value-schema equivalent")))
+            }
+        },
+    };
+    lines.insert(0, header);
+    PullSnippet {
+        key: key.to_string(),
+        tier: tier.as_wire().to_string(),
+        block: tier_schema_node(tier).to_string(),
+        mapped,
+        lines,
+    }
+}
+
+/// Type drift on a key declared on both sides.
+#[derive(Debug, serde::Serialize, PartialEq)]
+struct TypeDrift {
+    key: String,
+    tier: String,
+    local: String,
+    remote: String,
+}
+
+/// Everything `schema pull` has to say, computed purely from the two docs.
+#[derive(Debug, Default, serde::Serialize)]
+struct PullReport {
+    /// Remote keys absent locally — the snippet path.
+    missing_locally: Vec<PullSnippet>,
+    /// Local keys absent remotely — reported, never deleted.
+    local_only: Vec<TieredKey>,
+    /// Shared keys whose declared JSON-Schema `type` differs.
+    type_drift: Vec<TypeDrift>,
+    /// Shared keys declared in different tiers locally vs remotely.
+    tier_drift: Vec<TierChange>,
+}
+
+impl PullReport {
+    fn is_in_sync(&self) -> bool {
+        self.missing_locally.is_empty() && self.local_only.is_empty() && self.type_drift.is_empty() && self.tier_drift.is_empty()
+    }
+}
+
+/// Compare the local schema representation to the remote doc, pull-side.
+/// Keys match canonically ([`canonical_key`]); display names keep each
+/// side's own spelling.
+fn compute_pull_report(local: &Value, remote: &Value, date: &str) -> PullReport {
+    let local_map = flatten_with_specs(local);
+    let remote_map = flatten_with_specs(remote);
+    let mut report = PullReport::default();
+    for (ck, (key, tier, spec)) in &remote_map {
+        match local_map.get(ck) {
+            None => report.missing_locally.push(ts_snippet(key, *tier, spec, date)),
+            Some((local_key, local_tier, local_spec)) => {
+                if local_tier != tier {
+                    report.tier_drift.push(TierChange {
+                        key: local_key.clone(),
+                        from: local_tier.as_wire().to_string(),
+                        to: tier.as_wire().to_string(),
+                    });
+                }
+                let lt = local_spec.get("type").and_then(Value::as_str);
+                let rt = spec.get("type").and_then(Value::as_str);
+                if let (Some(lt), Some(rt)) = (lt, rt) {
+                    if lt != rt {
+                        report.type_drift.push(TypeDrift {
+                            key: local_key.clone(),
+                            tier: tier.as_wire().to_string(),
+                            local: lt.to_string(),
+                            remote: rt.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for (ck, (key, tier, _)) in &local_map {
+        if !remote_map.contains_key(ck) {
+            report.local_only.push(TieredKey {
+                key: key.clone(),
+                tier: tier.as_wire().to_string(),
+            });
+        }
+    }
+    report
+}
+
+/// Insert entry lines into the named tier block of a TypeScript config
+/// source, before the block's closing brace, matching its indentation.
+/// Deliberately strict — refuses rather than guesses:
+///
+/// - exactly ONE line may read `<node>: {` (trimmed); zero or several → error
+/// - the closing line found by brace counting must start with `}`, or the
+///   scan is deemed unreliable and refused
+///
+/// ponytail: brace counting doesn't parse comments/strings; a config.ts odd
+/// enough to unbalance them trips the closing-line check and refuses instead
+/// of mis-inserting. Upgrade path is a real TS parser if that ever bites.
+fn insert_into_tier_block(source: &str, node: &str, entries: &[String]) -> Result<String> {
+    let opener = format!("{node}: {{");
+    let lines: Vec<&str> = source.lines().collect();
+    let openers: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.trim() == opener).map(|(i, _)| i).collect();
+    let open_idx = match openers.as_slice() {
+        [] => anyhow::bail!("no `{node}: {{` block found in config.ts — add the block (or paste the snippet manually), then re-run"),
+        [i] => *i,
+        _ => anyhow::bail!(
+            "found {} `{node}: {{` lines in config.ts — refusing to guess which block to patch; paste the snippet manually",
+            openers.len()
+        ),
+    };
+    let indent = lines[open_idx].len() - lines[open_idx].trim_start().len();
+    let entry_indent = " ".repeat(indent + 4);
+
+    let mut depth = 0i64;
+    let mut close_idx = None;
+    for (i, line) in lines.iter().enumerate().skip(open_idx) {
+        for c in line.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            close_idx = Some(i);
+            break;
+        }
+    }
+    let close_idx = close_idx
+        .filter(|i| lines[*i].trim_start().starts_with('}'))
+        .with_context(|| format!("could not reliably locate the closing brace of `{node}` (unbalanced braces?) — refusing to modify config.ts"))?;
+
+    let mut out: Vec<String> = lines[..close_idx].iter().map(ToString::to_string).collect();
+    out.extend(entries.iter().map(|e| if e.is_empty() { String::new() } else { format!("{entry_indent}{e}") }));
+    out.extend(lines[close_idx..].iter().map(ToString::to_string));
+    let mut joined = out.join("\n");
+    if source.ends_with('\n') {
+        joined.push('\n');
+    }
+    Ok(joined)
+}
+
+/// Group a report's snippets by tier block, in [`ALL_TIERS`] display order.
+fn snippets_by_block(report: &PullReport) -> Vec<(String, Vec<&PullSnippet>)> {
+    ALL_TIERS
+        .iter()
+        .filter_map(|t| {
+            let block = tier_schema_node(*t);
+            let group: Vec<&PullSnippet> = report.missing_locally.iter().filter(|s| s.block == block).collect();
+            if group.is_empty() {
+                None
+            } else {
+                Some((block.to_string(), group))
+            }
+        })
+        .collect()
+}
+
+async fn cmd_schema_pull(schema_name: Option<String>, org_id: Option<String>, dry_run: bool, write: bool, json: bool, m2m: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("get current dir")?;
+    let dir = cwd.join(".smooai-config");
+    let config_ts = dir.join("config.ts");
+    let schema_path = dir.join("schema.json");
+
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+    let picked = pick_schema_entry(&schemas, schema_name.as_deref())?;
+    let remote_doc = picked.get("jsonSchema").context("remote schema entry has no jsonSchema field")?;
+    let remote_name = picked.get("name").and_then(Value::as_str).unwrap_or("(unnamed)");
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    let is_ts_consumer = config_ts.is_file();
+    let local_doc = if schema_path.exists() {
+        let raw = std::fs::read_to_string(&schema_path).with_context(|| format!("read {}", schema_path.display()))?;
+        Some(serde_json::from_str::<Value>(&raw).with_context(|| format!("parse JSON from {}", schema_path.display()))?)
+    } else {
+        None
+    };
+    if is_ts_consumer && local_doc.is_none() {
+        anyhow::bail!(
+            "{} exists but there is no built schema.json to diff against.\n\
+             Run `th config build` first so pull can see what config.ts declares.",
+            config_ts.display()
+        );
+    }
+
+    let empty = serde_json::json!({});
+    let report = compute_pull_report(local_doc.as_ref().unwrap_or(&empty), remote_doc, &date);
+
+    let mut written: Vec<String> = Vec::new();
+    if !is_ts_consumer && !dry_run {
+        // JSON consumer: schema.json IS the local representation — overwrite
+        // it with the remote doc (the `th config pull --force` behavior).
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let pretty = serde_json::to_string_pretty(remote_doc).context("serialize jsonSchema")?;
+        std::fs::write(&schema_path, format!("{pretty}\n")).with_context(|| format!("write {}", schema_path.display()))?;
+        written.push(schema_path.display().to_string());
+    }
+    if is_ts_consumer && write && !dry_run && !report.missing_locally.is_empty() {
+        // All-or-nothing: apply every block insertion in memory first, so a
+        // locator refusal on any tier leaves config.ts untouched.
+        let mut source = std::fs::read_to_string(&config_ts).with_context(|| format!("read {}", config_ts.display()))?;
+        for (block, group) in snippets_by_block(&report) {
+            let entries: Vec<String> = group.iter().flat_map(|s| s.lines.iter().cloned()).collect();
+            source = insert_into_tier_block(&source, &block, &entries)?;
+        }
+        std::fs::write(&config_ts, &source).with_context(|| format!("write {}", config_ts.display()))?;
+        written.push(config_ts.display().to_string());
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "schemaName": remote_name,
+            "consumer": if is_ts_consumer { "ts-source" } else { "json" },
+            "dryRun": dry_run,
+            "report": report,
+            "wrote": written,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        return Ok(());
+    }
+
+    println!();
+    println!("  {} {}", "Schema:".dimmed(), remote_name.cyan().bold());
+    println!(
+        "  {} {}",
+        "consumer:".dimmed(),
+        if is_ts_consumer {
+            "TypeScript source (.smooai-config/config.ts) — config.ts is never rewritten wholesale"
+                .dimmed()
+                .to_string()
+        } else {
+            "pulled schema.json (no config.ts)".dimmed().to_string()
+        }
+    );
+
+    if report.is_in_sync() {
+        println!();
+        println!("  {} local schema is in sync with the remote", "✓".green().bold());
+        println!();
+        return Ok(());
+    }
+
+    if !report.missing_locally.is_empty() {
+        println!();
+        if is_ts_consumer {
+            println!(
+                "  {} {}",
+                "+".green().bold(),
+                format!("missing locally ({}) — paste into .smooai-config/config.ts:", report.missing_locally.len()).green()
+            );
+            for (block, group) in snippets_by_block(&report) {
+                println!();
+                println!("    {}: {{", block.cyan());
+                for s in group {
+                    for line in &s.lines {
+                        println!("        {line}");
+                    }
+                }
+                println!("    }}");
+            }
+        } else {
+            println!(
+                "  {} {}",
+                "+".green().bold(),
+                format!("new from remote ({}):", report.missing_locally.len()).green()
+            );
+            for s in &report.missing_locally {
+                println!("      {} {} {}", "+".green(), s.key.cyan(), format!("[{}]", s.tier).dimmed());
+            }
+        }
+    }
+    if !report.local_only.is_empty() {
+        println!();
+        println!(
+            "  {} {}",
+            "●".yellow().bold(),
+            format!(
+                "local-only ({}) — not on the remote; left untouched (`th config push` would add them remotely):",
+                report.local_only.len()
+            )
+            .yellow()
+        );
+        for k in &report.local_only {
+            println!("      {} {}", k.key.cyan(), format!("[{}]", k.tier).dimmed());
+        }
+    }
+    if !report.tier_drift.is_empty() {
+        println!();
+        println!(
+            "  {} {}",
+            "~".yellow().bold(),
+            format!("tier drift ({}) — local → remote:", report.tier_drift.len()).yellow()
+        );
+        for c in &report.tier_drift {
+            println!("      {} {}: {} → {}", "~".yellow(), c.key.cyan(), c.from.dimmed(), c.to.cyan());
+        }
+    }
+    if !report.type_drift.is_empty() {
+        println!();
+        println!(
+            "  {} {}",
+            "~".yellow().bold(),
+            format!("type drift ({}) — local vs remote:", report.type_drift.len()).yellow()
+        );
+        for d in &report.type_drift {
+            println!(
+                "      {} {} {}: {} vs {}",
+                "~".yellow(),
+                d.key.cyan(),
+                format!("[{}]", d.tier).dimmed(),
+                d.local.dimmed(),
+                d.remote.cyan()
+            );
+        }
+    }
+
+    println!();
+    if dry_run {
+        let target = if is_ts_consumer {
+            if write {
+                "config.ts"
+            } else {
+                "nothing (print-only without --write)"
+            }
+        } else {
+            "schema.json"
+        };
+        println!("  {} dry-run — nothing written (would write: {target})", "●".dimmed());
+    } else if written.is_empty() {
+        if is_ts_consumer && !report.missing_locally.is_empty() {
+            println!("  {} print-only — pass --write to append the snippets into config.ts", "●".dimmed());
+        }
+    } else {
+        for w in &written {
+            println!("  {} wrote {}", "✓".green().bold(), w.cyan());
+        }
+        if is_ts_consumer {
+            println!(
+                "  {} {}",
+                "next:".dimmed(),
+                "fill in the TODO comments, then `th config build` to regenerate schema.json".dimmed()
+            );
+        }
     }
     println!();
     Ok(())
@@ -4089,6 +4593,265 @@ mod tests {
         assert_eq!(picked["id"], "2");
         let one = vec![serde_json::json!({"id": "1", "name": "only"})];
         assert_eq!(pick_schema_entry(&one, None).expect("auto-selects")["id"], "1");
+    }
+
+    // ---- `schema pull` ---------------------------------------------------
+
+    /// Excerpt of a real config.ts: the defineConfig call with all four tier
+    /// blocks. `defineLimit({ ... })` lines carry balanced inline braces —
+    /// exactly what the block locator's depth scan must not trip over.
+    const FIXTURE_CONFIG_TS: &str = "\
+import { BooleanSchema, defineConfig, defineLimit, NumberSchema, StringSchema } from '@smooai/config/config';
+
+const config: ReturnType<typeof defineConfig> = defineConfig({
+    publicConfigSchema: {
+        apiUrl: StringSchema,
+        // SMOODEV-2944: CDN base URL
+        cdnUrl: StringSchema,
+    },
+    secretConfigSchema: {
+        anthropicApiKey: StringSchema,
+    },
+    featureFlagSchema: {
+        customerService: BooleanSchema,
+    },
+    limitsSchema: {
+        agentMaxIterations: defineLimit({ default: 12, min: 1, max: 50, step: 1 }),
+    },
+});
+
+export default config;
+";
+
+    #[test]
+    fn schema_pull_parses() {
+        let cmd = parse(&["schema", "pull", "--schema-name", "smooai", "--dry-run", "--write", "--json", "--org", "org_x"]).expect("parses");
+        let Cmd::Schema {
+            cmd:
+                SchemaCmd::Pull {
+                    schema_name,
+                    org_id,
+                    dry_run,
+                    write,
+                    json,
+                    m2m,
+                },
+        } = cmd
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(schema_name.as_deref(), Some("smooai"));
+        assert_eq!(org_id.as_deref(), Some("org_x"));
+        assert!(dry_run && write && json && !m2m);
+    }
+
+    #[test]
+    fn ts_value_schema_maps_the_three_scalars_only() {
+        assert_eq!(ts_value_schema(&serde_json::json!({"type": "string"})), Some("StringSchema"));
+        assert_eq!(ts_value_schema(&serde_json::json!({"type": "boolean"})), Some("BooleanSchema"));
+        assert_eq!(ts_value_schema(&serde_json::json!({"type": "number"})), Some("NumberSchema"));
+        assert_eq!(ts_value_schema(&serde_json::json!({"type": "object"})), None);
+        assert_eq!(ts_value_schema(&serde_json::json!({"type": "array"})), None);
+        assert_eq!(ts_value_schema(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn ts_snippet_scalar_carries_pulled_comment_and_value_schema() {
+        let s = ts_snippet(
+            "hubspotDeltaSyncEnabled",
+            Tier::FeatureFlag,
+            &serde_json::json!({"type": "boolean"}),
+            "2026-08-20",
+        );
+        assert!(s.mapped);
+        assert_eq!(s.block, "featureFlagSchema");
+        assert_eq!(
+            s.lines,
+            vec![
+                "// pulled from remote 2026-08-20 — TODO: describe".to_string(),
+                "hubspotDeltaSyncEnabled: BooleanSchema,".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ts_snippet_uses_remote_description_over_todo() {
+        let s = ts_snippet(
+            "apiUrl",
+            Tier::Public,
+            &serde_json::json!({"type": "string", "description": "Base URL"}),
+            "2026-08-20",
+        );
+        assert_eq!(s.lines[0], "// pulled from remote 2026-08-20 — Base URL");
+    }
+
+    #[test]
+    fn ts_snippet_limit_maps_clamp_fields_to_define_limit() {
+        let spec = serde_json::json!({"type": "number", "default": 12, "minimum": 1, "maximum": 50, "multipleOf": 1});
+        let s = ts_snippet("agentMaxIterations", Tier::Limit, &spec, "2026-08-20");
+        assert!(s.mapped);
+        assert_eq!(s.lines[1], "agentMaxIterations: defineLimit({ default: 12, min: 1, max: 50, step: 1 }),");
+        // Partial clamp metadata: only present fields are emitted.
+        let s = ts_snippet("cap", Tier::Limit, &serde_json::json!({"type": "number", "default": 300}), "2026-08-20");
+        assert_eq!(s.lines[1], "cap: defineLimit({ default: 300 }),");
+    }
+
+    #[test]
+    fn ts_snippet_limit_without_default_falls_back_commented() {
+        // defineLimit throws without a numeric default — never emit that.
+        let s = ts_snippet("cap", Tier::Limit, &serde_json::json!({"type": "number", "minimum": 1}), "2026-08-20");
+        assert!(!s.mapped);
+        assert!(s.lines.iter().all(|l| l.starts_with("//")), "fallback must be fully commented: {:?}", s.lines);
+        assert!(s.lines.iter().any(|l| l.contains("defineLimit requires a numeric `default`")), "{:?}", s.lines);
+    }
+
+    #[test]
+    fn ts_snippet_unmappable_type_is_commented_with_remote_spec() {
+        let s = ts_snippet("webhookRouting", Tier::Public, &serde_json::json!({"type": "object"}), "2026-08-20");
+        assert!(!s.mapped);
+        assert!(s.lines.iter().all(|l| l.starts_with("//")), "must not emit uncompilable TS: {:?}", s.lines);
+        assert!(s.lines.iter().any(|l| l.contains(r#"{"type":"object"}"#)), "carries the spec: {:?}", s.lines);
+    }
+
+    #[test]
+    fn pull_report_classifies_missing_local_only_and_drift() {
+        // Local: built schema.json (JSON-Schema shape). Remote adds a flag +
+        // a limit, drops `customerService`, and drifts `apiUrl` to number.
+        let local = fixture_json_schema();
+        let remote = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "publicConfigSchema": { "type": "object", "properties": { "apiUrl": { "type": "number" } } },
+                "secretConfigSchema": { "type": "object", "properties": { "anthropicApiKey": { "type": "string" } } },
+                "featureFlagSchema": { "type": "object", "properties": { "hubspotDeltaSyncEnabled": { "type": "boolean" } } },
+                "limitsSchema": { "type": "object", "properties": {
+                    "agentMaxIterations": { "type": "number", "default": 12, "minimum": 1, "maximum": 50 },
+                    "voiceMonthlyMinutesCap": { "type": "number", "default": 300, "minimum": 0, "maximum": 100000, "multipleOf": 10 }
+                } },
+            }
+        });
+        let r = compute_pull_report(&local, &remote, "2026-08-20");
+        let missing: Vec<&str> = r.missing_locally.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(missing, vec!["hubspotDeltaSyncEnabled", "voiceMonthlyMinutesCap"], "limits must be included");
+        assert_eq!(
+            r.local_only,
+            vec![TieredKey {
+                key: "customerService".into(),
+                tier: "feature_flag".into()
+            }]
+        );
+        assert_eq!(
+            r.type_drift,
+            vec![TypeDrift {
+                key: "apiUrl".into(),
+                tier: "public".into(),
+                local: "string".into(),
+                remote: "number".into()
+            }]
+        );
+        assert!(r.tier_drift.is_empty());
+        assert!(!r.is_in_sync());
+        assert!(compute_pull_report(&local, &local, "2026-08-20").is_in_sync());
+    }
+
+    #[test]
+    fn pull_report_tier_drift_on_shared_key() {
+        let mut remote = fixture_json_schema();
+        // Move apiUrl public → secret remotely.
+        let props = remote["properties"].as_object_mut().unwrap();
+        let spec = props["publicConfigSchema"]["properties"].as_object_mut().unwrap().remove("apiUrl").unwrap();
+        props["secretConfigSchema"]["properties"].as_object_mut().unwrap().insert("apiUrl".into(), spec);
+        let r = compute_pull_report(&fixture_json_schema(), &remote, "2026-08-20");
+        assert_eq!(
+            r.tier_drift,
+            vec![TierChange {
+                key: "apiUrl".into(),
+                from: "public".into(),
+                to: "secret".into()
+            }]
+        );
+        assert!(r.missing_locally.is_empty() && r.local_only.is_empty(), "drift is not an add+remove");
+    }
+
+    #[test]
+    fn flatten_with_specs_reads_manifest_shape_and_bare_type_strings() {
+        let manifest = serde_json::json!({
+            "public": ["API_URL"],
+            "secret": ["ANTHROPIC_API_KEY"],
+            "featureFlag": [],
+            "types": { "apiUrl": "string", "anthropicApiKey": { "type": "string" } }
+        });
+        let map = flatten_with_specs(&manifest);
+        let (key, tier, spec) = &map[&canonical_key("apiUrl")];
+        assert_eq!(key, "API_URL");
+        assert_eq!(*tier, Tier::Public);
+        assert_eq!(spec["type"], "string", "bare type string normalizes to a spec object");
+        assert_eq!(map[&canonical_key("anthropicApiKey")].1, Tier::Secret);
+    }
+
+    #[test]
+    fn insert_appends_into_the_right_tier_block_with_indentation() {
+        let entries = vec![
+            "// pulled from remote 2026-08-20 — TODO: describe".to_string(),
+            "hubspotDeltaSyncEnabled: BooleanSchema,".to_string(),
+        ];
+        let out = insert_into_tier_block(FIXTURE_CONFIG_TS, "featureFlagSchema", &entries).expect("inserts");
+        assert!(
+            out.contains("        customerService: BooleanSchema,\n        // pulled from remote 2026-08-20 — TODO: describe\n        hubspotDeltaSyncEnabled: BooleanSchema,\n    },\n    limitsSchema: {"),
+            "appends before the block's closing brace at 8-space indent:\n{out}"
+        );
+        // Other blocks untouched; file still ends the same way.
+        assert!(out.contains("    publicConfigSchema: {\n        apiUrl: StringSchema,"));
+        assert!(out.ends_with("export default config;\n"), "trailing newline preserved");
+        assert_eq!(out.matches("hubspotDeltaSyncEnabled").count(), 1);
+    }
+
+    #[test]
+    fn insert_into_limits_block_survives_inline_define_limit_braces() {
+        let entries = vec!["voiceMonthlyMinutesCap: defineLimit({ default: 300, min: 0, max: 100000, step: 10 }),".to_string()];
+        let out = insert_into_tier_block(FIXTURE_CONFIG_TS, "limitsSchema", &entries).expect("inserts");
+        assert!(
+            out.contains("        agentMaxIterations: defineLimit({ default: 12, min: 1, max: 50, step: 1 }),\n        voiceMonthlyMinutesCap: defineLimit({ default: 300, min: 0, max: 100000, step: 10 }),\n    },\n});"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn insert_refuses_missing_block() {
+        let no_limits = FIXTURE_CONFIG_TS.replace("limitsSchema", "renamedSchema");
+        let err = insert_into_tier_block(&no_limits, "limitsSchema", &["x: NumberSchema,".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `limitsSchema: {` block"), "{err}");
+        assert!(err.contains("manually"), "points at the escape hatch: {err}");
+    }
+
+    #[test]
+    fn insert_refuses_ambiguous_block() {
+        let doubled = format!("{FIXTURE_CONFIG_TS}\nconst other = {{\n    publicConfigSchema: {{\n    }},\n}};\n");
+        let err = insert_into_tier_block(&doubled, "publicConfigSchema", &["x: StringSchema,".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("found 2"), "{err}");
+        assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    #[test]
+    fn insert_refuses_unbalanced_braces() {
+        let broken = "const config = defineConfig({\n    publicConfigSchema: {\n        apiUrl: StringSchema,\n";
+        let err = insert_into_tier_block(broken, "publicConfigSchema", &["x: StringSchema,".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("closing brace"), "{err}");
+    }
+
+    #[test]
+    fn snippets_group_by_block_in_tier_order() {
+        let local = serde_json::json!({});
+        let r = compute_pull_report(&local, &fixture_json_schema(), "2026-08-20");
+        let groups = snippets_by_block(&r);
+        let blocks: Vec<&str> = groups.iter().map(|(b, _)| b.as_str()).collect();
+        assert_eq!(blocks, vec!["publicConfigSchema", "secretConfigSchema", "featureFlagSchema", "limitsSchema"]);
     }
 
     #[test]
