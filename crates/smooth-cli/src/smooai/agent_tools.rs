@@ -304,6 +304,17 @@ pub fn render_registry(tools: &[RegistryTool]) -> String {
 #[must_use]
 pub fn restriction_banner(view: &AgentToolsView) -> String {
     if view.is_restricted() {
+        // Fail-closed, and the most alarming state there is: the agent has no
+        // tools AT ALL. Reachable via an all-`enabled: false` array, which is
+        // non-empty (so: restricted) but resolves to nothing. Rendering that as
+        // "RESTRICTED" over an "ENABLED (none)" list makes the reader infer the
+        // one thing they must not have to infer.
+        if view.enabled.is_empty() {
+            return format!(
+                "NO TOOLS AT ALL — this agent is restricted to an empty effective set, so it cannot use a single one of the {} tool(s) available to this org. It can only talk. That is what a non-empty enabledTools with nothing enabled means.",
+                view.available.len()
+            );
+        }
         // "The 0 tool(s) under MISSING are NOT available" reads as nonsense on
         // a fully-enabled agent, and this is the one line that has to land.
         if view.missing.is_empty() {
@@ -642,6 +653,18 @@ mod tests {
         assert!(b.contains("ALLOWLIST"), "{b}");
         assert!(b.contains("1 tool(s) under MISSING"), "{b}");
         assert!(b.contains("neither is any tool shipped from now on"), "{b}");
+    }
+
+    #[test]
+    fn restricted_with_an_empty_effective_set_says_no_tools_at_all() {
+        // tools-api's edge: an all-`enabled: false` array is non-empty (hence
+        // restricted) but resolves to zero tools. "RESTRICTED" over an empty
+        // ENABLED list makes the reader infer a mute agent; say it instead.
+        let v = view(json!({ "mode": "restricted", "enabled": [], "available": ["a", "b"], "missing": ["a", "b"] }));
+        let b = restriction_banner(&v);
+        assert!(b.starts_with("NO TOOLS AT ALL"), "{b}");
+        assert!(b.contains("cannot use a single one of the 2 tool(s)"), "{b}");
+        assert!(b.contains("It can only talk"), "{b}");
     }
 
     #[test]
