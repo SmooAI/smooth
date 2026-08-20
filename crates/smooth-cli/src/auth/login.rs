@@ -106,7 +106,11 @@ pub async fn cmd_login_user(email: Option<String>, password: Option<String>, bro
     let creds = password_grant(&http, &url, &key, &email, &password).await.context("Supabase password grant")?;
 
     let store = CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?;
+    // A background `th` may be refreshing the very session we are about
+    // to replace; without the lock the two writes race (th-5c0189).
+    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
     store.save(&creds).context("persist user credentials")?;
+    drop(lock);
 
     let user = creds.user.as_deref().unwrap_or("(unknown user)");
     println!(
@@ -162,7 +166,11 @@ async fn cmd_login_user_browser() -> Result<()> {
         created_at: Utc::now(),
     };
     let store = CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?;
+    // A background `th` may be refreshing the very session we are about
+    // to replace; without the lock the two writes race (th-5c0189).
+    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
     store.save(&creds).context("persist user credentials")?;
+    drop(lock);
 
     // Sync the active org through the shared writer so the
     // cross-store invariant (pearl th-3217db, single-store today)
@@ -224,7 +232,9 @@ pub async fn cmd_login_m2m(client_id: Option<String>, client_secret: Option<Stri
         .context("client_credentials grant")?;
 
     let store = CredentialsStore::default_m2m().context("locate ~/.smooth/auth/smooai.json")?;
+    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
     store.save(&creds).context("persist M2M credentials")?;
+    drop(lock);
 
     println!("{} M2M session saved to {}", "✓".green().bold(), store.path().display().to_string().dimmed());
     if let Some(exp) = creds.expires_at {

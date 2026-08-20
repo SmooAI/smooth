@@ -33,8 +33,12 @@ rand = "0.8"
 # progenitor's generated code references these crates directly for
 # regex pattern validation and UUID/duration parsing in models.
 regress = "0.10"
-
-[dev-dependencies]
+# Cross-process advisory lock over the credentials file (th-5c0189). Lives in
+# this crate because BOTH credential writers must contend for one sidecar.
+fs4.workspace = true
+# Not just a test helper: `CredentialsStore::save` writes through a
+# NamedTempFile so the token file is unique-named + O_EXCL + 0600 from
+# creation, with no world-readable window (th-5c0189).
 tempfile = "3"
 
 [build-dependencies]

@@ -46,6 +46,7 @@ pub mod relay;
 pub mod schedule;
 pub mod scheduler;
 pub mod search;
+pub mod secret_file;
 pub mod session_mode;
 pub mod single_instance;
 pub mod skills_route;

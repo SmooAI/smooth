@@ -605,15 +605,6 @@ pub fn schedule_store_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("schedules.db"), |h| h.join(".smooth").join("schedules.db"))
 }
 
-/// Tighten a file to owner-only (mode 600) on Unix; no-op elsewhere.
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
-
 /// Provision the local-flavor auth token, **auto-generating it on first run**.
 ///
 /// Resolution order: `SMOOTH_LOCAL_TOKEN` (env) → `~/.smooth/operator-token`
@@ -649,13 +640,10 @@ fn provision_local_token_at(path: &Path) -> Result<String> {
             return Ok(existing);
         }
     }
-    // First run: generate + persist a fresh token, owner-only.
+    // First run: generate + persist a fresh token, owner-only from the
+    // instant the file exists (th-5c0189).
     let token = uuid::Uuid::new_v4().simple().to_string();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
-    restrict_permissions(path);
+    crate::secret_file::write_secret(path, &token).with_context(|| format!("writing {}", path.display()))?;
     tracing::info!(path = %path.display(), "provisioned a local operator token");
     Ok(token)
 }
@@ -1306,14 +1294,8 @@ fn persist_daemon_addr(addr: &str) {
 /// Pure over its dir so it's testable without touching the real `$HOME`. Writes
 /// `<dir>/daemon.addr` (mode 600 on unix) and returns the path.
 fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
     let path = dir.join("daemon.addr");
-    std::fs::write(&path, addr)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::secret_file::write_secret(&path, addr)?;
     Ok(path)
 }
 

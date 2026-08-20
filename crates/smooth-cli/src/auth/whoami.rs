@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 
-use crate::auth::refresh::{refresh_m2m_session, refresh_user_session};
+use crate::auth::refresh::{decide, refresh_locked, Refresh};
 
 /// Print both the user and the M2M sessions if present. The two are
 /// independent — having one doesn't imply having the other.
@@ -35,42 +35,16 @@ pub async fn cmd_whoami() -> Result<()> {
         .build()
         .context("build http client")?;
 
-    // Silent refresh per session. A failure here just means we fall
-    // through to reporting the still-expired creds — we don't surface
-    // refresh errors to the user from `whoami`, since they may be
-    // running it diagnostically and don't want their terminal flooded
-    // with network errors. The next command that actually needs the
-    // session will surface a real error if/when it tries to use it.
-    let user_creds = if let Some(creds) = user_creds {
-        if creds.is_expired() && creds.refresh_token.is_some() {
-            match refresh_user_session(&http, &creds).await {
-                Ok(refreshed) => {
-                    let _ = user.save(&refreshed);
-                    Some(refreshed)
-                }
-                Err(_) => Some(creds),
-            }
-        } else {
-            Some(creds)
-        }
-    } else {
-        None
-    };
-    let m2m_creds = if let Some(creds) = m2m_creds {
-        if creds.is_expired() && creds.client_id.is_some() && creds.client_secret.is_some() {
-            match refresh_m2m_session(&http, &creds).await {
-                Ok(refreshed) => {
-                    let _ = m2m.save(&refreshed);
-                    Some(refreshed)
-                }
-                Err(_) => Some(creds),
-            }
-        } else {
-            Some(creds)
-        }
-    } else {
-        None
-    };
+    // Silent refresh per session, through the same locked choke point
+    // every other command uses — `whoami` refreshing unlocked was a
+    // second writer to the file, i.e. the exact hazard (th-5c0189).
+    // A failure here just means we fall through to reporting the
+    // still-expired creds: the user may be running this diagnostically
+    // and doesn't want their terminal flooded with network errors. The
+    // next command that actually needs the session will surface a real
+    // error if/when it tries to use it.
+    let user_creds = refreshed_or_as_is(&http, &user, user_creds, "no user session").await;
+    let m2m_creds = refreshed_or_as_is(&http, &m2m, m2m_creds, "no M2M session").await;
 
     if let Some(creds) = &user_creds {
         print_session("User", creds, user.path());
@@ -95,6 +69,19 @@ pub async fn cmd_whoami() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refresh `creds` if it needs it, falling back to the credentials as
+/// loaded when anything goes wrong. The `decide` pre-check keeps a
+/// healthy session off the lock entirely.
+async fn refreshed_or_as_is(http: &reqwest::Client, store: &CredentialsStore, creds: Option<Credentials>, missing_hint: &str) -> Option<Credentials> {
+    let creds = creds?;
+    // Err = expired with no refresh material, which no amount of locking
+    // or POSTing fixes. Report it as-is rather than queueing on the lock.
+    if !matches!(decide(&creds), Ok(action) if action != Refresh::NotNeeded) {
+        return Some(creds);
+    }
+    Some(refresh_locked(http, store, missing_hint).await.unwrap_or(creds))
 }
 
 fn print_session(label: &str, creds: &Credentials, path: &std::path::Path) {

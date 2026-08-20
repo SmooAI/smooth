@@ -5067,6 +5067,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dirs-next",
+ "fs4",
  "futures-core",
  "openapiv3",
  "prettyplease",
