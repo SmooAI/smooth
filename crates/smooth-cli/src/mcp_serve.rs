@@ -61,10 +61,34 @@ pub struct SmoothMcp {
 
 impl SmoothMcp {
     fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
+        let mut tool_router = Self::tool_router();
+        Self::apply_write_gate(&mut tool_router, mcp_writes_allowed());
+        Self { tool_router }
+    }
+
+    /// th-1d5ca8: the machine-level write kill switch. With writes denied,
+    /// every tool NOT annotated `read_only_hint` is disabled — hidden from
+    /// the advertised roster and rejected if called anyway (rmcp enforces
+    /// both for disabled routes). Fails closed: a tool with no annotations
+    /// counts as a write.
+    fn apply_write_gate(router: &mut ToolRouter<Self>, allow_writes: bool) {
+        if allow_writes {
+            return;
+        }
+        for tool in router.list_all() {
+            let read_only = tool.annotations.as_ref().and_then(|a| a.read_only_hint).unwrap_or(false);
+            if !read_only {
+                router.disable_route(tool.name.clone());
+            }
         }
     }
+}
+
+/// `SMOOTH_MCP_ALLOW_WRITE=0` (or `false`) denies every mutating MCP tool for
+/// this machine, whichever harness spawned the server. Anything else — unset
+/// included — allows them. Pearl th-1d5ca8.
+fn mcp_writes_allowed() -> bool {
+    !matches!(std::env::var("SMOOTH_MCP_ALLOW_WRITE").as_deref(), Ok("0" | "false"))
 }
 
 /// Arguments for `pearls_create`.
@@ -387,7 +411,8 @@ impl SmoothMcp {
     /// MCP error if no pearl store exists in the workspace or the query fails.
     #[tool(
         name = "pearls_ready",
-        description = "List work items (pearls) that are ready to work on now — open, unblocked, highest priority first."
+        description = "List work items (pearls) that are ready to work on now — open, unblocked, highest priority first.",
+        annotations(read_only_hint = true)
     )]
     pub async fn pearls_ready(&self) -> Result<String, ErrorData> {
         let (store, _dir) = crate::open_pearl_store_with_path().map_err(|e| store_err(&e))?;
@@ -1422,5 +1447,47 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_SESSION_ID");
         assert!(resolve_agent_id(None).is_err(), "no handle anywhere must error, not invent one");
         std::env::remove_var("SMOOTH_AGENT_SESSIONS_DIR");
+    }
+
+    /// th-1d5ca8: with writes denied, the advertised roster shrinks to
+    /// read-only tools ONLY — no mutating tool is listed (rmcp also rejects
+    /// calls to disabled routes), and unannotated tools fail closed.
+    #[test]
+    fn write_kill_switch_hides_every_mutating_tool() {
+        let mut router = SmoothMcp::tool_router();
+        let full = router.list_all().len();
+        SmoothMcp::apply_write_gate(&mut router, false);
+        let gated = router.list_all();
+
+        assert!(!gated.is_empty(), "reads must survive the kill switch");
+        assert!(gated.len() < full, "the gate must remove something");
+        for t in &gated {
+            assert_eq!(
+                t.annotations.as_ref().and_then(|a| a.read_only_hint),
+                Some(true),
+                "{} survived the write gate without read_only_hint",
+                t.name
+            );
+        }
+        let names: Vec<&str> = gated.iter().map(|t| t.name.as_ref()).collect();
+        for write_tool in [
+            "pearls_create",
+            "remember",
+            "mail_send",
+            "mail_ack",
+            "agent_identity",
+            "agent_status",
+            "operator_tools_set",
+        ] {
+            assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
+        }
+        for read_tool in ["pearls_ready", "recall", "mail_inbox", "agent_list", "operator_tools"] {
+            assert!(names.contains(&read_tool), "{read_tool} is read-only and must survive");
+        }
+
+        // allow_writes = true is a no-op.
+        let mut untouched = SmoothMcp::tool_router();
+        SmoothMcp::apply_write_gate(&mut untouched, true);
+        assert_eq!(untouched.list_all().len(), full);
     }
 }
