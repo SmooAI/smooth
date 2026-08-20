@@ -9,8 +9,10 @@
 //! the sandbox via a hook or `core.hooksPath`) — and **denies reads** of the
 //! operator's credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
 //! `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`) —
-//! including the daemon's *own* secrets in `~/.smooth` (`providers.json`'s
-//! LLM key, the `auth/` JWT), so a sandboxed tool can't exfil what drives it.
+//! including the daemon's *own* secrets and state in `~/.smooth`
+//! (`providers.json`'s LLM key, the `auth/` JWT, the `operator-token` WS
+//! bearer, `operator-storage.db`, `schedules.db`), so a sandboxed tool can't
+//! exfil what drives it or schedule itself a second turn.
 //!
 //! With a proxy configured ([`SandboxPolicy::with_proxy`]), the sandbox also
 //! becomes the **egress boundary**: `HTTP(S)_PROXY` point at the loopback goalie
@@ -158,6 +160,15 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
          (deny file-write* (regex #\"/\\.git/hooks/\"))\n\
          (deny file-write* (regex #\"/\\.git/config$\"))\n",
     );
+    // The daemon's OWN state counts as a crown jewel, not just the user's
+    // credentials. `~/.smooth/operator-token` is the bearer for
+    // `ws://127.0.0.1:8787/ws` — a sandboxed shell that reads it can open a
+    // FRESH connection as the owner principal and drive the agent outside this
+    // conversation's permission mode, and `schedules.db` turns that into
+    // persistence (the same primitive as the already-denied LaunchAgents).
+    // The two SQLite stores use `regex`, not `literal`, so the `-wal`/`-shm`
+    // siblings are covered too — a literal would leave every recently written
+    // row readable in the WAL.
     if let Some(home) = &policy.home {
         use std::fmt::Write as _;
         let home_path = std::fs::canonicalize(home).unwrap_or_else(|_| home.clone());
@@ -174,7 +185,10 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (subpath \"{h}/.gnupg\")\n\
              \x20  (literal \"{h}/.netrc\")\n\
              \x20  (literal \"{h}/.smooth/providers.json\")\n\
-             \x20  (subpath \"{h}/.smooth/auth\"))\n"
+             \x20  (subpath \"{h}/.smooth/auth\")\n\
+             \x20  (literal \"{h}/.smooth/operator-token\")\n\
+             \x20  (regex #\"/\\.smooth/operator-storage\\.db\")\n\
+             \x20  (regex #\"/\\.smooth/schedules\\.db\"))\n"
         );
         // Crown-jewel WRITE deny: even with writes allowed by default, a
         // hijacked shell must not overwrite credentials or plant persistence.
@@ -193,6 +207,9 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (literal \"{h}/.netrc\")\n\
              \x20  (subpath \"{h}/.smooth/auth\")\n\
              \x20  (literal \"{h}/.smooth/providers.json\")\n\
+             \x20  (literal \"{h}/.smooth/operator-token\")\n\
+             \x20  (regex #\"/\\.smooth/operator-storage\\.db\")\n\
+             \x20  (regex #\"/\\.smooth/schedules\\.db\")\n\
              \x20  (subpath \"{h}/Library/LaunchAgents\"))\n"
         );
     }
@@ -468,6 +485,67 @@ mod tests {
             assert!(
                 !out.contains("SMOOTH_SECRET_SENTINEL_4f3a"),
                 "the daemon's own creds under ~/.smooth/auth must not be readable in-sandbox: {out}"
+            );
+        }
+
+        /// The daemon's own runtime state — not just its credentials. The
+        /// operator token is a bearer for the local WS endpoint, so a
+        /// sandboxed shell that reads it can reconnect as the owner principal
+        /// outside this conversation's permission mode; `schedules.db` is how
+        /// that gets made persistent. Both must be kernel-denied like `~/.ssh`.
+        ///
+        /// Uses a FAKE home (`policy.home`), so the test never reads or
+        /// clobbers the real operator's token.
+        #[tokio::test]
+        async fn reading_or_writing_operator_state_is_denied() {
+            let fake_home = tempfile::tempdir().unwrap();
+            let home = std::fs::canonicalize(fake_home.path()).unwrap();
+            let smooth = home.join(".smooth");
+            std::fs::create_dir_all(&smooth).unwrap();
+            for (name, sentinel) in [
+                ("operator-token", "SMOOTH_WS_TOKEN_SENTINEL_7b1e"),
+                ("operator-storage.db", "SMOOTH_STORAGE_SENTINEL_7b1e"),
+                ("schedules.db", "SMOOTH_SCHEDULE_SENTINEL_7b1e"),
+                // SQLite keeps the newest rows in the WAL, so the deny has to
+                // cover the sibling files too — hence `regex`, not `literal`.
+                ("schedules.db-wal", "SMOOTH_WAL_SENTINEL_7b1e"),
+            ] {
+                std::fs::write(smooth.join(name), sentinel).unwrap();
+            }
+
+            let ws = tempfile::tempdir().unwrap();
+            let mut policy = SandboxPolicy::for_workspace(ws.path().to_path_buf());
+            policy.home = Some(home.clone());
+            let s = smooth.display();
+
+            let (_c, out) = run(
+                &policy,
+                &format!("cat '{s}/operator-token' '{s}/operator-storage.db' '{s}/schedules.db' '{s}/schedules.db-wal' 2>&1; echo DONE"),
+            )
+            .await;
+            assert!(out.contains("DONE"));
+            assert!(
+                !out.contains("SENTINEL_7b1e"),
+                "operator token / storage / schedule store must not be readable in-sandbox: {out}"
+            );
+
+            // And not overwritable — planting a schedule is persistence, the
+            // same primitive as the already-denied `~/Library/LaunchAgents`.
+            let (_c2, out2) = run(
+                &policy,
+                &format!("echo pwned > '{s}/operator-token' 2>&1; echo pwned > '{s}/schedules.db' 2>&1; echo DONE"),
+            )
+            .await;
+            assert!(out2.contains("DONE"));
+            assert_eq!(
+                std::fs::read_to_string(smooth.join("operator-token")).unwrap(),
+                "SMOOTH_WS_TOKEN_SENTINEL_7b1e",
+                "{out2}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(smooth.join("schedules.db")).unwrap(),
+                "SMOOTH_SCHEDULE_SENTINEL_7b1e",
+                "{out2}"
             );
         }
     }

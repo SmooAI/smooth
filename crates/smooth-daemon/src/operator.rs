@@ -910,6 +910,16 @@ deny = [
     "**/.aws/**",
     "**/Library/LaunchAgents/**",
     "**/.smooth/auth/**",
+    # The daemon's own runtime state. `operator-token` is the bearer for the
+    # local WS endpoint — reading it lets a tool reconnect as the owner
+    # principal outside this conversation's permission mode — and
+    # `schedules.db` makes that persistent, the same primitive as the
+    # LaunchAgents entry above. The kernel sandbox denies these too, but only
+    # for `bash`; the fs tools (`read_file`/`write_file`) reach them through
+    # this list alone.
+    "**/.smooth/operator-token",
+    "**/.smooth/operator-storage.db*",
+    "**/.smooth/schedules.db*",
 ]
 "#;
 
@@ -1854,6 +1864,14 @@ mod tests {
             "/home/me/.ssh/id_rsa",
             "/home/me/.aws/credentials",
             "/home/me/.smooth/auth/smooai.json",
+            // The daemon's own state: the WS bearer, and the stores that would
+            // let a hijacked tool schedule itself a later turn. The kernel
+            // sandbox covers these for `bash` only — a `read_file` tool call
+            // is gated here or nowhere.
+            "/home/me/.smooth/operator-token",
+            "/home/me/.smooth/operator-storage.db",
+            "/home/me/.smooth/schedules.db",
+            "/home/me/.smooth/schedules.db-wal",
         ] {
             assert!(policy.evaluate(&write_call(path)).is_some(), "deny policy must block write to: {path}");
         }
