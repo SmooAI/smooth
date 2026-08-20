@@ -82,8 +82,13 @@ pub enum Cmd {
         #[arg(long)]
         workflow: Option<String>,
         /// `AgentToolConfig` JSON (`{enabledTools: [{toolId, enabled,
-        /// authLevel, config?}]}`); `@` prefix reads a file. Empty
-        /// `enabledTools` = full tool set; non-empty = restrict.
+        /// authLevel, config?}]}`); `@` prefix reads a file.
+        ///
+        /// TRAP: empty `enabledTools` = the FULL tool set; non-empty = an
+        /// ALLOWLIST, so the first tool you add silently disables every other
+        /// one. This flag replaces the whole array — to flip a single tool
+        /// atomically, use `th api agents tools enable|disable` instead, and
+        /// `th api agents tools list <id>` to see what an agent is missing.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
         /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
@@ -145,8 +150,13 @@ pub enum Cmd {
         #[arg(long)]
         workflow: Option<String>,
         /// `AgentToolConfig` JSON (`{enabledTools: [{toolId, enabled,
-        /// authLevel, config?}]}`); `@` prefix reads a file. Empty
-        /// `enabledTools` = full tool set; non-empty = restrict.
+        /// authLevel, config?}]}`); `@` prefix reads a file.
+        ///
+        /// TRAP: empty `enabledTools` = the FULL tool set; non-empty = an
+        /// ALLOWLIST, so the first tool you add silently disables every other
+        /// one. This flag replaces the whole array — to flip a single tool
+        /// atomically, use `th api agents tools enable|disable` instead, and
+        /// `th api agents tools list <id>` to see what an agent is missing.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
         /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
@@ -195,6 +205,13 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+    },
+    /// Per-agent tool enablement — enumerate, enable/disable ONE tool, and
+    /// see which registered tools the agent is MISSING. Prefer this over
+    /// `update --tool-config`, which round-trips the whole array.
+    Tools {
+        #[command(subcommand)]
+        cmd: super::agent_tools::ToolsCmd,
     },
     /// Generate an agent config from a JSON prompt without persisting it.
     GenerateConfig {
@@ -454,6 +471,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("PUT agent knowledge")?,
             );
         }
+        Cmd::Tools { cmd } => super::agent_tools::cmd(cmd).await?,
         Cmd::GenerateConfig { body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;

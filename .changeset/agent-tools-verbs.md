@@ -1,0 +1,7 @@
+---
+'@smooai/smooth': patch
+---
+
+`th api agents` gains a `tools` group — per-agent tool enablement as a first-class operation instead of a whole-array round-trip. `tools list <agent-id>` is the drift view: enabled vs. available vs. **missing**, so a newly shipped tool is discoverable on day one rather than silently absent (this is the check that would have caught `verify_identity` sitting dark in production). `tools registry` enumerates every registerable tool with its description, default auth level, required product feature, self-scoping flag and channel restrictions — you cannot enable what you cannot enumerate. `tools enable|disable <agent-id> <tool-id>` flips exactly one tool through the server-side merge, removing the read-modify-write race that made raw SQL feel easier.
+
+The allowlist trap is now stated out loud instead of living in a `--help` string: every `tools list` says plainly whether the agent is UNRESTRICTED (empty `enabledTools` = every tool, including ones shipped later) or RESTRICTED (a non-empty list is an allowlist, and the next tool we ship is invisible to it). A `disable` that flips an unrestricted agent into an allowlist prints a loud WARNING, an `enable` on an unrestricted agent reports the no-op rather than claiming success, and an enabled `toolId` with no registry entry is flagged `NOT IN REGISTRY` (SMOODEV-981). `--tool-config` on `mint`/`update` now documents that it replaces the whole array and points at these verbs.

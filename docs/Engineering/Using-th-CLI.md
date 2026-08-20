@@ -220,12 +220,57 @@ th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,
 th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
+# ⚠️ --tool-config REPLACES the whole array — read-modify-write, so two
+# concurrent edits lose one. Prefer `th api agents tools` below for one tool.
 th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
 # SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
 # kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
 # mint accepts the same --personality/--workflow/--tool-config/--extension at create time.
 # Read any of these back with: th api agents show <agent-id>
 ```
+
+#### Per-agent tools — `th api agents tools` (pearl th-c66db7)
+
+The reason this exists: `verify_identity` shipped registered, deployed and
+fail-closed on every channel, and was **invisible in production** because one
+agent's `enabledTools` didn't list it. A non-empty `enabledTools` is an
+**allowlist**, so a tool shipped after that list was written is silently
+excluded — and until now nothing on any surface would tell you. `tools list` is
+that check.
+
+```bash
+# The drift view — enabled vs. available vs. MISSING. Run it after every
+# release that ships a tool; a newly registered tool shows up under MISSING.
+th api agents tools list <agent-id>
+th api agents tools list <agent-id> --json      # includes `restrictionNote`
+
+# What COULD this agent be given? id, description, default auth level,
+# required product feature, self-scoping flag, channel restrictions.
+th api agents tools registry
+
+# Flip ONE tool. The merge is server-side and atomic — no array round-trip,
+# no lost update. --auth-level defaults to the tool's defaultAuthLevel.
+th api agents tools enable  <agent-id> <tool-id> [--auth-level none|end_user|admin]
+th api agents tools disable <agent-id> <tool-id>
+```
+
+`tools list` states the mode in words rather than making you infer it:
+
+- **UNRESTRICTED** (`mode: all`) — no enabled entry, so the agent gets every
+  tool available to the org, *including ones shipped later*.
+- **RESTRICTED** (`mode: restricted`) — the list is an allowlist. Even with
+  nothing missing today, the next tool we ship is invisible to this agent.
+
+Two edges the CLI reports rather than hides:
+
+- `enable` on an **unrestricted** agent is a **no-op** (the tool is already on).
+  Writing a one-entry allowlist there would disable everything else — the exact
+  accident this pearl is about. `--auth-level` in that state is a 409.
+- `disable` on an **unrestricted** agent **materialises** the allowlist and
+  prints a loud WARNING: the agent stops picking up newly shipped tools.
+
+An enabled `toolId` with no registry entry is flagged `NOT IN REGISTRY` — it
+binds to nothing at runtime (SMOODEV-981: camelCase ids silently fail to bind).
 
 ### Knowledge
 

@@ -9,6 +9,7 @@
 //! order. Most resource commands take an `Option<String>` for `--org`
 //! and call this helper.
 
+pub mod agent_tools;
 pub mod agents;
 pub mod booking;
 pub mod branding;
