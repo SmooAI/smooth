@@ -38,8 +38,35 @@ pub fn write_secret(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents.as_ref())?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    persist_atomically(tmp, path)
+}
+
+/// Rename a temp file over `path`, retrying the one Windows conflict that is
+/// genuinely transient: `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` fails
+/// `ERROR_ACCESS_DENIED` while any other handle has the destination open,
+/// including a plain reader. `push-subs.json` is read by `send_to_all` and
+/// written by `save_subs`, so that overlap is real here. POSIX has no such
+/// conflict and returns on the first attempt.
+///
+/// ponytail: same 25 lines as `smooth-api-client`'s copy, for the same reason
+/// the module header gives — the crates share no dependency.
+fn persist_atomically(mut tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 20;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        match tmp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if !(cfg!(windows) && e.error.kind() == std::io::ErrorKind::PermissionDenied) {
+                    return Err(e.error);
+                }
+                tmp = e.file;
+                last = Some(e.error);
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) + 1));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("persist exhausted its attempts")))
 }
 
 /// `create_dir_all` that asks for mode 0700 up front on unix. Existing

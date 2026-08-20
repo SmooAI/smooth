@@ -167,9 +167,7 @@ impl CredentialsStore {
         let mut tmp = tempfile::NamedTempFile::new_in(parent).with_context(|| format!("create temp file in {}", parent.display()))?;
         std::io::Write::write_all(&mut tmp, json.as_bytes()).context("write credentials")?;
         tmp.as_file().sync_all().context("flush credentials to disk")?;
-        tmp.persist(&self.path)
-            .map_err(|e| e.error)
-            .with_context(|| format!("replace {}", self.path.display()))?;
+        persist_atomically(tmp, &self.path).with_context(|| format!("replace {}", self.path.display()))?;
         Ok(())
     }
 
@@ -185,6 +183,41 @@ impl CredentialsStore {
             Err(e) => Err(e).with_context(|| format!("delete credentials at {}", self.path.display())),
         }
     }
+}
+
+/// Rename a temp file over `dest`, retrying the one Windows conflict that
+/// is genuinely transient.
+///
+/// On Windows the rename compiles to `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`,
+/// which fails `ERROR_ACCESS_DENIED` while **any** other handle has the
+/// destination open — including a plain reader midway through a
+/// `read_to_string`. POSIX replace-over-an-open-file has no such conflict and
+/// returns on the first attempt every time.
+///
+/// This is not a workaround for writer-vs-writer contention: that is the
+/// [`crate::credential_lock`]'s job, and CI proves it works — eight
+/// concurrent *locked* savers pass on Windows. What it covers is a reader,
+/// which cannot take the exclusive lock without deadlocking the
+/// read-modify-write callers that hold it across their own `load`. The
+/// window is microseconds, so the first retry effectively always wins; a
+/// genuine permission error still surfaces after the attempts run out.
+fn persist_atomically(mut tmp: tempfile::NamedTempFile, dest: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 20;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..ATTEMPTS {
+        match tmp.persist(dest) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if !(cfg!(windows) && e.error.kind() == std::io::ErrorKind::PermissionDenied) {
+                    return Err(e.error);
+                }
+                tmp = e.file;
+                last = Some(e.error);
+                std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) + 1));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("persist exhausted its attempts")))
 }
 
 /// `create_dir_all` that asks for mode `0700` up front on unix, so a
@@ -378,6 +411,10 @@ mod tests {
             // writer panicked — a hung suite instead of a failed test,
             // which is how this wedged Windows CI for 30 minutes.
             for _ in 0..2_000 {
+                // Yield so the reader samples the file rather than pinning
+                // it open at 100% duty cycle — on Windows an always-open
+                // destination is a replace the writer cannot ever win.
+                std::thread::yield_now();
                 let loaded = store.load().expect("a reader must never see a partial file").expect("present");
                 let suffix = loaded.access_token.strip_prefix("tok-").expect("intact access token");
                 assert_eq!(
