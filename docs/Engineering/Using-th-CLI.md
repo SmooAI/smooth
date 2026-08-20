@@ -38,12 +38,11 @@ explicit in the command tree:
   `smoo → th` symlink next to the binary and `th` dispatches on argv[0], so
   `smoo agents list`, `smoo crm contacts list`, `smoo auth login` are the
   customer-facing spellings with zero extra keystrokes.
-- **Old top-level spellings still parse** (`th config`, `th crm`, `th api …`,
-  `th auth`, …) as *hidden* compat aliases — existing docs, hooks, and muscle
+- **Old top-level spellings still parse** (`smoo config`, `smoo crm`, `smoo api …`,
+  `smoo auth`, …) as *hidden* compat aliases — existing docs, hooks, and muscle
   memory keep working, but `--help` shows the clean split. New docs and skills
-  should use the `smoo …` spelling. (The rest of this document predates the
-  namespace; read any `th api …` / `th auth …` below as `smoo api …` /
-  `smoo auth …`.)
+  should use the `smoo …` spelling; this document was swept to it (pearl
+  th-845c06). The old `th <resource>` spellings remain hidden compat aliases.
 - **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).
@@ -101,16 +100,16 @@ The Smoo AI platform uses a two-tier identity model that `th` mirrors exactly:
                                 │
                                 ▼
                 ┌──────────────────────────────┐
-                │   https://api.smoo.ai/…      │  ← all `th api` calls
+                │   https://api.smoo.ai/…      │  ← all `smoo api` calls
                 └──────────────────────────────┘
 ```
 
 ### Logging in today (M2M client_credentials)
 
 ```bash
-th auth login --m2m                # interactive — prompts for client_id + secret
-SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… th auth login --m2m   # env-driven (CI, scripts)
-th auth login --m2m --client-id=… --client-secret=…              # flag-driven
+smoo auth login --m2m                # interactive — prompts for client_id + secret
+SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… smoo auth login --m2m   # env-driven (CI, scripts)
+smoo auth login --m2m --client-id=… --client-secret=…              # flag-driven
 ```
 
 Credential resolution order (first present wins):
@@ -119,17 +118,17 @@ Credential resolution order (first present wins):
 2. `SMOOAI_CLIENT_ID` / `SMOOAI_CLIENT_SECRET` env vars
 3. Interactive prompt
 
-The exchange happens against `https://auth.smoo.ai/token` with `grant_type=client_credentials` and `provider=client_credentials`. The response is a JWT (with org claims, role claims, expiration) that `th` stores at `~/.smooth/auth/smooai.json` and replays as `Authorization: Bearer …` on every `th api` call.
+The exchange happens against `https://auth.smoo.ai/token` with `grant_type=client_credentials` and `provider=client_credentials`. The response is a JWT (with org claims, role claims, expiration) that `th` stores at `~/.smooth/auth/smooai.json` and replays as `Authorization: Bearer …` on every `smoo api` call.
 
 ### Where client credentials come from
 
 - **Web app**: Organization Settings → API Keys → "Create API key". The secret is shown **once**. Copy immediately or you'll regenerate.
-- **`th api keys create`**: same thing from the CLI, **but** it currently requires a dashboard-user token (see [§4 "th admin" gap](#4-the-th-admin-gap-and-the-onboarding-collapse)). Today that means the web app is the practical source.
+- **`smoo api keys create`**: same thing from the CLI, **but** it currently requires a dashboard-user token (see [§4 "smoo admin" gap](#4-the-th-admin-gap-and-the-onboarding-collapse)). Today that means the web app is the practical source.
 
 ### Verifying you're logged in
 
 ```bash
-th auth whoami
+smoo auth whoami
 # Identity     client:bee846cc-...        ← the M2M client_id (or user:… if dashboard auth)
 # Email        brent@smoo.ai
 # Admin roles  super_admin (1)            ← present iff your client/user has admin grants
@@ -138,29 +137,29 @@ th auth whoami
 # Stored at    /Users/brentrager/.smooth/auth/smooai.json
 ```
 
-If you see `super_admin` in `Admin roles` you have *cross-org* powers — every `th api` call will succeed against any org you target with `--org <id>`. Treat that token with the same care as a root AWS key.
+If you see `super_admin` in `Admin roles` you have *cross-org* powers — every `smoo api` call will succeed against any org you target with `--org <id>`. Treat that token with the same care as a root AWS key.
 
 ### Refreshing a session (headless)
 
-Every `th api *` call already refreshes an expired token silently in the request path, so you rarely need this. When you want to freshen the stored token **now** — before handing it to a script, or to confirm the session still resolves — use:
+Every `smoo api *` call already refreshes an expired token silently in the request path, so you rarely need this. When you want to freshen the stored token **now** — before handing it to a script, or to confirm the session still resolves — use:
 
 ```bash
-th auth refresh          # refresh the user session
-th auth refresh --m2m    # refresh the M2M service-account session
+smoo auth refresh          # refresh the user session
+smoo auth refresh --m2m    # refresh the M2M service-account session
 ```
 
-It reuses the same silent-refresh path `th api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret *is* the durable credential.
+It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret *is* the durable credential.
 
 ### Switching orgs
 
 ```bash
-th org list                               # see what you have access to (alias of `th api orgs list`)
-th org switch <id|name>                   # persist active org across every credential store
-th org show                               # details of the active org
-th api agents list --org <other-org-id>   # one-off override (no switch)
+smoo org list                               # see what you have access to (alias of `smoo api orgs list`)
+smoo org switch <id|name>                   # persist active org across every credential store
+smoo org show                               # details of the active org
+smoo api agents list --org <other-org-id>   # one-off override (no switch)
 ```
 
-`th org` is the top-level alias for `th api orgs` — `list` / `switch` / `show`. `th auth whoami` prints a reminder of these.
+`smoo org` is the top-level alias for `smoo api orgs` — `list` / `switch` / `show`. `smoo auth whoami` prints a reminder of these.
 
 #### Cross-org behavior depends on which session you're using
 
@@ -168,27 +167,27 @@ This is the part that trips people up. "Switching" and `--org`/`--org-id` mean d
 
 | Session | Active org | Cross-org via `--org` / `--org-id`? |
 |---|---|---|
-| **User JWT** (`th config` default, `th api` user session) | set by `th org switch` | ✅ **Yes** — a master/super-admin is authorized over child orgs. Read/write child config with `--org-id <child>` and no switch. |
-| **M2M** (`--m2m`, and the whole `th admin config` surface) | baked into the token | ❌ **No** — the token is org-locked **server-side**. `--org <child>` → `403 Not authorized for this organization`, and `th org switch` is **cosmetic** for it (it changes local state the server ignores). |
+| **User JWT** (`smoo config` default, `smoo api` user session) | set by `smoo org switch` | ✅ **Yes** — a master/super-admin is authorized over child orgs. Read/write child config with `--org-id <child>` and no switch. |
+| **M2M** (`--m2m`, and the whole `smoo admin config` surface) | baked into the token | ❌ **No** — the token is org-locked **server-side**. `--org <child>` → `403 Not authorized for this organization`, and `smoo org switch` is **cosmetic** for it (it changes local state the server ignores). |
 
 Practical consequences:
 
-- **Setting config values on a child org needs no switch** — `th config set KEY VALUE --org-id <child>` works on the user JWT (master admin authorized over children).
-- **Creating a config *environment* on an unwired child org** hits the M2M org-lock (`th admin config environments` is M2M / admin-scoped → 403 cross-org). Bootstrap a brand-new child env via the **deploy path** (`prepareSmooConfig` creates the env at deploy) rather than an admin env-create call.
-- **To genuinely act *as* another org's M2M identity**, use named profiles — `th auth profile` bundles a user + M2M identity per org; select with `--profile <name>` / `SMOOAI_PROFILE`.
-- **Flag spelling**: `--org-id` and `--org` are interchangeable on both `th config` and `th admin config` (each accepts the other as an alias).
+- **Setting config values on a child org needs no switch** — `smoo config set KEY VALUE --org-id <child>` works on the user JWT (master admin authorized over children).
+- **Creating a config *environment* on an unwired child org** hits the M2M org-lock (`smoo admin config environments` is M2M / admin-scoped → 403 cross-org). Bootstrap a brand-new child env via the **deploy path** (`prepareSmooConfig` creates the env at deploy) rather than an admin env-create call.
+- **To genuinely act *as* another org's M2M identity**, use named profiles — `smoo auth profile` bundles a user + M2M identity per org; select with `--profile <name>` / `SMOOAI_PROFILE`.
+- **Flag spelling**: `--org-id` and `--org` are interchangeable on both `smoo config` and `smoo admin config` (each accepts the other as an alias).
 
 ### Logout
 
 ```bash
-th auth logout --m2m                             # deletes ~/.smooth/auth/smooai.json (idempotent)
+smoo auth logout --m2m                             # deletes ~/.smooth/auth/smooai.json (idempotent)
 ```
 
 ### Provider auth is separate
 
 **LLM provider** credentials (Anthropic, OpenAI, llm.smoo.ai, …) live at `~/.smooth/providers.json` and are managed through the model/cast surface (`th model`, `th cast models`) — a different file, lifecycle, and command tree from `auth.smoo.ai`.
 
-`th auth login` is **Smoo AI identity**, not provider auth. (An earlier revision of this doc said the opposite; `th auth` became the single identity surface when `th api login`/`logout`/`whoami` were removed — pearl th-16b0ca.)
+`smoo auth login` is **Smoo AI identity**, not provider auth. (An earlier revision of this doc said the opposite; `smoo auth` became the single identity surface when the old `th api login`/`logout`/`whoami` verbs were removed — pearl th-16b0ca.)
 
 ### Where sessions are stored
 
@@ -198,90 +197,90 @@ Resolution lives in `smooth_policy::auth_paths` and runs at startup in **both** 
 
 ---
 
-## 3. Daily `th api` reference — replace your curls
+## 3. Daily `smoo api` reference — replace your curls
 
 Everything under `api.smoo.ai` has a typed wrapper. **Stop writing `curl -H "Authorization: Bearer $JWT" https://api.smoo.ai/...`** — it skips auth refresh, doesn't pretty-print, ignores pagination, and goes stale every time the API changes.
 
 ### Orgs / membership
 
 ```bash
-th api orgs list                                   # GET /organizations
-th api orgs show                                   # active org details
-th api members list --org <id>                     # list seats
-th api members invite '{"email":"x@y","role":"admin"}'
-th api members invitations
-th api members revoke <id> / resend <id>
+smoo api orgs list                                   # GET /organizations
+smoo api orgs show                                   # active org details
+smoo api members list --org <id>                     # list seats
+smoo api members invite '{"email":"x@y","role":"admin"}'
+smoo api members invitations
+smoo api members revoke <id> / resend <id>
 # Teams (RBAC groupings that hold roles — SMOODEV-2645). Resolve teams by name
 # or id, members by email, roles by name. set-members/set-roles are replace-all.
-th api teams list                                  # teams + member/role counts
-th api teams create "Sales" --description "..."
-th api teams rename "Sales" "Revenue"
-th api teams set-members "Revenue" jane@acme.com bob@acme.com
-th api teams set-roles "Revenue" admin "Sales Rep"
-th api teams delete "Revenue"
+smoo api teams list                                  # teams + member/role counts
+smoo api teams create "Sales" --description "..."
+smoo api teams rename "Sales" "Revenue"
+smoo api teams set-members "Revenue" jane@acme.com bob@acme.com
+smoo api teams set-roles "Revenue" admin "Sales Rep"
+smoo api teams delete "Revenue"
 # CRM reminders (SMOODEV-2646). Target any CRM entity as TYPE:REF (contact,
 # company, deal by name/email/uuid; task/proposal/funnel/custom_object by uuid).
 # --at parses tomorrow / "next week" / "in 3 days" / 2h / 2026-08-01 / RFC3339.
-th api crm remind contact:jane@acme.com --at tomorrow --note "follow up"
-th api crm reminders list --mine                   # your pending, soonest first
-th api crm reminders list --entity deal:"Acme renewal"
-th api crm remind cancel <reminder-id>             # soft-cancel (also `reminders cancel`)
+smoo api crm remind contact:jane@acme.com --at tomorrow --note "follow up"
+smoo api crm reminders list --mine                   # your pending, soonest first
+smoo api crm reminders list --entity deal:"Acme renewal"
+smoo api crm remind cancel <reminder-id>             # soft-cancel (also `reminders cancel`)
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
-th admin org link-child <child-org-id>             # link under active org
-th admin org link-child <child-org-id> --parent <org> --type manages
-th admin org children                              # list active org's children
-th admin org unlink-child <child-org-id>           # delete the relationship
+smoo admin org link-child <child-org-id>             # link under active org
+smoo admin org link-child <child-org-id> --parent <org> --type manages
+smoo admin org children                              # list active org's children
+smoo admin org unlink-child <child-org-id>           # delete the relationship
 ```
 
 ### Agents (chat agents owned by an org)
 
 ```bash
-th api agents list                                 # active org
-th api agents show <agent-id>
-th api agents summary <agent-id>                   # config + status snapshot
-th api agents create -                             # raw JSON body on stdin
+smoo api agents list                                 # active org
+smoo api agents show <agent-id>
+smoo api agents summary <agent-id>                   # config + status snapshot
+smoo api agents create -                             # raw JSON body on stdin
 # mint = the typed front door to create — builds the body for you,
 # and for a public chat agent prints the ready-to-paste embed snippet
-th api agents mint --name "Support Bot" \
+smoo api agents mint --name "Support Bot" \
     --summary "Answers product questions" \
     --instructions @prompt.md \
     --allowed-origin https://example.com \
     --color background=#020618 --color primary=#f2a618
-th api agents mint --name "Chakra" --brand-from-url https://chakrabpc.com \
+smoo api agents mint --name "Chakra" --brand-from-url https://chakrabpc.com \
     --allowed-origin https://chakrabpc.com   # extract palette → PATCH colors
 # --summary defaults to the name if omitted.
-# Cross-org (mint into a CHILD org as a parent-org admin): th api sends the
+# Cross-org (mint into a CHILD org as a parent-org admin): smoo api sends the
 # org-locked M2M, which can't write to a child org. Point the client at your
 # user session (acts cross-org) for the write:
 #   SMOOAI_AUTH_FILE=~/.config/smooth/auth/profiles/<profile>/smooai-user.json \
-#     th api agents mint --name … --org <child-org-id>
-th api agents regenerate <agent-id> --generator=<name>
-th api agents list-knowledge <agent-id>
-th api agents set-knowledge <agent-id> <body>
+#     smoo api agents mint --name … --org <child-org-id>
+smoo api agents regenerate <agent-id> --generator=<name>
+smoo api agents list-knowledge <agent-id>
+smoo api agents set-knowledge <agent-id> <body>
 
 # SMOODEV-590 — per-agent config is live on all five polyglot servers
 # (instructions/personality/greeting/toolConfig/conversationWorkflow).
 # update takes either a raw JSON patch body OR typed field flags:
-th api agents update <agent-id> --instructions @prompt.md   # instructions.prompt
-th api agents update <agent-id> --greeting "Hi, I'm Smoo!"
-th api agents update <agent-id> --personality witty         # preset name…
-th api agents update <agent-id> --personality '{"preset":"zen","creativity":0.3,"persona":"dry, terse"}'
-th api agents update <agent-id> --visibility internal
-th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,intent,criteria,next?}]}
-th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
+smoo api agents update <agent-id> --instructions @prompt.md   # instructions.prompt
+smoo api agents update <agent-id> --greeting "Hi, I'm Smoo!"
+smoo api agents update <agent-id> --personality witty         # preset name…
+smoo api agents update <agent-id> --personality '{"preset":"zen","creativity":0.3,"persona":"dry, terse"}'
+smoo api agents update <agent-id> --visibility internal
+smoo api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,intent,criteria,next?}]}
+smoo api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
 # ⚠️ --tool-config REPLACES the whole array — read-modify-write, so two
-# concurrent edits lose one. Prefer `th agents tools` below for one tool.
-th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
+# concurrent edits lose one. Prefer `smoo agents tools` below for one tool.
+smoo api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
 # SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
 # kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
 # mint accepts the same --personality/--workflow/--tool-config/--extension at create time.
-# Read any of these back with: th api agents show <agent-id>
+# Read any of these back with: smoo api agents show <agent-id>
 ```
 
-#### Per-agent tools — `th agents tools` (pearl th-c66db7)
+#### Per-agent tools — `smoo agents tools` (pearl th-c66db7)
 
 The reason this exists: `verify_identity` shipped registered, deployed and
 fail-closed on every channel, and was **invisible in production** because one
@@ -293,23 +292,23 @@ that check.
 ```bash
 # The drift view — enabled vs. available vs. MISSING. Run it after every
 # release that ships a tool; a newly registered tool shows up under MISSING.
-th agents tools list <agent-id>
-th agents tools list <agent-id> --json          # includes `restrictionNote`
+smoo agents tools list <agent-id>
+smoo agents tools list <agent-id> --json          # includes `restrictionNote`
 
 # What COULD this agent be given? id, description, default auth level,
 # required product feature, self-scoping flag, channel restrictions.
-th agents tools registry
+smoo agents tools registry
 
 # Flip ONE tool. The merge is server-side and atomic — no array round-trip,
 # no lost update. --auth-level defaults to the tool's defaultAuthLevel.
-th agents tools enable  <agent-id> <tool-id> [--auth-level none|end_user|admin]
-th agents tools disable <agent-id> <tool-id>
+smoo agents tools enable  <agent-id> <tool-id> [--auth-level none|end_user|admin]
+smoo agents tools disable <agent-id> <tool-id>
 ```
 
-Every `th agents …` command is also spelled `th api agents …`, and always will
-be — `th api` is the thin, route-shaped surface (one subcommand per endpoint,
-nothing invented), so it stays complete. `th agents` is the promoted daily
-surface, alongside `th crm` / `th config` / `th testing`. Use whichever fits;
+Every `smoo agents …` command is also spelled `smoo api agents …`, and always will
+be — `smoo api` is the thin, route-shaped surface (one subcommand per endpoint,
+nothing invented), so it stays complete. `smoo agents` is the promoted daily
+surface, alongside `smoo crm` / `smoo config` / `smoo testing`. Use whichever fits;
 they are the same code path, not a wrapper.
 
 `tools list` states the mode in words rather than making you infer it:
@@ -333,40 +332,40 @@ binds to nothing at runtime (SMOODEV-981: camelCase ids silently fail to bind).
 ### Knowledge
 
 ```bash
-th api knowledge list
-th api knowledge show <doc-id>
-th api knowledge content <doc-id>                  # raw text
-th api knowledge upload '{"title":"…","body":"…"}'
-th api knowledge website '{"url":"https://…"}'
-th api knowledge process <doc-id>                  # re-run ingestion
-th api knowledge update <doc-id> <body>
-th api knowledge delete <doc-id>
+smoo api knowledge list
+smoo api knowledge show <doc-id>
+smoo api knowledge content <doc-id>                  # raw text
+smoo api knowledge upload '{"title":"…","body":"…"}'
+smoo api knowledge website '{"url":"https://…"}'
+smoo api knowledge process <doc-id>                  # re-run ingestion
+smoo api knowledge update <doc-id> <body>
+smoo api knowledge delete <doc-id>
 ```
 
 ### Config (org-scoped feature flags + values)
 
 For day-to-day get / set / list against `@smooai/config`, the
-top-level `th config` command is the muscle-memory shortcut —
+top-level `smoo config` command is the muscle-memory shortcut —
 auths via the user JWT by default and auto-refreshes via the
 stored Supabase refresh_token:
 
 ```bash
-th config get <key> --environment=<env>             # raw value (use --json to wrap)
-th config set <key> <value> --environment=<env>     # parses value as JSON when possible
-th config list --environment=<env>                  # key→value map (--json for raw)
-th config <sub> --m2m                               # use ~/.smooth/auth/smooai.json instead
-th config <sub> --org-id=<id>                       # override active org
+smoo config get <key> --environment=<env>             # raw value (use --json to wrap)
+smoo config set <key> <value> --environment=<env>     # parses value as JSON when possible
+smoo config list --environment=<env>                  # key→value map (--json for raw)
+smoo config <sub> --m2m                               # use ~/.smooth/auth/smooai.json instead
+smoo config <sub> --org-id=<id>                       # override active org
 ```
 
 The full schemas + environments + feature-flag-evaluation surface
-still lives under `th api config`:
+still lives under `smoo api config`:
 
 ```bash
-th api config schemas
-th api config environments
-th api config values --environment=production
-th api config feature-flag <flag-key>              # evaluate against active org
-th api config feature-flag <flag-key> --context=- < ctx.json
+smoo api config schemas
+smoo api config environments
+smoo api config values --environment=production
+smoo api config feature-flag <flag-key>              # evaluate against active org
+smoo api config feature-flag <flag-key> --context=- < ctx.json
 ```
 
 #### Local config layout + the `schema.json` wire format
@@ -375,11 +374,11 @@ Each consumer keeps a `.smooai-config/` directory: `config.ts` (the
 `@smooai/config` schema definitions — `publicConfigSchema`,
 `secretConfigSchema`, `featureFlagSchema`), `default.ts` (defaults),
 `package.json`, and **`schema.json`** — the wire format that
-`th config push`/`pull` sync with the org's remote schema.
+`smoo config push`/`pull` sync with the org's remote schema.
 
 > **Library vs CLI:** `@smooai/config` (the TypeScript runtime —
 > `await secretConfig.get(...)`) is unchanged. Only the operator CLI
-> moved from the deprecated `smooai-config` to `th config`.
+> moved from the deprecated `smooai-config` to `smoo config`.
 
 `schema.json` shape:
 
@@ -401,51 +400,51 @@ are two representations of the same keys, so an unmodified `pull` →
 
 > **Generating `schema.json`:** there is currently no generator from
 > `config.ts` (`withSmooConfig` is only a webpack DefinePlugin). Get a
-> `schema.json` via `th config init` (scaffold) or `th config pull`
-> (fetch a remote one). A `th config build` generator is tracked in
+> `schema.json` via `smoo config init` (scaffold) or `smoo config pull`
+> (fetch a remote one). A `smoo config build` generator is tracked in
 > pearl `th-4d1d6c`.
 
 > **Picking a schema:** on an org with **more than one** remote schema,
-> `th config pull` refuses to guess — pass `--schema-name <name>` (it
+> `smoo config pull` refuses to guess — pass `--schema-name <name>` (it
 > lists the available names). `--schema-name` on `push` selects an
 > **existing** schema to update; to **create** a new one, omit the flag
 > and set `"$smooaiName": "<name>"` in `schema.json`.
 
-> **Managing environments without `th admin`:** `th config environments
+> **Managing environments without `smoo admin`:** `smoo config environments
 > list|create|update|delete <…> --org-id <org>` works on the public
 > user-JWT surface — a parent-org admin can create a child org's
-> `production` environment with it (no internal `th admin`).
+> `production` environment with it (no internal `smoo admin`).
 
-### Auth clients — M2M + B2M keys (`th api keys`)
+### Auth clients — M2M + B2M keys (`smoo api keys`)
 
 Mint and manage an org's API auth clients. Two types, both first-class:
 
 - **M2M** (`--type m2m`, default) — a server/CI secret (`client_id` +
   **secret key**). Used for `client_credentials` grants at
-  `auth.smoo.ai` (the same kind `th auth login --m2m` consumes).
+  `auth.smoo.ai` (the same kind `smoo auth login --m2m` consumes).
 - **B2M** (`--type b2m`) — a browser/frontend **publishable key**
   restricted to an allowlist of origins. The key is exposed to the
   page, so the origin pin is the security boundary — at least one
   `--allowed-origin` is required.
 
-These routes require a dashboard **user** session (`th auth login`) and
+These routes require a dashboard **user** session (`smoo auth login`) and
 403 under M2M. A master admin can target a child org with `--org-id`.
 
 ```bash
-th api keys list                                  # M2M + B2M, with origins (--json for raw)
+smoo api keys list                                  # M2M + B2M, with origins (--json for raw)
 
-th api keys create                                # M2M (default) — prints secret key ONCE
-th api keys create --type b2m \
+smoo api keys create                                # M2M (default) — prints secret key ONCE
+smoo api keys create --type b2m \
   --allowed-origin https://app.example.com \
   --allowed-origin https://example.com            # B2M — prints publishable key ONCE
 
-th api keys update <client_id> \
+smoo api keys update <client_id> \
   --allowed-origin https://new.example.com        # replace a B2M client's origins (B2M only)
 
-th api keys rotate <client_id>                     # mint replacement (same type/origins), revoke old
-th api keys revoke <client_id>                     # delete a client
+smoo api keys rotate <client_id>                     # mint replacement (same type/origins), revoke old
+smoo api keys revoke <client_id>                     # delete a client
 
-th api keys create --type b2m --allowed-origin … --org-id <child>   # master admin, child org
+smoo api keys create --type b2m --allowed-origin … --org-id <child>   # master admin, child org
 ```
 
 The key value is shown exactly once — store it immediately. `--type`
@@ -455,29 +454,29 @@ rotation**: it creates a fresh client (new `client_id` + key) of the
 same type/origins, then revokes the old one — so update every consumer.
 A raw `--body '<json>'` escape hatch is still accepted.
 
-### LLM gateway keys (`th llm`)
+### LLM gateway keys (`smoo llm`)
 
 Mint and manage an org's `llm.smoo.ai` keys — the LiteLLM virtual keys
-scoped to the org's team/budget. `th llm` is the top-level surface over
+scoped to the org's team/budget. `smoo llm` is the top-level surface over
 `api.smoo.ai/organizations/{org_id}/llm-gateway/*`. It authenticates as
 the **user** (Supabase JWT) and is org-admin-gated, so it 401s under an
-M2M token — run `th auth login` (user flow) first. A master/super admin
+M2M token — run `smoo auth login` (user flow) first. A master/super admin
 can mint for a child org with `--org-id <child>` (the user JWT acts
 cross-org).
 
 ```bash
-th llm overview                       # masked key + month-to-date spend (--json for raw)
-th llm create-key                     # mint the org's persistent key — prints the value ONCE
-th llm rotate-key                     # invalidate + reissue the persistent key (prints once)
-th llm usage --days 30                # spend by model + by day (JSON timeseries)
+smoo llm overview                       # masked key + month-to-date spend (--json for raw)
+smoo llm create-key                     # mint the org's persistent key — prints the value ONCE
+smoo llm rotate-key                     # invalidate + reissue the persistent key (prints once)
+smoo llm usage --days 30                # spend by model + by day (JSON timeseries)
 
 # additional named keys (e.g. per service / environment)
-th llm keys list                      # masked list (--json for raw)
-th llm keys create ci                 # mint a named key — prints the value ONCE
-th llm keys rotate ci                 # reissue a named key
-th llm keys delete ci                 # revoke (soft-delete; name reusable later)
+smoo llm keys list                      # masked list (--json for raw)
+smoo llm keys create ci                 # mint a named key — prints the value ONCE
+smoo llm keys rotate ci                 # reissue a named key
+smoo llm keys delete ci                 # revoke (soft-delete; name reusable later)
 
-th llm create-key --org-id <child>    # master admin minting for a child org
+smoo llm create-key --org-id <child>    # master admin minting for a child org
 ```
 
 The minted key value is shown exactly once — store it immediately, then
@@ -485,24 +484,24 @@ wire it into the gateway provider with `th model login smooai-gateway`.
 `create-key` 409s if the org already has a key (rotate instead). Note
 this is the **static-key** model: a persistent virtual key, not the
 ephemeral JWT→session exchange originally sketched in pearl `th-f7b20f`
-(the backend shipped static keys, so `th llm` wraps that).
+(the backend shipped static keys, so `smoo llm` wraps that).
 
 ### Jobs (async queue)
 
 ```bash
-th api jobs list
-th api jobs show <job-id>
-th api jobs create <body>
-th api jobs update <job-id> <body>
+smoo api jobs list
+smoo api jobs show <job-id>
+smoo api jobs create <body>
+smoo api jobs update <job-id> <body>
 ```
 
 ### Integrations (SendGrid email)
 
 ```bash
-th api integrations sendgrid get
-th api integrations sendgrid create --from-email sender@acme.com --inbound-email inbound@acme.com [--from-name "Acme Support"]
-th api integrations sendgrid delete
-th api integrations sendgrid test --to you@example.com
+smoo api integrations sendgrid get
+smoo api integrations sendgrid create --from-email sender@acme.com --inbound-email inbound@acme.com [--from-name "Acme Support"]
+smoo api integrations sendgrid delete
+smoo api integrations sendgrid test --to you@example.com
 ```
 
 The API key is never passed on argv — `create` reads it from `SENDGRID_API_KEY`
@@ -514,14 +513,14 @@ configured integration.
 Drive the org's [Smooth Operator](../Product/Features/Org-Copilot.md) from the CLI —
 the same agent behind the dashboard's ⌘J panel. It acts on the org's own data:
 knowledge search, CRM lookup/create, analytics questions, template generation,
-and drafting + (on confirm) sending email. User-authed (`th auth login`);
+and drafting + (on confirm) sending email. User-authed (`smoo auth login`);
 401s under M2M.
 
 ```bash
-th api smooth-operator chat "Find contacts named Jane and draft a follow-up"   # run a turn
-th api smooth-operator chat "Make it warmer" --conversation <id>               # continue it
-th api smooth-operator chat "..." --json                                       # raw SmoothOperatorTurnResult
-th api smooth-operator history <conversation-id>                               # message history
+smoo api smooth-operator chat "Find contacts named Jane and draft a follow-up"   # run a turn
+smoo api smooth-operator chat "Make it warmer" --conversation <id>               # continue it
+smoo api smooth-operator chat "..." --json                                       # raw SmoothOperatorTurnResult
+smoo api smooth-operator history <conversation-id>                               # message history
 ```
 
 > **Transport (SMOODEV-2673).** The buffered REST `chat`/`confirm` routes were
@@ -537,12 +536,12 @@ turn mid-flight* (`write_confirmation_required`) and takes the decision
 **inline**, so approval is a flag on `chat` rather than a second command:
 without `--confirm` the action is declined and reported ("I did NOT do this
 without your approval"), and the turn still completes. The old
-`th api smooth-operator confirm` subcommand is **retired** — it now prints an
+`smoo api smooth-operator confirm` subcommand is **retired** — it now prints an
 explanation pointing at `--confirm`.
 
 ```bash
-th api smooth-operator chat "Send jane@acme.com the follow-up"             # drafts; declines the send, tells you
-th api smooth-operator chat "Send jane@acme.com the follow-up" --confirm   # allows the send this turn
+smoo api smooth-operator chat "Send jane@acme.com the follow-up"             # drafts; declines the send, tells you
+smoo api smooth-operator chat "Send jane@acme.com the follow-up" --confirm   # allows the send this turn
 ```
 
 Responses are buffered JSON (token streaming is phase 2). Every tool run is
@@ -551,10 +550,10 @@ audit-logged against the logged-in user.
 ### Keys (M2M auth clients)
 
 ```bash
-th api keys list                                   # 403 today unless dashboard-user token
-th api keys create '{"name":"…","scopes":[…]}'    # secret returned ONCE
-th api keys rotate <id>
-th api keys revoke <id>
+smoo api keys list                                   # 403 today unless dashboard-user token
+smoo api keys create '{"name":"…","scopes":[…]}'    # secret returned ONCE
+smoo api keys rotate <id>
+smoo api keys revoke <id>
 ```
 
 ### Observability (logs, traces, errors, LLM telemetry, source maps)
@@ -567,36 +566,36 @@ wrong.
 
 ```bash
 # Logs
-th api observability logs query --query="timeout" --level=ERROR --service=api-prime --since=6h
-th api observability logs facets --hours=24              # what levels/services/groups exist
-th api observability logs fields                         # structured fields discovered in parsed logs
-th api observability logs fields --key=userId            # …and that field's most common values
-th api observability logs trace <trace_id>               # every log line on one request
+smoo api observability logs query --query="timeout" --level=ERROR --service=api-prime --since=6h
+smoo api observability logs facets --hours=24              # what levels/services/groups exist
+smoo api observability logs fields                         # structured fields discovered in parsed logs
+smoo api observability logs fields --key=userId            # …and that field's most common values
+smoo api observability logs trace <trace_id>               # every log line on one request
 
 # Traces
-th api observability traces query --status=error --since=1h
-th api observability traces query --order-by=slowest --min-duration-ms=500
-th api observability traces show <trace_id>              # that trace's spans
+smoo api observability traces query --status=error --since=1h
+smoo api observability traces query --order-by=slowest --min-duration-ms=500
+smoo api observability traces show <trace_id>              # that trace's spans
 
 # Error tracking
-th api observability errors top --status=unresolved
-th api observability errors show <group_id> --events=20
+smoo api observability errors top --status=unresolved
+smoo api observability errors show <group_id> --events=20
 
 # LLM telemetry
-th api observability llm turns --status=error --window-minutes=120
-th api observability llm tool-failures
-th api observability llm cost --group-by=model           # or agent | conversation
+smoo api observability llm turns --status=error --window-minutes=120
+smoo api observability llm tool-failures
+smoo api observability llm cost --group-by=model           # or agent | conversation
 
 # Is the telemetry itself alive?
-th api observability health
+smoo api observability health
 
-# Uptime + audit trail — USER session only (`th auth login`); an org M2M key gets a 401
-th api observability monitors                            # every OPEN website-monitor incident
-th api observability audit --query="invite" --action=member.invite --since=7d --limit=100
+# Uptime + audit trail — USER session only (`smoo auth login`); an org M2M key gets a 401
+smoo api observability monitors                            # every OPEN website-monitor incident
+smoo api observability audit --query="invite" --action=member.invite --since=7d --limit=100
 
 # Source maps (SMOODEV-1164)
-th api observability sourcemaps-upload <dir> --release=<sha> --environment=production
-th api observability sourcemaps-list --release=<sha> --environment=production
+smoo api observability sourcemaps-upload <dir> --release=<sha> --environment=production
+smoo api observability sourcemaps-list --release=<sha> --environment=production
 ```
 
 **Read an empty result carefully.** These commands distinguish three things
@@ -606,7 +605,7 @@ that look alike in a terminal and must never be conflated:
 - *"The read failed"* — a non-zero exit carrying the HTTP status, never an empty list.
 - *"I saw a full page"* — the output says there may be more; raise `--limit`.
 
-`th api observability health` is the tiebreaker: a stale or failed pipe there
+`smoo api observability health` is the tiebreaker: a stale or failed pipe there
 means an empty log/trace result is a broken ingest, not a quiet system.
 
 The same functions back nine `observability_*` MCP tools in `th mcp serve`
@@ -619,16 +618,16 @@ can read logs and traces.
 
 ### Testing (report results + manage runs)
 
-Like `th config`, the testing surface is promoted to a top-level
-`th testing` command (the same subcommands also live under
-`th api testing`). The muscle-memory entry point is **`runs report`** —
+Like `smoo config`, the testing surface is promoted to a top-level
+`smoo testing` command (the same subcommands also live under
+`smoo api testing`). The muscle-memory entry point is **`runs report`** —
 it creates a run and submits a CTRF report in one call, so CI never
 hand-rolls the create-run → post-results dance:
 
 ```bash
-th testing runs report <ctrf.json> --environment=ci --tool=vitest --tags=unit,backend
-th testing runs report <junit.xml> --junit --tool=nextest --tags=unit,rust   # converts JUnit → CTRF first
-th testing runs report <file> --additional-org-ids=<id1>,<id2>               # also report to other orgs
+smoo testing runs report <ctrf.json> --environment=ci --tool=vitest --tags=unit,backend
+smoo testing runs report <junit.xml> --junit --tool=nextest --tags=unit,rust   # converts JUnit → CTRF first
+smoo testing runs report <file> --additional-org-ids=<id1>,<id2>               # also report to other orgs
 ```
 
 `runs report` defaults `--name` to the file's base name, `--tool` to the
@@ -637,31 +636,31 @@ GitHub Actions env (`$GITHUB_SHA`, the Actions run URL) when present. The
 lower-level CRUD is there too:
 
 ```bash
-th testing runs list|show|create|update|delete|results <id>
-th testing deployments|cases|environments <sub>
+smoo testing runs list|show|create|update|delete|results <id>
+smoo testing deployments|cases|environments <sub>
 ```
 
 This replaces the old `npx @smooai/testing runs report` + `junit-to-ctrf`
 combo — one `th` invocation, authed the same way every other `th` command is.
 
-### White-label branding (`th branding`, alias `th brand`)
+### White-label branding (`smoo branding`, alias `smoo brand`)
 
-Top-level, like `th crm` — SMOODEV-2820. Wraps the org's white-label row
+Top-level, like `smoo crm` — SMOODEV-2820. Wraps the org's white-label row
 (`/organizations/{org}/branding`) and re-hosts logos on our CDN so a partner's
 own server is never left as the source of truth for their mark.
 
 ```bash
-th branding show [--json]                          # LIVE vs staged, swatch table, preview URL
-th branding from-url https://partner.example       # DRY RUN — theme, logos, contrast verdict
-th branding from-url https://partner.example --apply    # stage it (enabled stays false)
-th branding from-url https://partner.example --enable   # stage AND go live
-th branding from-url https://partner.example --apply --logo ./real-logo.svg   # override a bad pick
-th branding set --app-name "Acme CRM" --primary '#7c3aed' --primary-foreground '#ffffff'
-th branding set --logo ./logo.png --logo-dark https://partner.example/dark.svg --favicon ./icon.svg
-th branding enable                                 # the live switch
-th branding disable                                # keeps the config, stops applying it
-th branding preview                                # the ?brandPreview=1 URL
-th branding clear --yes                            # delete the row
+smoo branding show [--json]                          # LIVE vs staged, swatch table, preview URL
+smoo branding from-url https://partner.example       # DRY RUN — theme, logos, contrast verdict
+smoo branding from-url https://partner.example --apply    # stage it (enabled stays false)
+smoo branding from-url https://partner.example --enable   # stage AND go live
+smoo branding from-url https://partner.example --apply --logo ./real-logo.svg   # override a bad pick
+smoo branding set --app-name "Acme CRM" --primary '#7c3aed' --primary-foreground '#ffffff'
+smoo branding set --logo ./logo.png --logo-dark https://partner.example/dark.svg --favicon ./icon.svg
+smoo branding enable                                 # the live switch
+smoo branding disable                                # keeps the config, stops applying it
+smoo branding preview                                # the ?brandPreview=1 URL
+smoo branding clear --yes                            # delete the row
 ```
 
 Things worth knowing before you use it:
@@ -676,11 +675,11 @@ Things worth knowing before you use it:
   no redirect following, 5 MB cap) and re-uploaded to the org's brand assets.
   `.ico` is rejected — the platform's allowlist is png / jpeg / gif / webp / svg.
 - **`set` is partial**, including `themeJson`: the server's PUT replaces that
-  whole column, so `th branding` reads-modifies-writes it for you. An empty
+  whole column, so `smoo branding` reads-modifies-writes it for you. An empty
   string (`--accent ''`) clears a token; an untouched token stays untouched.
   There is no PATCH on this route, so PUT-with-merge is the permanent contract.
   The merge sends **only keys that carry a value** — it never null-pads absent
-  tokens, and it drops nulls already in the row, so one `th branding set` heals
+  tokens, and it drops nulls already in the row, so one `smoo branding set` heals
   a row the dashboard poisoned (SMOODEV-2822).
 - **`from-url` shows which logo candidate it picked** (`→` vs `○`). The
   extractor can return several per kind and the first isn't always the mark —
@@ -689,7 +688,7 @@ Things worth knowing before you use it:
 - **The Aurora meaning tokens are never white-labeled** — `--color-heat-0..5`,
   `--color-ai`, `--gradient-aurora`, ok/warn/crit encode meaning, not chrome,
   and there are deliberately no flags for them.
-- **Auth:** the user JWT (`th auth login`), because the M2M session is
+- **Auth:** the user JWT (`smoo auth login`), because the M2M session is
   org-locked and 403s on any org whose client you don't hold.
 - **Known server gap:** the platform's write validator is still Phase 1, so the
   surface tokens (`--background`, `--card`, `--sidebar`, …) 400 today; the CLI
@@ -700,15 +699,15 @@ Things worth knowing before you use it:
 ### Profile / products
 
 ```bash
-th api profile                                     # currently-logged-in user
-th api products list                               # billing plans
+smoo api profile                                     # currently-logged-in user
+smoo api products list                               # billing plans
 ```
 
-> **Heuristic:** if you catch yourself typing `curl … api.smoo.ai`, stop and run `th api help` — odds are there's a typed subcommand that handles auth + pagination + error formatting for you. The repo's `th-curl-hint` PreToolUse hook will flag the curl and ask you to use `th api` instead.
+> **Heuristic:** if you catch yourself typing `curl … api.smoo.ai`, stop and run `smoo api help` — odds are there's a typed subcommand that handles auth + pagination + error formatting for you. The repo's `th-curl-hint` PreToolUse hook will flag the curl and ask you to use `smoo api` instead.
 
 ---
 
-## 4. The `th admin` gap (and the "onboarding collapse")
+## 4. The `smoo admin` gap (and the "onboarding collapse")
 
 Today the M2M token flow is fine for *acting on behalf of an org*. It's wrong for **cross-org admin work** — onboarding a new customer, minting a service-to-service key, setting a GH Actions secret, listing every org in the system. Those should not require you to:
 
@@ -719,23 +718,23 @@ Today the M2M token flow is fine for *acting on behalf of an org*. It's wrong fo
 5. Copy the secret
 6. Paste it into 1Password
 7. Paste it into a GH Actions secret
-8. Re-login `th api` with the new client
+8. Re-login `smoo api` with the new client
 
-That's the **7-step ceremony** [pearl `th-feebd2`](https://github.com/smoo-ai/smooth/) calls out, and the planned `th admin` surface collapses it to one command:
+That's the **7-step ceremony** [pearl `th-feebd2`](https://github.com/smoo-ai/smooth/) calls out, and the planned `smoo admin` surface collapses it to one command:
 
 ```bash
 # Planned — th-feebd2 (P1) blocked on th-abc4e2 (admin OAuth login)
-th admin onboard-customer --name="Acme" --primary-email="ops@acme.com"
+smoo admin onboard-customer --name="Acme" --primary-email="ops@acme.com"
 # → creates org via api.smoo.ai/admin/organizations
 # → mints a B2M key for the new org
 # → writes the secret to GH Actions via `gh secret set` (using the helpers from
 #   §13a of the smooai CLAUDE.md)
 # → emits a `.smoo-admin.env.ts` sidecar so the per-customer infra file can import it
 
-th admin mint-key --org=<id> --kind=b2m|m2m
-th admin set-secret <NAME> <value> --org=<id>          # wraps gh-secret-set helper
-th admin org list                                       # cross-org (today: not exposed)
-th admin org show <id>
+smoo admin mint-key --org=<id> --kind=b2m|m2m
+smoo admin set-secret <NAME> <value> --org=<id>          # wraps gh-secret-set helper
+smoo admin org list                                       # cross-org (today: not exposed)
+smoo admin org show <id>
 ```
 
 This requires the **dashboard-user OAuth flow** (pearl `th-abc4e2`) — a localhost-callback Supabase login that produces a *user* JWT carrying the user's admin grants, not a client-credentials JWT scoped to a single org. Until both pearls land, the workarounds are:
@@ -745,7 +744,7 @@ This requires the **dashboard-user OAuth flow** (pearl `th-abc4e2`) — a localh
 - **Setting GH Actions secrets**: `scripts/secret-helpers/gh-secret-set` (smooai repo §13a)
 - **Listing SST secrets**: `scripts/secret-helpers/sst-secret-list` (smooai repo §13a)
 
-If you hit one of these workarounds and there's no `th admin` for it yet, **file a pearl** (see §6).
+If you hit one of these workarounds and there's no `smoo admin` for it yet, **file a pearl** (see §6).
 
 ---
 
@@ -803,8 +802,8 @@ th agent backend set sqlite|cloud          # local (default, free) or cross-mach
 
 `th msg` also answers to `th msgs`.
 
-`th agent` is deliberately **singular-only**. The plural `th agents` is the Smoo
-AI platform agent surface (`th agents list`, `th agents tools …`) — a different
+`th agent` is deliberately **singular-only**. The plural `smoo agents` is the Smoo
+AI platform agent surface (`smoo agents list`, `smoo agents tools …`) — a different
 thing on a different store, so the two are not aliases of each other. This is
 `.claude/skills/normalize` rule 4 ("skip semantic collisions"), which named this
 exact pair; the alias existed anyway until th-c66db7 removed it.
@@ -847,7 +846,7 @@ Smoo account, forever, on the local SQLite mailbox. `th agent backend set cloud`
 moves it to your Smoo **user** account (`/user/agent-mail` on api.smoo.ai) so
 agents on *different machines* share one bus — a laptop and a build box seeing
 each other in `th agent list`, which is the one thing local SQLite cannot do. It
-needs `th auth login` (a user session; an org M2M key is rejected, since the
+needs `smoo auth login` (a user session; an org M2M key is rejected, since the
 routes are user-scoped) and is a paid feature after a **14-day trial** that
 starts on first use. The selection lives in `~/.smooth/mail.toml`
 (`$SMOOTH_MAIL_CONFIG` overrides); `th agent backend status` shows the backend
@@ -895,7 +894,7 @@ the plugin manifest's `mcpServers`.
 `th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes three tiers:
 
 - **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
-- **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `th api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
+- **Your business — behind Sign in with Smoo (`smoo auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `smoo api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `smoo auth login`" message rather than failing opaquely.
 
 - **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else the CLI's own resolver (the handle env vars, then the SessionStart hook's record for this session) — one shared chain, so a tool call and a `th msg` call can never answer for different mailboxes; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
 
@@ -1181,7 +1180,7 @@ Besides the health checks (daemon, Dolt, providers, `~/.smooth`, pearls, backup,
 workspace volume, git hooks) a bare `th doctor` now reports two more things:
 
 - **Smoo AI sign-in** — whether a user or M2M session exists for the active auth
-  profile (`th auth login` if not). Not a health failure: a local-only Big Smooth
+  profile (`smoo auth login` if not). Not a health failure: a local-only Big Smooth
   works without it, so it's raised as a *setup step*, not an issue.
 - **A `macOS access` section** — the grants Big Smooth's personal-data tools
   need, which used to be visible only behind the `--setup-*` flags. Before this,
@@ -1220,7 +1219,7 @@ place). It runs the full health check, then walks every step that came back not
 ready, in dependency order:
 
 1. **LLM provider credentials** → points at `th model login <provider>`
-2. **Smoo AI sign-in** → points at `th auth login`
+2. **Smoo AI sign-in** → points at `smoo auth login`
 3. **Full Disk Access** → runs `--fix-fda`
 4. **Calendar** → runs `--setup-calendar`
 5. **Reminders** → runs `--setup-reminders`
@@ -1434,18 +1433,18 @@ providers' live models either way (Tab for "show all").
 ```
 Need to call api.smoo.ai?
 ├── It's a per-org resource (agents, knowledge, jobs, members, config, …)
-│   └── Add under `th api <resource> <verb>`  (crates/smooth-cli/src/api/<resource>.rs)
+│   └── Add under `smoo api <resource> <verb>`  (crates/smooth-cli/src/api/<resource>.rs)
 ├── It's cross-org / requires dashboard-user grants
-│   └── Add under `th admin <verb>`  (crates/smooth-cli/src/admin/, blocked on th-feebd2)
+│   └── Add under `smoo admin <verb>`  (crates/smooth-cli/src/admin/, blocked on th-feebd2)
 │       — file a sub-pearl that depends on th-feebd2 so it lands once the surface exists
 └── It's purely local (no api.smoo.ai roundtrip)
     └── Goes at the top level under its own namespace
         (th pearls, th worktree, th cache, th doctor, …)
 ```
 
-### What belongs in `th api` vs `th admin`
+### What belongs in `smoo api` vs `smoo admin`
 
-| Lives in `th api` | Lives in `th admin` |
+| Lives in `smoo api` | Lives in `smoo admin` |
 |---|---|
 | Acts on resources owned by **your active org** | Acts **across orgs** or **on the platform itself** |
 | Authenticated as an M2M client or a regular dashboard user | Authenticated as an **admin-grant dashboard user** |
@@ -1462,8 +1461,8 @@ Need to call api.smoo.ai?
 
 ### How to actually add a subcommand
 
-1. **Search first**: `rg "th api <something>" crates/` — somebody may have started it
-2. **File the pearl**: `th pearls create --title="th api X: add Y" --type=feature --priority=2 --description="…"`
+1. **Search first**: `rg "smoo api <something>" crates/` — somebody may have started it
+2. **File the pearl**: `th pearls create --title="smoo api X: add Y" --type=feature --priority=2 --description="…"`
 3. **Worktree**: `th worktree create th-<id>-th-api-x-add-y`
 4. **Add the clap node**: `crates/smooth-cli/src/api/<resource>.rs` (clone the nearest sibling — they all follow the same shape)
 5. **Wire it in**: register the new module under `src/api/mod.rs` and the parent `Commands` enum
@@ -1480,8 +1479,8 @@ Both repos ship a `PreToolUse` Bash hook (`.claude/hooks/th-curl-hint.sh`) that 
 
 | Pattern | Hint |
 |---|---|
-| `curl … api.smoo.ai` | Use `th api …` instead |
-| `curl … auth.smoo.ai/token` | Use `th auth login --m2m` instead |
+| `curl … api.smoo.ai` | Use `smoo api …` instead |
+| `curl … auth.smoo.ai/token` | Use `smoo auth login --m2m` instead |
 | `curl … atlassian.net/rest/api` | Use `th jira sync` (or file a pearl for the missing verb) |
 | `gh secret set … --body -` with stdin echo | Use `scripts/secret-helpers/gh-secret-set` to avoid trailing-newline corruption |
 | `pnpm sst secret list` (raw) | Use `scripts/secret-helpers/sst-secret-list` to avoid plaintext leakage |
@@ -1497,8 +1496,8 @@ If you find yourself overriding the hint constantly for a particular pattern, th
 The `th` binary is built from this repo. Every gap is a `th-*` pearl waiting to happen:
 
 - Daily friction → `th pearls create --type=task --priority=3`
-- New API surface lands in `apps/web` → mirror it under `th api <resource>` in the same week (and ship a changeset)
-- New admin operation → `th admin <verb>` (after `th-feebd2` lands; until then, file a blocked pearl)
+- New API surface lands in `apps/web` → mirror it under `smoo api <resource>` in the same week (and ship a changeset)
+- New admin operation → `smoo admin <verb>` (after `th-feebd2` lands; until then, file a blocked pearl)
 - New shell-helper pattern that survives more than two uses → promote to a `th` subcommand or `~/.smooth/plugins/`
 
 `th gain` (RTK proxy, separate binary) tracks token savings on automated operations — surface the heaviest non-`th` curl/jq pipelines there as candidates for promotion.
@@ -1509,22 +1508,22 @@ The `th` binary is built from this repo. Every gap is a `th-*` pearl waiting to 
 
 ```bash
 # Identity
-th auth whoami                                                       # who am I, which org, when does my JWT expire
-th api orgs list                                                    # what orgs can I see
-th api orgs switch <id>                                             # change active org
+smoo auth whoami                                                       # who am I, which org, when does my JWT expire
+smoo api orgs list                                                    # what orgs can I see
+smoo api orgs switch <id>                                             # change active org
 
 # Routine querying (replace your curls)
-th api agents list
-th api knowledge list
-th api jobs list
-th api config values --environment=production
-th api members list
-th api keys list                                                    # (403 today on M2M tokens — uses dashboard auth)
+smoo api agents list
+smoo api knowledge list
+smoo api jobs list
+smoo api config values --environment=production
+smoo api members list
+smoo api keys list                                                    # (403 today on M2M tokens — uses dashboard auth)
 
 # White-label a partner org
-th branding from-url https://partner.example                        # dry run
-th branding set --logo ./logo.png --primary '#7c3aed'
-th branding enable                                                  # refuses on bad contrast
+smoo branding from-url https://partner.example                        # dry run
+smoo branding set --logo ./logo.png --primary '#7c3aed'
+smoo branding enable                                                  # refuses on bad contrast
 
 # Pearls
 th pearls ready
@@ -1565,5 +1564,5 @@ th cache list
 - [Pearls Workflow](../../README.md) — pearl tracking philosophy
 - [Security Architecture](../white-paper-security-architecture.md) — the in-VM services `th` orchestrates
 - [Extending Smooth](../extending.md) — MCP servers + file-based plugins
-- pearl `th-feebd2` — the `th admin` surface
+- pearl `th-feebd2` — the `smoo admin` surface
 - pearl `th-abc4e2` — dashboard-user OAuth login

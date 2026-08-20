@@ -15,7 +15,7 @@
 //! Two tiers (th-aa4c32 spiked the local tier; th-03943a added the org tier):
 //! - **Local, free, no sign-in**: `pearls_ready` / `pearls_create` (the
 //!   workspace pearl store) and `remember` / `recall` (local memory).
-//! - **Your business, behind Sign in with Smoo (`th auth login`)**:
+//! - **Your business, behind Sign in with Smoo (`smoo auth login`)**:
 //!   `ask_business` — one turn of the Smooth Operator org agent over its SEP
 //!   WebSocket transport (see `smooai::smooth_operator_ws`), which never sends
 //!   or takes a destructive action unless the caller passes `approve: true`;
@@ -30,7 +30,7 @@
 //!   server, so they all reach the same `~/.smooth/mail.db`.
 //! - **Observability (signed in)**: the nine `observability_*` tools
 //!   (th-5abaa5), mirroring what the hosted `mcp.smoo.ai` server exposes and
-//!   sharing their HTTP layer with `th api observability` — logs, traces,
+//!   sharing their HTTP layer with `smoo api observability` — logs, traces,
 //!   errors, pipeline health, monitor incidents, the audit trail, and LLM
 //!   turns/tool-failures/cost. They are what let a coding session diagnose the
 //!   running system instead of guessing.
@@ -499,7 +499,7 @@ impl SmoothMcp {
         Ok(out.trim_end().to_string())
     }
 
-    // ── Your business (requires Sign in with Smoo: `th auth login`) ──────────
+    // ── Your business (requires Sign in with Smoo: `smoo auth login`) ──────────
 
     /// Fast semantic read of your org's knowledge base.
     ///
@@ -507,7 +507,7 @@ impl SmoothMcp {
     /// MCP error if not signed in to Smoo, no active org, or the request fails.
     #[tool(
         name = "knowledge_search",
-        description = "Search your Smoo org's knowledge base and return the most relevant passages. Requires a signed-in Smoo session (`th auth login`, or an M2M key via `th api login`).",
+        description = "Search your Smoo org's knowledge base and return the most relevant passages. Requires a signed-in Smoo session (`smoo auth login`, or a service account via `smoo auth login --m2m`).",
         annotations(read_only_hint = true)
     )]
     pub async fn knowledge_search(&self, params: Parameters<KnowledgeSearchArgs>) -> Result<String, ErrorData> {
@@ -549,7 +549,7 @@ impl SmoothMcp {
     /// `message`, or the operator call fails.
     #[tool(
         name = "ask_business",
-        description = "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, only when you pass approve=true, send — email or other writes. Needs Sign in with Smoo (`th auth login`). Continue a thread by passing back the conversation_id it returns."
+        description = "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, only when you pass approve=true, send — email or other writes. Needs Sign in with Smoo (`smoo auth login`). Continue a thread by passing back the conversation_id it returns."
     )]
     pub async fn ask_business(&self, params: Parameters<AskBusinessArgs>) -> Result<String, ErrorData> {
         let a = params.0;
@@ -561,7 +561,7 @@ impl SmoothMcp {
         let org = crate::active_org::resolve(a.org).map_err(|e| ErrorData::invalid_request(format!("No active Smoo org. {e}"), None))?;
 
         // The user session is minted into the SEP token inside `operator_turn`;
-        // it errors (with a `th auth login` hint) when there's no Smoo session.
+        // it errors (with a `smoo auth login` hint) when there's no Smoo session.
         // `approve` gates destructive tools inline: false (default) declines +
         // surfaces; true allows them this turn.
         let turn = crate::smooai::smooth_operator_ws::operator_turn(&org, message, a.conversation_id.as_deref(), a.approve.unwrap_or(false))
@@ -810,7 +810,7 @@ impl SmoothMcp {
     // ── Observability (requires Sign in with Smoo) ──────────────────────────
     //
     // These mirror the 9 tools the hosted `mcp.smoo.ai` server exposes
-    // (SMOODEV-2949) and share their HTTP layer with `th api observability`
+    // (SMOODEV-2949) and share their HTTP layer with `smoo api observability`
     // (pearl th-5abaa5), so the CLI and an agent cannot get different answers
     // to the same question.
     //
@@ -830,7 +830,7 @@ impl SmoothMcp {
         description = "Search your Smoo org's structured logs over a time window (free-text, service, level, or trace id). \
             Use it to find what a service actually printed around an incident. Windows are relative — `90s`, `45m`, `6h`, `7d` — \
             and a bare number is rejected rather than guessed at. An empty result says the query RAN and matched nothing; \
-            a failure is reported as a failure, so never read one as the other. Needs Sign in with Smoo (`th auth login`).",
+            a failure is reported as a failure, so never read one as the other. Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_logs_search(&self, params: Parameters<LogsSearchArgs>) -> Result<String, ErrorData> {
@@ -862,7 +862,7 @@ impl SmoothMcp {
         description = "Search your Smoo org's distributed traces — by service, status (ok/error/unset), minimum duration, or free text. \
             This is the tool for \"what was slow\" and \"which requests errored\"; pair a returned trace id with \
             observability_logs_search to read that request's logs. An empty result means the query ran and matched nothing, \
-            NOT that tracing is down. Needs Sign in with Smoo (`th auth login`).",
+            NOT that tracing is down. Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_traces_search(&self, params: Parameters<TracesSearchArgs>) -> Result<String, ErrorData> {
@@ -892,7 +892,7 @@ impl SmoothMcp {
         description = "List your Smoo org's error-tracking groups (deduplicated exceptions), most recently seen first, with event and user counts. \
             Filter by status (unresolved/resolved/muted) or environment. Note that zero groups means nothing is being REPORTED — \
             which is not the same as nothing being wrong; check observability_service_health if that is surprising. \
-            Needs Sign in with Smoo (`th auth login`).",
+            Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_errors_top(&self, params: Parameters<ErrorsTopArgs>) -> Result<String, ErrorData> {
@@ -915,7 +915,7 @@ impl SmoothMcp {
         description = "Report when each of your Smoo org's telemetry pipes (logs, traces, metrics, errors, replays, monitor evals) last wrote a row, \
             plus the open incident count. Call this FIRST whenever another observability tool came back empty: a stale or failed pipe means \
             the emptiness is a broken ingest, not a quiet system. A pipe with a failed probe is reported as PROBE FAILED, never as quiet. \
-            Needs Sign in with Smoo (`th auth login`).",
+            Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_service_health(&self, params: Parameters<OrgOnlyArgs>) -> Result<String, ErrorData> {
@@ -934,7 +934,7 @@ impl SmoothMcp {
         name = "observability_monitors_status",
         description = "List every OPEN uptime incident across your Smoo org's website monitors — what is alerting right now, since when, and the last error. \
             Zero incidents means monitors are configured and none are alerting; it is reported in words so it cannot be confused with a failed read. \
-            Unlike the other observability tools this route accepts only a USER session, not an org M2M key — run `th auth login`.",
+            Unlike the other observability tools this route accepts only a USER session, not an org M2M key — run `smoo auth login`.",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_monitors_status(&self, params: Parameters<OrgOnlyArgs>) -> Result<String, ErrorData> {
@@ -954,7 +954,7 @@ impl SmoothMcp {
         description = "Search your Smoo org's platform AUDIT TRAIL — who did what, when, and whether it succeeded. \
             This is the tamper-evident record of actions taken against the org (not the local `th audit` tool log). \
             Filter by action name or free text over a relative window (default 24h). \
-            Like observability_monitors_status this route accepts only a USER session — run `th auth login`.",
+            Like observability_monitors_status this route accepts only a USER session — run `smoo auth login`.",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_audit_search(&self, params: Parameters<AuditSearchArgs>) -> Result<String, ErrorData> {
@@ -977,7 +977,7 @@ impl SmoothMcp {
         description = "List recent LLM agent turns on your Smoo org — model, latency, finish reason, token counts — filterable by conversation, model, service, \
             trace id or status. This is how you answer \"why did that agent turn fail\" or \"which model served this conversation\". \
             An empty result can legitimately mean nothing has emitted gen_ai telemetry for this org yet; the answer says so rather than implying silence is health. \
-            Needs Sign in with Smoo (`th auth login`).",
+            Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_llm_turns_search(&self, params: Parameters<LlmTurnsArgs>) -> Result<String, ErrorData> {
@@ -1006,7 +1006,7 @@ impl SmoothMcp {
         name = "observability_llm_tool_failures",
         description = "Group your Smoo org's FAILING agent tool calls by tool over a window — failure count against total calls, when it last failed, and the last error. \
             Use it to find which tool is breaking your agents rather than reading turns one at a time. \
-            Zero failing tools is stated explicitly so it cannot be confused with a failed read. Needs Sign in with Smoo (`th auth login`).",
+            Zero failing tools is stated explicitly so it cannot be confused with a failed read. Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_llm_tool_failures(&self, params: Parameters<LlmToolFailuresArgs>) -> Result<String, ErrorData> {
@@ -1030,7 +1030,7 @@ impl SmoothMcp {
         name = "observability_llm_cost_breakdown",
         description = "Break down your Smoo org's LLM usage by model, agent, or conversation over a window — calls and input/output/cached tokens, plus cost when it is measured. \
             IMPORTANT: when cost is not being emitted the answer says \"cost not measured\" rather than $0.00 — unknown spend must never be reported as free. \
-            Needs Sign in with Smoo (`th auth login`).",
+            Needs Sign in with Smoo (`smoo auth login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn observability_llm_cost_breakdown(&self, params: Parameters<LlmCostArgs>) -> Result<String, ErrorData> {
@@ -1144,7 +1144,7 @@ fn obs_err(what: &str, e: &anyhow::Error) -> ErrorData {
 /// it verbatim to the user.
 fn sign_in_err(e: &anyhow::Error) -> ErrorData {
     ErrorData::invalid_request(
-        format!("Sign in to Smoo to use your business tools — run `th auth login` (Sign in with Smoo). ({e})"),
+        format!("Sign in to Smoo to use your business tools — run `smoo auth login` (Sign in with Smoo). ({e})"),
         None,
     )
 }
@@ -1166,7 +1166,7 @@ impl ServerHandler for SmoothMcp {
                 "Smooth exposes your Smoo AI `th` CLI as MCP tools, in two tiers.\n\n\
                  LOCAL — free, no sign-in. `pearls_ready` / `pearls_create` track work in the pearl \
                  store of the workspace this server was launched in. `remember` / `recall` keep local notes.\n\n\
-                 YOUR BUSINESS — requires Sign in with Smoo (tell the user to run `th auth login`). \
+                 YOUR BUSINESS — requires Sign in with Smoo (tell the user to run `smoo auth login`). \
                  `ask_business` talks to Smooth Operator, the agent that runs on the user's live Smoo org: \
                  ask about revenue and the pipeline, search the CRM, and draft — or, with the user's explicit \
                  approval, send — email. It acts on the active org and NEVER sends or takes a destructive action \
@@ -1195,7 +1195,7 @@ impl ServerHandler for SmoothMcp {
                  pipe makes a broken ingest look like calm. Second, these tools report their own truncation and their own \
                  unknowns — \"there may be more\" means you have not seen everything, and \"cost not measured\" means unknown \
                  spend, not free.\n\n\
-                 When an org tool reports the user isn't signed in, tell them to run `th auth login` — don't retry blindly."
+                 When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
     }
@@ -1330,7 +1330,7 @@ mod tests {
         assert!(desc("observability_llm_cost_breakdown").contains("never be reported as free"));
 
         // Instructions surface the sign-in path for org tools.
-        assert!(instructions.contains("th auth login"), "instructions should name the sign-in command");
+        assert!(instructions.contains("smoo auth login"), "instructions should name the sign-in command");
 
         client.cancel().await.expect("client shutdown");
         server.abort();
