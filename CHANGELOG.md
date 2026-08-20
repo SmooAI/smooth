@@ -1,5 +1,13 @@
 # @smooai/smooth
 
+## 0.40.0
+
+### Minor Changes
+
+- 8f09b67: th-7f1da8: the Presence glow-up + codified CLI spec. Bare `th --help` now renders a branded, grouped map of the surface (wordmark gradient, sections for Platform / Big Smooth / Work / Agent mail / Coding / LLM / System, teal-accent literals, dimmed blurbs) with a two-way sync test pinning it to the clap tree; `th --help-full` keeps the native flat view, and all per-command help is themed via clap styles — everything pipe-safe and NO_COLOR-clean. Appending `ai` to any command path (`smoo org ai`, `th pearls ai`, bare `th ai`) prints a generated markdown guide (about, subcommands, flags, curated examples, house conventions) built for humans and AI agents. The interface contract is codified in docs/Engineering/CLI-Spec.md and partly test-enforced: every platform `list` verb must offer `--json` — the new conformance test found and this change backfills 19 that didn't (orgs, members, crm contacts, knowledge, jobs, products, booking, heypage, auth profiles, admin config).
+- 1df7b79: `smoo config schema` — patch the @smooai/config schema straight from the CLI, remote-first. `show` renders every declared key per tier with type/description/default; `add` upserts a key declaration (`--tier secret|public|feature_flag|limit`, with `--type`/`--description`/`--default` and `--min`/`--max` clamp bounds for limits); `rm` removes one. Both write-verbs print the would-be change, support `--dry-run`, POST a new schema version via the same endpoint `push` uses, and keep a pulled local `.smooai-config/schema.json` in sync when one exists. Foot-guns are refused loudly: adding a key already declared in a different tier shows the existing declaration, and `rm` reminds you that values are not deleted.
+- fd1077f: `smoo config schema pull` — bring the LOCAL schema representation up to date with the org's remote schema, correctly for both consumer kinds. A plain pulled `schema.json` (no `config.ts`) is overwritten like `smoo config pull --force`; a TypeScript consumer is never rewritten wholesale — remote keys missing locally are emitted as ready-to-paste snippets in the file's own conventions (`BooleanSchema`/`StringSchema`/`NumberSchema`, `defineLimit({ default, min, max, step })`), with `--write` appending them into the right tier block mechanically (all-or-nothing, refusing on an ambiguous block). Local-only keys are reported (push would add them) and never deleted; tier and type drift on shared keys are reported as tables. `--dry-run` prints everything and writes nothing; `--json` emits the structured report.
+
 ## 0.39.0
 
 ### Minor Changes
