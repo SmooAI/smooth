@@ -86,7 +86,17 @@ bundle, and the user can revoke it in System Settings.
   a `SQLITE_OPEN_READ_ONLY` connection (no subprocess exists at all, so there is
   no shell and no injection surface), and the **send** spawns `/usr/bin/osascript`
   with a fixed AppleScript that takes the recipient and body as `on run argv`
-  arguments — never interpolated into script source.
+  arguments — never interpolated into script source. A **group** send (pearl
+  th-265003) addresses an *existing* chat by its exact GUID (`chat id …`) and
+  errors if none matches, so it can never silently invent a phantom conversation
+  the way a group *name* passed as a 1:1 handle once did.
+- **`contacts`** (macOS, pearl th-ffa500) — **read-only**, and the reason a bare
+  phone number can be given a name (and a name turned into a send handle). Like
+  the `imessage` read it is *in-process* `rusqlite` on a `SQLITE_OPEN_READ_ONLY`
+  connection against the Address Book databases under `~/Library` (no subprocess,
+  no shell, no injection surface). Every command requires a filter — there is no
+  "dump the whole address book" shape — and because it mutates nothing it stays
+  available even in Plan mode.
 
 **Mutations get no extra userspace gate, on purpose — with one exception.**
 `calendar` can book and move events and `imessage` can text a real human. Those

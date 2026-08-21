@@ -111,6 +111,40 @@ const SEND_SCRIPT: &str = r#"on run argv
     end tell
 end run"#;
 
+/// The AppleScript that sends to an existing **group chat**, addressed by its
+/// chat GUID (the `guid` a `conversations` read returns). **Fixed** — the caller
+/// supplies `argv`, never script text.
+///
+/// This is the fix for pearl th-265003. The single-participant [`SEND_SCRIPT`]
+/// path, handed a group's *name*, silently invents a phantom 1:1 to a
+/// non-existent handle and reports success — exactly how the message to the
+/// "Scrodes" group vanished. This script instead resolves the group by its
+/// **exact GUID** via `chat id` (the specifier that actually works on current
+/// macOS — `text chat id` and iterating `text chats` both fail with -1728), and
+/// `error`s if no such chat exists rather than creating one, so a bad GUID fails
+/// loudly instead of vanishing. On success it returns `name|participant-count`,
+/// so the caller echoes the real target back and a wrong send can't be mistaken
+/// for a right one.
+const SEND_GROUP_SCRIPT: &str = r#"on run argv
+    set targetId to item 1 of argv
+    set messageText to item 2 of argv
+    tell application "Messages"
+        set targetChat to missing value
+        try
+            set targetChat to chat id targetId
+        end try
+        if targetChat is missing value then
+            error "no existing chat matches " & targetId
+        end if
+        send messageText to targetChat
+        set nm to ""
+        try
+            set nm to name of targetChat
+        end try
+        return nm & "|" & (count of participants of targetChat)
+    end tell
+end run"#;
+
 /// `imessage` — read, search and send macOS Messages.
 pub struct IMessageTool;
 
@@ -177,7 +211,7 @@ impl Tool for IMessageTool {
         ToolSchema {
             name: "imessage".into(),
             description: format!(
-                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text someone. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first). Send: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email (run `conversations` or `thread` first to get it); a nickname will NOT resolve. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
+                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text a person OR a group. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first — each row includes a `chat` GUID you send a GROUP with). Send to ONE person: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email; a name will NOT resolve, so use the `contacts` tool to turn a name into a number first. Send to a GROUP: {{\"command\":\"send\",\"chat\":\"<the group's `chat` GUID from conversations>\",\"text\":\"hi all\"}} — NEVER pass a group's NAME as `contact` (that silently sends nowhere); run `conversations` to get the group's GUID and pass it as `chat`. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
                 COMMANDS.join(", ")
             ),
             parameters: json!({
@@ -190,7 +224,11 @@ impl Tool for IMessageTool {
                     },
                     "contact": {
                         "type": "string",
-                        "description": "Who. For `thread`: a phone number, email, or part of a contact/group name — matched loosely. For `send`: the EXACT phone number (+15551234567) or Apple ID email of the recipient; loose names do not resolve when sending."
+                        "description": "Who. For `thread`: a phone number, email, or part of a contact/group name — matched loosely. For `send` to ONE person: the EXACT phone number (+15551234567) or Apple ID email; a name or nickname does not resolve — use the `contacts` tool to get the number first. To send to a GROUP use `chat`, not `contact`."
+                    },
+                    "chat": {
+                        "type": "string",
+                        "description": "For `send` to a GROUP: the group's `chat` GUID exactly as `conversations` returned it (e.g. \"iMessage;+;chat123…\"). Targets that existing group thread; if no such chat exists the send fails loudly rather than going nowhere. Mutually exclusive with `contact`."
                     },
                     "query": {
                         "type": "string",
@@ -220,8 +258,10 @@ impl Tool for IMessageTool {
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let command = command_of(&arguments)?;
         if command == "send" {
-            let (contact, text) = send_args(&arguments)?;
-            return send_message(&contact, &text).await;
+            return match send_args(&arguments)? {
+                SendTarget::Contact(contact, text) => send_message(&contact, &text).await,
+                SendTarget::Group(guid, text) => send_group_message(&guid, &text).await,
+            };
         }
 
         let Some(path) = chat_db_path() else {
@@ -336,7 +376,10 @@ pub fn build_query(command: &str, arguments: &Value) -> anyhow::Result<ReadQuery
             })
         }
         "conversations" => Ok(ReadQuery {
-            sql: "SELECT c.chat_identifier, c.display_name, c.service_name, MAX(m.date), COUNT(m.ROWID)
+            // `c.guid` is the send-addressable id: pass it back as `chat` to
+            // `send` to reach a group. Without it the model had no way to target a
+            // group thread and fell back to sending a group NAME as a handle.
+            sql: "SELECT c.chat_identifier, c.display_name, c.service_name, MAX(m.date), COUNT(m.ROWID), c.guid
                   FROM chat c
                   JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
                   JOIN message m ON m.ROWID = cmj.message_id
@@ -457,8 +500,12 @@ fn conversation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let service: Option<String> = row.get(2).unwrap_or(None);
     let last: i64 = row.get(3).unwrap_or(0);
     let count: i64 = row.get(4).unwrap_or(0);
+    let guid: Option<String> = row.get(5).unwrap_or(None);
     Ok(json!({
-        "chat": chat_identifier,
+        // The send-addressable GUID: pass it to `send` as `chat` to reach a group.
+        "chat": guid,
+        // The human identifier (phone/email for a 1:1, `chat123…` for a group).
+        "identifier": chat_identifier,
         "name": display_name.filter(|d| !d.is_empty()),
         "service": service,
         "last_message_at": format_apple_date(last),
@@ -521,18 +568,130 @@ pub fn extract_attributed_body(blob: &[u8]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// Validate the `send` arguments.
-fn send_args(arguments: &Value) -> anyhow::Result<(String, String)> {
-    let contact = required_str(
-        arguments,
-        "contact",
-        "`send` needs `contact` — the exact phone number (+15551234567) or Apple ID email to send to. Run `conversations` or `thread` first to get it; a nickname will not resolve.",
-    )?;
+/// Where a `send` goes: one person by handle, or a group by chat GUID.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendTarget {
+    /// A 1:1 send to a phone number or email.
+    Contact(String, String),
+    /// A group send to an existing chat, addressed by its GUID.
+    Group(String, String),
+}
+
+/// Validate the `send` arguments into a [`SendTarget`].
+///
+/// Exactly one of `chat` (group GUID) or `contact` (1:1 handle) is required. A
+/// `contact` must be **handle-shaped** — an email, or a run with at least
+/// [`MIN_HANDLE_DIGITS`] digits. That single check is what stops the Scrodes
+/// failure: handed the bare word "scrodes" as `contact`, the old path invented a
+/// phantom iMessage handle and reported success; now it's refused with a pointer
+/// to `contacts` (to resolve a name) or `chat` (to reach a group).
+fn send_args(arguments: &Value) -> anyhow::Result<SendTarget> {
     let text = required_str(arguments, "text", "`send` needs `text` — the message body to send")?;
     if text.chars().count() > MAX_SEND_CHARS {
         anyhow::bail!("message is {} characters; the limit is {MAX_SEND_CHARS}", text.chars().count());
     }
-    Ok((contact, text))
+
+    let chat = optional_str(arguments, "chat");
+    let contact = optional_str(arguments, "contact");
+    match (chat, contact) {
+        (Some(_), Some(_)) => anyhow::bail!("`send` takes `chat` (a group) OR `contact` (one person), not both"),
+        (Some(guid), None) => Ok(SendTarget::Group(guid, text)),
+        (None, Some(contact)) => {
+            if !is_handle_shaped(&contact) {
+                anyhow::bail!(
+                    "`{contact}` isn't a phone number or email, so it can't be a `send` recipient. If it's a person's name, look them up with the `contacts` tool and send to their number. If it's a group, run `conversations` and pass the group's `chat` GUID."
+                );
+            }
+            Ok(SendTarget::Contact(contact, text))
+        }
+        (None, None) => anyhow::bail!(
+            "`send` needs a recipient: `contact` (an exact phone number or email) for one person, or `chat` (a group GUID from `conversations`) for a group."
+        ),
+    }
+}
+
+/// The fewest digits a string needs before it's plausibly a phone number. Below
+/// this (e.g. "scrodes" = 0 digits) a `contact` is a name or a mistake, not a
+/// handle — the guard that prevents a phantom send.
+const MIN_HANDLE_DIGITS: usize = 7;
+
+/// A `send` `contact` is either an email (has `@`) or a phone number (enough
+/// digits). A bare name is neither.
+fn is_handle_shaped(contact: &str) -> bool {
+    if contact.contains('@') {
+        return true;
+    }
+    contact.chars().filter(char::is_ascii_digit).count() >= MIN_HANDLE_DIGITS
+}
+
+/// A trimmed, non-empty string argument, or `None`.
+fn optional_str(arguments: &Value, key: &str) -> Option<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Send to an existing group chat by GUID, **outside** the kernel sandbox.
+///
+/// Unlike [`send_message`], this **cannot create a new conversation** — the
+/// script errors when no existing chat matches, so a bad GUID fails loudly
+/// instead of vanishing. On success it echoes the resolved chat's name and
+/// participant count, so the model reports the real target it hit.
+async fn send_group_message(guid: &str, text: &str) -> anyhow::Result<String> {
+    let output = run_osascript(SEND_GROUP_SCRIPT, guid, text).await?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let (name, participants) = stdout.trim().split_once('|').unwrap_or_else(|| (stdout.trim(), ""));
+        let group = if name.is_empty() { format!("group {guid}") } else { name.to_owned() };
+        return Ok(json!({
+            "sent": true,
+            "chat": guid,
+            "group": group,
+            "participants": participants.trim().parse::<u32>().ok(),
+            "text": text,
+        })
+        .to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if stderr.contains("no existing chat matches") {
+        return Ok(format!(
+            "No existing group chat matches `{guid}`, so nothing was sent. Run `conversations` and copy the group's `chat` GUID exactly — don't guess it."
+        ));
+    }
+    if looks_like_automation_denial(&stderr) {
+        let next_step = initiate(Grant::MessagesAutomation).unwrap_or(SETUP_HINT);
+        return Ok(format!(
+            "Big Smooth isn't allowed to control Messages.app. {next_step}\n\n--- osascript said ---\n{}",
+            truncate(&stderr)
+        ));
+    }
+    Ok(format!("Sending to group {guid} failed.\n{}", truncate(&stderr)))
+}
+
+/// Spawn `osascript` with a fixed script and two `argv` data arguments, bounded
+/// by [`SEND_TIMEOUT`]. Shared by the 1:1 and group send paths.
+async fn run_osascript(script: &str, arg1: &str, arg2: &str) -> anyhow::Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("/usr/bin/osascript");
+    cmd.arg("-e")
+        .arg(script)
+        .arg(arg1)
+        .arg(arg2)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| anyhow::anyhow!("failed to spawn `osascript`: {e}"))?;
+    match tokio::time::timeout(SEND_TIMEOUT, child.wait_with_output()).await {
+        Ok(r) => r.map_err(|e| anyhow::anyhow!("`osascript` error: {e}")),
+        Err(_) => anyhow::bail!(
+            "sending timed out after {}s — Messages.app may be waiting on a permission prompt. {SETUP_HINT}",
+            SEND_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 /// Send via Messages.app, **outside** the kernel sandbox (see the module docs).
@@ -540,24 +699,7 @@ fn send_args(arguments: &Value) -> anyhow::Result<(String, String)> {
 /// The recipient and body go over as `argv`, so no caller-supplied byte is ever
 /// parsed as AppleScript.
 async fn send_message(contact: &str, text: &str) -> anyhow::Result<String> {
-    let mut cmd = tokio::process::Command::new("/usr/bin/osascript");
-    cmd.arg("-e")
-        .arg(SEND_SCRIPT)
-        .arg(contact)
-        .arg(text)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let child = cmd.spawn().map_err(|e| anyhow::anyhow!("failed to spawn `osascript`: {e}"))?;
-    let output = match tokio::time::timeout(SEND_TIMEOUT, child.wait_with_output()).await {
-        Ok(r) => r.map_err(|e| anyhow::anyhow!("`osascript` error: {e}"))?,
-        Err(_) => anyhow::bail!(
-            "sending timed out after {}s — Messages.app may be waiting on a permission prompt. {SETUP_HINT}",
-            SEND_TIMEOUT.as_secs()
-        ),
-    };
+    let output = run_osascript(SEND_SCRIPT, contact, text).await?;
     if output.status.success() {
         return Ok(json!({"sent": true, "to": contact, "text": text}).to_string());
     }
@@ -834,28 +976,69 @@ mod tests {
         assert!(send_args(&json!({"text": "hi"})).is_err(), "no recipient");
         assert!(send_args(&json!({"contact": "+15551234567"})).is_err(), "no body");
         assert!(send_args(&json!({"contact": "  ", "text": "hi"})).is_err(), "blank recipient");
-        let (to, body) = send_args(&json!({"contact": " +15551234567 ", "text": "hi"})).unwrap();
-        assert_eq!((to.as_str(), body.as_str()), ("+15551234567", "hi"));
+        assert_eq!(
+            send_args(&json!({"contact": " +15551234567 ", "text": "hi"})).unwrap(),
+            SendTarget::Contact("+15551234567".into(), "hi".into())
+        );
+    }
+
+    #[test]
+    fn a_bare_name_as_contact_is_refused_not_sent_to_a_phantom() {
+        // The Scrodes regression: "scrodes" (a group NAME) as `contact` used to
+        // create a phantom 1:1 and report success. Now it's refused, and the
+        // error points at the two right paths.
+        let err = send_args(&json!({"contact": "scrodes", "text": "hi"})).unwrap_err().to_string();
+        assert!(err.contains("contacts"), "should point at the contacts tool: {err}");
+        assert!(err.contains("chat"), "should point at group `chat`: {err}");
+        // A name with a stray digit or two is still not a phone number.
+        assert!(send_args(&json!({"contact": "Josh 2", "text": "hi"})).is_err());
+    }
+
+    #[test]
+    fn is_handle_shaped_accepts_numbers_and_emails_only() {
+        assert!(is_handle_shaped("+15551234567"));
+        assert!(is_handle_shaped("(812) 887-6048"));
+        assert!(is_handle_shaped("josh@example.com"));
+        assert!(!is_handle_shaped("scrodes"));
+        assert!(!is_handle_shaped("Josh"));
+        assert!(!is_handle_shaped("123456"), "6 digits is too few to be a phone number");
+    }
+
+    #[test]
+    fn send_to_a_group_takes_a_chat_guid() {
+        assert_eq!(
+            send_args(&json!({"chat": "iMessage;+;chat883", "text": "hi all"})).unwrap(),
+            SendTarget::Group("iMessage;+;chat883".into(), "hi all".into())
+        );
+        // Both at once is a mistake, not a merge.
+        assert!(send_args(&json!({"chat": "x;+;y", "contact": "+15551234567", "text": "hi"})).is_err());
     }
 
     #[test]
     fn send_refuses_a_runaway_message() {
         let long = "z".repeat(MAX_SEND_CHARS + 1);
-        let err = send_args(&json!({"contact": "+1", "text": long})).unwrap_err().to_string();
+        let err = send_args(&json!({"contact": "+15551234567", "text": long})).unwrap_err().to_string();
         assert!(err.contains("the limit is"), "{err}");
         // Exactly at the cap is fine.
-        assert!(send_args(&json!({"contact": "+1", "text": "z".repeat(MAX_SEND_CHARS)})).is_ok());
+        assert!(send_args(&json!({"contact": "+15551234567", "text": "z".repeat(MAX_SEND_CHARS)})).is_ok());
     }
 
     #[test]
-    fn the_send_script_is_fixed_and_reads_its_data_from_argv() {
-        // The whole injection defence in one assertion: the script takes `argv`
-        // and never interpolates. If someone ever reaches for format!() here,
+    fn both_send_scripts_are_fixed_and_read_their_data_from_argv() {
+        // The whole injection defence in one assertion: the scripts take `argv`
+        // and never interpolate. If someone ever reaches for format!() here,
         // this fails.
-        assert!(SEND_SCRIPT.contains("on run argv"), "{SEND_SCRIPT}");
-        assert!(SEND_SCRIPT.contains("item 1 of argv"));
-        assert!(SEND_SCRIPT.contains("item 2 of argv"));
-        assert!(!SEND_SCRIPT.contains("{}"), "no format placeholders may exist in the script");
+        for script in [SEND_SCRIPT, SEND_GROUP_SCRIPT] {
+            assert!(script.contains("on run argv"), "{script}");
+            assert!(script.contains("item 1 of argv"));
+            assert!(script.contains("item 2 of argv"));
+            assert!(!script.contains("{}"), "no format placeholders may exist in the script");
+        }
+        // The group script must never CREATE a chat — it errors when none matches.
+        assert!(
+            SEND_GROUP_SCRIPT.contains("no existing chat matches"),
+            "group send must fail loudly, not invent a chat"
+        );
     }
 
     #[tokio::test]
@@ -863,7 +1046,7 @@ mod tests {
         // No recipient → refused at the argument gate, so Messages is never
         // touched. (A test that actually sent would text a real human.)
         let err = IMessageTool.execute(json!({"command": "send", "text": "hi"})).await.unwrap_err().to_string();
-        assert!(err.contains("needs `contact`"), "{err}");
+        assert!(err.contains("needs a recipient"), "{err}");
     }
 
     #[tokio::test]
@@ -959,13 +1142,14 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
-             CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT, service_name TEXT);
+             CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, display_name TEXT, service_name TEXT);
              CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, is_from_me INTEGER, text TEXT,
                                    attributedBody BLOB, cache_has_attachments INTEGER, service TEXT, handle_id INTEGER);
              CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
 
              INSERT INTO handle VALUES (1, '+15551234567', 'iMessage'), (2, 'friend@example.com', 'iMessage');
-             INSERT INTO chat VALUES (1, '+15551234567', '', 'iMessage'), (2, 'chat99', 'Dinner Crew', 'iMessage');",
+             INSERT INTO chat VALUES (1, 'iMessage;-;+15551234567', '+15551234567', '', 'iMessage'),
+                                    (2, 'iMessage;+;chat99', 'chat99', 'Dinner Crew', 'iMessage');",
         )
         .unwrap();
 
@@ -1079,7 +1263,12 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["name"], "Dinner Crew", "most recently active first");
         assert_eq!(rows[0]["message_count"], 1);
-        assert_eq!(rows[1]["chat"], "+15551234567");
+        // `chat` is now the send-addressable GUID (feed straight to `send` as
+        // `chat`), `identifier` the human phone/email/room id.
+        assert_eq!(rows[0]["chat"], "iMessage;+;chat99", "a group exposes its GUID for sending");
+        assert_eq!(rows[0]["identifier"], "chat99");
+        assert_eq!(rows[1]["chat"], "iMessage;-;+15551234567");
+        assert_eq!(rows[1]["identifier"], "+15551234567");
         assert_eq!(rows[1]["name"], Value::Null, "an empty display name is not a name");
         assert_eq!(rows[1]["message_count"], 2);
     }

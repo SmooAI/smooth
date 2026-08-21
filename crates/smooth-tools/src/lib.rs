@@ -26,6 +26,11 @@ pub mod bash;
 #[cfg(target_os = "macos")]
 pub mod calendar;
 pub mod cd;
+/// macOS Contacts (Address Book, read-only in-process SQLite). Platform-specific
+/// by nature — the Address Book database exists nowhere else, so Linux/Windows
+/// never see the tool.
+#[cfg(target_os = "macos")]
+pub mod contacts;
 pub mod crawl;
 pub mod create_skill;
 pub mod cwd;
@@ -79,6 +84,8 @@ pub use bash::BashTool;
 #[cfg(target_os = "macos")]
 pub use calendar::{CalendarDeleteTool, CalendarTool};
 pub use cd::CdTool;
+#[cfg(target_os = "macos")]
+pub use contacts::ContactsTool;
 pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;
 pub use cwd::SessionCwd;
