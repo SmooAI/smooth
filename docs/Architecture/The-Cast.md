@@ -9,15 +9,15 @@
 
 ## Cast at a glance
 
-| Role            | Crate              | What it does                                       | Where it runs                     |
-| --------------- | ------------------ | -------------------------------------------------- | --------------------------------- |
-| Big Smooth      | `smooth-bigsmooth` | Orchestrator, API, dispatch                        | Host process (axum on `:4400`)    |
-| Operative       | `smooth-operative` | Runs one pearl's agent loop + tools                | Host subprocess (one per pearl)   |
-| Engine (Groove) | `smooth-operator`  | Agent loop, LLM client, tools, checkpoint/resume   | In-process to the operative       |
-| Narc            | `smooth-narc`      | Tool surveillance hook + optional LLM judge        | In-process on the operative's registry |
-| Scribe          | `smooth-scribe`    | Per-actor structured logging                       | In-process, feeds Archivist       |
-| Archivist       | `smooth-archivist` | Central log + event aggregator, SSE stream         | In-process to Big Smooth          |
-| Diver           | `smooth-diver`     | Pearl lifecycle + Jira sync                        | In-process to Big Smooth          |
+| Role            | Crate              | What it does                                     | Where it runs                          |
+| --------------- | ------------------ | ------------------------------------------------ | -------------------------------------- |
+| Big Smooth      | `smooth-bigsmooth` | Orchestrator, API, dispatch                      | Host process (axum on `:4400`)         |
+| Operative       | `smooth-operative` | Runs one pearl's agent loop + tools              | Host subprocess (one per pearl)        |
+| Engine (Groove) | `smooth-operator`  | Agent loop, LLM client, tools, checkpoint/resume | In-process to the operative            |
+| Narc            | `smooth-narc`      | Tool surveillance hook + optional LLM judge      | In-process on the operative's registry |
+| Scribe          | `smooth-scribe`    | Per-actor structured logging                     | In-process, feeds Archivist            |
+| Archivist       | `smooth-archivist` | Central log + event aggregator, SSE stream       | In-process to Big Smooth               |
+| Diver           | `smooth-diver`     | Pearl lifecycle + Jira sync                      | In-process to Big Smooth               |
 
 There is no longer any gRPC-over-UDS wire between cast members. Big Smooth's cast shares `Arc<AppState>`. The one real process boundary is Big Smooth ↔ each operative subprocess, and it is crossed with **JSON-lines `AgentEvent`s on the operative's stdout** — see [[Dispatch]].
 

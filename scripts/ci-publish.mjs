@@ -12,11 +12,11 @@
  * Requires the env var `CARGO_REGISTRY_TOKEN` (or a prior
  * `cargo login`). The release workflow passes it in.
  */
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import https from "node:https";
-import process from "node:process";
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import https from 'node:https';
+import { resolve } from 'node:path';
+import process from 'node:process';
 
 const root = process.cwd();
 
@@ -39,16 +39,16 @@ const root = process.cwd();
 // for exactly the crates you list here.
 const PUBLISH_ORDER = [];
 
-const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const version = pkg.version;
 if (!version) {
-    console.error("Unable to read version from package.json");
+    console.error('Unable to read version from package.json');
     process.exit(1);
 }
 
 function run(cmd, args, opts = {}) {
-    console.log(`\n> ${cmd} ${args.join(" ")}`);
-    execFileSync(cmd, args, { stdio: "inherit", cwd: root, ...opts });
+    console.log(`\n> ${cmd} ${args.join(' ')}`);
+    execFileSync(cmd, args, { stdio: 'inherit', cwd: root, ...opts });
 }
 
 // crates.io sparse-index path layout:
@@ -73,12 +73,12 @@ function getSparseIndex(crate) {
                     res({ exists: false, versions: [] });
                     return;
                 }
-                let body = "";
-                r.setEncoding("utf8");
-                r.on("data", (c) => (body += c));
-                r.on("end", () => {
+                let body = '';
+                r.setEncoding('utf8');
+                r.on('data', (c) => (body += c));
+                r.on('end', () => {
                     const versions = body
-                        .split("\n")
+                        .split('\n')
                         .map((l) => l.trim())
                         .filter(Boolean)
                         .map((line) => {
@@ -92,10 +92,8 @@ function getSparseIndex(crate) {
                     res({ exists: versions.length > 0, versions });
                 });
             })
-            .on("error", (err) => {
-                console.warn(
-                    `sparse-index lookup failed for ${crate}: ${err.message}`,
-                );
+            .on('error', (err) => {
+                console.warn(`sparse-index lookup failed for ${crate}: ${err.message}`);
                 // Fall through — cargo publish will reject cleanly if already published.
                 res({ exists: true, versions: [] });
             });
@@ -138,29 +136,23 @@ function sleep(ms) {
         }
 
         if (lastPublishWasNew) {
-            console.log(
-                `  throttling ${newCrateDelayMs / 1000}s to stay under crates.io's new-crate rate limit`,
-            );
+            console.log(`  throttling ${newCrateDelayMs / 1000}s to stay under crates.io's new-crate rate limit`);
             await sleep(newCrateDelayMs);
         }
 
         const willBeNewCrate = await isCrateNew(crate);
-        console.log(
-            `\n[publish] ${crate}@${version}${willBeNewCrate ? " (first upload)" : ""}`,
-        );
+        console.log(`\n[publish] ${crate}@${version}${willBeNewCrate ? ' (first upload)' : ''}`);
         try {
             // --no-verify skips the pre-flight `cargo build --release` that
             // cargo publish runs by default. The release job has already
             // built the workspace before we reach this step, so verifying
             // again triples the run time for no safety gain.
-            run("cargo", ["publish", "-p", crate, "--no-verify"]);
+            run('cargo', ['publish', '-p', crate, '--no-verify']);
             lastPublishWasNew = willBeNewCrate;
         } catch (err) {
             const nowPublished = await isAlreadyPublished(crate, version);
             if (nowPublished) {
-                console.log(
-                    `  (recovered) ${crate}@${version} appeared on crates.io during publish — continuing`,
-                );
+                console.log(`  (recovered) ${crate}@${version} appeared on crates.io during publish — continuing`);
                 lastPublishWasNew = willBeNewCrate;
                 continue;
             }
@@ -168,9 +160,7 @@ function sleep(ms) {
         }
     }
 
-    console.log(
-        `\nPublished ${PUBLISH_ORDER.length} crate(s) @ ${version} to crates.io.`,
-    );
+    console.log(`\nPublished ${PUBLISH_ORDER.length} crate(s) @ ${version} to crates.io.`);
 })().catch((err) => {
     console.error(err);
     process.exit(1);

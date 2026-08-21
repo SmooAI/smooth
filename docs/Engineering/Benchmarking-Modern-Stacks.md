@@ -19,16 +19,16 @@ wrong for the stack we actually ship.
 Grounded in `smooai/apps/web` (next 16.2, react 19.2, tailwindcss 4.1,
 `@tanstack/react-query` 5.72, `@tanstack/react-table` 8.21):
 
-| stale idiom | why it is wrong now |
-| --- | --- |
-| `tailwind.config.js` | Tailwind 4 is CSS-first — tokens live in `@theme` |
-| `@tailwind base;` | v3's three directives; v4 is one `@import "tailwindcss"` |
-| `getServerSideProps` | pages-router data fetching, removed in the App Router |
-| `forwardRef` wrapper | React 19 passes `ref` as an ordinary prop |
-| `useQuery(key, fn)` | TanStack Query v5 takes a single options object |
-| `cacheTime` | renamed `gcTime` in v5 |
-| `useTable(` | `@tanstack/react-table` v7; v8 is `useReactTable` |
-| `accessor:` | v7 column shape; v8 uses `accessorKey` / `accessorFn` |
+| stale idiom          | why it is wrong now                                      |
+| -------------------- | -------------------------------------------------------- |
+| `tailwind.config.js` | Tailwind 4 is CSS-first — tokens live in `@theme`        |
+| `@tailwind base;`    | v3's three directives; v4 is one `@import "tailwindcss"` |
+| `getServerSideProps` | pages-router data fetching, removed in the App Router    |
+| `forwardRef` wrapper | React 19 passes `ref` as an ordinary prop                |
+| `useQuery(key, fn)`  | TanStack Query v5 takes a single options object          |
+| `cacheTime`          | renamed `gcTime` in v5                                   |
+| `useTable(`          | `@tanstack/react-table` v7; v8 is `useReactTable`        |
+| `accessor:`          | v7 column shape; v8 uses `accessorKey` / `accessorFn`    |
 
 Every one of those is a **substring**. That is the whole trick: API
 currency is objectively checkable, so it does not need a judge and must
@@ -63,9 +63,8 @@ modernising code nobody asked it to touch.
 **What we already have.** `CLAUDE.md` says to use the Context7 MCP server
 for up-to-date library docs; `smooth-tools` ships `create_skill`; skills
 live in `.claude/skills/` and `~/.smooth/plugins/`. The gap versus
-opencode is that nothing *requires* a source/doc lookup before writing
+opencode is that nothing _requires_ a source/doc lookup before writing
 against a fast-moving library — Context7 is available, not mandatory.
-
 
 ## Greenfield is the harder case — and the baseline is bad
 
@@ -76,8 +75,8 @@ read**, which turns the usual advice into "use whatever you remember".
 Measured baseline, `deepseek-v4-flash`, empty workspace, unguided
 (2026-08-07):
 
-> *"Build me a small web dashboard that shows a table of sales deals with
-> the total value at the top."*
+> _"Build me a small web dashboard that shows a table of sales deals with
+> the total value at the top."_
 
 It produced `index.html`, `styles.css`, `app.js`, `data.js` and a
 hand-rolled `server.js`. **No React, no framework at all.** Not a stale
@@ -97,22 +96,21 @@ house default gets applied, and `greenfield-respects-named-stack` checks
 that an explicit user instruction still beats it. A suite that only
 tested the first would teach the agent to override people.
 
-
 ### The A/B: steering works, measured
 
 Same prompt, same model (`deepseek-v4-flash`), same empty workspace. The
 only difference is `.smooth/skills/greenfield-stack/SKILL.md` seeded into
 the workspace, which `smooth-cast`'s project-scoped discovery picks up.
 
-| | unguided | steered |
-| --- | --- | --- |
-| scaffold | `index.html` + hand-rolled `server.js` | `create-next-app` |
-| framework | **none** — vanilla JS | next **16.3.0**, react **19.2.8** |
-| styling | hand-written CSS | tailwind **4** + `@tailwindcss/postcss`, no config file |
-| table | hand-rolled `<table>` | `@tanstack/react-table` **8.21.3** |
-| routing | — | App Router (`src/app/`), incl. `loading.tsx` |
+|           | unguided                               | steered                                                 |
+| --------- | -------------------------------------- | ------------------------------------------------------- |
+| scaffold  | `index.html` + hand-rolled `server.js` | `create-next-app`                                       |
+| framework | **none** — vanilla JS                  | next **16.3.0**, react **19.2.8**                       |
+| styling   | hand-written CSS                       | tailwind **4** + `@tailwindcss/postcss`, no config file |
+| table     | hand-rolled `<table>`                  | `@tanstack/react-table` **8.21.3**                      |
+| routing   | —                                      | App Router (`src/app/`), incl. `loading.tsx`            |
 
-Note the versions: the steered run produced next **16.3**, *newer* than
+Note the versions: the steered run produced next **16.3**, _newer_ than
 the 16.2 pinned in the skill's own table. It scaffolded with
 `create-next-app` rather than hand-writing config, so it inherited
 current defaults for free — which is exactly what the skill's build order

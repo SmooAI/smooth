@@ -51,7 +51,7 @@ aws ssm describe-instance-information --filters Key=InstanceIds,Values=<iid> \
 ## Drive it
 
 Use `winrun.sh` (next to this SKILL.md) — it sends a PowerShell script and polls
-for output. **Gotcha it already handles:** the SSM `--parameters` *shorthand*
+for output. **Gotcha it already handles:** the SSM `--parameters` _shorthand_
 mangles newlines, so it passes a JSON file instead.
 
 ```bash

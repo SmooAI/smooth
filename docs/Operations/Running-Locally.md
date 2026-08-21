@@ -64,17 +64,17 @@ Each injected block is capped at **16 KB**; an oversized file is truncated on a 
 
 ## Useful knobs
 
-| Flag / env                    | Default        | Meaning                                              |
-| ----------------------------- | -------------- | ---------------------------------------------------- |
-| `--port`                      | 4400           | Big Smooth API port                                  |
-| `--bind`                      | 127.0.0.1      | Interface to bind on. ⚠️ The API has no auth today — anything other than loopback exposes every route to the network (pearl th-6db839) |
-| `--no-leader`                 | off            | Skip starting Big Smooth (API + web UI)              |
-| `--max-operators N`           | 3              | Max concurrent operatives                            |
-| `--skip-test`                 | off            | Skip the workflow TEST phase (bench only)            |
-| `--foreground`                | off            | Don't daemonise                                      |
-| `SMOOTH_SANDBOX_MAX_CONCURRENCY` | 3           | Equivalent to `--max-operators`                      |
-| `SMOOTH_OPERATIVE_NATIVE`     | auto-discovered | Absolute path to the `smooth-operative` binary      |
-| `SMOOTH_WORKFLOW`             | 1              | Multi-phase workflow; `0` falls back to single-Agent |
+| Flag / env                       | Default         | Meaning                                                                                                                                |
+| -------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port`                         | 4400            | Big Smooth API port                                                                                                                    |
+| `--bind`                         | 127.0.0.1       | Interface to bind on. ⚠️ The API has no auth today — anything other than loopback exposes every route to the network (pearl th-6db839) |
+| `--no-leader`                    | off             | Skip starting Big Smooth (API + web UI)                                                                                                |
+| `--max-operators N`              | 3               | Max concurrent operatives                                                                                                              |
+| `--skip-test`                    | off             | Skip the workflow TEST phase (bench only)                                                                                              |
+| `--foreground`                   | off             | Don't daemonise                                                                                                                        |
+| `SMOOTH_SANDBOX_MAX_CONCURRENCY` | 3               | Equivalent to `--max-operators`                                                                                                        |
+| `SMOOTH_OPERATIVE_NATIVE`        | auto-discovered | Absolute path to the `smooth-operative` binary                                                                                         |
+| `SMOOTH_WORKFLOW`                | 1               | Multi-phase workflow; `0` falls back to single-Agent                                                                                   |
 
 ## Status & health
 
@@ -86,14 +86,14 @@ th doctor --init-home-repo           # Make ~/.smooth a git repo (audit history)
 
 ## Talking to it
 
-| Surface         | Endpoint                                                                |
-| --------------- | ----------------------------------------------------------------------- |
-| Web UI          | `http://localhost:4400`                                                 |
-| WebSocket       | `ws://localhost:4400/ws`                                                |
-| REST            | `http://localhost:4400/api/*`                                           |
-| TUI             | `th code`                                                               |
-| Pearls          | `th pearls list`, `th pearls show <id>`, …                              |
-| Inbox (access)  | `th inbox`                                                              |
+| Surface        | Endpoint                                   |
+| -------------- | ------------------------------------------ |
+| Web UI         | `http://localhost:4400`                    |
+| WebSocket      | `ws://localhost:4400/ws`                   |
+| REST           | `http://localhost:4400/api/*`              |
+| TUI            | `th code`                                  |
+| Pearls         | `th pearls list`, `th pearls show <id>`, … |
+| Inbox (access) | `th inbox`                                 |
 
 ## Related
 

@@ -22,13 +22,13 @@ are structural rather than bugs.
 **1. The mailbox was a function of where you were standing.** Store resolution
 walked up from the cwd (`find_dolt_dir()`), so an agent in
 `~/dev/smooai/smooth-th-abc123/` and an agent in `~/dev/smooai/smooth/` had two
-*different, unconnected* mailboxes for the same repo — and an agent in a
+_different, unconnected_ mailboxes for the same repo — and an agent in a
 different repo entirely had a third. Since every unit of work happens in its own
 worktree, the common case was agents that could not reach each other, silently.
 An agent is a property of the **machine**, not of a checkout.
 
 **2. Dolt is single-writer, and mail is the most concurrent thing we do.** A
-handful of agents sending and polling at once wedged the *entire* store with
+handful of agents sending and polling at once wedged the _entire_ store with
 `Error 1105: cannot update manifest: database is read only` — which blocks pearl
 writes too, so a mail storm took work tracking down with it. We papered over it
 twice (retry-with-backoff in th-e979ac, then telling the watcher not to `--pull`
@@ -65,7 +65,7 @@ no new external dependency; the daemon already links it.
   `th agent list` answers "who is around and what are they doing".
 - **Dead agents are reaped**: `list` flips any row whose recorded pid is no
   longer alive to `offline`. The pid must be supplied (`--pid $PPID` from the
-  SessionStart hook, or `$SMOOTH_AGENT_PID`) and is deliberately *never* `th`'s
+  SessionStart hook, or `$SMOOTH_AGENT_PID`) and is deliberately _never_ `th`'s
   own — `th` is a one-shot child of the real session, so recording its pid would
   mark every agent offline a second after registering.
 - **The Dolt-era sync flags become no-ops.** `--no-push`, `--pull`, `--no-pull`

@@ -95,7 +95,7 @@ secret**, and enforce a hard scope boundary:
 ### Scope isolation over key secrecy
 
 We cannot make the bundled key secret, so we stop relying on secrecy and make
-the key *worthless beyond the free crawl route*. A minimally-scoped org caps the
+the key _worthless beyond the free crawl route_. A minimally-scoped org caps the
 blast radius at "free crawl," which is a tier we were giving away anyway.
 
 ### Abuse control at the edge, not at the key
@@ -152,4 +152,4 @@ it's a narrow one.
 - Marketing may show the tiers before the endpoint is GA — copy must label it a
   preview with proposed (not final) limits/prices.
 - Final free-tier limits and Pro pricing are commercial decisions, out of scope
-  for this ADR (it fixes the *auth model*, not the numbers).
+  for this ADR (it fixes the _auth model_, not the numbers).

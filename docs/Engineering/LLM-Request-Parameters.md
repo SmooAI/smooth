@@ -44,11 +44,11 @@ Because the behaviour does not follow the model names, so any table you
 write from intuition is wrong. Measured by actually calling each model
 against `llm.smoo.ai` on 2026-08-07:
 
-| rejects `temperature: 0` | accepts it |
-| --- | --- |
-| `gpt-5.1`, `gpt-5.4-pro`, `gpt-5.5` | `gpt-5`, `gpt-5.2`, `gpt-5.4` |
-| `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-fable-5` | `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `claude-opus-4-6` |
-| | `gemini-3.5-flash`, `deepseek-v4-flash`, `deepseek-v4-pro`, `glm-5.1`, `minimax-m2.7`, `groq-gpt-oss-20b` |
+| rejects `temperature: 0`                                                  | accepts it                                                                                                |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `gpt-5.1`, `gpt-5.4-pro`, `gpt-5.5`                                       | `gpt-5`, `gpt-5.2`, `gpt-5.4`                                                                             |
+| `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-fable-5` | `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `claude-opus-4-6`                           |
+|                                                                           | `gemini-3.5-flash`, `deepseek-v4-flash`, `deepseek-v4-pro`, `glm-5.1`, `minimax-m2.7`, `groq-gpt-oss-20b` |
 
 `gpt-5.1` rejects while `gpt-5.2` accepts. `gpt-5.4` accepts while
 `gpt-5.4-pro` rejects. There is no prefix rule, and the set moves every

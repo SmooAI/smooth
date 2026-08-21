@@ -9,17 +9,17 @@
 
 `th` is the single Rust binary built from this repo (`crates/smooth-cli/`). It bundles:
 
-| Layer | Subcommand surface | Backed by |
-|---|---|---|
-| **Local pearl tracking** | `th pearls …` | Embedded Dolt DB at `<repo>/.smooth/dolt/` |
-| **Jira sync** | `th jira sync` | Atlassian REST + Dolt pearl store |
-| **Smoo AI platform** | `smoo …` (= `th smoo …`) | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
-| **Provider auth** | `th model …` / `th providers …` | LLM provider credentials at `~/.smooth/providers.json` |
-| **Operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Big Smooth daemon; operatives as host subprocesses |
-| **Coding TUI** | `th` (no args) or `th code` | smooth-code crate, ratatui |
-| **Worktree helpers** | `th worktree create/list/merge/remove` | git plumbing |
-| **MCP / plugins / skills** | `th mcp`, `th plugin`, `th skills` | TOML manifests under `~/.smooth/` |
-| **Service ops** | `th service`, `th doctor`, `th cache`, `th audit` | local launchd / systemd, `~/.smooth/` |
+| Layer                      | Subcommand surface                                | Backed by                                                            |
+| -------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- |
+| **Local pearl tracking**   | `th pearls …`                                     | Embedded Dolt DB at `<repo>/.smooth/dolt/`                           |
+| **Jira sync**              | `th jira sync`                                    | Atlassian REST + Dolt pearl store                                    |
+| **Smoo AI platform**       | `smoo …` (= `th smoo …`)                          | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
+| **Provider auth**          | `th model …` / `th providers …`                   | LLM provider credentials at `~/.smooth/providers.json`               |
+| **Operator orchestration** | `th up`, `th run`, `th operators`, `th access`    | Big Smooth daemon; operatives as host subprocesses                   |
+| **Coding TUI**             | `th` (no args) or `th code`                       | smooth-code crate, ratatui                                           |
+| **Worktree helpers**       | `th worktree create/list/merge/remove`            | git plumbing                                                         |
+| **MCP / plugins / skills** | `th mcp`, `th plugin`, `th skills`                | TOML manifests under `~/.smooth/`                                    |
+| **Service ops**            | `th service`, `th doctor`, `th cache`, `th audit` | local launchd / systemd, `~/.smooth/`                                |
 
 Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting. Append `ai` to any command path (`smoo org ai`, `th pearls ai`, bare `th ai`) for a generated markdown guide built for humans and AI agents alike. The full interface contract — verbs, flags, output, color — is codified in [`CLI-Spec.md`](CLI-Spec.md) and partly enforced by tests.
 
@@ -39,7 +39,7 @@ explicit in the command tree:
   `smoo agents list`, `smoo crm contacts list`, `smoo auth login` are the
   customer-facing spellings with zero extra keystrokes.
 - **Old top-level spellings still parse** (`smoo config`, `smoo crm`, `smoo api …`,
-  `smoo auth`, …) as *hidden* compat aliases — existing docs, hooks, and muscle
+  `smoo auth`, …) as _hidden_ compat aliases — existing docs, hooks, and muscle
   memory keep working, but `--help` shows the clean split. New docs and skills
   should use the `smoo …` spelling; this document was swept to it (pearl
   th-845c06). The old `th <resource>` spellings remain hidden compat aliases.
@@ -47,7 +47,7 @@ explicit in the command tree:
   twin — `smoo analytics`, `smoo campaigns` (send is preview-first; real send
   needs `--confirm`, suppression stays server-side), `smoo drip`,
   `smoo audiences`, `smoo files search|summarize`, `smoo heypage
-  versions|rollback|source|content`, `smoo api observability metrics` +
+versions|rollback|source|content`, `smoo api observability metrics` +
   `web-vitals`, and the one-offs (`forms`, `gbp`, `search-console`, `sheets`,
   `workforce`). Pearl trail: th-739bb1 / th-b1f09c / th-088c93 / th-a5d991.
 - **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
@@ -144,7 +144,7 @@ smoo auth whoami
 # Stored at    /Users/brentrager/.smooth/auth/smooai.json
 ```
 
-If you see `super_admin` in `Admin roles` you have *cross-org* powers — every `smoo api` call will succeed against any org you target with `--org <id>`. Treat that token with the same care as a root AWS key.
+If you see `super_admin` in `Admin roles` you have _cross-org_ powers — every `smoo api` call will succeed against any org you target with `--org <id>`. Treat that token with the same care as a root AWS key.
 
 ### Refreshing a session (headless)
 
@@ -155,7 +155,7 @@ smoo auth refresh          # refresh the user session
 smoo auth refresh --m2m    # refresh the M2M service-account session
 ```
 
-It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret *is* the durable credential.
+It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret _is_ the durable credential.
 
 ### Switching orgs
 
@@ -172,16 +172,16 @@ smoo api agents list --org <other-org-id>   # one-off override (no switch)
 
 This is the part that trips people up. "Switching" and `--org`/`--org-id` mean different things for the two session types:
 
-| Session | Active org | Cross-org via `--org` / `--org-id`? |
-|---|---|---|
-| **User JWT** (`smoo config` default, `smoo api` user session) | set by `smoo org switch` | ✅ **Yes** — a master/super-admin is authorized over child orgs. Read/write child config with `--org-id <child>` and no switch. |
-| **M2M** (`--m2m`, and the whole `smoo admin config` surface) | baked into the token | ❌ **No** — the token is org-locked **server-side**. `--org <child>` → `403 Not authorized for this organization`, and `smoo org switch` is **cosmetic** for it (it changes local state the server ignores). |
+| Session                                                       | Active org               | Cross-org via `--org` / `--org-id`?                                                                                                                                                                          |
+| ------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **User JWT** (`smoo config` default, `smoo api` user session) | set by `smoo org switch` | ✅ **Yes** — a master/super-admin is authorized over child orgs. Read/write child config with `--org-id <child>` and no switch.                                                                              |
+| **M2M** (`--m2m`, and the whole `smoo admin config` surface)  | baked into the token     | ❌ **No** — the token is org-locked **server-side**. `--org <child>` → `403 Not authorized for this organization`, and `smoo org switch` is **cosmetic** for it (it changes local state the server ignores). |
 
 Practical consequences:
 
 - **Setting config values on a child org needs no switch** — `smoo config set KEY VALUE --org-id <child>` works on the user JWT (master admin authorized over children).
-- **Creating a config *environment* on an unwired child org** hits the M2M org-lock (`smoo admin config environments` is M2M / admin-scoped → 403 cross-org). Bootstrap a brand-new child env via the **deploy path** (`prepareSmooConfig` creates the env at deploy) rather than an admin env-create call.
-- **To genuinely act *as* another org's M2M identity**, use named profiles — `smoo auth profile` bundles a user + M2M identity per org; select with `--profile <name>` / `SMOOAI_PROFILE`.
+- **Creating a config _environment_ on an unwired child org** hits the M2M org-lock (`smoo admin config environments` is M2M / admin-scoped → 403 cross-org). Bootstrap a brand-new child env via the **deploy path** (`prepareSmooConfig` creates the env at deploy) rather than an admin env-create call.
+- **To genuinely act _as_ another org's M2M identity**, use named profiles — `smoo auth profile` bundles a user + M2M identity per org; select with `--profile <name>` / `SMOOAI_PROFILE`.
 - **Flag spelling**: `--org-id` and `--org` are interchangeable on both `smoo config` and `smoo admin config` (each accepts the other as an alias).
 
 ### Logout
@@ -321,7 +321,7 @@ they are the same code path, not a wrapper.
 `tools list` states the mode in words rather than making you infer it:
 
 - **UNRESTRICTED** (`mode: all`) — no enabled entry, so the agent gets every
-  tool available to the org, *including ones shipped later*.
+  tool available to the org, _including ones shipped later_.
 - **RESTRICTED** (`mode: restricted`) — the list is an allowlist. Even with
   nothing missing today, the next tool we ship is invisible to this agent.
 
@@ -486,7 +486,7 @@ are two representations of the same keys, so an unmodified `pull` →
 > and set `"$smooaiName": "<name>"` in `schema.json`.
 
 > **Managing environments without `smoo admin`:** `smoo config environments
-> list|create|update|delete <…> --org-id <org>` works on the public
+list|create|update|delete <…> --org-id <org>` works on the public
 > user-JWT surface — a parent-org admin can create a child org's
 > `production` environment with it (no internal `smoo admin`).
 
@@ -606,8 +606,8 @@ smoo api smooth-operator history <conversation-id>                              
 > `eventual_response`. Implementation: `crates/smooth-cli/src/smooai/smooth_operator_ws.rs`
 > (hand-rolled: the `smooth-operator` crates are server-side and ship no Rust client).
 
-Destructive tools (e.g. `email.send`) **never auto-run**. The socket *parks the
-turn mid-flight* (`write_confirmation_required`) and takes the decision
+Destructive tools (e.g. `email.send`) **never auto-run**. The socket _parks the
+turn mid-flight_ (`write_confirmation_required`) and takes the decision
 **inline**, so approval is a flag on `chat` rather than a second command:
 without `--confirm` the action is declined and reported ("I did NOT do this
 without your approval"), and the turn still completes. The old
@@ -676,9 +676,9 @@ smoo api observability sourcemaps-list --release=<sha> --environment=production
 **Read an empty result carefully.** These commands distinguish three things
 that look alike in a terminal and must never be conflated:
 
-- *"The query ran and matched nothing"* — said in those words.
-- *"The read failed"* — a non-zero exit carrying the HTTP status, never an empty list.
-- *"I saw a full page"* — the output says there may be more; raise `--limit`.
+- _"The query ran and matched nothing"_ — said in those words.
+- _"The read failed"_ — a non-zero exit carrying the HTTP status, never an empty list.
+- _"I saw a full page"_ — the output says there may be more; raise `--limit`.
 
 `smoo api observability health` is the tiebreaker: a stale or failed pipe there
 means an empty log/trace result is a broken ingest, not a quiet system.
@@ -758,7 +758,7 @@ Things worth knowing before you use it:
   a row the dashboard poisoned (SMOODEV-2822).
 - **`from-url` shows which logo candidate it picked** (`→` vs `○`). The
   extractor can return several per kind and the first isn't always the mark —
-  one real run returned the wordmark *and* the page's `og:image` screenshot,
+  one real run returned the wordmark _and_ the page's `og:image` screenshot,
   both as `logo`. Override with `--logo` / `--logo-dark` / `--favicon`.
 - **The Aurora meaning tokens are never white-labeled** — `--color-heat-0..5`,
   `--color-ai`, `--gradient-aurora`, ok/warn/crit encode meaning, not chrome,
@@ -784,7 +784,7 @@ smoo api products list                               # billing plans
 
 ## 4. The `smoo admin` gap (and the "onboarding collapse")
 
-Today the M2M token flow is fine for *acting on behalf of an org*. It's wrong for **cross-org admin work** — onboarding a new customer, minting a service-to-service key, setting a GH Actions secret, listing every org in the system. Those should not require you to:
+Today the M2M token flow is fine for _acting on behalf of an org_. It's wrong for **cross-org admin work** — onboarding a new customer, minting a service-to-service key, setting a GH Actions secret, listing every org in the system. Those should not require you to:
 
 1. Open the web app
 2. Create an org manually
@@ -812,7 +812,7 @@ smoo admin org list                                       # cross-org (today: no
 smoo admin org show <id>
 ```
 
-This requires the **dashboard-user OAuth flow** (pearl `th-abc4e2`) — a localhost-callback Supabase login that produces a *user* JWT carrying the user's admin grants, not a client-credentials JWT scoped to a single org. Until both pearls land, the workarounds are:
+This requires the **dashboard-user OAuth flow** (pearl `th-abc4e2`) — a localhost-callback Supabase login that produces a _user_ JWT carrying the user's admin grants, not a client-credentials JWT scoped to a single org. Until both pearls land, the workarounds are:
 
 - **Org listing**: log into the web app and pull from the URL bar
 - **New-customer onboarding**: the 7-step ceremony above
@@ -838,7 +838,7 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 **Write-locked store — leaked `smooth-dolt` processes (pearl th-118847).** A store can be perfectly healthy on disk and still refuse every write: a leaked one-shot `smooth-dolt sql …` process holds it open, so `th pearls create` / `th msg send` die with `Error 1105: cannot update manifest: database is read only` while reads keep working. `th pearls doctor` therefore (a) lists the `smooth-dolt` processes holding **this project's** store — argv[0] must be the `smooth-dolt` binary AND an argv path must sit under this store, so another project's server or an unrelated process is never touched — and (b) probes **write-ability**, not just readability, reporting `✗ store is write-locked by N leaked smooth-dolt process(es)` instead of a misleading `✓ healthy`. The remedy is `th pearls doctor --reap` (implied by `--auto-repair`): SIGTERM → brief grace → SIGKILL for each leaked process, then a re-probe to confirm writes work again. One-shots are only reaped once they're older than `--reap-age-secs` (default 30s — a healthy one lives milliseconds, so the bound only protects a concurrently-running query); a live `smooth-dolt serve` is only reaped with `--force`. **The re-clone is reachable only when the manifest does not read cleanly** — a healthy store can never be re-cloned away from a broken remote. Root cause of the leak: local one-shots now carry a 120s wallclock bound (`SMOOTH_DOLT_QUERY_TIMEOUT_SECS`, `0` disables), so a wedged child is killed and reaped by its parent instead of hanging `th` until the user Ctrl-Cs and orphans it.
 
-**Remote sync diagnosis (pearl th-53f6b9).** After the local checks, `th pearls doctor` runs a **remote sync** section. A cheap **tip-level check** runs first (pearl th-c42cc4): local dolt branch head vs the remote-tracking head, and the last-synced `refs/dolt/data` tip (dolt's git-remote-cache `FETCH_HEAD`) vs a bounded `git ls-remote` — all-in-sync answers in ~1s with **no clone**. Anything else falls through to the deep probe: it lists the configured dolt remote (no remote → informational skip), temp-clones the remote's `refs/dolt/data` under a bounded timeout (`SMOOTH_DOLT_SYNC_TIMEOUT_SECS`, 30s default; clone failure → "remote unreachable"), and compares histories — heuristically, over the last 500 commits on each side. Each db is classified as **in-sync**, **local-ahead** (run `th pearls push`), **remote-ahead** (run `th pearls pull`), or **diverged, no common ancestor** — the push/pull deadlock (push refused: diverged; pull refused: data-loss guard). The stray-re-init signature (remote has exactly ONE bare "Initialize data repository" commit) is called out specifically with the fix: `th pearls push --force` overwrites only that bare commit. A divergence against *real* remote commits instead recommends inspecting via `smooth-dolt clone <url> /tmp/check` before any force. Doctor also reports whether the branch upstream is configured (unset upstream makes a bare dolt push fail with `remote '' not found`; plain `th pearls push` auto-repairs it via a `-u` retry). This section is read-only — doctor diagnoses and recommends, it never force-pushes.
+**Remote sync diagnosis (pearl th-53f6b9).** After the local checks, `th pearls doctor` runs a **remote sync** section. A cheap **tip-level check** runs first (pearl th-c42cc4): local dolt branch head vs the remote-tracking head, and the last-synced `refs/dolt/data` tip (dolt's git-remote-cache `FETCH_HEAD`) vs a bounded `git ls-remote` — all-in-sync answers in ~1s with **no clone**. Anything else falls through to the deep probe: it lists the configured dolt remote (no remote → informational skip), temp-clones the remote's `refs/dolt/data` under a bounded timeout (`SMOOTH_DOLT_SYNC_TIMEOUT_SECS`, 30s default; clone failure → "remote unreachable"), and compares histories — heuristically, over the last 500 commits on each side. Each db is classified as **in-sync**, **local-ahead** (run `th pearls push`), **remote-ahead** (run `th pearls pull`), or **diverged, no common ancestor** — the push/pull deadlock (push refused: diverged; pull refused: data-loss guard). The stray-re-init signature (remote has exactly ONE bare "Initialize data repository" commit) is called out specifically with the fix: `th pearls push --force` overwrites only that bare commit. A divergence against _real_ remote commits instead recommends inspecting via `smooth-dolt clone <url> /tmp/check` before any force. Doctor also reports whether the branch upstream is configured (unset upstream makes a bare dolt push fail with `remote '' not found`; plain `th pearls push` auto-repairs it via a `-u` retry). This section is read-only — doctor diagnoses and recommends, it never force-pushes.
 
 **Session priming + memories (pearl th-202885).** `th pearls remember "insight"` records a durable project note; `th pearls memories` lists them; `th pearls forget <id>` drops one. `th pearls prime` prints a compact context block — in-progress + open pearls plus recent memories — for an agent to load at session start (`--json` for machine consumption).
 
@@ -919,7 +919,7 @@ immediately and would mark every agent offline a second after registering.
 **Optional cloud backend (pearl th-b02f63).** Everything above works with no
 Smoo account, forever, on the local SQLite mailbox. `th agent backend set cloud`
 moves it to your Smoo **user** account (`/user/agent-mail` on api.smoo.ai) so
-agents on *different machines* share one bus — a laptop and a build box seeing
+agents on _different machines_ share one bus — a laptop and a build box seeing
 each other in `th agent list`, which is the one thing local SQLite cannot do. It
 needs `smoo auth login` (a user session; an org M2M key is rejected, since the
 routes are user-scoped) and is a paid feature after a **14-day trial** that
@@ -942,7 +942,7 @@ harness that reads `AGENTS.md` learns to register + poll without bespoke wiring.
 
 ### `th` as an MCP server — `th mcp serve` (epic th-63e572)
 
-`th mcp` has two halves. The `add`/`list`/`remove`/`defaults`/`install` subcommands are a **client** manager — they register *other* MCP servers (Playwright, GitHub, …) for the operator to consume, writing `~/.smooth/mcp.toml`. `th mcp serve` is the **inverse**: it runs `th` *itself* as a stdio MCP **server**, exposing th's surfaces as MCP tools so Claude Desktop / Cursor / Windsurf / VS Code can drive them.
+`th mcp` has two halves. The `add`/`list`/`remove`/`defaults`/`install` subcommands are a **client** manager — they register _other_ MCP servers (Playwright, GitHub, …) for the operator to consume, writing `~/.smooth/mcp.toml`. `th mcp serve` is the **inverse**: it runs `th` _itself_ as a stdio MCP **server**, exposing th's surfaces as MCP tools so Claude Desktop / Cursor / Windsurf / VS Code can drive them.
 
 ```jsonc
 // Claude Desktop / Cursor / Windsurf: ~/.cursor/mcp.json etc.
@@ -960,11 +960,11 @@ change. A harness with no config directory is skipped, not conjured. Users of
 the `smooth-agent` Claude Code plugin get the server automatically — it ships in
 the plugin manifest's `mcpServers`.
 
-| Harness | File | Entry |
-|---|---|---|
-| `claude-code` | `~/.claude.json` | `mcpServers.smooth` (`type: "stdio"`) |
-| `codex` | `~/.codex/config.toml` | `[mcp_servers.smooth]` |
-| `opencode` | `~/.config/opencode/opencode.json` | `mcp.smooth` (`type: "local"`, one argv array) |
+| Harness       | File                               | Entry                                          |
+| ------------- | ---------------------------------- | ---------------------------------------------- |
+| `claude-code` | `~/.claude.json`                   | `mcpServers.smooth` (`type: "stdio"`)          |
+| `codex`       | `~/.codex/config.toml`             | `[mcp_servers.smooth]`                         |
+| `opencode`    | `~/.config/opencode/opencode.json` | `mcp.smooth` (`type: "local"`, one argv array) |
 
 `th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes three tiers:
 
@@ -1107,7 +1107,7 @@ th attest --all --json          # machine-readable summary
 ```
 
 **Checks are the repo's, not `th`'s.** An executable `scripts/ci/<name>.sh` in
-the repo root *is* a check called `<name>`; that file name is the whole
+the repo root _is_ a check called `<name>`; that file name is the whole
 interface. Files starting with `_` are helpers and `*.test.sh` are the checks'
 own tests, so neither is discovered. `th attest` contains no knowledge of any
 particular repo's checks — see `smooai/scripts/ci/README.md` for the reference
@@ -1119,15 +1119,15 @@ SHA, so pushing a new commit un-credits everything.
 
 #### Three outcomes, not two
 
-| Local outcome     | Exit   | Posted      | CI does       |
-| ----------------- | ------ | ----------- | ------------- |
-| passed            | 0      | `success`   | skips the row |
-| failed            | 1..96, 98+ | `failure` | runs the row |
-| **could not run** | **97** | **nothing** | runs the row  |
+| Local outcome     | Exit       | Posted      | CI does       |
+| ----------------- | ---------- | ----------- | ------------- |
+| passed            | 0          | `success`   | skips the row |
+| failed            | 1..96, 98+ | `failure`   | runs the row  |
+| **could not run** | **97**     | **nothing** | runs the row  |
 
 The third row is the point, and it was paid for: `ci-attest/rust` went red twice
 on a perfectly healthy tree because a laptop's Docker daemon was off, which
-red-flagged both PRs *and* sent the 37-minute job to CI anyway. A status is a
+red-flagged both PRs _and_ sent the 37-minute job to CI anyway. A status is a
 claim about the **commit**; "your Docker daemon is off" is a claim about the
 **laptop**. The governing rule:
 
@@ -1140,8 +1140,8 @@ claim about the **commit**; "your Docker daemon is off" is a claim about the
    to 120s. Only ever starts a runtime the machine already has, never stops one.
    A machine with no `docker` at all is skipped, not blocked.
 2. **Missing `node_modules`** (in a repo with a `package.json`) → `pnpm install
-   --frozen-lockfile`, which can never rewrite the lockfile behind you. A
-   lockfile it cannot satisfy *is* a broken precondition → 97.
+--frozen-lockfile`, which can never rewrite the lockfile behind you. A
+   lockfile it cannot satisfy _is_ a broken precondition → 97.
 3. **Stripped `PATH`** — launchd, cron and `ssh host cmd` never source the
    profile that puts Homebrew and cargo on `PATH`. The four well-known dirs are
    **appended** (so an explicitly-set `PATH` still wins) and the same prelude is
@@ -1154,7 +1154,7 @@ There is a fourth condition that can only be distrusted, never repaired: the
 1-minute **load average is sampled before each check**, and a failure on a
 machine above 2× its core count lands in the 97 bucket instead of on the PR — a
 test with a sub-second timeout on an oversubscribed box is measuring the
-scheduler. Sampling *before* is load-bearing: on a machine dedicated to
+scheduler. Sampling _before_ is load-bearing: on a machine dedicated to
 attesting the check IS the load (cargo on 10 cores takes smoo-hub to 62), so
 sampling afterwards would swallow every genuine failure. A **pass** under load
 is still a pass.
@@ -1198,7 +1198,7 @@ The commit travels as `refs/attest/<sha>` — a namespace no workflow triggers o
 prefixed with the hostname. **The local process keeps both the GitHub
 credentials and the decision**: the remote never posts a status, so a
 misconfigured build box cannot credit anything. Everything that is about the
-*host* rather than the *commit* maps to 97 — a failed `cd`/fetch/checkout, less
+_host_ rather than the _commit_ maps to 97 — a failed `cd`/fetch/checkout, less
 than `min_free_gib` free on the host's system volume, and ssh's own failures
 (unreachable, auth refused, exit 255). A remote 97 stays 97. The ref is deleted
 afterwards, best effort.
@@ -1256,31 +1256,31 @@ workspace volume, git hooks) a bare `th doctor` now reports two more things:
 
 - **Smoo AI sign-in** — whether a user or M2M session exists for the active auth
   profile (`smoo auth login` if not). Not a health failure: a local-only Big Smooth
-  works without it, so it's raised as a *setup step*, not an issue.
+  works without it, so it's raised as a _setup step_, not an issue.
 - **A `macOS access` section** — the grants Big Smooth's personal-data tools
   need, which used to be visible only behind the `--setup-*` flags. Before this,
   a bare `th doctor` could say "all checks passed" on a Mac where the calendar,
   reminders and messages tools were all dead.
 
-  ```
-    macOS access
-      grants belong to Big Smooth.app; `th`'s own probe is a proxy, not proof
-      ✓ Big Smooth.app: /Users/you/Applications/Big Smooth.app
-      ✓ ical CLI: /opt/homebrew/bin/ical
-      ○ Calendar: not-determined — nobody has asked yet
-        → th doctor --setup-calendar (or Big Smooth's Set Up menu)
-      ○ Reminders: not-determined — nobody has asked yet
-        → th doctor --setup-reminders (or Big Smooth's Set Up menu)
-      ✓ Messages: chat.db readable (Full Disk Access granted)
-  ```
+    ```
+      macOS access
+        grants belong to Big Smooth.app; `th`'s own probe is a proxy, not proof
+        ✓ Big Smooth.app: /Users/you/Applications/Big Smooth.app
+        ✓ ical CLI: /opt/homebrew/bin/ical
+        ○ Calendar: not-determined — nobody has asked yet
+          → th doctor --setup-calendar (or Big Smooth's Set Up menu)
+        ○ Reminders: not-determined — nobody has asked yet
+          → th doctor --setup-reminders (or Big Smooth's Set Up menu)
+        ✓ Messages: chat.db readable (Full Disk Access granted)
+    ```
 
-  **The load-bearing nuance: the process that needs these grants is the daemon
-  (`Big Smooth.app`), not `th`.** TCC grants are per-binary, so what `th` reads
-  about *itself* (the EventKit statuses, `chat.db` readability) is a proxy — it
-  never proves the app bundle is granted, which is why every line says "for
-  `th`" and the fix always names the app. The one real check is Messages:
-  `~/Library/Messages/chat.db` is Full-Disk-Access-gated, so a successful read
-  means FDA is genuinely in place for the probing binary.
+    **The load-bearing nuance: the process that needs these grants is the daemon
+    (`Big Smooth.app`), not `th`.** TCC grants are per-binary, so what `th` reads
+    about _itself_ (the EventKit statuses, `chat.db` readability) is a proxy — it
+    never proves the app bundle is granted, which is why every line says "for
+    `th`" and the fix always names the app. The one real check is Messages:
+    `~/Library/Messages/chat.db` is Full-Disk-Access-gated, so a successful read
+    means FDA is genuinely in place for the probing binary.
 
 The run ends with a setup-step summary — `N setup step(s) not ready: …` plus
 `Walk them all: th doctor --onboard` — kept separate from the `N issue(s) found`
@@ -1359,11 +1359,11 @@ Until then the `reminders` tool still registers and answers every call with "run
 
 Once granted, Big Smooth can read and adjust the user's real Reminders:
 
-| Verb | Arguments | Does |
-|---|---|---|
-| `list` | `status` (`open` default / `all`), `list` (filter by list name) | reads reminders |
-| `add` | `title` (required), `due`, `list` | creates one |
-| `complete` | `id` (from a `list`) | marks it done |
+| Verb       | Arguments                                                       | Does            |
+| ---------- | --------------------------------------------------------------- | --------------- |
+| `list`     | `status` (`open` default / `all`), `list` (filter by list name) | reads reminders |
+| `add`      | `title` (required), `due`, `list`                               | creates one     |
+| `complete` | `id` (from a `list`)                                            | marks it done   |
 
 Due dates are **absolute** — `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Natural language
 ("tomorrow 2pm") is deliberately refused: the model resolves relative dates with
@@ -1519,13 +1519,13 @@ Need to call api.smoo.ai?
 
 ### What belongs in `smoo api` vs `smoo admin`
 
-| Lives in `smoo api` | Lives in `smoo admin` |
-|---|---|
-| Acts on resources owned by **your active org** | Acts **across orgs** or **on the platform itself** |
-| Authenticated as an M2M client or a regular dashboard user | Authenticated as an **admin-grant dashboard user** |
-| Backed by `/organizations/{org_id}/…` endpoints | Backed by `/admin/…` endpoints (don't exist yet — paired pearl) |
+| Lives in `smoo api`                                                         | Lives in `smoo admin`                                                                       |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Acts on resources owned by **your active org**                              | Acts **across orgs** or **on the platform itself**                                          |
+| Authenticated as an M2M client or a regular dashboard user                  | Authenticated as an **admin-grant dashboard user**                                          |
+| Backed by `/organizations/{org_id}/…` endpoints                             | Backed by `/admin/…` endpoints (don't exist yet — paired pearl)                             |
 | `agents`, `knowledge`, `members`, `config`, `jobs`, `keys`, `observability` | `onboard-customer`, `mint-key`, `org list/show`, `set-secret`, `feature-flag set` (planned) |
-| **Adding one**: just a new file under `src/api/` + clap subcommand | **Adding one**: requires API-side `/admin/...` endpoint + CLI subcommand together |
+| **Adding one**: just a new file under `src/api/` + clap subcommand          | **Adding one**: requires API-side `/admin/...` endpoint + CLI subcommand together           |
 
 ### What does NOT belong in `th`
 
@@ -1552,13 +1552,13 @@ Need to call api.smoo.ai?
 
 Both repos ship a `PreToolUse` Bash hook (`.claude/hooks/th-curl-hint.sh`) that pattern-matches the command about to run and blocks it with a hint when it sees:
 
-| Pattern | Hint |
-|---|---|
-| `curl … api.smoo.ai` | Use `smoo api …` instead |
-| `curl … auth.smoo.ai/token` | Use `smoo auth login --m2m` instead |
-| `curl … atlassian.net/rest/api` | Use `th jira sync` (or file a pearl for the missing verb) |
+| Pattern                                    | Hint                                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------- |
+| `curl … api.smoo.ai`                       | Use `smoo api …` instead                                                        |
+| `curl … auth.smoo.ai/token`                | Use `smoo auth login --m2m` instead                                             |
+| `curl … atlassian.net/rest/api`            | Use `th jira sync` (or file a pearl for the missing verb)                       |
 | `gh secret set … --body -` with stdin echo | Use `scripts/secret-helpers/gh-secret-set` to avoid trailing-newline corruption |
-| `pnpm sst secret list` (raw) | Use `scripts/secret-helpers/sst-secret-list` to avoid plaintext leakage |
+| `pnpm sst secret list` (raw)               | Use `scripts/secret-helpers/sst-secret-list` to avoid plaintext leakage         |
 
 The hook **does not block** legitimate uses (file a pearl, hit override, or use `--body` directly per the helper README) — it nudges. Override by re-running and confirming when prompted. The full hint policy is in `.claude/hooks/th-curl-hint.sh`.
 

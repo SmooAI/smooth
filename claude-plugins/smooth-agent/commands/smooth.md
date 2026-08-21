@@ -1,6 +1,6 @@
 ---
 description: Big Smooth — orchestrate Claude Code worker sessions via the `th claude` engine (run, add-agent, drive/manual, mail, status)
-argument-hint: "[status|run <task>|add-agent <task>|drive <id>|manual <id>|mail <to> <body>|ls|attach <id>] …"
+argument-hint: '[status|run <task>|add-agent <task>|drive <id>|manual <id>|mail <to> <body>|ls|attach <id>] …'
 allowed-tools: Bash(th claude:*), Bash(th msg:*), Bash(th agent:*), Bash(th pearls:*)
 ---
 

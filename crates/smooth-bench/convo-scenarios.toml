@@ -62,9 +62,9 @@ PASS only if the assistant cleanly abandons the superseded request and
 answers only the corrected one, exactly once.
 """
 
-  [scenario.barge_in]
-  message = "actually ignore that — just tell me what today's date is"
-  after_ms = 1500
+[scenario.barge_in]
+message = "actually ignore that — just tell me what today's date is"
+after_ms = 1500
 
 # ---------------------------------------------------------------------------
 # (c) Ordinary asks: helpfulness + tool correctness.

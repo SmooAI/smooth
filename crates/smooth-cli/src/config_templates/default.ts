@@ -1,4 +1,5 @@
 import type { InferConfigTypes } from '@smooai/config/config';
+
 import config from './config.ts';
 
 type ConfigType = InferConfigTypes<typeof config>['ConfigTypeInput'];

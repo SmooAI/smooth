@@ -28,10 +28,10 @@ suspicious.
 
 Both MCP servers and plugins are resolved from two locations:
 
-| Scope | Path | Use case |
-|---|---|---|
-| Global | `$SMOOTH_HOME/` (else `~/.smooth/`) | Personal tools that follow you across projects (your IDE, your credentials) |
-| Project | `<repo>/.smooth/` | Tools specific to this repo (a DB MCP pointed at this project, a deploy helper, a team-wide Playwright config) |
+| Scope   | Path                                | Use case                                                                                                       |
+| ------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Global  | `$SMOOTH_HOME/` (else `~/.smooth/`) | Personal tools that follow you across projects (your IDE, your credentials)                                    |
+| Project | `<repo>/.smooth/`                   | Tools specific to this repo (a DB MCP pointed at this project, a deploy helper, a team-wide Playwright config) |
 
 On a **name collision, the project entry wins** and the global one
 is shadowed. This is the same resolution order used by most tools
@@ -204,8 +204,8 @@ workspace's project plugins under the same guard `/api/skills` uses.
 ### `prompt_hint` vs `description`
 
 The agent sees the concatenation of `description` + `prompt_hint`
-as the tool's docstring. Use `description` for *what it does* and
-`prompt_hint` for *when to reach for it*:
+as the tool's docstring. Use `description` for _what it does_ and
+`prompt_hint` for _when to reach for it_:
 
 ```toml
 description = "Render a Mermaid diagram to a PNG."
@@ -226,8 +226,8 @@ th plugin remove --project jq    # Project only
 
 ## Security model
 
-> *Users do their thing on their machines. The framework is secure
-> forward, but doesn't stop them from doing what they want.*
+> _Users do their thing on their machines. The framework is secure
+> forward, but doesn't stop them from doing what they want._
 
 Loading MCP configs and plugins from disk is deliberately
 frictionless — no trust prompts, no sandboxing at install time. It's
@@ -257,7 +257,7 @@ The defensive layers kick in at **call time**, not install time:
 If a Narc layer would reject a call from a built-in tool, it'll
 reject the same call from an MCP server or plugin.
 
-### What's *not* defended against
+### What's _not_ defended against
 
 - Running `th` in a repo whose `.smooth/` contains a plugin with a
   command you wouldn't otherwise run. There is no VM around it —

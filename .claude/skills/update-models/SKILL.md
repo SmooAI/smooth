@@ -7,7 +7,7 @@ description: Refresh model strings, pricing, and availability across every place
 
 Smooth names models in **six** places, and they drift from what
 `llm.smoo.ai` actually serves. This skill refreshes them from the live
-gateway — and, importantly, checks that each one still *works*.
+gateway — and, importantly, checks that each one still _works_.
 
 ## The rule that makes this skill worth running
 
@@ -45,13 +45,12 @@ pricing comes from `/model/info`.
 
 `status` column:
 
-| status | meaning |
-|---|---|
-| `ok` | callable, returns tool calls, accepts `temperature: 0` |
-| `ok (rejects temperature 0)` | works only at its default temperature — see th-c127d1 before shipping it |
-| `EMPTY REPLY` | 200 with neither content nor a tool call — the "Big Smooth says nothing" failure |
-| `BROKEN (…)` | the gateway rejected the call outright |
-
+| status                       | meaning                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `ok`                         | callable, returns tool calls, accepts `temperature: 0`                           |
+| `ok (rejects temperature 0)` | works only at its default temperature — see th-c127d1 before shipping it         |
+| `EMPTY REPLY`                | 200 with neither content nor a tool call — the "Big Smooth says nothing" failure |
+| `BROKEN (…)`                 | the gateway rejected the call outright                                           |
 
 ## Prefer the latest — with two hard gates
 
@@ -94,8 +93,6 @@ on outcomes while taking three times the tool calls with a higher error
 rate, which is the difference between an agent you can leave running and
 one you cannot.
 
-
-
 > [!warning] Do not probe during a rollout — you will get a false BROKEN
 > A litellm `config.yaml` change ships as a kustomize ConfigMap whose
 > hash forces a rolling restart, so for a few minutes some pods serve the
@@ -126,11 +123,11 @@ willing to pay is not a candidate no matter how it scores.
 
 Measured 2026-08-08, against `deepseek-v4-flash` at $0.14/$0.28:
 
-| bracket | models | vs flash |
-| --- | --- | --- |
-| **workhorse** (the target) | `deepseek-v4-flash`, `groq-gpt-oss-120b`, `minimax-m3-direct`, `qwen3.6-flash-direct`, `qwen3.5-plus-direct` | 1–3x |
-| mid | `glm-5.2-direct`, `kimi-k2.7-code-direct`, `qwen3-max-direct` | 6–10x |
-| premium | `gpt-5.5`, `kimi-k3-direct`, `claude-opus-4-8` | 20–100x |
+| bracket                    | models                                                                                                       | vs flash |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ | -------- |
+| **workhorse** (the target) | `deepseek-v4-flash`, `groq-gpt-oss-120b`, `minimax-m3-direct`, `qwen3.6-flash-direct`, `qwen3.5-plus-direct` | 1–3x     |
+| mid                        | `glm-5.2-direct`, `kimi-k2.7-code-direct`, `qwen3-max-direct`                                                | 6–10x    |
+| premium                    | `gpt-5.5`, `kimi-k3-direct`, `claude-opus-4-8`                                                               | 20–100x  |
 
 **Having a model in LiteLLM is not the same as routing to it.** Keep the
 premium tier configured and priced — it costs nothing until called, and
@@ -145,14 +142,14 @@ Bench the bracket you would actually ship.
 
 `rg '"deepseek-v4-flash"' crates/` finds most of it. The full list:
 
-| File | What it names |
-|---|---|
-| `crates/smooth-web/web/src/modes.ts` | **the Settings picker** — Flash/Code/UI/Plan/Fast + the `+` premium tier |
+| File                                       | What it names                                                                       |
+| ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `crates/smooth-web/web/src/modes.ts`       | **the Settings picker** — Flash/Code/UI/Plan/Fast + the `+` premium tier            |
 | `crates/smooth-policy/src/smooth_alias.rs` | routing aliases (`smooth-coding` → a real model) + the legacy-alias migration table |
-| `crates/smooth-cast/src/providers.rs` | `providers.json` routing defaults |
-| `crates/smooth-code/src/model_picker.rs` | the `th code` model picker |
-| `crates/smooth-cli/src/operator_serve.rs` | `SMOOAI_MODEL` default for `th operator serve` |
-| `crates/smooth-daemon/src/operator.rs` | `FAST_MODEL` (the narc judge / cheap classifier) |
+| `crates/smooth-cast/src/providers.rs`      | `providers.json` routing defaults                                                   |
+| `crates/smooth-code/src/model_picker.rs`   | the `th code` model picker                                                          |
+| `crates/smooth-cli/src/operator_serve.rs`  | `SMOOAI_MODEL` default for `th operator serve`                                      |
+| `crates/smooth-daemon/src/operator.rs`     | `FAST_MODEL` (the narc judge / cheap classifier)                                    |
 
 Keep them consistent: a model in `modes.ts` that no alias or provider
 default knows about will render in the picker and fail at runtime.
@@ -167,7 +164,7 @@ default knows about will render in the picker and fail at runtime.
   $0.14/$0.28 — **214x input, 643x output**. Put that in the PR
   description when promoting anything into the premium tier.
 - **Run the bench.** `cargo run -p smooai-smooth-bench -- convo --model
-  <old> --model <new>` scores them against each other on real scenarios.
+<old> --model <new>` scores them against each other on real scenarios.
   Cheap models have repeatedly held their own; do not assume the
   expensive one wins. See [[Bench-Harness]].
 

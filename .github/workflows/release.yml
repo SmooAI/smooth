@@ -41,7 +41,7 @@ jobs:
               uses: actions/setup-node@v4
               with:
                   node-version: 22
-                  cache: "pnpm"
+                  cache: 'pnpm'
 
             - name: Install system dependencies
               run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev libicu-dev pkg-config protobuf-compiler
@@ -91,8 +91,8 @@ jobs:
               id: changesets
               uses: changesets/action@v1
               with:
-                  commit: "🦋 New version release"
-                  title: "🦋 New version release"
+                  commit: '🦋 New version release'
+                  title: '🦋 New version release'
                   # Override the default `changeset version` so the version
                   # PR carries Cargo.toml + Cargo.lock bumps too.
                   version: pnpm ci:version

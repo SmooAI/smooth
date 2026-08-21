@@ -13,18 +13,18 @@
  * validation (version mismatch) or publish a stale lock that subsequent
  * `cargo install` calls refuse.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import process from "node:process";
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import process from 'node:process';
 
 const root = process.cwd();
 
-const packageJsonPath = resolve(root, "package.json");
-const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+const packageJsonPath = resolve(root, 'package.json');
+const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
 const version = pkg.version;
 
 if (!version) {
-    console.error("Unable to read version from package.json");
+    console.error('Unable to read version from package.json');
     process.exit(1);
 }
 
@@ -58,10 +58,10 @@ const pluginVersion = (label) => ({
 });
 
 const updates = [
-    pluginVersion("claude-plugins/smooth-agent/.claude-plugin/plugin.json"),
-    pluginVersion(".claude-plugin/marketplace.json"),
+    pluginVersion('claude-plugins/smooth-agent/.claude-plugin/plugin.json'),
+    pluginVersion('.claude-plugin/marketplace.json'),
     {
-        path: "Cargo.toml",
+        path: 'Cargo.toml',
         apply(content) {
             let next = content;
 
@@ -69,16 +69,12 @@ const updates = [
             // synced to the workspace version: the crates.io operator-core dep
             // (name-matched — it has no `git =`), or any git dep (its version
             // lives at the pinned rev, not the workspace). See steps 2 & 3.
-            const isExternalDep = (s) =>
-                s.includes("smooai-smooth-operator-core") || /\bgit\s*=/.test(s);
+            const isExternalDep = (s) => s.includes('smooai-smooth-operator-core') || /\bgit\s*=/.test(s);
 
             // 1. workspace.package.version
-            const workspacePattern =
-                /(\[workspace\.package\]\s*\nversion\s*=\s*")([^"]+)(")/;
+            const workspacePattern = /(\[workspace\.package\]\s*\nversion\s*=\s*")([^"]+)(")/;
             if (!workspacePattern.test(next)) {
-                throw new Error(
-                    "workspace.package.version line not found in Cargo.toml",
-                );
+                throw new Error('workspace.package.version line not found in Cargo.toml');
             }
             next = next.replace(workspacePattern, `$1${version}$3`);
 
@@ -103,10 +99,7 @@ const updates = [
                 if (isExternalDep(line)) {
                     return line;
                 }
-                return line.replace(
-                    /(\bversion\s*=\s*")([^"]+)(")/,
-                    `$1${version}$3`,
-                );
+                return line.replace(/(\bversion\s*=\s*")([^"]+)(")/, `$1${version}$3`);
             });
 
             // 3. Add version to any smooth-X workspace dep that doesn't have
@@ -120,25 +113,21 @@ const updates = [
             //    deps — pinning an operator release that doesn't exist at the
             //    rev and breaking `cargo` resolution (the 0.23.0-vs-1.23.1
             //    failure). Pearl th-1ee32b.
-            const addVersionPattern =
-                /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
-            next = next.replace(
-                addVersionPattern,
-                (match, pre, _v, body, close) => {
-                    if (isExternalDep(body)) {
-                        return match;
-                    }
-                    const trimmed = body.trimStart();
-                    const separator = trimmed.length > 0 ? " " : "";
-                    return `${pre} version = "${version}",${separator}${trimmed}${close}`;
-                },
-            );
+            const addVersionPattern = /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
+            next = next.replace(addVersionPattern, (match, pre, _v, body, close) => {
+                if (isExternalDep(body)) {
+                    return match;
+                }
+                const trimmed = body.trimStart();
+                const separator = trimmed.length > 0 ? ' ' : '';
+                return `${pre} version = "${version}",${separator}${trimmed}${close}`;
+            });
 
             return next;
         },
     },
     {
-        path: "Cargo.lock",
+        path: 'Cargo.lock',
         apply(content) {
             // Every workspace crate uses the package name `smooai-smooth-*`
             // (see the `package = "smooai-smooth-<name>"` rename in commit
@@ -165,8 +154,7 @@ const updates = [
             // grows upstream. The prefix is safe because NO crate in this
             // workspace is named `smooai-smooth-operator*` — the engine lives in
             // its own repo (see CLAUDE.md §1); `ls crates/` is the check.
-            const pattern =
-                /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
+            const pattern = /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
             return content.replace(pattern, (match, pre, _ver, post) => {
                 if (/name = "smooai-smooth-operator[^"]*"\n/.test(pre)) {
                     return match;
@@ -183,9 +171,9 @@ for (const { path, apply } of updates) {
     const absolutePath = resolve(root, path);
     let content;
     try {
-        content = readFileSync(absolutePath, "utf8");
+        content = readFileSync(absolutePath, 'utf8');
     } catch (error) {
-        if (error && error.code === "ENOENT") {
+        if (error && error.code === 'ENOENT') {
             console.warn(`Skipping ${path} (not found)`);
             continue;
         }
@@ -200,7 +188,7 @@ for (const { path, apply } of updates) {
 }
 
 if (touched === 0) {
-    console.warn("No files were updated by sync-versions.");
+    console.warn('No files were updated by sync-versions.');
 } else {
     console.log(`\nSynced version ${version} to ${touched} file(s).`);
 }

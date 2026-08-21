@@ -34,14 +34,16 @@
 ## Essential Commands
 
 ### Finding work
+
 - `th pearls ready` — issues ready to work (no blockers)
 - `th pearls list --status=open` — all open
 - `th pearls list --status=in_progress` — your active work
 - `th pearls show <id>` — full view with deps + history
 
 ### Creating & updating
+
 - `th pearls create --title="Summary" --description="Why this exists and what needs doing" --type=task|bug|feature --priority=2`
-  - Priority: 0–4 (0 = critical, 2 = medium, 4 = backlog). Not "high"/"low".
+    - Priority: 0–4 (0 = critical, 2 = medium, 4 = backlog). Not "high"/"low".
 - `th pearls update <id> --status=in_progress` — claim work
 - `th pearls update <id> --title/--description/--priority/--assign` — edit fields
 - `th pearls close <id>` — mark complete
@@ -51,11 +53,13 @@
   block the agent on $EDITOR.
 
 ### Dependencies & blocking
+
 - `th pearls dep add <issue> <depends-on>` — issue depends on depends-on
 - `th pearls blocked` — show blocked issues
 - `th pearls show <id>` — see what's blocking / blocked by
 
 ### Sync
+
 - `th pearls push` / `th pearls pull` — push or pull the Dolt DB
 - `th pearls search <query>` — full-text
 - `th pearls stats` — project counts
@@ -63,6 +67,7 @@
 ## Common Workflows
 
 **Starting work:**
+
 ```bash
 th pearls ready
 th pearls show <id>
@@ -70,6 +75,7 @@ th pearls update <id> --status=in_progress
 ```
 
 **Completing work:**
+
 ```bash
 th pearls close <id1> <id2> ...
 git add . && git commit -m "Pearl th-XXXX: ..."
@@ -77,6 +83,7 @@ git push
 ```
 
 **Spawning dependent pearls:**
+
 ```bash
 # Creates can run in parallel
 th pearls create --title="Implement feature X" --type=feature

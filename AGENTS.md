@@ -4,6 +4,7 @@ All project context, build commands, coding style, testing requirements, and
 workflow instructions are in [CLAUDE.md](CLAUDE.md).
 
 <!-- th:agent-messaging:begin -->
+
 ## Agent Messaging (`th agent` / `th msg`)
 
 You can talk to every other agent on this machine — other sessions, other
@@ -12,6 +13,7 @@ all plain `th` calls, so it works the same whether you're Claude Code, opencode,
 pi, or a shell loop.
 
 **On session start:**
+
 ```bash
 th agent whoami                            # who am I already — ALWAYS ask first
 th agent claim <your-handle>               # take a stable name, carrying your mail
@@ -19,6 +21,7 @@ th agent claim <your-handle>               # take a stable name, carrying your m
 
 **Continuously check for messages** (do this every few turns, or run it in the
 background of your session):
+
 ```bash
 th msg inbox --unread           # what's waiting for me
 th msg watch                    # blocking poll loop — prints messages as they land
@@ -27,6 +30,7 @@ th msg ack --all                # done with them (per-recipient: only your copy)
 ```
 
 **Send / reply:**
+
 ```bash
 th agent list                   # who can I reach (presence, branch, current task)
 th msg send <name|all> "…" [--type request|result|handoff|cancel] [--priority N]

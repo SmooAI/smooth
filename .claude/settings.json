@@ -1,14 +1,14 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "extraKnownMarketplaces": {
-    "smooth": {
-      "source": {
-        "source": "github",
-        "repo": "SmooAI/smooth"
-      }
+    "$schema": "https://json.schemastore.org/claude-code-settings.json",
+    "extraKnownMarketplaces": {
+        "smooth": {
+            "source": {
+                "source": "github",
+                "repo": "SmooAI/smooth"
+            }
+        }
+    },
+    "enabledPlugins": {
+        "smooth-agent@smooth": true
     }
-  },
-  "enabledPlugins": {
-    "smooth-agent@smooth": true
-  }
 }

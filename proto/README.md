@@ -15,7 +15,7 @@ Today's architecture has two trust boundaries:
 The safehouse↔operator boundary protects against attacks the threat
 model doesn't actually cover (Smooth's worry is prompt injection of an
 honest LLM, not a maliciously fine-tuned model). Removing it collapses
-a *lot* of plumbing: SMOOTH_NARC_URL detection, host.containers.internal
+a _lot_ of plumbing: SMOOTH_NARC_URL detection, host.containers.internal
 workarounds, per-bead VM spawn pools, cross-VM HTTP. The auto-mode
 work in iters 1-9 had to thread around this complexity; with the
 collapse, the same flow becomes localhost UDS gRPC.
@@ -55,14 +55,14 @@ HOST                                          SANDBOX VM
 
 ## The protos
 
-| File | Service | Notes |
-|------|---------|-------|
-| `narc.proto` | The judge | Decision::Ask never returned through Judge — internally held + replayed |
-| `wonk.proto` | Policy gate | CheckNetwork/Tool/Cli/File, escalates to Narc when uncertain |
-| `goalie.proto` | HTTP proxy mgmt | TODO — data plane stays HTTP; control plane is gRPC |
-| `scribe.proto` | Logger | Client-streaming ingest, server-streaming query |
-| `bigsmooth.proto` | Orchestrator | Dispatch + AccessStore + operator events |
-| `host_stub.proto` | The poke hole | One RPC: IssueCredential |
+| File              | Service         | Notes                                                                   |
+| ----------------- | --------------- | ----------------------------------------------------------------------- |
+| `narc.proto`      | The judge       | Decision::Ask never returned through Judge — internally held + replayed |
+| `wonk.proto`      | Policy gate     | CheckNetwork/Tool/Cli/File, escalates to Narc when uncertain            |
+| `goalie.proto`    | HTTP proxy mgmt | TODO — data plane stays HTTP; control plane is gRPC                     |
+| `scribe.proto`    | Logger          | Client-streaming ingest, server-streaming query                         |
+| `bigsmooth.proto` | Orchestrator    | Dispatch + AccessStore + operator events                                |
+| `host_stub.proto` | The poke hole   | One RPC: IssueCredential                                                |
 
 ## How the trust boundaries fall
 
@@ -78,7 +78,7 @@ HOST                                          SANDBOX VM
 3. **Persistent state + learned context.** Bind-mount the state dirs. Add the learned-context collector. ~1 week.
 4. **Cleanup.** Drop `safehouse_*` terms, `host_tool` as a user-visible tool, `SMOOTH_NARC_URL` detection. ~3 days.
 
-Total: ~5 weeks. The endpoint is a system that's *materially* simpler than today's.
+Total: ~5 weeks. The endpoint is a system that's _materially_ simpler than today's.
 
 ## Decisions locked in
 
@@ -105,4 +105,4 @@ Total: ~5 weeks. The endpoint is a system that's *materially* simpler than today
 - `dispatch_ws_task_sandboxed` vs `dispatch_ws_task_direct` branching — one dispatch path.
 - The per-VM `spawn_cast()` function in operative. Cast members are sandbox-singleton processes.
 - The per-bead microsandbox pool.
-- The `host_tool` agent-visible tool. Internal tools (gh_*, aws_*, etc.) call IssueCredential as needed; the agent sees them as normal tools.
+- The `host_tool` agent-visible tool. Internal tools (gh__, aws__, etc.) call IssueCredential as needed; the agent sees them as normal tools.

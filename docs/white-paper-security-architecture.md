@@ -64,6 +64,7 @@ Every Smooth deployment runs in a layered VM topology:
 **Big Smooth** is a read-only orchestrator. It dispatches tasks, monitors progress, and reviews results. It never executes LLM tool calls directly. It never writes to the user's filesystem. It never makes API calls on behalf of agents.
 
 **Operator VMs** are where agents actually run. Each operator gets its own hardware-isolated microVM with:
+
 - Its own kernel
 - Its own filesystem (bind-mounted workspace)
 - Its own network stack (filtered by Goalie)
@@ -73,12 +74,12 @@ Every Smooth deployment runs in a layered VM topology:
 
 Every operator VM runs four independent security services:
 
-| Service | Role | Enforcement |
-|---------|------|-------------|
-| **Wonk** | Access control authority | TOML policy rules, domain allowlists, filesystem deny patterns, port restrictions |
-| **Goalie** | Network proxy | HTTP/HTTPS forward proxy, all traffic routed through Wonk checks |
-| **Narc** | Tool surveillance | Secret detection (10 regex patterns), prompt injection guard (6 patterns), write guard |
-| **Scribe** | Audit logging | Every tool call, network request, and file write logged with trace context |
+| Service    | Role                     | Enforcement                                                                            |
+| ---------- | ------------------------ | -------------------------------------------------------------------------------------- |
+| **Wonk**   | Access control authority | TOML policy rules, domain allowlists, filesystem deny patterns, port restrictions      |
+| **Goalie** | Network proxy            | HTTP/HTTPS forward proxy, all traffic routed through Wonk checks                       |
+| **Narc**   | Tool surveillance        | Secret detection (10 regex patterns), prompt injection guard (6 patterns), write guard |
+| **Scribe** | Audit logging            | Every tool call, network request, and file write logged with trace context             |
 
 These services are **independent processes** communicating over HTTP. A compromised agent cannot disable Wonk because Wonk runs in a separate process with its own address space. A compromised Wonk cannot suppress audit logs because Scribe forwards directly to the Archivist in the Safehouse.
 
@@ -112,6 +113,7 @@ deny = ["workflow"]
 ```
 
 Policies vary by orchestration phase:
+
 - **Assess**: Read-only filesystem, minimal network, no write tools
 - **Execute**: Full tool access, writable filesystem, package registries allowed
 - **Review**: Read-only, adversarial—only LLM API access, no auto-approve
@@ -144,16 +146,16 @@ A critical subtlety: operators see guest paths (`/workspace/.env`) but policies 
 
 ### 3.1 Threats Addressed
 
-| Threat | Mitigation |
-|--------|-----------|
-| Prompt injection causing data exfiltration | Goalie network proxy + Wonk domain allowlist |
-| Agent reads secrets (.env, SSH keys, API tokens) | Wonk filesystem deny patterns with path translation |
-| Agent executes destructive commands (rm -rf, git push --force) | Narc CLI guard + Wonk writable policy |
-| Agent installs malicious packages | Goalie restricts to approved registries |
-| Agent communicates with C2 server | All network traffic through Goalie; only allowlisted domains |
-| Lateral movement to other services | Hardware VM isolation; no host network access by default |
-| Agent modifies its own security config | Wonk/Goalie/Narc run as independent processes in the VM |
-| Audit log tampering | Scribe forwards to Archivist in the Safehouse (separate VM) |
+| Threat                                                         | Mitigation                                                   |
+| -------------------------------------------------------------- | ------------------------------------------------------------ |
+| Prompt injection causing data exfiltration                     | Goalie network proxy + Wonk domain allowlist                 |
+| Agent reads secrets (.env, SSH keys, API tokens)               | Wonk filesystem deny patterns with path translation          |
+| Agent executes destructive commands (rm -rf, git push --force) | Narc CLI guard + Wonk writable policy                        |
+| Agent installs malicious packages                              | Goalie restricts to approved registries                      |
+| Agent communicates with C2 server                              | All network traffic through Goalie; only allowlisted domains |
+| Lateral movement to other services                             | Hardware VM isolation; no host network access by default     |
+| Agent modifies its own security config                         | Wonk/Goalie/Narc run as independent processes in the VM      |
+| Audit log tampering                                            | Scribe forwards to Archivist in the Safehouse (separate VM)  |
 
 ### 3.2 Threats Not Addressed (Current Limitations)
 
@@ -196,28 +198,28 @@ The entire stack compiles to a single binary with zero runtime dependencies. Ope
 
 ## 5. Performance
 
-| Metric | Value |
-|--------|-------|
-| microVM boot time | ~200ms (warm cache) |
-| Policy evaluation (Wonk) | <1ms per check |
-| Network proxy overhead (Goalie) | <5ms per request |
-| Secret detection (Narc) | <1ms per tool call |
-| Max concurrent operators | 3 per host (configurable) |
-| Memory per operator VM | 4GB default |
+| Metric                          | Value                     |
+| ------------------------------- | ------------------------- |
+| microVM boot time               | ~200ms (warm cache)       |
+| Policy evaluation (Wonk)        | <1ms per check            |
+| Network proxy overhead (Goalie) | <5ms per request          |
+| Secret detection (Narc)         | <1ms per tool call        |
+| Max concurrent operators        | 3 per host (configurable) |
+| Memory per operator VM          | 4GB default               |
 
 ---
 
 ## 6. Comparison
 
-| Feature | Claude Code | Cursor | Smooth |
-|---------|------------|--------|--------|
-| Hardware isolation | No | No | **Yes (microVMs)** |
-| Network filtering | No | No | **Yes (Goalie proxy)** |
-| Filesystem deny patterns | No | No | **Yes (Wonk policy)** |
-| Independent audit logging | No | No | **Yes (Scribe → Archivist)** |
-| Enterprise policy override | No | No | **Yes (TOML deny rules)** |
-| Multi-agent orchestration | No | No | **Yes (delegation API)** |
-| Port forwarding (dev servers) | N/A | N/A | **Yes (policy-controlled)** |
+| Feature                       | Claude Code | Cursor | Smooth                       |
+| ----------------------------- | ----------- | ------ | ---------------------------- |
+| Hardware isolation            | No          | No     | **Yes (microVMs)**           |
+| Network filtering             | No          | No     | **Yes (Goalie proxy)**       |
+| Filesystem deny patterns      | No          | No     | **Yes (Wonk policy)**        |
+| Independent audit logging     | No          | No     | **Yes (Scribe → Archivist)** |
+| Enterprise policy override    | No          | No     | **Yes (TOML deny rules)**    |
+| Multi-agent orchestration     | No          | No     | **Yes (delegation API)**     |
+| Port forwarding (dev servers) | N/A         | N/A    | **Yes (policy-controlled)**  |
 
 ---
 
@@ -231,4 +233,4 @@ This is not theoretical. Smooth ships as a single binary. The security architect
 
 ---
 
-*For more information, visit [github.com/SmooAI/smooth](https://github.com/SmooAI/smooth) or contact brent@smooai.com.*
+_For more information, visit [github.com/SmooAI/smooth](https://github.com/SmooAI/smooth) or contact brent@smooai.com._

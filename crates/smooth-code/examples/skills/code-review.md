@@ -4,6 +4,7 @@ description: Perform a thorough code review
 ---
 
 Please review the following code for:
+
 - Security vulnerabilities (SQL injection, XSS, etc.)
 - Performance issues
 - Code style and best practices
