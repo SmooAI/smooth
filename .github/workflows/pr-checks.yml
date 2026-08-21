@@ -199,6 +199,40 @@ jobs:
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: cargo build --release -p smooai-smooth-cli
 
+    # Pearl th-9bee92: the ONLY repo-wide check. Deliberately ungated — no
+    # dorny/paths-filter, no `if:` — because the bug this job fixes is a check
+    # that verifies nothing on the diff in front of it. `rust` gates on
+    # crates/**, `web` gates on crates/smooth-web/web/**, so a markdown- or
+    # changeset-only PR (e.g. #473) previously ran nothing but a grep and
+    # reported all-green. oxfmt covers md/json/jsonc/yaml/toml/css/js/ts, which
+    # is every text file that PR touched.
+    #
+    # oxfmt is pinned to an exact version in package.json: formatter output
+    # changes between minor releases, so a caret range would turn an unrelated
+    # PR red the day a new oxfmt ships.
+    format:
+        name: Format check
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: pnpm/action-setup@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            # Root install is three dev deps (changesets, husky, oxfmt).
+            # HUSKY=0: the `prepare` script has nothing to install in CI.
+            - name: Install
+              run: pnpm install --frozen-lockfile
+              env:
+                  HUSKY: '0'
+
+            - name: Format check
+              run: pnpm format:check
+
     web:
         name: Web checks
         runs-on: ubuntu-latest

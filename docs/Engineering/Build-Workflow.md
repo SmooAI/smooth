@@ -44,6 +44,7 @@ pnpm build                           # Build dist/, then re-`cargo build` to emb
 
 - **Rust:** edition 2021, max line width 160, field init shorthand, `unsafe_code = "forbid"`, `unused_must_use = "deny"`, clippy pedantic + nursery as warnings, `anyhow` for app errors / `thiserror` for library errors, `tracing` for logging.
 - **TypeScript:** oxfmt for formatting, oxlint for linting, Vite + React 19 + Tailwind 4.
+- **Everything else (md / json / yaml / toml / css):** `oxfmt` too — it is the repo's single formatter. `pnpm format` to write, `pnpm format:check` to verify. The `format` job in `pr-checks.yml` runs it ungated on every PR, so markdown and changesets are covered. Generated/vendored files are excluded in `.oxfmtrc.json` `ignorePatterns` (obsidian vault internals, bench session dumps, the `openapi.json` snapshot, lockfiles, and `CHANGELOG.md` — `changeset version` generates it, so formatting it would red every release PR).
 
 ## Testing
 

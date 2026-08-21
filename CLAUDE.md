@@ -245,6 +245,11 @@ pnpm dev                     # Vite dev server at :3100
 - Vite + React 19 + Tailwind CSS 4
 - oxfmt for formatting, oxlint for linting
 
+### Everything that is not Rust
+**`oxfmt` is the only formatter in this repo** (pearl th-9bee92 removed the never-wired `dprint.json` and `.prettierignore`). `pnpm format` writes, `pnpm format:check` verifies, and the `format` job in `pr-checks.yml` runs it **ungated on every PR** — it is the one check a docs-only or changeset-only diff cannot skip. It owns `md`, `json`/`jsonc`, `yaml`, `toml`, `css`, and `js`/`ts`, so a markdown or changeset edit is **not** format-exempt. Exclusions (generated or vendored bytes) live in `.oxfmtrc.json` `ignorePatterns` — `CHANGELOG.md` is on that list because `changeset version` writes it, and oxfmt mangles the prose it appends.
+
+> ⚠️ oxfmt formats markdown, and it reads bare `snake_case` in prose as an emphasis span — `transfer_call, notify_humans` comes back out as `transfer*call, notify_humans`. Backtick identifiers in docs; the corruption is oxfmt's own output, so `format:check` will *demand* it once it lands.
+
 ---
 
 ## 4. Key Modules (smooth-daemon)
