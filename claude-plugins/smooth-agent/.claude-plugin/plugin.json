@@ -6,10 +6,7 @@
     "mcpServers": {
         "smooth": {
             "command": "th",
-            "args": [
-                "mcp",
-                "serve"
-            ]
+            "args": ["mcp", "serve"]
         }
     },
     "author": {
@@ -19,11 +16,5 @@
     "homepage": "https://github.com/SmooAI/smooth",
     "repository": "https://github.com/SmooAI/smooth",
     "license": "MIT",
-    "keywords": [
-        "orchestration",
-        "tmux",
-        "multi-agent",
-        "th-mail",
-        "pearls"
-    ]
+    "keywords": ["orchestration", "tmux", "multi-agent", "th-mail", "pearls"]
 }

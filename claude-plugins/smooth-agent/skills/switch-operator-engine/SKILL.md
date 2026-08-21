@@ -30,13 +30,13 @@ th operator serve --help          # per-engine caveats, self-documenting
 
 ## Per-engine notes (the ones that bite)
 
-| `--lang` | What runs | Caveat |
-|----------|-----------|--------|
-| `rust`   | `th daemon` | The only runnable Rust LocalServer — it's the daemon, so it carries the daemon's narc/storage/persona extras, not a bare engine. |
-| `go`     | `go run ./cmd/serve` | Needs Go toolchain. |
-| `ts`     | `node dist/main.js` | Auto-builds (`pnpm install && pnpm build`) on first run if `dist/main.js` is missing. |
-| `python` | `uv run python -m smooth_operator_server` | Bind is **hardcoded 127.0.0.1:8787 upstream** — `--port` is ignored (the CLI warns you). Runs `uv sync` first. |
-| `dotnet` | `dotnet run` | Needs .NET SDK. |
+| `--lang` | What runs                                 | Caveat                                                                                                                           |
+| -------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `rust`   | `th daemon`                               | The only runnable Rust LocalServer — it's the daemon, so it carries the daemon's narc/storage/persona extras, not a bare engine. |
+| `go`     | `go run ./cmd/serve`                      | Needs Go toolchain.                                                                                                              |
+| `ts`     | `node dist/main.js`                       | Auto-builds (`pnpm install && pnpm build`) on first run if `dist/main.js` is missing.                                            |
+| `python` | `uv run python -m smooth_operator_server` | Bind is **hardcoded 127.0.0.1:8787 upstream** — `--port` is ignored (the CLI warns you). Runs `uv sync` first.                   |
+| `dotnet` | `dotnet run`                              | Needs .NET SDK.                                                                                                                  |
 
 ## How to run one (it blocks)
 
@@ -59,6 +59,6 @@ that — `th operator serve` is the single-engine, discoverable front door.
 ## When NOT to use this
 
 - To run the production/daemon Big Smooth for real work, use `th up` / `th
-  daemon` directly — this skill is for *comparing engines*, not daily driving.
+daemon` directly — this skill is for _comparing engines_, not daily driving.
 - If the sibling `smooth-operator` repo isn't checked out, `th operator serve`
   errors with the expected path — clone it or set `SMOOTH_OPERATOR_REPO`.

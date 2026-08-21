@@ -10,7 +10,7 @@ sibling `smooai-glow-up`, this is a thin wrapper around real design craft — it
 supplies the _identity_ the craft must honor.
 
 **Presence is not Aurora.** Aurora (smooai) is a dashboard language: a cool
-midnight ground and a teal→gold→coral spectrum spent as *heat* — pipeline stage,
+midnight ground and a teal→gold→coral spectrum spent as _heat_ — pipeline stage,
 priority, temperature. Smooth is a **personal agent you cohabit with**, mostly
 met in a terminal. Its ground is **warm**, and its color is spent on **presence
 and attention**, not measurement. Don't import Aurora's heat ramp here; don't
@@ -19,7 +19,7 @@ export Presence's warmth there.
 ## How to run it
 
 1. **Understand the surface first.** Read the code that renders it and, where you
-   can, *look at it running*. Never restyle from imagination.
+   can, _look at it running_. Never restyle from imagination.
 2. **Honor what already ships** — the implementation is the source of truth:
     - **TUI**: `crates/smooth-code/src/theme.rs` — every color and semantic style
       function already lives here (`th_gradient`, `smoo_gradient`, `panel_border`,
@@ -30,7 +30,7 @@ export Presence's warmth there.
       `--color-amber`, `--color-online`, `--color-th-teal`, `--color-th-blue`).
       Add tokens there, not inline.
     - **CLI**: the `th` command surface — plain, pipe-safe output (see below).
-3. **Verify by rendering, not by reasoning** (see *Verification*). A TUI diff you
+3. **Verify by rendering, not by reasoning** (see _Verification_). A TUI diff you
    haven't seen drawn is a guess.
 4. **Follow the repo workflow** — worktree per pearl, colocated `#[cfg(test)]`
    tests, `cargo fmt` + `cargo clippy` + `cargo test` green, changeset, PR. See
@@ -41,7 +41,7 @@ export Presence's warmth there.
 ## The Presence design language
 
 > The one idea everything hangs on: **the teal→blue `th` gradient is Big Smooth's
-> face.** It marks where *he* is present — his turns, his mark, his heartbeat —
+> face.** It marks where _he_ is present — his turns, his mark, his heartbeat —
 > and nothing else. Chrome never wears the face. Everything else stays quiet so
 > presence reads instantly.
 
@@ -50,13 +50,13 @@ export Presence's warmth there.
 Smooth's neutrals are **warm** near-black and warm off-white — deliberate, so the
 product feels like a room you share, not a dashboard you audit.
 
-| Role | Web token | TUI (`theme.rs`) |
-|---|---|---|
-| ground | `--color-background` warm near-black | terminal default bg (inherit!) |
-| raised | `--color-panel` / `--color-panel-2` | border, not fill |
-| text | `--color-foreground` warm off-white | `SMOO_WHITE` |
-| muted | `--color-muted-foreground` | `MUTED` |
-| hairline | `--color-border` | `panel_border(false)` |
+| Role     | Web token                            | TUI (`theme.rs`)               |
+| -------- | ------------------------------------ | ------------------------------ |
+| ground   | `--color-background` warm near-black | terminal default bg (inherit!) |
+| raised   | `--color-panel` / `--color-panel-2`  | border, not fill               |
+| text     | `--color-foreground` warm off-white  | `SMOO_WHITE`                   |
+| muted    | `--color-muted-foreground`           | `MUTED`                        |
+| hairline | `--color-border`                     | `panel_border(false)`          |
 
 **Never** cool grey/blue-black in Smooth (that's Aurora's ground), and never pure
 grey — the warmth is the point.
@@ -67,7 +67,7 @@ grey — the warmth is the point.
   `th_gradient()` / `th_gradient_color()`.
 - **Reserved for Big Smooth's presence**: his wordmark, his turns, his
   alive/heartbeat indicator. Never for buttons, borders, or section headers.
-- The `smoo` orange→red gradient (`smoo_gradient()`) is the *brand wordmark* only.
+- The `smoo` orange→red gradient (`smoo_gradient()`) is the _brand wordmark_ only.
 
 ### Attention (spend sparingly, mean it)
 
@@ -82,13 +82,13 @@ grey — the warmth is the point.
 A TUI has no blur, shadow, or gradient fill. It has **fg/bg, bold/dim/italic/
 reverse, box-drawing, and whitespace**. Translate the intent, don't fake the effect:
 
-| Web idea | Terminal equivalent |
-|---|---|
-| glass/elevation | a **border** (`panel_border(active)`), or nothing — never a bg fill |
-| gradient fill | a **per-character gradient** across a short run of text only (`gradient_row`, `th_gradient_color`) — never across a paragraph |
-| drop shadow | one blank line of breathing room |
-| hover/active | `Modifier::BOLD` + brighter border; reserve `REVERSED` for selection |
-| disabled | `MUTED` fg, never a grey bg |
+| Web idea        | Terminal equivalent                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| glass/elevation | a **border** (`panel_border(active)`), or nothing — never a bg fill                                                           |
+| gradient fill   | a **per-character gradient** across a short run of text only (`gradient_row`, `th_gradient_color`) — never across a paragraph |
+| drop shadow     | one blank line of breathing room                                                                                              |
+| hover/active    | `Modifier::BOLD` + brighter border; reserve `REVERSED` for selection                                                          |
+| disabled        | `MUTED` fg, never a grey bg                                                                                                   |
 
 **Background fills are the TUI's cardinal sin**: they fight the user's terminal
 theme, break transparency, and smear in copy/paste. Style the **foreground** and
@@ -110,7 +110,7 @@ let their terminal be the ground.
 
 - **Pipe-safe by default**: respect `NO_COLOR`, and drop styling when stdout isn't
   a TTY. A `th … | grep` must never contain escape codes.
-- Machine-readable escape hatch (`--json`) stays *unstyled and stable*.
+- Machine-readable escape hatch (`--json`) stays _unstyled and stable_.
 - Errors: one line saying what failed, one line saying what to do next. Never a
   wall of Rust backtrace at a user.
 - Progress on stderr, results on stdout — so redirection works.
@@ -118,7 +118,7 @@ let their terminal be the ground.
 ### Don't
 
 Background fills · the `th` face on chrome · amber for anything but "needs you" ·
-cool/grey neutrals · a gradient longer than a word or two · color as the *only*
+cool/grey neutrals · a gradient longer than a word or two · color as the _only_
 carrier of meaning · emoji as status glyphs (they wreck column alignment in half
 the terminals out there).
 
@@ -132,11 +132,11 @@ The web skill says "screenshot the rendered component." The terminal equivalent:
   fixed-size buffer and assert on it. This is the runnable check to leave behind
   for any non-trivial layout logic.
 - **Look at it live** — run the TUI under tmux and capture the pane:
-  ```bash
-  tmux new-session -d -s glow -x 120 -y 40 'th code'
-  sleep 3 && tmux capture-pane -p -t glow     # add -e to keep escape codes
-  tmux kill-session -t glow
-  ```
+    ```bash
+    tmux new-session -d -s glow -x 120 -y 40 'th code'
+    sleep 3 && tmux capture-pane -p -t glow     # add -e to keep escape codes
+    tmux kill-session -t glow
+    ```
 - **Check the degraded paths too**: `NO_COLOR=1`, a narrow width (80 cols), and a
   non-TTY pipe. A design that only works at 200 columns in truecolor isn't done.
 

@@ -15,13 +15,13 @@
 // deliberately not here yet: it needs the OpenCode SDK client, not a shell-out.
 // The pearl tracks it.
 
-const HARNESS = "opencode";
+const HARNESS = 'opencode';
 const TOUCH_EVERY_MS = 60_000;
 
-const sanitize = (s) => s.toLowerCase().replace(/[^a-z0-9-]/g, "");
+const sanitize = (s) => s.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
 export const SmoothAgent = async ({ $, directory }) => {
-    const base = sanitize((directory || process.cwd()).split("/").filter(Boolean).pop() || "session") || "session";
+    const base = sanitize((directory || process.cwd()).split('/').filter(Boolean).pop() || 'session') || 'session';
     const handles = new Map(); // session id -> registered handle
     const lastTouch = new Map(); // session id -> ms timestamp
     let thOk = true; // ponytail: first failure disables all calls (th missing / broken)
@@ -38,8 +38,8 @@ export const SmoothAgent = async ({ $, directory }) => {
     // Event payload shapes vary a little across OpenCode versions; every
     // accessor is hedged and an unidentifiable session is simply skipped.
     const sessionId = (input) => {
-        const sid = input?.session?.id ?? input?.sessionID ?? input?.info?.id ?? "";
-        return typeof sid === "string" && sid ? sid : "";
+        const sid = input?.session?.id ?? input?.sessionID ?? input?.info?.id ?? '';
+        return typeof sid === 'string' && sid ? sid : '';
     };
 
     const handleFor = (sid) => {
@@ -50,31 +50,31 @@ export const SmoothAgent = async ({ $, directory }) => {
     };
 
     return {
-        "session.created": async (input) => {
+        'session.created': async (input) => {
             const sid = sessionId(input);
             if (!sid) return;
             // --pid: the long-lived OpenCode process, so `th agent list` reaps
             // the row when it dies (same contract as the Claude Code hook).
-            await th("agent", "register", "--name", handleFor(sid), "--harness", HARNESS, "--pid", String(process.pid));
+            await th('agent', 'register', '--name', handleFor(sid), '--harness', HARNESS, '--pid', String(process.pid));
         },
-        "tool.execute.before": async (input) => {
+        'tool.execute.before': async (input) => {
             const sid = sessionId(input);
             if (!sid || !handles.has(sid)) return;
             const now = Date.now();
             if (now - (lastTouch.get(sid) ?? 0) < TOUCH_EVERY_MS) return;
             lastTouch.set(sid, now);
-            await th("agent", "status", "--name", handleFor(sid), "--status", "working");
+            await th('agent', 'status', '--name', handleFor(sid), '--status', 'working');
         },
-        "session.idle": async (input) => {
+        'session.idle': async (input) => {
             const sid = sessionId(input);
             if (!sid || !handles.has(sid)) return;
             lastTouch.delete(sid);
-            await th("agent", "status", "--name", handleFor(sid), "--status", "idle");
+            await th('agent', 'status', '--name', handleFor(sid), '--status', 'idle');
         },
-        "session.deleted": async (input) => {
+        'session.deleted': async (input) => {
             const sid = sessionId(input);
             if (!sid || !handles.has(sid)) return;
-            await th("agent", "status", "--name", handleFor(sid), "--status", "offline");
+            await th('agent', 'status', '--name', handleFor(sid), '--status', 'offline');
             handles.delete(sid);
             lastTouch.delete(sid);
         },

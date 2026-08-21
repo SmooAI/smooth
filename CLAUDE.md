@@ -147,13 +147,13 @@ Need to call api.smoo.ai?
     └── Top-level namespace        →  th pearls, th worktree, th doctor, …
 ```
 
-| Lives in `smoo api` | Lives in `smoo admin` |
-|---|---|
-| Acts on **your active org** | Acts **across orgs** or on the platform itself |
-| Authenticated as M2M client or regular dashboard user | Authenticated as **admin-grant dashboard user** |
-| Backed by `/organizations/{org_id}/…` | Backed by `/admin/…` (paired endpoints don't exist yet) |
+| Lives in `smoo api`                                                         | Lives in `smoo admin`                                                             |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Acts on **your active org**                                                 | Acts **across orgs** or on the platform itself                                    |
+| Authenticated as M2M client or regular dashboard user                       | Authenticated as **admin-grant dashboard user**                                   |
+| Backed by `/organizations/{org_id}/…`                                       | Backed by `/admin/…` (paired endpoints don't exist yet)                           |
 | `agents`, `knowledge`, `members`, `config`, `jobs`, `keys`, `observability` | `onboard-customer`, `mint-key`, `set-secret`, `org list/show`, `feature-flag set` |
-| **Adding one**: file under `src/smooai/` + clap subcommand | **Adding one**: API endpoint + CLI subcommand together |
+| **Adding one**: file under `src/smooai/` + clap subcommand                  | **Adding one**: API endpoint + CLI subcommand together                            |
 
 ### What does NOT belong in `th`
 
@@ -177,13 +177,13 @@ Need to call api.smoo.ai?
 
 `.claude/hooks/th-curl-hint.sh` flags Bash commands that should be `th` calls and asks before letting them through:
 
-| Pattern | Suggestion |
-|---|---|
-| `curl … api.smoo.ai` | `smoo api …` |
-| `curl … auth.smoo.ai/token` | `smoo auth login` (`--m2m` for a service account) |
-| `curl … atlassian.net/rest/api` | `th jira sync` (or file a pearl) |
-| `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879) |
-| `pnpm sst secret list` (raw) | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
+| Pattern                            | Suggestion                                             |
+| ---------------------------------- | ------------------------------------------------------ |
+| `curl … api.smoo.ai`               | `smoo api …`                                           |
+| `curl … auth.smoo.ai/token`        | `smoo auth login` (`--m2m` for a service account)      |
+| `curl … atlassian.net/rest/api`    | `th jira sync` (or file a pearl)                       |
+| `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879)   |
+| `pnpm sst secret list` (raw)       | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
 
 Override with ` # th-curl-hint:ack reason=…` if you genuinely need raw curl. **Overriding the same hint twice = file a pearl for the missing wrapper.**
 
@@ -235,6 +235,7 @@ pnpm dev                     # Vite dev server at :3100
 ## 3. Coding Style
 
 ### Rust
+
 - Edition 2021, max_width 160, field init shorthand
 - `unsafe_code = "forbid"`, `unused_must_use = "deny"`
 - clippy pedantic + nursery (warn)
@@ -242,13 +243,15 @@ pnpm dev                     # Vite dev server at :3100
 - `tracing` for logging
 
 ### Web (TypeScript/React)
+
 - Vite + React 19 + Tailwind CSS 4
 - oxfmt for formatting, oxlint for linting
 
 ### Everything that is not Rust
+
 **`oxfmt` is the only formatter in this repo** (pearl th-9bee92 removed the never-wired `dprint.json` and `.prettierignore`). `pnpm format` writes, `pnpm format:check` verifies, and the `format` job in `pr-checks.yml` runs it **ungated on every PR** — it is the one check a docs-only or changeset-only diff cannot skip. It owns `md`, `json`/`jsonc`, `yaml`, `toml`, `css`, and `js`/`ts`, so a markdown or changeset edit is **not** format-exempt. Exclusions (generated or vendored bytes) live in `.oxfmtrc.json` `ignorePatterns` — `CHANGELOG.md` is on that list because `changeset version` writes it, and oxfmt mangles the prose it appends.
 
-> ⚠️ oxfmt formats markdown, and it reads bare `snake_case` in prose as an emphasis span — `transfer_call, notify_humans` comes back out as `transfer*call, notify_humans`. Backtick identifiers in docs; the corruption is oxfmt's own output, so `format:check` will *demand* it once it lands.
+> ⚠️ oxfmt formats markdown, and it reads bare `snake_case` in prose as an emphasis span — `transfer_call, notify_humans` comes back out as `transfer*call, notify_humans`. Backtick identifiers in docs; the corruption is oxfmt's own output, so `format:check` will _demand_ it once it lands.
 
 ---
 
@@ -259,20 +262,20 @@ smooth-operator's `LocalServer` (canonical WS protocol + widget) and adds its
 own routes through the engine's `serve_routes` seam. Entry point:
 `serve_local_flavor` in `operator.rs`.
 
-| Module | Purpose |
-|---|---|
-| `lib.rs` | Crate root; `serve_local_flavor` re-export + `start_egress_proxy` (the goalie egress boundary) |
-| `operator.rs` | The local deployment flavor — builds and runs the operator `LocalServer` in-process, wires tool providers and hooks |
-| `operator_storage.rs` | Durable SQLite `StorageAdapter` so conversations/sessions survive restart (no Postgres) |
-| `hooks/mod.rs` | The two engine `ToolHook`s installed on every per-turn registry: permission gate, then Narc |
-| `hooks/narc.rs` | `NarcHook` — regex detectors on tool args (secrets, prompt injection, dangerous shell), LLM-judge escalation, secret redaction in `post_call` |
-| `config.rs` | Daemon config + LLM credential resolution (env → providers.json → gateway), egress config |
-| `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver` |
-| `search.rs` | `GET /search` — the `@`-mention autocomplete backend for the web composer |
-| `cwd_route.rs` | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd` |
-| `auth_login.rs` | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin) |
-| `push.rs` | Web Push — VAPID-signed notifications to the installed PWA |
-| `tailscale.rs` | Best-effort `tailscale serve` exposure of the loopback listener |
+| Module                         | Purpose                                                                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib.rs`                       | Crate root; `serve_local_flavor` re-export + `start_egress_proxy` (the goalie egress boundary)                                                |
+| `operator.rs`                  | The local deployment flavor — builds and runs the operator `LocalServer` in-process, wires tool providers and hooks                           |
+| `operator_storage.rs`          | Durable SQLite `StorageAdapter` so conversations/sessions survive restart (no Postgres)                                                       |
+| `hooks/mod.rs`                 | The two engine `ToolHook`s installed on every per-turn registry: permission gate, then Narc                                                   |
+| `hooks/narc.rs`                | `NarcHook` — regex detectors on tool args (secrets, prompt injection, dangerous shell), LLM-judge escalation, secret redaction in `post_call` |
+| `config.rs`                    | Daemon config + LLM credential resolution (env → providers.json → gateway), egress config                                                     |
+| `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver`                                   |
+| `search.rs`                    | `GET /search` — the `@`-mention autocomplete backend for the web composer                                                                     |
+| `cwd_route.rs`                 | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd`                                                                                     |
+| `auth_login.rs`                | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin)                                             |
+| `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                    |
+| `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                               |
 
 ### Dispatch
 
@@ -316,12 +319,12 @@ Three layers, in the order a tool call meets them:
    pass goalie's exact-host allowlist. `SandboxedCommand` is the only way `bash`
    builds a subprocess — there is no plain-`Command` constructor.
 
-   ⚠️ **macOS only.** Layer 3 is Seatbelt-backed and exists nowhere else
-   (th-08e05a). On Linux and Windows `bash` runs unsandboxed with a startup
-   warning — layers 1 and 2 still apply, but they are userspace, and the egress
-   allowlist drops from a boundary to a suggestion. Before shipping a Windows
-   build read [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
-   which enumerates exactly what is exposed there.
+    ⚠️ **macOS only.** Layer 3 is Seatbelt-backed and exists nowhere else
+    (th-08e05a). On Linux and Windows `bash` runs unsandboxed with a startup
+    warning — layers 1 and 2 still apply, but they are userspace, and the egress
+    allowlist drops from a boundary to a suggestion. Before shipping a Windows
+    build read [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
+    which enumerates exactly what is exposed there.
 
 Removed with the microVM stack (2026-07, pearl th-f4a801; see git history):
 **Wonk** (per-VM access authority), Goalie's per-VM FUSE + iptables enforcement,
@@ -332,6 +335,7 @@ and the "Big Smooth is READ-ONLY inside The Safehouse VM" isolation model.
 ## 5. Data
 
 ### Per-project (Dolt)
+
 Pearl data lives in `.smooth/dolt/` per project, backed by an embedded
 Dolt database (via the `smooth-dolt` Go binary). Full version control,
 sync via dolt's own `refs/dolt/data` git ref + push/pull to remotes.
@@ -357,6 +361,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 > files in git anymore.
 >
 > **Implications:**
+>
 > - `git clone` of a fresh checkout has no `.smooth/dolt/` on disk.
 >   `th pearls init` detects the missing dir + the `origin` remote
 >   and runs `smooth-dolt clone` to bootstrap from `refs/dolt/data`
@@ -371,6 +376,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 >   that still tracks dolt should keep those as a transitional fix).
 
 ### Global (`~/.smooth/`)
+
 - `registry.json` — Multi-project registry (auto-updated on pearl store open)
 - `smooth.db` — Legacy SQLite. No migration command ships any more (`th pearls migrate-from-sqlite` was removed); the file is unread and safe to delete.
 - `mail.db` — Agent mail + the agent roster (SQLite; `$SMOOTH_MAIL_DB` overrides). Machine-level on purpose — see [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)
@@ -382,6 +388,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 - `plugins/<name>/plugin.toml` — CLI-wrapper tool manifests
 
 ### Project-scoped (`<repo>/.smooth/`)
+
 - `dolt/` — Pearl database (see above)
 - `mcp.toml` — Project-specific MCP servers; merged with global,
   project wins on name collision
@@ -464,9 +471,9 @@ Never edit source code or commit directly on `main`. Always use worktrees.
 - `cargo clippy` must be clean (zero warnings) before commit
 - `cargo fmt -- --check` must pass before commit
 - Test categories:
-  - **Unit tests**: every public function, every error path, every edge case
-  - **Integration tests**: cross-module interactions (e.g., policy → sandbox, sandbox → goalie egress)
-  - **Property tests**: where applicable (e.g., policy round-trip serialization)
+    - **Unit tests**: every public function, every error path, every edge case
+    - **Integration tests**: cross-module interactions (e.g., policy → sandbox, sandbox → goalie egress)
+    - **Property tests**: where applicable (e.g., policy round-trip serialization)
 - When adding a new module: write tests FIRST or alongside, never "add tests later"
 - When fixing a bug: add a regression test that fails without the fix
 - Security-critical code (policy enforcement, access control, secret detection) requires **exhaustive** test coverage including adversarial inputs

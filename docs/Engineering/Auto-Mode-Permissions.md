@@ -14,12 +14,12 @@ failed/timed-out `ask`) blocks the tool before Narc or the tool body execute.
 
 ## Modes (`SMOOTH_AUTO_MODE`)
 
-| Value | Behaviour |
-|---|---|
-| `ask` (default; unset/unknown) | Read-only allow, mutating **ask**, dangerous **deny**. |
-| `accept-edits` | Like `ask`, but filesystem-**edit tools** (`file_write` / `edit` / `apply_patch` / `create_file`) auto-approve. Bash, network, and unknown tools still ask; hard denies still block. |
-| `deny` (aka `dontask` / `headless`) | Like `ask` but **never prompts** — an unmatched `ask` becomes a **deny** (fail-closed CI/headless posture). |
-| `bypass` | Allow everything **except** the hard circuit-breakers (`rm -rf /`, dangerous domains, credential paths). |
+| Value                               | Behaviour                                                                                                                                                                            |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ask` (default; unset/unknown)      | Read-only allow, mutating **ask**, dangerous **deny**.                                                                                                                               |
+| `accept-edits`                      | Like `ask`, but filesystem-**edit tools** (`file_write` / `edit` / `apply_patch` / `create_file`) auto-approve. Bash, network, and unknown tools still ask; hard denies still block. |
+| `deny` (aka `dontask` / `headless`) | Like `ask` but **never prompts** — an unmatched `ask` becomes a **deny** (fail-closed CI/headless posture).                                                                          |
+| `bypass`                            | Allow everything **except** the hard circuit-breakers (`rm -rf /`, dangerous domains, credential paths).                                                                             |
 
 Spellings are normalized (dashes/underscores/camelCase all accepted).
 
@@ -30,7 +30,7 @@ adversarial inputs. Precedence is **deny > ask > allow** (a deny always wins).
 
 1. **Credential-path guard** — any command/path referencing `~/.ssh`,
    `~/.aws/credentials`, `id_rsa`, `/etc/shadow`, … is an immediate **deny**
-   (read *and* write — this is the lethal-trifecta exfil risk). Survives `bypass`.
+   (read _and_ write — this is the lethal-trifecta exfil risk). Survives `bypass`.
 2. **Baseline dangerous-CLI / dangerous-domain deny** — reuses
    `smooth_narc::judge::rule_engine_decide` + `DANGEROUS_DOMAIN_SUFFIXES`.
    Survives `bypass`.
@@ -61,16 +61,16 @@ and the pending entry is expired so the queue doesn't leak.
 
 The approver picks a scope; `AutoModeHook::persist_grant` writes it:
 
-| Scope | Effect |
-|---|---|
-| `Once` | Nothing persisted — the next identical call re-asks. |
-| `Session` | Merged into the in-process `SharedWonkGrants` only. |
+| Scope          | Effect                                                          |
+| -------------- | --------------------------------------------------------------- |
+| `Once`         | Nothing persisted — the next identical call re-asks.            |
+| `Session`      | Merged into the in-process `SharedWonkGrants` only.             |
 | `PearlProject` | Appended to `<repo>/.smooth/wonk-allow.toml` **and** merged in. |
-| `User` | Appended to `~/.smooth/wonk-allow.toml` **and** merged in. |
+| `User`         | Appended to `~/.smooth/wonk-allow.toml` **and** merged in.      |
 
 Project grants win over user grants on collision (project file loaded last).
 
-## What this is *not*
+## What this is _not_
 
 The permission engine expresses **intent + UX**; it is bypassable by the same
 reasoning agent it constrains. The load-bearing boundary in the daemon design is

@@ -13,24 +13,24 @@ Engine: the `smooth-dolt` Go binary (built from `scripts/build-smooth-dolt.sh`).
 
 ## Global: `~/.smooth/`
 
-| Path                     | What                                                            |
-| ------------------------ | --------------------------------------------------------------- |
-| `registry.json`          | Index of every project pearl store this `th` knows about        |
-| `providers.json`         | LLM provider credentials                                        |
-| `audit/`                 | Rotating tool-usage logs per actor (Big Smooth, operatives, …)  |
-| `mcp.toml`               | Global MCP server configs                                       |
-| `plugins/<name>/plugin.toml` | CLI-wrapper plugin manifests                                |
-| `smooth.pid`             | Big Smooth daemon pid (`th up` writes it, `th down` reads it)   |
-| `smooth.log`             | Big Smooth daemon stdout+stderr                                 |
-| `smooth.db`              | Legacy SQLite — unread, and no migration command ships any more; safe to delete |
+| Path                         | What                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `registry.json`              | Index of every project pearl store this `th` knows about                        |
+| `providers.json`             | LLM provider credentials                                                        |
+| `audit/`                     | Rotating tool-usage logs per actor (Big Smooth, operatives, …)                  |
+| `mcp.toml`                   | Global MCP server configs                                                       |
+| `plugins/<name>/plugin.toml` | CLI-wrapper plugin manifests                                                    |
+| `smooth.pid`                 | Big Smooth daemon pid (`th up` writes it, `th down` reads it)                   |
+| `smooth.log`                 | Big Smooth daemon stdout+stderr                                                 |
+| `smooth.db`                  | Legacy SQLite — unread, and no migration command ships any more; safe to delete |
 
 ## Project: `<repo>/.smooth/`
 
-| Path                  | What                                                              |
-| --------------------- | ----------------------------------------------------------------- |
-| `dolt/`               | Pearl database (see above)                                        |
-| `mcp.toml`            | Project-scoped MCP servers; merged with global, project wins      |
-| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                   |
+| Path                         | What                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| `dolt/`                      | Pearl database (see above)                                   |
+| `mcp.toml`                   | Project-scoped MCP servers; merged with global, project wins |
+| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                     |
 
 ## Audit log
 

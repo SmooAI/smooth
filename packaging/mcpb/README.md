@@ -7,10 +7,10 @@ compiled `th` binary and runs `th mcp serve` — a stdio MCP server that exposes
 
 ## Tools
 
-| Tool | What it does |
-| --- | --- |
-| `pearls_ready` | List work items ready to work on now — open, unblocked, highest priority first. |
-| `pearls_create` | Create a new work item (pearl); returns the new pearl id. |
+| Tool            | What it does                                                                    |
+| --------------- | ------------------------------------------------------------------------------- |
+| `pearls_ready`  | List work items ready to work on now — open, unblocked, highest priority first. |
+| `pearls_create` | Create a new work item (pearl); returns the new pearl id.                       |
 
 These act on the pearl store in the **workspace the server is launched in**. The
 org tools — the Smooth Operator agent, CRM, knowledge, and analytics — unlock

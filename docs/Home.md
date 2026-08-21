@@ -42,45 +42,45 @@ One process, one operative per task. The microVM sandbox stack was removed in Ju
 
 ## Start here
 
-| Page                                              | Description                                                 |
-| ------------------------------------------------- | ----------------------------------------------------------- |
-| [[Start-Here/What-Is-Smooth]]                     | One-pager. What `th up` boots, what gets dispatched, the why |
-| [[Start-Here/Glossary]]                           | Cast roles, work model, terms                               |
-| [[Operations/Running-Locally]]                    | `th up`, `th down`, `th code`                               |
+| Page                           | Description                                                  |
+| ------------------------------ | ------------------------------------------------------------ |
+| [[Start-Here/What-Is-Smooth]]  | One-pager. What `th up` boots, what gets dispatched, the why |
+| [[Start-Here/Glossary]]        | Cast roles, work model, terms                                |
+| [[Operations/Running-Locally]] | `th up`, `th down`, `th code`                                |
 
 ---
 
 ## Architecture
 
-| Page                                              | Description                                                  |
-| ------------------------------------------------- | ------------------------------------------------------------ |
-| [[Architecture/Architecture-Overview]]            | Top-level diagram + control flow                             |
-| [[Architecture/The-Cast]]                         | Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver |
-| [[Architecture/Dispatch]]                         | How a task flows from chat to an operative and back          |
-| [[Architecture/Operatives]]                       | The agent runtime, the operative binary, tool surface        |
-| [[Architecture/Security-Model]]                   | Narc surveillance today; auto-mode + kernel sandbox planned  |
-| [[Architecture/Pearls]]                           | The work-item tracker (Dolt-backed)                          |
-| [[Architecture/Data-Storage]]                     | Dolt, smooth-dolt, sessions, audit                           |
-| [[Architecture/Extension-System]]                 | SEP — the planned extension protocol                         |
-| [[Architecture/Daemon-Direction]]                 | Where Big Smooth is headed (epic `th-c89c2a`)                |
+| Page                                   | Description                                                   |
+| -------------------------------------- | ------------------------------------------------------------- |
+| [[Architecture/Architecture-Overview]] | Top-level diagram + control flow                              |
+| [[Architecture/The-Cast]]              | Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver |
+| [[Architecture/Dispatch]]              | How a task flows from chat to an operative and back           |
+| [[Architecture/Operatives]]            | The agent runtime, the operative binary, tool surface         |
+| [[Architecture/Security-Model]]        | Narc surveillance today; auto-mode + kernel sandbox planned   |
+| [[Architecture/Pearls]]                | The work-item tracker (Dolt-backed)                           |
+| [[Architecture/Data-Storage]]          | Dolt, smooth-dolt, sessions, audit                            |
+| [[Architecture/Extension-System]]      | SEP — the planned extension protocol                          |
+| [[Architecture/Daemon-Direction]]      | Where Big Smooth is headed (epic `th-c89c2a`)                 |
 
 ---
 
 ## Engineering
 
-| Page                                              | Description                                  |
-| ------------------------------------------------- | -------------------------------------------- |
-| [[Engineering/Build-Workflow]]                    | `cargo`, `pnpm install:th`                   |
-| [[Engineering/Bench-Harness]]                     | `th bench`, scoring, The Line                |
+| Page                           | Description                   |
+| ------------------------------ | ----------------------------- |
+| [[Engineering/Build-Workflow]] | `cargo`, `pnpm install:th`    |
+| [[Engineering/Bench-Harness]]  | `th bench`, scoring, The Line |
 
 ---
 
 ## Operations
 
-| Page                                              | Description                                                 |
-| ------------------------------------------------- | ----------------------------------------------------------- |
-| [[Operations/Running-Locally]]                    | Quickstart, common knobs                                    |
-| [[Operations/Troubleshooting]]                    | Known traps, runner missing, port collisions                |
+| Page                           | Description                                  |
+| ------------------------------ | -------------------------------------------- |
+| [[Operations/Running-Locally]] | Quickstart, common knobs                     |
+| [[Operations/Troubleshooting]] | Known traps, runner missing, port collisions |
 
 ---
 

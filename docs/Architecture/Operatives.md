@@ -5,7 +5,7 @@
 > [!arch] The agents that actually do the work
 > An operative is a `smooth-operative` process running the `smooth-operator` agent engine with a scoped tool surface, hooked into Narc surveillance. One operative per dispatched pearl. It runs on the **host** against your working directory (no microVM, no bind mount) and streams `AgentEvent`s as JSON-lines to Big Smooth.
 >
-> **Naming:** the *operative* is the worker binary that runs a pearl. The *`smooth-operator` engine* (crate `smooth-operator-core`) is the agent framework it runs. Don't conflate them — and don't confuse either with the public `smooth-operator` service.
+> **Naming:** the _operative_ is the worker binary that runs a pearl. The _`smooth-operator` engine_ (crate `smooth-operator-core`) is the agent framework it runs. Don't conflate them — and don't confuse either with the public `smooth-operator` service.
 
 ## The operative binary
 
@@ -32,13 +32,13 @@ Big Smooth resolves it via `$SMOOTH_OPERATIVE_NATIVE`, then `target/{release,deb
 
 The engine provides the framework:
 
-| Module            | Job                                                              |
-| ----------------- | ---------------------------------------------------------------- |
-| `agent.rs`        | Observe → think → act loop; emits `AgentEvent`s through a channel |
+| Module            | Job                                                                |
+| ----------------- | ------------------------------------------------------------------ |
+| `agent.rs`        | Observe → think → act loop; emits `AgentEvent`s through a channel  |
 | `llm.rs`          | Chat completions (OpenAI-compatible + native Anthropic), streaming |
-| `tool.rs`         | `Tool` trait + `ToolRegistry` with pre/post `ToolHook`s          |
-| `conversation.rs` | Message history, token estimation, context-window trimming       |
-| `checkpoint.rs`   | Groove checkpoint store; configurable strategies                 |
+| `tool.rs`         | `Tool` trait + `ToolRegistry` with pre/post `ToolHook`s            |
+| `conversation.rs` | Message history, token estimation, context-window trimming         |
+| `checkpoint.rs`   | Groove checkpoint store; configurable strategies                   |
 
 ## The coding workflow
 

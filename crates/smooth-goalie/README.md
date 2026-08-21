@@ -4,7 +4,7 @@
 
 **Goalie — in-VM network proxy with zero trust**
 
-*Every packet the agent sends goes through Goalie. Every decision goes to Wonk. No decisions happen inside Goalie — it is strictly enforcement and audit. You do not route around the keeper.*
+_Every packet the agent sends goes through Goalie. Every decision goes to Wonk. No decisions happen inside Goalie — it is strictly enforcement and audit. You do not route around the keeper._
 
 [![crates.io](https://img.shields.io/crates/v/smooai-smooth-goalie)](https://crates.io/crates/smooai-smooth-goalie)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/SmooAI/smooth/blob/main/LICENSE)

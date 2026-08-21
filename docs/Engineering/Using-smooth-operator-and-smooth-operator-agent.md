@@ -2,10 +2,10 @@
 
 This guide explains how the **smooth** monorepo should get maximum leverage from the two public OSS projects that grew out of it:
 
-| Project | What it is | Repo |
-| --- | --- | --- |
+| Project                      | What it is                                                                                                                                                                                                                                                          | Repo                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | **smooth-operator** (engine) | The Rust agent-orchestration **engine** — `Agent`, `Workflow`, `Tool`, `CheckpointStore`, `LlmProvider`, `Memory`, `KnowledgeBase`, HITL, cost. Published as `smooai-smooth-operator-core` on crates.io; smooth consumes it as `smooth-operator` (package-aliased). | [SmooAI/smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) (extracted from the former in-tree `crates/smooth-operator`) |
-| **smooth-operator-agent** | The productized, polyglot knowledge-chat + tools + conversations **service** built on the engine. Serverless (SST/AWS) or k8s. | [SmooAI/smooth-operator-agent](https://github.com/SmooAI/smooth-operator-agent) |
+| **smooth-operator-agent**    | The productized, polyglot knowledge-chat + tools + conversations **service** built on the engine. Serverless (SST/AWS) or k8s.                                                                                                                                      | [SmooAI/smooth-operator-agent](https://github.com/SmooAI/smooth-operator-agent)                                                            |
 
 > TL;DR: smooth **already runs on** smooth-operator (the `th` TUI, Big Smooth, coding workflows, the cast/role system). The upside is to (1) consume it as the **extracted public crate** instead of vendoring, (2) wire the **real backends** behind its trait seams, and (3) dogfood **smooth-operator-agent** as smooth's own hosted knowledge assistant.
 
@@ -16,7 +16,7 @@ The engine extraction is **complete**. smooth no longer vendors the engine: the 
 The cutover landed in two steps:
 
 1. **SMOODEV-1787 (PR 1/4)** — replace the in-tree copy with a rev-pinned git dep on the engine repo.
-2. **SMOODEV-1788 (PR 4/4, the final cutover)** — switch from the git rev to the **published crates.io release `smooai-smooth-operator-core = "0.14.0"`**, the clean *generic* engine. Root `Cargo.toml` now reads `smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }`; `Cargo.lock` resolves it from the crates.io registry (checksum-pinned), not a git source.
+2. **SMOODEV-1788 (PR 4/4, the final cutover)** — switch from the git rev to the **published crates.io release `smooai-smooth-operator-core = "0.14.0"`**, the clean _generic_ engine. Root `Cargo.toml` now reads `smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }`; `Cargo.lock` resolves it from the crates.io registry (checksum-pinned), not a git source.
 
 This makes smooth a **consumer** of the public engine — the same artifact the rest of the world uses — so our dogfooding pressure improves the OSS product directly.
 
@@ -65,6 +65,7 @@ The smooth-operator parity epic items pay off here first:
 smooth-operator already depends on `rmcp` (the Rust MCP SDK). Expose smooth's tools over MCP so external agents can drive them, and consume external MCP servers as tools inside smooth operators. smooth-operator-agent's tool layer should be the canonical place tools are defined once and surfaced over MCP.
 
 ## Related
+
 - [SmooAI/smooth-operator-agent docs/ARCHITECTURE.md](https://github.com/SmooAI/smooth-operator-agent/blob/main/docs/ARCHITECTURE.md)
 - [SmooAI/smooth-operator-agent docs/ROADMAP.md](https://github.com/SmooAI/smooth-operator-agent/blob/main/docs/ROADMAP.md)
 - Parity epic: SMOODEV-1466

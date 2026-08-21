@@ -26,12 +26,12 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: "Existing release tag to build + attach the DMG to (blank = current branch, artifact only)"
+                description: 'Existing release tag to build + attach the DMG to (blank = current branch, artifact only)'
                 required: false
                 type: string
     push:
         tags:
-            - "v*"
+            - 'v*'
 
 concurrency:
     group: macos-app-${{ github.ref }}

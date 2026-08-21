@@ -9,9 +9,9 @@ follow-ups).
 > **Why not GitHub Actions?** A red Windows job is a ~10-minute push →
 > queue → run → read-log loop. An SSM box is a ~10-second
 > `send-command` → poll loop against a warm machine with the toolchain
-> already installed. Use Actions for the *gate* (the CI matrix already
+> already installed. Use Actions for the _gate_ (the CI matrix already
 > runs `cargo nextest` on `windows-latest`); use the box for
-> *iteration*.
+> _iteration_.
 
 ## Why Windows is hard here
 
@@ -68,7 +68,7 @@ aws ssm describe-instance-information \
 
 `scripts/win-ssm/winrun.sh` (mirrored in this runbook below) sends a
 PowerShell script and polls for output. **Gotcha:** the SSM
-`--parameters` *shorthand* mangles newlines — pass a JSON **file**
+`--parameters` _shorthand_ mangles newlines — pass a JSON **file**
 instead (`{"commands":["<whole script>"]}` via `--parameters file://…`).
 
 ```bash

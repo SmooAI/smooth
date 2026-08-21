@@ -83,7 +83,7 @@ against the registry `build_chat_tools` returns). Consequences:
 - **Reload** — `th ext reload <name>` now POSTs `/api/ext/reload` on the local
   daemon (best-effort) so the live host respawns the extension immediately;
   the next chat turn picks up fresh tool proxies. `GET /api/ext` lists loaded
-  extensions + commands. Newly *installed* extensions still need a daemon
+  extensions + commands. Newly _installed_ extensions still need a daemon
   restart (discovery runs at startup).
 - **Lifetime** — one shared host across chat sessions (a per-turn host would
   respawn every subprocess per message). Extension in-process state therefore
@@ -92,13 +92,13 @@ against the registry `build_chat_tools` returns). Consequences:
 
 ## Relationship to what exists today
 
-| Existing surface | SEP verdict | Status |
-| --- | --- | --- |
-| `plugin.toml` CLI wrappers | **Keep** — the zero-code declarative tier | — |
-| `mcp.toml` / rmcp | **Sibling standard** — keep the bridge | — |
-| `smooth-cast` skills | **Unify** — extension `[resources] skills` feeds smooth-cast discovery (trusted only); smooth-cast stays canonical | Done (Phase 5) |
-| `smooth-code` duplicate skill parser | **Delete** — migrate to smooth-cast; `/skill:name` stays as frontend sugar | Done (Phase 5) |
-| `smooth-plugin` trait crate | **Delete** — zero consumers; in-process traits are what SEP rejects | Done (Phase 5) |
+| Existing surface                     | SEP verdict                                                                                                        | Status         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `plugin.toml` CLI wrappers           | **Keep** — the zero-code declarative tier                                                                          | —              |
+| `mcp.toml` / rmcp                    | **Sibling standard** — keep the bridge                                                                             | —              |
+| `smooth-cast` skills                 | **Unify** — extension `[resources] skills` feeds smooth-cast discovery (trusted only); smooth-cast stays canonical | Done (Phase 5) |
+| `smooth-code` duplicate skill parser | **Delete** — migrate to smooth-cast; `/skill:name` stays as frontend sugar                                         | Done (Phase 5) |
+| `smooth-plugin` trait crate          | **Delete** — zero consumers; in-process traits are what SEP rejects                                                | Done (Phase 5) |
 
 ## Related
 
