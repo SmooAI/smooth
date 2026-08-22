@@ -211,7 +211,17 @@ impl SmoothApiClient {
         }
         let resp = req.send().await.map_err(|e| anyhow::anyhow!("{method} {url}: {e}"))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // `resp.text()` fails when the body is truncated mid-stream — a
+        // connection reset after the headers landed. `unwrap_or_default()`
+        // turned that into an empty body, which `decode` then reads as
+        // "204-shaped success" and returns `Ok({"ok": true})`: a torn
+        // response reported to the operator as a completed write (pearl
+        // th-db25d4 item 7). The read error is the only evidence the write
+        // may not have happened, so it has to survive.
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| anyhow::anyhow!("{method} {url}: response body was cut off mid-read ({e}) — the request may or may not have been applied"))?;
         Ok((status, text))
     }
 
@@ -260,6 +270,45 @@ fn user_agent() -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    /// Pearl th-db25d4 item 7: a body cut off mid-read must not read as a
+    /// completed write.
+    ///
+    /// `send_once` did `resp.text().await.unwrap_or_default()`, and `decode`
+    /// treats an empty body as the 204-shaped success case — so a connection
+    /// reset after the headers landed returned `Ok({"ok": true})`. Callers
+    /// print their ✓ off that. The server may or may not have applied the
+    /// write; the read error is the only evidence either way.
+    ///
+    /// The fixture is a raw socket that promises 512 bytes and then hangs up
+    /// after 5, which is exactly the wire condition.
+    #[tokio::test]
+    async fn truncated_response_body_is_an_error_not_ok_true() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            // Read the request line so the client isn't blocked writing.
+            let _ = std::io::Read::read(&mut sock, &mut [0_u8; 1024]);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 512\r\n\r\n");
+            let _ = sock.write_all(b"{\"id\"");
+            let _ = sock.flush();
+            drop(sock); // hang up mid-body
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai.json"));
+        let client = SmoothApiClient::new(&format!("http://{addr}"), None, store).expect("build");
+
+        let result = client.get("/organizations/o/teams").await;
+        let _ = server.join();
+
+        let err = result.expect_err("a torn response must not be reported as a successful write");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cut off mid-read"), "unexpected error: {msg}");
+    }
 
     #[test]
     fn unauthenticated_client_says_so() {
