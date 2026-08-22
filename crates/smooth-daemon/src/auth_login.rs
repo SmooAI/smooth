@@ -884,15 +884,53 @@ async fn heartbeat_tick(http: &reqwest::Client, store: &CredentialsStore, supaba
     let creds = store.load()?;
     let action = heartbeat_action(creds.as_ref());
     if action == HeartbeatAction::Refresh {
-        let previous = creds.expect("Refresh implies credentials were loaded");
-        let renewed = refresh::refresh_session(http, supabase_url, anon_key, &previous).await?;
-        // Supabase ROTATES the refresh token — persisting is mandatory,
-        // not an optimization: skip it and the next tick presents a
-        // revoked token and the session dies.
-        store.save(&renewed)?;
+        // Under the lock (th-c6a542): the relay refresher and a concurrent `th`
+        // spend the SAME rotating refresh token, and two exchanges of one token
+        // trip Supabase reuse-detection, which revokes the whole family until a
+        // full `th auth login`. `only_if_due` lets us no-op when a peer already
+        // refreshed while we waited for the lock.
+        let renewed = refresh_user_session_locked(http, store, supabase_url, anon_key, true).await?;
         tracing::info!(expires_at = ?renewed.expires_at, "credential heartbeat: session renewed");
     }
     Ok(action)
+}
+
+/// Refresh the user session under the cross-process credential lock, persisting
+/// the rotation, and return the freshest credentials (pearl th-c6a542).
+///
+/// The lock (`smooth_api_client::credential_lock`, keyed on the credentials file
+/// path so `th`, the relay, and this heartbeat all contend for one sidecar)
+/// serializes the whole load → refresh → save sequence. Supabase rotates the
+/// refresh token on every exchange and revokes the family if a rotated token is
+/// re-presented, so two refreshers racing the same token kill the session — this
+/// is what stopped smoo-hub falling off the relay ~hourly. After acquiring the
+/// lock we **re-read** the file: a peer may have refreshed while we waited, in
+/// which case (`only_if_due`) we adopt their token instead of spending ours.
+///
+/// # Errors
+/// No session on disk, no refresh token to exchange, or the Supabase grant / the
+/// persist failed. Callers treat an error as "keep using the existing token".
+pub(crate) async fn refresh_user_session_locked(
+    http: &reqwest::Client,
+    store: &CredentialsStore,
+    supabase_url: &str,
+    anon_key: &str,
+    only_if_due: bool,
+) -> anyhow::Result<Credentials> {
+    let _lock = smooth_api_client::credential_lock(store.path())?;
+    // Re-read UNDER the lock — the winner of the race just wrote the fresh token.
+    let current = store.load()?.ok_or_else(|| anyhow::anyhow!("no Smoo session on disk"))?;
+    if only_if_due && !refresh::should_refresh(&current) {
+        return Ok(current);
+    }
+    if current.refresh_token.is_none() {
+        anyhow::bail!("Smoo session has no refresh token — sign in again (`th auth login`)");
+    }
+    let renewed = refresh::refresh_session(http, supabase_url, anon_key, &current).await?;
+    // Rotation persist is mandatory: skip it and the next exchange presents a
+    // revoked token.
+    store.save(&renewed)?;
+    Ok(renewed)
 }
 
 /// Spawn the background credential heartbeat: every [`HEARTBEAT_INTERVAL`],
@@ -1539,5 +1577,56 @@ mod tests {
         assert!(result.is_err(), "a failed renewal must not be swallowed");
         // And the stale credentials are left alone rather than clobbered.
         assert_eq!(store.load().unwrap().unwrap().access_token, "tok");
+    }
+
+    // ---- refresh_user_session_locked (th-c6a542) ---------------------------
+
+    #[tokio::test]
+    async fn locked_refresh_no_ops_when_a_peer_already_refreshed() {
+        // only_if_due + a token with runway models the winner of the lock race
+        // already having rotated the token: we adopt it and never spend our
+        // refresh token — so we never reach the network (UNREACHABLE proves it).
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(45, Some("rtok"))));
+        let creds = refresh_user_session_locked(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon", true)
+            .await
+            .expect("a not-due session short-circuits before any network call");
+        assert_eq!(creds.access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn locked_refresh_bails_without_a_refresh_token() {
+        // Due for refresh but nothing to spend — a clear error, no network call.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(-30, None)));
+        let err = refresh_user_session_locked(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no refresh token"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn locked_refresh_force_attempts_even_a_not_due_token() {
+        // only_if_due=false is the relay's post-4401 force: the token has runway
+        // but was rejected server-side, so it MUST attempt a refresh rather than
+        // short-circuit — against an unreachable endpoint that surfaces as Err,
+        // and the on-disk token is left untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(45, Some("rtok"))));
+        let result = refresh_user_session_locked(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon", false).await;
+        assert!(result.is_err(), "force must attempt the refresh, not short-circuit");
+        assert_eq!(store.load().unwrap().unwrap().access_token, "tok", "a failed force leaves the token untouched");
+    }
+
+    #[tokio::test]
+    async fn locked_refresh_bails_on_an_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), None);
+        assert!(
+            refresh_user_session_locked(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon", true)
+                .await
+                .is_err()
+        );
     }
 }
