@@ -178,6 +178,9 @@ const PLAN_READONLY_TOOLS: &[&str] = &[
     "cd",
     "present_plan",
     "todo_write",
+    // Read-only macOS Contacts (th-ffa500). Naming a number never mutates
+    // anything, so it's safe for a Plan-mode turn to look someone up.
+    "contacts",
 ];
 
 /// The role a turn runs as, extracted from the principal's groups. `None` for the
@@ -284,6 +287,14 @@ impl ToolProvider for SandboxedToolProvider {
         // hook see it like any other.
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::IMessageTool) as Arc<dyn Tool>);
+        // macOS Contacts (pearl th-ffa500) — read-only Address Book. Same
+        // trusted-integration posture as `imessage`: in-process read-only SQLite,
+        // outside the kernel sandbox (the profile denies ~/Library), Narc-visible.
+        // It turns the phone numbers `imessage` returns into names, and names into
+        // send handles — the gap that made Big Smooth unable to find "Josh". Being
+        // read-only, it survives the Plan-mode filter (see `PLAN_READONLY_TOOLS`).
+        #[cfg(target_os = "macos")]
+        tools.push(Arc::new(smooth_tools::ContactsTool) as Arc<dyn Tool>);
         // send_file (file transfer, EPIC th-2e39fe): deliver a workspace file to
         // the user as a download. It needs `ctx.directive_sink` — the per-turn
         // channel the engine drains onto `eventual_response.directive` — which
