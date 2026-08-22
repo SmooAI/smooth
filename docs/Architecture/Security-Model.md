@@ -87,12 +87,12 @@ bundle, and the user can revoke it in System Settings.
   no shell and no injection surface), and the **send** spawns `/usr/bin/osascript`
   with a fixed AppleScript that takes the recipient and body as `on run argv`
   arguments — never interpolated into script source. A **group** send (pearl
-  th-265003) addresses an *existing* chat by its exact GUID (`chat id …`) and
+  th-265003) addresses an _existing_ chat by its exact GUID (`chat id …`) and
   errors if none matches, so it can never silently invent a phantom conversation
-  the way a group *name* passed as a 1:1 handle once did.
+  the way a group _name_ passed as a 1:1 handle once did.
 - **`contacts`** (macOS, pearl th-ffa500) — **read-only**, and the reason a bare
   phone number can be given a name (and a name turned into a send handle). Like
-  the `imessage` read it is *in-process* `rusqlite` on a `SQLITE_OPEN_READ_ONLY`
+  the `imessage` read it is _in-process_ `rusqlite` on a `SQLITE_OPEN_READ_ONLY`
   connection against the Address Book databases under `~/Library` (no subprocess,
   no shell, no injection surface). Every command requires a filter — there is no
   "dump the whole address book" shape — and because it mutates nothing it stays
