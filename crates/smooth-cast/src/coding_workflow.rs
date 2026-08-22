@@ -394,13 +394,18 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         if improved {
             if let Some(ref ws) = cfg.workspace_root {
                 match snapshot_workspace(ws, &best_snapshot_dir(ws)) {
-                    Ok(()) => {
+                    // Only a COMPLETE snapshot may advance `snapshot_taken` /
+                    // `best_failed_count`. The two must stay consistent: a
+                    // restore trusts `best_failed_count` to describe what is
+                    // actually sitting in the snapshot dir.
+                    Ok(true) => {
                         snapshot_taken = true;
                         if let Some(now) = current_failed {
                             best_failed_count = Some(now);
                         }
                         tracing::info!(iteration, failed = current_failed, "coding workflow: snapshotted best-seen workspace");
                     }
+                    Ok(false) => tracing::warn!(iteration, "coding workflow: snapshot refused — later regressions will NOT be restored"),
                     Err(e) => tracing::warn!(error = %e, "coding workflow: snapshot failed"),
                 }
             }
@@ -1387,22 +1392,56 @@ fn is_unsafe_to_snapshot(src: &Path) -> bool {
     false
 }
 
-fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Take a snapshot of `src` into `dst`.
+///
+/// Returns `Ok(true)` only when `dst` now holds a COMPLETE copy of `src`.
+/// `Ok(false)` means the snapshot was refused (unsafe source) and `dst` holds
+/// nothing this run wrote.
+///
+/// The distinction is load-bearing (pearl th-db25d4 item 6): this used to
+/// return a bare `Ok(())` on refusal, so the caller set `snapshot_taken = true`
+/// and logged "snapshotted best-seen workspace" for a snapshot it never took.
+/// A later regression then restored a STALE snapshot — one taken turns earlier,
+/// before the tree grew past `is_unsafe_to_snapshot`'s 200-entry threshold —
+/// over the live workspace, deleting every file created since. Untracked files
+/// are unrecoverable.
+///
+/// A mid-copy failure is the same hazard wearing a different hat: it leaves a
+/// PARTIAL tree at `dst` that a later restore would happily treat as complete.
+/// So the error path removes `dst` — a restore that finds nothing is a no-op,
+/// which is the safe direction to fail.
+fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<bool> {
     if is_unsafe_to_snapshot(src) {
         tracing::warn!(
             src = %src.display(),
             "coding workflow: refusing to snapshot — workspace looks like $HOME or a non-project dir"
         );
-        return Ok(());
+        return Ok(false);
     }
     if dst.exists() {
         std::fs::remove_dir_all(dst)?;
     }
     std::fs::create_dir_all(dst)?;
-    copy_recursive(src, dst)
+    match copy_recursive(src, dst) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            // Never leave a half-written snapshot behind for a later restore
+            // to trust.
+            let _ = std::fs::remove_dir_all(dst);
+            Err(e)
+        }
+    }
 }
 
 fn restore_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // An empty snapshot restores nothing, so the delete pass below would be
+    // pure destruction. Fail closed rather than wipe the live tree.
+    if !snapshot_has_entries(src) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("refusing to restore from an empty snapshot at {}", src.display()),
+        ));
+    }
     for entry in std::fs::read_dir(dst)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -1417,6 +1456,13 @@ fn restore_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     copy_recursive(src, dst)
+}
+
+/// Does the snapshot hold at least one entry we'd actually copy back?
+/// Excluded names (`.git`, `node_modules`, …) don't count — a snapshot of only
+/// those restores nothing.
+fn snapshot_has_entries(src: &Path) -> bool {
+    std::fs::read_dir(src).is_ok_and(|rd| rd.flatten().any(|e| !is_snapshot_excluded(&e.file_name())))
 }
 
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -2067,6 +2113,55 @@ FooTest > testThree PASSED";
         assert!(p.contains("Missing semicolon"));
     }
 
+    // ---- Pearl th-db25d4 item 6: stale-snapshot mass delete ----
+
+    /// A refused snapshot must report `false`, not success. The caller keys
+    /// `snapshot_taken` off this; when refusal read as success it kept an
+    /// EARLIER run's snapshot marked live, and a later regression restored
+    /// that stale tree over the workspace, deleting everything since.
+    #[test]
+    fn refused_snapshot_reports_not_taken() {
+        let src = tempfile::tempdir().unwrap();
+        let snap = tempfile::tempdir().unwrap();
+        // Trip is_unsafe_to_snapshot's 200-entry threshold.
+        for i in 0..205 {
+            std::fs::write(src.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        assert!(is_unsafe_to_snapshot(src.path()), "fixture must actually be refused");
+
+        let took = snapshot_workspace(src.path(), snap.path()).expect("refusal is not an error");
+        assert!(!took, "a refused snapshot must NOT report itself as taken");
+    }
+
+    /// Restoring from a snapshot with nothing to copy back is pure deletion.
+    /// Fail closed: the live tree must survive.
+    #[test]
+    fn restore_refuses_empty_snapshot_instead_of_wiping_the_workspace() {
+        let snap = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(dst.path().join("uncommitted.py"), b"hours of work").unwrap();
+
+        let err = restore_workspace(snap.path(), dst.path()).expect_err("must refuse an empty snapshot");
+        assert!(format!("{err}").contains("empty snapshot"), "unexpected error: {err}");
+        assert!(
+            dst.path().join("uncommitted.py").is_file(),
+            "restore from an empty snapshot deleted the live workspace"
+        );
+    }
+
+    /// A snapshot holding only excluded names (`.git`, `node_modules`) copies
+    /// nothing back, so it is empty for restore's purposes too.
+    #[test]
+    fn restore_refuses_snapshot_of_only_excluded_entries() {
+        let snap = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(snap.path().join("node_modules")).unwrap();
+        std::fs::write(dst.path().join("keep.py"), b"work").unwrap();
+
+        assert!(restore_workspace(snap.path(), dst.path()).is_err());
+        assert!(dst.path().join("keep.py").is_file());
+    }
+
     #[test]
     fn snapshot_and_restore_roundtrip_preserves_non_excluded_entries() {
         let src = tempfile::tempdir().unwrap();
@@ -2080,7 +2175,7 @@ FooTest > testThree PASSED";
         std::fs::create_dir_all(src.path().join("node_modules")).unwrap();
         std::fs::write(src.path().join("node_modules").join("pkg.json"), b"{}").unwrap();
 
-        snapshot_workspace(src.path(), snap.path()).unwrap();
+        assert!(snapshot_workspace(src.path(), snap.path()).unwrap());
         assert!(snap.path().join("bowling.py").is_file());
         assert!(snap.path().join("sub").join("nested.txt").is_file());
         assert!(!snap.path().join("node_modules").exists());

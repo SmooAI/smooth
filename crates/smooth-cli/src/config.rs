@@ -428,6 +428,8 @@ pub enum Cmd {
         /// instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Manage an org's config environments (e.g. `production`,
     /// `staging`). Creating an environment is how a new org's config is
@@ -568,6 +570,9 @@ pub enum SchemaCmd {
         /// Print the would-be change without POSTing a new version.
         #[arg(long)]
         dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -765,7 +770,9 @@ pub enum EnvironmentsCmd {
         #[arg(long)]
         m2m: bool,
     },
-    /// Delete a config environment.
+    /// Delete a config environment. Irreversible — every value stored under
+    /// it goes with it. Prints the target (org + host) and requires typing
+    /// the environment id back; refuses when not attached to a terminal.
     Delete {
         /// The environment id (from `list`).
         env_id: String,
@@ -778,6 +785,8 @@ pub enum EnvironmentsCmd {
         /// Use the M2M session instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// List all config values set in an environment (across schemas).
     Values {
@@ -875,7 +884,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org_id,
             force,
             m2m,
-        } => cmd_delete(key, environment, org_id, force, m2m).await,
+            confirm,
+        } => cmd_delete(key, environment, org_id, force, m2m, confirm).await,
         Cmd::Environments { cmd } => cmd_environments(cmd).await,
         Cmd::Limits { cmd } => cmd_limits(cmd).await,
         Cmd::Schema { cmd } => cmd_schema(cmd).await,
@@ -944,16 +954,34 @@ async fn cmd_environments(cmd: EnvironmentsCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
             println!();
         }
-        EnvironmentsCmd::Delete { env_id, org_id, json: _, m2m } => {
+        EnvironmentsCmd::Delete {
+            env_id,
+            org_id,
+            json: _,
+            m2m,
+            confirm,
+        } => {
             let cfg = ConfigClient::load(m2m).await?;
             let org = cfg.resolve_org(org_id)?;
-            let resp = cfg
-                .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
-                .await
-                .context("DELETE environment")?;
-            println!();
-            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
-            println!();
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "config environment",
+                    id: &env_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                confirm,
+            )?;
+            if proceed {
+                let resp = cfg
+                    .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
+                    .await
+                    .context("DELETE environment")?;
+                println!();
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                println!();
+            }
         }
         EnvironmentsCmd::Values { env_id, org_id, json: _, m2m } => {
             let cfg = ConfigClient::load(m2m).await?;
@@ -1506,9 +1534,25 @@ fn schemas_matching<'a>(schemas: &'a [Value], name: Option<&str>) -> Vec<&'a Val
         .collect()
 }
 
-async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool) -> Result<()> {
+async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool, confirm: crate::destructive::Confirm) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
+    // The environment is half the target and defaults to `development`, so
+    // it goes in the banner: `--env production` is one keystroke away and
+    // deleting a secret there is not recoverable from the CLI.
+    let proceed = crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb: "delete",
+            noun: "config value",
+            id: &format!("{key} @ {environment}"),
+            org: &org,
+            severity: crate::destructive::Severity::Irreversible,
+        },
+        confirm,
+    )?;
+    if !proceed {
+        return Ok(());
+    }
     let mut path = format!(
         "/organizations/{org}/config/values/{}?environment={}",
         urlencoding::encode(&key),
@@ -2947,6 +2991,7 @@ async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
             schema_name,
             org_id,
             dry_run,
+            yes,
             m2m,
         } => {
             println!();
@@ -2954,6 +2999,21 @@ async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
                 "  {} values set for this key are not deleted — use `th config delete {key}` for those",
                 "!".yellow().bold()
             );
+            let org_for_banner = org_id.clone().unwrap_or_else(|| "(active org)".to_string());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "remove",
+                    noun: "schema key declaration",
+                    id: &key,
+                    org: &org_for_banner,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if !proceed {
+                return Ok(());
+            }
             cmd_schema_patch(schema_name, org_id, dry_run, m2m, format!("th config schema rm {key}"), move |doc| {
                 schema_patch_rm(doc, &key, tier)
             })

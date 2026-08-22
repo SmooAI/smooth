@@ -36,13 +36,16 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Revoke (delete) a pending invitation.
+    /// Revoke (delete) a pending invitation. Prints the target (org + host)
+    /// and confirms before acting; refuses when not attached to a terminal.
     Revoke {
         /// The invitation id from `th api members invitations`.
         invitation_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Resend the email for a pending invitation.
     Resend {
@@ -106,14 +109,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("POST invitation")?,
             );
         }
-        Cmd::Revoke { invitation_id, org } => {
+        Cmd::Revoke { invitation_id, org, confirm } => {
             let org = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{org}/member-invitations/{invitation_id}"))
-                    .await
-                    .context("DELETE invitation")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "revoke",
+                    noun: "member invitation",
+                    id: &invitation_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{org}/member-invitations/{invitation_id}"))
+                        .await
+                        .context("DELETE invitation")?,
+                );
+            }
         }
         Cmd::Resend { invitation_id, org } => {
             let org = require_active_org(&client, org)?;

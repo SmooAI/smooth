@@ -131,13 +131,16 @@ pub enum DeploymentsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a deployment by id.
+    /// Delete a deployment by id. Prints the target (org + host)
+    /// and confirms before acting; refuses when not attached to a terminal.
     Delete {
         /// The deployment id from `th testing deployments list`.
         deployment_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -180,13 +183,16 @@ pub enum CasesCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a test case by id.
+    /// Delete a test case by id. Prints the target (org + host)
+    /// and confirms before acting; refuses when not attached to a terminal.
     Delete {
         /// The case id from `th testing cases list`.
         case_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -221,13 +227,16 @@ pub enum EnvironmentsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a test environment by id.
+    /// Delete a test environment by id. Prints the target (org + host)
+    /// and confirms before acting; refuses when not attached to a terminal.
     Delete {
         /// The environment id from `th testing environments list`.
         env_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -270,13 +279,16 @@ pub enum RunsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a test run by id.
+    /// Delete a test run by id. Prints the target (org + host)
+    /// and confirms before acting; refuses when not attached to a terminal.
     Delete {
         /// The run id from `th testing runs list`.
         run_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Submit results for a run. Body is optional JSON.
     Results {
@@ -381,14 +393,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         .context("PATCH deployment")?,
                 );
             }
-            DeploymentsCmd::Delete { deployment_id, org } => {
+            DeploymentsCmd::Delete { deployment_id, org, confirm } => {
                 let o = require_active_org(&client, org)?;
-                print_json(
-                    &client
-                        .delete(&format!("/organizations/{o}/testing/deployments/{deployment_id}"))
-                        .await
-                        .context("DELETE deployment")?,
-                );
+                let proceed = crate::destructive::confirm_delete("deployment", &deployment_id, &o, confirm)?;
+                if proceed {
+                    print_json(
+                        &client
+                            .delete(&format!("/organizations/{o}/testing/deployments/{deployment_id}"))
+                            .await
+                            .context("DELETE deployment")?,
+                    );
+                }
             }
         },
         Cmd::Cases { cmd } => match cmd {
@@ -425,14 +440,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         .context("PATCH case")?,
                 );
             }
-            CasesCmd::Delete { case_id, org } => {
+            CasesCmd::Delete { case_id, org, confirm } => {
                 let o = require_active_org(&client, org)?;
-                print_json(
-                    &client
-                        .delete(&format!("/organizations/{o}/testing/cases/{case_id}"))
-                        .await
-                        .context("DELETE case")?,
-                );
+                let proceed = crate::destructive::confirm_delete("test case", &case_id, &o, confirm)?;
+                if proceed {
+                    print_json(
+                        &client
+                            .delete(&format!("/organizations/{o}/testing/cases/{case_id}"))
+                            .await
+                            .context("DELETE case")?,
+                    );
+                }
             }
         },
         Cmd::Environments { cmd } => match cmd {
@@ -468,14 +486,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         .context("PATCH test environment")?,
                 );
             }
-            EnvironmentsCmd::Delete { env_id, org } => {
+            EnvironmentsCmd::Delete { env_id, org, confirm } => {
                 let o = require_active_org(&client, org)?;
-                print_json(
-                    &client
-                        .delete(&format!("/organizations/{o}/testing/environments/{env_id}"))
-                        .await
-                        .context("DELETE test environment")?,
-                );
+                let proceed = crate::destructive::confirm_delete("test environment", &env_id, &o, confirm)?;
+                if proceed {
+                    print_json(
+                        &client
+                            .delete(&format!("/organizations/{o}/testing/environments/{env_id}"))
+                            .await
+                            .context("DELETE test environment")?,
+                    );
+                }
             }
         },
         Cmd::Runs { cmd } => match cmd {
@@ -507,14 +528,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         .context("PATCH run")?,
                 );
             }
-            RunsCmd::Delete { run_id, org } => {
+            RunsCmd::Delete { run_id, org, confirm } => {
                 let o = require_active_org(&client, org)?;
-                print_json(
-                    &client
-                        .delete(&format!("/organizations/{o}/testing/runs/{run_id}"))
-                        .await
-                        .context("DELETE run")?,
-                );
+                let proceed = crate::destructive::confirm_delete("test run", &run_id, &o, confirm)?;
+                if proceed {
+                    print_json(
+                        &client
+                            .delete(&format!("/organizations/{o}/testing/runs/{run_id}"))
+                            .await
+                            .context("DELETE run")?,
+                    );
+                }
             }
             RunsCmd::Results { run_id, body, org } => {
                 let o = require_active_org(&client, org)?;

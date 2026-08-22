@@ -17,6 +17,7 @@ mod claude;
 mod config;
 mod daemon_health;
 mod daemon_launcher;
+mod destructive;
 mod ext;
 mod fda;
 mod gradient;
@@ -9379,6 +9380,91 @@ mod cli_dispatch_tests {
     #[test]
     fn command_definitions_are_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    /// Pearl th-db25d4 item 8: every remote delete/revoke verb must carry the
+    /// `--dry-run` / `--yes` pair that `destructive::gate` keys off.
+    ///
+    /// This walks the WHOLE command tree rather than listing the nine verbs
+    /// the audit happened to name. A hand-written list of call sites drifts
+    /// the moment someone adds the tenth — and an ungated delete is exactly
+    /// the bug this pearl is about: it fires against `api.smoo.ai` on the
+    /// first keystroke, using whichever org was last persisted as active.
+    ///
+    /// Local-only verbs are exempt: nothing leaves the machine, so there is
+    /// no production blast radius to gate.
+    #[test]
+    fn every_remote_delete_verb_is_gated_by_dry_run_and_yes() {
+        /// Command paths that delete purely local state (pearl store, mail
+        /// store, on-disk config, local processes). Prefix match on the
+        /// space-joined path from the root.
+        const LOCAL_ONLY: &[&str] = &[
+            "th pearls",
+            "th msg",
+            "th mail",
+            "th agent",
+            "th memory",
+            "th remember",
+            "th recall",
+            "th ext",
+            "th skill",
+            "th worktree",
+            "th service",
+            "th cast",
+            "th bench",
+            "th schedule",
+            "th config init",
+            "th config build",
+            // Local files on this machine: harness configs, plugin dirs,
+            // provider/model registries, credential profiles.
+            "th mcp",
+            "th plugin",
+            "th providers",
+            "th model",
+            "th auth profile",
+            "th smoo auth profile",
+        ];
+
+        fn is_delete_verb(name: &str) -> bool {
+            matches!(name, "delete" | "rm" | "rmdir" | "remove" | "revoke" | "destroy" | "purge")
+        }
+
+        fn walk(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                if LOCAL_ONLY.iter().any(|p| here.starts_with(p)) {
+                    continue;
+                }
+                if is_delete_verb(sub.get_name()) && sub.get_subcommands().next().is_none() {
+                    let has = |long: &str| sub.get_arguments().any(|a| a.get_long() == Some(long));
+                    if !has("dry-run") || !has("yes") {
+                        offenders.push(here.clone());
+                    }
+                }
+                walk(sub, &here, offenders);
+            }
+        }
+
+        let cmd = Cli::command();
+        let mut offenders = Vec::new();
+        walk(&cmd, "th", &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "these remote delete verbs hit production with no confirmation — wire them through \
+             `destructive::gate` (or add them to LOCAL_ONLY if they only touch this machine): {offenders:#?}"
+        );
+    }
+
+    /// Positive control for the sweep above: it must actually be looking at
+    /// something. A tree walk that silently matches nothing passes forever.
+    #[test]
+    fn the_delete_verb_sweep_actually_finds_delete_verbs() {
+        fn count(cmd: &clap::Command) -> usize {
+            let mine = usize::from(matches!(cmd.get_name(), "delete" | "rm" | "revoke"));
+            mine + cmd.get_subcommands().map(count).sum::<usize>()
+        }
+        let found = count(&Cli::command());
+        assert!(found >= 9, "expected the audited delete verbs to be reachable, found {found}");
     }
 
     /// Pearl th-91de11: `main`'s dispatch used to end in a `Some(_) =>` arm that
