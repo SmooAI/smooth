@@ -114,6 +114,12 @@ pub enum Cmd {
         /// Emit the raw JSON response instead of the confirmation line.
         #[arg(long)]
         json: bool,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Rotate an auth client: mint a fresh client of the SAME type (and
     /// same allowed origins for B2M), then revoke the old one. The
@@ -191,18 +197,37 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 println!();
             }
         }
-        Cmd::Revoke { client_id, org_id, json } => {
+        Cmd::Revoke {
+            client_id,
+            org_id,
+            json,
+            dry_run,
+            yes,
+        } => {
             let org = crate::active_org::resolve(org_id)?;
-            let resp = client
-                .delete(&format!("/organizations/{org}/auth-clients/{client_id}"))
-                .await
-                .context("DELETE auth-client")?;
-            if json {
-                print_json(&resp);
-            } else {
-                println!();
-                println!("  {} revoked client {}", "✓".green(), client_id.bold());
-                println!();
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "revoke",
+                    noun: "auth client",
+                    id: &client_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                let resp = client
+                    .delete(&format!("/organizations/{org}/auth-clients/{client_id}"))
+                    .await
+                    .context("DELETE auth-client")?;
+                if json {
+                    print_json(&resp);
+                } else {
+                    println!();
+                    println!("  {} revoked client {}", "✓".green(), client_id.bold());
+                    println!();
+                }
             }
         }
         Cmd::Rotate { client_id, org_id, json } => {

@@ -235,13 +235,16 @@ pub enum TypesCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Remove a booking type by id.
+    /// Remove a booking type by id. /// Prints the target (org + host) and confirms before acting; refuses
+    /// when not attached to a terminal.
     Rm {
         /// The type id from `th booking types list`.
         type_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -277,13 +280,16 @@ pub enum BlockCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a manual busy block by its calendar event id.
+    /// Remove a manual busy block by its calendar event id. /// Prints the target (org + host) and confirms before acting; refuses
+    /// when not attached to a terminal.
     Rm {
         /// The event id from `th booking block list`.
         event_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -308,13 +314,16 @@ pub enum CalendarsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Remove a connected calendar by its integration id.
+    /// Remove a connected calendar by its integration id. /// Prints the target (org + host) and confirms before acting; refuses
+    /// when not attached to a terminal.
     Rm {
         /// The integration id from `th booking calendars list`.
         integration_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -472,15 +481,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Types {
-            cmd: TypesCmd::Rm { type_id, org },
+            cmd: TypesCmd::Rm { type_id, org, confirm },
         } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/booking/types/{o}/{}", urlencoding::encode(&type_id)))
-                    .await
-                    .context("DELETE booking type")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "booking type",
+                    id: &type_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/booking/types/{o}/{}", urlencoding::encode(&type_id)))
+                        .await
+                        .context("DELETE booking type")?,
+                );
+            }
         }
         Cmd::Slots {
             org,
@@ -567,15 +588,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
         }
         Cmd::Block {
-            cmd: BlockCmd::Rm { event_id, org },
+            cmd: BlockCmd::Rm { event_id, org, confirm },
         } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/booking/blocks/{o}/{}", urlencoding::encode(&event_id)))
-                    .await
-                    .context("DELETE block")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "busy block",
+                    id: &event_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/booking/blocks/{o}/{}", urlencoding::encode(&event_id)))
+                        .await
+                        .context("DELETE block")?,
+                );
+            }
         }
         Cmd::Calendars {
             cmd: CalendarsCmd::List { org, json },
@@ -610,15 +643,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             println!();
         }
         Cmd::Calendars {
-            cmd: CalendarsCmd::Rm { integration_id, org },
+            cmd: CalendarsCmd::Rm { integration_id, org, confirm },
         } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/booking/calendars/{o}/{}", urlencoding::encode(&integration_id)))
-                    .await
-                    .context("DELETE calendar")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "connected calendar",
+                    id: &integration_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/booking/calendars/{o}/{}", urlencoding::encode(&integration_id)))
+                        .await
+                        .context("DELETE calendar")?,
+                );
+            }
         }
         Cmd::Link { org, type_slug, note } => {
             let o = require_active_org(&client, org)?;

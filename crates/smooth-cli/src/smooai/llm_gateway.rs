@@ -123,6 +123,12 @@ pub enum KeysCmd {
         /// Emit the raw JSON response instead of the confirmation line.
         #[arg(long)]
         json: bool,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -203,18 +209,37 @@ async fn keys(cmd: KeysCmd, client: &UserClient) -> Result<()> {
                 .context("POST llm-gateway named key rotate")?;
             print_minted_key(&resp, json);
         }
-        KeysCmd::Delete { name, org_id, json } => {
+        KeysCmd::Delete {
+            name,
+            org_id,
+            json,
+            dry_run,
+            yes,
+        } => {
             let org = crate::active_org::resolve(org_id)?;
-            let resp = client
-                .delete(&format!("/organizations/{org}/llm-gateway/keys/{name}"))
-                .await
-                .context("DELETE llm-gateway named key")?;
-            if json {
-                print_json(&resp);
-            } else {
-                println!();
-                println!("  {} revoked key {}", "✓".green(), name.bold());
-                println!();
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "revoke",
+                    noun: "LLM gateway key",
+                    id: &name,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                let resp = client
+                    .delete(&format!("/organizations/{org}/llm-gateway/keys/{name}"))
+                    .await
+                    .context("DELETE llm-gateway named key")?;
+                if json {
+                    print_json(&resp);
+                } else {
+                    println!();
+                    println!("  {} revoked key {}", "✓".green(), name.bold());
+                    println!();
+                }
             }
         }
     }

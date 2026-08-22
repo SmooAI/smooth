@@ -53,13 +53,21 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a team (resolved by name or id).
+    /// Delete a team (resolved by name or id). Prints the target (org +
+    /// host) and confirms before acting; refuses when not attached to a
+    /// terminal.
     Delete {
         /// The team to delete (name or id).
         team: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Replace a team's members (pass emails or member ids — replace-all).
     SetMembers {
@@ -114,11 +122,24 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 .context("PATCH team")?;
             println!("  {} renamed team {} → {}", "↻".yellow(), id.dimmed(), new_name.bold());
         }
-        Cmd::Delete { team, org } => {
+        Cmd::Delete { team, org, dry_run, yes } => {
             let org = resolve_org(org)?;
             let id = resolve_team_id(&client, &org, &team).await?;
-            client.delete(&format!("/organizations/{org}/teams/{id}")).await.context("DELETE team")?;
-            println!("  {} deleted team {}", "🗑".red(), id.dimmed());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "team",
+                    id: &id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                client.delete(&format!("/organizations/{org}/teams/{id}")).await.context("DELETE team")?;
+                println!("  {} deleted team {}", "🗑".red(), id.dimmed());
+            }
         }
         Cmd::SetMembers { team, members, org } => {
             let org = resolve_org(org)?;

@@ -85,10 +85,26 @@ impl SandboxPolicy {
     }
 }
 
-/// A shell command that is guaranteed to be built inside the OS sandbox.
+/// A shell command routed through the single sandbox-application point.
 ///
-/// The wrapped [`Command`] can only be obtained via [`shell`](Self::shell),
-/// which always applies the sandbox — there is no unsandboxed path.
+/// The wrapped [`Command`] can only be obtained via [`shell`](Self::shell), so
+/// there is no path that BYPASSES this type. That is not the same as "always
+/// sandboxed", and the difference matters (pearl th-db25d4 item 11):
+///
+/// | | FS confinement | egress deny |
+/// |---|---|---|
+/// | macOS | `sandbox-exec` + SBPL | kernel `(deny network-outbound)` |
+/// | Linux | **none** (bubblewrap + Landlock TODO, th-08e05a) | **none** — proxy env vars only |
+/// | Windows | **none** (AppContainer/Job Object TODO, th-08e05a) | **none** — proxy env vars only |
+///
+/// Off macOS the env scrubbing in [`shell`](Self::shell) is real, and both
+/// non-macOS `build` implementations log `bash is running UNSANDBOXED` — but
+/// the FS and network confinement are absent, so the proxy allowlist is
+/// ADVISORY: a tool that ignores `HTTP_PROXY` egresses anywhere it likes.
+/// smoo-hub runs Linux, so this is the deployed posture, not a hypothetical.
+///
+/// [`SandboxPolicy::is_enforced`] is the runtime answer; branch on it rather
+/// than assuming.
 pub struct SandboxedCommand(Command);
 
 impl SandboxedCommand {
@@ -105,10 +121,17 @@ impl SandboxedCommand {
         let mut cmd = build(policy, command);
         scrub_secret_env(&mut cmd);
         if let Some(addr) = &policy.proxy {
-            // Force HTTP(S) egress through the loopback proxy. The kernel
-            // network-deny (macos_profile) makes this non-optional: direct
-            // off-box connects fail, so a tool that ignores these vars simply
-            // can't reach the network at all.
+            // Force HTTP(S) egress through the loopback proxy.
+            //
+            // How binding this is depends on the platform, and the comment
+            // here used to claim the strong version everywhere (pearl
+            // th-db25d4 item 11). On macOS the kernel network-deny in
+            // `macos_profile` makes it non-optional — direct off-box connects
+            // fail, so a tool ignoring these vars cannot reach the network at
+            // all. On Linux and Windows there is no kernel deny, so these
+            // variables are a REQUEST: honoured by well-behaved HTTP clients,
+            // ignored by anything that opens its own socket. Treat the egress
+            // allowlist as advisory off macOS.
             let url = format!("http://{addr}");
             for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
                 cmd.env(key, &url);

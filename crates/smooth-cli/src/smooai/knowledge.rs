@@ -107,13 +107,21 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a knowledge document permanently.
+    /// Delete a knowledge document permanently. Prints the target (org +
+    /// host) and requires typing the document id back; refuses when not
+    /// attached to a terminal.
     Delete {
         /// The document id from `th api knowledge list`.
         doc_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -233,14 +241,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("PATCH knowledge content")?,
             );
         }
-        Cmd::Delete { doc_id, org } => {
+        Cmd::Delete { doc_id, org, dry_run, yes } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{o}/knowledge/{doc_id}"))
-                    .await
-                    .context("DELETE knowledge doc")?,
-            );
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "knowledge document",
+                    id: &doc_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/knowledge/{doc_id}"))
+                        .await
+                        .context("DELETE knowledge doc")?,
+                );
+            }
         }
     }
     Ok(())

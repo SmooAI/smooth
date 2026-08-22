@@ -47,11 +47,19 @@ pub enum SendgridCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete the org's SendGrid integration.
+    /// Delete the org's SendGrid integration. Prints the target (org +
+    /// host) and confirms before acting; refuses when not attached to a
+    /// terminal.
     Delete {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Send a test email to verify the configuration.
     Test {
@@ -93,14 +101,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         .context("POST sendgrid integration")?,
                 );
             }
-            SendgridCmd::Delete { org } => {
+            SendgridCmd::Delete { org, dry_run, yes } => {
                 let o = require_active_org(&client, org)?;
-                print_json(
-                    &client
-                        .delete(&format!("/organizations/{o}/integrations/sendgrid"))
-                        .await
-                        .context("DELETE sendgrid integration")?,
-                );
+                let proceed = crate::destructive::gate(
+                    &crate::destructive::Target {
+                        verb: "delete",
+                        noun: "SendGrid integration",
+                        id: "sendgrid",
+                        org: &o,
+                        severity: crate::destructive::Severity::Standard,
+                    },
+                    dry_run,
+                    yes,
+                )?;
+                if proceed {
+                    print_json(
+                        &client
+                            .delete(&format!("/organizations/{o}/integrations/sendgrid"))
+                            .await
+                            .context("DELETE sendgrid integration")?,
+                    );
+                }
             }
             SendgridCmd::Test { to, org } => {
                 let o = require_active_org(&client, org)?;
