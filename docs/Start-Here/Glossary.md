@@ -20,7 +20,7 @@
 - **[[Architecture/The-Cast#Archivist|Archivist]]** — Central log + event aggregator. SSE stream backs the live dashboard.
 - **[[Architecture/The-Cast#Diver|Diver]]** — Pearl lifecycle manager. Creates pearls on dispatch, closes on complete, syncs Jira.
 - **Engine (Groove)** — The `smooth-operator` agent framework the operative runs; Groove is its checkpoint/resume layer.
-- **Wonk / Goalie** — *Removed July 2026 (`th-f4a801`).* The former microVM access authority + network/FS proxy. Enforcement is being rebuilt as an auto-mode permission engine (`th-515a13`). See [[Architecture/Security-Model]] and [[Decisions/ADR-004-remove-microvm-sandbox-stack]].
+- **Wonk / Goalie** — _Removed July 2026 (`th-f4a801`)._ The former microVM access authority + network/FS proxy. Enforcement is being rebuilt as an auto-mode permission engine (`th-515a13`). See [[Architecture/Security-Model]] and [[Decisions/ADR-004-remove-microvm-sandbox-stack]].
 
 ## Work model
 
@@ -40,7 +40,7 @@
 
 - **MCP server** — A Model Context Protocol server whose tools land in the registry as `<server>.<tool>`. Configured via `mcp.toml`.
 - **Plugin** — A CLI-wrapper tool declared in `plugin.toml`, registered by the daemon as `plugin_<name>` and listed at `GET /api/plugins`.
-- **SEP** — *Planned.* The Smooth Extension Protocol — subprocess extensions over JSON-RPC. See [[Architecture/Extension-System]].
+- **SEP** — _Planned._ The Smooth Extension Protocol — subprocess extensions over JSON-RPC. See [[Architecture/Extension-System]].
 - **`SMOOTH_NARC_URL`** — The URL operatives dial to escalate ambiguous tool calls to Narc. Loopback, since operatives are host subprocesses.
 
 ## Related

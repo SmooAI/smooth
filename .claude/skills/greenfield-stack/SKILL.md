@@ -21,17 +21,17 @@ The two rules, in order:
 Pinned to what `smooai/apps/web` actually ships, because "modern" means
 "survives our codebase", not "recent".
 
-| Need | Use | Not |
-| --- | --- | --- |
-| App framework | **Next 16**, App Router, Server Components by default | `create-react-app`, Vite-for-an-app, pages router |
-| UI runtime | **React 19** | class components, `React.FC` |
-| Styling | **Tailwind 4**, CSS-first `@theme` tokens | `tailwind.config.js`, CSS-in-JS, styled-components |
-| Components | **shadcn/ui** primitives (Radix under it) | a component library nobody asked for |
-| Server state | **TanStack Query v5** | `useEffect` + `fetch` + three `useState`s |
-| Tables | **TanStack Table v8** | hand-rolled `<table>` with sort state |
-| Forms | **react-hook-form** + zod resolver | uncontrolled `<form>` + manual validation |
-| Icons | **lucide-react** | an icon font |
-| Dates | `Intl` / `date-fns` | moment |
+| Need          | Use                                                   | Not                                                |
+| ------------- | ----------------------------------------------------- | -------------------------------------------------- |
+| App framework | **Next 16**, App Router, Server Components by default | `create-react-app`, Vite-for-an-app, pages router  |
+| UI runtime    | **React 19**                                          | class components, `React.FC`                       |
+| Styling       | **Tailwind 4**, CSS-first `@theme` tokens             | `tailwind.config.js`, CSS-in-JS, styled-components |
+| Components    | **shadcn/ui** primitives (Radix under it)             | a component library nobody asked for               |
+| Server state  | **TanStack Query v5**                                 | `useEffect` + `fetch` + three `useState`s          |
+| Tables        | **TanStack Table v8**                                 | hand-rolled `<table>` with sort state              |
+| Forms         | **react-hook-form** + zod resolver                    | uncontrolled `<form>` + manual validation          |
+| Icons         | **lucide-react**                                      | an icon font                                       |
+| Dates         | `Intl` / `date-fns`                                   | moment                                             |
 
 **Server Components are the default.** Reach for `"use client"` only when
 the component needs state, effects, or event handlers — and put it as low
@@ -42,24 +42,24 @@ in the tree as possible, not at the page root.
 The idioms below are what a model trained a year or two ago produces.
 They compile, they read fine, and they are wrong for this stack:
 
-| Wrote | Should be |
-| --- | --- |
-| `tailwind.config.js` | `@theme { --color-brand: … }` in CSS |
-| `@tailwind base;` | one `@import "tailwindcss";` |
+| Wrote                | Should be                                   |
+| -------------------- | ------------------------------------------- |
+| `tailwind.config.js` | `@theme { --color-brand: … }` in CSS        |
+| `@tailwind base;`    | one `@import "tailwindcss";`                |
 | `getServerSideProps` | a Server Component, or `fetch` in the route |
-| `forwardRef(...)` | `ref` as an ordinary prop (React 19) |
-| `useQuery(key, fn)` | `useQuery({ queryKey, queryFn })` |
-| `cacheTime` | `gcTime` |
-| `useTable(...)` (v7) | `useReactTable` + `getCoreRowModel()` |
-| `accessor:` | `accessorKey` / `accessorFn` |
-| `useFormState` | `useActionState` |
+| `forwardRef(...)`    | `ref` as an ordinary prop (React 19)        |
+| `useQuery(key, fn)`  | `useQuery({ queryKey, queryFn })`           |
+| `cacheTime`          | `gcTime`                                    |
+| `useTable(...)` (v7) | `useReactTable` + `getCoreRowModel()`       |
+| `accessor:`          | `accessorKey` / `accessorFn`                |
+| `useFormState`       | `useActionState`                            |
 
 ## Verify before you write
 
 **This step is not optional, and it is the whole point of the skill.**
 The table above has a date on it and the ecosystem does not care.
 
-1. **Context7 MCP** — resolve the library, read the *current* docs for
+1. **Context7 MCP** — resolve the library, read the _current_ docs for
    the exact API you are about to use. Prefer this; it is live.
    Configure it once in `~/.smooth/mcp.toml`:
 

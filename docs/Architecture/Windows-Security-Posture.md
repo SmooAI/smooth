@@ -12,13 +12,13 @@ release, and link it from anything that offers a Windows download.
 [[Security-Model]] describes three layers a tool call passes through. Only two
 of the three exist on Windows.
 
-| Layer | macOS | Linux | Windows |
-|---|---|---|---|
-| 1. Permission gate (`smooth-policy` auto-mode + `DenyPolicy`) | ✅ | ✅ | ✅ |
-| 2. Narc surveillance (regex detectors + LLM judge, secret redaction) | ✅ | ✅ | ✅ |
-| 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) | ✅ Seatbelt | ❌ TODO | ❌ **TODO** |
-| Secret-env scrubbing at the spawn point | ✅ | ✅ | ✅ |
-| Egress boundary (goalie exact-host allowlist, kernel-enforced) | ✅ | ❌ | ❌ |
+| Layer                                                                | macOS       | Linux   | Windows     |
+| -------------------------------------------------------------------- | ----------- | ------- | ----------- |
+| 1. Permission gate (`smooth-policy` auto-mode + `DenyPolicy`)        | ✅          | ✅      | ✅          |
+| 2. Narc surveillance (regex detectors + LLM judge, secret redaction) | ✅          | ✅      | ✅          |
+| 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`)             | ✅ Seatbelt | ❌ TODO | ❌ **TODO** |
+| Secret-env scrubbing at the spawn point                              | ✅          | ✅      | ✅          |
+| Egress boundary (goalie exact-host allowlist, kernel-enforced)       | ✅          | ❌      | ❌          |
 
 Layers 1 and 2 are **userspace**. They are worth having, and they are not the
 load-bearing boundary — the whole premise of the security model is that a
@@ -34,21 +34,21 @@ injection, a malicious repo's postinstall script, whatever — can do everything
 the logged-in user can:
 
 - **Read any credential store.** `%USERPROFILE%\.ssh`, `.aws`, `.kube`,
-  `.docker`, `.gnupg`, `_netrc`, `AppData\...\gh` — and Big Smooth's *own*
+  `.docker`, `.gnupg`, `_netrc`, `AppData\...\gh` — and Big Smooth's _own_
   secrets in `%USERPROFILE%\.smooth` (`providers.json`'s LLM key, the `auth/`
   JWT). On macOS every one of these is a kernel read-deny. Here, nothing stops
   it.
 - **Overwrite those same stores**, and plant persistence (Run key, Startup
-  folder, a Scheduled Task) that later executes *outside* any agent context.
+  folder, a Scheduled Task) that later executes _outside_ any agent context.
 - **Write `.git/hooks/*` and `.git/config` in any repo on the machine**, which
   re-enters execution outside the agent on the next git operation. Kernel-denied
-  on macOS in *every* repo, precisely because this is the cheapest escape.
+  on macOS in _every_ repo, precisely because this is the cheapest escape.
 - **Reach the network directly.** The goalie egress allowlist is only
   load-bearing because the macOS sandbox kernel-denies non-loopback outbound, so
   a tool that ignores `HTTP_PROXY` simply cannot connect. On Windows the proxy
   env vars are still set, but ignoring them works — the allowlist becomes a
   suggestion. This is the third leg of the lethal trifecta (private-data access
-  + untrusted content + egress) left open.
+    - untrusted content + egress) left open.
 
 ### Layer 1 was silently inert for path rules — fixed in th-a59af5
 
@@ -63,10 +63,10 @@ accident because it built its fixture path with an embedded `/`.
 
 Fixed (targets are normalized to `/` before matching, with a test that builds
 the path component-by-component). Called out here because the same shape —
-a Unix-separator assumption that turns an *enforcement* check into a no-op
+a Unix-separator assumption that turns an _enforcement_ check into a no-op
 rather than an error — is the thing to look for in any future Windows work.
 
-### Layer 1 is only *partly* Windows-shaped
+### Layer 1 is only _partly_ Windows-shaped
 
 Separately from the missing kernel layer: the daemon's embedded `DenyPolicy`
 path list (`DENY_POLICY_TOML` in `smooth-daemon/src/operator.rs`) was written
@@ -93,7 +93,7 @@ that never matches and reads as protection while providing none. It needs
 call site) plus a real Windows host to verify against. Tracked with th-08e05a;
 do not add Windows path denies without testing them on Windows.
 
-What *does* still hold on Windows:
+What _does_ still hold on Windows:
 
 - **Secret-named env vars are scrubbed** from the child at the single spawn
   point (`scrub_secret_env`), so `set` / `env` cannot dump the daemon's own
@@ -110,7 +110,7 @@ What *does* still hold on Windows:
    `SandboxPolicy::is_enforced()` returns `false` there — surface that, don't
    paper over it.
 3. Prefer a stricter permission posture: `SMOOTH_AUTO_MODE=ask` rather than the
-   default `Bypass`, since the userspace gate is the *only* gate.
+   default `Bypass`, since the userspace gate is the _only_ gate.
 
 ## The fix (th-08e05a)
 

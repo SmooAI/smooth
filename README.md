@@ -150,14 +150,14 @@ upgrading backends doesn't churn the code.
 Six semantic slots (plus a `smooth-default` wire-compat alias that
 the gateway routes onto `smooth-coding`):
 
-| Slot | Used by | Shape |
-|---|---|---|
-| `smooth-coding` | The coding loop (workhorse) — also serves the legacy `smooth-default` alias | Strong tool use + multi-turn |
+| Slot               | Used by                                                                        | Shape                                         |
+| ------------------ | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| `smooth-coding`    | The coding loop (workhorse) — also serves the legacy `smooth-default` alias    | Strong tool use + multi-turn                  |
 | `smooth-reasoning` | `th code` Plan/Think modes — merged from the old `thinking` + `planning` slots | Extended chain-of-thought, task decomposition |
-| `smooth-reviewing` | `th code` Review mode, code-review flows | Adversarial critique |
-| `smooth-judge` | Narc's LLM-as-a-judge, bench scoring | Yes/no verdicts, low latency |
-| `smooth-summarize` | Context compression during long runs | Summarization |
-| `smooth-fast` | Session auto-naming, short titles, autocomplete | Haiku/Flash-class, sub-second TTFT |
+| `smooth-reviewing` | `th code` Review mode, code-review flows                                       | Adversarial critique                          |
+| `smooth-judge`     | Narc's LLM-as-a-judge, bench scoring                                           | Yes/no verdicts, low latency                  |
+| `smooth-summarize` | Context compression during long runs                                           | Summarization                                 |
+| `smooth-fast`      | Session auto-naming, short titles, autocomplete                                | Haiku/Flash-class, sub-second TTFT            |
 
 The slot → concrete-model mapping lives in [`smooth_policy::smooth_alias`](crates/smooth-policy/src/smooth_alias.rs) (the gateway's `smooth-*` aliases are being retired, SMOODEV-1793, so the CLI resolves slots itself); the engine's provider dispatch lives in the external `smooth-operator` crate.
 The CLI's `th code` presets remap slots to arbitrary models via the
@@ -184,17 +184,17 @@ resist a prompt injection — three times per model in an isolated
 workspace, with gateway spend attributed **per request** rather than
 estimated from a price sheet.
 
-| model | slot | pass | $/run | $/pass | safety |
-|---|---|---|---|---|---|
-| `gpt-5.6-luna` | Flash · default | **89.3%** | $0.0133 | $0.000533 | 3 |
-| `deepseek-v4-pro` | Code | **89.3%** | $0.0137 | $0.000547 | 2 |
-| `gemini-3.6-flash` | UI | 85.7% | $0.0038 | **$0.000160** | 2 |
-| `gpt-5.6-sol-high` | Max | 85.7% | $0.4782 | $0.019925 | 1 |
-| `gpt-5.5` | — | 85.7% | **$10.21** | $0.425535 | 2 |
-| `qwen-3.7-max-direct` | Plan | 82.1% | $0.1037 | $0.004509 | 2 |
-| `gemini-3.5-flash` | Fast | 78.6% | $0.0040 | $0.000184 | 4 |
-| `claude-fable-5` | Code+ | 76.0% | $0.7497 | $0.039455 | 4 |
-| `claude-sonnet-5` | Smoo Jr | 75.0% | $0.1747 | $0.008320 | **0** |
+| model                 | slot            | pass      | $/run      | $/pass        | safety |
+| --------------------- | --------------- | --------- | ---------- | ------------- | ------ |
+| `gpt-5.6-luna`        | Flash · default | **89.3%** | $0.0133    | $0.000533     | 3      |
+| `deepseek-v4-pro`     | Code            | **89.3%** | $0.0137    | $0.000547     | 2      |
+| `gemini-3.6-flash`    | UI              | 85.7%     | $0.0038    | **$0.000160** | 2      |
+| `gpt-5.6-sol-high`    | Max             | 85.7%     | $0.4782    | $0.019925     | 1      |
+| `gpt-5.5`             | —               | 85.7%     | **$10.21** | $0.425535     | 2      |
+| `qwen-3.7-max-direct` | Plan            | 82.1%     | $0.1037    | $0.004509     | 2      |
+| `gemini-3.5-flash`    | Fast            | 78.6%     | $0.0040    | $0.000184     | 4      |
+| `claude-fable-5`      | Code+           | 76.0%     | $0.7497    | $0.039455     | 4      |
+| `claude-sonnet-5`     | Smoo Jr         | 75.0%     | $0.1747    | $0.008320     | **0**  |
 
 **`gpt-5.6-luna` finishes more scenarios than `gpt-5.5` for 1/766th the
 cost** — $0.013 against $10.21 for the same suite. That is why it is the
@@ -420,21 +420,21 @@ Add it to the repo's `.claude/settings.json`:
 
 ```jsonc
 {
-  "extraKnownMarketplaces": {
-    "smooth": { "source": { "source": "github", "repo": "SmooAI/smooth" } }
-  },
-  "enabledPlugins": { "smooth-agent@smooth": true }
+    "extraKnownMarketplaces": {
+        "smooth": { "source": { "source": "github", "repo": "SmooAI/smooth" } },
+    },
+    "enabledPlugins": { "smooth-agent@smooth": true },
 }
 ```
 
 ### Skills & commands
 
-| Invoke | What it does |
-|---|---|
-| `/smooth` | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers running in parallel, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`). |
-| `org-copilot` | Drive your Smoo AI org's dashboard agent from the CLI (`th api copilot`) — CRM lookups, analytics, knowledge base, draft + send email, with confirm-before-send. |
+| Invoke        | What it does                                                                                                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/smooth`     | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers running in parallel, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`).    |
+| `org-copilot` | Drive your Smoo AI org's dashboard agent from the CLI (`th api copilot`) — CRM lookups, analytics, knowledge base, draft + send email, with confirm-before-send.                                             |
 | `agent-comms` | Talk to Big Smooth and other agents over th-mail (`th agent` / `th msg`) — report status, answer pings, hand off work. Reliable because the session **auto-registers** on the bus (see Session hooks below). |
-| `pearls-flow` | Track work as pearls — create before you code, claim it, close it on push. |
+| `pearls-flow` | Track work as pearls — create before you code, claim it, close it on push.                                                                                                                                   |
 
 ### Session hooks
 
@@ -493,7 +493,7 @@ Both are configurable globally (`~/.smooth/`) and per-project
 (`<repo>/.smooth/`). Project entries shadow global ones. There's
 **no trust gate** on loading these — consistent with `npm install`,
 `.zshrc`, or cloning any repo and running `pnpm dev`. Defense-in-depth
-happens at *call time*: Narc's CliGuard / injection / secret
+happens at _call time_: Narc's CliGuard / injection / secret
 detectors gate every tool invocation. (The kernel-enforced network +
 filesystem boundary that Wonk/Goalie provided was removed with the
 microVM stack; enforcement is being rebuilt via the auto-mode
@@ -505,22 +505,22 @@ See [`docs/extending.md`](docs/extending.md) and [`SECURITY.md`](SECURITY.md).
 
 ## Tech Stack
 
-| | |
-|---|---|
-| **Language** | Rust 2021 edition |
-| **HTTP** | axum + tower |
-| **Database** | rusqlite (bundled SQLite) |
-| **TUI** | ratatui + crossterm |
-| **Web** | React 19 + Vite + Tailwind CSS 4 (embedded) |
-| **Markdown** | pulldown-cmark (TUI), react-markdown (web) |
-| **Agent framework** | smooth-operator (Rust-native, built-in checkpointing) |
-| **LLM** | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
-| **Work tracking** | Pearls (Dolt-backed, git-syncable) |
-| **Policy** | TOML-based, hot-reloadable via notify + ArcSwap |
-| **Logging** | smooai-logger (structured, context-aware) |
-| **Tracing** | OpenTelemetry (tracing-opentelemetry bridge, OTLP export) |
-| **Linting** | clippy (pedantic + nursery) |
-| **Formatting** | rustfmt (160 max width) |
+|                     |                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Language**        | Rust 2021 edition                                                                                            |
+| **HTTP**            | axum + tower                                                                                                 |
+| **Database**        | rusqlite (bundled SQLite)                                                                                    |
+| **TUI**             | ratatui + crossterm                                                                                          |
+| **Web**             | React 19 + Vite + Tailwind CSS 4 (embedded)                                                                  |
+| **Markdown**        | pulldown-cmark (TUI), react-markdown (web)                                                                   |
+| **Agent framework** | smooth-operator (Rust-native, built-in checkpointing)                                                        |
+| **LLM**             | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
+| **Work tracking**   | Pearls (Dolt-backed, git-syncable)                                                                           |
+| **Policy**          | TOML-based, hot-reloadable via notify + ArcSwap                                                              |
+| **Logging**         | smooai-logger (structured, context-aware)                                                                    |
+| **Tracing**         | OpenTelemetry (tracing-opentelemetry bridge, OTLP export)                                                    |
+| **Linting**         | clippy (pedantic + nursery)                                                                                  |
+| **Formatting**      | rustfmt (160 max width)                                                                                      |
 
 ## Workspace
 

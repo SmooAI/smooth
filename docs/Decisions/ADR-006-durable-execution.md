@@ -59,7 +59,7 @@ Enumerating the gaps mattered more than enumerating the libraries:
 3. **Catch-up policy.** A daemon asleep for eight hours wakes with schedules
    past due and fires all of them at once. There is no coalesce/skip/backfill
    choice — it just stampedes.
-4. **Retry budget.** A firing that fails stays due *forever*, retried every 30s
+4. **Retry budget.** A firing that fails stays due _forever_, retried every 30s
    with no backoff and no give-up. th-e979ac solved exactly this shape for Dolt
    (`retry_on_lock_flap`, `crates/smooth-pearls/src/dolt.rs:1214` — recover-once
    then exponential backoff + jitter to a bounded budget) and the scheduler
@@ -124,7 +124,7 @@ the exercise, and is identical whether or not apalis is present.
 
 ### Replay is the wrong model for an agent turn anyway
 
-Even granting a hypothetical Rust library that *did* implement Temporal
+Even granting a hypothetical Rust library that _did_ implement Temporal
 semantics locally, it would not fit. Deterministic replay requires the workflow
 body to be deterministic. An agent turn is an LLM sampling call whose output
 chooses the next step; the tool calls it makes write files, push git refs, and
@@ -134,7 +134,7 @@ different workflow.
 The primitive that fits a non-deterministic, side-effecting loop is
 **checkpointing**: persist the conversation state after each step and resume
 forward from the last one. The engine already models this (`CheckpointStore`,
-a deliberately *synchronous* trait — see the root `Cargo.toml` note choosing
+a deliberately _synchronous_ trait — see the root `Cargo.toml` note choosing
 sync `postgres` over async sqlx for exactly this reason). The daemon simply
 wires the in-memory implementation. The fix is a ~150-line rusqlite impl of a
 trait we already depend on, not a new execution model.
@@ -173,8 +173,8 @@ Writing our own workflow/step-state engine has the same "decompose into
 re-runnable steps" cost as apalis, plus we own the bugs. And there is no
 concrete workflow demanding it today: th-3c09d6's own note says the multi-step
 routine primitive is the engine's `conversationWorkflow` (goal + steps,
-judge-advanced) and explicitly warns *"do NOT reimplement multi-step routine
-machinery"*. The scheduler's job is to be the **trigger**. A second workflow
+judge-advanced) and explicitly warns _"do NOT reimplement multi-step routine
+machinery"_. The scheduler's job is to be the **trigger**. A second workflow
 engine underneath the one the engine already ships is the exact duplication that
 note is guarding against.
 

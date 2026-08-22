@@ -37,7 +37,7 @@ label flag. Add dependencies with `th pearls dep add <issue> <depends-on>`.
 - Don't use ad-hoc TODO lists for multi-step work — pearls are the tracker.
 - When you finish, report to the orchestrator over th-mail (see the
   `agent-comms` skill): `th msg send --to big-smooth --from "$SMOOTH_AGENT_HANDLE"
-  --body "closed pearl <id>: <what>"`.
+--body "closed pearl <id>: <what>"`.
 - Every flag above is non-interactive by design — pass `--title` / `--description`
   / `--status` rather than looking for an `$EDITOR` flow (there isn't one).
 - `th pearls prime` prints open/in-progress pearls plus recent project memories —

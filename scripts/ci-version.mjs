@@ -9,15 +9,15 @@
  *    its default `version` input), and step 2 only fired during `publish`
  *    — after the PR was already merged with stale Cargo.* files.
  */
-import { execSync } from "node:child_process";
-import process from "node:process";
+import { execSync } from 'node:child_process';
+import process from 'node:process';
 
 const root = process.cwd();
 
 function run(cmd, opts = {}) {
     console.log(`\n> ${cmd}`);
-    execSync(cmd, { stdio: "inherit", cwd: root, ...opts });
+    execSync(cmd, { stdio: 'inherit', cwd: root, ...opts });
 }
 
-run("pnpm changeset version");
-run("pnpm version:sync");
+run('pnpm changeset version');
+run('pnpm version:sync');

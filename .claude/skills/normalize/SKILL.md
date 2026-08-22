@@ -20,18 +20,18 @@ run`). This skill finds the gaps and adds the aliases.
    the canonical variant name and its command spelling exactly as-is.
 3. **`visible_alias`** (shows in `--help`), not `alias` (hidden).
 4. **Skip collisions.** If the counterpart form is already a distinct command
-   in the same enum, skip it. Also skip *semantic* collisions: e.g. top-level
+   in the same enum, skip it. Also skip _semantic_ collisions: e.g. top-level
    `th agent` is agent-messaging while `th agents` is the Smoo AI platform
    agent surface — do NOT alias top-level `agent`→`agents`; it would make
    `th agents` mean messaging.
 
-   This one is not hypothetical. The alias shipped anyway, and `th agents`
-   meant messaging until th-c66db7 removed it and promoted the platform
-   surface. `main.rs` now carries a parse test with a negative control
-   (`th_agents_is_platform_agents_not_messaging`); re-adding the alias fails
-   it loudly, because clap rejects a duplicate command name at
-   parser-construction time. Prefer that shape — an assertion that a spelling
-   resolves where you MEANT — over trusting this rule to be followed.
+    This one is not hypothetical. The alias shipped anyway, and `th agents`
+    meant messaging until th-c66db7 removed it and promoted the platform
+    surface. `main.rs` now carries a parse test with a negative control
+    (`th_agents_is_platform_agents_not_messaging`); re-adding the alias fails
+    it loudly, because clap rejects a duplicate command name at
+    parser-construction time. Prefer that shape — an assertion that a spelling
+    resolves where you MEANT — over trusting this rule to be followed.
 
 ## Audit
 
@@ -48,7 +48,7 @@ pair. Output columns: `STATUS  file  Enum  command -> counterpart`.
 Gap table to report (one row per gap):
 
 | command | canonical | missing alias | collision? |
-|---------|-----------|---------------|------------|
+| ------- | --------- | ------------- | ---------- |
 
 ## Fix pattern
 

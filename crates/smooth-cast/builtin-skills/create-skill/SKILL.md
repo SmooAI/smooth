@@ -2,19 +2,19 @@
 name: create-skill
 description: Author a new skill (SKILL.md) for Smooth. Asks clarifying questions, drafts the frontmatter + body, writes the file to the user's chosen location, and offers a test invocation.
 triggers:
-  - make a skill
-  - create a skill
-  - add a skill
-  - save this as a skill
-  - new skill
-  - author a skill
+    - make a skill
+    - create a skill
+    - add a skill
+    - save this as a skill
+    - new skill
+    - author a skill
 scope: host
 allowed_tools:
-  - read_file
-  - write_file
-  - edit_file
-  - list_files
-  - bash
+    - read_file
+    - write_file
+    - edit_file
+    - list_files
+    - bash
 ---
 
 # create-skill
@@ -83,12 +83,14 @@ Optional sections worth including:
 ### 8. Write the file
 
 For project scope:
+
 ```bash
 mkdir -p .smooth/skills/<name>
 # write SKILL.md
 ```
 
 For user scope:
+
 ```bash
 mkdir -p ~/.smooth/skills/<name>
 # write SKILL.md

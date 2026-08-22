@@ -17,9 +17,9 @@
 
 ## What it talks to
 
-| Calls          | Listened-to by  |
-| -------------- | --------------- |
-| [[Other-Role]] | [[Other-Role]]  |
+| Calls          | Listened-to by |
+| -------------- | -------------- |
+| [[Other-Role]] | [[Other-Role]] |
 
 ## State it owns
 

@@ -12,8 +12,8 @@ Code worker sessions in tmux, coordinate them over
 - **`agent-comms`** skill — teaches a worker session to report status, answer
   pings, and hand off work over `th msg`/`th agent`.
 - **`th-mail`** skill — `/th-mail` arms a background `th msg watch --once`
-  watcher so an arriving message *pulls the session back in* instead of it
-  polling. The only surface that gets you *pushed* mail rather than checking for
+  watcher so an arriving message _pulls the session back in_ instead of it
+  polling. The only surface that gets you _pushed_ mail rather than checking for
   it.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
@@ -22,7 +22,7 @@ Code worker sessions in tmux, coordinate them over
   analytics, knowledge) rather than code changes. Needs a `th auth login` user
   session; it 401s under an M2M client.
 - **The `smooth` MCP server** — the plugin manifest registers `th mcp serve`,
-  so every session gets the agent bus as *tools* rather than shell calls:
+  so every session gets the agent bus as _tools_ rather than shell calls:
   `agent_identity`, `agent_status`, `agent_list`, `mail_inbox`, `mail_send`,
   `mail_ack` (plus `pearls_ready`/`pearls_create`, `remember`/`recall`, and the
   org tier behind `th auth login`). Codex and OpenCode reach the same mailbox
@@ -45,12 +45,12 @@ Code worker sessions in tmux, coordinate them over
       prompt, nudging a placeholder session to rename itself to a task-meaningful
       handle: `th agent rename --from <placeholder> --to <new>` (carries its mail
       over). Workers are never nudged.
-  Registration is always-on and safe — since pearl th-374f85 the mailbox is a
-  machine-level SQLite file, so a register is a millisecond-scale local write.
-  The hooks still do **not** auto-start a background `th msg watch`: a watcher
-  per session is a lot of processes for something most sessions never need.
-  Background mail-watching stays **opt-in** via the `/th-mail` skill. No `th` on PATH → the hooks are a no-op and the rest of
-  the plugin still works.
+      Registration is always-on and safe — since pearl th-374f85 the mailbox is a
+      machine-level SQLite file, so a register is a millisecond-scale local write.
+      The hooks still do **not** auto-start a background `th msg watch`: a watcher
+      per session is a lot of processes for something most sessions never need.
+      Background mail-watching stays **opt-in** via the `/th-mail` skill. No `th` on PATH → the hooks are a no-op and the rest of
+      the plugin still works.
 - **Shared repo guardrail hooks** — the SmooAI worktree/pearls guardrails that
   used to be hand-copied into every repo's `.claude/hooks/`, now one source of
   truth (pearl th-44bace). All derive the repo/main-worktree from git at runtime,
@@ -74,13 +74,13 @@ Code worker sessions in tmux, coordinate them over
       internals, raw `dolt` writes that bypass the single-writer server,
       backgrounded pearl/msg watchers). Override with `# pearls-guard:ack`.
 
-  Skills:
+    Skills:
     - `windows-build-box` — spin up a throwaway Windows EC2 build box over SSM
       (no RDP) to build/test on Windows faster than CI round-trips, then tear it
       down. Self-contained (`winrun.sh` ships beside the SKILL).
 
-  Enable per-repo in `.claude/settings.json` (`enabledPlugins`) and delete the
-  local `.claude/hooks/` copies — see the repo's own settings for the pattern.
+    Enable per-repo in `.claude/settings.json` (`enabledPlugins`) and delete the
+    local `.claude/hooks/` copies — see the repo's own settings for the pattern.
 
 ## Requires
 

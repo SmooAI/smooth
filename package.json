@@ -1,6 +1,6 @@
 {
     "name": "@smooai/smooth",
-    "version": "0.40.0",
+    "version": "0.40.1",
     "description": "Security-first AI agent orchestration platform",
     "homepage": "https://github.com/SmooAI/smooth#readme",
     "bugs": {
@@ -18,7 +18,9 @@
     },
     "scripts": {
         "prepare": "husky",
-        "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets",
+        "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets && pnpm format:check",
+        "format": "oxfmt --write .",
+        "format:check": "oxfmt --check .",
         "build:web": "pnpm -C crates/smooth-web/web install --silent && pnpm -C crates/smooth-web/web build",
         "dev:desktop": "pnpm -C desktop install --silent && pnpm -C desktop dev",
         "build:smooth-dolt": "bash scripts/build-smooth-dolt.sh",
@@ -42,7 +44,8 @@
     },
     "devDependencies": {
         "@changesets/cli": "^2.28.1",
-        "husky": "^9.1.7"
+        "husky": "^9.1.7",
+        "oxfmt": "0.64.0"
     },
     "engines": {
         "node": ">=22.0.0"

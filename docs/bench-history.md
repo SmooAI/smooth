@@ -13,4 +13,4 @@ fails the workflow — a human has to investigate before the release goes
 public.
 
 | version | date | overall% | cpp% | go% | java% | javascript% | python% | rust% | cost_usd | commit_sha |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ------- | ---- | -------- | ---- | --- | ----- | ----------- | ------- | ----- | -------- | ---------- |

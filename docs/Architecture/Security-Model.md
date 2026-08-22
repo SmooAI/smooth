@@ -11,10 +11,10 @@ Every tool call the operative makes passes two in-process hooks on its `ToolRegi
 
 1. **`PermissionHook`** (from the `smooth-operator` engine) — role-scoped tool gating. The operative's agent role (`SMOOTH_AGENT`, default `fixer`) declares which tools and permissions it's allowed; the hook blocks anything outside that surface. This is capability scoping, not a network/FS boundary.
 2. **`NarcHook`** (`smooth-narc`) — surveillance. Fast regex detectors run on every call:
-   - **Secret detection** — 10 patterns (API keys, tokens, private-key headers, …). A tool call or result carrying a secret is flagged/blocked.
-   - **Prompt-injection guard** — 6 patterns over incoming content.
-   - **Write guard** — optional (`SMOOTH_NARC_WRITE_GUARD=1`); off by default because the workspace is expected to be written.
-   - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict.
+    - **Secret detection** — 10 patterns (API keys, tokens, private-key headers, …). A tool call or result carrying a secret is flagged/blocked.
+    - **Prompt-injection guard** — 6 patterns over incoming content.
+    - **Write guard** — optional (`SMOOTH_NARC_WRITE_GUARD=1`); off by default because the workspace is expected to be written.
+    - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict.
 
 `smooth-policy` TOML is still parsed by the operative, but only to log the intended network allowlist and phase and to feed Narc's surveillance context. **It no longer enforces anything** — the Wonk rule engine and the Goalie iptables/FUSE proxy that turned that policy into a kernel boundary were removed.
 
@@ -55,12 +55,12 @@ Every exception must earn it the same way:
 
 - **argv only, no shell** — no interpolation or injection path.
 - **fixed binary** — a resolved path, never caller-supplied.
-- **fixed script/statement** — the caller supplies *data*, never code.
+- **fixed script/statement** — the caller supplies _data_, never code.
 - **verb allowlist, not a denylist** — an enumerated set, so a new upstream release
   can't quietly widen what the agent can reach.
 - **still a normal tool call** — the permission gate and Narc hook see it exactly
   like every other tool, so surveillance and policy are unchanged. Only the
-  *kernel* layer is waived, and only for that one integration.
+  _kernel_ layer is waived, and only for that one integration.
 
 The TCC grant is the compensating control: the OS asks the human once, per app
 bundle, and the user can revoke it in System Settings.
@@ -69,7 +69,7 @@ bundle, and the user can revoke it in System Settings.
 
 - **`calendar`** / **`calendar_delete`** (macOS, pearl th-94cc4a) — spawn the
   `ical` EventKit client with a plain `Command`.
-- **`reminders`** (macOS, pearl th-94cc4a) — *in-process* EventKit
+- **`reminders`** (macOS, pearl th-94cc4a) — _in-process_ EventKit
   (`EKReminder`/`EKEventStore` via objc2, in the `smooth-menubar` quarantine
   crate). Seatbelt denies EventKit's XPC + mach lookups, so it cannot run inside
   the sandbox; but unlike `calendar` **no subprocess exists at all** — typed
@@ -82,7 +82,7 @@ bundle, and the user can revoke it in System Settings.
   reminders equivalent of `calendar_delete`, and that is the point: completing a
   reminder is reversible, so nothing here needs a confirmation gate.
 - **`imessage`** (macOS, pearl th-1665ed) — two halves, both outside the sandbox:
-  the **read** is *in-process* `rusqlite` against `~/Library/Messages/chat.db` on
+  the **read** is _in-process_ `rusqlite` against `~/Library/Messages/chat.db` on
   a `SQLITE_OPEN_READ_ONLY` connection (no subprocess exists at all, so there is
   no shell and no injection surface), and the **send** spawns `/usr/bin/osascript`
   with a fixed AppleScript that takes the recipient and body as `on run argv`
@@ -119,7 +119,7 @@ fail **closed** — the tool call is refused, not silently run.
 Two shapes fall out of that mechanism and are worth knowing:
 
 - **The matcher is on the tool NAME, not the arguments** (`contains`). "This
-  *verb* needs confirmation" is therefore only expressible as "this *tool* needs
+  _verb_ needs confirmation" is therefore only expressible as "this _tool_ needs
   confirmation" — which is why `delete` was split off the `calendar` tool onto its
   own `calendar_delete` rather than gated by inspecting a `command` argument. It
   also means `delete` must be off the ungated tool's allowlist entirely, or the
@@ -159,11 +159,11 @@ The user opts in with Full Disk Access and can revoke it in System Settings.
 
 **It intentionally reads a location the deny policy lists.** The daemon's embedded
 `DenyPolicy` has `**/Library/**` under `[paths] deny`, covering reads as well as
-writes. That tier gates tools which take a *path argument* (`read_file`,
+writes. That tier gates tools which take a _path argument_ (`read_file`,
 `write_file`, `bash`); `imessage` takes no path — the database location is fixed
 in the binary and not caller-supplied — so the glob never applies to it. That is
 the intended design (a fixed, audited location is exactly what a path deny-list
-protects against reaching *arbitrarily*), but it is worth stating plainly: adding
+protects against reaching _arbitrarily_), but it is worth stating plainly: adding
 this tool means `~/Library/Messages/chat.db` is now reachable by the agent through
 a route the path deny-list does not cover. Any future OS-integration tool that
 reads a denied path must be scrutinised the same way, and must keep its location

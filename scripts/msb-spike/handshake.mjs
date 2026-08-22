@@ -3,7 +3,10 @@
 // create_conversation_session -> immediate_response{data.sessionId}.
 const url = process.argv[2] || 'ws://127.0.0.1:18791/ws';
 const ws = new WebSocket(url);
-const t = setTimeout(() => { console.log('FAIL: timeout'); process.exit(1); }, 15000);
+const t = setTimeout(() => {
+    console.log('FAIL: timeout');
+    process.exit(1);
+}, 15000);
 
 ws.onopen = () => {
     console.log('WS OPEN ->', url);
@@ -26,4 +29,7 @@ ws.onmessage = (e) => {
         process.exit(0);
     }
 };
-ws.onerror = (e) => { console.log('FAIL: ws error', e.message ?? e); process.exit(1); };
+ws.onerror = (e) => {
+    console.log('FAIL: ws error', e.message ?? e);
+    process.exit(1);
+};

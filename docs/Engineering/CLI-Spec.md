@@ -41,13 +41,13 @@ smoo <noun> <verb> [args] [flags]        # platform
 
 ## 3. Standard flags
 
-| Flag | Rule |
-|---|---|
-| `--json` | **Every read verb** (`list`/`show`/`search`/reports) offers it. Output is the raw response JSON, stable, unstyled, no truncation beyond what the server did. Enforced by test for every `list` under `smoo`. |
-| `--org-id` (alias `--org`) | Every platform verb that acts on an org accepts an override; default is the active org (`smoo org switch`). |
-| `--profile` | Global; selects the auth profile. Never define a per-command flag with this name. |
-| `--confirm` | Required for any action that **sends, spends, or destroys** (`smoo campaigns send`). The unflagged invocation previews (server-side dry-run where the API offers one) and says exactly what `--confirm` would do. |
-| `--dry-run` | For mutations where a preview needs to be explicit rather than the default. Prefer preview-by-default + `--confirm` for the dangerous class above. |
+| Flag                       | Rule                                                                                                                                                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--json`                   | **Every read verb** (`list`/`show`/`search`/reports) offers it. Output is the raw response JSON, stable, unstyled, no truncation beyond what the server did. Enforced by test for every `list` under `smoo`.      |
+| `--org-id` (alias `--org`) | Every platform verb that acts on an org accepts an override; default is the active org (`smoo org switch`).                                                                                                       |
+| `--profile`                | Global; selects the auth profile. Never define a per-command flag with this name.                                                                                                                                 |
+| `--confirm`                | Required for any action that **sends, spends, or destroys** (`smoo campaigns send`). The unflagged invocation previews (server-side dry-run where the API offers one) and says exactly what `--confirm` would do. |
+| `--dry-run`                | For mutations where a preview needs to be explicit rather than the default. Prefer preview-by-default + `--confirm` for the dangerous class above.                                                                |
 
 ## 4. Output contract
 

@@ -3,12 +3,12 @@
 Four small scripts, composed. Each one does exactly one thing and prints the
 artifact it produced on stdout, so they pipe together:
 
-| Script | What it does |
-| --- | --- |
-| `make-app-bundle.sh <daemon-bin> <out-dir> [version]` | Assembles + signs `Big Smooth.app` (+ bundles `th`). |
-| `make-dmg.sh <app> <out.dmg> [volume-name]` | Wraps the app in a drag-to-Applications `.dmg`. |
-| `notarize-and-staple.sh <artifact…>` | Apple notarization + staple. No-op without credentials. |
-| `install-local.sh` | Builds everything and installs the app to `~/Applications` on THIS Mac. |
+| Script                                                | What it does                                                            |
+| ----------------------------------------------------- | ----------------------------------------------------------------------- |
+| `make-app-bundle.sh <daemon-bin> <out-dir> [version]` | Assembles + signs `Big Smooth.app` (+ bundles `th`).                    |
+| `make-dmg.sh <app> <out.dmg> [volume-name]`           | Wraps the app in a drag-to-Applications `.dmg`.                         |
+| `notarize-and-staple.sh <artifact…>`                  | Apple notarization + staple. No-op without credentials.                 |
+| `install-local.sh`                                    | Builds everything and installs the app to `~/Applications` on THIS Mac. |
 
 Day-to-day you only run the last one:
 
@@ -34,11 +34,11 @@ manual dispatch.
 
 `SIGN_IDENTITY` (default `-`, ad-hoc) decides how much of the chain runs:
 
-| Identity | Hardened runtime | Notarizable | Use |
-| --- | --- | --- | --- |
-| `-` (ad-hoc) | no | no | local dev; runs on this Mac only |
-| `Apple Distribution: …` | no | no | smoo-hub deploys — a *stable* DR, so TCC grants survive |
-| `Developer ID Application: …` | **yes** | **yes** | anything a user downloads |
+| Identity                      | Hardened runtime | Notarizable | Use                                                     |
+| ----------------------------- | ---------------- | ----------- | ------------------------------------------------------- |
+| `-` (ad-hoc)                  | no               | no          | local dev; runs on this Mac only                        |
+| `Apple Distribution: …`       | no               | no          | smoo-hub deploys — a _stable_ DR, so TCC grants survive |
+| `Developer ID Application: …` | **yes**          | **yes**     | anything a user downloads                               |
 
 Hardened runtime (`codesign --options runtime`) turns on **only** for a
 `Developer ID` identity: Apple requires it for notarization, and it buys nothing
@@ -106,14 +106,14 @@ NOTARY_APPLE_ID=you@smoo.ai NOTARY_TEAM_ID=DTX9733844 NOTARY_PASSWORD=<app-speci
 `.github/workflows/macos-app.yml` reads these; every one is optional, and the
 job degrades to an ad-hoc, un-notarized DMG when they're missing.
 
-| Secret | Value |
-| --- | --- |
-| `MACOS_SIGN_IDENTITY` | `Developer ID Application: Smoo LLC (DTX9733844)` |
-| `MACOS_CERT_P12` | base64 of the exported `.p12` (cert **+ private key**) |
-| `MACOS_CERT_PASSWORD` | the `.p12` export password |
-| `NOTARY_KEY_P8` | base64 of `AuthKey_XXXX.p8` |
-| `NOTARY_KEY_ID` | the key ID |
-| `NOTARY_ISSUER` | the issuer UUID |
+| Secret                | Value                                                  |
+| --------------------- | ------------------------------------------------------ |
+| `MACOS_SIGN_IDENTITY` | `Developer ID Application: Smoo LLC (DTX9733844)`      |
+| `MACOS_CERT_P12`      | base64 of the exported `.p12` (cert **+ private key**) |
+| `MACOS_CERT_PASSWORD` | the `.p12` export password                             |
+| `NOTARY_KEY_P8`       | base64 of `AuthKey_XXXX.p8`                            |
+| `NOTARY_KEY_ID`       | the key ID                                             |
+| `NOTARY_ISSUER`       | the issuer UUID                                        |
 
 Set them with the wrapper, never `echo | gh secret set --body -` — that stores a
 trailing newline and silently breaks byte-comparing consumers (SMOODEV-879):

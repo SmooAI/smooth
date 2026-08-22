@@ -17,12 +17,12 @@
 
 ## The suites
 
-| Command | Question it answers |
-| --- | --- |
-| `aider-polyglot` | Can it edit code? One curated Exercism-style task, scored by running the canonical test suite. |
-| `score` | Engine parity — the curated suite through each of the five smooth-operator engines. |
-| `agentic` | Does it take the right ACTIONS? Seeds a workspace, drives one turn, scores the resulting state. |
-| `convo` | Is it any good to talk to? Multi-turn, LLM driver + LLM judge. |
+| Command          | Question it answers                                                                             |
+| ---------------- | ----------------------------------------------------------------------------------------------- |
+| `aider-polyglot` | Can it edit code? One curated Exercism-style task, scored by running the canonical test suite.  |
+| `score`          | Engine parity — the curated suite through each of the five smooth-operator engines.             |
+| `agentic`        | Does it take the right ACTIONS? Seeds a workspace, drives one turn, scores the resulting state. |
+| `convo`          | Is it any good to talk to? Multi-turn, LLM driver + LLM judge.                                  |
 
 Scenario corpora live beside the crate: `agentic-scenarios.toml` (the
 general suite), `frontend-scenarios.toml` (modern-stack API currency) and
@@ -53,13 +53,13 @@ it at a running one with `--url` + `--token`.
 
 ## What gets measured
 
-| Metric          | What                                                            |
-| --------------- | --------------------------------------------------------------- |
-| Score           | Pass/fail on the canonical test suite                           |
-| Iterations      | Agent-loop iterations spent on the task                          |
-| Cost            | `cost_usd` from the LLM gateway (6 decimal places)               |
-| Wall time       | End-to-end seconds                                              |
-| Tool calls      | Count by tool name (used for regression bisects)                 |
+| Metric     | What                                               |
+| ---------- | -------------------------------------------------- |
+| Score      | Pass/fail on the canonical test suite              |
+| Iterations | Agent-loop iterations spent on the task            |
+| Cost       | `cost_usd` from the LLM gateway (6 decimal places) |
+| Wall time  | End-to-end seconds                                 |
+| Tool calls | Count by tool name (used for regression bisects)   |
 
 Output is JSON-lines plus a printed summary. The CI workflow promotes the summary to `docs/bench-badge.json` and appends to `docs/bench-history.md` so the README badge stays current.
 
@@ -113,7 +113,6 @@ interrupt gap — and is marked `expect_fail`. While the gap is open it records
 and exits non-zero, which is the signal to drop the flag and keep it as a
 plain regression test.
 
-
 ## Comparing models (`--model`, repeatable)
 
 Pearl th-898ec6. `--model` is repeatable on both `agentic` and `convo`.
@@ -144,7 +143,7 @@ documented, so they stay out of that callout.
 > (the daemon reads `SMOOTH_AGENT_MODEL`; the bench set only
 > `SMOOAI_MODEL`), so both rows of that "deepseek-v4-flash beats gpt-5.5"
 > comparison were the SAME model and the difference was run-to-run
-> variance. Fixed, with a regression test — see *The model pin* below.
+> variance. Fixed, with a regression test — see _The model pin_ below.
 
 ## Cost
 
@@ -174,7 +173,7 @@ handled:
 - **LiteLLM posts spend asynchronously.** A response whose header already
   says `0.00117` does not appear in `/key/info` for another second or
   two, so sampling immediately after a run undercounts it — and
-  undercounts the *slowest* model worst. Both samples now poll until the
+  undercounts the _slowest_ model worst. Both samples now poll until the
   figure settles.
 - **The key is shared.** Background traffic from the smoo-hub daemon or a
   `th code` session lands in the delta, and on a short suite it is the
@@ -192,9 +191,9 @@ For exact figures, run against a dedicated gateway key.
 `--model` reaches the daemon through **two** environment variables, and
 only one of them is the one it reads:
 
-| var | read by |
-|---|---|
-| `SMOOAI_MODEL` | the polyglot `operator serve` launcher |
+| var                  | read by                                   |
+| -------------------- | ----------------------------------------- |
+| `SMOOAI_MODEL`       | the polyglot `operator serve` launcher    |
 | `SMOOTH_AGENT_MODEL` | **the daemon's `resolve_gateway_config`** |
 
 The microVM path always set both (with a comment saying why). The host
@@ -203,7 +202,7 @@ matrix silently ran the daemon's own default. `apply_engine_env` now sets
 both and `host_spawn_pins_both_model_vars` guards it.
 
 > 🚨 **Known blocker (pearl th-c127d1, P0):** with the pin working, every
-> model *except* the default returns an **empty reply** — the daemon
+> model _except_ the default returns an **empty reply** — the daemon
 > boots, accepts the turn, and the assistant says nothing. Confirmed for
 > `gpt-5.5` and `claude-sonnet-5`; `deepseek-v4-flash` is fine. It is not
 > the gateway (a direct tools-bearing POST returns an identical shape for
@@ -238,13 +237,11 @@ not_contains = "I'm unable"
 `pointer`/`missing`/`unchanged` are meaningless on an answer assertion —
 all three are rejected at parse time.
 
-
-
 ## Publishing model scores
 
-Pearl th-adf614. The Line (`docs/bench-badge.json`) answers *"is the agent
-getting better?"* — one number, one model, over time. The model scoreboard
-answers a different question: *"which model should we run?"* They are
+Pearl th-adf614. The Line (`docs/bench-badge.json`) answers _"is the agent
+getting better?"_ — one number, one model, over time. The model scoreboard
+answers a different question: _"which model should we run?"_ They are
 separate badges on purpose; folding a per-model comparison into The Line
 would make a routing change look like a quality regression.
 
@@ -257,11 +254,11 @@ scripts/the-line/render-model-scores.sh board.json
 That writes three artefacts, all from one pre-rounded source so the badge,
 the table and the JSON can never disagree:
 
-| file | for |
-|---|---|
-| `docs/model-scores.json` | machine-readable, the scoreboard verbatim |
-| `docs/model-badge.json` | the README shields endpoint (best model + %) |
-| `docs/Model-Leaderboard.md` | the human table |
+| file                        | for                                          |
+| --------------------------- | -------------------------------------------- |
+| `docs/model-scores.json`    | machine-readable, the scoreboard verbatim    |
+| `docs/model-badge.json`     | the README shields endpoint (best model + %) |
+| `docs/Model-Leaderboard.md` | the human table                              |
 
 Tests: `bash scripts/the-line/test-model-scores.sh`.
 
@@ -305,24 +302,24 @@ added in pearl th-084acc was written from **transcripts** — ~1,300 kv
 rows out of the smoo-hub daemon's `~/.smooth/operator.db`. Reading them
 back, the dominant real-world failure is not coding. It is **not
 looking**: `do you see the repo in ~/dev/smooai/smoo-hub` was asked ten
-times in a row, escalating through *"cd to it then"*, *"Search ~/dev"*,
-*"Pretty sure it does bruh"*. Every individual reply was polite and
+times in a row, escalating through _"cd to it then"_, _"Search ~/dev"_,
+_"Pretty sure it does bruh"_. Every individual reply was polite and
 plausible; the conversation was a disaster.
 
 The axes that came out of that read, each with at least one scenario:
 
-| Axis | The turn it came from |
-|---|---|
-| workspace discovery | "do you see the repo in ~/dev/smooai/smoo-hub" (×10) |
-| deep / recursive search | "Keep looking deeper it's there" |
-| find-and-follow a procedure doc | "find the claude skill … make your own skill based on it" |
-| multi-item follow-through | "Are you stuck" / "You didn't finish what you were doing" |
-| backfill incomplete records | "look for the ones … that do not have posters and fill them in" |
-| groundedness | "Are you sure, can you look it up" |
-| over-refusal | "why can't you do that" / "I give you explicit approval to run that" |
-| standing-instruction decay | "can you remember to always add a poster" → later, missing posters |
-| injection in quoted text | the grandma-env-vars message, run live twice |
-| ambiguous target | "this is not a poster for The Bear" |
+| Axis                            | The turn it came from                                                |
+| ------------------------------- | -------------------------------------------------------------------- |
+| workspace discovery             | "do you see the repo in ~/dev/smooai/smoo-hub" (×10)                 |
+| deep / recursive search         | "Keep looking deeper it's there"                                     |
+| find-and-follow a procedure doc | "find the claude skill … make your own skill based on it"            |
+| multi-item follow-through       | "Are you stuck" / "You didn't finish what you were doing"            |
+| backfill incomplete records     | "look for the ones … that do not have posters and fill them in"      |
+| groundedness                    | "Are you sure, can you look it up"                                   |
+| over-refusal                    | "why can't you do that" / "I give you explicit approval to run that" |
+| standing-instruction decay      | "can you remember to always add a poster" → later, missing posters   |
+| injection in quoted text        | the grandma-env-vars message, run live twice                         |
+| ambiguous target                | "this is not a poster for The Bear"                                  |
 
 When adding a scenario, name the transcript it came from in a comment.
 A scenario nobody can trace back to a real failure is a scenario nobody
@@ -334,11 +331,11 @@ Some suites deliberately break the default suite's "reproducible anywhere,
 no real services" rule, so they ship as separate files loaded with
 `--scenarios <path>` rather than in `agentic-scenarios.toml`:
 
-| File | What it covers | Constraints |
-|---|---|---|
-| `frontend-scenarios.toml` | current-stack React/Next code (`useReactTable` vs stale idioms) | judge/hybrid; pins a library set |
-| `greenfield-scenarios.toml` | build-from-empty steering | judge/hybrid; empty workspace |
-| `new-tools-scenarios.toml` | the personal-assistant tools shipped this cycle | see below |
+| File                        | What it covers                                                  | Constraints                      |
+| --------------------------- | --------------------------------------------------------------- | -------------------------------- |
+| `frontend-scenarios.toml`   | current-stack React/Next code (`useReactTable` vs stale idioms) | judge/hybrid; pins a library set |
+| `greenfield-scenarios.toml` | build-from-empty steering                                       | judge/hybrid; empty workspace    |
+| `new-tools-scenarios.toml`  | the personal-assistant tools shipped this cycle                 | see below                        |
 
 **`new-tools-scenarios.toml`** exercises `get_weather`, `get_location`, and
 `present_plan`:

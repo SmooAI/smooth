@@ -12,5 +12,15 @@
         "sortImportDeclarationSpecifiers": "source",
         "groupImportDeclarations": true
     },
-    "experimentalSortPackageJson": true
+    "experimentalSortPackageJson": true,
+    "ignorePatterns": [
+        "**/pnpm-lock.yaml",
+        "CHANGELOG.md",
+        "docs/.obsidian/**",
+        "docs/bench-sessions/**",
+        "docs/engine-baseline.json",
+        "docs/model-badge.json",
+        "docs/model-scores.json",
+        "crates/smooth-api-client/openapi.json"
+    ]
 }

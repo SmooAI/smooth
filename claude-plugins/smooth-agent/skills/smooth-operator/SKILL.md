@@ -6,7 +6,7 @@ description: Drive the user's Smoo AI org Smooth Operator from the CLI via `smoo
 # smooth-operator — drive the org's dashboard agent from `th`
 
 The Smoo AI **Smooth Operator** is the always-on agent inside the SmooAI dashboard.
-It acts on the *org's own* data on behalf of an operator: searching the
+It acts on the _org's own_ data on behalf of an operator: searching the
 knowledge base, looking up and creating CRM contacts, querying analytics,
 generating content/templates, and drafting + (on confirmation) sending email.
 `smoo api smooth-operator` is the headless bridge to it — reach for it when the user
@@ -57,33 +57,33 @@ triggers one, the response carries a `pendingAction` and the loop pauses. How
 
 - **On a TTY (a human is watching):** you get a `Approve email.send — …?` y/N
   prompt. Default is **No**.
-- **Non-interactively (you, the agent):** you must decide *up front* with a flag:
-  - `--confirm` — auto-approve any destructive action this turn triggers
-  - `--no-confirm` — auto-decline it
-  - **no flag** → `th` prints the pending action and **stops without running
-    it** (it does not guess). This is the safe default.
+- **Non-interactively (you, the agent):** you must decide _up front_ with a flag:
+    - `--confirm` — auto-approve any destructive action this turn triggers
+    - `--no-confirm` — auto-decline it
+    - **no flag** → `th` prints the pending action and **stops without running
+      it** (it does not guess). This is the safe default.
 
 **Rules for agents:**
 
 - **Never pass `--confirm` by default.** Only add it when the user has
-  explicitly authorized *this* send (e.g. "yes, send it").
+  explicitly authorized _this_ send (e.g. "yes, send it").
 - To inspect first, then decide, run the chat **without** a flag, read the
   printed `pendingAction` (or use `--json`), and — if authorized — confirm the
-  *same* conversation without resending the message:
+  _same_ conversation without resending the message:
 
-  ```bash
-  smoo api smooth-operator chat "Send the follow-up to jane@acme.com"   # pauses, prints the pending email.send
-  # ...user confirms they want it sent...
-  smoo api smooth-operator confirm <conversation-id> --approve          # runs it
-  smoo api smooth-operator confirm <conversation-id> --decline          # or drop it
-  ```
+    ```bash
+    smoo api smooth-operator chat "Send the follow-up to jane@acme.com"   # pauses, prints the pending email.send
+    # ...user confirms they want it sent...
+    smoo api smooth-operator confirm <conversation-id> --approve          # runs it
+    smoo api smooth-operator confirm <conversation-id> --decline          # or drop it
+    ```
 
 - When the user has already said "send it" in the same breath, the one-shot
   form is fine:
 
-  ```bash
-  smoo api smooth-operator chat "Send jane@acme.com the follow-up email" --confirm
-  ```
+    ```bash
+    smoo api smooth-operator chat "Send jane@acme.com the follow-up email" --confirm
+    ```
 
 ## Notes
 

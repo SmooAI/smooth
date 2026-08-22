@@ -47,22 +47,22 @@
 
 ## Component map
 
-| Crate                  | Role                                                                     |
-| ---------------------- | ------------------------------------------------------------------------ |
-| `smooth-cli`           | The `th` binary. Clap entry point — `th up`/`down`/`status`, all subcommands. |
-| `smooth-bigsmooth`     | Big Smooth. axum server, dispatch, orchestrator state, pearl + Diver wiring. |
-| `smooth-operative`     | The worker binary the dispatcher exec's per task. Hosts the agent loop.   |
-| `smooth-operator`      | Agent engine (external dep, `smooth-operator-core`): LLM client, tools, conversation, checkpoints (Groove). |
-| `smooth-narc`          | Tool-surveillance hook — regex secret/injection detectors + optional LLM judge. |
-| `smooth-policy`        | Policy types + TOML. Parsed for surveillance/diagnostics; feeds the in-progress auto-mode engine (`th-515a13`). |
-| `smooth-scribe`        | Per-actor structured logging.                                            |
-| `smooth-archivist`     | Central log + event aggregator. SSE stream backs the dashboard.          |
-| `smooth-diver`         | Pearl lifecycle manager + Jira sync.                                     |
-| `smooth-pearls`        | Pearl store. Dolt-backed.                                                |
-| `smooth-cast`          | Skills discovery + agent role/persona resources.                         |
-| `smooth-code`          | Ratatui TUI (`th code`).                                                 |
-| `smooth-web`           | Embedded Vite SPA via `rust-embed`.                                      |
-| `smooth-tunnel`        | `th tunnel` — reverse tunnel to th.smoo.ai for remote control.           |
+| Crate              | Role                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `smooth-cli`       | The `th` binary. Clap entry point — `th up`/`down`/`status`, all subcommands.                                   |
+| `smooth-bigsmooth` | Big Smooth. axum server, dispatch, orchestrator state, pearl + Diver wiring.                                    |
+| `smooth-operative` | The worker binary the dispatcher exec's per task. Hosts the agent loop.                                         |
+| `smooth-operator`  | Agent engine (external dep, `smooth-operator-core`): LLM client, tools, conversation, checkpoints (Groove).     |
+| `smooth-narc`      | Tool-surveillance hook — regex secret/injection detectors + optional LLM judge.                                 |
+| `smooth-policy`    | Policy types + TOML. Parsed for surveillance/diagnostics; feeds the in-progress auto-mode engine (`th-515a13`). |
+| `smooth-scribe`    | Per-actor structured logging.                                                                                   |
+| `smooth-archivist` | Central log + event aggregator. SSE stream backs the dashboard.                                                 |
+| `smooth-diver`     | Pearl lifecycle manager + Jira sync.                                                                            |
+| `smooth-pearls`    | Pearl store. Dolt-backed.                                                                                       |
+| `smooth-cast`      | Skills discovery + agent role/persona resources.                                                                |
+| `smooth-code`      | Ratatui TUI (`th code`).                                                                                        |
+| `smooth-web`       | Embedded Vite SPA via `rust-embed`.                                                                             |
+| `smooth-tunnel`    | `th tunnel` — reverse tunnel to th.smoo.ai for remote control.                                                  |
 
 ## Where to next
 

@@ -43,7 +43,7 @@ Rename "the Boardroom" to "the Safehouse" throughout the codebase, env surface, 
 
 We considered:
 
-- **The Stage** — fits the existing "Cast" metaphor (theatrical), but the family is closer to *Goodfellas* than *Hamilton*.
+- **The Stage** — fits the existing "Cast" metaphor (theatrical), but the family is closer to _Goodfellas_ than _Hamilton_.
 - **The Joint** — strong mob slang, doubles as a software term ("joint runtime"). Generic, but loses the heist-specific feel.
 - **The Front** — best descriptive match (the microVM literally is a front: a clean HTTP port hiding the crew). Felt slightly too clever; the architecture's value isn't really "deception."
 - **The Office** — Sopranos-coded, but the TV-sitcom collision is unavoidable and "office" still leans corporate.
@@ -60,7 +60,7 @@ The product is consumer-developer-facing. The heist framing reads better in mark
 
 - Naming is internally consistent. Every cast member's metaphor lands in the same crime-family bucket now.
 - Marketing/docs/CLI tracing read as one coherent product instead of "a corporate boardroom hiring a crew of mobsters."
-- `SMOOTH_SAFEHOUSE_MODE=1` reads as a more specific dispatch decision than `SMOOTH_BOARDROOM_MODE` did — the env var name now describes *what kind of place we're in* (a sealed safehouse, not an open conference room).
+- `SMOOTH_SAFEHOUSE_MODE=1` reads as a more specific dispatch decision than `SMOOTH_BOARDROOM_MODE` did — the env var name now describes _what kind of place we're in_ (a sealed safehouse, not an open conference room).
 
 ### Negative / accepted
 
