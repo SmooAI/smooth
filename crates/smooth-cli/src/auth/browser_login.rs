@@ -184,20 +184,57 @@ fn url_encode(s: &str) -> String {
 /// HTML the browser tab sees after the callback fires. Closed by JS
 /// on a short timer; falls back to a "you can close this tab" line
 /// if scripts are blocked.
+///
+/// Styled in **Presence** (th-40745f): a warm near-black ground with the same
+/// dual teal/blue radial glow the web SPA uses, warm off-white text, one
+/// hairline card. The teal→blue `th` gradient is Big Smooth's FACE — used once,
+/// as the focal mark, and nowhere else. The online-green dot means "connected".
+/// Self-contained inline CSS because this page is served by a bare `tiny_http`
+/// listener with no asset pipeline. `oklch()` + `color-mix()` are fine — the tab
+/// only ever opens in the user's just-used desktop browser.
 const SUCCESS_HTML: &str = r#"<!doctype html>
-<html><head><title>th auth login — done</title></head>
-<body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 32rem;">
-<h2>You're signed in.</h2>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>th auth login — done</title><style>
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;color:oklch(0.93 0.014 70);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;align-items:center;justify-content:center;padding:2rem;background:radial-gradient(1100px 700px at 78% -8%,color-mix(in oklch,#00a6a6 11%,transparent),transparent 60%),radial-gradient(900px 600px at 12% 108%,color-mix(in oklch,#1238dd 13%,transparent),transparent 62%),oklch(0.165 0.012 55)}
+main{max-width:26rem;width:100%;text-align:center;padding:2.75rem 2.25rem;border:1px solid oklch(0.3 0.014 60);border-radius:18px;background:color-mix(in oklch,oklch(0.205 0.014 58) 55%,transparent);animation:rise .5s cubic-bezier(.2,.7,.2,1) both}
+.mark{position:relative;z-index:0;display:inline-block;font-weight:800;font-size:2.9rem;line-height:1;letter-spacing:.02em;margin-bottom:1.4rem;background:linear-gradient(105deg,#00a6a6,#1238dd);-webkit-background-clip:text;background-clip:text;color:transparent}
+.mark::after{content:"";position:absolute;inset:-70% -45%;z-index:-1;background:radial-gradient(circle at 50% 46%,color-mix(in oklch,#1238dd 34%,transparent),transparent 66%);filter:blur(7px)}
+h1{font-size:1.5rem;font-weight:650;margin:0 0 .5rem;letter-spacing:-.01em}
+p{margin:0;color:oklch(0.66 0.02 65);font-size:1rem}
+.dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.55rem;vertical-align:middle;background:oklch(0.74 0.17 152);box-shadow:0 0 0 3px color-mix(in oklch,oklch(0.74 0.17 152) 22%,transparent)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){main{animation:none}}
+</style></head>
+<body><main>
+<div class="mark">th</div>
+<h1><span class="dot"></span>You're signed in.</h1>
 <p>You can close this tab and return to your terminal.</p>
+</main>
 <script>setTimeout(() => window.close(), 1500);</script>
 </body></html>"#;
 
+/// Error variant — same warm Presence ground, but calm, not celebratory: the
+/// `th` face is dimmed and the status dot is a warm danger red. Deliberately NOT
+/// amber — in Presence amber means only "Big Smooth needs you", never "failed".
 const ERROR_HTML: &str = r#"<!doctype html>
-<html><head><title>th auth login — error</title></head>
-<body style="font-family: system-ui, sans-serif; padding: 2rem; max-width: 32rem;">
-<h2>Sign-in failed.</h2>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>th auth login — error</title><style>
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;color:oklch(0.93 0.014 70);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;align-items:center;justify-content:center;padding:2rem;background:radial-gradient(1100px 700px at 78% -8%,color-mix(in oklch,#00a6a6 9%,transparent),transparent 60%),radial-gradient(900px 600px at 12% 108%,color-mix(in oklch,#1238dd 10%,transparent),transparent 62%),oklch(0.165 0.012 55)}
+main{max-width:26rem;width:100%;text-align:center;padding:2.75rem 2.25rem;border:1px solid oklch(0.3 0.014 60);border-radius:18px;background:color-mix(in oklch,oklch(0.205 0.014 58) 55%,transparent)}
+.mark{position:relative;display:inline-block;font-weight:800;font-size:2.9rem;line-height:1;letter-spacing:.02em;margin-bottom:1.4rem;background:linear-gradient(105deg,#00a6a6,#1238dd);-webkit-background-clip:text;background-clip:text;color:transparent;opacity:.5;filter:grayscale(.4)}
+h1{font-size:1.5rem;font-weight:650;margin:0 0 .5rem;letter-spacing:-.01em}
+p{margin:0;color:oklch(0.66 0.02 65);font-size:1rem}
+.dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.55rem;vertical-align:middle;background:oklch(0.64 0.19 25);box-shadow:0 0 0 3px color-mix(in oklch,oklch(0.64 0.19 25) 22%,transparent)}
+</style></head>
+<body><main>
+<div class="mark">th</div>
+<h1><span class="dot"></span>Sign-in failed.</h1>
 <p>Return to your terminal — th will show the details.</p>
-</body></html>"#;
+</main></body></html>"#;
 
 /// Listener wrapper that knows its OS-assigned port.
 pub struct Listener {
