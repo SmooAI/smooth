@@ -77,6 +77,11 @@ reqwest = { workspace = true, features = ["json"] }
 # user session via smooai-client-shared's CredentialsStore (the same file `th`
 # reads), so Big Smooth can act on the user's Smoo org via th-backed extensions.
 smooai-client-shared.workspace = true
+# th-c6a542: the cross-process credential lock (path-keyed `credential_lock`),
+# so the daemon's session refreshers serialize load→refresh→save against `th`
+# and each other — otherwise concurrent use of the rotating Supabase refresh
+# token trips reuse-detection and revokes the whole family.
+smooth-api-client.workspace = true
 base64 = "0.22"
 # /search pearl suggestions (th-8e9cf6) — open the project/global Dolt store
 smooth-pearls.workspace = true

@@ -35,8 +35,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use smooai_client_shared::auth::refresh;
-use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
+use smooai_client_shared::auth::storage::CredentialsStore;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -302,32 +301,28 @@ fn needs_refresh(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool 
 async fn fresh_access_token(http: &reqwest::Client, force: bool) -> Option<String> {
     let store = CredentialsStore::default_user().ok()?;
     let creds = store.load().ok().flatten()?;
-    let creds = if force || needs_refresh(creds.expires_at, Utc::now()) {
-        refresh_and_persist(http, &store, creds).await
-    } else {
-        creds
-    };
-    Some(creds.access_token).filter(|t| !t.is_empty())
-}
-
-/// Refresh the session against Supabase and persist the rotated tokens, reusing
-/// the exact mechanism the credential heartbeat uses ([`crate::auth_login`]).
-/// Best-effort: on any failure logs and returns the ORIGINAL creds so the
-/// caller still attempts a connect. Supabase ROTATES the refresh token, so a
-/// successful refresh MUST be saved or the next refresh presents a revoked one.
-async fn refresh_and_persist(http: &reqwest::Client, store: &CredentialsStore, creds: Credentials) -> Credentials {
-    if creds.refresh_token.is_none() {
-        tracing::warn!("relay: Smoo session is near expiry with no refresh token — sign in again (`th auth login`)");
-        return creds;
+    if !force && !needs_refresh(creds.expires_at, Utc::now()) {
+        return Some(creds.access_token).filter(|t| !t.is_empty());
     }
-    match refresh::refresh_session(http, &crate::auth_login::supabase_url(), &crate::auth_login::supabase_anon_key(), &creds).await {
+    // Refresh under the SHARED credential lock (th-c6a542). The old path here
+    // refreshed unlocked, so it raced the credential heartbeat and any `th`
+    // process on the one rotating Supabase refresh token — two exchanges of the
+    // same token trip reuse-detection and revoke the family, which is why
+    // smoo-hub fell off the relay ~hourly until a full `th auth login`.
+    // `only_if_due = !force`: a plain expiry refresh no-ops if a peer already did
+    // it; a post-4401 `force` still refreshes. Best-effort: on any failure keep
+    // the existing token so the connect is still attempted (a dead token
+    // resurfaces as a 4401) and the daemon never crashes.
+    let creds = match crate::auth_login::refresh_user_session_locked(
+        http,
+        &store,
+        &crate::auth_login::supabase_url(),
+        &crate::auth_login::supabase_anon_key(),
+        !force,
+    )
+    .await
+    {
         Ok(renewed) => {
-            if let Err(e) = store.save(&renewed) {
-                // Use the fresh token for THIS connect even if the save failed;
-                // the next reconnect will just refresh again.
-                tracing::error!(error = %format!("{e:#}"), "relay: refreshed the Smoo session but persisting it failed");
-                return renewed;
-            }
             tracing::info!(expires_at = ?renewed.expires_at, "relay: refreshed the Smoo session");
             renewed
         }
@@ -335,7 +330,8 @@ async fn refresh_and_persist(http: &reqwest::Client, store: &CredentialsStore, c
             tracing::warn!(error = %format!("{e:#}"), "relay: could not refresh the Smoo session — trying the existing token");
             creds
         }
-    }
+    };
+    Some(creds.access_token).filter(|t| !t.is_empty())
 }
 
 /// Spawn the relay supervisor.
@@ -492,6 +488,8 @@ async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungste
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
+    use smooai_client_shared::auth::storage::Credentials;
+
     use super::*;
 
     // ── config resolution ─────────────────────────────────────────────────────
@@ -734,15 +732,15 @@ mod tests {
         assert!(!needs_refresh(None, now));
     }
 
-    #[tokio::test]
-    async fn refresh_and_persist_without_a_refresh_token_keeps_the_session() {
-        // No refresh token ⇒ no network hit, original creds returned unchanged.
-        let dir = tempfile::tempdir().unwrap();
-        let store = CredentialsStore::at(dir.path().join("smooai-user.json"));
-        let creds = creds_expiring(Some(Utc::now() - ChronoDuration::hours(1)), None);
-        let out = refresh_and_persist(&reqwest::Client::default(), &store, creds.clone()).await;
-        assert_eq!(out.access_token, creds.access_token);
-        assert!(out.refresh_token.is_none());
+    // The refresh itself now runs under the shared credential lock in
+    // `auth_login::refresh_user_session_locked` (th-c6a542) — its behaviour
+    // (lock, re-read, only_if_due short-circuit, no-refresh-token bail) is tested
+    // there. Here we only own the decision gate and the persistence invariant.
+    #[test]
+    fn creds_expiring_builds_a_user_session_the_decision_gate_reads() {
+        let c = creds_expiring(Some(Utc::now() - ChronoDuration::hours(1)), None);
+        assert!(needs_refresh(c.expires_at, Utc::now()), "an hour past expiry is due for refresh");
+        assert!(c.refresh_token.is_none());
     }
 
     #[test]

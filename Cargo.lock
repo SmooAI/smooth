@@ -5236,6 +5236,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smooai-client-shared",
+ "smooai-smooth-api-client",
  "smooai-smooth-cast",
  "smooai-smooth-goalie",
  "smooai-smooth-menubar",
