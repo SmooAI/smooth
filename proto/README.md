@@ -105,4 +105,4 @@ Total: ~5 weeks. The endpoint is a system that's _materially_ simpler than today
 - `dispatch_ws_task_sandboxed` vs `dispatch_ws_task_direct` branching — one dispatch path.
 - The per-VM `spawn_cast()` function in operative. Cast members are sandbox-singleton processes.
 - The per-bead microsandbox pool.
-- The `host_tool` agent-visible tool. Internal tools (gh__, aws__, etc.) call IssueCredential as needed; the agent sees them as normal tools.
+- The `host_tool` agent-visible tool. Internal tools (gh**, aws**, etc.) call IssueCredential as needed; the agent sees them as normal tools.

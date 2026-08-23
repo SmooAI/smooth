@@ -155,7 +155,7 @@ smoo auth refresh          # refresh the user session
 smoo auth refresh --m2m    # refresh the M2M service-account session
 ```
 
-It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret _is_ the durable credential.
+It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client*id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret \_is* the durable credential.
 
 ### Switching orgs
 

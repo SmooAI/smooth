@@ -179,7 +179,8 @@ pub enum PartnersCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Remove a partner from the program.
+    /// Remove a partner from the program. Prints the target (org + host) and
+    /// confirms before acting; refuses when not attached to a terminal.
     #[command(visible_alias = "rm")]
     Remove {
         /// Partner email, display name, or code.
@@ -187,6 +188,8 @@ pub enum PartnersCmd {
         /// Override the active org.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -341,18 +344,30 @@ async fn partners(cmd: PartnersCmd) -> Result<()> {
                 .context("PATCH partner")?;
             render_partners(&json!([updated]));
         }
-        PartnersCmd::Remove { partner, org } => {
+        PartnersCmd::Remove { partner, org, confirm } => {
             let o = require_active_org(&client, org)?;
             let id = program_id(&load_program(&client, &o).await?)?;
             let found = find_partner(&client, &o, &id, &partner).await?;
             let partner_id = found.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-            client
-                .delete(&format!("/organizations/{o}/referral-programs/{id}/partners/{partner_id}"))
-                .await
-                .context("DELETE partner")?;
-            println!();
-            println!("  {} removed {}", "✓".green(), partner.bold());
-            println!();
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "remove",
+                    noun: "referral partner",
+                    id: &partner_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                client
+                    .delete(&format!("/organizations/{o}/referral-programs/{id}/partners/{partner_id}"))
+                    .await
+                    .context("DELETE partner")?;
+                println!();
+                println!("  {} removed {}", "✓".green(), partner.bold());
+                println!();
+            }
         }
     }
     Ok(())

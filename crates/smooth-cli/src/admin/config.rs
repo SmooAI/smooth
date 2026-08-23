@@ -93,11 +93,19 @@ pub enum SchemasCmd {
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
-    /// Delete a schema. Irreversible.
+    /// Delete a schema. Irreversible — every value stored under it goes
+    /// with it. Prints the target (org + host) and confirms before acting;
+    /// refuses outright when not attached to a terminal.
     Delete {
         schema_id: String,
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Push a new schema version. Body is the full new schema doc.
     Push {
@@ -141,11 +149,18 @@ pub enum EnvironmentsCmd {
         org: Option<String>,
     },
     /// Delete an environment. Irreversible — every value under it goes
-    /// with it.
+    /// with it. Prints the target (org + host) and confirms before acting;
+    /// refuses outright when not attached to a terminal.
     Delete {
         env_id: String,
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Dump every value in this environment, across all schemas.
     Values {
@@ -228,14 +243,27 @@ async fn dispatch_schemas(cmd: SchemasCmd, client: &smooth_api_client::SmoothApi
                     .context("PATCH schema")?,
             );
         }
-        SchemasCmd::Delete { schema_id, org } => {
+        SchemasCmd::Delete { schema_id, org, dry_run, yes } => {
             let o = require_active_org(client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{o}/config/schemas/{schema_id}"))
-                    .await
-                    .context("DELETE schema")?,
-            );
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "config schema",
+                    id: &schema_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/schemas/{schema_id}"))
+                        .await
+                        .context("DELETE schema")?,
+                );
+            }
         }
         SchemasCmd::Push { schema_id, body, org } => {
             let o = require_active_org(client, org)?;
@@ -294,14 +322,27 @@ async fn dispatch_environments(cmd: EnvironmentsCmd, client: &smooth_api_client:
                     .context("PATCH environment")?,
             );
         }
-        EnvironmentsCmd::Delete { env_id, org } => {
+        EnvironmentsCmd::Delete { env_id, org, dry_run, yes } => {
             let o = require_active_org(client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{o}/config/environments/{env_id}"))
-                    .await
-                    .context("DELETE environment")?,
-            );
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "config environment",
+                    id: &env_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/environments/{env_id}"))
+                        .await
+                        .context("DELETE environment")?,
+                );
+            }
         }
         EnvironmentsCmd::Values { env_id, org } => {
             let o = require_active_org(client, org)?;

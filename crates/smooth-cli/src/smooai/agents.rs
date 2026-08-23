@@ -169,13 +169,17 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete an agent permanently.
+    /// Delete an agent permanently. Prints the target (org + host) and
+    /// requires typing the agent id back; refuses when not attached to a
+    /// terminal.
     Delete {
         /// The agent id from `th agents list`.
         agent_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Re-run one of the agent's generators.
     Regenerate {
@@ -427,14 +431,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("PATCH agent")?,
             );
         }
-        Cmd::Delete { agent_id, org } => {
+        Cmd::Delete { agent_id, org, confirm } => {
             let org = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{org}/agents/{agent_id}"))
-                    .await
-                    .context("DELETE agent")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "agent",
+                    id: &agent_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{org}/agents/{agent_id}"))
+                        .await
+                        .context("DELETE agent")?,
+                );
+            }
         }
         Cmd::Regenerate { agent_id, slot, org } => {
             let org = require_active_org(&client, org)?;

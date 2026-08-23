@@ -52,7 +52,8 @@ pub enum LayoutCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Remove a widget from the layout.
+    /// Remove a widget from the layout. Prints the target (org + host) and
+    /// confirms before acting; refuses when not attached to a terminal.
     Remove {
         /// Widget id to remove.
         widget_id: String,
@@ -62,6 +63,8 @@ pub enum LayoutCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -147,6 +150,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             widget_id,
             dashboard_type,
             org,
+            confirm,
         } => {
             let o = resolve_org(org)?;
             let layout = fetch_layout(&client, &o, &dashboard_type).await?;
@@ -155,6 +159,19 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             widgets.retain(|x| x.get("widgetId").and_then(Value::as_str) != Some(widget_id.as_str()));
             if widgets.len() == before {
                 anyhow::bail!("widget `{widget_id}` is not on the {dashboard_type} dashboard");
+            }
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "remove",
+                    noun: "dashboard widget",
+                    id: &widget_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if !proceed {
+                return Ok(());
             }
             save_layout(&client, &o, &dashboard_type, &widgets).await?;
             println!("✓ removed `{widget_id}` from the {dashboard_type} dashboard ({} widgets)", widgets.len());
