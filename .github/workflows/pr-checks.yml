@@ -125,10 +125,10 @@ jobs:
             - uses: pnpm/action-setup@v4
               if: steps.gate.outputs.run == 'true'
 
-            - uses: actions/setup-node@v4
-              if: steps.gate.outputs.run == 'true'
-              with:
-                  node-version: 22
+            # Toolchains come from mise.toml, read here by mise-action so the runner
+            # and a developer's shell resolve identical versions.
+            - name: Setup toolchains (mise)
+              uses: jdx/mise-action@v4
 
             - name: Build web UI
               if: steps.gate.outputs.run == 'true'
@@ -219,9 +219,10 @@ jobs:
 
             - uses: pnpm/action-setup@v4
 
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22
+            # Toolchains come from mise.toml, read here by mise-action so the runner
+            # and a developer's shell resolve identical versions.
+            - name: Setup toolchains (mise)
+              uses: jdx/mise-action@v4
 
             # Root install is three dev deps (changesets, husky, oxfmt).
             # HUSKY=0: the `prepare` script has nothing to install in CI.
@@ -271,10 +272,10 @@ jobs:
             - uses: pnpm/action-setup@v4
               if: steps.gate.outputs.run == 'true'
 
-            - uses: actions/setup-node@v4
-              if: steps.gate.outputs.run == 'true'
-              with:
-                  node-version: 22
+            # Toolchains come from mise.toml, read here by mise-action so the runner
+            # and a developer's shell resolve identical versions.
+            - name: Setup toolchains (mise)
+              uses: jdx/mise-action@v4
 
             - name: Install
               if: steps.gate.outputs.run == 'true'
