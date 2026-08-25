@@ -815,6 +815,28 @@ mod provision_tests {
         assert!(msg.contains("big-smooth-test"), "the message must name the key so it can be revoked");
     }
 
+    /// The backup is not the only thing that can fail — a save into a
+    /// read-only directory must propagate too. Without this the error
+    /// path is only ever exercised by `back_up`, and a swallowed
+    /// `save_to_file` would look tested.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_errors_too() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = write_gateway_key(&locked.join("providers.json"), "sk-would-be-lost", true);
+
+        // Restore before asserting so the tempdir can always clean up.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = result.expect_err("a save into a read-only directory must fail");
+        assert!(key_lost_message("k", "sk-would-be-lost", &err).contains("sk-would-be-lost"));
+    }
+
     /// Verification has to actually fail when the gateway rejects the
     /// key. A key written into a file is not evidence that it works —
     /// removing this check is how "provisioned" starts meaning nothing.
