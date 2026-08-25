@@ -540,7 +540,7 @@ can mint for a child org with `--org-id <child>` (the user JWT acts
 cross-org).
 
 ```bash
-smoo llm provision                      # sign in → mint → write providers.json → verify (value never printed)
+smoo llm onboard                        # connect Big Smooth to an org: sign in → pick org → mint → write → verify
 smoo llm overview                       # masked key + month-to-date spend (--json for raw)
 smoo llm create-key                     # mint the org's persistent key — prints the value ONCE
 smoo llm rotate-key                     # invalidate + reissue the persistent key (prints once)
@@ -555,39 +555,60 @@ smoo llm keys delete ci                 # revoke (soft-delete; name reusable lat
 smoo llm create-key --org-id <child>    # master admin minting for a child org
 ```
 
-#### `smoo llm provision` — the one-step path
+#### `smoo llm onboard` — connecting Big Smooth to an org
 
-`create-key` / `keys create` print the value once and expect a human to
-paste it into `th model login`. `smoo llm provision` closes that loop: it
-reuses the Smoo session (signing in if there isn't one), mints
-`big-smooth-<hostname>`, backs up `~/.smooth/providers.json` to
-`providers.json.bak-<stamp>`, writes the key into the `smooai-gateway`
-provider with every routing slot pointed at it, and then makes one real
-call through the gateway to prove the key works. **The value never
-reaches the terminal** — the single exception is a failed write, where the
-key is already live and billable and losing it silently is worse.
+Big Smooth is something a Smoo org adopts. `smoo llm onboard` (alias of
+`smoo llm provision`) is that adoption path: it reuses the Smoo session
+(signing in if there isn't one), **asks which org**, mints
+`big-smooth-<hostname>` on that org, backs up `~/.smooth/providers.json`
+to `providers.json.bak-<stamp>`, writes the key into the `smooai-gateway`
+provider with every routing slot pointed at it, and makes one real call
+through the gateway to prove the key works. **The value never reaches the
+terminal** — the single exception is a failed write, where the key is
+already live and billable and losing it silently is worse.
+
+Big Smooth then spends against **that org's** LiteLLM team and budget
+(`team_id == org_id`), so its usage bills to the org that onboarded it.
 
 ```bash
-smoo llm provision                      # default: name big-smooth-<hostname>, active org
-smoo llm provision --name ci-runner     # explicit name (sanitised to the API's rule)
-smoo llm provision --rotate             # existing name → mint a fresh value and write it
-smoo llm provision --credential-only    # store the key; leave default provider + routing alone
-smoo llm provision --no-verify          # skip the proof call (output says it was skipped)
-smoo llm provision --org-id <other-org> # the ONLY isolation boundary — see below
+smoo llm onboard                        # interactive org picker, then the whole flow
+smoo llm onboard --org-id acme          # UUID, or a name/slug substring
+smoo llm onboard --rotate               # already connected → fresh value (how a 2nd machine gets one)
+smoo llm onboard --name ci-runner       # override the key name
+smoo llm onboard --credential-only      # store the key; leave default provider + routing alone
+smoo llm onboard --no-verify            # skip the proof call (output says it was skipped)
 ```
 
-Re-running is idempotent: an existing key of that name is a visible skip,
-never a second billable key behind the same label. The old value was shown
-once and cannot be re-read, so a skip has nothing to write — `--rotate` is
-how you get a value onto a new machine.
+**The org is chosen, never defaulted.** It takes a UUID or a name/slug
+substring; omitted, you get the same picker `smoo org switch` uses; with
+no TTY it is a hard error. Silently taking the active org would bill Big
+Smooth to whichever customer you last looked at.
 
-> ⚠️ **A new key gives attribution, not isolation.** LiteLLM enforces
-> budget at the **team** level and the team _is_ the org, so every key in
-> one org shares one budget and one fate. Big Smooth spent 95% of the
-> master org's lifetime budget and took smoo.ai's public chat agent down
-> with it — both were keys on the same team, and a separate key would not
-> have helped. Per-key spend in `LiteLLM_SpendLogs` is what a fresh key
-> buys you; `--org-id <other-org>` is what a blast radius costs.
+**Requires ADMIN on the target org** — every `llm-gateway` route is
+`requireOrgAdmin`-gated server-side, and this goes through that route as
+the logged-in user. A 403 is reported as "connecting Big Smooth to
+`<org>` needs ADMIN on that org", not a raw status line.
+
+Re-running is idempotent as _already connected_: the previous value was
+shown once and can't be re-read, so a skip has nothing to write.
+`--rotate` mints a fresh value and writes it.
+
+Big Smooth mints its **own named key** rather than the org's single
+`default` key. An org may already have a gateway key for its own reasons,
+and "the org has a key" is not "Big Smooth is onboarded"; a named key also
+keeps Big Smooth's spend separable in `LiteLLM_SpendLogs`.
+
+> ⚠️ **Same org means same budget.** LiteLLM enforces budget at the
+> **team** level and the team _is_ the org, so a second key on one org
+> gives attribution, not isolation — one budget, one fate. Big Smooth
+> spent 95% of the master org's budget and took smoo.ai's public chat
+> agent down with it; both were keys on the same team. Choosing a
+> different org is the only thing that changes the blast radius.
+
+> ⚠️ **Minting is not read-only.** The route runs `syncOrgLlmLimits`
+> first ("no cap, no key"), which re-stamps the org's tier budget onto its
+> team. That is the mechanism behind the outage above, so the command
+> says it happened. The resulting cap isn't returned by any API today.
 
 There is deliberately no `--max-budget` flag: `POST
 /organizations/{org}/llm-gateway/keys` accepts `{ name }` and nothing
@@ -598,7 +619,7 @@ monthly-sized number becomes an outage.
 
 The minted key value is shown exactly once — store it immediately, then
 wire it into the gateway provider with `th model login smooai-gateway`
-(or skip both steps with `smoo llm provision`).
+(or skip both steps with `smoo llm onboard`).
 `create-key` 409s if the org already has a key (rotate instead). Note
 this is the **static-key** model: a persistent virtual key, not the
 ephemeral JWT→session exchange originally sketched in pearl `th-f7b20f`

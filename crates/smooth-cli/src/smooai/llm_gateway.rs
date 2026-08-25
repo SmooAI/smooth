@@ -70,31 +70,36 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// One step: mint a named gateway key and write it straight into
-    /// `~/.smooth/providers.json`, so Big Smooth (`th code`, `th up`,
-    /// the daemon) can use it without a human ever seeing the value.
-    /// Signs in first if there's no Smoo AI session.
+    /// Connect Big Smooth to a Smoo AI org — sign in, mint a gateway
+    /// key ON THAT ORG, and write it into `~/.smooth/providers.json`
+    /// so `th code` / `th up` / the daemon can use it. The key value
+    /// never touches the terminal.
     ///
-    /// ISOLATION CAVEAT — read this before assuming a fresh key is a
-    /// blast shield. LiteLLM enforces budget at the TEAM level, and the
-    /// team IS the org, so every key minted into one org shares one
-    /// budget and one fate: exhaust it and every other key on that org
-    /// dies with yours. On 2026-08 Big Smooth spent 95% of the master
-    /// org's lifetime budget and took smoo.ai's public chat agent down
-    /// with it — a separate key would NOT have prevented that.
+    /// Big Smooth then spends against THAT ORG's LiteLLM team and
+    /// budget (`team_id == org_id`), so its usage bills to the org that
+    /// onboarded it. That is the whole point: today Big Smooth runs on
+    /// the master org's internal key, sharing a team with smoo.ai's
+    /// public chat agent — in 2026-08 it reached 95.3% of the team's
+    /// budget and took that agent down with it.
     ///
-    /// A new key gives ATTRIBUTION (per-key spend in
-    /// `LiteLLM_SpendLogs`). Only a DIFFERENT ORG gives ISOLATION —
-    /// pass `--org-id <other-org>` if this workload must not be able to
-    /// starve the rest.
+    /// WHICH ORG IS THE DECISION THAT MATTERS. Budget is enforced per
+    /// TEAM and the team IS the org, so the org you pick is the billing
+    /// account and the blast radius, both. A separate KEY on the same
+    /// org gives attribution (per-key spend in `LiteLLM_SpendLogs`), not
+    /// isolation. There is no silent default: pass `--org-id`, or pick
+    /// from your orgs interactively.
+    ///
+    /// Requires ADMIN on the target org — the API enforces it.
+    #[command(visible_alias = "onboard")]
     Provision {
         /// Key name, unique per org. Defaults to `big-smooth-<hostname>`
-        /// so spend is attributable to the machine that spent it.
+        /// so per-key spend names the machine that spent it.
         #[arg(long)]
         name: Option<String>,
-        /// Override the active org (see `overview` for the fallback
-        /// chain). This is the ONLY isolation boundary — see the
-        /// command description.
+        /// The org to connect Big Smooth to: a UUID, or a name/slug
+        /// substring matched against your orgs. Omit it and you get an
+        /// interactive picker — never a silent default, because picking
+        /// wrong bills Big Smooth to the wrong org.
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         #[command(flatten)]
@@ -402,6 +407,29 @@ fn sanitize_key_name(raw: &str) -> String {
     }
 }
 
+/// `Name (slug)` when we know them, else the bare id — the picker can
+/// hand back a UUID for a managed child org with no name attached.
+fn org_label(org: &super::OrgRef) -> String {
+    match (org.name.is_empty(), org.slug.is_empty()) {
+        (false, false) => format!("{} ({})", org.name, org.slug),
+        (false, true) => org.name.clone(),
+        _ => org.id.clone(),
+    }
+}
+
+/// The API gates every one of these routes on ADMIN of the target org
+/// (`requireOrgAdmin`). Say that in product terms — a raw `HTTP 403
+/// Forbidden: {"message":"Org admin role required"}` reads like a bug
+/// in the CLI, not a role the caller can go and ask for.
+fn admin_hint(e: anyhow::Error, org_label: &str) -> anyhow::Error {
+    if e.to_string().contains("HTTP 403") {
+        return e.context(format!(
+            "connecting Big Smooth to {org_label} needs ADMIN on that org — ask an admin to run this, or pick an org you administer"
+        ));
+    }
+    e
+}
+
 /// Is a key of this name already active on the org? Drives the
 /// idempotency check — the API 409s on a duplicate, but checking first
 /// makes the skip explicit instead of an error the user has to read.
@@ -497,10 +525,11 @@ async fn verify_gateway(api_url: &str, key: &str) -> Result<String> {
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools, reason = "one field per CLI switch — they are flags, not state")]
 pub struct ProvisionFlags {
-    /// Rotate an existing key of this name instead of stopping.
-    /// Without this, an existing name is a visible skip — the old value
-    /// was shown once and is not recoverable, so a re-run can't write
-    /// it anywhere.
+    /// Re-onboard: mint a fresh value for an org already connected.
+    /// Without this, an org that is already connected is a visible
+    /// skip — the previous value was shown once and cannot be re-read,
+    /// so a re-run has nothing to write. This is how a SECOND machine
+    /// gets a working key.
     #[arg(long)]
     rotate: bool,
     /// Store the credential only: don't make the gateway the default
@@ -533,13 +562,20 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
             UserClient::from_user_session().await?
         }
     };
-    let org = crate::active_org::resolve(org_id)?;
+    // Which org Big Smooth is onboarded onto is the billing account AND
+    // the blast radius, so it is chosen, never defaulted. Reuses the
+    // `th org switch` resolver: UUID → direct, name/slug → matched,
+    // omitted → interactive picker (and a hard error with no TTY).
+    let org_ref = super::resolve_switch_org(&client, org_id).await?;
+    let org = org_ref.id.clone();
+    let org_label = org_label(&org_ref);
     let name = name.map_or_else(default_key_name, |n| sanitize_key_name(&n));
     let path = providers_path()?;
 
     let list = client
         .get(&format!("/organizations/{org}/llm-gateway/keys"))
         .await
+        .map_err(|e| admin_hint(e, &org_label))
         .context("GET llm-gateway keys")?;
     let exists = key_exists(&list, &name);
 
@@ -547,30 +583,39 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
         // Idempotent: never stack a second key behind the same name. The
         // old value was shown once, so there is nothing to write either.
         if json {
-            print_json(&json!({ "org": org, "name": name, "action": "skipped", "reason": "key already exists" }));
+            print_json(&json!({ "org": org, "orgLabel": org_label, "name": name, "action": "already-onboarded" }));
         } else {
             println!();
-            println!("  {} key {} already exists on org {}", "○".yellow().bold(), name.bold(), org.dimmed());
-            println!("    {}", "skipped — its value was shown once and cannot be re-read".dimmed());
+            println!("  {} Big Smooth is already connected to {}", "○".yellow().bold(), org_label.bold());
+            println!("    {} {}", "key".dimmed(), name.dimmed());
             println!(
-                "    {} to mint a fresh value and write it: {}",
-                "→".dimmed(),
-                "th llm provision --rotate".bold()
+                "    {}",
+                "its value was shown once and cannot be re-read, so there is nothing to write".dimmed()
             );
+            println!("    {} new machine, or a lost value? {}", "→".dimmed(), "th llm onboard --rotate".bold());
+            println!("    {} different org? {}", "→".dimmed(), "th llm onboard --org-id <other-org>".bold());
             println!();
         }
         return Ok(());
     }
 
+    // Big Smooth mints its OWN NAMED key rather than the org's single
+    // `default` key: an org can already have a gateway key for its own
+    // reasons, and "the org has a key" is not "Big Smooth is onboarded".
+    // A named key also keeps Big Smooth's spend separable in
+    // `LiteLLM_SpendLogs` from whatever else the org runs. Same team, so
+    // same budget — attribution, not isolation.
     let resp = if exists {
         client
             .post(&format!("/organizations/{org}/llm-gateway/keys/{name}/rotate"), &json!({}))
             .await
+            .map_err(|e| admin_hint(e, &org_label))
             .context("POST llm-gateway named key rotate")?
     } else {
         client
             .post(&format!("/organizations/{org}/llm-gateway/keys"), &json!({ "name": name }))
             .await
+            .map_err(|e| admin_hint(e, &org_label))
             .context("POST llm-gateway named key")?
     };
     let key = resp.get("key").and_then(Value::as_str).context("gateway response carried no key value")?;
@@ -597,6 +642,7 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
     if json {
         print_json(&json!({
             "org": org,
+            "orgLabel": org_label,
             "name": name,
             "mask": mask,
             "action": if exists { "rotated" } else { "created" },
@@ -611,7 +657,7 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
     print_provision_summary(&Provisioned {
         exists,
         name: &name,
-        org: &org,
+        org: &org_label,
         mask,
         path: &path,
         backup: backup.as_deref(),
@@ -647,12 +693,13 @@ fn print_provision_summary(p: &Provisioned) {
     } = p;
     println!();
     println!(
-        "  {} {} key {} on org {}",
+        "  {} Big Smooth is connected to {}{}",
         "✓".green().bold(),
-        if exists { "rotated" } else { "minted" },
-        name.bold(),
-        org.dimmed()
+        org.bold(),
+        if exists { " (key rotated)" } else { "" }
     );
+    println!("    {} bills to that org — LiteLLM budget is per team, and the team IS the org", "$".dimmed());
+    println!("    {} {}", "key".dimmed(), name.dimmed());
     if !mask.is_empty() {
         println!("    {} {}", "mask".dimmed(), mask.dimmed());
     }
@@ -682,17 +729,32 @@ fn print_provision_summary(p: &Provisioned) {
         }
     }
     println!();
+    // Minting is NOT read-only: the route runs `syncOrgLlmLimits` first
+    // ("no cap, no key"), which stamps the org's tier budget onto the
+    // team. That is the mechanism behind the outage this command exists
+    // to fix, so it gets said out loud rather than happening quietly.
+    println!("  {} minting re-applied {}'s tier budget to its LiteLLM team.", "!".yellow(), org.bold());
     println!(
-        "  {} a new key gives {}, not isolation. Budget is enforced per {} — every key on org {} shares one budget.",
+        "    {} the resulting cap isn't readable from any API yet — check the LiteLLM team, or {}",
+        "→".dimmed(),
+        "th llm overview".bold()
+    );
+    println!();
+    println!(
+        "  {} a second key on the SAME org gives {}, not isolation — one budget, one fate.",
         "!".yellow(),
-        "attribution".bold(),
-        "team = org".bold(),
-        org.dimmed()
+        "attribution".bold()
     );
     println!(
-        "    {} to isolate this workload, provision it into a different org: {}",
+        "    {} connect to a different org: {}",
         "→".dimmed(),
-        "th llm provision --org-id <other-org>".bold()
+        "th llm onboard --org-id <other-org>".bold()
+    );
+    println!(
+        "    {} disconnect: {} then {}",
+        "→".dimmed(),
+        format!("th llm keys delete {name}").bold(),
+        "th model remove smooai-gateway".bold()
     );
     println!();
 }
@@ -700,7 +762,7 @@ fn print_provision_summary(p: &Provisioned) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod provision_tests {
-    use super::{back_up, key_exists, key_lost_message, sanitize_key_name, verify_gateway, verify_model, write_gateway_key};
+    use super::{admin_hint, back_up, key_exists, key_lost_message, org_label, sanitize_key_name, verify_gateway, verify_model, write_gateway_key};
 
     /// The API rejects anything outside `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
     /// with a 400, and a Mac's hostname routinely contains spaces and
@@ -853,6 +915,45 @@ mod provision_tests {
         let result = verify_gateway(&url, "sk-rejected").await;
         handle.join().ok();
         assert!(result.is_err(), "a 401 from the gateway must not read as verified");
+    }
+
+    fn org(id: &str, name: &str, slug: &str) -> crate::smooai::OrgRef {
+        crate::smooai::OrgRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            slug: slug.to_string(),
+        }
+    }
+
+    /// The org is the billing account, so it has to be named in the
+    /// output. The picker can hand back a bare UUID for a managed child
+    /// org, and "connected to (unnamed)" tells the user nothing.
+    #[test]
+    fn org_label_never_comes_out_empty() {
+        assert_eq!(org_label(&org("id-1", "Acme", "acme")), "Acme (acme)");
+        assert_eq!(org_label(&org("id-1", "Acme", "")), "Acme");
+        assert_eq!(org_label(&org("id-1", "", "")), "id-1");
+        assert_eq!(org_label(&org("id-1", "", "acme")), "id-1");
+    }
+
+    /// Every one of these routes is org-admin-gated server-side. A raw
+    /// `HTTP 403 Forbidden: {"message":"Org admin role required"}` reads
+    /// like a CLI bug; the caller needs to know it is a role they can go
+    /// and ask for, on a named org.
+    #[test]
+    fn a_403_explains_the_admin_requirement_and_names_the_org() {
+        let raw = anyhow::anyhow!(r#"POST https://api.smoo.ai/... returned HTTP 403 Forbidden: {{"message":"Org admin role required"}}"#);
+        let hinted = admin_hint(raw, "Acme (acme)").to_string();
+        assert!(hinted.contains("ADMIN"), "the 403 must name the role: {hinted}");
+        assert!(hinted.contains("Acme (acme)"), "the 403 must name the org: {hinted}");
+    }
+
+    /// …and only a 403. A 500 dressed up as a permissions problem sends
+    /// the user chasing a role they already have.
+    #[test]
+    fn other_failures_are_left_alone() {
+        let raw = anyhow::anyhow!("POST https://api.smoo.ai/... returned HTTP 500 Internal Server Error: boom");
+        assert!(!admin_hint(raw, "Acme").to_string().contains("ADMIN"));
     }
 
     /// The verification call must never resurrect a retired `smooth-*`
