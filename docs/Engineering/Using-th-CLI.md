@@ -540,6 +540,7 @@ can mint for a child org with `--org-id <child>` (the user JWT acts
 cross-org).
 
 ```bash
+smoo llm provision                      # sign in → mint → write providers.json → verify (value never printed)
 smoo llm overview                       # masked key + month-to-date spend (--json for raw)
 smoo llm create-key                     # mint the org's persistent key — prints the value ONCE
 smoo llm rotate-key                     # invalidate + reissue the persistent key (prints once)
@@ -554,8 +555,50 @@ smoo llm keys delete ci                 # revoke (soft-delete; name reusable lat
 smoo llm create-key --org-id <child>    # master admin minting for a child org
 ```
 
+#### `smoo llm provision` — the one-step path
+
+`create-key` / `keys create` print the value once and expect a human to
+paste it into `th model login`. `smoo llm provision` closes that loop: it
+reuses the Smoo session (signing in if there isn't one), mints
+`big-smooth-<hostname>`, backs up `~/.smooth/providers.json` to
+`providers.json.bak-<stamp>`, writes the key into the `smooai-gateway`
+provider with every routing slot pointed at it, and then makes one real
+call through the gateway to prove the key works. **The value never
+reaches the terminal** — the single exception is a failed write, where the
+key is already live and billable and losing it silently is worse.
+
+```bash
+smoo llm provision                      # default: name big-smooth-<hostname>, active org
+smoo llm provision --name ci-runner     # explicit name (sanitised to the API's rule)
+smoo llm provision --rotate             # existing name → mint a fresh value and write it
+smoo llm provision --credential-only    # store the key; leave default provider + routing alone
+smoo llm provision --no-verify          # skip the proof call (output says it was skipped)
+smoo llm provision --org-id <other-org> # the ONLY isolation boundary — see below
+```
+
+Re-running is idempotent: an existing key of that name is a visible skip,
+never a second billable key behind the same label. The old value was shown
+once and cannot be re-read, so a skip has nothing to write — `--rotate` is
+how you get a value onto a new machine.
+
+> ⚠️ **A new key gives attribution, not isolation.** LiteLLM enforces
+> budget at the **team** level and the team _is_ the org, so every key in
+> one org shares one budget and one fate. Big Smooth spent 95% of the
+> master org's lifetime budget and took smoo.ai's public chat agent down
+> with it — both were keys on the same team, and a separate key would not
+> have helped. Per-key spend in `LiteLLM_SpendLogs` is what a fresh key
+> buys you; `--org-id <other-org>` is what a blast radius costs.
+
+There is deliberately no `--max-budget` flag: `POST
+/organizations/{org}/llm-gateway/keys` accepts `{ name }` and nothing
+else, so the switch would be wired to nothing. When the route does take a
+cap, it must take the **window** with it — `max_budget` with no
+`budget_duration` is a lifetime cap that never resets, which is how a
+monthly-sized number becomes an outage.
+
 The minted key value is shown exactly once — store it immediately, then
-wire it into the gateway provider with `th model login smooai-gateway`.
+wire it into the gateway provider with `th model login smooai-gateway`
+(or skip both steps with `smoo llm provision`).
 `create-key` 409s if the org already has a key (rotate instead). Note
 this is the **static-key** model: a persistent virtual key, not the
 ephemeral JWT→session exchange originally sketched in pearl `th-f7b20f`
