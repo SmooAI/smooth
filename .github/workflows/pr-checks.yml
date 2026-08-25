@@ -93,6 +93,11 @@ jobs:
                           - 'go/**'
                           - 'scripts/build-smooth-dolt.sh'
                           - '.github/workflows/pr-checks.yml'
+                          # mise.toml pins the Go/Node/Python toolchains this
+                          # lane compiles with. Without it here a toolchain bump
+                          # touches no other path, so every step below gates off
+                          # and the job reports success having compiled nothing.
+                          - 'mise.toml'
 
             # One boolean instead of repeating the compound condition on a dozen
             # steps. `shell: bash` because the Windows leg defaults to pwsh,
