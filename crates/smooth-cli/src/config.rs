@@ -246,6 +246,12 @@ pub enum Cmd {
     /// schema. Prints a per-tier diff first; with `--dry-run`, stops
     /// after printing. To create a NEW remote schema, omit `--schema-name`
     /// and set `"$smooaiName": "<name>"` in schema.json.
+    ///
+    /// The push REPLACES the remote key set with the local one, so a
+    /// partial local schema removes every key it does not declare — across
+    /// every environment, production included. A push that removes keys or
+    /// changes a tier therefore confirms first, and refuses outright when
+    /// not attached to a terminal. Pure additions are not gated.
     Push {
         /// Override the active org.
         #[arg(long, visible_alias = "org")]
@@ -253,8 +259,8 @@ pub enum Cmd {
         /// Select an EXISTING remote schema to update (must match a
         /// schema already on the org). To CREATE a new schema instead,
         /// drop this flag and set `"$smooaiName": "<name>"` in
-        /// schema.json. Defaults to `$smooaiName`, falling back to the
-        /// first remote schema.
+        /// schema.json. Defaults to `$smooaiName`, then the org's only
+        /// remote schema; REQUIRED when the org has more than one.
         #[arg(long)]
         schema_name: Option<String>,
         /// Optional change description recorded with the new version.
@@ -263,6 +269,10 @@ pub enum Cmd {
         /// Compute + print the diff, but do not POST the new version.
         #[arg(long)]
         dry_run: bool,
+        /// Confirm a push that REMOVES keys, or changes a key's tier,
+        /// without the interactive prompt. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -294,8 +304,10 @@ pub enum Cmd {
         /// Override the active org.
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Schema name to compare against. Defaults to the first
-        /// remote schema.
+        /// Schema name to compare against. Defaults to `$smooaiName`, then
+        /// the org's only remote schema. Required when the org has more
+        /// than one — comparing against an arbitrary schema is how a push
+        /// ends up replacing the wrong key set.
         #[arg(long)]
         schema_name: Option<String>,
         /// Emit the diff as structured JSON instead of pretty-print.
@@ -307,13 +319,17 @@ pub enum Cmd {
         m2m: bool,
     },
     /// Reconcile the local `.smooai-config/schema.json` with the org's
-    /// remote schema. SAFE by design — direction is always explicit, never
-    /// a magic two-way merge:
+    /// remote schema. The direction is always explicit — never a magic
+    /// two-way merge:
     ///
     /// - `th config sync` → print the diff, then tell you which direction to
     ///   apply. Changes nothing.
-    /// - `th config sync --push` → apply local → remote (same as `push`).
+    /// - `th config sync --push` → apply local → remote (same as `push`,
+    ///   including its confirmation when the push REMOVES keys).
     /// - `th config sync --pull` → apply remote → local (same as `pull`).
+    ///   This OVERWRITES `.smooai-config/schema.json`, so it confirms first
+    ///   and refuses when not attached to a terminal; `--yes` skips the
+    ///   prompt.
     ///
     /// `--push` and `--pull` are mutually exclusive. `--dry-run` forces the
     /// diff-only behavior even when a direction is given.
@@ -341,6 +357,11 @@ pub enum Cmd {
         /// direction. Forces the same behavior as bare `th config sync`.
         #[arg(long)]
         dry_run: bool,
+        /// Confirm the overwrite without the interactive prompt: a
+        /// key-removing `--push`, or a `--pull` over an existing local
+        /// `schema.json`. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -428,6 +449,8 @@ pub enum Cmd {
         /// instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Manage an org's config environments (e.g. `production`,
     /// `staging`). Creating an environment is how a new org's config is
@@ -568,6 +591,9 @@ pub enum SchemaCmd {
         /// Print the would-be change without POSTing a new version.
         #[arg(long)]
         dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -765,7 +791,9 @@ pub enum EnvironmentsCmd {
         #[arg(long)]
         m2m: bool,
     },
-    /// Delete a config environment.
+    /// Delete a config environment. Irreversible — every value stored under
+    /// it goes with it. Prints the target (org + host) and requires typing
+    /// the environment id back; refuses when not attached to a terminal.
     Delete {
         /// The environment id (from `list`).
         env_id: String,
@@ -778,6 +806,8 @@ pub enum EnvironmentsCmd {
         /// Use the M2M session instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// List all config values set in an environment (across schemas).
     Values {
@@ -836,8 +866,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             schema_name,
             description,
             dry_run,
+            yes,
             m2m,
-        } => cmd_push(org_id, schema_name, description, dry_run, m2m).await,
+        } => cmd_push(org_id, schema_name, description, dry_run, yes, m2m).await,
         Cmd::Pull {
             org_id,
             schema_name,
@@ -857,8 +888,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             schema_name,
             json,
             dry_run,
+            yes,
             m2m,
-        } => cmd_sync(push, pull, org_id, schema_name, json, dry_run, m2m).await,
+        } => cmd_sync(push, pull, org_id, schema_name, json, dry_run, yes, m2m).await,
         Cmd::Build { directory, stdout, check } => cmd_build(directory, stdout, check),
         Cmd::Init { directory, force } => cmd_init(directory, force),
         Cmd::FeatureFlag {
@@ -875,7 +907,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org_id,
             force,
             m2m,
-        } => cmd_delete(key, environment, org_id, force, m2m).await,
+            confirm,
+        } => cmd_delete(key, environment, org_id, force, m2m, confirm).await,
         Cmd::Environments { cmd } => cmd_environments(cmd).await,
         Cmd::Limits { cmd } => cmd_limits(cmd).await,
         Cmd::Schema { cmd } => cmd_schema(cmd).await,
@@ -944,16 +977,34 @@ async fn cmd_environments(cmd: EnvironmentsCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
             println!();
         }
-        EnvironmentsCmd::Delete { env_id, org_id, json: _, m2m } => {
+        EnvironmentsCmd::Delete {
+            env_id,
+            org_id,
+            json: _,
+            m2m,
+            confirm,
+        } => {
             let cfg = ConfigClient::load(m2m).await?;
             let org = cfg.resolve_org(org_id)?;
-            let resp = cfg
-                .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
-                .await
-                .context("DELETE environment")?;
-            println!();
-            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
-            println!();
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "config environment",
+                    id: &env_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                confirm,
+            )?;
+            if proceed {
+                let resp = cfg
+                    .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
+                    .await
+                    .context("DELETE environment")?;
+                println!();
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                println!();
+            }
         }
         EnvironmentsCmd::Values { env_id, org_id, json: _, m2m } => {
             let cfg = ConfigClient::load(m2m).await?;
@@ -1506,9 +1557,25 @@ fn schemas_matching<'a>(schemas: &'a [Value], name: Option<&str>) -> Vec<&'a Val
         .collect()
 }
 
-async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool) -> Result<()> {
+async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool, confirm: crate::destructive::Confirm) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
+    // The environment is half the target and defaults to `development`, so
+    // it goes in the banner: `--env production` is one keystroke away and
+    // deleting a secret there is not recoverable from the CLI.
+    let proceed = crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb: "delete",
+            noun: "config value",
+            id: &format!("{key} @ {environment}"),
+            org: &org,
+            severity: crate::destructive::Severity::Irreversible,
+        },
+        confirm,
+    )?;
+    if !proceed {
+        return Ok(());
+    }
     let mut path = format!(
         "/organizations/{org}/config/values/{}?environment={}",
         urlencoding::encode(&key),
@@ -2035,7 +2102,15 @@ fn load_local_schema_json() -> Result<(std::path::PathBuf, Value)> {
 /// Resolve which remote schema to act on. Order:
 /// 1. `--schema-name` flag (errors if no match)
 /// 2. `$smooaiName` inside the local schema.json (errors if no match)
-/// 3. First remote schema in the list (or `None` if there are none)
+/// 3. The only remote schema, when there is exactly one
+///
+/// With more than one remote schema and nothing to disambiguate, this
+/// ERRORS rather than guessing (pearl th-db25d4 item 5). It used to return
+/// `remote_schemas.first()` — an arbitrary pick from an unordered API
+/// response — and `cmd_push` then REPLACED that schema's whole key set with
+/// whatever the local `schema.json` happened to hold. `resolve_pull_schema`
+/// below already refused to guess in exactly this situation; push, the side
+/// that writes, was the lenient one.
 fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local_schema: Option<&Value>) -> Result<Option<&'a Value>> {
     let by_name = |name: &str| -> Option<&Value> { remote_schemas.iter().find(|s| s.get("name").and_then(|v| v.as_str()) == Some(name)) };
     if let Some(name) = flag {
@@ -2059,6 +2134,19 @@ fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local
             // caller knows to create.
             return Ok(by_name(name));
         }
+    }
+    if remote_schemas.len() > 1 {
+        let available: Vec<String> = remote_schemas
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        anyhow::bail!(
+            "this org has {} remote schemas and nothing says which one to act on. \
+             Refusing to guess — picking the wrong one replaces its entire key set. \
+             Pass `--schema-name <name>`, or add \"$smooaiName\" to .smooai-config/schema.json. Available: {}.",
+            remote_schemas.len(),
+            available.join(", ")
+        );
     }
     Ok(remote_schemas.first())
 }
@@ -2107,7 +2195,20 @@ async fn list_schemas(client: &ConfigClient, org: &str) -> Result<Vec<Value>> {
     Ok(arr)
 }
 
-async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, description: Option<String>, dry_run: bool, m2m: bool) -> Result<()> {
+/// Does this push take something away from the remote schema?
+///
+/// Pearl th-db25d4 item 5: `push` REPLACES the stored key set, so a removal
+/// is not "a key you forgot to add" — it is a key that stops resolving for
+/// every consumer, in every environment, production included. Additions are
+/// harmless and stay unprompted; removals and tier changes are the two that
+/// take something away, so they are what the gate keys off.
+///
+/// Pure so the classification is testable without a live org.
+fn push_is_destructive(diff: &SchemaDiff) -> bool {
+    !diff.removed.is_empty() || !diff.tier_changed.is_empty()
+}
+
+async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, description: Option<String>, dry_run: bool, yes: bool, m2m: bool) -> Result<()> {
     let (local_path, local_schema) = load_local_schema_json()?;
 
     let cfg = ConfigClient::load(m2m).await?;
@@ -2141,6 +2242,34 @@ async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, descripti
         println!("  {} already in sync", "✓".green().bold());
         println!();
         return Ok(());
+    }
+
+    // The diff above already printed exactly which keys go and which tiers
+    // move — that listing IS the dry run, and it is worth more than a y/n.
+    // The gate only decides whether to act on it.
+    if push_is_destructive(&diff) {
+        let target = format!(
+            "{} ({} key(s) removed, {} tier change(s))",
+            resolved_name.as_deref().unwrap_or("(unnamed)"),
+            diff.removed.len(),
+            diff.tier_changed.len()
+        );
+        let proceed = crate::destructive::gate(
+            &crate::destructive::Target {
+                verb: "replace the key set of",
+                noun: "config schema",
+                id: &target,
+                org: &org,
+                severity: crate::destructive::Severity::Irreversible,
+            },
+            // `--dry-run` already returned above, so this call is only ever
+            // reached for a real push.
+            false,
+            yes,
+        )?;
+        if !proceed {
+            return Ok(());
+        }
     }
 
     // POST the schema in the JSON-Schema shape the server stores (it persists
@@ -2291,7 +2420,7 @@ fn decide_sync_direction(push: bool, pull: bool, dry_run: bool) -> SyncDirection
 /// delegates to `cmd_diff` / `cmd_push` / `cmd_pull` rather than
 /// re-implementing any HTTP logic.
 #[allow(clippy::too_many_arguments)]
-async fn cmd_sync(push: bool, pull: bool, org_id: Option<String>, schema_name: Option<String>, json: bool, dry_run: bool, m2m: bool) -> Result<()> {
+async fn cmd_sync(push: bool, pull: bool, org_id: Option<String>, schema_name: Option<String>, json: bool, dry_run: bool, yes: bool, m2m: bool) -> Result<()> {
     match decide_sync_direction(push, pull, dry_run) {
         SyncDirection::DiffOnly => {
             // Reuse the read-only diff renderer (same comparison the
@@ -2308,11 +2437,36 @@ async fn cmd_sync(push: bool, pull: bool, org_id: Option<String>, schema_name: O
         // local → remote: identical to `th config push`. The `pull`-path
         // multi-schema guard (`resolve_pull_schema`) lives inside
         // `cmd_pull`; the push path uses `pick_remote_schema`.
-        SyncDirection::Push => cmd_push(org_id, schema_name, None, false, m2m).await,
-        // remote → local: identical to `th config pull`. `--force` is true
-        // here because sync's whole job is to reconcile an existing file;
-        // refusing on an existing schema.json would defeat the command.
-        SyncDirection::Pull => cmd_pull(org_id, schema_name, true, m2m).await,
+        SyncDirection::Push => cmd_push(org_id, schema_name, None, false, yes, m2m).await,
+        // remote → local: identical to `th config pull`. Sync's job IS to
+        // reconcile an existing file, so `cmd_pull`'s `--force` gate has to
+        // be satisfied — but hard-coding `force = true` (pearl th-db25d4
+        // item 5) meant the one guard standing between a hand-written
+        // schema.json and a silent overwrite was defeated from inside the
+        // CLI, under a doc comment that called sync "SAFE by design".
+        // Ask instead: `--yes` passes straight through, a terminal confirms,
+        // and a script with neither refuses.
+        SyncDirection::Pull => {
+            let cwd = std::env::current_dir().context("get current dir")?;
+            let local = cwd.join(".smooai-config").join("schema.json");
+            if local.exists() {
+                let proceed = crate::destructive::gate(
+                    &crate::destructive::Target {
+                        verb: "overwrite",
+                        noun: "local file",
+                        id: &local.display().to_string(),
+                        org: &org_id.clone().unwrap_or_else(|| "(active org)".to_string()),
+                        severity: crate::destructive::Severity::Standard,
+                    },
+                    false,
+                    yes,
+                )?;
+                if !proceed {
+                    return Ok(());
+                }
+            }
+            cmd_pull(org_id, schema_name, true, m2m).await
+        }
     }
 }
 
@@ -2947,6 +3101,7 @@ async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
             schema_name,
             org_id,
             dry_run,
+            yes,
             m2m,
         } => {
             println!();
@@ -2954,6 +3109,21 @@ async fn cmd_schema(cmd: SchemaCmd) -> Result<()> {
                 "  {} values set for this key are not deleted — use `th config delete {key}` for those",
                 "!".yellow().bold()
             );
+            let org_for_banner = org_id.clone().unwrap_or_else(|| "(active org)".to_string());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "remove",
+                    noun: "schema key declaration",
+                    id: &key,
+                    org: &org_for_banner,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if !proceed {
+                return Ok(());
+            }
             cmd_schema_patch(schema_name, org_id, dry_run, m2m, format!("th config schema rm {key}"), move |doc| {
                 schema_patch_rm(doc, &key, tier)
             })
@@ -4315,11 +4485,78 @@ mod tests {
         assert!(picked.is_none(), "expected None, got {picked:?}");
     }
 
+    /// Pearl th-db25d4 item 5. This test used to assert the OPPOSITE — that
+    /// an ambiguous pick silently returns `remote_schemas[0]` — which locked
+    /// the defect in: `cmd_push` then REPLACED that arbitrarily-chosen
+    /// schema's entire key set with the local file, across every environment
+    /// including production. `resolve_pull_schema` had refused to guess in
+    /// this exact situation the whole time; only the writing side guessed.
     #[test]
-    fn pick_remote_schema_falls_back_to_first() {
+    fn pick_remote_schema_refuses_to_guess_between_several() {
         let schemas = vec![serde_json::json!({"id": "1", "name": "alpha"}), serde_json::json!({"id": "2", "name": "beta"})];
+        let err = pick_remote_schema(&schemas, None, None).expect_err("must not guess which schema to replace");
+        let msg = format!("{err}");
+        assert!(msg.contains("Refusing to guess"), "{msg}");
+        assert!(msg.contains("alpha") && msg.contains("beta"), "must list the options: {msg}");
+    }
+
+    /// One remote schema is not ambiguous — auto-select stays.
+    #[test]
+    fn pick_remote_schema_auto_selects_the_only_one() {
+        let schemas = vec![serde_json::json!({"id": "1", "name": "alpha"})];
         let picked = pick_remote_schema(&schemas, None, None).expect("ok").expect("some");
         assert_eq!(picked.get("id").and_then(|v| v.as_str()), Some("1"));
+    }
+
+    /// A fresh org with no remote schemas is the create path, not an error.
+    #[test]
+    fn pick_remote_schema_empty_remote_is_the_create_path() {
+        assert!(pick_remote_schema(&[], None, None).expect("ok").is_none());
+    }
+
+    /// Pearl th-db25d4 item 5: which pushes have to confirm. Additions take
+    /// nothing away and stay unprompted — gating them would train people to
+    /// mash `--yes`, which is how the gate stops working.
+    #[test]
+    fn only_pushes_that_take_something_away_are_gated() {
+        let key = |k: &str| TieredKey {
+            key: k.to_string(),
+            tier: "secret".to_string(),
+        };
+
+        let additions_only = SchemaDiff {
+            added: vec![key("newKey")],
+            removed: vec![],
+            tier_changed: vec![],
+        };
+        assert!(!push_is_destructive(&additions_only), "a pure addition must not prompt");
+
+        let removes = SchemaDiff {
+            added: vec![],
+            removed: vec![key("databaseUrl")],
+            tier_changed: vec![],
+        };
+        assert!(push_is_destructive(&removes), "removing a key must prompt");
+
+        let retiers = SchemaDiff {
+            added: vec![],
+            removed: vec![],
+            tier_changed: vec![TierChange {
+                key: "apiKey".to_string(),
+                from: "secret".to_string(),
+                to: "public".to_string(),
+            }],
+        };
+        assert!(push_is_destructive(&retiers), "moving a secret to public must prompt");
+
+        // The dangerous shape in the wild: a feature-branch dev whose local
+        // schema.json holds only their own new key.
+        let partial_local = SchemaDiff {
+            added: vec![key("myNewFlag")],
+            removed: vec![key("databaseUrl"), key("stripeSecretKey"), key("cdnUrl")],
+            tier_changed: vec![],
+        };
+        assert!(push_is_destructive(&partial_local));
     }
 
     #[test]

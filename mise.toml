@@ -1,0 +1,16 @@
+# Toolchain versions for this repo — read by mise locally and by
+# jdx/mise-action in CI, so a developer's shell and the runner agree.
+#
+# Not listed here on purpose:
+#   pnpm  -> package.json "packageManager". pnpm self-substitutes to that
+#            version regardless of which pnpm binary launches it, so a mise
+#            pin would be cosmetic and would drift.
+#   dotnet-> actions/setup-dotnet. It installs several SDKs side by side;
+#            mise's dotnet backend pins one.
+#   rust  -> rust-toolchain.toml + dtolnay/rust-toolchain. rustup is canonical
+#            and mise defers to it anyway.
+[tools]
+node = "24.14.0" # ships npm 11.9.0 — required (>=11.5.1) for npm OIDC trusted publishing
+python = "3.13"
+go = "1.26"
+uv = "latest"

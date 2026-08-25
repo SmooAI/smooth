@@ -17,6 +17,7 @@ mod claude;
 mod config;
 mod daemon_health;
 mod daemon_launcher;
+mod destructive;
 mod ext;
 mod fda;
 mod gradient;
@@ -3244,12 +3245,34 @@ async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<
     Ok(())
 }
 
+/// `reqwest` only returns `Err` when the request never completed. A 404 or a
+/// 500 is a perfectly successful *round trip*, so `Ok(_)` says nothing about
+/// whether the server did the thing (pearl th-db25d4 item 7). Both `th approve`
+/// and `th steer` used to print their success line on `Ok(_)` and exit 0 —
+/// telling an operator a review was approved when the daemon had never heard
+/// of the bead.
+///
+/// Every non-2xx becomes an `Err` here, carrying the status and whatever the
+/// body said, so the caller's `?` gives it a non-zero exit.
+fn require_success(status: reqwest::StatusCode, url: &str, body: &str) -> Result<()> {
+    if status.is_success() {
+        return Ok(());
+    }
+    let detail = body.trim();
+    if detail.is_empty() {
+        anyhow::bail!("POST {url} returned HTTP {status}");
+    }
+    anyhow::bail!("POST {url} returned HTTP {status}: {detail}")
+}
+
 async fn cmd_approve(bead_id: &str) -> Result<()> {
     let client = reqwest::Client::new();
-    match client.post(format!("http://localhost:4400/api/reviews/{bead_id}/approve")).send().await {
-        Ok(_) => println!("Approved: {bead_id}"),
-        Err(e) => println!("Error: {e}"),
-    }
+    let url = format!("http://localhost:4400/api/reviews/{bead_id}/approve");
+    let resp = client.post(&url).send().await.with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    require_success(status, &url, &body)?;
+    println!("Approved: {bead_id}");
     Ok(())
 }
 
@@ -3257,13 +3280,12 @@ async fn cmd_steer(bead_id: &str, action: &str, message: Option<&str>) -> Result
     let client = reqwest::Client::new();
     let url = format!("http://localhost:4400/api/steering/{bead_id}/{action}");
     let body = message.map_or(serde_json::json!({}), |m| serde_json::json!({"message": m}));
-    match client.post(&url).json(&body).send().await {
-        Ok(resp) => {
-            let json: serde_json::Value = resp.json().await?;
-            println!("{}: {}", action, json["data"].as_str().unwrap_or("ok"));
-        }
-        Err(e) => println!("Error: {e}"),
-    }
+    let resp = client.post(&url).json(&body).send().await.with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    require_success(status, &url, &text)?;
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    println!("{}: {}", action, json["data"].as_str().unwrap_or("ok"));
     Ok(())
 }
 
@@ -4704,7 +4726,25 @@ async fn jira_sync_push(
                     title: Some(format!("{}: {}", ticket.key, sync_pearl.title)),
                     ..Default::default()
                 };
-                let _ = store.update(&sync_pearl.id, &update);
+                // This write is the ONLY record that the ticket exists.
+                // `plan_sync` decides a pearl is unkeyed by looking for a
+                // `SMOODEV-…` key in its TITLE (`smooth-diver/src/jira.rs`
+                // `extract_keys`), so if the title never gets the key, the
+                // next run classifies the pearl as unkeyed again and files
+                // ANOTHER production Jira ticket — forever, one per run.
+                // A `let _ =` here printed "↑ id → KEY" over exactly that.
+                if let Err(e) = store.update(&sync_pearl.id, &update) {
+                    eprintln!(
+                        "  {} created {} but could not record it on pearl {}: {e}\n      \
+                         Put `{}: ` at the front of the pearl title by hand, or the next \
+                         `th jira sync --push` will file a DUPLICATE ticket.",
+                        "✗".red(),
+                        ticket.key,
+                        sync_pearl.id,
+                        ticket.key
+                    );
+                    continue;
+                }
                 println!("  {} {} → {}", "↑".green(), sync_pearl.id, ticket.key);
                 pushed += 1;
             }
@@ -4769,7 +4809,47 @@ fn sync_push_pearl_state(dolt_dir: &std::path::Path) {
                 set_upstream: true,
             });
         }
-        Err(e) => tracing::debug!(error = %e, "pearl push skipped (no remote / offline)"),
+        Err(e) => match classify_push_error(&e) {
+            // The only genuinely quiet case: nowhere to push to.
+            PushOutcome::NoRemote => tracing::debug!(error = %e, "pearl push skipped (no remote configured)"),
+            PushOutcome::Fatal => {
+                tracing::warn!(error = %e, "pearl push FAILED — this state is local-only until it succeeds");
+                eprintln!(
+                    "  {} pearl push failed — your pearls are local-only until this succeeds: {e:#}",
+                    "!".yellow().bold()
+                );
+            }
+        },
+    }
+}
+
+/// How `sync_push_pearl_state` should react to a push error.
+///
+/// Pearl th-db25d4 item 7: the `Err(e)` arm used to funnel EVERY failure into
+/// `tracing::debug!("no remote / offline")` — a message that is only true for
+/// one of them. An expired SSH key, a rejected non-fast-forward, a wedged
+/// lock: all silently reclassified as "nothing to push to", at a level nobody
+/// sees, so pearls sat un-pushed on one laptop for weeks while every command
+/// reported success. `is_no_remote_error` — the predicate that draws the real
+/// line — was defined in this same file and never consulted.
+///
+/// Pulled out as a pure function so the routing itself is testable: the bug
+/// was never in the predicate, it was in which errors reached it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushOutcome {
+    /// No remote is configured (the global `~/.smooth/dolt` store, or a
+    /// project with no origin). Nothing to report.
+    NoRemote,
+    /// A real failure. The user's pearls are local-only until it is fixed,
+    /// so say so out loud.
+    Fatal,
+}
+
+fn classify_push_error(e: &anyhow::Error) -> PushOutcome {
+    if is_no_remote_error(e) {
+        PushOutcome::NoRemote
+    } else {
+        PushOutcome::Fatal
     }
 }
 
@@ -6797,6 +6877,75 @@ mod push_error_predicate_tests {
         assert!(!is_no_remote_error(&e));
         assert!(!is_no_common_ancestor_error(&e));
     }
+
+    /// Pearl th-db25d4 item 7. `sync_push_pearl_state` funnelled EVERY push
+    /// error into `tracing::debug!("no remote / offline")`, so an expired SSH
+    /// key or a rejected non-fast-forward looked exactly like a laptop with
+    /// no remote configured — and pearls lived only locally for weeks with
+    /// nothing on screen.
+    ///
+    /// This asserts the ROUTING, not the predicate. `is_no_remote_error` was
+    /// always correct; the bug was that nothing called it, so a test of the
+    /// predicate alone would have passed throughout the outage.
+    #[test]
+    fn real_push_failures_route_to_fatal_not_silence() {
+        for msg in [
+            "Permission denied (publickey).",
+            "git@github.com: Permission denied (publickey). fatal: Could not read from remote repository.",
+            "error: failed to push some refs",
+            "Updates were rejected because the remote contains work that you do not have locally",
+            "Error 1105: database is locked",
+            "dial tcp: i/o timeout",
+        ] {
+            assert_eq!(
+                classify_push_error(&err(msg)),
+                PushOutcome::Fatal,
+                "`{msg}` would be swallowed as a quiet no-remote no-op, hiding an un-pushed pearl store"
+            );
+        }
+    }
+
+    /// The one case that IS legitimately silent stays silent — otherwise the
+    /// fix just trades a hidden failure for a nag on every command run in the
+    /// global store.
+    #[test]
+    fn a_genuinely_absent_remote_stays_quiet() {
+        assert_eq!(classify_push_error(&err("fatal: remote not found: origin")), PushOutcome::NoRemote);
+        assert_eq!(classify_push_error(&err("no configured push destination")), PushOutcome::NoRemote);
+    }
+}
+
+#[cfg(test)]
+mod http_status_tests {
+    use super::require_success;
+
+    /// Pearl th-db25d4 item 7: `th approve` matched on `Ok(_)` from
+    /// `reqwest::send()` and printed "Approved: <id>" for ANY status. A 404
+    /// from the daemon — bead does not exist — read as approval, and the
+    /// command exited 0 so nothing downstream noticed either.
+    #[test]
+    fn non_2xx_is_an_error_not_a_success() {
+        for code in [400_u16, 401, 403, 404, 409, 500, 502, 503] {
+            let status = reqwest::StatusCode::from_u16(code).expect("valid status");
+            let err = require_success(status, "http://localhost:4400/api/reviews/x/approve", "").expect_err("HTTP {code} must not read as success");
+            assert!(format!("{err}").contains(&code.to_string()), "error should name the status: {err}");
+        }
+    }
+
+    /// The server's own explanation is the useful part — keep it.
+    #[test]
+    fn error_carries_the_response_body() {
+        let err = require_success(reqwest::StatusCode::NOT_FOUND, "http://x/y", "no such bead").expect_err("404");
+        assert!(format!("{err}").contains("no such bead"), "{err}");
+    }
+
+    #[test]
+    fn success_codes_pass() {
+        for code in [200_u16, 201, 202, 204] {
+            let status = reqwest::StatusCode::from_u16(code).expect("valid status");
+            assert!(require_success(status, "http://x/y", "").is_ok(), "HTTP {code} should pass");
+        }
+    }
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
@@ -6861,19 +7010,26 @@ fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
                 Ok(issue) => {
                     // If the bead was closed/in_progress/deferred, update status
                     let target_status = smooth_pearls::PearlStatus::from_str_loose(status);
+                    let mut status_note = String::new();
                     if let Some(st) = target_status {
                         if st != smooth_pearls::PearlStatus::Open {
-                            let _ = store.update(
+                            // Discarding this printed a ✓ for a pearl
+                            // migrated with the WRONG status — a closed bead
+                            // silently reappearing as open work
+                            // (pearl th-db25d4 item 7).
+                            if let Err(e) = store.update(
                                 &issue.id,
                                 &smooth_pearls::PearlUpdate {
                                     status: Some(st),
                                     ..Default::default()
                                 },
-                            );
+                            ) {
+                                status_note = format!(" {} status stayed `open` ({e})", "!".yellow());
+                            }
                         }
                     }
                     migrated += 1;
-                    println!("  {} {} ← {}", "✓".green(), issue.id, bead_title.dimmed());
+                    println!("  {} {} ← {}{status_note}", "✓".green(), issue.id, bead_title.dimmed());
                 }
                 Err(e) => {
                     skipped += 1;
@@ -9392,6 +9548,91 @@ mod cli_dispatch_tests {
     #[test]
     fn command_definitions_are_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    /// Pearl th-db25d4 item 8: every remote delete/revoke verb must carry the
+    /// `--dry-run` / `--yes` pair that `destructive::gate` keys off.
+    ///
+    /// This walks the WHOLE command tree rather than listing the nine verbs
+    /// the audit happened to name. A hand-written list of call sites drifts
+    /// the moment someone adds the tenth — and an ungated delete is exactly
+    /// the bug this pearl is about: it fires against `api.smoo.ai` on the
+    /// first keystroke, using whichever org was last persisted as active.
+    ///
+    /// Local-only verbs are exempt: nothing leaves the machine, so there is
+    /// no production blast radius to gate.
+    #[test]
+    fn every_remote_delete_verb_is_gated_by_dry_run_and_yes() {
+        /// Command paths that delete purely local state (pearl store, mail
+        /// store, on-disk config, local processes). Prefix match on the
+        /// space-joined path from the root.
+        const LOCAL_ONLY: &[&str] = &[
+            "th pearls",
+            "th msg",
+            "th mail",
+            "th agent",
+            "th memory",
+            "th remember",
+            "th recall",
+            "th ext",
+            "th skill",
+            "th worktree",
+            "th service",
+            "th cast",
+            "th bench",
+            "th schedule",
+            "th config init",
+            "th config build",
+            // Local files on this machine: harness configs, plugin dirs,
+            // provider/model registries, credential profiles.
+            "th mcp",
+            "th plugin",
+            "th providers",
+            "th model",
+            "th auth profile",
+            "th smoo auth profile",
+        ];
+
+        fn is_delete_verb(name: &str) -> bool {
+            matches!(name, "delete" | "rm" | "rmdir" | "remove" | "revoke" | "destroy" | "purge")
+        }
+
+        fn walk(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                if LOCAL_ONLY.iter().any(|p| here.starts_with(p)) {
+                    continue;
+                }
+                if is_delete_verb(sub.get_name()) && sub.get_subcommands().next().is_none() {
+                    let has = |long: &str| sub.get_arguments().any(|a| a.get_long() == Some(long));
+                    if !has("dry-run") || !has("yes") {
+                        offenders.push(here.clone());
+                    }
+                }
+                walk(sub, &here, offenders);
+            }
+        }
+
+        let cmd = Cli::command();
+        let mut offenders = Vec::new();
+        walk(&cmd, "th", &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "these remote delete verbs hit production with no confirmation — wire them through \
+             `destructive::gate` (or add them to LOCAL_ONLY if they only touch this machine): {offenders:#?}"
+        );
+    }
+
+    /// Positive control for the sweep above: it must actually be looking at
+    /// something. A tree walk that silently matches nothing passes forever.
+    #[test]
+    fn the_delete_verb_sweep_actually_finds_delete_verbs() {
+        fn count(cmd: &clap::Command) -> usize {
+            let mine = usize::from(matches!(cmd.get_name(), "delete" | "rm" | "revoke"));
+            mine + cmd.get_subcommands().map(count).sum::<usize>()
+        }
+        let found = count(&Cli::command());
+        assert!(found >= 9, "expected the audited delete verbs to be reachable, found {found}");
     }
 
     /// Pearl th-91de11: `main`'s dispatch used to end in a `Some(_) =>` arm that

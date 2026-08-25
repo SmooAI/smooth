@@ -431,13 +431,20 @@ pub enum StagesCmd {
         #[arg(long)]
         color: Option<String>,
     },
-    /// Delete a pipeline stage.
+    /// Delete a pipeline stage. Prints the target (org + host) and
+    /// confirms before acting; refuses when not attached to a terminal.
     Delete {
         /// The stage id from `th api crm stages list`.
         stage_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Reorder stages — pass ids in the desired board order.
     Reorder {
@@ -543,13 +550,20 @@ pub enum TasksCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a task.
+    /// Delete a task. Prints the target (org + host) and confirms before
+    /// acting; refuses when not attached to a terminal.
     Rm {
         /// The task id from `th api crm tasks list`.
         task_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1859,13 +1873,26 @@ async fn stages(cmd: StagesCmd) -> Result<()> {
                 .context("PATCH stage")?;
             println!("  {} updated stage {}", "↻".yellow(), stage_id.dimmed());
         }
-        StagesCmd::Delete { stage_id, org } => {
+        StagesCmd::Delete { stage_id, org, dry_run, yes } => {
             let org = resolve_org(org)?;
-            client
-                .delete(&format!("/organizations/{org}/crm/stages/{stage_id}"))
-                .await
-                .context("DELETE stage")?;
-            println!("  {} deleted stage {}", "✗".red(), stage_id.dimmed());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "pipeline stage",
+                    id: &stage_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                client
+                    .delete(&format!("/organizations/{org}/crm/stages/{stage_id}"))
+                    .await
+                    .context("DELETE stage")?;
+                println!("  {} deleted stage {}", "✗".red(), stage_id.dimmed());
+            }
         }
         StagesCmd::Reorder { ids, org } => {
             let org = resolve_org(org)?;
@@ -2070,13 +2097,26 @@ async fn tasks(cmd: TasksCmd) -> Result<()> {
                 .context("POST task complete")?;
             println!("  {} completed task {}", "✓".green().bold(), task_id.dimmed());
         }
-        TasksCmd::Rm { task_id, org } => {
+        TasksCmd::Rm { task_id, org, dry_run, yes } => {
             let org = resolve_org(org)?;
-            client
-                .delete(&format!("/organizations/{org}/crm/tasks/{task_id}"))
-                .await
-                .context("DELETE task")?;
-            println!("  {} deleted task {}", "✗".red(), task_id.dimmed());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "task",
+                    id: &task_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                client
+                    .delete(&format!("/organizations/{org}/crm/tasks/{task_id}"))
+                    .await
+                    .context("DELETE task")?;
+                println!("  {} deleted task {}", "✗".red(), task_id.dimmed());
+            }
         }
     }
     Ok(())

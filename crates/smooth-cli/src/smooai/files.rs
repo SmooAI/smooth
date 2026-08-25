@@ -136,19 +136,27 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a file.
+    /// Delete a file. Prints the target (org + host) and confirms before
+    /// acting; refuses when not attached to a terminal.
     Rm {
         /// The file id.
         file_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
-    /// Delete a folder and its contents (blocked if the subtree is deletion-locked).
+    /// Delete a folder and its contents (blocked if the subtree is
+    /// deletion-locked). Takes the whole subtree, so it prints the target
+    /// (org + host) and requires typing the folder id back; refuses when not
+    /// attached to a terminal.
     Rmdir {
         /// The folder id.
         folder_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Set a deletion lock on a file or folder (org admin only).
     Lock {
@@ -355,18 +363,42 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("PATCH folder")?,
             );
         }
-        Cmd::Rm { file_id, org } => {
+        Cmd::Rm { file_id, org, confirm } => {
             let o = require_active_org(&client, org)?;
-            print_json(&client.delete(&format!("/organizations/{o}/files/{file_id}")).await.context("DELETE file")?);
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "file",
+                    id: &file_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(&client.delete(&format!("/organizations/{o}/files/{file_id}")).await.context("DELETE file")?);
+            }
         }
-        Cmd::Rmdir { folder_id, org } => {
+        Cmd::Rmdir { folder_id, org, confirm } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{o}/folders/{folder_id}"))
-                    .await
-                    .context("DELETE folder")?,
-            );
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "folder and its contents",
+                    id: &folder_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Irreversible,
+                },
+                confirm,
+            )?;
+            if proceed {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/folders/{folder_id}"))
+                        .await
+                        .context("DELETE folder")?,
+                );
+            }
         }
         Cmd::Lock { kind, id, org } => {
             let o = require_active_org(&client, org)?;

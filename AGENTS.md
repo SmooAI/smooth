@@ -44,4 +44,5 @@ recorded handle → `user@host`; set `$SMOOTH_HARNESS` so others can see what to
 you are, and `th agent claim <handle>` to take a durable name (your mail comes
 with it). The mailbox is machine-local, so there is nothing to push or pull —
 `--no-push`/`--pull` still parse but do nothing.
+
 <!-- th:agent-messaging:end -->

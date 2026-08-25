@@ -119,10 +119,18 @@ async fn post_cost(State(state): State<AppState>, Path(id): Path<String>, Json(m
 }
 
 /// Post a session message and sync to Jira as a comment.
+///
+/// The local write is the durable half — the Jira mirror below is
+/// best-effort. A `let _ =` on it returned 201 CREATED for a message that
+/// was never stored (pearl th-db25d4 item 7), so a failed store now answers
+/// 500 and the caller can retry.
 async fn post_message(State(state): State<AppState>, Path(id): Path<String>, Json(msg): Json<SessionMessage>) -> StatusCode {
     // Save as pearl comment for local tracking
     let comment_text = format!("[{} → {}] {}", msg.from, msg.to, msg.content);
-    let _ = state.store.pearl_store().add_comment(&id, &comment_text);
+    if let Err(e) = state.store.pearl_store().add_comment(&id, &comment_text) {
+        tracing::error!(error = %e, pearl = %id, "diver: failed to store session message");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
 
     // Sync to Jira if configured
     if let Some(ref jira) = state.jira {

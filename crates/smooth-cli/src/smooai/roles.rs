@@ -65,13 +65,21 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Delete a custom role (system roles cannot be deleted).
+    /// Delete a custom role (system roles cannot be deleted). Prints the
+    /// target (org + host) and confirms before acting; refuses when not
+    /// attached to a terminal.
     Delete {
         /// The role to delete (name or id).
         role: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
     /// Add permission keys to a role, preserving every existing key.
     Grant {
@@ -84,11 +92,15 @@ pub enum Cmd {
         org: Option<String>,
     },
     /// Remove permission keys from a role, preserving every other key.
+    /// Prints the target (org + host) and confirms before acting; refuses
+    /// when not attached to a terminal.
     Revoke {
         /// The role (name or id).
         role: String,
         /// Permission keys to remove.
         keys: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -147,9 +159,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             template,
             org,
         } => create(&client, resolve_org(org)?, &name, description, template).await,
-        Cmd::Delete { role, org } => delete(&client, resolve_org(org)?, &role).await,
+        Cmd::Delete { role, org, dry_run, yes } => delete(&client, resolve_org(org)?, &role, dry_run, yes).await,
         Cmd::Grant { role, keys, org } => grant(&client, resolve_org(org)?, &role, &keys).await,
-        Cmd::Revoke { role, keys, org } => revoke(&client, resolve_org(org)?, &role, &keys).await,
+        Cmd::Revoke { role, keys, org, confirm } => revoke(&client, resolve_org(org)?, &role, &keys, confirm).await,
         Cmd::SetPermissions { role, keys, org } => set_permissions(&client, resolve_org(org)?, &role, keys).await,
         Cmd::MemberRoles { member, org, json } => member_roles(&client, resolve_org(org)?, &member, json).await,
         Cmd::Assign { member, roles, org } => assign(&client, resolve_org(org)?, &member, &roles).await,
@@ -212,13 +224,26 @@ async fn create(client: &UserClient, org: String, name: &str, description: Optio
     Ok(())
 }
 
-async fn delete(client: &UserClient, org: String, role: &str) -> Result<()> {
+async fn delete(client: &UserClient, org: String, role: &str, dry_run: bool, yes: bool) -> Result<()> {
     let roles = fetch_roles(client, &org).await?;
     let found = find_role(&roles, role)?;
     refuse_system(found, "delete")?;
     let id = role_id(found);
-    client.delete(&format!("/organizations/{org}/roles/{id}")).await.context("DELETE role")?;
-    println!("  {} deleted role {}", "🗑".red(), id.dimmed());
+    let proceed = crate::destructive::gate(
+        &crate::destructive::Target {
+            verb: "delete",
+            noun: "custom role",
+            id,
+            org: &org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        dry_run,
+        yes,
+    )?;
+    if proceed {
+        client.delete(&format!("/organizations/{org}/roles/{id}")).await.context("DELETE role")?;
+        println!("  {} deleted role {}", "🗑".red(), id.dimmed());
+    }
     Ok(())
 }
 
@@ -240,15 +265,30 @@ async fn grant(client: &UserClient, org: String, role: &str, keys: &[String]) ->
     Ok(())
 }
 
-async fn revoke(client: &UserClient, org: String, role: &str, keys: &[String]) -> Result<()> {
+async fn revoke(client: &UserClient, org: String, role: &str, keys: &[String], confirm: crate::destructive::Confirm) -> Result<()> {
     let roles = fetch_roles(client, &org).await?;
     let found = find_role(&roles, role)?;
     refuse_system(found, "modify")?;
     let before = permissions_of(found);
     let perms: Vec<String> = before.iter().filter(|p| !keys.iter().any(|k| k == *p)).cloned().collect();
     let removed = before.len() - perms.len();
-    patch_permissions(client, &org, role_id(found), &perms).await?;
-    println!("  {} revoked {removed} key(s) from {} — now {} total", "✓".green(), role.bold(), perms.len());
+    // Name the keys actually coming off, not just the role — a `--dry-run`
+    // that only echoed the role would hide a typo'd permission key.
+    let target = format!("{role} ({removed} key(s): {})", keys.join(", "));
+    let proceed = crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb: "revoke",
+            noun: "permissions from role",
+            id: &target,
+            org: &org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )?;
+    if proceed {
+        patch_permissions(client, &org, role_id(found), &perms).await?;
+        println!("  {} revoked {removed} key(s) from {} — now {} total", "✓".green(), role.bold(), perms.len());
+    }
     Ok(())
 }
 

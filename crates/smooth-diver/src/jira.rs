@@ -381,6 +381,29 @@ mod tests {
         assert_eq!(extract_keys("SMOODEV-5 dup SMOODEV-5", "SMOODEV"), vec!["SMOODEV-5"]);
     }
 
+    /// Pearl th-db25d4 item 7 — why the title write in `jira_sync_push`
+    /// cannot be a `let _ =`.
+    ///
+    /// A pearl's Jira key lives ONLY in its title: `plan_sync` re-derives
+    /// "is this tracked?" from `extract_keys(&pearl.title, project)` on every
+    /// run, with no separate id column to fall back on. So a `store.update`
+    /// that silently fails to prepend the key leaves the pearl looking
+    /// untracked forever — and `--push` files ANOTHER production Jira ticket
+    /// each time it runs. This pins the mechanism: same pearl, one run apart,
+    /// and only the title tells them apart.
+    #[test]
+    fn a_pearl_whose_title_never_got_its_key_is_pushed_again_every_run() {
+        // The ticket was created, but the title write was dropped.
+        let write_lost = vec![pearl("th-1", "open", "make the widget spin")];
+        let plan = plan_sync(&write_lost, &[issue("SMOODEV-1", "To Do")], "SMOODEV");
+        assert_eq!(plan.unkeyed_pearls.len(), 1, "an un-keyed title is indistinguishable from never-pushed");
+
+        // The title write landed: the same pearl is now tracked and quiet.
+        let write_landed = vec![pearl("th-1", "open", "SMOODEV-1: make the widget spin")];
+        let plan = plan_sync(&write_landed, &[issue("SMOODEV-1", "To Do")], "SMOODEV");
+        assert!(plan.unkeyed_pearls.is_empty(), "a keyed title must not be pushed a second time");
+    }
+
     fn pearl(id: &str, status: &str, title: &str) -> SyncPearl {
         SyncPearl {
             id: id.into(),
