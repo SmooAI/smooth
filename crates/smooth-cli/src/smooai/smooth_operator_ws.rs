@@ -288,7 +288,7 @@ mod tests {
     fn create_frame_resume_keeps_conversation_and_agent_id() {
         let f = create_frame("th-3", Some("conv-7"));
         assert_eq!(f["conversationId"], "conv-7");
-        assert!(f.get("agentId").and_then(Value::as_str).is_some_and(|a| !a.is_empty()));
+        assert!(f.get("agentId").and_then(Value::as_str).is_some_and(|a| !a.trim().is_empty()));
         assert!(create_frame("th-3", None).get("conversationId").is_none());
     }
 
