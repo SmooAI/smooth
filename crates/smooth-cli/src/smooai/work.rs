@@ -247,6 +247,12 @@ pub enum ItemsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print the target and exit without deleting.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the interactive confirmation. Required in scripts/CI.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -727,13 +733,26 @@ async fn items(cmd: ItemsCmd) -> Result<()> {
             let title = r.get("title").and_then(Value::as_str).unwrap_or("?");
             println!("  {} {} → {}", "✓".green(), title.bold(), status_cell(&status));
         }
-        ItemsCmd::Rm { item_id, org } => {
+        ItemsCmd::Rm { item_id, org, dry_run, yes } => {
             let org = resolve_org(org)?;
-            client
-                .delete(&format!("/organizations/{org}/work-items/{item_id}"))
-                .await
-                .context("DELETE work item")?;
-            println!("  {} work item {} deleted", "✓".green(), short_id(&item_id).dimmed());
+            let proceed = crate::destructive::gate(
+                &crate::destructive::Target {
+                    verb: "delete",
+                    noun: "work item",
+                    id: &item_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                dry_run,
+                yes,
+            )?;
+            if proceed {
+                client
+                    .delete(&format!("/organizations/{org}/work-items/{item_id}"))
+                    .await
+                    .context("DELETE work item")?;
+                println!("  {} work item {} deleted", "✓".green(), short_id(&item_id).dimmed());
+            }
         }
     }
     Ok(())
