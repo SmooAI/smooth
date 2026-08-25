@@ -9235,6 +9235,18 @@ mod org_cli_tests {
     /// debug_assert + the /normalize skill audit.)
     #[test]
     fn singular_plural_aliases_parse() {
+        // Windows test threads get a ~1MB stack; parsing/dropping the full
+        // derive tree repeatedly in a debug build overflows it now that
+        // `smoo work` grew the Command graph. Run on an explicit 8MB stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(singular_plural_aliases_parse_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn singular_plural_aliases_parse_body() {
         // top-level: `th org` ⇄ `th orgs`
         assert!(matches!(
             Cli::try_parse_from(["th", "orgs", "list"]).expect("th orgs").command,
