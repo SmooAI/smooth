@@ -620,7 +620,9 @@ already-connected org is normal and needs no `--rotate`.
 > first ("no cap, no key"), which re-stamps the org's tier budget onto its
 > team. That is the mechanism behind the outage above, so the command
 > says it happened, and prints the resulting cap when the deployment's
-> `overview` reports `limits`. The window is always printed with the cap:
+> `overview` reports `limits` — that number is the tier budget the mint
+> computed and pushed, not the LiteLLM team read back, so it can disagree
+> with reality if someone edited the team directly. The window is always printed with the cap:
 > a budget with no `budgetDuration` is a LIFETIME cap that never resets,
 > and it says so in those words.
 

@@ -836,7 +836,10 @@ fn print_provision_summary(p: &Provisioned) {
     // to fix, so it gets said out loud rather than happening quietly.
     println!("  {} minting re-applied {}'s tier budget to its LiteLLM team.", "!".yellow(), org.bold());
     match limits.map(budget_line) {
-        Some(Some(line)) => println!("    {} {}", "cap".dimmed(), line),
+        // The number is the tier budget the mint just COMPUTED and pushed,
+        // not the team read back from LiteLLM — say so, or an incident
+        // reads it as the live ceiling after someone edited the team.
+        Some(Some(line)) => println!("    {} {} {}", "cap".dimmed(), line, "(computed from tier, not read back)".dimmed()),
         // Older deployments don't report `limits` on `overview`.
         _ => println!(
             "    {} this deployment doesn't report the resulting cap — check the LiteLLM team, or {}",
