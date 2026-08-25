@@ -155,7 +155,7 @@ smoo auth refresh          # refresh the user session
 smoo auth refresh --m2m    # refresh the M2M service-account session
 ```
 
-It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client_id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret _is_ the durable credential.
+It reuses the same silent-refresh path `smoo api` uses: a **user** session exchanges its Supabase refresh token; an **M2M** session re-mints via `client_credentials` from the stored client*id/secret (no browser, fully headless — M2M has no rotation and never needs a human). It's a no-op (and says so) when the token still has runway. There's no separate `refresh_token` to manage for M2M; the client secret \_is* the durable credential.
 
 ### Switching orgs
 
@@ -770,6 +770,61 @@ Things worth knowing before you use it:
   turns that into a diagnosis naming the two stale schemas. `from-url` 404s
   until the propose endpoint deploys. Accent tokens, logos, and the
   enable/disable/clear lifecycle all work now.
+
+### Smoo Projects (`smoo work`, alias `smoo projects`)
+
+Top-level, like `smoo crm` — SMOODEV-3038. Wraps the api-prime work domain
+(SMOODEV-2994/3015/3033): projects, work items, sprints, releases, work-item
+links, and the Jira work-items sync. Authenticates as the logged-in user
+(`smoo auth login`) and requires the org to carry the `projects` product
+feature (internal-only per ADR-105 today).
+
+```bash
+smoo work projects list [--status active|archived] [--json]
+smoo work projects create "Support" --key SUP [--description "…"]
+smoo work projects update SUP --name "Support 2" [--clear-description]
+smoo work projects archive SUP                        # DELETE = archive; history kept
+
+smoo work items list --project SMOODEV --status open --assignee me [--json]
+smoo work items list --type bug --sprint <id> --release <id> --support-ticket <id>
+smoo work items create "Fix login" --project SMOODEV --type bug --priority 3 --due 2026-09-01
+smoo work items update <id> --assignee jane@acme.com  # PATCH sends ONLY changed fields
+smoo work items update <id> --clear-assignee          # explicit null (unassign)
+smoo work items transition <id> done                  # status machine stamps/clears completedAt
+smoo work items rm <id>                               # hard delete (+ its Jira sync mapping)
+
+smoo work sprints create "Sprint 12" --project SMOODEV --starts 2026-09-01 --ends 2026-09-14
+smoo work sprints start <id>                          # at most one active per project (409 otherwise)
+smoo work sprints complete <id> [--rollover-to <id>]  # unfinished items roll forward / to backlog
+smoo work releases create "v2.1" --project SMOODEV --target-date 2026-10-01
+smoo work releases release <id>                       # stamps releasedAt
+
+smoo work links link <item> --file <file-id>          # attach a managed file / authored doc
+smoo work links link <item> --url https://… --title "Design doc"
+smoo work links link <item> --item <other> --type blocks   # typed issue link
+smoo work links for-file <file-id>                    # reverse: which items reference this file
+
+smoo work jira import [--full]                        # start the Temporal pull (--full resets the watermark)
+smoo work jira status                                 # metadata.workItemsSync: state / watermark / error
+```
+
+Things worth knowing before you use it:
+
+- **Projects resolve by KEY.** Anywhere a command takes a project, a uuid
+  passes through and anything else matches the org's project KEYs (or exact
+  name) case-insensitively — `--project SMOODEV` just works.
+- **`--assignee` takes `me`, an email, or a uuid.** `me` resolves through your
+  session's email against the org members list.
+- **Update is set-vs-clear.** The server's PATCH contract is present-sets /
+  null-clears / absent-keeps, so `update` sends only the fields you flagged and
+  every nullable field has a `--clear-*` twin. A typo'd value errors — it never
+  silently clears.
+- **Priorities are 0 (lowest) – 4 (highest)**, default 2; tables render the
+  number plus its label (`3 high`).
+- **Lifecycle is server-owned.** `transition <id> done` stamps `completedAt`
+  (leaving `done` clears it); sprints go planned → active → completed via
+  `start`/`complete`, releases planned → released via `release` — `state` in an
+  update body is rejected by the API, so the CLI doesn't offer it.
 
 ### Profile / products
 
