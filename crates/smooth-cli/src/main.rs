@@ -969,6 +969,18 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::branding::Cmd,
     },
+    /// Smoo Projects — projects, work items, sprints, releases, links, and
+    /// the Jira work-items sync (SMOODEV-3038).
+    ///
+    /// `smoo work items list --project SMOODEV --status open --assignee me`,
+    /// `smoo work items transition <id> done`, `smoo work jira status`.
+    /// Authenticates as the logged-in user (`smoo auth login`); the org needs
+    /// the `projects` product feature.
+    #[command(visible_alias = "projects")]
+    Work {
+        #[command(subcommand)]
+        cmd: smooai::work::Cmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1825,6 +1837,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Search { args } => smooai::websearch::run(args).await,
         SmooCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
         SmooCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+        SmooCommands::Work { cmd } => smooai::work::cmd(cmd).await,
         SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
         SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
         SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
@@ -9222,6 +9235,18 @@ mod org_cli_tests {
     /// debug_assert + the /normalize skill audit.)
     #[test]
     fn singular_plural_aliases_parse() {
+        // Windows test threads get a ~1MB stack; parsing/dropping the full
+        // derive tree repeatedly in a debug build overflows it now that
+        // `smoo work` grew the Command graph. Run on an explicit 8MB stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(singular_plural_aliases_parse_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn singular_plural_aliases_parse_body() {
         // top-level: `th org` ⇄ `th orgs`
         assert!(matches!(
             Cli::try_parse_from(["th", "orgs", "list"]).expect("th orgs").command,

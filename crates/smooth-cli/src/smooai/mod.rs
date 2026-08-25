@@ -45,6 +45,7 @@ pub mod testing;
 pub mod user_client;
 pub mod websearch;
 pub mod widgets;
+pub mod work;
 pub mod workforce;
 
 use std::io::IsTerminal;
