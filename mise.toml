@@ -12,5 +12,5 @@
 [tools]
 node = "24.14.0" # ships npm 11.9.0 — required (>=11.5.1) for npm OIDC trusted publishing
 python = "3.13"
-go = "1.23"
+go = "1.26"
 uv = "latest"
