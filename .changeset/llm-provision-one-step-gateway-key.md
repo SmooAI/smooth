@@ -43,6 +43,13 @@ public agent down with it.
   has a key" is not "Big Smooth is onboarded". It also keeps Big Smooth's spend
   separable in `LiteLLM_SpendLogs`. Same team, so same budget: attribution, not
   isolation.
+- **Key-name contract, shared with the dashboard:** an org is connected iff it has
+  an active key named `big-smooth` or `big-smooth-<something>`. The key IS the
+  connection — no flag, no column, nothing that can disagree with reality. A
+  prefix rather than one exact name because Big Smooth runs on several machines:
+  one shared key would force the second machine to rotate (invalidating the
+  first's) and pile every machine's spend into one bucket. Other machines' keys
+  are reported as context, never as a reason to block.
 - Minting is **not read-only** — the route runs `syncOrgLlmLimits` first ("no cap,
   no key"), re-stamping the org's tier budget onto its team. That is the exact
   mechanism behind the outage above, so the output says it happened.
@@ -52,9 +59,13 @@ public agent down with it.
 - `--credential-only` stores the key and leaves the user's default provider and
   routing alone; `--no-verify` skips the proof call and says so in the output.
 
-Not shipped, both needing a smooai-side route change: a per-key `max_budget` +
-budget window (`POST /organizations/{org}/llm-gateway/keys` accepts `{ name }` and
-nothing else, so the flag would be wired to nothing), and reporting the resulting
-budget cap (no API surface returns it). When the cap does ship, the **window must
-ship with it** — `max_budget` with no `budget_duration` is a lifetime cap that
-never resets, which is how a monthly-sized number becomes an outage.
+The resulting budget cap is printed when the deployment's `overview` reports
+`limits` (best-effort — an older deployment just says less). The **window is always
+printed with the cap**, and a budget with no `budgetDuration` is labelled
+`LIFETIME — never resets`, because reading one of those as monthly is what turned a
+routine mint into an outage.
+
+Not shipped, needing a smooai-side route change: a per-key `max_budget` + budget
+window. `POST /organizations/{org}/llm-gateway/keys` accepts `{ name }` and nothing
+else, so the flag would be wired to nothing. When the cap does ship, the window must
+ship with it, for the reason above.

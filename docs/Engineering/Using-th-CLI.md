@@ -598,6 +598,17 @@ Big Smooth mints its **own named key** rather than the org's single
 and "the org has a key" is not "Big Smooth is onboarded"; a named key also
 keeps Big Smooth's spend separable in `LiteLLM_SpendLogs`.
 
+**Key-name contract (shared with the dashboard).** An org is connected to
+Big Smooth iff it has an active `org_llm_keys` row named `big-smooth` or
+`big-smooth-<something>`. The key _is_ the connection — no flag, no
+column, nothing that can disagree with reality. It is a **prefix**, not
+one exact name, because Big Smooth runs on more than one machine: one
+shared `big-smooth` key would force the second machine to rotate (which
+invalidates the first machine's key) and would pile every machine's spend
+into one bucket. So `onboard` mints per machine and reports the org's
+other Big Smooth keys as context — a second machine on an
+already-connected org is normal and needs no `--rotate`.
+
 > ⚠️ **Same org means same budget.** LiteLLM enforces budget at the
 > **team** level and the team _is_ the org, so a second key on one org
 > gives attribution, not isolation — one budget, one fate. Big Smooth
@@ -608,7 +619,10 @@ keeps Big Smooth's spend separable in `LiteLLM_SpendLogs`.
 > ⚠️ **Minting is not read-only.** The route runs `syncOrgLlmLimits`
 > first ("no cap, no key"), which re-stamps the org's tier budget onto its
 > team. That is the mechanism behind the outage above, so the command
-> says it happened. The resulting cap isn't returned by any API today.
+> says it happened, and prints the resulting cap when the deployment's
+> `overview` reports `limits`. The window is always printed with the cap:
+> a budget with no `budgetDuration` is a LIFETIME cap that never resets,
+> and it says so in those words.
 
 There is deliberately no `--max-budget` flag: `POST
 /organizations/{org}/llm-gateway/keys` accepts `{ name }` and nothing

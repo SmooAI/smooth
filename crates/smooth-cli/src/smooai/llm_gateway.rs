@@ -381,10 +381,47 @@ fn providers_path() -> Result<std::path::PathBuf> {
     Ok(dirs_next::home_dir().context("cannot determine home directory")?.join(".smooth/providers.json"))
 }
 
+/// CROSS-SURFACE CONTRACT — the dashboard reads the same rows.
+///
+/// An org is connected to Big Smooth iff it has an active `org_llm_keys`
+/// row named `big-smooth` or `big-smooth-<something>`. The key IS the
+/// connection: no flag, no column, nothing that can disagree with
+/// reality. The web UI's `BIG_SMOOTH_KEY_NAME` and
+/// `docs/Product/Features/Big-Smooth-Connection.md` (smooai monorepo)
+/// are the other half.
+///
+/// It is a PREFIX and not an exact name because Big Smooth runs on more
+/// than one machine. One shared `big-smooth` key would mean the second
+/// machine to onboard has to rotate — which invalidates the first
+/// machine's key — and every machine's spend would land in one bucket.
+const BIG_SMOOTH_KEY_PREFIX: &str = "big-smooth";
+
 /// Default key name: `big-smooth-<hostname>`, so per-key spend in
 /// `LiteLLM_SpendLogs` names the machine that spent it.
 fn default_key_name() -> String {
-    sanitize_key_name(&format!("big-smooth-{}", smooth_pearls::mail_store::short_hostname()))
+    sanitize_key_name(&format!("{BIG_SMOOTH_KEY_PREFIX}-{}", smooth_pearls::mail_store::short_hostname()))
+}
+
+/// Does this key name mean "Big Smooth" under the contract above?
+fn is_big_smooth_key(name: &str) -> bool {
+    name == BIG_SMOOTH_KEY_PREFIX || name.starts_with(&format!("{BIG_SMOOTH_KEY_PREFIX}-"))
+}
+
+/// Every Big Smooth key already on the org — i.e. the other machines
+/// (and the dashboard's own `big-smooth`) already connected. Distinct
+/// from [`key_exists`], which answers the narrower "does THIS machine
+/// have a key", the only question that decides whether we mint.
+fn big_smooth_keys(list: &Value) -> Vec<String> {
+    list.get("keys")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|k| k.get("name").and_then(Value::as_str))
+                .filter(|n| is_big_smooth_key(n))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Coerce a name into the API's rule
@@ -401,7 +438,7 @@ fn sanitize_key_name(raw: &str) -> String {
     }
     out.truncate(64);
     if out.is_empty() {
-        "big-smooth".to_string()
+        BIG_SMOOTH_KEY_PREFIX.to_string()
     } else {
         out
     }
@@ -502,6 +539,24 @@ fn key_lost_message(name: &str, key: &str, err: &anyhow::Error) -> String {
     )
 }
 
+/// Render `overview`'s `limits` payload as one line. `None` when the
+/// field is there but carries no budget — a shape we don't understand is
+/// not something to print half of.
+///
+/// The window is printed WITH the cap, always: a `maxBudget` with no
+/// `budgetDuration` is a LIFETIME cap that never resets, and reading one
+/// as monthly is what turned a routine mint into an outage.
+fn budget_line(limits: &Value) -> Option<String> {
+    let budget = limits.get("maxBudgetUsd").and_then(Value::as_f64)?;
+    let window = limits
+        .get("budgetDuration")
+        .and_then(Value::as_str)
+        .filter(|w| !w.is_empty())
+        .map_or_else(|| "LIFETIME — never resets".to_string(), |w| format!("per {w}"));
+    let tier = limits.get("tier").and_then(Value::as_str).unwrap_or("?");
+    Some(format!("${budget:.2} {window} · tier {tier}"))
+}
+
 /// One real (tiny) call through the gateway with the key we just wrote.
 /// A key in a file is not evidence that it works.
 async fn verify_gateway(api_url: &str, key: &str) -> Result<String> {
@@ -544,6 +599,42 @@ pub struct ProvisionFlags {
     json: bool,
 }
 
+/// Mint (or rotate) Big Smooth's OWN NAMED key rather than the org's
+/// single `default` key: an org can already have a gateway key for its
+/// own reasons, so "the org has a key" is not "Big Smooth is onboarded",
+/// and `create-key`'s 409 is a normal state rather than an error to route
+/// around. A named key also keeps Big Smooth's spend separable in
+/// `LiteLLM_SpendLogs`. Same team, so same budget — attribution, not
+/// isolation.
+async fn mint_key(client: &UserClient, org: &str, name: &str, org_label: &str, rotating: bool) -> Result<Value> {
+    if rotating {
+        client
+            .post(&format!("/organizations/{org}/llm-gateway/keys/{name}/rotate"), &json!({}))
+            .await
+            .map_err(|e| admin_hint(e, org_label))
+            .context("POST llm-gateway named key rotate")
+    } else {
+        client
+            .post(&format!("/organizations/{org}/llm-gateway/keys"), &json!({ "name": name }))
+            .await
+            .map_err(|e| admin_hint(e, org_label))
+            .context("POST llm-gateway named key")
+    }
+}
+
+/// The mint ran `syncOrgLlmLimits` server-side ("no cap, no key"), so the
+/// org's tier budget was just re-stamped onto its team. `overview` reports
+/// the resulting numbers — but only on deployments carrying the `limits`
+/// field, so this is best-effort: an absent field or a failed call means
+/// we say less, never that onboarding failed.
+async fn fetch_limits(client: &UserClient, org: &str) -> Option<Value> {
+    client
+        .get(&format!("/organizations/{org}/llm-gateway/overview"))
+        .await
+        .ok()
+        .and_then(|v| v.get("limits").cloned())
+}
+
 async fn provision(name: Option<String>, org_id: Option<String>, flags: ProvisionFlags) -> Result<()> {
     let ProvisionFlags {
         rotate,
@@ -577,16 +668,23 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
         .await
         .map_err(|e| admin_hint(e, &org_label))
         .context("GET llm-gateway keys")?;
+    // Two different questions. `exists` = does THIS MACHINE have a key
+    // (the only thing that decides whether to mint); `siblings` = every
+    // other Big Smooth key on the org, which is what the dashboard calls
+    // "connected". A second machine onboarding an already-connected org
+    // is normal and must NOT need `--rotate` — rotating would invalidate
+    // the first machine's key.
     let exists = key_exists(&list, &name);
+    let siblings: Vec<String> = big_smooth_keys(&list).into_iter().filter(|n| n != &name).collect();
 
     if exists && !rotate {
         // Idempotent: never stack a second key behind the same name. The
         // old value was shown once, so there is nothing to write either.
         if json {
-            print_json(&json!({ "org": org, "orgLabel": org_label, "name": name, "action": "already-onboarded" }));
+            print_json(&json!({ "org": org, "orgLabel": org_label, "name": name, "action": "already-onboarded", "otherBigSmoothKeys": siblings }));
         } else {
             println!();
-            println!("  {} Big Smooth is already connected to {}", "○".yellow().bold(), org_label.bold());
+            println!("  {} this machine is already connected to {}", "○".yellow().bold(), org_label.bold());
             println!("    {} {}", "key".dimmed(), name.dimmed());
             println!(
                 "    {}",
@@ -599,25 +697,7 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
         return Ok(());
     }
 
-    // Big Smooth mints its OWN NAMED key rather than the org's single
-    // `default` key: an org can already have a gateway key for its own
-    // reasons, and "the org has a key" is not "Big Smooth is onboarded".
-    // A named key also keeps Big Smooth's spend separable in
-    // `LiteLLM_SpendLogs` from whatever else the org runs. Same team, so
-    // same budget — attribution, not isolation.
-    let resp = if exists {
-        client
-            .post(&format!("/organizations/{org}/llm-gateway/keys/{name}/rotate"), &json!({}))
-            .await
-            .map_err(|e| admin_hint(e, &org_label))
-            .context("POST llm-gateway named key rotate")?
-    } else {
-        client
-            .post(&format!("/organizations/{org}/llm-gateway/keys"), &json!({ "name": name }))
-            .await
-            .map_err(|e| admin_hint(e, &org_label))
-            .context("POST llm-gateway named key")?
-    };
+    let resp = mint_key(&client, &org, &name, &org_label, exists).await?;
     let key = resp.get("key").and_then(Value::as_str).context("gateway response carried no key value")?;
     let mask = resp.get("mask").and_then(Value::as_str).unwrap_or("");
 
@@ -631,6 +711,8 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
             return Err(e);
         }
     };
+
+    let limits = fetch_limits(&client, &org).await;
 
     let verified = if no_verify {
         None
@@ -649,6 +731,8 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
             "providersFile": path.display().to_string(),
             "backup": backup.as_ref().map(|b| b.display().to_string()),
             "routingWired": !credential_only,
+            "otherBigSmoothKeys": siblings,
+            "limits": limits,
             "verified": verified.as_ref().map(|v| json!({ "ok": v.is_ok(), "detail": v.as_ref().map_or_else(std::string::ToString::to_string, Clone::clone) })),
         }));
         return Ok(());
@@ -663,6 +747,8 @@ async fn provision(name: Option<String>, org_id: Option<String>, flags: Provisio
         backup: backup.as_deref(),
         credential_only,
         verified,
+        siblings: &siblings,
+        limits: limits.as_ref(),
     });
     Ok(())
 }
@@ -678,6 +764,10 @@ struct Provisioned<'a> {
     backup: Option<&'a std::path::Path>,
     credential_only: bool,
     verified: Option<Result<String>>,
+    /// Other machines (and the dashboard's own key) already on this org.
+    siblings: &'a [String],
+    /// `overview`'s `limits` payload, when the deployment reports it.
+    limits: Option<&'a Value>,
 }
 
 fn print_provision_summary(p: &Provisioned) {
@@ -690,6 +780,8 @@ fn print_provision_summary(p: &Provisioned) {
         backup,
         credential_only,
         ref verified,
+        siblings,
+        limits,
     } = p;
     println!();
     println!(
@@ -702,6 +794,15 @@ fn print_provision_summary(p: &Provisioned) {
     println!("    {} {}", "key".dimmed(), name.dimmed());
     if !mask.is_empty() {
         println!("    {} {}", "mask".dimmed(), mask.dimmed());
+    }
+    if !siblings.is_empty() {
+        println!(
+            "    {} {} other Big Smooth {} on this org: {}",
+            "+".dimmed(),
+            siblings.len(),
+            if siblings.len() == 1 { "key" } else { "keys" },
+            siblings.join(", ").dimmed()
+        );
     }
     println!("    {} {}", "stored".dimmed(), path.display());
     if let Some(b) = backup {
@@ -734,11 +835,15 @@ fn print_provision_summary(p: &Provisioned) {
     // team. That is the mechanism behind the outage this command exists
     // to fix, so it gets said out loud rather than happening quietly.
     println!("  {} minting re-applied {}'s tier budget to its LiteLLM team.", "!".yellow(), org.bold());
-    println!(
-        "    {} the resulting cap isn't readable from any API yet — check the LiteLLM team, or {}",
-        "→".dimmed(),
-        "th llm overview".bold()
-    );
+    match limits.map(budget_line) {
+        Some(Some(line)) => println!("    {} {}", "cap".dimmed(), line),
+        // Older deployments don't report `limits` on `overview`.
+        _ => println!(
+            "    {} this deployment doesn't report the resulting cap — check the LiteLLM team, or {}",
+            "→".dimmed(),
+            "th llm overview".bold()
+        ),
+    }
     println!();
     println!(
         "  {} a second key on the SAME org gives {}, not isolation — one budget, one fate.",
@@ -762,7 +867,10 @@ fn print_provision_summary(p: &Provisioned) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod provision_tests {
-    use super::{admin_hint, back_up, key_exists, key_lost_message, org_label, sanitize_key_name, verify_gateway, verify_model, write_gateway_key};
+    use super::{
+        admin_hint, back_up, big_smooth_keys, budget_line, is_big_smooth_key, key_exists, key_lost_message, org_label, sanitize_key_name, verify_gateway,
+        verify_model, write_gateway_key, BIG_SMOOTH_KEY_PREFIX,
+    };
 
     /// The API rejects anything outside `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
     /// with a 400, and a Mac's hostname routinely contains spaces and
@@ -915,6 +1023,57 @@ mod provision_tests {
         let result = verify_gateway(&url, "sk-rejected").await;
         handle.join().ok();
         assert!(result.is_err(), "a 401 from the gateway must not read as verified");
+    }
+
+    /// CROSS-SURFACE CONTRACT with the dashboard: an org is connected iff
+    /// it has an active key named `big-smooth` or `big-smooth-<x>`. Break
+    /// this and the UI shows "Not connected" for an org the CLI connected.
+    #[test]
+    fn the_big_smooth_key_contract_is_a_prefix() {
+        assert!(is_big_smooth_key("big-smooth"), "the dashboard's own key name must match");
+        assert!(is_big_smooth_key("big-smooth-laptop"));
+        assert!(is_big_smooth_key(&super::default_key_name()), "our own default must match the contract");
+        // Not ours — a prefix match must not swallow someone else's key.
+        assert!(!is_big_smooth_key("big-smoothie"));
+        assert!(!is_big_smooth_key("ci"));
+        assert!(!is_big_smooth_key(""));
+        assert!(!is_big_smooth_key("not-big-smooth"));
+        assert!(super::default_key_name().starts_with(BIG_SMOOTH_KEY_PREFIX));
+    }
+
+    /// A second machine onboarding an already-connected org is NORMAL:
+    /// the other machines' keys are reported, not treated as this
+    /// machine's. Confusing the two would make the second machine rotate
+    /// — invalidating the first machine's key.
+    #[test]
+    fn sibling_keys_are_listed_without_blocking_this_machine() {
+        let list = serde_json::json!({ "keys": [
+            { "name": "big-smooth" },          // the dashboard's
+            { "name": "big-smooth-laptop" },   // another machine
+            { "name": "ci" },                  // not ours
+        ]});
+        let mut found = big_smooth_keys(&list);
+        found.sort();
+        assert_eq!(found, vec!["big-smooth", "big-smooth-laptop"]);
+        // This machine is a different key, so it still mints.
+        assert!(!key_exists(&list, "big-smooth-desktop"));
+    }
+
+    /// The window must be printed WITH the cap. `maxBudget` with no
+    /// `budgetDuration` is a LIFETIME cap that never resets, and reading
+    /// one as monthly is what turned a routine mint into an outage.
+    #[test]
+    fn a_budget_with_no_window_is_reported_as_lifetime() {
+        let monthly = serde_json::json!({ "tier": "pro", "maxBudgetUsd": 500.0, "budgetDuration": "1mo" });
+        let line = budget_line(&monthly).expect("a budget renders");
+        assert!(line.contains("$500.00") && line.contains("per 1mo"), "{line}");
+
+        let no_window = serde_json::json!({ "tier": "pro", "maxBudgetUsd": 500.0 });
+        let line = budget_line(&no_window).expect("a budget renders");
+        assert!(line.contains("LIFETIME"), "a capless window must not read as periodic: {line}");
+
+        // A shape with no budget at all prints nothing rather than half a fact.
+        assert!(budget_line(&serde_json::json!({ "tier": "pro" })).is_none());
     }
 
     fn org(id: &str, name: &str, slug: &str) -> crate::smooai::OrgRef {
