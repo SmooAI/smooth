@@ -160,6 +160,11 @@ pub struct BenchOpts {
     pub big_smooth_url: String,
     pub budget_usd: Option<f64>,
     pub model: Option<String>,
+    /// Per-token price for `model`, fetched from the gateway's `/v1/model/info`.
+    /// When set, the turn's cost is computed as tokens × price — the gateway's
+    /// own cost header is absent on streaming routes (it flushes before the body,
+    /// so it reports 0.0), which left every score-path task at $0 (th-c3618b).
+    pub price: Option<crate::pricing::ModelPrice>,
 }
 
 impl Default for BenchOpts {
@@ -171,6 +176,7 @@ impl Default for BenchOpts {
             // and should not fire on a run that was going to converge.
             budget_usd: Some(5.00),
             model: None,
+            price: None,
         }
     }
 }
@@ -190,6 +196,10 @@ pub struct BenchResult {
     pub solved: bool,
     pub duration_s: f64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
     pub tool_calls: Vec<ToolCallRecord>,
     pub llm_error: Option<String>,
     pub test_stdout: String,
@@ -304,6 +314,19 @@ pub fn turn_deadline() -> std::time::Duration {
     std::time::Duration::from_secs(std::env::var("SMOOTH_BENCH_DEADLINE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(1800))
 }
 
+/// A turn's cost in USD: tokens × published price when a price is known,
+/// otherwise the engine-reported figure.
+///
+/// The gateway omits its cost header on streaming routes (it flushes before the
+/// response body, so it reports 0.0), so `reported` is 0 for every polyglot
+/// engine. When a `price` is known, tokens × price is the attributable number —
+/// concurrent traffic can't move it, unlike a key-spend delta (th-c3618b /
+/// th-adf614). With no price, the reported figure is the only signal there is.
+#[must_use]
+fn resolve_cost(price: Option<crate::pricing::ModelPrice>, reported: f64, prompt_tokens: u64, completion_tokens: u64) -> f64 {
+    price.map_or(reported, |p| p.cost(prompt_tokens, completion_tokens))
+}
+
 /// Drive one prepared task through the canonical LocalServer protocol at
 /// `url`, then strip agent-added tests, run the test command, and write
 /// `result.json`. Shared by the single-task CLI path and the per-task
@@ -320,21 +343,26 @@ pub async fn run_prepared(lang: PolyglotLang, task: &str, setup: &TaskSetup, url
     let prompt = setup.prompt.clone();
 
     let t0 = Instant::now();
-    let (cost_usd, tool_calls, llm_error) = match crate::canonical_driver::run_via_canonical(url, &prompt, token, turn_deadline()).await {
-        Ok(out) => (
-            out.cost,
-            out.tool_calls
-                .into_iter()
-                .map(|t| ToolCallRecord {
-                    name: t.name,
-                    success: t.success,
-                })
-                .collect(),
-            None,
-        ),
-        Err(e) => (0.0, Vec::new(), Some(e.to_string())),
-    };
+    let (reported_cost, prompt_tokens, completion_tokens, tool_calls, llm_error) =
+        match crate::canonical_driver::run_via_canonical(url, &prompt, token, turn_deadline()).await {
+            Ok(out) => (
+                out.cost,
+                out.prompt_tokens,
+                out.completion_tokens,
+                out.tool_calls
+                    .into_iter()
+                    .map(|t| ToolCallRecord {
+                        name: t.name,
+                        success: t.success,
+                    })
+                    .collect(),
+                None,
+            ),
+            Err(e) => (0.0, 0, 0, Vec::new(), Some(e.to_string())),
+        };
     let duration_s = t0.elapsed().as_secs_f64();
+
+    let cost_usd = resolve_cost(opts.price, reported_cost, prompt_tokens, completion_tokens);
 
     // Delete agent-added test files and run the test command. Shared
     // tail with the score-tui path so both surface identical scores.
@@ -353,6 +381,8 @@ pub async fn run_prepared(lang: PolyglotLang, task: &str, setup: &TaskSetup, url
         solved: counts.solved(),
         duration_s,
         cost_usd,
+        prompt_tokens,
+        completion_tokens,
         tool_calls,
         llm_error,
         test_stdout,
@@ -1144,6 +1174,28 @@ pub fn print_summary(r: &BenchResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Pearl th-c3618b: cost = tokens × price, not the streaming 0 ──
+
+    #[test]
+    fn resolve_cost_prefers_price_over_a_zero_reported_cost() {
+        // The streaming failure mode: engine reports 0, but a price exists.
+        let price = crate::pricing::ModelPrice {
+            input_per_token: 2.3e-7,   // gpt-5.6-luna: $0.23/M in
+            output_per_token: 1.38e-6, // $1.38/M out
+        };
+        let cost = resolve_cost(Some(price), 0.0, 1000, 500);
+        // 1000×2.3e-7 + 500×1.38e-6 = 2.3e-4 + 6.9e-4 = 9.2e-4
+        assert!((cost - 9.2e-4).abs() < 1e-12, "got {cost}");
+    }
+
+    #[test]
+    fn resolve_cost_falls_back_to_reported_when_no_price() {
+        // No published price → the engine's own figure is the only signal.
+        assert!((resolve_cost(None, 0.0123, 1000, 500) - 0.0123).abs() < 1e-12);
+        // And an unpriced turn with no reported cost is honestly 0, not a guess.
+        assert_eq!(resolve_cost(None, 0.0, 1000, 500), 0.0);
+    }
 
     // ── Pearl th-086f0f: native-summary parsers ───────────────────
 
