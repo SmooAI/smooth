@@ -279,7 +279,21 @@ impl TaskRunner for EngineTaskRunner {
     async fn run_one(&self, lang: crate::PolyglotLang, task: &str, opts: &crate::BenchOpts) -> Result<TaskOutcome> {
         let setup = crate::prepare_task(lang, task)?;
         let port = self.engine.default_port();
-        let (url, token, _guard) = spawn_engine(self.engine, &self.model, &setup.work_dir, &self.repo, &self.env, self.ready_timeout, port, None)?;
+        // Capture the engine's stdout/stderr next to result.json (a sibling of
+        // work_dir = run_dir/<task>, so outside the agent's sandbox). Without
+        // this the host sweep sent every engine log to /dev/null, which is what
+        // made a run of `INTERNAL_ERROR` turns impossible to diagnose without
+        // re-running (th-34af94).
+        let (url, token, _guard) = spawn_engine(
+            self.engine,
+            &self.model,
+            &setup.work_dir,
+            &self.repo,
+            &self.env,
+            self.ready_timeout,
+            port,
+            Some(&setup.run_dir),
+        )?;
         let result = crate::run_prepared(lang, task, &setup, &url, token.as_deref(), opts).await?;
         // `_guard` drops here → the engine (and its children) are reaped
         // before the next task boots on the same port.
