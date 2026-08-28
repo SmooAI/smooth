@@ -302,6 +302,9 @@ async fn main() -> Result<()> {
                 big_smooth_url: url,
                 budget_usd: Some(budget),
                 model,
+                // Single-task path reports the engine's own cost (0 on streaming
+                // routes); the priced number is the `score` sweep's job (th-c3618b).
+                price: None,
             };
             println!("Running aider-polyglot/{}/{task} …", lang_enum.dataset_dir());
             let result = run_aider_polyglot(lang_enum, &task, &opts).await?;
@@ -851,24 +854,49 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
             big_smooth_url: String::new(), // filled per engine by the matrix runner
             budget_usd: Some(args.budget_usd),
             model: None,
+            price: None, // filled per model by the matrix runner from `prices`
         },
     };
 
     args.isolation.check_engines(&engines)?;
+
+    // List prices for cost = tokens × price. The gateway omits its cost header on
+    // streaming routes (it reports 0.0), so the engine-reported cost is 0 for every
+    // polyglot engine; tokens × published price is the attributable number
+    // (th-c3618b / th-adf614). Fetched from env's gateway before it moves into the
+    // booter below; an unreachable gateway degrades to UNKNOWN, never a failed run.
+    let prices = match &env.gateway_url {
+        Some(url) => match smooth_bench::pricing::PriceBook::fetch(url, env.gateway_key.as_deref()).await {
+            Ok(b) => {
+                eprintln!("cost: loaded list prices for {} models from the gateway", b.len());
+                for m in &models {
+                    if b.get(m).is_none() {
+                        eprintln!("cost: WARNING {m} has no published price — its cost will read $0");
+                    }
+                }
+                b
+            }
+            Err(e) => {
+                eprintln!("cost: could not load list prices ({e:#}) — costs will read $0");
+                smooth_bench::pricing::PriceBook::default()
+            }
+        },
+        None => smooth_bench::pricing::PriceBook::default(),
+    };
 
     let mut observer = StdoutObserver;
     let run = match args.isolation {
         Isolation::Host => {
             let mut booter = ProcessBooter::new(repo, env);
             booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
-            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?
+            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &prices, &mut observer).await?
         }
         Isolation::MicroVm => {
             // The microVM backend needs the SMOOTH repo (for
             // `scripts/msb-spike/`), not the smooth-operator one.
             let mut booter = MicroVmBooter::new(smooth_repo_root(), env);
             booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
-            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?
+            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &prices, &mut observer).await?
         }
     };
 

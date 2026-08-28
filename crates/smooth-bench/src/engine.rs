@@ -1031,6 +1031,7 @@ pub async fn run_engine_matrix<B, O>(
     engines: &[Engine],
     models: &[String],
     sweep_cfg: &SweepConfig,
+    prices: &crate::pricing::PriceBook,
     observer: &mut O,
 ) -> Result<EngineMatrixRun>
 where
@@ -1050,6 +1051,10 @@ where
             let mut cfg = sweep_cfg.clone();
             cfg.task_opts.big_smooth_url = booted.url.clone();
             cfg.task_opts.model = Some(model.clone());
+            // Price the model once per cell so every task computes cost from
+            // tokens × price (th-c3618b). `None` when the gateway publishes no
+            // price → cost falls back to the engine-reported figure.
+            cfg.task_opts.price = prices.get(model);
             let SweepRun { score, per_task: _ } = run_sweep(curated, booted.runner.as_ref(), &cfg, observer).await?;
             results.push(EngineScore {
                 engine: engine.as_str().to_string(),
@@ -1310,6 +1315,7 @@ mod tests {
             &engines,
             &["deepseek-v4-flash".to_string()],
             &pr_one_per_lang(),
+            &crate::pricing::PriceBook::default(),
             &mut crate::sweep::StdoutObserver,
         )
         .await
@@ -1381,7 +1387,9 @@ mod tests {
         let cfg = pr_one_per_lang();
         let mut obs = crate::sweep::StdoutObserver;
 
-        let run = run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut obs).await.unwrap();
+        let run = run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &crate::pricing::PriceBook::default(), &mut obs)
+            .await
+            .unwrap();
 
         // One result per engine×model cell, each tagged.
         assert_eq!(run.results.len(), 3);
@@ -1411,7 +1419,9 @@ mod tests {
         let cfg = pr_one_per_lang();
         let mut obs = crate::sweep::StdoutObserver;
 
-        let run = run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut obs).await.unwrap();
+        let run = run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &crate::pricing::PriceBook::default(), &mut obs)
+            .await
+            .unwrap();
 
         // 2 engines × 2 models = 4 cells.
         assert_eq!(run.results.len(), 4);
