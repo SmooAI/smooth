@@ -102,13 +102,32 @@ impl Engine {
         let bind = format!("127.0.0.1:{port}");
         let ws = workspace.to_path_buf();
         match self {
-            // The one runnable Rust LocalServer is the daemon itself; it
-            // confines its fs/shell tools to SMOOTH_WORKSPACE.
+            // The one runnable Rust LocalServer with coding tools is the daemon
+            // itself (the bare `smooth-operator-server` binary registers no fs/shell
+            // tools — `tool_provider` defaults to None). It confines those tools to
+            // SMOOTH_WORKSPACE.
+            //
+            // Two things make it bootable in a bench (th-e493b4):
+            //   * `SMOOTH_ALLOW_SECOND_DAEMON=1` — the daemon's single-instance guard
+            //     refuses to start when any Big Smooth is already running (they'd
+            //     fight over ~/.smooth/operator-storage.db), which is ALWAYS true on a
+            //     dev box or smoo-hub. Without this the rust engine simply never boots.
+            //   * `HOME` = the task's run dir (the parent of `workspace`, a sibling of
+            //     the agent's sandbox) — so each daemon gets its OWN ~/.smooth
+            //     (operator-storage.db, daemon.addr, …) and can't corrupt the real
+            //     Big Smooth's. Its LLM creds come from SMOOTH_API_* (see
+            //     `apply_engine_env`), so an empty scratch HOME with no providers.json
+            //     is fine.
             Self::Rust => BootCommand {
                 program: "th".into(),
                 args: vec!["daemon".into()],
                 cwd: None,
-                env: vec![("SMOOTH_ADDR".into(), bind), ("SMOOTH_WORKSPACE".into(), ws.display().to_string())],
+                env: vec![
+                    ("SMOOTH_ADDR".into(), bind),
+                    ("SMOOTH_WORKSPACE".into(), ws.display().to_string()),
+                    ("SMOOTH_ALLOW_SECOND_DAEMON".into(), "1".into()),
+                    ("HOME".into(), ws.parent().unwrap_or(&ws).display().to_string()),
+                ],
             },
             Self::Go => BootCommand {
                 // `go run` resolves modules from the *cwd*, not the package
@@ -339,9 +358,18 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
     command.env("SMOOTH_AUTO_MODE", "bypass");
     if let Some(u) = &env.gateway_url {
         command.env("SMOOAI_GATEWAY_URL", u);
+        // The rust daemon reads its gateway creds from SMOOTH_API_URL/KEY/MODEL
+        // (tier 1) or ~/.smooth/providers.json — NOT the SMOOAI_GATEWAY_* the
+        // polyglot servers read. Because the rust engine boots with an isolated
+        // scratch HOME (no providers.json, see `boot_command`), it needs the creds
+        // on the explicit env or every turn errors with no credentials (th-e493b4).
+        // Harmless to the polyglot engines, which ignore these.
+        command.env("SMOOTH_API_URL", u);
+        command.env("SMOOTH_MODEL", model);
     }
     if let Some(k) = &env.gateway_key {
         command.env("SMOOAI_GATEWAY_KEY", k);
+        command.env("SMOOTH_API_KEY", k);
     }
     if let Some(p) = &env.persona {
         command.env("SMOOTH_PERSONA", p);
@@ -1069,6 +1097,8 @@ mod tests {
         let ws = Path::new("/scratch/task-work");
 
         // rust: workspace via env, no cwd override (daemon confines to SMOOTH_WORKSPACE).
+        // Plus the second-daemon bypass and a scratch HOME (= workspace's parent) so it
+        // boots alongside a running Big Smooth with isolated storage (th-e493b4).
         let rust = Engine::Rust.boot_command(repo, 8791, ws);
         assert_eq!(rust.program, "th");
         assert_eq!(rust.args, ["daemon"]);
@@ -1078,6 +1108,8 @@ mod tests {
             [
                 ("SMOOTH_ADDR".to_string(), "127.0.0.1:8791".to_string()),
                 ("SMOOTH_WORKSPACE".to_string(), "/scratch/task-work".to_string()),
+                ("SMOOTH_ALLOW_SECOND_DAEMON".to_string(), "1".to_string()),
+                ("HOME".to_string(), "/scratch".to_string()),
             ]
         );
 
