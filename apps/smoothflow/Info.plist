@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-maintained. Referenced via INFOPLIST_FILE in project.yml — NOT via
+     xcodegen's `info:` key, which regenerates this file and drops the usage
+     strings (that silently kills every TCC prompt: EventKit returns
+     granted=false with no error). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>ai.smoo.smoothflow</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>SmoothFlow</string>
+    <key>CFBundleDisplayName</key>
+    <string>SmoothFlow</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <!-- TCC usage strings. The app's MAIN executable asks; the daemon, tmux and
+         agents it spawns inherit (see docs/Architecture/SmoothFlow-macOS.md). -->
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>SmoothFlow lets Smooth read and manage your calendar so agents can schedule around you.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>SmoothFlow lets Smooth read and manage your calendar so agents can schedule around you.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>SmoothFlow lets Smooth read and manage your reminders.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>SmoothFlow lets Smooth read and manage your reminders.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SmoothFlow controls Messages and other apps on your behalf when an agent needs to.</string>
+    <key>NSUserNotificationsUsageDescription</key>
+    <string>SmoothFlow notifies you when an agent needs you.</string>
+</dict>
+</plist>
