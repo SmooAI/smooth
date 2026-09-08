@@ -115,7 +115,10 @@ final class DaemonManager: ObservableObject {
         // Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay.
         env["SMOOTH_TAILSCALE_SERVE"] = "0"
         // A GUI app's PATH is tiny; agents the daemon launches need the usual dirs.
-        env["PATH"] = ["\(home.path)/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
+        // The bundle's own Contents/MacOS goes first so the `th` shipped with the
+        // app (release builds) wins over a stale ~/.cargo/bin one.
+        let bundleBin = Bundle.main.executableURL?.deletingLastPathComponent().path
+        env["PATH"] = [bundleBin, "\(home.path)/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin"].compactMap { $0 }.joined(separator: ":")
         p.environment = env
         let logURL = home.appendingPathComponent(".smooth/smoothflow-daemon.log")
         try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)

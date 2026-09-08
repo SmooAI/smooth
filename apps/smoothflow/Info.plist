@@ -20,10 +20,15 @@
     <string>SmoothFlow</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Version: bump BOTH with scripts/bump-version.sh <x.y.z>. Sparkle compares
+         CFBundleVersion, so it must move on every release; keeping it equal to the
+         marketing version is the one-number rule. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.1</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>0.2.1</string>
+    <key>CFBundleIconFile</key>
+    <string>SmoothFlow</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSApplicationCategoryType</key>
@@ -50,5 +55,16 @@
     <string>SmoothFlow controls Messages and other apps on your behalf when an agent needs to.</string>
     <key>NSUserNotificationsUsageDescription</key>
     <string>SmoothFlow notifies you when an agent needs you.</string>
+    <!-- Sparkle OTA (docs/Architecture/SmoothFlow-macOS.md "Release and OTA").
+         The private half of SUPublicEDKey is the SMOOTHFLOW_SPARKLE_PRIVATE_KEY
+         GitHub Actions secret; smoothflow-publish.yml signs the appcast with it. -->
+    <key>SUFeedURL</key>
+    <string>https://downloads.smoo.ai/smoothflow/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>X1FXuUBFHg0H2X+UFsdoH2qP5JkiERmYzzVW+ZO924Q=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>3600</integer>
 </dict>
 </plist>

@@ -1,11 +1,17 @@
 import AppKit
+import Sparkle
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let app = AppController()
+    /// Sparkle OTA. Feed + key live in Info.plist (SUFeedURL / SUPublicEDKey);
+    /// checks hourly on its own, the menu item is the manual path.
+    let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMenu()
+        installStatusItem()
         app.start()
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -26,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About SmoothFlow", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(checkForUpdatesItem())
         appMenu.addItem(.separator())
         appMenu.addItem(item("Settings…", #selector(showSettings), ","))
         let perms = NSMenu()
@@ -88,6 +95,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bar.addItem(submenu(window, "Window"))
         NSApp.windowsMenu = window
         return bar
+    }
+
+    private func checkForUpdatesItem() -> NSMenuItem {
+        let it = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+        it.target = updater
+        return it
+    }
+
+    // MARK: status item
+
+    /// The window can be closed while the fleet keeps running
+    /// (applicationShouldTerminateAfterLastWindowClosed = false); the menu-bar
+    /// glyph is how you get back. Template image, so it follows the bar's
+    /// appearance — Presence spends no color on chrome.
+    private func installStatusItem() {
+        let si = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let image = NSImage(named: "MenuBarTemplate") {
+            image.isTemplate = true
+            si.button?.image = image
+        } else {
+            si.button?.title = "th"
+        }
+        si.button?.toolTip = "SmoothFlow"
+        let menu = NSMenu()
+        menu.addItem(item("Open SmoothFlow", #selector(openMainWindow), ""))
+        menu.addItem(item("Inbox", #selector(inbox), ""))
+        menu.addItem(.separator())
+        menu.addItem(checkForUpdatesItem())
+        menu.addItem(item("Settings…", #selector(showSettings), ""))
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit SmoothFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        si.menu = menu
+        statusItem = si
+    }
+
+    @objc private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        app.mainWindow.window?.makeKeyAndOrderFront(nil)
     }
 
     private func item(_ title: String, _ action: Selector, _ key: String, _ mods: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
