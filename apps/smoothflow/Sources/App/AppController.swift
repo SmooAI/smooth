@@ -54,8 +54,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     private func connect() {
         switch DaemonAddress.resolve(env: ProcessInfo.processInfo.environment, setting: UserDefaults.standard.string(forKey: DaemonAddress.defaultsKey)) {
-        case let .external(ep):
+        case var .external(ep):
             daemon.stop()
+            let file = try? String(contentsOf: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".smooth/operator-token"), encoding: .utf8)
+            ep.token = DaemonAddress.token(env: ProcessInfo.processInfo.environment, tokenFile: file)
             client.connect(to: ep)
         case .spawn:
             if UserDefaults.standard.object(forKey: "tmuxOwnedByApp") as? Bool ?? true { daemon.startTmuxServer() }
@@ -96,6 +98,12 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 Task { await loadHandoff(for: s.id) }
             case .screen:
                 break
+            case .connected:
+                reattachSurfaces()
+            case let .relaunched(id):
+                if let v = surfaces[id] { client.send(.attach(id: id, cols: v.gridSize.cols, rows: v.gridSize.rows)) }
+            case let .handoff(id, h):
+                handoffs[id] = h
             case let .error(msg):
                 thOutput = msg
             }
@@ -114,9 +122,24 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         v.onResize = { [weak self] cols, rows in self?.client.send(.resize(id: id, cols: cols, rows: rows)) }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
         surfaces[id] = v
-        let g = v.gridSize
-        client.send(.attach(id: id, cols: g.cols, rows: g.rows))
+        if store.sessions[id]?.isLive == true {
+            let g = v.gridSize
+            client.send(.attach(id: id, cols: g.cols, rows: g.rows))
+        }
         return v
+    }
+
+    /// After every (re)connect the engine has no attachments for us: re-attach
+    /// every surface whose session still exists and drop the rest. Also runs
+    /// after a daemon restart — the tmux sessions outlive it, so the surfaces
+    /// get a fresh redraw rather than a blank pane.
+    private func reattachSurfaces() {
+        for (id, v) in surfaces {
+            guard let s = store.sessions[id] else { surfaces[id] = nil; continue }
+            guard s.isLive else { continue }
+            let g = v.gridSize
+            client.send(.attach(id: id, cols: g.cols, rows: g.rows))
+        }
     }
 
     // MARK: actions (all flow frames)

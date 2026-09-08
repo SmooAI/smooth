@@ -35,8 +35,20 @@ final class DaemonManager: ObservableObject {
         return dir.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("smooth-daemon").path) } ?? false
     }
 
+    static let tmuxSocket = "smoothflow"
+
+    /// The token the app and its child agree on: the user's existing
+    /// `~/.smooth/operator-token` when there is one (so `th flow` works too),
+    /// else a fresh one passed down as `SMOOTH_LOCAL_TOKEN`.
+    private(set) lazy var token: String = {
+        let file = try? String(contentsOf: home.appendingPathComponent(".smooth/operator-token"), encoding: .utf8)
+        return DaemonAddress.token(env: ProcessInfo.processInfo.environment, tokenFile: file) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    }()
+
     func resolveBinary() -> String? {
-        DaemonAddress.daemonBinary(bundleExecutableDir: Bundle.main.executableURL?.deletingLastPathComponent(),
+        let override = ProcessInfo.processInfo.environment[DaemonAddress.binaryEnvKey] ?? UserDefaults.standard.string(forKey: DaemonAddress.binaryDefaultsKey)
+        return DaemonAddress.daemonBinary(override: override,
+                                   bundleExecutableDir: Bundle.main.executableURL?.deletingLastPathComponent(),
                                    home: home,
                                    path: ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/opt/homebrew/bin:/usr/bin",
                                    exists: { FileManager.default.isExecutableFile(atPath: $0) })
@@ -72,10 +84,15 @@ final class DaemonManager: ObservableObject {
 
     private func startChild(_ binary: String) -> DaemonAddress.Endpoint? {
         let port = Self.freePort()
-        let ep = DaemonAddress.Endpoint(host: "127.0.0.1", port: port)
+        let ep = DaemonAddress.Endpoint(host: "127.0.0.1", port: port, token: token)
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = ["operator", "--addr", ep.description]
+        // A crash of the app must not orphan the daemon (seven orphaned
+        // `smooth-daemon operator` processes were found on one dev box). macOS
+        // has no parent-death signal, so a one-line sh supervisor watches our
+        // pid and takes the daemon down with it; `terminate()` reaches the
+        // daemon through the TERM trap.
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", Self.childSupervisor, binary, "operator", "--addr", ep.description]
         var env = ProcessInfo.processInfo.environment
         env["SMOOTHFLOW_PARENT"] = Bundle.main.bundleIdentifier ?? "ai.smoo.smoothflow"
         // The daemon refuses to start next to a running Big Smooth (they would
@@ -83,6 +100,20 @@ final class DaemonManager: ObservableObject {
         // on its own port; opt out of the guard. ponytail: flow.db is separate,
         // operator-storage.db is still shared — split it when the engine lands.
         env["SMOOTH_ALLOW_SECOND_DAEMON"] = "1"
+        // Our own operator store, so the child never shares operator-storage.db
+        // with a running Big Smooth (the guard above exists because of that file).
+        env["SMOOTH_OPERATOR_DB"] = home.appendingPathComponent(".smooth/smoothflow-operator.db").path
+        // Own flow store too: a Big Smooth (`th up`) running the same engine
+        // on the default ~/.smooth/flow.db + `smooth-flow` socket would
+        // otherwise supervise OUR rows, fail `has-session` on ITS socket, and
+        // mark every live session "process vanished". Seen for real.
+        env["SMOOTH_FLOW_DB"] = home.appendingPathComponent(".smooth/smoothflow-flow.db").path
+        // The engine must launch agents under the tmux server THIS app owns —
+        // that is the whole TCC story (docs/Architecture/SmoothFlow-macOS.md).
+        env["SMOOTH_FLOW_TMUX_SOCKET"] = Self.tmuxSocket
+        env["SMOOTH_LOCAL_TOKEN"] = token
+        // Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay.
+        env["SMOOTH_TAILSCALE_SERVE"] = "0"
         // A GUI app's PATH is tiny; agents the daemon launches need the usual dirs.
         env["PATH"] = ["\(home.path)/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin", env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
         p.environment = env
@@ -106,7 +137,7 @@ final class DaemonManager: ObservableObject {
         }
         process = p
         endpoint = ep
-        status = "child pid \(p.processIdentifier) on \(ep.description)"
+        status = "child (sh \(p.processIdentifier)) on \(ep.description)"
         return ep
     }
 
@@ -137,7 +168,7 @@ final class DaemonManager: ObservableObject {
             status = "LaunchAgent registration failed: \(error.localizedDescription)"
             return nil
         }
-        let ep = DaemonAddress.Endpoint(host: "127.0.0.1", port: Self.agentPort)
+        let ep = DaemonAddress.Endpoint(host: "127.0.0.1", port: Self.agentPort, token: token)
         endpoint = ep
         return ep
     }
@@ -172,13 +203,22 @@ final class DaemonManager: ObservableObject {
     private static func tmux(_ bin: String, _ args: [String]) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["-L", "smoothflow"] + args
+        p.arguments = ["-L", tmuxSocket] + args
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run(); p.waitUntilExit(); return p.terminationStatus == 0 } catch { return false }
     }
 
     // MARK: helpers
+
+    /// `sh -c` body: run `$0 "$@"` in the background, exit with it when our
+    /// parent (the app) is gone, forward TERM/INT. `$PPID` is the app's pid.
+    static let childSupervisor = #"""
+    "$0" "$@" & d=$!
+    trap 'kill "$d" 2>/dev/null' TERM INT
+    while kill -0 "$PPID" 2>/dev/null && kill -0 "$d" 2>/dev/null; do sleep 1; done
+    kill "$d" 2>/dev/null; wait "$d"
+    """#
 
     static func freePort() -> Int {
         let sock = socket(AF_INET, SOCK_STREAM, 0)

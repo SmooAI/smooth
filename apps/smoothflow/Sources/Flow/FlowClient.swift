@@ -17,6 +17,8 @@ final class FlowClient {
 
     init(store: FlowStore) { self.store = store }
 
+    static let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+
     func connect(to endpoint: DaemonAddress.Endpoint) {
         address = endpoint
         closed = false
@@ -34,7 +36,8 @@ final class FlowClient {
 
     func send(_ frame: ClientFrame) {
         guard let task, store.connection.isConnected else { return }
-        task.send(.data(frame.encode())) { [weak self] error in
+        // Text, not binary: the engine's WS loop only reads `Message::Text`.
+        task.send(.string(frame.encodeText())) { [weak self] error in
             if let error { Task { @MainActor in self?.dropped("send failed: \(error.localizedDescription)") } }
         }
     }
@@ -43,7 +46,10 @@ final class FlowClient {
     func handoff(for id: String) async throws -> Handoff {
         guard let address else { throw URLError(.cannotConnectToHost) }
         let url = address.httpBase.appendingPathComponent("api/flow/sessions/\(id)/handoff")
-        let (data, _) = try await session.data(from: url)
+        var req = URLRequest(url: url)
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse) }
         return try JSONDecoder().decode(Handoff.self, from: data)
     }
 
@@ -53,6 +59,9 @@ final class FlowClient {
         let t = session.webSocketTask(with: address.wsURL)
         task = t
         t.resume()
+        // Identify ourselves before the first server frame; the engine ignores
+        // it until the follow-up that reads it, by contract (unknown ⇒ ignored).
+        t.send(.string(ClientFrame.hello(client: "smoothflow", version: Self.version).encodeText())) { _ in }
         receive(on: t)
     }
 

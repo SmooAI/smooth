@@ -12,6 +12,13 @@ enum StoreEffect: Equatable {
     case finished(Session)
     /// Snapshot text arrived (phones use this; desktop shows it while unattached).
     case screen(id: String, text: String)
+    /// A (re)connect completed: `flow.hello` arrived. Surfaces must re-attach.
+    case connected
+    /// The engine (re)launched this session's process (new pid): its old PTY
+    /// attachment is gone, so an existing surface must re-attach.
+    case relaunched(id: String)
+    /// The engine pushed a handoff packet (`flow.handoff`).
+    case handoff(id: String, Handoff)
     case error(String)
 }
 
@@ -35,6 +42,10 @@ final class FlowStore: ObservableObject {
     @Published private(set) var fanOuts: [String: FanOut] = [:]
     @Published private(set) var fanOutCandidates: [String: [String]] = [:]
     @Published var lastError: String?
+    /// Activity per session from `flow.event`, newest last. ponytail: capped
+    /// at `eventCap` per session; page from the engine if history matters.
+    @Published private(set) var events: [String: [FlowEvent]] = [:]
+    static let eventCap = 500
 
     var ordered: [Session] { order.compactMap { sessions[$0] } }
     var focused: Session? { focusedId.flatMap { sessions[$0] } }
@@ -77,19 +88,24 @@ final class FlowStore: ObservableObject {
             sessions = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
             order = list.map(\.id)
             if let f = focusedId, sessions[f] == nil { focusedId = nil }
-            if focusedId == nil { focusedId = order.first }
-            return []
+            // Land on something alive: a dead row at the top of the fleet was
+            // what the first real-engine launch focused (and tried to attach).
+            if focusedId == nil { focusedId = ordered.first(where: \.isLive)?.id ?? order.first }
+            events = events.filter { sessions[$0.key] != nil }
+            return [.connected]
 
         case let .session(s):
             let before = sessions[s.id]
             upsert(s)
             var effects: [StoreEffect] = []
+            if let b = before, let pid = s.pid, b.pid != pid, s.state != .done, s.state != .dead { effects.append(.relaunched(id: s.id)) }
             if s.needsYou, before?.needsYou != true || before?.attention != s.attention { effects.append(.attention(s)) }
             if (s.state == .done || s.state == .dead), before?.state != s.state { effects.append(.finished(s)) }
             return effects
 
         case let .sessionRemoved(id):
             sessions[id] = nil
+            events[id] = nil
             order.removeAll { $0 == id }
             for (fid, ids) in fanOutCandidates { fanOutCandidates[fid] = ids.filter { $0 != id } }
             if focusedId == id { focusedId = order.first }
@@ -116,6 +132,18 @@ final class FlowStore: ObservableObject {
             for c in candidates { upsert(c) }
             fanOutCandidates[f.id] = candidates.map(\.id)
             return []
+
+        case let .event(e):
+            guard sessions[e.sessionId] != nil else { return [] }
+            var list = events[e.sessionId] ?? []
+            guard !list.contains(where: { $0.eventId == e.eventId }) else { return [] }
+            list.append(e)
+            if list.count > Self.eventCap { list.removeFirst(list.count - Self.eventCap) }
+            events[e.sessionId] = list
+            return []
+
+        case let .handoff(id, h):
+            return sessions[id] != nil ? [.handoff(id: id, h)] : []
 
         case let .error(_, code, message):
             lastError = "\(code): \(message)"
