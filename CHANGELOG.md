@@ -1,5 +1,87 @@
 # @smooai/smooth
 
+## 0.42.0
+
+### Minor Changes
+
+- c69a7c7: pearls: compaction-proof handoff (th-9483e8) + SmoothFlow state hooks (th-1b8e05).
+  `th pearls checkpoint <id> [--note] [--next] [--auto]` records a checkpoint —
+  note + auto-collected worktree/branch/HEAD/dirty/session id — as a
+  `smooth-checkpoint:` JSON comment (public store API only — no schema work).
+  `th pearls show <id> --handoff [--json]` and
+  `th pearls prime --in-progress [--cwd .] [--assignee] [--json]` emit the
+  `{pearl, handoff, checkpoints, blocks, pr}` packet the SmoothFlow pearl rail
+  reads, or a compact "resume cold" block. `th pearls list --json` added. The smooth-agent plugin
+  gains `PreCompact` auto-checkpointing, a `SessionStart` (`compact|resume`) hook
+  that injects the handoff packets, and `flow-hook.sh` posting every lifecycle
+  event to the daemon's `/api/flow/hooks` (PermissionRequest decision passthrough,
+  everything else fire-and-forget, always exit 0 when the daemon is down).
+- f5610f4: `th pearls` now stores every project's pearls in one machine-global SQLite file (`~/.smooth/pearls.db`) instead of an embedded Dolt database per project (pearl th-d3e842). Why: Dolt's history and branching were never used, its single-writer lock wedged the store under parallel agents, every read cost ~0.7s of cold boot, `NOW()` returned local time, `ADD COLUMN IF NOT EXISTS` was a syntax error, and pearls created inside a linked git worktree vanished with it. Rows are keyed by the canonical project root (the main checkout even from a worktree), so all of those go away and `th pearls ready` answers in milliseconds.
+
+  - `th pearls migrate-from-dolt [PATH]` imports a legacy `.smooth/dolt` store (all tables, ids and timestamps preserved; pearls upsert by `updated_at`, the rest insert-or-ignore, so it is safe to re-run; Dolt dir untouched). `dolt.rs`/`dolt_server.rs`/`go/smooth-dolt` survive only for this command and are deleted in th-c6ba83.
+  - `th pearls init` is now "ensure db + register project"; `push`/`pull` print an exit-0 notice (sync is th-19cca5); `log`, `remote`, `gc`, `doctor`, `migrate-from-beads` are removed.
+  - `~/.smooth/registry.json` drops entries whose path no longer exists.
+  - The dead Dolt `Mailbox`/`AgentRegistry` types (superseded by `mail.db`, ADR-010) are removed.
+
+- 275cf46: SmoothFlow engine + `th flow` (epic th-6ac036, lane A th-7f0af3). New
+  `smooth-flow` crate hosted in `smooth-daemon`: agent/shell sessions run under
+  one long-lived `tmux -L smooth-flow` server so they outlive the daemon and the
+  app; PTY bytes stream to attached clients over `GET /api/flow/ws` (a
+  `portable-pty` on `tmux attach`, so late joiners get a full redraw and resize
+  works); Claude Code hooks (`POST /api/flow/hooks`) drive state, with a 120 s
+  long-poll for `PermissionRequest`; a supervision tick resumes crashed agents
+  with backoff, schedules usage-limit resumes at the parsed reset time, and
+  refuses duplicate resumes; fan-out races N worktrees and merges the winner.
+  The Smoo Relay bridges `channel:"flow"` envelopes to the flow WS with phone
+  caps (16 KiB / ~30 fps). `th flow ls|new|attach|send|approve|kill|snapshot|
+inbox|handoff|fanout` is the thin CLI. The Claude Code pane-state heuristics
+  moved from `smooth-cli` into `smooth-tmux::detect` so `th claude` and the
+  engine share one copy.
+- 06551be: SmoothFlow macOS shell (`apps/smoothflow`, pearl th-f7f823): a native AppKit
+  fleet console for Smooth agents — sidebar grouped by project, one libghostty
+  surface per session fed by `flow.output`, inbox with approve/deny, usage-limit
+  and held-session cards, steer bar, fan-out sheet, pearl rail, notifications
+  keyed on `flow.attention`. The app spawns `smooth-daemon` and the `smoothflow`
+  tmux server itself so every TCC grant (Calendar, Reminders, FDA, Notifications,
+  Apple Events) attributes to the app and is inherited by the daemon and agents
+  — measured and written down in `docs/Architecture/SmoothFlow-macOS.md`.
+  Builds against a zero-dependency mock flow engine (`mock/server.mjs`) until
+  the engine lands. New `smoothflow-mac` workflow: compile + XCTest on PR,
+  signed/notarized DMG on dispatch.
+- f1ec942: `th pkg` (EPIC th-55b2c7, M0): install agent packages — skills, rules, MCP
+  servers, hooks — into Claude Code, Codex and OpenCode from ONE
+  Claude-plugin-layout source (a path, `owner/repo[/subdir][#ref]`, or a
+  marketplace.json). A package is one plugin with N harness renderings: the
+  Claude plugin layout is the shared core, `harness/<name>/` overlays hold what
+  only that harness understands, and the output is each harness's native shape
+  (Claude gets it through its own plugin system; Codex/OpenCode get symlinked
+  skills, MCP entries and their overlay files). Every written path + sha256 and
+  every owned config key lands in `~/.smooth/pkg/index.toml`, so `th pkg rm`
+  removes exactly what was installed and `th pkg status` reports drift and the
+  customization points each harness has. `th harness enable codex|opencode` is
+  now sugar for installing the smooth-agent package (its OpenCode lifecycle
+  plugin moved to `harness/opencode/plugin.js`), and the MCP config writers
+  accept arbitrary server names. `th pkg init` scaffolds the layout.
+
+### Patch Changes
+
+- bb02b86: SmoothFlow macOS shell now runs against the real flow engine (pearl
+  th-f7f823): text WebSocket frames, the daemon's local token on every flow
+  route, ghostty actions raised off the main thread no longer trap, window
+  resizes reach the engine, surfaces re-attach after a reconnect or a
+  `--resume` relaunch, and done/dead rows are never attached. The child daemon
+  gets its own operator + flow stores, the app-owned `smoothflow` tmux socket
+  and no tailnet exposure, runs under a supervisor that dies with the app, and
+  `SMOOTHFLOW_DAEMON_BIN` / Settings point a dev build at any engine binary. New
+  **activity** tab (⌘⌥4) renders the engine follow-up's `flow.event` frames;
+  `flow.handoff` pushes the pearl rail; the client sends `flow.hello`. TCC probe
+  from a pane the real engine created: responsible = SmoothFlow, Calendar
+  granted.
+- 5c39ecb: SmoothFlow: claude / opencode / codex sessions exercised through the app
+  against the real engine and recorded in the architecture doc (what launches,
+  where state comes from, whether resume continues the session); done/dead rows
+  no longer send input or resize frames to the engine.
+
 ## 0.41.5
 
 ### Patch Changes
