@@ -51,6 +51,11 @@ pub enum ClientFrame {
         argv: Option<Vec<String>>,
         #[serde(default)]
         title: Option<String>,
+        /// Additive (th-d33afa): the tmux socket (`tmux -L <name>`) to create
+        /// the session on, instead of the daemon's default. The macOS shell
+        /// owns `tmux -L smoothflow` so TCC attribution holds.
+        #[serde(default)]
+        tmux_socket: Option<String>,
     },
     #[serde(rename = "flow.send")]
     Send { id: String, text: String },
@@ -76,6 +81,61 @@ pub enum ClientFrame {
     FanoutPick { fan_out_id: String, winner_session_id: String },
     #[serde(rename = "flow.mark_read")]
     MarkRead { id: String },
+    /// Additive (th-d33afa): a client asking for `flow.hello` again — the
+    /// phone's bridge nudge, since over the relay nothing opens the flow WS
+    /// until the phone sends a frame.
+    #[serde(rename = "flow.hello")]
+    Hello {},
+    /// Additive (th-d33afa): the pearl-rail packet over WS (the relay brokers
+    /// WS only). Reply is `ServerFrame::Handoff`.
+    #[serde(rename = "flow.handoff")]
+    Handoff { id: String },
+}
+
+/// Who an event line belongs to (the phone's Chat tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventKind {
+    User,
+    Agent,
+    Tool,
+    System,
+}
+
+impl EventKind {
+    /// The wire/storage spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Tool => "tool",
+            Self::System => "system",
+        }
+    }
+}
+
+impl std::str::FromStr for EventKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "user" => Ok(Self::User),
+            "agent" => Ok(Self::Agent),
+            "tool" => Ok(Self::Tool),
+            "system" => Ok(Self::System),
+            other => Err(anyhow::anyhow!("unknown event kind `{other}`")),
+        }
+    }
+}
+
+/// One line of a session's event stream (`flow.event`, th-d33afa).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowEvent {
+    pub event_id: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub kind: EventKind,
+    pub text: String,
 }
 
 /// A `flow.approve` decision.
@@ -85,6 +145,18 @@ pub enum Decision {
     Allow,
     Deny,
     AllowSession,
+}
+
+impl Decision {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+            Self::AllowSession => "allow_session",
+        }
+    }
 }
 
 /// Parse one client frame. `Ok(None)` for a frame of an unknown type (or a
@@ -143,6 +215,24 @@ pub enum ServerFrame {
         r#ref: Option<Value>,
         code: String,
         message: String,
+    },
+    /// Additive (th-d33afa): one event line of a session's stream.
+    #[serde(rename = "flow.event")]
+    Event {
+        id: String,
+        #[serde(flatten)]
+        event: FlowEvent,
+    },
+    /// Additive (th-d33afa): the pearl-rail packet, same shape as
+    /// `GET /api/flow/sessions/{id}/handoff` plus the session `id`.
+    #[serde(rename = "flow.handoff")]
+    Handoff {
+        id: String,
+        pearl: Value,
+        handoff: Value,
+        checkpoints: Value,
+        blocks: Value,
+        pr: Value,
     },
 }
 
@@ -275,6 +365,40 @@ pub fn map_hook_event(event: &str, payload: &Value) -> HookOutcome {
     }
 }
 
+/// The event line a hook produces for the Chat tab, if any (th-d33afa).
+///
+/// The user's prompt, each tool call, the agent's final message on `Stop`,
+/// and system lines for notifications and session end. A permission
+/// request produces no line here — its state change does (`needs_you`
+/// with the attention detail), so it isn't reported twice.
+#[must_use]
+pub fn hook_event_text(event: &str, payload: &Value) -> Option<(EventKind, String)> {
+    let text = |k: &str| {
+        payload
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
+    match event {
+        "UserPromptSubmit" => text("prompt").map(|t| (EventKind::User, t)),
+        "PreToolUse" => {
+            let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
+            let detail = permission_detail(payload);
+            let brief = detail.strip_prefix(tool).and_then(|d| d.strip_prefix(": ")).unwrap_or("");
+            Some((EventKind::Tool, format!("● {tool}({brief})")))
+        }
+        "Stop" => text("last_assistant_message").map(|t| (EventKind::Agent, t)),
+        "Notification" => text("message").map(|t| (EventKind::System, t)),
+        "SessionEnd" => Some((
+            EventKind::System,
+            format!("session ended{}", text("reason").map(|r| format!(" ({r})")).unwrap_or_default()),
+        )),
+        _ => None,
+    }
+}
+
 /// The state a hook outcome lands in, if any.
 #[must_use]
 pub const fn outcome_state(outcome: &HookOutcome) -> Option<SessionState> {
@@ -344,6 +468,7 @@ mod tests {
             agent_session_id: Some("u".into()),
             argv: vec!["claude".into()],
             tmux_session: None,
+            tmux_socket: Some("smooth-flow".into()),
             pid: None,
             pid_start: Some(1),
             state: SessionState::Working,
@@ -384,6 +509,7 @@ mod tests {
                 prompt: Some("hi".into()),
                 argv: None,
                 title: None,
+                tmux_socket: Some("smoothflow".into()),
             },
             ClientFrame::Send {
                 id: "a".into(),
@@ -417,6 +543,84 @@ mod tests {
             let back = parse_client_frame(&v.to_string()).unwrap().unwrap();
             assert_eq!(back, f);
         }
+    }
+
+    #[test]
+    fn additive_phone_frames_round_trip() {
+        let hello = parse_client_frame(r#"{"channel":"flow","type":"flow.hello"}"#).unwrap().unwrap();
+        assert_eq!(hello, ClientFrame::Hello {});
+        let h = parse_client_frame(r#"{"channel":"flow","type":"flow.handoff","id":"fs-1"}"#).unwrap().unwrap();
+        assert_eq!(h, ClientFrame::Handoff { id: "fs-1".into() });
+
+        let ev = ServerFrame::Event {
+            id: "fs-1".into(),
+            event: FlowEvent {
+                event_id: "fs-1-0".into(),
+                at: Utc::now(),
+                kind: EventKind::Tool,
+                text: "● Bash(ls)".into(),
+            },
+        };
+        let v: Value = serde_json::from_str(&ev.to_wire()).unwrap();
+        assert_eq!(v["type"], "flow.event");
+        assert_eq!(v["kind"], "tool", "event fields are flattened to the top level: {v}");
+        assert_eq!(v["event_id"], "fs-1-0");
+        assert!(v["at"].is_string());
+        assert_eq!(parse_server_frame(&ev.to_wire()).unwrap().to_wire(), ev.to_wire());
+
+        let ho = ServerFrame::Handoff {
+            id: "fs-1".into(),
+            pearl: Value::Null,
+            handoff: json!({"branch":"b"}),
+            checkpoints: json!([]),
+            blocks: json!([]),
+            pr: Value::Null,
+        };
+        let v: Value = serde_json::from_str(&ho.to_wire()).unwrap();
+        assert_eq!(v["type"], "flow.handoff");
+        assert_eq!(v["handoff"]["branch"], "b");
+        assert_eq!(parse_server_frame(&ho.to_wire()).unwrap(), ho);
+    }
+
+    #[test]
+    fn hook_event_text_table() {
+        assert_eq!(
+            hook_event_text("UserPromptSubmit", &json!({"prompt":" fix it "})),
+            Some((EventKind::User, "fix it".into()))
+        );
+        assert_eq!(hook_event_text("UserPromptSubmit", &json!({})), None);
+        assert_eq!(
+            hook_event_text("PreToolUse", &json!({"tool_name":"Bash","tool_input":{"command":"ls"}})),
+            Some((EventKind::Tool, "● Bash(ls)".into()))
+        );
+        assert_eq!(
+            hook_event_text("PreToolUse", &json!({"tool_name":"Glob"})),
+            Some((EventKind::Tool, "● Glob()".into()))
+        );
+        assert_eq!(hook_event_text("PreToolUse", &json!({})), Some((EventKind::Tool, "● tool()".into())));
+        assert_eq!(
+            hook_event_text("Stop", &json!({"last_assistant_message":"done"})),
+            Some((EventKind::Agent, "done".into()))
+        );
+        assert_eq!(hook_event_text("Stop", &json!({})), None);
+        assert_eq!(
+            hook_event_text("PermissionRequest", &json!({"tool_name":"Bash","tool_input":{"command":"rm x"}})),
+            None,
+            "the needs_you state change carries the permission line"
+        );
+        assert_eq!("tool".parse::<EventKind>().unwrap(), EventKind::Tool);
+        assert!("nope".parse::<EventKind>().is_err());
+        assert_eq!(EventKind::Agent.as_str(), "agent");
+        assert_eq!(
+            hook_event_text("Notification", &json!({"message":"hi"})),
+            Some((EventKind::System, "hi".into()))
+        );
+        assert_eq!(
+            hook_event_text("SessionEnd", &json!({"reason":"exit"})),
+            Some((EventKind::System, "session ended (exit)".into()))
+        );
+        assert_eq!(hook_event_text("SessionEnd", &json!({})), Some((EventKind::System, "session ended".into())));
+        assert_eq!(hook_event_text("PostToolUse", &json!({})), None);
     }
 
     #[test]

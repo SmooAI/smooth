@@ -14,6 +14,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::{EventKind, FlowEvent};
+
 /// Where the flow database lives: `$SMOOTH_FLOW_DB`, else `~/.smooth/flow.db`.
 #[must_use]
 pub fn default_path() -> PathBuf {
@@ -196,6 +198,10 @@ pub struct Session {
     pub argv: Vec<String>,
     #[serde(default)]
     pub tmux_session: Option<String>,
+    /// The tmux socket (`tmux -L …`) the session lives on; `None` on rows
+    /// from before th-d33afa ⇒ the daemon's default socket.
+    #[serde(default)]
+    pub tmux_socket: Option<String>,
     #[serde(default)]
     pub pid: Option<u32>,
     /// Process start time (epoch seconds) — with `pid`, the liveness index.
@@ -240,6 +246,7 @@ pub struct NewSession {
     pub agent_session_id: Option<String>,
     pub argv: Vec<String>,
     pub tmux_session: Option<String>,
+    pub tmux_socket: Option<String>,
     pub fan_out_id: Option<String>,
 }
 
@@ -247,6 +254,15 @@ pub struct NewSession {
 #[must_use]
 pub fn new_session_id() -> String {
     format!("fs-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+}
+
+/// Events kept per session (th-d33afa): the phone's Chat tab replays these
+/// on `flow.attach`.
+pub const EVENT_BUFFER: usize = 200;
+
+/// `<session>-<seq>` — the mock's spelling, so phones need no special case.
+fn event_id(session_id: &str, seq: i64) -> String {
+    format!("{session_id}-{seq}")
 }
 
 /// Mint a fan-out id: `fo-` + 8 hex.
@@ -305,10 +321,19 @@ impl FlowStore {
                  updated_at       TEXT NOT NULL,
                  ended_at         TEXT,
                  exit_code        INTEGER,
-                 unread           INTEGER NOT NULL DEFAULT 0
+                 unread           INTEGER NOT NULL DEFAULT 0,
+                 tmux_socket      TEXT
              );
              CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_session_id);
              CREATE INDEX IF NOT EXISTS sessions_fanout_idx ON sessions(fan_out_id);
+             CREATE TABLE IF NOT EXISTS events (
+                 session_id TEXT NOT NULL,
+                 seq        INTEGER NOT NULL,
+                 at         TEXT NOT NULL,
+                 kind       TEXT NOT NULL,
+                 text       TEXT NOT NULL,
+                 PRIMARY KEY (session_id, seq)
+             );
              CREATE TABLE IF NOT EXISTS fan_outs (
                  id                TEXT PRIMARY KEY,
                  prompt            TEXT NOT NULL,
@@ -319,6 +344,16 @@ impl FlowStore {
              );",
         )
         .context("apply flow schema")?;
+        // th-d33afa added `tmux_socket` to an existing table; SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so probe first.
+        let has_socket = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'tmux_socket'")?
+            .exists([])
+            .context("probe tmux_socket column")?;
+        if !has_socket {
+            conn.execute("ALTER TABLE sessions ADD COLUMN tmux_socket TEXT", [])
+                .context("add tmux_socket")?;
+        }
         Ok(Self { conn })
     }
 
@@ -350,6 +385,7 @@ impl FlowStore {
             agent_session_id: row.get("agent_session_id")?,
             argv: serde_json::from_str(&argv).unwrap_or_default(),
             tmux_session: row.get("tmux_session")?,
+            tmux_socket: row.get("tmux_socket")?,
             pid: row.get::<_, Option<i64>>("pid")?.and_then(|p| u32::try_from(p).ok()),
             pid_start: row.get("pid_start")?,
             state: state.parse().unwrap_or(SessionState::Dead),
@@ -375,8 +411,8 @@ impl FlowStore {
         self.conn
             .execute(
                 "INSERT INTO sessions (id, kind, title, project, worktree, branch, pearl_id, agent_session_id, argv, tmux_session,
-                                       state, fan_out_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12)",
+                                       state, fan_out_id, created_at, updated_at, tmux_socket)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13)",
                 params![
                     id,
                     kind.as_str(),
@@ -390,6 +426,7 @@ impl FlowStore {
                     new.tmux_session,
                     new.fan_out_id,
                     now.to_rfc3339(),
+                    new.tmux_socket,
                 ],
             )
             .context("insert session")?;
@@ -542,6 +579,66 @@ impl FlowStore {
         Ok(self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).context("remove session")? > 0)
     }
 
+    /// Append one event line to `session_id`'s stream (`flow.event`,
+    /// th-d33afa) and prune the stream to the last [`EVENT_BUFFER`].
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn add_event(&self, session_id: &str, kind: EventKind, text: &str) -> Result<FlowEvent> {
+        let seq: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?1", params![session_id], |r| {
+                r.get(0)
+            })
+            .context("next event seq")?;
+        let at = Utc::now();
+        // Guarded on the session row (no FK in the schema): a stray id must
+        // not grow the table.
+        let n = self
+            .conn
+            .execute(
+                "INSERT INTO events (session_id, seq, at, kind, text)
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?1)",
+                params![session_id, seq, at.to_rfc3339(), kind.as_str(), text],
+            )
+            .context("insert event")?;
+        if n == 0 {
+            bail!("no such session: {session_id}");
+        }
+        self.conn
+            .execute(
+                "DELETE FROM events WHERE session_id = ?1 AND seq <= ?2 - ?3",
+                params![session_id, seq, i64::try_from(EVENT_BUFFER).unwrap_or(i64::MAX)],
+            )
+            .context("prune events")?;
+        Ok(FlowEvent {
+            event_id: event_id(session_id, seq),
+            at,
+            kind,
+            text: text.to_string(),
+        })
+    }
+
+    /// The buffered event stream of `session_id`, oldest first.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn events(&self, session_id: &str) -> Result<Vec<FlowEvent>> {
+        let mut stmt = self.conn.prepare("SELECT seq, at, kind, text FROM events WHERE session_id = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            let seq: i64 = r.get(0)?;
+            let at: String = r.get(1)?;
+            let kind: String = r.get(2)?;
+            Ok(FlowEvent {
+                event_id: event_id(session_id, seq),
+                at: parse_ts(&at),
+                kind: kind.parse().unwrap_or(EventKind::System),
+                text: r.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("list events")
+    }
+
     /// Insert a fan-out.
     ///
     /// # Errors
@@ -615,6 +712,71 @@ mod tests {
             argv: vec!["zsh".into(), "-l".into()],
             ..Default::default()
         }
+    }
+
+    /// th-d33afa: the event stream is capped at EVENT_BUFFER per session,
+    /// ids stay monotonic across the prune, and a stray session id is refused.
+    #[test]
+    fn events_buffer_last_200_per_session_and_refuse_ghosts() {
+        let st = FlowStore::open_in_memory().unwrap();
+        let s = st
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        for i in 1..=(EVENT_BUFFER + 5) {
+            let ev = st.add_event(&s.id, EventKind::Tool, &format!("line {i}")).unwrap();
+            assert_eq!(ev.event_id, format!("{}-{i}", s.id));
+        }
+        let evs = st.events(&s.id).unwrap();
+        assert_eq!(evs.len(), EVENT_BUFFER);
+        assert_eq!(evs.first().unwrap().text, "line 6");
+        assert_eq!(evs.last().unwrap().event_id, format!("{}-{}", s.id, EVENT_BUFFER + 5));
+        assert!(st.add_event("fs-ghost", EventKind::System, "x").is_err());
+        assert!(st.events("fs-ghost").unwrap().is_empty());
+        // Streams are per session.
+        let other = st
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(st.events(&other.id).unwrap().is_empty());
+    }
+
+    /// th-d33afa: a pre-existing flow.db without `tmux_socket` is migrated on
+    /// open, and rows from before carry `None`.
+    #[test]
+    fn opening_an_old_db_adds_the_tmux_socket_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', project TEXT NOT NULL,
+                 worktree TEXT NOT NULL, branch TEXT, pearl_id TEXT, agent_session_id TEXT, argv TEXT NOT NULL DEFAULT '[]',
+                 tmux_session TEXT, pid INTEGER, pid_start INTEGER, state TEXT NOT NULL, attention TEXT, fan_out_id TEXT,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, ended_at TEXT, exit_code INTEGER, unread INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO sessions (id, kind, project, worktree, state, created_at, updated_at)
+                 VALUES ('fs-old', 'shell', '/p', '/p', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let st = FlowStore::open(&path).unwrap();
+        assert_eq!(st.get("fs-old").unwrap().unwrap().tmux_socket, None);
+        let st2 = FlowStore::open(&path).unwrap(); // idempotent
+        let s = st2
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                tmux_socket: Some("smoothflow".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(st2.get(&s.id).unwrap().unwrap().tmux_socket.as_deref(), Some("smoothflow"));
     }
 
     #[test]

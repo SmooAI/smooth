@@ -39,6 +39,13 @@ enum Cmd {
         /// Address to bind the local-flavor operator on.
         #[arg(long, default_value = "127.0.0.1:8787")]
         addr: String,
+        /// tmux socket name (`tmux -L <name>`) SmoothFlow creates sessions on
+        /// (default `smooth-flow`; same as `SMOOTH_FLOW_TMUX_SOCKET`). The
+        /// macOS shell starts `tmux -L smoothflow` itself and passes it here:
+        /// panes on a server the app started inherit the app's TCC grants
+        /// (Full Disk Access, Calendar); on any other server agents get none.
+        #[arg(long, env = "SMOOTH_FLOW_TMUX_SOCKET")]
+        tmux_socket: Option<String>,
     },
     /// Tail the egress proxy's audit log (allowed/blocked off-box decisions).
     Audit {
@@ -184,7 +191,7 @@ fn main() -> ExitCode {
 fn server_addr(cmd: &Cmd) -> Option<Result<SocketAddr>> {
     match cmd {
         Cmd::Run => Some(resolve_run_addr()),
-        Cmd::Operator { addr } => Some(addr.parse().with_context(|| format!("invalid --addr {addr:?}"))),
+        Cmd::Operator { addr, .. } => Some(addr.parse().with_context(|| format!("invalid --addr {addr:?}"))),
         _ => None,
     }
 }
@@ -204,8 +211,13 @@ async fn run(cmd: Cmd) -> Result<()> {
             let socket = resolve_run_addr()?;
             smooth_daemon::serve_local_flavor(socket).await
         }
-        Cmd::Operator { addr } => {
+        Cmd::Operator { addr, tmux_socket } => {
             let socket: SocketAddr = addr.parse().with_context(|| format!("invalid --addr {addr:?}"))?;
+            if let Some(name) = tmux_socket.filter(|n| !n.trim().is_empty()) {
+                // The engine reads the socket per call (`smooth_flow::tmux::socket_name`),
+                // so the flag is just the env var spelled as an argument.
+                std::env::set_var("SMOOTH_FLOW_TMUX_SOCKET", name.trim());
+            }
             smooth_daemon::serve_local_flavor(socket).await
         }
         Cmd::Audit { lines } => cmd_audit(lines),

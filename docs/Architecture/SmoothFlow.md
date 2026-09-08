@@ -14,15 +14,15 @@ dumb view.
 
 ## Where the pieces live
 
-| Piece                                                    | Path                                                 |
-| -------------------------------------------------------- | ---------------------------------------------------- |
-| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                |
-| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`             |
-| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                  |
-| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                   |
-| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)        |
-| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`) |
-| tmux server                                              | `tmux -L smooth-flow` (`$SMOOTH_FLOW_TMUX_SOCKET`)   |
+| Piece                                                    | Path                                                        |
+| -------------------------------------------------------- | ----------------------------------------------------------- |
+| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                       |
+| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                    |
+| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                         |
+| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                          |
+| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)               |
+| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)        |
+| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc) |
 
 ## Process model
 
@@ -92,8 +92,10 @@ sessions(id TEXT PK,             -- "fs-" + 8 hex
          tmux_session, pid, pid_start,
          state,                  -- starting|working|idle|needs_you|limited|done|dead
          attention,              -- JSON {reason, detail, resume_at, request_id}
-         fan_out_id, created_at, updated_at, ended_at, exit_code, unread)
+         fan_out_id, created_at, updated_at, ended_at, exit_code, unread,
+         tmux_socket)            -- the `tmux -L` server the session lives on (v0.1)
 fan_outs(id TEXT PK, prompt, base_commit, pearl_id, created_at, winner_session_id)
+events(session_id, seq, at, kind, text, PK(session_id, seq))  -- last 200 per session (v0.1)
 ```
 
 Timestamps are UTC RFC3339 text written from Rust `Utc::now()`. Terminal
@@ -105,16 +107,80 @@ real signals).
 
 Engine → clients (broadcast; `flow.output` only to clients that attached
 the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
-`flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`.
+`flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`, and (v0.1)
+`flow.event`, `flow.handoff`.
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
-`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`.
+`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, and (v0.1)
+`flow.hello`, `flow.handoff`.
 
 Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
 field: `flow.fanout.new` accepts `project` (the main checkout to fan out from;
 defaults to the daemon's workspace).
+
+## v0.1 additions (th-d33afa) — what the phones needed
+
+All additive; a v0 client that ignores unknown types is unaffected.
+
+### `flow.event` — the per-session event stream
+
+`{channel:"flow", type:"flow.event", id, event_id, at, kind, text}` with
+`kind ∈ user | agent | tool | system` — the Chat tab of the companion apps.
+`event_id` is `<session id>-<seq>` (monotonic per session). The engine keeps
+the last **200** per session in `flow.db` (`events`) and **replays them on
+`flow.attach`**, before any `flow.output`, so a phone that just looked sees
+what happened while it wasn't. Derivation (`protocol::hook_event_text` +
+the engine):
+
+| Source                                                  | kind     | text                                                                                                                         |
+| ------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| hook `UserPromptSubmit` (`prompt`)                      | `user`   | the prompt                                                                                                                   |
+| `flow.send {text}`                                      | `user`   | the steer                                                                                                                    |
+| `flow.approve {decision}`                               | `user`   | `approve: allow` / `deny` / `allow_session`                                                                                  |
+| hook `PreToolUse`                                       | `tool`   | `● Bash(ls)` — tool + the command/path/pattern                                                                               |
+| hook `Stop` (`last_assistant_message`)                  | `agent`  | the agent's final message                                                                                                    |
+| hook `Notification` (`message`)                         | `system` | the message                                                                                                                  |
+| hook `SessionEnd` (`reason`)                            | `system` | `session ended (reason)`                                                                                                     |
+| any **state change** (hooks, scrape, supervision, kill) | `system` | `working` · `idle` · `needs_you · permission: Bash: rm x` · `limited · usage_limit: resumes at …` · `dead · crashed: exit 1` |
+
+A `PermissionRequest` adds no line of its own — its `needs_you` state change
+carries the detail, so the prompt isn't reported twice. `PostToolUse`
+produces no line either (the state stays `working`).
+
+### `flow.handoff` over WS
+
+`flow.handoff {id}` → `flow.handoff {id, pearl, handoff, checkpoints, blocks,
+pr}` — the same body as `GET /api/flow/sessions/{id}/handoff` (below) plus
+the session `id`, because the relay brokers WS only. Nulls are sent, never
+omitted, so a phone can tell "no pearl" from "field missing".
+
+### Client `flow.hello`
+
+A client may send `{channel:"flow", type:"flow.hello"}`; the engine answers
+with a fresh `flow.hello`. This is the phone's bridge nudge: over the relay
+nothing opens the flow WS until the phone sends a frame, so the bridge is
+opened by the **first** `channel:"flow"` envelope (whatever its type), the
+engine's on-connect hello goes back, and the nudge's reply follows.
+
+### tmux socket (TCC) {#tmux-socket-tcc}
+
+Sessions are created on the tmux server named by, in order: the
+`tmux_socket` field of `flow.new` (`th flow new --tmux-socket <name>`), then
+`smooth-daemon operator --tmux-socket <name>` / `$SMOOTH_FLOW_TMUX_SOCKET`,
+then the default `smooth-flow`. Every row records its socket, so a daemon
+restarted with a different setting still finds its old panes.
+
+**Why it matters:** on macOS, TCC attributes a pane's grants (Full Disk
+Access, Calendar, Notifications) to the process that started the tmux
+_server_. The SmoothFlow app starts `tmux -L smoothflow` itself (as a direct
+child, on every launch) and passes `SMOOTH_FLOW_TMUX_SOCKET=smoothflow` to
+the daemon it spawns. A session created on any other socket — the default
+`smooth-flow` server, or one a terminal started — runs agents with **no**
+FDA/Calendar access, and the failures are silent (empty listings, "not
+authorized" from EventKit), not prompts. `th flow new` from a terminal
+therefore lands on the app's server only with `--tmux-socket smoothflow`.
 
 ## Hooks — state comes from hooks, scraping is the fallback
 
@@ -177,12 +243,15 @@ steps in the main checkout (`checkout main`, `pull --rebase`, `merge <branch>
 
 ## Pearl rail
 
-`GET /api/flow/sessions/{id}/handoff` returns `{pearl, handoff:{worktree,
-branch, head, dirty, agent_session_id, next}, checkpoints, blocks, pr}`. Git
+`GET /api/flow/sessions/{id}/handoff` (and `flow.handoff` over WS) returns
+`{pearl, handoff:{worktree, branch, head, dirty, agent_session_id, next},
+checkpoints:[{at, note, auto}], blocks:[ids], pr:{number, url, ci}|null}`. Git
 facts come from the engine; `pearl`/`checkpoints`/`blocks`/`next` come from
-`th pearls show <id> --json` when the installed `th` has it (lane C), else
-`pearl` degrades to `{id, text}` and the lists to `[]`; `pr` comes from
-`gh pr list --head <branch>` and is `null` without `gh`.
+`th pearls show <id> --handoff --json` (lane C, th-9483e8 — the packet has
+exactly this shape) when the installed `th` has it, else `pearl` degrades to
+`{id, text}` from the plain `th pearls show` and the lists to `[]`; `pr`
+comes from `gh pr list --head <branch>` (falling back to the packet's) and is
+`null` without `gh`.
 
 ## Testing
 
@@ -191,6 +260,6 @@ frame round-trips, the hook table, the reset-time parser, the guard, the PTY
 bridge and — when `tmux` is on `PATH` — a live shell session end to end
 (launch, stream, send, snapshot, kill, death detection). `smooth-daemon`'s
 `flow_route` tests drive the WS + the hook long-poll over a real socket;
-`relay` tests pin the channel routing and the phone caps. All live tests use a
-private tmux socket (`SMOOTH_FLOW_TMUX_SOCKET`) so they never touch a running
-daemon's sessions.
+`relay` tests pin the channel routing and the phone caps. All live tests name a
+private tmux socket per call (`tmux_socket` on the request) so they never
+touch a running daemon's sessions.

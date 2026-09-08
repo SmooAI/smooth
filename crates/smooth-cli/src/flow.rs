@@ -56,6 +56,11 @@ pub enum FlowCommands {
         model: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// tmux socket (`tmux -L <name>`) to create the session on, instead of
+        /// the daemon's default. Use the shell app's socket (`smoothflow`) when
+        /// the agent needs the app's TCC grants.
+        #[arg(long)]
+        tmux_socket: Option<String>,
         /// Attach immediately after creating.
         #[arg(long)]
         attach: bool,
@@ -382,6 +387,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             prompt,
             model,
             title,
+            tmux_socket,
             attach,
             json,
             argv,
@@ -394,6 +400,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
                 prompt,
                 model,
                 title,
+                tmux_socket,
                 attach,
                 json,
                 argv,
@@ -444,6 +451,7 @@ struct NewArgs {
     prompt: Option<String>,
     model: Option<String>,
     title: Option<String>,
+    tmux_socket: Option<String>,
     attach: bool,
     json: bool,
     argv: Vec<String>,
@@ -458,6 +466,7 @@ async fn cmd_new(a: NewArgs) -> Result<()> {
         prompt,
         model,
         title,
+        tmux_socket,
         attach,
         json,
         argv,
@@ -470,6 +479,7 @@ async fn cmd_new(a: NewArgs) -> Result<()> {
         "prompt": prompt,
         "model": model,
         "title": title,
+        "tmux_socket": tmux_socket,
         "argv": if argv.is_empty() { Value::Null } else { json!(argv) },
     });
     let v = call(reqwest::Method::POST, "/api/flow/sessions", Some(body)).await?;

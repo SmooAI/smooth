@@ -984,4 +984,49 @@ mod tests {
         assert_eq!(v["frame"]["type"], "stream_token");
         assert_eq!(v["frame"]["token"], "pong-from-operator");
     }
+
+    /// th-d33afa: the phone's FIRST `channel:flow` frame (its `flow.hello`
+    /// nudge) is what opens the flow bridge; the engine's on-connect hello
+    /// comes back first, then the reply to the nudge — both enveloped to the
+    /// phone with the flow channel intact.
+    #[tokio::test]
+    async fn first_flow_frame_opens_the_flow_bridge_and_hello_comes_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = smooth_flow::Engine::open(smooth_flow::EngineConfig {
+            db_path: tmp.path().join("flow.db"),
+            default_project: tmp.path().to_path_buf(),
+            version: "t".into(),
+            machine_label: "m".into(),
+        })
+        .unwrap();
+        let app = crate::flow_route::flow_router(engine, Some("tok".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // Exactly what run_connection does on RelayMsg::FlowFrame.
+        let nudge = r#"{"channel":"flow","type":"flow.hello"}"#;
+        let RelayMsg::FlowFrame(from, frame) = classify_relay_msg(&json!({"from":"phone-9","frame":serde_json::from_str::<Value>(nudge).unwrap()}).to_string())
+        else {
+            panic!("a flow.hello envelope is a flow frame")
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let _task = spawn_bridge_with(from, flow_ws_url(addr.port(), "tok"), rx, out_tx, true);
+        tx.send(frame).unwrap();
+
+        let mut hellos = 0;
+        while hellos < 2 {
+            let envelope = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+                .await
+                .expect("hello within 5s")
+                .unwrap();
+            let v: Value = serde_json::from_str(&envelope).unwrap();
+            assert_eq!(v["to"], "phone-9");
+            assert_eq!(v["frame"]["channel"], "flow");
+            assert_eq!(v["frame"]["type"], "flow.hello", "{v}");
+            assert_eq!(v["frame"]["daemon"]["version"], "t");
+            hellos += 1;
+        }
+    }
 }
