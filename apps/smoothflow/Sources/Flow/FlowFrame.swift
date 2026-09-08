@@ -125,6 +125,9 @@ struct Session: Codable, Equatable, Identifiable {
     var label: String { pearlId.map { "\($0) \(title)" } ?? title }
     var projectName: String { (project as NSString).lastPathComponent.isEmpty ? project : (project as NSString).lastPathComponent }
     var needsYou: Bool { state == .needsYou || state == .limited || attention?.reason == .held }
+    /// Has (or will have) a PTY to attach to. `done`/`dead` rows keep their
+    /// surface scrollback but must not be attached — the engine refuses.
+    var isLive: Bool { state != .done && state != .dead }
 }
 
 struct FanOut: Codable, Equatable, Identifiable {
@@ -189,6 +192,35 @@ struct Handoff: Codable, Equatable {
     var pr: PR?
 }
 
+/// `flow.event {id, event_id, at, kind, text}` — one line of a session's
+/// activity (tool calls, hook events, supervision) as the engine saw it.
+struct FlowEvent: Codable, Equatable, Identifiable {
+    var sessionId: String
+    var eventId: String
+    var at: String
+    var kind: String
+    var text: String
+    var id: String { eventId }
+
+    enum CodingKeys: String, CodingKey { case sessionId = "id", eventId = "event_id", at, kind, text }
+
+    init(sessionId: String, eventId: String, at: String, kind: String, text: String) {
+        self.sessionId = sessionId; self.eventId = eventId; self.at = at; self.kind = kind; self.text = text
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        at = try c.decodeIfPresent(String.self, forKey: .at) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        text = try c.decodeFlexibleString(forKey: .text) ?? ""
+        eventId = try c.decodeFlexibleString(forKey: .eventId) ?? "\(sessionId)/\(at)/\(kind)/\(text.hashValue)"
+    }
+
+    /// Events that mean "Big Smooth needs you" — the only ones that earn amber.
+    var needsYou: Bool { ["permission", "question", "usage_limit", "held", "crashed", "needs_you"].contains(kind) }
+}
+
 /// Engine → client.
 enum FlowFrame: Equatable {
     case hello(daemon: DaemonInfo, sessions: [Session])
@@ -199,6 +231,11 @@ enum FlowFrame: Equatable {
     case attention(id: String, attention: Attention?)
     case fanout(FanOut, candidates: [Session])
     case error(ref: Int?, code: String, message: String)
+    /// Additive (engine follow-up): one activity line for a session.
+    case event(FlowEvent)
+    /// Additive: the handoff packet pushed instead of polled — the same shape
+    /// as `GET /api/flow/sessions/{id}/handoff`, plus `id`.
+    case handoff(id: String, Handoff)
     case unknown(type: String)
 
     private struct Key: CodingKey {
@@ -242,8 +279,12 @@ enum FlowFrame: Equatable {
             case "flow.fanout":
                 frame = .fanout(try c.decode(FanOut.self, forKey: Key("fan_out")),
                                 candidates: try c.decodeIfPresent([Session].self, forKey: Key("candidates")) ?? [])
+            case "flow.event":
+                frame = .event(try FlowEvent(from: decoder))
+            case "flow.handoff":
+                frame = .handoff(id: try c.decode(String.self, forKey: Key("id")), try Handoff(from: decoder))
             case "flow.error":
-                frame = .error(ref: try c.decodeIfPresent(Int.self, forKey: Key("ref")),
+                frame = .error(ref: try? c.decodeIfPresent(Int.self, forKey: Key("ref")),
                                code: try c.decodeFlexibleString(forKey: Key("code")) ?? "unknown",
                                message: try c.decodeIfPresent(String.self, forKey: Key("message")) ?? "")
             default:
@@ -255,6 +296,8 @@ enum FlowFrame: Equatable {
 
 /// Client → engine. `encode()` yields the wire JSON.
 enum ClientFrame: Equatable {
+    /// Sent once per connection so the engine knows who is looking.
+    case hello(client: String, version: String)
     case attach(id: String, cols: Int, rows: Int)
     case detach(id: String)
     case input(id: String, data: Data)
@@ -270,6 +313,7 @@ enum ClientFrame: Equatable {
 
     var type: String {
         switch self {
+        case .hello: "flow.hello"
         case .attach: "flow.attach"
         case .detach: "flow.detach"
         case .input: "flow.input"
@@ -287,6 +331,7 @@ enum ClientFrame: Equatable {
 
     var fields: [String: Any] {
         switch self {
+        case let .hello(client, version): ["client": client, "version": version]
         case let .attach(id, cols, rows): ["id": id, "cols": cols, "rows": rows]
         case let .detach(id): ["id": id]
         case let .input(id, data): ["id": id, "data_b64": data.base64EncodedString()]
@@ -311,6 +356,10 @@ enum ClientFrame: Equatable {
         let cleaned = obj.mapValues { v -> Any in if case Optional<Any>.none = v { return NSNull() } else { return v } }
         return (try? JSONSerialization.data(withJSONObject: cleaned)) ?? Data()
     }
+
+    /// The wire text. The engine reads TEXT WebSocket messages only (a binary
+    /// frame is silently skipped), so this is what actually goes on the socket.
+    func encodeText() -> String { String(decoding: encode(), as: UTF8.self) }
 }
 
 enum ApproveDecision: String { case allow, deny, allowSession = "allow_session" }

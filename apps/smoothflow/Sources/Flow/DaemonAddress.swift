@@ -6,7 +6,14 @@ enum DaemonAddress {
     struct Endpoint: Equatable {
         var host: String
         var port: Int
-        var wsURL: URL { URL(string: "ws://\(host):\(port)/api/flow/ws")! }
+        /// The daemon's local token (`?token=` on the WS, `X-Smooth-Token` on HTTP).
+        /// Every flow route but `/hooks` is gated on it.
+        var token: String? = nil
+        var wsURL: URL {
+            var c = URLComponents(string: "ws://\(host):\(port)/api/flow/ws")!
+            if let token { c.queryItems = [URLQueryItem(name: "token", value: token)] }
+            return c.url!
+        }
         var httpBase: URL { URL(string: "http://\(host):\(port)/")! }
         var description: String { "\(host):\(port)" }
     }
@@ -21,6 +28,9 @@ enum DaemonAddress {
 
     static let envKey = "SMOOTHFLOW_DAEMON_ADDR"
     static let defaultsKey = "daemonAddr"
+    static let binaryEnvKey = "SMOOTHFLOW_DAEMON_BIN"
+    static let binaryDefaultsKey = "daemonBinary"
+    static let tokenEnvKey = "SMOOTHFLOW_DAEMON_TOKEN"
 
     /// Order: env override → Settings override → spawn. `~/.smooth/daemon.addr`
     /// is deliberately NOT consulted: it advertises whatever daemon happened to
@@ -44,9 +54,12 @@ enum DaemonAddress {
         return Endpoint(host: host.isEmpty ? "127.0.0.1" : host, port: port)
     }
 
-    /// The `smooth-daemon` to launch: bundled → `~/.cargo/bin` → PATH.
-    static func daemonBinary(bundleExecutableDir: URL?, home: URL, path: String, exists: (String) -> Bool) -> String? {
+    /// The `smooth-daemon` to launch: explicit override (`SMOOTHFLOW_DAEMON_BIN`
+    /// / Settings) → bundled → `~/.cargo/bin` → PATH. The override is how a dev
+    /// build points the app at an engine built elsewhere.
+    static func daemonBinary(override: String? = nil, bundleExecutableDir: URL?, home: URL, path: String, exists: (String) -> Bool) -> String? {
         var candidates: [String] = []
+        if let o = override?.trimmingCharacters(in: .whitespacesAndNewlines), !o.isEmpty { candidates.append((o as NSString).expandingTildeInPath) }
         if let dir = bundleExecutableDir { candidates.append(dir.appendingPathComponent("smooth-daemon").path) }
         candidates.append(home.appendingPathComponent(".cargo/bin/smooth-daemon").path)
         candidates += path.split(separator: ":").map { "\($0)/smooth-daemon" }
@@ -55,4 +68,15 @@ enum DaemonAddress {
 
     /// `~/.smooth/daemon.addr` as written by the daemon (host:port, one line).
     static func readAddrFile(_ contents: String) -> Endpoint? { parse(contents) }
+
+    /// The local token to present: `SMOOTHFLOW_DAEMON_TOKEN` → `SMOOTH_LOCAL_TOKEN`
+    /// → `~/.smooth/operator-token` (what the daemon itself provisions). Blank
+    /// values are unset. `nil` means an open daemon (or one we cannot talk to).
+    static func token(env: [String: String], tokenFile: String?) -> String? {
+        for k in [tokenEnvKey, "SMOOTH_LOCAL_TOKEN"] {
+            if let t = env[k]?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        }
+        if let t = tokenFile?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+        return nil
+    }
 }

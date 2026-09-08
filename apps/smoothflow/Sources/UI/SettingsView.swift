@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject var daemon: DaemonManager
     @State private var notify = NotifySettings.load()
     @State private var addr = UserDefaults.standard.string(forKey: DaemonAddress.defaultsKey) ?? ""
+    @State private var binary = UserDefaults.standard.string(forKey: DaemonAddress.binaryDefaultsKey) ?? ""
     @State private var mode: DaemonManager.Mode = .child
 
     var body: some View {
@@ -53,6 +54,9 @@ struct SettingsView: View {
             TextField("Connect to an external daemon instead (host:port) — dev/mock only", text: $addr)
                 .font(.body.monospaced())
                 .onSubmit { UserDefaults.standard.set(addr, forKey: DaemonAddress.defaultsKey); app.restartConnection() }
+            TextField("Launch this smooth-daemon binary instead of the bundled one — dev only", text: $binary)
+                .font(.body.monospaced())
+                .onSubmit { UserDefaults.standard.set(binary, forKey: DaemonAddress.binaryDefaultsKey); app.restartConnection() }
             Text("Never rely on a daemon started from a terminal: macOS attributes its TCC prompts to that terminal and denies them silently.")
                 .font(.caption).foregroundStyle(Color(Theme.muted))
             Button("Restart daemon") { app.restartConnection() }

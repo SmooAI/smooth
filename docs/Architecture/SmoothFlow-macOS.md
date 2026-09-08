@@ -8,7 +8,9 @@ inbox of what needs a human, and a pearl rail. **The app holds no state.** Every
 fact on screen arrived as a `flow.*` frame from the engine (`smooth-flow`, lane
 A, hosted in `smooth-daemon`); every decision leaves as a `flow.*` frame. The
 protocol is [`smoothflow-protocol.md`](../../apps/smoothflow/mock/protocol.md)
-(v0 contract, mocked by `apps/smoothflow/mock/server.mjs`).
+(v0 contract, mocked by `apps/smoothflow/mock/server.mjs`); the engine's own
+account is [`SmoothFlow.md`](SmoothFlow.md). The shell was built against the
+mock and then integrated with the real engine (section below).
 
 ![main](assets/smoothflow/main.png)
 
@@ -73,6 +75,26 @@ daemon it did not start:
 - `SMOOTHFLOW_DAEMON_ADDR` / Settings ▸ Daemon override the address for the
   mock server. `~/.smooth/daemon.addr` is deliberately **not** consulted: it
   advertises whichever daemon started last, terminal ones included.
+- `SMOOTHFLOW_DAEMON_BIN` / Settings ▸ Daemon ("launch this binary") points a
+  dev build at an engine built elsewhere (it wins over bundled → `~/.cargo/bin`
+  → `PATH`). This is how the integration below was run.
+- The child is spawned through a one-line `sh` supervisor that exits with the
+  app: macOS has no parent-death signal, and an app crash used to leave the
+  daemon (and its supervision loop) running — seven such orphans were found
+  after one day of shell development.
+
+### What the child daemon is started with
+
+| env                          | value                              | why                                                                                 |
+| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
+| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                       | agents run under the **app-owned** tmux server (the TCC story below)                |
+| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new  | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
+| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db` | never share Big Smooth's operator store                                             |
+| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`     | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
+| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                | Big Smooth may be running; we are a separate product on our own port                |
+| `SMOOTH_TAILSCALE_SERVE`     | `0`                                | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+
+The token rides as `?token=` on the WebSocket and `X-Smooth-Token` on HTTP.
 
 ### TCC matrix (measured 2026-09-07, macOS 26.4, Developer-ID-signed ad-hoc-equivalent build)
 
@@ -124,6 +146,76 @@ error, status `notDetermined`, nothing in tccd's log:
 2. **Hardened runtime without `com.apple.security.personal-information.calendars`**
    (same for `.reminders`) — known from Big Smooth (th-36da65), still true.
 
+## Integration with the real engine (2026-09-08)
+
+Run against `smooth-daemon` built from lane A's branch (`th-7f0af3-flow-engine`),
+launched by the app via `SMOOTHFLOW_DAEMON_BIN`. Everything below was driven
+through the app (keystrokes into the ghostty surface, ⌘⌥R, ⌘⌥Y, the steer
+bar) and cross-checked with `th flow ls/snapshot` against the same daemon.
+
+| Path                                                  | Result                                                                         |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `flow.hello` → sidebar                                | fleet listed, first **live** session focused                                   |
+| shell session: attach → output → typed input → output | `echo ROUNDTRIP-42` round-trips through the surface                            |
+| window resize → `flow.resize`                         | `tput cols; tput lines` follows the window (124×43 → 92×39)                    |
+| claude session (`reply with the word ok`)             | starting → working → idle from hooks; steer bar sends `flow.send`, reply lands |
+| `flow.kill{resume:true}` (⌘⌥R)                        | relaunched as `claude --resume <id>`, surface re-attaches under the new pid    |
+| `PermissionRequest` hook → inbox card → ⌘⌥Y           | the long-polled hook returns `decision.behavior = allow`; session → working    |
+| `flow.snapshot` / `GET …/handoff`                     | pane text and the pearl rail (branch, HEAD, dirty count, resumable session id) |
+
+What did not match the mock, all fixed on the shell side:
+
+- **Text frames only.** The engine's WS loop reads `Message::Text`; the shell
+  sent binary and every frame was silently skipped.
+- **Token.** The engine gates every flow route (additive to v0). The shell
+  now resolves the same token the daemon provisions.
+- **Ghostty actions off the main thread.** The real engine's first attach is a
+  full redraw; ghostty then raises actions from its renderer thread and
+  `MainActor.assumeIsolated` trapped (crash on first attach). Off-main actions
+  are copied and hopped to main.
+- **Resize never reached the engine.** `ghostty_surface_size` still reports the
+  old grid right after `ghostty_surface_set_size`; the grid is re-read shortly
+  after and only real changes become `flow.resize`.
+- **Re-attach.** After a reconnect (`flow.hello`) or a relaunch (a `flow.session`
+  with a new pid) the engine has no attachment for us; surfaces re-attach.
+  Done/dead rows are never attached (the engine refuses, and it was the first
+  thing the app focused).
+- **`flow.error.ref`** may be any JSON, not just an int.
+
+Engine-side findings filed as pearls (not patched here): th-f4073b
+(`handoff.dirty[0]` loses its first character), th-3e6b1b (a second daemon
+overwrites `~/.smooth/daemon.addr`), th-4f7866 (a daemon supervises rows on a
+socket it does not own → "process vanished").
+
+Additive frames the shell already decodes for the engine follow-up:
+`flow.event {id, event_id, at, kind, text}` (the **activity** tab, ⌘⌥4 — amber
+only on the kinds that mean "needs you"), `flow.handoff {id, …GET body}` (pushed
+pearl rail), and the client sends `flow.hello {client:"smoothflow", version}`
+on connect.
+
+| Claude session, steered from the bar           | Inbox card from a real `PermissionRequest` hook |
+| ---------------------------------------------- | ----------------------------------------------- |
+| ![claude](assets/smoothflow/engine-claude.png) | ![inbox](assets/smoothflow/engine-inbox.png)    |
+
+![shell](assets/smoothflow/engine-shell.png)
+
+### TCC probe from a pane the real engine created
+
+`scripts/tcc-probe.sh` run inside `fs-…`, a shell session the engine launched
+on the app-owned `tmux -L smoothflow` server:
+
+```
+engine-pane  pid=69299  ppid=60248  responsible=58932(SmoothFlow)  fda=denied  calendar=calendar: granted
+terminal     pid=69721  ppid=65831  responsible=1385(cmux)         fda=granted calendar=calendar: not-determined
+```
+
+The Calendar prompt appeared **for SmoothFlow** the moment the probe ran
+`smooth-daemon tcc calendar` in that pane (the ad-hoc signature changes per
+build, so a rebuilt Debug app is asked again); after Allow the pane reads
+`granted`, while the same probe from the terminal is `not-determined` and reads
+FDA the other way round. Attribution follows the app through the real
+engine's daemon → tmux → pane chain, exactly as the matrix predicted.
+
 ## Attention → notifications
 
 `AttentionNotifier.notification(for:settings:)` is a pure map from a session
@@ -147,7 +239,7 @@ session (identifier `session:<id>`), cleared when the session is focused.
 | ⌘1…9      | focus session N                            |
 | ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request |
 | ⌘⌥R / ⌘⌥K | kill & resume / kill                       |
-| ⌘⌥1/2/3   | terminal / diff / PR tab                   |
+| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab        |
 | ⌘D / ⌘⇧W  | split / close split                        |
 
 ![fan-out](assets/smoothflow/fanout.png)
@@ -164,12 +256,13 @@ name; the workflow normalizes it.
 
 ## Gaps (pearls filed from the main checkout)
 
-- Engine must run agents under the app-owned `tmux -L smoothflow` server so
-  attribution holds across daemon restarts.
-- `SMOOTH_ALLOW_SECOND_DAEMON=1` is set for the child: the daemon still shares
-  `operator-storage.db` with a running Big Smooth; needs its own store.
-- Diff tab shells `git diff` in the worktree; the PR tab only shows what the
-  handoff endpoint reports (`pr.number/url/ci`). "Merge" opens the PR.
-- "Close pearl + GC worktree" from the inbox is not in the v0 protocol.
-- The Developer ID / notarized release path is wired but only the ad-hoc and
-  locally re-signed builds were exercised.
+- th-c7041a — engine launches agents under the app-owned `tmux -L smoothflow`
+  server. The engine already honors `SMOOTH_FLOW_TMUX_SOCKET`, which the app
+  sets; the pearl tracks making that the contract (`--tmux-socket`).
+- th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
+  by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
+- th-e126cc — "Close pearl + GC worktree" from the inbox is not in the v0
+  protocol; the PR tab only shows what the handoff endpoint reports, "Merge"
+  opens the PR.
+- th-b4e4de — the Developer ID / notarized release path is wired but only the
+  ad-hoc and locally re-signed builds were exercised.

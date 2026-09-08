@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum CenterTab: Int { case terminal, diff, pr }
+enum CenterTab: Int { case terminal, diff, pr, activity }
 
 /// Center column: tab strip (terminal / diff / PR), a splittable surface area,
 /// and the steer bar. Surfaces are owned by `AppController` and merely hosted here.
@@ -9,13 +9,14 @@ enum CenterTab: Int { case terminal, diff, pr }
 final class CenterViewController: NSViewController, NSTextFieldDelegate {
     unowned let app: AppController
 
-    private let tabs = NSSegmentedControl(labels: ["terminal", "diff", "PR"], trackingMode: .selectOne, target: nil, action: nil)
+    private let tabs = NSSegmentedControl(labels: ["terminal", "diff", "PR", "activity"], trackingMode: .selectOne, target: nil, action: nil)
     private let pathLabel = NSTextField(labelWithString: "")
     private let split = NSSplitView()
     private var panes: [SessionPane] = []
     private var activePane = 0
     private let diffView = DiffView()
     private var prHost: NSHostingView<PRView>?
+    private var activityHost: NSHostingView<ActivityView>?
     private let steerField = NSTextField()
     private let steerHint = NSTextField(labelWithString: "⌘↵ send · ⌘⇧↵ send to all working")
     private let content = NSView()
@@ -99,6 +100,10 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 let host = NSHostingView(rootView: PRView(app: app, store: app.store))
                 prHost = host
                 show(host)
+            case .activity:
+                let host = NSHostingView(rootView: ActivityView(store: app.store))
+                activityHost = host
+                show(host)
             }
         }
     }
@@ -145,6 +150,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     func refreshHeaders() {
         for p in panes { if let id = p.sessionId, let s = app.store.sessions[id] { p.setHeader(s) } }
+        // argv changes under a session (`claude --resume …` after a kill/resume).
+        if let s = app.store.focused { pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))" }
     }
 
     func focusSteer() { view.window?.makeFirstResponder(steerField) }
@@ -281,6 +288,53 @@ struct PRView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: store.focusedId) { if let id = store.focusedId { await app.loadHandoff(for: id) } }
     }
+}
+
+/// The focused session's `flow.event` lines, newest at the bottom. Quiet by
+/// design: time and kind recede, the text carries it, and amber appears only
+/// on the events that mean Big Smooth needs you.
+struct ActivityView: View {
+    @ObservedObject var store: FlowStore
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                if let id = store.focusedId {
+                    let events = store.events[id] ?? []
+                    if events.isEmpty {
+                        Text("No activity yet · the engine sends `flow.event` as hooks and supervision fire")
+                            .font(.caption).foregroundStyle(Color(Theme.muted)).padding(20)
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(events) { e in row(e).id(e.id) }
+                        }
+                        .padding(14)
+                        .onChange(of: events.count) { _, _ in if let last = events.last { proxy.scrollTo(last.id, anchor: .bottom) } }
+                        .onAppear { if let last = events.last { proxy.scrollTo(last.id, anchor: .bottom) } }
+                    }
+                } else {
+                    Text("No session focused").foregroundStyle(Color(Theme.muted)).padding(20)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func row(_ e: FlowEvent) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(Self.clock(e.at)).font(.caption.monospaced()).foregroundStyle(Color(Theme.faint)).frame(width: 58, alignment: .trailing)
+            Text(e.kind).font(.caption.monospaced()).foregroundStyle(e.needsYou ? Color(Theme.amber) : Color(Theme.muted)).frame(width: 96, alignment: .leading)
+            Text(e.text).font(.caption).textSelection(.enabled).lineLimit(4)
+        }
+    }
+
+    /// `HH:mm:ss` local, or the raw text when it is not a timestamp.
+    static func clock(_ iso: String) -> String {
+        guard let d = ISO8601DateFormatter.flexible.date(from: iso) else { return String(iso.prefix(8)) }
+        return clockFormatter.string(from: d)
+    }
+
+    private static let clockFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
 }
 
 enum Shell {

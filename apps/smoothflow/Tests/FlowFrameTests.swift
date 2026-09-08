@@ -132,3 +132,68 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertEqual(pick["winner_session_id"] as? String, "w")
     }
 }
+
+/// Frames the engine follow-up adds (flow.event, flow.handoff, client hello)
+/// and the wire facts the real engine pinned: text frames, token-gated routes.
+final class FlowFrameIntegrationTests: XCTestCase {
+    private func decode(_ json: String) throws -> FlowFrame { try FlowFrame.decode(Data(json.utf8)) }
+
+    func testEventDecodes() throws {
+        let f = try decode(#"{"channel":"flow","type":"flow.event","id":"fs-1","event_id":"ev-9","at":"2026-09-08T12:00:00Z","kind":"PreToolUse","text":"Bash: git status"}"#)
+        guard case let .event(e) = f else { return XCTFail("\(f)") }
+        XCTAssertEqual(e.sessionId, "fs-1")
+        XCTAssertEqual(e.eventId, "ev-9")
+        XCTAssertEqual(e.kind, "PreToolUse")
+        XCTAssertEqual(e.text, "Bash: git status")
+        XCTAssertFalse(e.needsYou)
+        guard case let .event(p) = try decode(#"{"type":"flow.event","id":"fs-1","event_id":7,"kind":"permission","text":{"command":"rm -rf x"}}"#) else { return XCTFail() }
+        XCTAssertEqual(p.eventId, "7", "numeric ids stringify")
+        XCTAssertEqual(p.text, "rm -rf x", "object text renders like attention detail")
+        XCTAssertTrue(p.needsYou)
+        guard case let .event(q) = try decode(#"{"type":"flow.event","id":"fs-1","kind":"Stop","text":"done"}"#) else { return XCTFail() }
+        XCTAssertFalse(q.eventId.isEmpty, "a missing event_id gets a synthetic one so the row is still Identifiable")
+    }
+
+    func testHandoffPushDecodesLikeTheGet() throws {
+        let f = try decode(#"{"type":"flow.handoff","id":"fs-1","pearl":{"id":"th-1","title":"T","status":"in_progress","priority":2,"labels":["x"]},"handoff":{"worktree":"/w","branch":"b","head":"abc","dirty":["a.rs"],"agent_session_id":"u","next":"push"},"checkpoints":[{"at":"2026-09-08T00:00:00Z","note":"n","auto":false}],"blocks":["th-2"],"pr":{"number":5,"url":"https://x/5","ci":"green"}}"#)
+        guard case let .handoff(id, h) = f else { return XCTFail("\(f)") }
+        XCTAssertEqual(id, "fs-1")
+        XCTAssertEqual(h.pearl?.title, "T")
+        XCTAssertEqual(h.handoff?.dirty, ["a.rs"])
+        XCTAssertEqual(h.checkpoints?.first?.note, "n")
+        XCTAssertEqual(h.pr?.number, 5)
+        // The real engine degrades `pearl` to {id, text} when th lacks `show --json`.
+        guard case let .handoff(_, thin) = try decode(#"{"type":"flow.handoff","id":"fs-1","pearl":{"id":"th-1","text":"raw"},"handoff":{"worktree":"/w"},"checkpoints":[],"blocks":[],"pr":null}"#) else { return XCTFail() }
+        XCTAssertEqual(thin.pearl?.id, "th-1")
+        XCTAssertNil(thin.pr)
+    }
+
+    func testErrorRefMayBeAnyJson() throws {
+        guard case let .error(ref, code, _) = try decode(#"{"type":"flow.error","ref":"abc","code":"bad_frame","message":"m"}"#) else { return XCTFail() }
+        XCTAssertNil(ref)
+        XCTAssertEqual(code, "bad_frame")
+        guard case let .error(none, _, _) = try decode(#"{"type":"flow.error","ref":null,"code":"x","message":"m"}"#) else { return XCTFail() }
+        XCTAssertNil(none)
+    }
+
+    func testClientHelloAndTextEncoding() throws {
+        let hello = ClientFrame.hello(client: "smoothflow", version: "0.1")
+        let o = try XCTUnwrap(JSONSerialization.jsonObject(with: hello.encode()) as? [String: Any])
+        XCTAssertEqual(o["type"] as? String, "flow.hello")
+        XCTAssertEqual(o["channel"] as? String, "flow")
+        XCTAssertEqual(o["client"] as? String, "smoothflow")
+        let text = ClientFrame.input(id: "a", data: Data("hi".utf8)).encodeText()
+        XCTAssertTrue(text.hasPrefix("{") && text.contains(#""data_b64":"aGk=""#), "one JSON object per TEXT message: \(text)")
+    }
+
+    func testEngineSessionRowDecodes() throws {
+        // A row exactly as the real engine serializes it (RFC3339 with nanos, argv array, pid_start skipped).
+        let json = #"{"channel":"flow","type":"flow.session","session":{"id":"fs-7b0a1c2d","kind":"shell","title":"zsh","project":"/Users/u/dev/x","worktree":"/Users/u/dev/x","branch":"main","pearl_id":null,"agent_session_id":null,"argv":["zsh","-l"],"tmux_session":"fs-7b0a1c2d","pid":4242,"state":"starting","attention":null,"fan_out_id":null,"created_at":"2026-09-08T16:01:02.123456789Z","updated_at":"2026-09-08T16:01:02.123456789Z","ended_at":null,"exit_code":null,"unread":false}}"#
+        guard case let .session(s) = try decode(json) else { return XCTFail() }
+        XCTAssertEqual(s.tmuxSession, "fs-7b0a1c2d")
+        XCTAssertEqual(s.pid, 4242)
+        XCTAssertEqual(s.state, .starting)
+        XCTAssertEqual(s.argv, ["zsh", "-l"])
+        XCTAssertNotNil(ISO8601DateFormatter.flexible.date(from: s.createdAt), "nanosecond timestamps parse")
+    }
+}

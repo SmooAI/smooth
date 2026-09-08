@@ -10,7 +10,7 @@ final class FlowStoreTests: XCTestCase {
 
     func testHelloReplacesFleetAndFocusesFirst() {
         let store = FlowStore()
-        XCTAssertEqual(store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [s("a"), s("b")])), [])
+        XCTAssertEqual(store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [s("a"), s("b")])), [.connected])
         XCTAssertEqual(store.order, ["a", "b"])
         XCTAssertEqual(store.focusedId, "a")
         XCTAssertTrue(store.connection.isConnected)
@@ -114,5 +114,73 @@ final class FlowStoreTests: XCTestCase {
         XCTAssertEqual(store.apply(.error(ref: nil, code: "held", message: "pid 5 owns it")), [.error("held: pid 5 owns it")])
         XCTAssertEqual(store.lastError, "held: pid 5 owns it")
         XCTAssertEqual(store.apply(.unknown(type: "flow.x")), [])
+    }
+}
+
+@MainActor
+final class FlowStoreIntegrationTests: XCTestCase {
+    private func s(_ id: String) -> Session { Session(id: id, kind: "claude", title: id, project: "/p", state: .working) }
+    private func ev(_ sid: String, _ n: Int, kind: String = "PostToolUse") -> FlowEvent {
+        FlowEvent(sessionId: sid, eventId: "e\(n)", at: "2026-09-08T00:00:0\(n % 10)Z", kind: kind, text: "t\(n)")
+    }
+
+    func testHelloFocusesTheFirstLiveSessionNotADeadOne() {
+        let store = FlowStore()
+        var dead = s("dead"); dead.state = .dead
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [dead, s("live")]))
+        XCTAssertEqual(store.focusedId, "live")
+        XCTAssertFalse(dead.isLive)
+        XCTAssertTrue(s("live").isLive)
+    }
+
+    func testHelloEmitsConnectedSoSurfacesReattach() {
+        let store = FlowStore()
+        XCTAssertEqual(store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [s("a")])), [.connected])
+    }
+
+    func testEventsAccumulateDedupeAndCap() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a")]))
+        XCTAssertEqual(store.apply(.event(ev("a", 1))), [])
+        XCTAssertEqual(store.apply(.event(ev("a", 1))), [], "a redelivered event is not appended twice")
+        XCTAssertEqual(store.events["a"]?.count, 1)
+        XCTAssertEqual(store.apply(.event(ev("ghost", 1))), [], "events for unknown sessions are dropped")
+        XCTAssertNil(store.events["ghost"])
+        for n in 2...(FlowStore.eventCap + 10) { store.apply(.event(ev("a", n))) }
+        XCTAssertEqual(store.events["a"]?.count, FlowStore.eventCap)
+        XCTAssertEqual(store.events["a"]?.first?.eventId, "e11", "oldest rows fall off")
+        store.apply(.sessionRemoved(id: "a"))
+        XCTAssertNil(store.events["a"])
+    }
+
+    func testNewPidMeansRelaunchedSoTheSurfaceReattaches() {
+        let store = FlowStore()
+        var a = s("a"); a.pid = 100
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [a]))
+        XCTAssertEqual(store.apply(.session(a)), [], "same pid, nothing")
+        a.pid = 200
+        XCTAssertEqual(store.apply(.session(a)), [.relaunched(id: "a")], "the engine resumed it under a new pid")
+        a.pid = nil
+        XCTAssertEqual(store.apply(.session(a)), [], "pid cleared (dying) is not a relaunch")
+        a.pid = 300; a.state = .done
+        XCTAssertEqual(store.apply(.session(a)), [.finished(a)], "a terminal state never re-attaches")
+    }
+
+    func testHandoffPushBecomesAnEffectOnlyForKnownSessions() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a")]))
+        let h = Handoff(pearl: nil, handoff: nil, checkpoints: nil, blocks: nil, pr: Handoff.PR(number: 1, url: nil, ci: nil))
+        XCTAssertEqual(store.apply(.handoff(id: "a", h)), [.handoff(id: "a", h)])
+        XCTAssertEqual(store.apply(.handoff(id: "zz", h)), [])
+    }
+
+    func testReconnectHelloDropsEventsOfVanishedSessions() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a"), s("b")]))
+        store.apply(.event(ev("a", 1)))
+        store.apply(.event(ev("b", 1)))
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("b")]))
+        XCTAssertNil(store.events["a"])
+        XCTAssertEqual(store.events["b"]?.count, 1)
     }
 }

@@ -119,6 +119,16 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         guard let surface, bounds.width > 0, bounds.height > 0 else { return }
         let scale = window?.backingScaleFactor ?? 2
         ghostty_surface_set_size(surface, UInt32(bounds.width * scale), UInt32(bounds.height * scale))
+        // Ghostty applies the size on its own thread, so the grid read right
+        // here is still the OLD one (a window resize never reached the engine
+        // as `flow.resize` — measured: cols stuck at the first attach). Check
+        // now and again shortly after; only a real change is reported.
+        reportGridIfChanged()
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in self?.reportGridIfChanged() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in self?.reportGridIfChanged() }
+    }
+
+    private func reportGridIfChanged() {
         let g = gridSize
         if g != lastGrid, g.cols > 0, g.rows > 0 {
             lastGrid = g
