@@ -40,7 +40,7 @@ Code worker sessions in tmux, coordinate them over
       plain `claude` session registers under a **placeholder** handle derived
       from the session (`cc-<cwd-basename>-<sid4>`, e.g.
       `cc-smooth-th-e651bc-agent-onboard-a21c`) with `--no-push` (registration
-      fires on every start; skipping the Dolt remote push keeps it cheap).
+      fires on every start; pearls are local SQLite so it is cheap).
     - `on-first-prompt.sh` (UserPromptSubmit) fires **once**, after the first
       prompt, nudging a placeholder session to rename itself to a task-meaningful
       handle: `th agent rename --from <placeholder> --to <new>` (carries its mail
@@ -70,8 +70,8 @@ Code worker sessions in tmux, coordinate them over
       `ci-attest/*` statuses, so each credited CI row skips in ~8s). Override
       with `# attest:ack reason=...`.
     - `pearls-store-guard.sh` (PreToolUse Bash) — nudges away from the patterns
-      that wedge the Dolt pearl store read-only (hand-deleting `.smooth/dolt`
-      internals, raw `dolt` writes that bypass the single-writer server,
+      that lose every project's pearls at once (hand-deleting
+      `~/.smooth/pearls.db` or a legacy `.smooth/dolt`, raw sqlite writes that bypass `th pearls`,
       backgrounded pearl/msg watchers). Override with `# pearls-guard:ack`.
 
     Skills:
