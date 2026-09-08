@@ -37,6 +37,7 @@ mod mail_backend;
 mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
+mod pearls_handoff;
 /// Reclaimable-disk findings reported by `th doctor` (pearl th-91de11).
 mod reclaim;
 /// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
@@ -1577,9 +1578,41 @@ enum PearlCommands {
     List {
         #[arg(long)]
         status: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Show issue details
-    Show { id: String },
+    Show {
+        id: String,
+        /// Print the handoff packet (where the work is, what happened, what's
+        /// next) instead of the full record. Pearl th-9483e8.
+        #[arg(long)]
+        handoff: bool,
+        /// With --handoff: machine-readable packet.
+        #[arg(long, requires = "handoff")]
+        json: bool,
+    },
+    /// Record a checkpoint on a pearl: a note plus the auto-collected handoff
+    /// state (worktree, branch, HEAD, dirty files, agent session, next step).
+    /// Handoff fields overwrite (latest wins); notes append. Pearl th-9483e8.
+    Checkpoint {
+        id: String,
+        /// What happened since the last checkpoint.
+        #[arg(long)]
+        note: Option<String>,
+        /// What the next session should do first.
+        #[arg(long)]
+        next: Option<String>,
+        /// Hook mode: silent, never fails (exit 0 even without a store).
+        #[arg(long)]
+        auto: bool,
+        /// Harness session id (falls back to $CLAUDE_SESSION_ID).
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Directory to collect git state from (default: cwd).
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+    },
     /// Update an issue
     Update {
         id: String,
@@ -1677,6 +1710,16 @@ enum PearlCommands {
         memories: usize,
         #[arg(long)]
         json: bool,
+        /// Only the handoff packets of in_progress pearls (pearl th-9483e8).
+        #[arg(long)]
+        in_progress: bool,
+        /// With --in-progress: only pearls assigned to this agent.
+        #[arg(long, requires = "in_progress")]
+        assignee: Option<String>,
+        /// With --in-progress: only pearls whose recorded worktree is this
+        /// directory's repo, or whose id is in its branch name.
+        #[arg(long, requires = "in_progress")]
+        cwd: Option<std::path::PathBuf>,
     },
 }
 
@@ -4788,7 +4831,13 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
     if let PearlCommands::MigrateFromDolt { path } = cmd {
         return cmd_pearls_migrate_from_dolt(path.as_deref());
     }
-    let store = open_pearl_store()?;
+    // `checkpoint --auto` is called from harness hooks: a failed open (a
+    // repo without pearls) is a silent no-op, never a failed hook.
+    let store = match open_pearl_store() {
+        Ok(s) => s,
+        Err(_) if matches!(cmd, PearlCommands::Checkpoint { auto: true, .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     match cmd {
         PearlCommands::Create {
@@ -4815,7 +4864,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             println!("  {}", format_pearl_line(&issue));
         }
 
-        PearlCommands::List { status } => {
+        PearlCommands::List { status, json } => {
             let query = if let Some(ref s) = status {
                 let st = smooth_pearls::PearlStatus::from_str_loose(s).ok_or_else(|| anyhow::anyhow!("unknown status: {s}"))?;
                 smooth_pearls::PearlQuery::new().with_status(st)
@@ -4823,7 +4872,9 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 smooth_pearls::PearlQuery::new()
             };
             let issues = store.list(&query)?;
-            if issues.is_empty() {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&issues)?);
+            } else if issues.is_empty() {
                 println!("No pearls found.");
             } else {
                 for issue in &issues {
@@ -4833,8 +4884,17 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
-        PearlCommands::Show { id } => {
+        PearlCommands::Show { id, handoff, json } => {
             let issue = store.get(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found: {id}"))?;
+            if handoff {
+                let packet = pearls_handoff::packet(&store, &issue, true)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&packet)?);
+                } else {
+                    print!("{}", pearls_handoff::render(&packet));
+                }
+                return Ok(());
+            }
             println!("{} {}", issue.status, issue.title.bold());
             println!("  {} {} | {} | {}", "ID:".dimmed(), issue.id, issue.priority, issue.pearl_type);
             if let Some(ref assignee) = issue.assigned_to {
@@ -4862,12 +4922,38 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 }
             }
 
-            // Show comments
+            // Show comments — checkpoint records render as a compact log
+            // instead of raw JSON (`--handoff` has the full packet).
             let comments = store.get_comments(&issue.id)?;
+            let (checkpoints, comments): (Vec<_>, Vec<_>) = comments.into_iter().partition(pearls_handoff::is_checkpoint_comment);
             if !comments.is_empty() {
                 println!("\n{}", "Comments:".dimmed());
                 for c in &comments {
                     println!("  {} {}", c.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed(), c.content);
+                }
+            }
+            let checkpoints = pearls_handoff::parse_checkpoints(&checkpoints);
+            if !checkpoints.is_empty() {
+                println!(
+                    "\n{}",
+                    format!("Checkpoints ({}; `th pearls show {} --handoff` for the packet):", checkpoints.len(), issue.id).dimmed()
+                );
+                for cp in checkpoints.iter().filter(|c| c.note.is_some()) {
+                    println!("  {} {}", cp.at.format("%Y-%m-%d %H:%M").to_string().dimmed(), cp.note.as_deref().unwrap_or(""));
+                }
+                if let Some(last) = checkpoints.last() {
+                    let h = pearls_handoff::merged_handoff(&checkpoints);
+                    println!(
+                        "  {} last {}{} · {} @ {}",
+                        "↳".dimmed(),
+                        last.at.format("%Y-%m-%d %H:%M"),
+                        if last.auto { " (auto)" } else { "" },
+                        h.branch.as_deref().unwrap_or("-"),
+                        h.head.as_deref().map_or("-", |x| &x[..x.len().min(12)])
+                    );
+                    if let Some(next) = h.next {
+                        println!("  {} {next}", "next:".dimmed());
+                    }
                 }
             }
 
@@ -4963,6 +5049,37 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
+        }
+
+        PearlCommands::Checkpoint {
+            id,
+            note,
+            next,
+            auto,
+            session_id,
+            cwd,
+        } => {
+            let cwd = match cwd {
+                Some(c) => c,
+                None => std::env::current_dir()?,
+            };
+            let opts = pearls_handoff::CheckpointOpts { note, next, auto, session_id };
+            if auto {
+                // Hook mode: best-effort and silent.
+                let _ = pearls_handoff::checkpoint(&store, &id, &cwd, &opts);
+                return Ok(());
+            }
+            let cp = pearls_handoff::checkpoint(&store, &id, &cwd, &opts)?;
+            println!(
+                "{} Checkpoint on {} ({} @ {})",
+                "✓".green().bold(),
+                id.green().bold(),
+                cp.handoff.branch.as_deref().unwrap_or("-"),
+                cp.handoff.head.as_deref().map_or("-", |x| &x[..x.len().min(12)])
+            );
+            if let Some(n) = &cp.note {
+                println!("  {n}");
+            }
         }
 
         PearlCommands::Search { query } => {
@@ -5065,7 +5182,32 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 println!("{} no memory with id {id}", "✗".red());
             }
         }
-        PearlCommands::Prime { memories, json } => {
+        PearlCommands::Prime {
+            memories,
+            json,
+            in_progress,
+            assignee,
+            cwd,
+        } => {
+            if in_progress {
+                let pearls = pearls_handoff::in_progress(&store, assignee.as_deref(), cwd.as_deref())?;
+                let mut packets = Vec::with_capacity(pearls.len());
+                for p in &pearls {
+                    packets.push(pearls_handoff::packet(&store, p, true)?);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&packets)?);
+                } else if packets.is_empty() {
+                    println!("No in-progress pearls{}.", if cwd.is_some() { " for this worktree" } else { "" });
+                } else {
+                    println!("{}", "# In-progress handoff".bold());
+                    for pk in &packets {
+                        println!();
+                        print!("{}", pearls_handoff::render(pk));
+                    }
+                }
+                return Ok(());
+            }
             let mem = store.memory();
             let open = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Open))?;
             let in_progress = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::InProgress))?;

@@ -18,6 +18,23 @@
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-worktree-warning.sh"
                     }
                 ]
+            },
+            {
+                "matcher": "compact|resume",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/handoff-context.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart"
+                    }
+                ]
             }
         ],
         "UserPromptSubmit": [
@@ -26,6 +43,14 @@
                     {
                         "type": "command",
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/on-first-prompt.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh UserPromptSubmit"
                     }
                 ]
             }
@@ -60,6 +85,14 @@
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/attest-push-hint.sh"
                     }
                 ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PreToolUse"
+                    }
+                ]
             }
         ],
         "PostToolUse": [
@@ -69,6 +102,83 @@
                     {
                         "type": "command",
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/enforce-pearls-labels.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PostToolUse"
+                    }
+                ]
+            }
+        ],
+        "PermissionRequest": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PermissionRequest",
+                        "timeout": 125
+                    }
+                ]
+            }
+        ],
+        "Notification": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Notification"
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Stop"
+                    }
+                ]
+            }
+        ],
+        "SubagentStop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SubagentStop"
+                    }
+                ]
+            }
+        ],
+        "PreCompact": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/precompact-checkpoint.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PreCompact"
+                    }
+                ]
+            }
+        ],
+        "SessionEnd": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionEnd"
                     }
                 ]
             }
