@@ -1134,6 +1134,40 @@ removal). Requires `tmux` on `PATH`.
 > fleet to maximize a flat-rate plan is the gray zone — keep concurrency
 > tasteful, and use the metered API + smooth-operator for true fleet scale.
 
+### SmoothFlow — sessions Big Smooth keeps alive (`th flow`, pearl th-7f0af3)
+
+`th flow` is a thin client over the SmoothFlow engine inside the daemon
+([architecture](../Architecture/SmoothFlow.md)). Sessions — Claude Code, Codex,
+OpenCode, or a plain shell — run under one long-lived `tmux -L smooth-flow`
+server, so they survive this terminal, the app, and `th` itself. The engine is
+the only state holder; `th flow` connects and never launches the daemon.
+
+```bash
+th flow ls [--json]                                      # every session: state glyph, attention, worktree
+th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --session-id, launched under tmux
+th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
+th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
+th flow new --kind claude --attach -- claude --model opus # explicit argv after `--`
+th flow attach <id>                                      # raw-mode stream; Ctrl-\ detaches (session keeps running)
+th flow send <id> "also add a regression test"           # steer: bracketed-paste + Enter into the prompt
+th flow inbox                                            # sessions that need you or finished unread
+th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
+th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
+th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
+th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
+th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
+```
+
+States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
+`limited` (usage limit — the engine resumes at the parsed reset time) ·
+`done` · `dead`. Attention reasons in brackets: `permission`, `question`,
+`usage_limit`, `crashed`, `held` (another live pid owns that harness session).
+
+Discovery is `~/.smooth/daemon.addr`; auth is the daemon's local token
+(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Errors are two lines:
+what failed, then what to do.
+
 ### Worktree helpers
 
 ```bash

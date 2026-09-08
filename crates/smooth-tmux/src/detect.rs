@@ -1,5 +1,9 @@
 //! Pure pane-state detection for Claude Code TUIs.
 //!
+//! Lives in `smooth-tmux` (moved from `smooth-cli::claude::detect`, th-7f0af3)
+//! so `th claude`'s supervisor and the SmoothFlow engine share ONE copy of the
+//! heuristics.
+//!
 //! A supervisor decides what to do by scraping the captured pane text.
 //! All logic here is pure string analysis so it is exhaustively unit
 //! testable on captured fixtures without a live tmux or a live Claude.
@@ -52,6 +56,15 @@ const APPROVAL_MARKERS: &[&str] = &[
 /// Substrings that mark active work (interrupt hint).
 const WORKING_MARKERS: &[&str] = &["esc to interrupt", "esc to cancel", "(running", "tokens · esc"];
 
+/// Substrings that mark an idle, ready prompt (the composer + its hint line).
+const IDLE_MARKERS: &[&str] = &["? for shortcuts", "for shortcuts", "shift+tab to cycle", "> "];
+
+/// The live signals (working / idle) render at the BOTTOM of the pane — the
+/// status line under the composer. Only this many trailing lines are
+/// consulted for them, so a dialog's "Esc to cancel" that has scrolled up
+/// after being answered can't keep a session reading as working (th-7f0af3).
+const LIVE_TAIL_LINES: usize = 12;
+
 /// Substrings that mark a generic error.
 const ERROR_MARKERS: &[&str] = &["api error", "fatal error", "request failed", "execution error"];
 
@@ -67,11 +80,19 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 /// while the model is actively streaming, so it is the most reliable
 /// *live* signal. If it is present we are working, even if an older
 /// error line is still visible above it.
+/// The last [`LIVE_TAIL_LINES`] non-blank lines of `pane`, joined.
+fn live_tail(lower: &str) -> String {
+    let lines: Vec<&str> = lower.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    lines[start..].join("\n")
+}
+
 #[must_use]
 pub fn detect_state(pane: &str) -> PaneState {
     let lower = pane.to_lowercase();
+    let tail = live_tail(&lower);
 
-    if contains_any(&lower, WORKING_MARKERS) {
+    if contains_any(&tail, WORKING_MARKERS) {
         return PaneState::Working;
     }
     if contains_any(&lower, USAGE_LIMIT_MARKERS) {
@@ -86,7 +107,7 @@ pub fn detect_state(pane: &str) -> PaneState {
     // Heuristic for "idle and ready": Claude Code shows a prompt box. If
     // there's a recognizable prompt affordance and no working hint, call
     // it idle.
-    if lower.contains("> ") || lower.contains("for shortcuts") || lower.contains("? for shortcuts") {
+    if contains_any(&tail, IDLE_MARKERS) {
         return PaneState::Idle;
     }
     PaneState::Unknown
@@ -143,6 +164,24 @@ mod tests {
     fn idle_detected() {
         let pane = "╭─────────╮\n│ >       │\n╰─────────╯\n  ? for shortcuts";
         assert_eq!(detect_state(pane), PaneState::Idle);
+    }
+
+    #[test]
+    fn answered_dialog_scrolled_up_no_longer_reads_as_working() {
+        // The trust dialog's "Esc to cancel" is still visible at the top of
+        // a 40-row pane after it was answered; the live composer at the
+        // bottom says idle. The bottom wins.
+        let mut pane = String::from("Quick safety check\n  Enter to confirm · Esc to cancel\n");
+        for i in 0..20 {
+            pane.push_str("output line ");
+            pane.push_str(&i.to_string());
+            pane.push('\n');
+        }
+        pane.push_str("❯ \n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n");
+        assert_eq!(detect_state(&pane), PaneState::Idle);
+        // …but a live interrupt hint at the bottom still wins over everything.
+        pane.push_str("● Thinking… (esc to interrupt)\n");
+        assert_eq!(detect_state(&pane), PaneState::Working);
     }
 
     #[test]

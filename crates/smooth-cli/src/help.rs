@@ -51,6 +51,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("operator", "dogfood the polyglot engine servers"),
             ("web", "open the dashboard in your browser"),
             ("inbox", "reviews + notifications needing you"),
+            ("flow", "SmoothFlow — agent / shell sessions Big Smooth keeps alive under tmux"),
             ("run", "run a pearl through an operative"),
             ("pause", "halt a running operative"),
             ("resume", "resume a paused operative"),

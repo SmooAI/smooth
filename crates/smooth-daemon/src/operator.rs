@@ -1200,6 +1200,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // th-backed extensions (th-bc624a).
         .serve_routes(
             crate::search::search_router(workspace.clone())
+                // /api/flow/* — the SmoothFlow engine (th-7f0af3): opens
+                // ~/.smooth/flow.db, starts the supervisor, serves the flow WS +
+                // HTTP siblings + the Claude Code hooks endpoint. Token-gated
+                // (except hooks): a flow session is a shell on this host.
+                .merge(crate::flow_route::install(workspace.clone(), token.clone()).context("opening the SmoothFlow engine")?)
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
