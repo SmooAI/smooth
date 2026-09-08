@@ -5318,8 +5318,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.44.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b6c6b84#b6c6b848c2fdd5af362383bf0e8ef072900a0575"
+version = "1.58.10"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5350,8 +5350,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.44.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b6c6b84#b6c6b848c2fdd5af362383bf0e8ef072900a0575"
+version = "1.58.10"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5362,9 +5362,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "1.7.10"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c3d3d9c931b50ce6f9c262e1d20e82911f5a1001cccd830f5756dd259384f76"
+checksum = "457200125a75ce4d1224524ee4021ae3d49ad004a173e49b82712c53a52a3c60"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5390,8 +5390,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.44.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b6c6b84#b6c6b848c2fdd5af362383bf0e8ef072900a0575"
+version = "1.58.10"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5411,8 +5411,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.44.1"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=b6c6b84#b6c6b848c2fdd5af362383bf0e8ef072900a0575"
+version = "1.58.10"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
 dependencies = [
  "anyhow",
  "async-trait",
