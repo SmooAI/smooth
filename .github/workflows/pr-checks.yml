@@ -189,6 +189,16 @@ jobs:
               run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
                   NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
+                  # th-7f0af3: any `Cli::try_parse_from` test can die with
+                  # "Recursion too deep; the stack overflowed" on the Windows
+                  # leg — clap-derive builds the whole `th` command tree (60+
+                  # subcommands, nested enums) in one unoptimized call chain,
+                  # and MSVC debug frames sit right at libtest's 2 MiB
+                  # per-test thread. It flaked green→red on main with zero
+                  # Rust changes (incremental codegen shifts frame sizes).
+                  # libtest sizes its test threads from this var; reserve is
+                  # free, so give it room instead of chasing frames.
+                  RUST_MIN_STACK: 16777216
 
             # One report per PR — publishing from both legs would double every
             # entry in the check summary.
