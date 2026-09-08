@@ -7,7 +7,36 @@
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { BENCH_DATE, BENCH_SCENARIOS, BENCH_SUITE, BENCH_TRIALS, MODEL_ROWS, costBadge, modeById, type ModelCosts, type ModelRow } from './modes';
+import {
+    BENCH_DATE,
+    BENCH_SCENARIOS,
+    BENCH_SUITE,
+    BENCH_TRIALS,
+    MODEL_ROWS,
+    costBadge,
+    fetchModelRows,
+    modeById,
+    type ModelCosts,
+    type ModelRow,
+} from './modes';
+
+/** The picker rows: the bundled catalog immediately (instant render, offline
+ * fallback), replaced by the daemon's live `/api/model-catalog` once it loads —
+ * the single source of truth so a bench refresh shows here without a rebuild
+ * (th-1d8007). */
+function useModelRows(): ModelRow[] {
+    const [rows, setRows] = useState<ModelRow[]>(MODEL_ROWS);
+    useEffect(() => {
+        let alive = true;
+        void fetchModelRows().then((live) => {
+            if (alive && live) setRows(live);
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
+    return rows;
+}
 
 /** $/pass, or an explicit "unknown" — a null cost is NEVER shown as $0/free. */
 function fmtPerPass(n: number | null): string {
@@ -58,10 +87,11 @@ export function ModelPicker({
     autoFocus?: boolean;
 }) {
     const [q, setQ] = useState('');
+    const allRows = useModelRows();
     const rows = useMemo(() => {
         const needle = q.trim().toLowerCase();
-        return needle ? MODEL_ROWS.filter((r) => r.model.toLowerCase().includes(needle)) : MODEL_ROWS;
-    }, [q]);
+        return needle ? allRows.filter((r) => r.model.toLowerCase().includes(needle)) : allRows;
+    }, [q, allRows]);
 
     return (
         <div className="flex min-h-0 flex-col">

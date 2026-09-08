@@ -121,7 +121,27 @@ export function deriveRows(models: ModelScore[]): ModelRow[] {
         .sort((a, b) => b.passRatePct - a.passRatePct || (a.costPerPassUsd ?? Infinity) - (b.costPerPassUsd ?? Infinity));
 }
 
-// ── Bound to the bundled data ─────────────────────────────────────────────────
+// ── Live catalog fetch (single source of truth) ───────────────────────────────
+
+/** Fetch the bench catalog the daemon serves (`GET /api/model-catalog`,
+ * th-1d8007) and derive picker rows from it — one source of truth so a bench
+ * refresh reaches every client without the old per-platform hand-copy. Returns
+ * null on any failure (offline, old daemon, malformed body); callers fall back
+ * to the bundled `MODEL_ROWS`. Same-origin relative URL: the page is served by
+ * the daemon that also serves this route. */
+export async function fetchModelRows(): Promise<ModelRow[] | null> {
+    try {
+        const res = await fetch('/api/model-catalog', { headers: { accept: 'application/json' } });
+        if (!res.ok) return null;
+        const data = (await res.json()) as Partial<BenchFile>;
+        if (!data || !Array.isArray(data.models) || data.models.length === 0) return null;
+        return deriveRows(data.models);
+    } catch {
+        return null;
+    }
+}
+
+// ── Bound to the bundled data (synchronous default + offline fallback) ─────────
 
 export const MODEL_ROWS: ModelRow[] = deriveRows(BENCH.models);
 export const BENCH_SUITE = BENCH.suite;
