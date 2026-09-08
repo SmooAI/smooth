@@ -53,7 +53,7 @@ jobs:
                   restore-keys: ${{ runner.os }}-pnpm-store-
 
             - name: Install system dependencies
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev libicu-dev pkg-config protobuf-compiler
+              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
 
             - name: Setup Rust toolchain
               uses: dtolnay/rust-toolchain@stable
@@ -73,9 +73,6 @@ jobs:
                   cd crates/smooth-web/web
                   pnpm install --no-frozen-lockfile
                   pnpm build
-
-            - name: Build smooth-dolt (embedded Dolt for pearl memory tests)
-              run: bash scripts/build-smooth-dolt.sh
 
             - name: Format check
               run: cargo fmt --check

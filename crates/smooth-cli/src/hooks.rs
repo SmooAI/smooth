@@ -234,8 +234,8 @@ impl HooksStatus {
 /// Execute pearl-specific logic for the given git hook.
 pub fn run_hook(hook_name: &str, args: &[String]) -> Result<()> {
     match hook_name {
-        // pre-commit / pre-push / post-merge used to commit + push the Dolt
-        // pearl store; pearls are SQLite now (`~/.smooth/pearls.db`, pearl
+        // pre-commit / pre-push / post-merge used to commit + push the old
+        // per-repo pearl store; pearls are SQLite now (`~/.smooth/pearls.db`, pearl
         // th-d3e842). Kept as no-ops so hooks installed by an older `th`
         // keep resolving. post-checkout was always a placeholder.
         "pre-commit" | "pre-push" | "post-checkout" | "post-merge" => Ok(()),
@@ -314,7 +314,6 @@ pub fn print_install_outcome(outcome: &InstallOutcome) {
             println!("  {} cargo fmt --check + clippy", "pre-commit:".bold());
             println!("  {} cargo test", "pre-push:".bold());
             println!("  {} pearl ID from branch name", "prepare-commit-msg:".bold());
-            println!("  {} pearl Dolt auto-commit/push", "pearl lifecycle:".bold());
         }
         InstallOutcome::SkippedForeign(existing) => {
             println!(

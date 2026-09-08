@@ -41,12 +41,6 @@ Thumbs.db
 # Claude Code
 .claude/worktree-bypass
 
-# Beads / Dolt files
-# Legacy per-project Dolt pearl stores (.smooth/dolt/) — pearls moved to
-# ~/.smooth/pearls.db (pearl th-d3e842); the dir is only migration input
-# and is never tracked. Entries go with the shim in pearl th-c6ba83.
-/.dolt/
-.smooth/dolt/
 .beads-credential-key
 .smooth/pearls.db
 .smooth/pearls.db-wal

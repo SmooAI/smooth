@@ -1,7 +1,7 @@
 # Pearls Workflow Context
 
-> Pearl tracking via `th pearls`. Dolt-backed per-project, optional
-> global registry at `~/.smooth/registry.json`.
+> Pearl tracking via `th pearls`. One SQLite database per machine
+> (`~/.smooth/pearls.db`), rows keyed by project; registry at `~/.smooth/registry.json`.
 
 ## 🚨 SESSION CLOSE PROTOCOL 🚨
 
@@ -28,8 +28,7 @@
   read those before guessing conventions. For cross-session insights
   about you-the-user, auto-memory is loaded automatically.
 - Persistence you don't need beats lost context.
-- Data is auto-committed to the Dolt pearls DB (`.smooth/dolt/`).
-  Run `th pearls push` at session end so teammates can pull.
+- Every write lands in `~/.smooth/pearls.db` immediately; nothing to commit or push.
 
 ## Essential Commands
 
@@ -60,7 +59,6 @@
 
 ### Sync
 
-- `th pearls push` / `th pearls pull` — push or pull the Dolt DB
 - `th pearls search <query>` — full-text
 - `th pearls stats` — project counts
 

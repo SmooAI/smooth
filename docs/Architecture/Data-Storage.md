@@ -25,11 +25,10 @@ One SQLite database (WAL) holding pearls, dependencies, labels, comments, histor
 
 ## Project: `<repo>/.smooth/`
 
-| Path                         | What                                                                             |
-| ---------------------------- | -------------------------------------------------------------------------------- |
-| `dolt/`                      | Legacy Dolt pearl store — import with `th pearls migrate-from-dolt`, then delete |
-| `mcp.toml`                   | Project-scoped MCP servers; merged with global, project wins                     |
-| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                                         |
+| Path                         | What                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| `mcp.toml`                   | Project-scoped MCP servers; merged with global, project wins |
+| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                     |
 
 ## Audit log
 

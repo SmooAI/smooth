@@ -172,8 +172,8 @@ spend in the status bar:
 CODING · smooth-coding → minimax-m2.7 | iter 3/5 | failed: 4 → 1 | spend: $0.012
 ```
 
-All state is durable through Smooth's built-in pearl tracker (Dolt-backed
-per-project, git-syncable).
+All state is durable through Smooth's built-in pearl tracker (one SQLite
+database per machine, `~/.smooth/pearls.db`).
 
 ### Which model — measured, not asserted
 
@@ -230,7 +230,7 @@ machine-readable in [`docs/model-scores.json`](docs/model-scores.json).
                          ▼
   ┌────────────────────────────────────────────────────────────┐
   │  Big Smooth  (host process, 127.0.0.1:4400)                 │
-  │  API · pearl store (Dolt) · dispatch · Diver · Archivist    │
+  │  API · pearl store (SQLite) · dispatch · Diver · Archivist  │
   └───────────────────────────┬────────────────────────────────┘
                               │ spawn subprocess, JSON-lines on stdout
                               ▼
@@ -515,7 +515,7 @@ See [`docs/extending.md`](docs/extending.md) and [`SECURITY.md`](SECURITY.md).
 | **Markdown**        | pulldown-cmark (TUI), react-markdown (web)                                                                   |
 | **Agent framework** | smooth-operator (Rust-native, built-in checkpointing)                                                        |
 | **LLM**             | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
-| **Work tracking**   | Pearls (Dolt-backed, git-syncable)                                                                           |
+| **Work tracking**   | Pearls (SQLite, `~/.smooth/pearls.db`)                                                                       |
 | **Policy**          | TOML-based, hot-reloadable via notify + ArcSwap                                                              |
 | **Logging**         | smooai-logger (structured, context-aware)                                                                    |
 | **Tracing**         | OpenTelemetry (tracing-opentelemetry bridge, OTLP export)                                                    |
@@ -532,7 +532,7 @@ smooth/
 │   ├── smooth-tools/             # Library — agent tools + the kernel OS sandbox
 │   ├── smooth-policy/            # Library — shared policy types, TOML parsing
 │   ├── smooth-goalie/            # Library + bin — HTTP forward proxy (egress boundary)
-│   ├── smooth-pearls/            # Library — Dolt-backed pearl tracker
+│   ├── smooth-pearls/            # Library — SQLite-backed pearl tracker
 │   ├── smooth-cast/              # Library — coding-harness cast roles, skills, workflow
 │   ├── smooth-code/              # Library — `th code` ratatui coding TUI
 │   ├── smooth-diver/             # Library — pearl lifecycle manager + Jira sync

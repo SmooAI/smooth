@@ -98,7 +98,7 @@ pub(crate) fn now_ts() -> String {
     fmt_ts(Utc::now())
 }
 
-/// Naive timestamp shapes the Dolt store used; accepted on read so
+/// Naive timestamp shapes the pre-SQLite store used; accepted on read so
 /// migrated rows parse like fresh ones.
 const LEGACY_TS_FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"];
 
@@ -830,7 +830,7 @@ impl PearlStore {
     /// Import a pearl row verbatim, keeping its id and timestamps. Missing →
     /// inserted; present with an older `updated_at` → overwritten; otherwise
     /// left alone — so re-running an import is a no-op and edits made in
-    /// the source after the first run still land. Used by `migrate-from-dolt`.
+    /// the source after the first run still land. Used by store imports (sync).
     pub fn import_pearl(&self, pearl: &Pearl) -> Result<ImportOutcome> {
         let conn = self.conn();
         let existing: Option<String> = conn
@@ -988,7 +988,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_create_roundtrips_awkward_text() {
-        // Regression for th-944230 in the Dolt era: `\'` in field text broke
+        // Regression for th-944230: `\'` in field text broke
         // the hand-rolled escape. Bound parameters make it a non-issue, but
         // the guard stays.
         let store = test_store();
@@ -1375,7 +1375,7 @@ pub(crate) mod tests {
         assert_eq!(b.list(&PearlQuery::new()).unwrap().len(), 1);
         assert!(b.get(&pa.id).unwrap().is_none(), "ids are project-scoped");
         assert_eq!(a.stats().unwrap().total, 1);
-        // Same id in two projects is allowed (Dolt-era ids were per store).
+        // Same id in two projects is allowed (pre-SQLite ids were per store).
         assert_eq!(b.import_pearl(&pa).unwrap(), ImportOutcome::Inserted);
         assert_eq!(b.import_pearl(&pa).unwrap(), ImportOutcome::Unchanged, "re-import is a no-op");
         assert_eq!(b.get(&pa.id).unwrap().unwrap().title, "in a");
@@ -1439,7 +1439,7 @@ pub(crate) mod tests {
         let b = a + chrono::Duration::milliseconds(1);
         assert!(fmt_ts(a) < fmt_ts(b));
         assert_eq!(parse_ts(&fmt_ts(a)).unwrap(), a);
-        // Dolt-era shapes still parse.
+        // Pre-SQLite timestamp shapes still parse.
         assert!(parse_ts("2026-06-22 16:24:02").is_some());
         assert!(parse_ts("2026-06-22T16:24:02Z").is_some());
         assert!(parse_ts("").is_none());

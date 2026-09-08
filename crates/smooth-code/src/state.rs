@@ -457,8 +457,8 @@ pub struct AppState {
     pub autocomplete: AutocompleteState,
     /// Pearls exposed to the `@` picker. Pre-fetched once at app
     /// startup from the pearl store so the autocomplete refresh
-    /// doesn't pay a Dolt query per keystroke. `None` when the
-    /// store isn't reachable (no pearls created yet, smooth-dolt
+    /// doesn't pay a store query per keystroke. `None` when the
+    /// store isn't reachable (no pearls created yet, database
     /// missing, etc.) — picker silently omits pearls in that case.
     pub pearls: Vec<PearlSuggestion>,
     /// Current git repository state (populated by `GitState::refresh`).

@@ -70,7 +70,7 @@ The "Line" is the rolling per-task score in `docs/bench-history.md`. Every merge
 ## Pitfalls
 
 - **Token estimation:** the runner estimates token usage when the gateway omits it from the response. Cost math depends on it. See pearl th-eff0d0 commit history.
-- **Repo Dolt vs global:** the bench prefers the repo's local Dolt over the global registry. Don't write bench-only state into your global pearls.
+- **Bench project vs yours:** pearls are keyed by project root in `~/.smooth/pearls.db`. Don't write bench-only state into your own projects' pearls.
 - **CMake / `[METRICS]` capture:** C++ tasks need `-DEXERCISM_RUN_ALL_TESTS` and the work dir named after the task. The harness handles this; if you add a new task type, replicate that contract.
 
 ## Agentic conversation suite (`smooth-bench convo`)

@@ -27,7 +27,7 @@ There is no longer any gRPC-over-UDS wire between cast members. Big Smooth's cas
 
 The orchestrator and the `axum` server on `127.0.0.1:4400` (loopback by default; the API is unauthenticated today — pearl `th-6db839`). Owns:
 
-- The pearl store (Dolt) and session/message/snapshot history.
+- The pearl store (SQLite) and session/message/snapshot history.
 - Dispatch: `dispatch_ws_task` → `dispatch_ws_task_direct` spawns the operative.
 - The teammate registry that backs the UI sidebar (`th operatives` reads it).
 - Orchestrator state (`orchestrator.rs`) — a state surface (`Idle → Scheduling → Dispatching → Monitoring → Reviewing`) that status/TUI/web readers poll. Its VM-dispatch guts were removed; it now reports state only.

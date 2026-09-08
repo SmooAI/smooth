@@ -33,7 +33,7 @@ The microVM existed to isolate **untrusted tenants** — which Smooth has decide
 │     ├─ ToolHook chain: rule engine → classifier → Narc           │
 │     ├─ sandboxed tool-subprocess spawner (kernel-enforced)       │
 │     ├─ egress proxy (separate process, real boundary)            │
-│     ├─ Dolt session + checkpoint store (Groove resume)           │
+│     ├─ SQLite session + checkpoint store (Groove resume)         │
 │     ├─ durable completion + approval queues                      │
 │     └─ cron scheduler + sub-agent delegation                     │
 │                                                                  │
@@ -47,7 +47,7 @@ The microVM existed to isolate **untrusted tenants** — which Smooth has decide
      (smooth-code)       surface (smooth-web) (Telegram/Slack, later)
 ```
 
-Communication is REST for commands + a **durable SSE event surface** (every event persisted to a Dolt row and published; frontends resume from a monotonic cursor) with WS retained for token streaming. The daemon binds loopback + tailnet only, runs as a non-root dedicated user, and gates every endpoint with a bearer token.
+Communication is REST for commands + a **durable SSE event surface** (every event persisted to a SQLite row and published; frontends resume from a monotonic cursor) with WS retained for token streaming. The daemon binds loopback + tailnet only, runs as a non-root dedicated user, and gates every endpoint with a bearer token.
 
 ## What already landed toward this
 

@@ -3,7 +3,7 @@
 # inside a container, so it can boot in a microsandbox microVM.
 #
 # Only the standalone daemon binary is built (package `smooai-smooth-daemon`,
-# bin `smooth-daemon`). `th` itself is NOT built — that would drag in dolt /
+# bin `smooth-daemon`). `th` itself is NOT built — that would drag in
 # the web bundle / the TUI for no benefit here; `th` merely spawns the daemon.
 #
 # Caching: the apt/toolchain layer lives in the builder IMAGE; the cargo

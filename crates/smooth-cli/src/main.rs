@@ -32,7 +32,7 @@ mod harness;
 /// th-7f1da8: the branded top-level help + the universal `ai` explainer.
 mod help;
 /// th-374f85: `th agent` / `th msg` / `th inbox` on the machine-level
-/// SQLite mail store (ADR-010), off the per-repo Dolt pearl store.
+/// SQLite mail store (ADR-010), separate from the pearl store.
 mod mail;
 mod mail_backend;
 mod mcp_install;
@@ -1694,13 +1694,6 @@ enum PearlCommands {
     Push,
     /// Pearls are local SQLite now — prints where sync is headed.
     Pull,
-    /// One-shot import of a legacy `.smooth/dolt` store into `~/.smooth/pearls.db`.
-    /// PATH is any directory inside the project (default: cwd). Idempotent;
-    /// the Dolt directory is left untouched.
-    MigrateFromDolt {
-        #[arg(value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
     /// List all registered pearl projects
     Projects,
     /// Record a persistent project memory (an insight to recall later).
@@ -2487,7 +2480,7 @@ async fn cmd_status() -> Result<()> {
     // `/health` answers with the plain string `ok` (smooth-operator's
     // LocalServer), so the daemon reports liveness and nothing else. Only
     // subsystems we actually checked get a line — the old panel printed
-    // "healthy" for the Dolt store, operatives and Tailscale off JSON fields
+    // "healthy" for the pearl store, operatives and Tailscale off JSON fields
     // that no daemon has ever sent, which is worse than saying nothing.
     let port = daemon_health::DEFAULT_PORT;
     let health = daemon_health::probe(port).await;
@@ -4372,9 +4365,6 @@ smooth.db-shm
 # Rotating audit logs
 audit/
 
-# Dolt store has its own push/pull via `th pearls push/pull`
-dolt/
-
 # Project-scoped sandbox caches — machine-local, large
 project-cache/
 pearl-env/
@@ -4853,9 +4843,6 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
     if matches!(cmd, PearlCommands::Init) {
         return cmd_pearls_init();
     }
-    if let PearlCommands::MigrateFromDolt { path } = cmd {
-        return cmd_pearls_migrate_from_dolt(path.as_deref());
-    }
     // `checkpoint --auto` is called from harness hooks: a failed open (a
     // repo without pearls) is a silent no-op, never a failed hook.
     let store = match open_pearl_store() {
@@ -5262,7 +5249,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         }
 
         // Handled before the match above.
-        PearlCommands::Init | PearlCommands::MigrateFromDolt { .. } => unreachable!("handled at the top of cmd_pearls"),
+        PearlCommands::Init => unreachable!("handled at the top of cmd_pearls"),
 
         PearlCommands::Push | PearlCommands::Pull => {
             println!(
@@ -5272,50 +5259,6 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-/// `th pearls migrate-from-dolt [PATH]` — import a legacy `.smooth/dolt`
-/// store (found by walking up from PATH, default cwd) into the SQLite
-/// store for that project. Safe to re-run: pearls upsert by `updated_at`,
-/// everything else is insert-or-ignore; the Dolt dir is never touched.
-fn cmd_pearls_migrate_from_dolt(path: Option<&std::path::Path>) -> Result<()> {
-    let start = match path {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_dir()?,
-    };
-    let dolt_dir = smooth_pearls::dolt::find_repo_dolt_dir(&start)
-        .ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found at or above {} — nothing to migrate", start.display()))?;
-    // Project = the directory holding `.smooth/`, git-resolved to the main checkout.
-    let project = dolt_dir.parent().and_then(std::path::Path::parent).unwrap_or(&start);
-    let store = smooth_pearls::PearlStore::open(project)?;
-    let before = store.stats()?;
-    println!(
-        "Importing {} → {} (project {})",
-        dolt_dir.display(),
-        store.db_path().display(),
-        store.project_root().display()
-    );
-    println!("  before: {} pearl(s) in SQLite for this project", before.total);
-    let report = smooth_pearls::migrate_dolt::migrate_from_dolt(&dolt_dir, &store)?;
-    for (table, (read, inserted)) in report.rows() {
-        let updated = if table == "pearls" {
-            format!("  updated {:>5}", report.pearls_updated)
-        } else {
-            String::new()
-        };
-        println!("  {table:<13} read {read:>5}  inserted {inserted:>5}{updated}");
-    }
-    let after = store.stats()?;
-    println!(
-        "  after:  {} pearl(s) ({} open, {} in progress, {} closed)",
-        after.total, after.open, after.in_progress, after.closed
-    );
-    println!(
-        "{} Dolt store left in place; delete it when you're satisfied: rm -rf {}",
-        "✓".green().bold(),
-        dolt_dir.display()
-    );
     Ok(())
 }
 
@@ -5331,9 +5274,6 @@ fn cmd_pearls_init() -> Result<()> {
         store.db_path().display(),
         store.project_root().display()
     );
-    if smooth_pearls::dolt::find_repo_dolt_dir(&cwd).is_some() && store.stats()?.total == 0 {
-        println!("  Legacy .smooth/dolt store found — import it with: th pearls migrate-from-dolt");
-    }
     let repo_root = hooks::find_git_root(&cwd);
 
     // Inject the agent-messaging protocol into AGENTS.md so any agent
@@ -7147,7 +7087,7 @@ fn extract_placeholders(template: &str) -> Vec<String> {
 ///
 /// Output = the embedded workflow primer + a live "Ready to work"
 /// section populated from `th pearls ready`. If pearls isn't available
-/// (first run in a repo, Dolt not initialized, etc.), the live section
+/// (first run in a repo, no store yet, etc.), the live section
 /// is silently omitted — the static primer alone still gives Claude
 /// enough to operate.
 fn cmd_prime() -> Result<()> {

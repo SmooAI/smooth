@@ -108,7 +108,7 @@ register --name <other>` would give this session a _second_ mailbox and is
   refused without `--force`.
 - **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (old
   scripts pass them) and print a deprecation note, but do nothing — the mailbox
-  is machine-local, with no remote to sync and no Dolt write lock to contend
+  is machine-local, with no remote to sync and no write lock to contend
   for. The old `Error 1105: database is read only` advice no longer applies.
 - **`th msg` (agent mail) ≠ `th inbox`** (operative review gates). Different
   things.

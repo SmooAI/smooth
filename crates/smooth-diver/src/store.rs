@@ -87,7 +87,7 @@ pub struct SessionMessage {
 /// The Diver store — wraps `PearlStore` with lifecycle management.
 pub struct DiverStore {
     pearl_store: PearlStore,
-    /// In-memory cost ledger (will move to Dolt table later).
+    /// In-memory cost ledger (will move to a pearls table later).
     costs: Mutex<Vec<CostEntry>>,
     /// Pearl ID → Jira ticket key mapping.
     jira_keys: Mutex<std::collections::HashMap<String, String>>,

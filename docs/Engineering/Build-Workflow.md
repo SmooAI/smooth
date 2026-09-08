@@ -19,17 +19,6 @@ pnpm build:web                       # Just rebuild the embedded Vite SPA
 cargo build -p smooth-operative --release   # Just the runner (auto-discovered from target/release/)
 ```
 
-## One-time dev setup
-
-```bash
-# Build smooth-dolt (Go binary) — ONLY needed for `th pearls migrate-from-dolt`;
-# pearls are SQLite now and the shim is deleted in pearl th-c6ba83.
-brew install icu4c                           # macOS; required by the Dolt link
-bash scripts/build-smooth-dolt.sh            # → target/release/smooth-dolt (~145MB)
-```
-
-Re-run `build-smooth-dolt.sh` after changing the Go shim.
-
 ## The web SPA
 
 `crates/smooth-web/web/` is the React + Vite source. `rust-embed` includes the compiled `dist/` into the `smooth-web` crate so the embedded server serves it out of the binary.

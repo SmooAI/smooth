@@ -38,15 +38,12 @@ lsof -i :4400                        # find the offending pid
 
 Or pick a different port: `th up --port 4500`.
 
-## `th pearls` errors mentioning `.smooth/dolt` or `smooth-dolt`
+## A repo still has a `.smooth/dolt/` directory
 
-Pearls moved to one SQLite file, `~/.smooth/pearls.db` (pearl th-d3e842). Nothing
-reads `.smooth/dolt` any more except the one-shot importer:
-
-```bash
-th pearls migrate-from-dolt        # inside the project; idempotent
-th pearls stats                    # confirm the counts landed
-```
+Pearls moved to one SQLite file, `~/.smooth/pearls.db` (pearl th-d3e842), and
+the Dolt reader is gone (pearl th-c6ba83). If that directory holds pearls you
+have not migrated, install th ≤ 0.42.x, run `th pearls migrate-from-dolt` inside
+the project, check `th pearls stats`, then upgrade and `rm -rf .smooth/dolt`.
 
 `th pearls push` / `pull` print a notice and exit 0 — sync is pearl th-19cca5.
 

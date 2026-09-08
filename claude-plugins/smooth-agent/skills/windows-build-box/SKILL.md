@@ -76,8 +76,8 @@ as base64 in a PowerShell script — `[IO.File]::WriteAllBytes(...,[Convert]::Fr
 then `tar -xzf` (tar ships with Windows). SSM's payload cap is ~100 KB; for larger
 trees use a presigned S3 URL curl'd on the box, or `git clone` with a short-lived PAT.
 
-**Known result (pearl th-5f35a5):** `smooth-dolt` (embedded Dolt, CGO) builds on
-Windows with `-tags gms_pure_go` — no ICU needed, only mingw gcc. If a Go build
+**Known result (pearl th-5f35a5, historical — the Go binary is gone in th-c6ba83):** CGO Go code built on
+Windows with mingw gcc alone. If a Go build
 fails with `undefined: syscall.SIG…`, that's a Unix-only signal needing a
 `//go:build !windows` split, not a toolchain problem.
 

@@ -90,7 +90,7 @@ impl MemoryStore {
     }
 
     /// Import a memory verbatim, keeping its id + timestamp (idempotent).
-    /// Used by `migrate-from-dolt`.
+    /// Used by store imports (sync).
     ///
     /// # Errors
     ///
