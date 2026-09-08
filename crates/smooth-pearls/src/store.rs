@@ -256,6 +256,16 @@ impl PearlStore {
                  v          TEXT NOT NULL,
                  updated_at TEXT NOT NULL,
                  PRIMARY KEY (project, k)
+             );
+             CREATE TABLE IF NOT EXISTS sync_map (
+                 project           TEXT NOT NULL,
+                 pearl_id          TEXT NOT NULL,
+                 remote_id         TEXT NOT NULL,
+                 remote_updated_at TEXT NOT NULL,
+                 local_updated_at  TEXT NOT NULL,
+                 last_synced_at    TEXT NOT NULL,
+                 PRIMARY KEY (project, pearl_id),
+                 UNIQUE (project, remote_id)
              );",
         )
         .context("apply pearl schema")?;
@@ -654,6 +664,22 @@ impl PearlStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every dependency row in this project (one query — `th pearls sync`
+    /// reconciles the whole graph at once).
+    pub fn all_deps(&self) -> Result<Vec<PearlDependency>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT pearl_id, depends_on, dep_type FROM pearl_dependencies WHERE project = ?1 ORDER BY pearl_id, depends_on")?;
+        let rows = stmt.query_map(params![self.project], |r| {
+            let dep_type: String = r.get(2)?;
+            Ok(PearlDependency {
+                pearl_id: r.get(0)?,
+                depends_on: r.get(1)?,
+                dep_type: if dep_type == "related" { PearlDepType::Related } else { PearlDepType::Blocks },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // ── Labels ──────────────────────────────────────────────────────────
 
     /// Add a label to a pearl. Idempotent.
@@ -925,6 +951,84 @@ impl PearlStore {
         Ok(n > 0)
     }
 
+    /// Mint an unused pearl id (`th-xxxxxx`) without inserting anything —
+    /// `th pearls sync` pairs it with [`Self::import_pearl`] to materialize a
+    /// remote work item locally.
+    pub fn new_id(&self) -> Result<String> {
+        let conn = self.conn();
+        self.fresh_id(&conn)
+    }
+
+    /// Replace a pearl's label set wholesale (sync applies the remote set
+    /// verbatim). Does not touch `updated_at`.
+    pub fn replace_labels(&self, pearl_id: &str, labels: &[String]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM pearl_labels WHERE project = ?1 AND pearl_id = ?2", params![self.project, pearl_id])?;
+        for label in labels {
+            tx.execute(
+                "INSERT OR IGNORE INTO pearl_labels (project, pearl_id, label) VALUES (?1, ?2, ?3)",
+                params![self.project, pearl_id, label],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ── sync_map (th pearls sync, pearl th-19cca5) ──────────────────────
+
+    /// The pearl ↔ remote work item mapping, or `None` when never synced.
+    pub fn sync_map_get(&self, pearl_id: &str) -> Result<Option<SyncMapEntry>> {
+        self.conn()
+            .query_row(
+                "SELECT pearl_id, remote_id, remote_updated_at, local_updated_at, last_synced_at FROM sync_map WHERE project = ?1 AND pearl_id = ?2",
+                params![self.project, pearl_id],
+                sync_map_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Reverse lookup by the remote work item id.
+    pub fn sync_map_by_remote(&self, remote_id: &str) -> Result<Option<SyncMapEntry>> {
+        self.conn()
+            .query_row(
+                "SELECT pearl_id, remote_id, remote_updated_at, local_updated_at, last_synced_at FROM sync_map WHERE project = ?1 AND remote_id = ?2",
+                params![self.project, remote_id],
+                sync_map_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Every mapping for this project.
+    pub fn sync_map_list(&self) -> Result<Vec<SyncMapEntry>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT pearl_id, remote_id, remote_updated_at, local_updated_at, last_synced_at FROM sync_map WHERE project = ?1 ORDER BY pearl_id")?;
+        let rows = stmt.query_map(params![self.project], sync_map_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Insert or overwrite a mapping.
+    pub fn sync_map_upsert(&self, e: &SyncMapEntry) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO sync_map (project, pearl_id, remote_id, remote_updated_at, local_updated_at, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(project, pearl_id) DO UPDATE SET remote_id = excluded.remote_id, remote_updated_at = excluded.remote_updated_at,
+                 local_updated_at = excluded.local_updated_at, last_synced_at = excluded.last_synced_at",
+            params![
+                self.project,
+                e.pearl_id,
+                e.remote_id,
+                fmt_ts(e.remote_updated_at),
+                fmt_ts(e.local_updated_at),
+                fmt_ts(e.last_synced_at)
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Import a config row (idempotent — an existing key is left alone).
     pub fn import_config(&self, key: &str, value: &str, updated_at: DateTime<Utc>) -> Result<bool> {
         let n = self.conn().execute(
@@ -933,6 +1037,28 @@ impl PearlStore {
         )?;
         Ok(n > 0)
     }
+}
+
+fn sync_map_row(row: &Row<'_>) -> rusqlite::Result<SyncMapEntry> {
+    Ok(SyncMapEntry {
+        pearl_id: row.get(0)?,
+        remote_id: row.get(1)?,
+        remote_updated_at: ts_or_now(&row.get::<_, String>(2)?),
+        local_updated_at: ts_or_now(&row.get::<_, String>(3)?),
+        last_synced_at: ts_or_now(&row.get::<_, String>(4)?),
+    })
+}
+
+/// One row of `sync_map`: which remote work item a pearl is, and the
+/// `updated_at` each side had when they were last reconciled (the
+/// last-writer-wins baseline for `th pearls sync`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncMapEntry {
+    pub pearl_id: String,
+    pub remote_id: String,
+    pub remote_updated_at: DateTime<Utc>,
+    pub local_updated_at: DateTime<Utc>,
+    pub last_synced_at: DateTime<Utc>,
 }
 
 #[cfg(test)]
@@ -1443,6 +1569,54 @@ pub(crate) mod tests {
         assert!(parse_ts("2026-06-22 16:24:02").is_some());
         assert!(parse_ts("2026-06-22T16:24:02Z").is_some());
         assert!(parse_ts("").is_none());
+    }
+
+    #[test]
+    fn sync_map_round_trips_and_reverse_looks_up() {
+        let store = test_store();
+        let p = store.create(&new_task("synced")).unwrap();
+        assert!(store.sync_map_get(&p.id).unwrap().is_none());
+        let t = Utc::now();
+        let e = SyncMapEntry {
+            pearl_id: p.id.clone(),
+            remote_id: "11111111-2222-3333-4444-555555555555".into(),
+            remote_updated_at: t,
+            local_updated_at: p.updated_at,
+            last_synced_at: t,
+        };
+        store.sync_map_upsert(&e).unwrap();
+        let got = store.sync_map_get(&p.id).unwrap().unwrap();
+        assert_eq!(got.remote_id, e.remote_id);
+        assert_eq!(got.remote_updated_at.timestamp_millis(), t.timestamp_millis());
+        assert_eq!(store.sync_map_by_remote(&e.remote_id).unwrap().unwrap().pearl_id, p.id);
+        // Upsert overwrites in place.
+        let later = t + chrono::Duration::seconds(5);
+        store.sync_map_upsert(&SyncMapEntry { last_synced_at: later, ..e }).unwrap();
+        assert_eq!(store.sync_map_list().unwrap().len(), 1);
+        assert_eq!(store.sync_map_list().unwrap()[0].last_synced_at.timestamp_millis(), later.timestamp_millis());
+    }
+
+    #[test]
+    fn all_deps_lists_every_edge() {
+        let store = test_store();
+        let a = store.create(&new_task("a")).unwrap();
+        let b = store.create(&new_task("b")).unwrap();
+        store.add_dep(&a.id, &b.id).unwrap();
+        let deps = store.all_deps().unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!((deps[0].pearl_id.as_str(), deps[0].depends_on.as_str()), (a.id.as_str(), b.id.as_str()));
+    }
+
+    #[test]
+    fn new_id_and_replace_labels() {
+        let store = test_store();
+        let id = store.new_id().unwrap();
+        assert!(id.starts_with("th-") && store.get(&id).unwrap().is_none());
+        let p = store.create(&new_task("labelled")).unwrap();
+        store.replace_labels(&p.id, &["a".into(), "b".into()]).unwrap();
+        assert_eq!(store.get(&p.id).unwrap().unwrap().labels, vec!["a", "b"]);
+        store.replace_labels(&p.id, &["c".into()]).unwrap();
+        assert_eq!(store.get(&p.id).unwrap().unwrap().labels, vec!["c"]);
     }
 
     #[test]

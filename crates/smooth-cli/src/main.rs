@@ -39,6 +39,7 @@ mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
 mod pearls_handoff;
+mod pearls_sync;
 /// th-55b2c7: `th pkg` — one package, N harness renderings.
 mod pkg;
 /// Reclaimable-disk findings reported by `th doctor` (pearl th-91de11).
@@ -1690,9 +1691,33 @@ enum PearlCommands {
     /// Ensure the pearl database exists and register this project
     /// (`~/.smooth/registry.json`). Idempotent.
     Init,
-    /// Pearls are local SQLite now — prints where sync is headed.
+    /// Two-way sync with Smoo Projects work items (pearl th-19cca5). Pulls
+    /// remote changes into `~/.smooth/pearls.db`, pushes local ones, links
+    /// deps as `blocks`, mirrors comments. Last writer wins; never deletes.
+    Sync {
+        /// Bind this checkout to a Smoo project (uuid or KEY) — remembered
+        /// for later runs.
+        #[arg(long)]
+        project: Option<String>,
+        /// Only pull remote → local.
+        #[arg(long, conflicts_with = "push_only")]
+        pull_only: bool,
+        /// Only push local → remote.
+        #[arg(long)]
+        push_only: bool,
+        /// Report what would change without writing either side.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Superseded by `th pearls sync` — prints the pointer.
     Push,
-    /// Pearls are local SQLite now — prints where sync is headed.
+    /// Superseded by `th pearls sync` — prints the pointer.
     Pull,
     /// List all registered pearl projects
     Projects,
@@ -5251,9 +5276,24 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         // Handled before the match above.
         PearlCommands::Init => unreachable!("handled at the top of cmd_pearls"),
 
+        PearlCommands::Sync {
+            project,
+            pull_only,
+            push_only,
+            dry_run,
+            json,
+            org,
+        } => {
+            let opts = pearls_sync::SyncOptions {
+                pull: !push_only,
+                push: !pull_only,
+                dry_run,
+            };
+            pearls_sync::cmd(&store, project, opts, json, org).await?;
+        }
         PearlCommands::Push | PearlCommands::Pull => {
             println!(
-                "pearls are local SQLite now ({}); `th pearls sync` is th-19cca5 — see `th pearls list`",
+                "pearls are local SQLite ({}); there is no remote to push/pull — run `th pearls sync` (Smoo Projects work items)",
                 store.db_path().display()
             );
         }

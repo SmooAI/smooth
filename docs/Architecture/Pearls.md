@@ -54,7 +54,9 @@ th pearls close <id1> <id2> …
 th pearls ready                       # open, no blockers
 th pearls blocked                     # open, unmet deps
 th pearls projects                    # all registered projects
-th pearls push / pull                 # exit-0 notice: sync is pearl th-19cca5
+th pearls sync --project SMOOTH       # bind this checkout to a Smoo project, then sync
+th pearls sync [--pull-only|--push-only] [--dry-run] [--json]
+th pearls push / pull                 # exit-0 notice pointing at `th pearls sync`
 th db path                            # where pearls.db lives
 ```
 
@@ -127,6 +129,30 @@ project's root, not the worktree's.
 `SessionStart` with matcher `compact|resume` injects
 `th pearls prime --in-progress --cwd .` as `additionalContext`. Both are
 silent no-ops without `th`, a store, or a match.
+
+## Sync with Smoo Projects (`th pearls sync`, pearl th-19cca5)
+
+The store is offline-first; `th pearls sync` is the explicit reconcile against
+the Smoo Projects work-items API (the one `smoo work` wraps), as the logged-in
+user. It runs pull, then push, then relations:
+
+- **Mapping** — `sync_map(project, pearl_id, remote_id, remote_updated_at,
+local_updated_at, last_synced_at)` in `pearls.db`. The remote item carries
+  `externalRef = <pearl_id>@<checkout-dir-name>`; a machine that has never
+  synced adopts items by that ref (keeping the pearl id when free) instead of
+  duplicating them. The project binding is `config.sync.project_id` /
+  `sync.project_key`; `sync.last_pull_at` is the `updatedSince` cursor.
+- **Fields** — title, description, labels, priority (inverted: P0 ↔ 4),
+  type (`epic` ↔ `feature` + `epic` label), status (`closed` ↔ `done`,
+  `deferred` ↔ `blocked`, `in_review`/`cancelled` fold into `in_progress`/
+  `closed` on pull and are not demoted on push), parent. Dependencies become
+  `blocks` links on the blocker item; comments mirror both ways with a
+  `pearl-comment:<id>` first line marking ours.
+- **Conflicts** — "changed" means "differs from the baseline" (clock skew
+  between laptop and server must not hide an edit); timestamps only break
+  ties, newer wins, the loser is listed in the report. Nothing is deleted on
+  either side, ever; orphans are reported.
+- Deps/comments are reconciled for the active set (open, or touched this run).
 
 ## Diver: the lifecycle wrapper
 
