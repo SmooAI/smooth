@@ -2,7 +2,9 @@
 //!
 //! ONE long-lived server (`tmux -L smooth-flow`) that outlives the daemon, so
 //! an app crash or a daemon restart never kills an agent's PTY. Sessions are
-//! named after the flow session id.
+//! named after the flow session id. Every call names its socket explicitly
+//! (th-d33afa): a session records the socket it was created on, so a daemon
+//! restarted with a different `--tmux-socket` still finds its old panes.
 //!
 //! `remain-on-exit` is on: a dead pane stays until the engine has read its
 //! exit status (`#{pane_dead_status}` — the PTY's own report, which is the
@@ -28,8 +30,12 @@ const HISTORY_LIMIT: &str = "50000";
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 40;
 
-/// The socket name to use — `$SMOOTH_FLOW_TMUX_SOCKET` overrides so tests
-/// and a second daemon never share a server.
+/// The default socket for NEW sessions.
+///
+/// `$SMOOTH_FLOW_TMUX_SOCKET` (which `smooth-daemon --tmux-socket` sets)
+/// overrides so tests, a second daemon and the macOS shell (`tmux -L
+/// smoothflow`, whose server the app starts so TCC grants attribute to it)
+/// never share a server.
 #[must_use]
 pub fn socket_name() -> String {
     std::env::var("SMOOTH_FLOW_TMUX_SOCKET")
@@ -38,15 +44,14 @@ pub fn socket_name() -> String {
         .unwrap_or_else(|| FLOW_SOCKET.to_string())
 }
 
-fn tmux(args: &[&str]) -> Result<std::process::Output> {
-    let socket = socket_name();
-    let mut full: Vec<&str> = vec!["-L", &socket];
+fn tmux(socket: &str, args: &[&str]) -> Result<std::process::Output> {
+    let mut full: Vec<&str> = vec!["-L", socket];
     full.extend_from_slice(args);
     Command::new("tmux").args(&full).output().context("running tmux")
 }
 
-fn tmux_ok(args: &[&str]) -> Result<String> {
-    let out = tmux(args)?;
+fn tmux_ok(socket: &str, args: &[&str]) -> Result<String> {
+    let out = tmux(socket, args)?;
     if !out.status.success() {
         return Err(anyhow!("tmux {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -75,56 +80,59 @@ pub fn exec_command(argv: &[String]) -> String {
 /// a command that exits instantly would otherwise take the server (and its
 /// exit status) with it before `remain-on-exit` was set. `exit-empty off`
 /// keeps the server alive with zero sessions so options persist.
-fn ensure_server() {
-    let _ = tmux(&[
-        "start-server",
-        ";",
-        "set-option",
-        "-s",
-        "exit-empty",
-        "off",
-        ";",
-        "set-option",
-        "-s",
-        "escape-time",
-        "0",
-        ";",
-        "set-option",
-        "-g",
-        "remain-on-exit",
-        "on",
-        ";",
-        "set-option",
-        "-g",
-        "status",
-        "off",
-        ";",
-        "set-option",
-        "-g",
-        "history-limit",
-        HISTORY_LIMIT,
-        ";",
-        "set-option",
-        "-g",
-        "window-size",
-        "latest",
-        ";",
-        "set-option",
-        "-g",
-        "mouse",
-        "off",
-        ";",
-        "set-option",
-        "-g",
-        "set-titles",
-        "off",
-    ]);
+fn ensure_server(socket: &str) {
+    let _ = tmux(
+        socket,
+        &[
+            "start-server",
+            ";",
+            "set-option",
+            "-s",
+            "exit-empty",
+            "off",
+            ";",
+            "set-option",
+            "-s",
+            "escape-time",
+            "0",
+            ";",
+            "set-option",
+            "-g",
+            "remain-on-exit",
+            "on",
+            ";",
+            "set-option",
+            "-g",
+            "status",
+            "off",
+            ";",
+            "set-option",
+            "-g",
+            "history-limit",
+            HISTORY_LIMIT,
+            ";",
+            "set-option",
+            "-g",
+            "window-size",
+            "latest",
+            ";",
+            "set-option",
+            "-g",
+            "mouse",
+            "off",
+            ";",
+            "set-option",
+            "-g",
+            "set-titles",
+            "off",
+        ],
+    );
 }
 
 /// Is `session` present on the flow server?
 #[must_use]
-pub fn session_alive(session: &str) -> bool {
-    tmux(&["has-session", "-t", session]).is_ok_and(|o| o.status.success())
+pub fn session_alive(socket: &str, session: &str) -> bool {
+    tmux(socket, &["has-session", "-t", session]).is_ok_and(|o| o.status.success())
 }
 
 /// Create a detached session running `exec argv` in `cwd`. Returns the
@@ -132,40 +140,43 @@ pub fn session_alive(session: &str) -> bool {
 ///
 /// # Errors
 /// When tmux is missing or the session cannot be created.
-pub fn launch(session: &str, cwd: &Path, argv: &[String]) -> Result<u32> {
+pub fn launch(socket: &str, session: &str, cwd: &Path, argv: &[String]) -> Result<u32> {
     if argv.is_empty() {
         return Err(anyhow!("cannot launch an empty argv"));
     }
     let cmd = exec_command(argv);
     let cwd_s = cwd.to_string_lossy();
-    ensure_server();
-    let out = tmux(&[
-        "new-session",
-        "-d",
-        "-s",
-        session,
-        "-x",
-        &DEFAULT_COLS.to_string(),
-        "-y",
-        &DEFAULT_ROWS.to_string(),
-        "-c",
-        &cwd_s,
-        "sh",
-        "-c",
-        &cmd,
-    ])?;
+    ensure_server(socket);
+    let out = tmux(
+        socket,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            &DEFAULT_COLS.to_string(),
+            "-y",
+            &DEFAULT_ROWS.to_string(),
+            "-c",
+            &cwd_s,
+            "sh",
+            "-c",
+            &cmd,
+        ],
+    )?;
     if !out.status.success() {
         return Err(anyhow!("tmux new-session `{session}` failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    pane_pid(session)
+    pane_pid(socket, session)
 }
 
 /// The pane's process id.
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn pane_pid(session: &str) -> Result<u32> {
-    let s = tmux_ok(&["display-message", "-p", "-t", session, "#{pane_pid}"])?;
+pub fn pane_pid(socket: &str, session: &str) -> Result<u32> {
+    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_pid}"])?;
     s.trim().parse::<u32>().with_context(|| format!("pane_pid `{s}`"))
 }
 
@@ -174,8 +185,8 @@ pub fn pane_pid(session: &str) -> Result<u32> {
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn pane_exit_status(session: &str) -> Result<Option<i32>> {
-    let s = tmux_ok(&["display-message", "-p", "-t", session, "#{pane_dead}\t#{pane_dead_status}"])?;
+pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
+    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}\t#{pane_dead_status}"])?;
     let mut parts = s.split('\t');
     let dead = parts.next().unwrap_or("0").trim() == "1";
     if !dead {
@@ -188,8 +199,8 @@ pub fn pane_exit_status(session: &str) -> Result<Option<i32>> {
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn pane_size(session: &str) -> Result<(u16, u16)> {
-    let s = tmux_ok(&["display-message", "-p", "-t", session, "#{pane_width}\t#{pane_height}"])?;
+pub fn pane_size(socket: &str, session: &str) -> Result<(u16, u16)> {
+    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_width}\t#{pane_height}"])?;
     let mut parts = s.split('\t');
     let cols = parts.next().unwrap_or("80").trim().parse().unwrap_or(80);
     let rows = parts.next().unwrap_or("24").trim().parse().unwrap_or(24);
@@ -200,53 +211,53 @@ pub fn pane_size(session: &str) -> Result<(u16, u16)> {
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn capture_visible(session: &str) -> Result<String> {
-    driver(session).capture_visible()
+pub fn capture_visible(socket: &str, session: &str) -> Result<String> {
+    driver(socket, session).capture_visible()
 }
 
 /// Capture including scrollback, front-truncated to the driver's budget.
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn capture_scrollback(session: &str) -> Result<String> {
-    driver(session).capture()
+pub fn capture_scrollback(socket: &str, session: &str) -> Result<String> {
+    driver(socket, session).capture()
 }
 
 /// Bracketed-paste `text` + Enter into the pane.
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn send_text(session: &str, text: &str) -> Result<()> {
-    driver(session).send(text)
+pub fn send_text(socket: &str, session: &str, text: &str) -> Result<()> {
+    driver(socket, session).send(text)
 }
 
 /// A named key (`Enter`, `Escape`, `C-c`, `1`).
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn send_key(session: &str, key: &str) -> Result<()> {
-    driver(session).send_key(key)
+pub fn send_key(socket: &str, session: &str, key: &str) -> Result<()> {
+    driver(socket, session).send_key(key)
 }
 
 /// Kill the session (never the server).
-pub fn kill_session(session: &str) {
-    let _ = tmux(&["kill-session", "-t", session]);
+pub fn kill_session(socket: &str, session: &str) {
+    let _ = tmux(socket, &["kill-session", "-t", session]);
 }
 
 /// Kill the whole flow server (tests / `th flow` never call this).
-pub fn kill_server() {
-    let _ = tmux(&["kill-server"]);
+pub fn kill_server(socket: &str) {
+    let _ = tmux(socket, &["kill-server"]);
 }
 
 /// `tmux attach` argv for the PTY bridge — the whole reason the socket is
 /// stable.
 #[must_use]
-pub fn attach_argv(session: &str) -> Vec<String> {
-    vec!["tmux".into(), "-L".into(), socket_name(), "attach-session".into(), "-t".into(), session.into()]
+pub fn attach_argv(socket: &str, session: &str) -> Vec<String> {
+    vec!["tmux".into(), "-L".into(), socket.into(), "attach-session".into(), "-t".into(), session.into()]
 }
 
-fn driver(session: &str) -> TmuxDriver {
-    TmuxDriver::open_existing(&socket_name(), session)
+fn driver(socket: &str, session: &str) -> TmuxDriver {
+    TmuxDriver::open_existing(socket, session)
 }
 
 /// True when a `tmux` binary runs.
@@ -291,9 +302,10 @@ mod tests {
 
     #[test]
     fn attach_argv_targets_the_flow_socket() {
-        let a = attach_argv("fs-1");
+        let a = attach_argv("smoothflow", "fs-1");
         assert_eq!(a[0], "tmux");
         assert_eq!(a[1], "-L");
+        assert_eq!(a[2], "smoothflow");
         assert_eq!(a[3], "attach-session");
         assert_eq!(a[5], "fs-1");
     }
@@ -313,12 +325,11 @@ mod tests {
             eprintln!("skipping: tmux not available");
             return;
         }
-        let _g = tests_env_lock();
+        // The socket is explicit per call (th-d33afa) — no env, no lock.
         let sock = format!("flow-t-{}", std::process::id());
-        std::env::set_var("SMOOTH_FLOW_TMUX_SOCKET", &sock);
         let dir = tempfile::tempdir().unwrap();
         let session = "fs-livetest";
-        let pid = launch(session, dir.path(), &["sh".into(), "-c".into(), "echo READY; exit 7".into()]).unwrap();
+        let pid = launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), "echo READY; exit 7".into()]).unwrap();
         assert!(pid > 0);
         // remain-on-exit keeps the pane so the exit code is readable.
         // tmux reports the dead status before it has necessarily drained the
@@ -326,23 +337,23 @@ mod tests {
         let mut status = None;
         let mut text = String::new();
         for _ in 0..100 {
-            status = pane_exit_status(session).unwrap();
+            status = pane_exit_status(&sock, session).unwrap();
             // A dead pane's last line scrolls into history behind tmux's
             // "Pane is dead" banner, so read the scrollback.
-            text = capture_scrollback(session).unwrap();
+            text = capture_scrollback(&sock, session).unwrap();
             if status.is_some() && text.contains("READY") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert_eq!(status, Some(7), "PTY-reported exit status");
-        assert!(session_alive(session));
+        assert!(session_alive(&sock, session));
+        assert!(!session_alive("flow-t-other-socket", session), "sessions are per socket");
         assert!(text.contains("READY"), "{text}");
-        let (cols, rows) = pane_size(session).unwrap();
+        let (cols, rows) = pane_size(&sock, session).unwrap();
         assert!(cols > 0 && rows > 0);
-        kill_session(session);
-        assert!(!session_alive(session));
-        kill_server();
-        std::env::remove_var("SMOOTH_FLOW_TMUX_SOCKET");
+        kill_session(&sock, session);
+        assert!(!session_alive(&sock, session));
+        kill_server(&sock);
     }
 }

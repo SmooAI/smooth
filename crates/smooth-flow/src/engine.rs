@@ -20,7 +20,10 @@ use serde_json::{json, Value};
 use smooth_tmux::detect::{detect_state, PaneState};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::protocol::{approval_keystroke, map_hook_event, permission_reply, CandidateSpec, DaemonInfo, Decision, HookEvent, HookOutcome, ServerFrame};
+use crate::protocol::{
+    approval_keystroke, hook_event_text, map_hook_event, permission_reply, CandidateSpec, DaemonInfo, Decision, EventKind, FlowEvent, HookEvent, HookOutcome,
+    ServerFrame,
+};
 use crate::pty::{OnOutput, PtyAttach};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Session, SessionKind, SessionState};
 use crate::{limit, proc, tmux};
@@ -77,6 +80,8 @@ pub struct NewRequest {
     pub title: Option<String>,
     pub model: Option<String>,
     pub fan_out_id: Option<String>,
+    /// The tmux socket to create the session on (default: [`tmux::socket_name`]).
+    pub tmux_socket: Option<String>,
 }
 
 /// What `POST /api/flow/hooks` should do after the engine processed a hook.
@@ -173,6 +178,18 @@ fn th(cwd: &Path, args: &[&str]) -> Result<String> {
         bail!("th {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The tmux socket a session lives on. Rows from before th-d33afa carry no
+/// socket and fall back to the daemon's default.
+fn socket_of(s: &Session) -> String {
+    s.tmux_socket.clone().unwrap_or_else(tmux::socket_name)
+}
+
+/// `(socket, tmux session)` of a launched session.
+fn pane(s: &Session) -> Result<(String, String)> {
+    let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
+    Ok((socket_of(s), t))
 }
 
 /// The main checkout for `dir` (git-common-dir's parent — the pearls rule),
@@ -378,8 +395,32 @@ impl Engine {
                     attention: s.attention.clone(),
                 });
             }
+            if before.as_ref().map(|b| b.state) != Some(s.state) {
+                self.event(id, EventKind::System, &state_line(s));
+            }
         }
         Ok(after)
+    }
+
+    // ── events (th-d33afa) ───────────────────────────────────────────────
+
+    /// Append one line to the session's event stream and broadcast it as
+    /// `flow.event`. Never fails the caller: the stream is a view, the
+    /// state change it describes already happened.
+    fn event(&self, id: &str, kind: EventKind, text: &str) {
+        match self.with_store(|st| st.add_event(id, kind, text)) {
+            Ok(event) => self.emit(ServerFrame::Event { id: id.to_string(), event }),
+            Err(e) => tracing::warn!(session = %id, error = %e, "flow: recording event"),
+        }
+    }
+
+    /// The buffered event stream (last [`crate::store::EVENT_BUFFER`]),
+    /// oldest first — replayed to a client on `flow.attach`.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn events(&self, id: &str) -> Result<Vec<FlowEvent>> {
+        self.with_store(|st| st.events(id))
     }
 
     /// Create a worktree `../<repo>-<pearl>-<slug>` on branch `<pearl>-<slug>`
@@ -448,6 +489,7 @@ impl Engine {
                 agent_session_id: agent_session_id.clone(),
                 argv: argv.clone(),
                 tmux_session: None,
+                tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
                 fan_out_id: req.fan_out_id.clone(),
             })
         })?;
@@ -463,10 +505,11 @@ impl Engine {
     /// record pid + start time, broadcast.
     fn launch(&self, session: &Session, argv: &[String]) -> Result<Session> {
         let tmux_name = session.id.clone();
-        if tmux::session_alive(&tmux_name) {
-            tmux::kill_session(&tmux_name);
+        let sock = socket_of(session);
+        if tmux::session_alive(&sock, &tmux_name) {
+            tmux::kill_session(&sock, &tmux_name);
         }
-        let pid = tmux::launch(&tmux_name, Path::new(&session.worktree), argv)?;
+        let pid = tmux::launch(&sock, &tmux_name, Path::new(&session.worktree), argv)?;
         let start = proc::start_time(pid);
         self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
         if let Some(agent) = &session.agent_session_id {
@@ -482,8 +525,8 @@ impl Engine {
             return Ok(p.clone());
         }
         let session = self.require(id)?;
-        let tmux_name = session.tmux_session.ok_or_else(|| anyhow!("session {id} has no tmux session"))?;
-        if !tmux::session_alive(&tmux_name) {
+        let (sock, tmux_name) = pane(&session)?;
+        if !tmux::session_alive(&sock, &tmux_name) {
             bail!("session {id} is not running");
         }
         let sid = id.to_string();
@@ -501,7 +544,7 @@ impl Engine {
                 data_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
             });
         });
-        let pty = PtyAttach::spawn(&tmux::attach_argv(&tmux_name), cols, rows, on_output)?;
+        let pty = PtyAttach::spawn(&tmux::attach_argv(&sock, &tmux_name), cols, rows, on_output)?;
         self.inner
             .ptys
             .lock()
@@ -538,11 +581,9 @@ impl Engine {
     /// # Errors
     /// When the session is unknown/not running or the PTY is closed.
     pub fn input(&self, id: &str, data: &[u8]) -> Result<()> {
-        let (cols, rows) = self
-            .require(id)?
-            .tmux_session
-            .as_deref()
-            .and_then(|t| tmux::pane_size(t).ok())
+        let (cols, rows) = pane(&self.require(id)?)
+            .ok()
+            .and_then(|(k, t)| tmux::pane_size(&k, &t).ok())
             .unwrap_or((120, 40));
         self.pty_for(id, cols, rows)?.write(data)
     }
@@ -561,8 +602,10 @@ impl Engine {
     /// When the session is unknown or tmux refuses.
     pub fn send(&self, id: &str, text: &str) -> Result<()> {
         let s = self.require(id)?;
-        let t = s.tmux_session.as_deref().ok_or_else(|| anyhow!("session {id} has no tmux session"))?;
-        tmux::send_text(t, text)
+        let (k, t) = pane(&s)?;
+        tmux::send_text(&k, &t, text)?;
+        self.event(id, EventKind::User, text);
+        Ok(())
     }
 
     /// `flow.snapshot`: plain-text visible pane.
@@ -571,13 +614,13 @@ impl Engine {
     /// When the session is unknown or tmux refuses.
     pub fn snapshot(&self, id: &str) -> Result<ServerFrame> {
         let s = self.require(id)?;
-        let t = s.tmux_session.as_deref().ok_or_else(|| anyhow!("session {id} has no tmux session"))?;
-        let (cols, rows) = tmux::pane_size(t)?;
+        let (k, t) = pane(&s)?;
+        let (cols, rows) = tmux::pane_size(&k, &t)?;
         Ok(ServerFrame::Screen {
             id: id.to_string(),
             cols,
             rows,
-            text: tmux::capture_visible(t)?,
+            text: tmux::capture_visible(&k, &t)?,
         })
     }
 
@@ -611,9 +654,10 @@ impl Engine {
         if let Some(tx) = pending {
             let _ = tx.send(decision);
         } else {
-            let t = s.tmux_session.as_deref().ok_or_else(|| anyhow!("session {id} has no tmux session"))?;
-            tmux::send_key(t, approval_keystroke(decision))?;
+            let (k, t) = pane(&s)?;
+            tmux::send_key(&k, &t, approval_keystroke(decision))?;
         }
+        self.event(id, EventKind::User, &format!("approve: {}", decision.as_str()));
         self.set_state(id, SessionState::Working, None)?;
         Ok(())
     }
@@ -624,15 +668,16 @@ impl Engine {
     /// When the session is unknown or the relaunch fails.
     pub fn kill(&self, id: &str, resume: bool) -> Result<Session> {
         let s = self.require(id)?;
+        let sock = socket_of(&s);
         let tmux_name = s.tmux_session.clone();
         if let Some(pid) = s.pid {
             if proc::is_alive(pid, s.pid_start) {
                 proc::kill_tree(pid, KILL_GRACE);
             }
         }
-        let exit = tmux_name.as_deref().and_then(|t| tmux::pane_exit_status(t).ok().flatten());
+        let exit = tmux_name.as_deref().and_then(|t| tmux::pane_exit_status(&sock, t).ok().flatten());
         if let Some(t) = &tmux_name {
-            tmux::kill_session(t);
+            tmux::kill_session(&sock, t);
         }
         self.drop_pty(id);
         self.with_store(|st| st.set_exit_code(id, exit))?;
@@ -660,7 +705,7 @@ impl Engine {
             bail!("session {id} is {} — kill it first", s.state);
         }
         if let Some(t) = &s.tmux_session {
-            tmux::kill_session(t);
+            tmux::kill_session(&socket_of(&s), t);
         }
         self.with_store(|st| st.remove(id))?;
         self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
@@ -710,6 +755,9 @@ impl Engine {
             return Ok(HookReply::Immediate(json!({})));
         };
         self.rt().hook_seen.insert(s.id.clone());
+        if let Some((kind, text)) = hook_event_text(&ev.event, &ev.payload) {
+            self.event(&s.id, kind, &text);
+        }
         match map_hook_event(&ev.event, &ev.payload) {
             HookOutcome::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
@@ -795,12 +843,13 @@ impl Engine {
             return Ok(());
         }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
-        if !tmux::session_alive(t) {
+        let sock = socket_of(s);
+        if !tmux::session_alive(&sock, t) {
             return self.on_death(s, None);
         }
-        if let Some(code) = tmux::pane_exit_status(t)? {
+        if let Some(code) = tmux::pane_exit_status(&sock, t)? {
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
-            tmux::kill_session(t);
+            tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
             if code == 0 {
                 // Rule 5: exit 0 is proven — the PTY reported it.
@@ -818,14 +867,14 @@ impl Engine {
             if due {
                 tracing::info!(session = %s.id, "flow: usage limit window passed — resuming");
                 self.rt().limit_resumed_at.insert(s.id.clone(), Instant::now());
-                tmux::send_key(t, "Enter")?;
+                tmux::send_key(&sock, t, "Enter")?;
                 self.set_state(&s.id, SessionState::Working, None)?;
             }
             return Ok(());
         }
         // Scrape the visible pane: limits always; approvals when hooks
         // didn't report one; working/idle only when hooks never spoke.
-        let pane = tmux::capture_visible(t)?;
+        let pane = tmux::capture_visible(&sock, t)?;
         let hooks_seen = self.rt().hook_seen.contains(&s.id);
         match detect_state(&pane) {
             PaneState::UsageLimit => {
@@ -920,6 +969,7 @@ impl Engine {
                 title: Some(format!("{pearl_id} · {}", c.label)),
                 model: c.model.clone(),
                 fan_out_id: Some(fo.id.clone()),
+                tmux_socket: None,
             })?;
             sessions.push(s);
         }
@@ -1009,32 +1059,56 @@ impl Engine {
             .lines()
             .filter_map(|l| l.get(3..).map(str::to_string))
             .collect();
-        let pearl_json = s.pearl_id.as_deref().and_then(|p| {
-            th(Path::new(&s.project), &["pearls", "show", p, "--json"])
-                .ok()
-                .and_then(|out| serde_json::from_str::<Value>(&out).ok())
-                .or_else(|| {
-                    th(Path::new(&s.project), &["pearls", "show", p])
-                        .ok()
-                        .map(|text| json!({ "id": p, "text": text }))
-                })
-        });
-        let pr = s.branch.as_deref().and_then(|b| pr_for_branch(wt, b));
+        // `th pearls show <id> --handoff --json` (lane C, th-9483e8) is the
+        // packet {pearl, handoff, checkpoints, blocks, pr}; an older `th`
+        // degrades to the human text as `pearl.text`.
+        let project = Path::new(&s.project);
+        let packet = s
+            .pearl_id
+            .as_deref()
+            .and_then(|p| th(project, &["pearls", "show", p, "--handoff", "--json"]).ok())
+            .and_then(|out| serde_json::from_str::<Value>(&out).ok())
+            .filter(Value::is_object);
+        let pearl_json = packet
+            .as_ref()
+            .and_then(|p| p.get("pearl").cloned())
+            .or_else(|| {
+                s.pearl_id
+                    .as_deref()
+                    .and_then(|p| th(project, &["pearls", "show", p]).ok().map(|text| json!({ "id": p, "text": text })))
+            })
+            .unwrap_or(Value::Null);
+        let from_packet = |key: &str| packet.as_ref().and_then(|p| p.get(key).cloned()).filter(|v| !v.is_null());
+        let pr = s.branch.as_deref().and_then(|b| pr_for_branch(wt, b)).or_else(|| from_packet("pr"));
         Ok(json!({
-            "pearl": pearl_json.clone().unwrap_or(Value::Null),
+            "pearl": pearl_json,
             "handoff": {
                 "worktree": s.worktree,
                 "branch": s.branch,
                 "head": head,
                 "dirty": dirty,
                 "agent_session_id": s.agent_session_id,
-                "next": pearl_json.as_ref().and_then(|p| p.pointer("/handoff/next").cloned()).unwrap_or(Value::Null),
+                "next": packet.as_ref().and_then(|p| p.pointer("/handoff/next").cloned()).unwrap_or(Value::Null),
             },
-            "checkpoints": pearl_json.as_ref().and_then(|p| p.get("checkpoints").cloned()).unwrap_or_else(|| json!([])),
-            "blocks": pearl_json.as_ref().and_then(|p| p.get("blocks").or_else(|| p.get("blocked_by")).cloned()).unwrap_or_else(|| json!([])),
+            "checkpoints": from_packet("checkpoints").unwrap_or_else(|| json!([])),
+            "blocks": from_packet("blocks").unwrap_or_else(|| json!([])),
             "pr": pr.unwrap_or(Value::Null),
         }))
     }
+}
+
+/// The system event line for a state change: `needs_you · permission: Bash: ls`.
+fn state_line(s: &Session) -> String {
+    let mut line = s.state.to_string();
+    if let Some(a) = &s.attention {
+        line.push_str(" · ");
+        line.push_str(&a.reason);
+        if let Some(d) = a.detail.as_deref().filter(|d| !d.is_empty()) {
+            line.push_str(": ");
+            line.push_str(d);
+        }
+    }
+    line
 }
 
 /// `th pearls create` a child pearl in the main checkout; returns its id.
@@ -1446,9 +1520,8 @@ mod tests {
             eprintln!("skipping: tmux not available");
             return;
         }
-        let _g = crate::tmux::tests_env_lock();
+        // The request names the socket (th-d33afa) — no env, no lock.
         let sock = format!("flow-e-{}", std::process::id());
-        std::env::set_var("SMOOTH_FLOW_TMUX_SOCKET", &sock);
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let mut rx = e.subscribe();
@@ -1458,10 +1531,13 @@ mod tests {
                 worktree: Some(tmp.path().to_string_lossy().into()),
                 argv: Some(vec!["sh".into(), "-c".into(), "echo FLOW-READY; cat".into()]),
                 title: Some("t".into()),
+                tmux_socket: Some(sock.clone()),
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(s.state, SessionState::Idle);
+        assert_eq!(s.tmux_socket.as_deref(), Some(sock.as_str()), "the row records its socket");
+        assert!(tmux::session_alive(&sock, &s.id) && !tmux::session_alive(&tmux::socket_name(), &s.id));
         assert!(s.pid.is_some() && s.tmux_session.as_deref() == Some(s.id.as_str()));
         assert!(proc::is_alive(s.pid.unwrap(), s.pid_start));
 
@@ -1479,6 +1555,10 @@ mod tests {
             }
         }
         assert!(seen.contains("hello-flow"), "PTY stream: {seen:?}");
+        // The steer is on the event stream (user), after the shell's idle line.
+        let events = e.events(&s.id).unwrap();
+        assert_eq!(events.last().map(|ev| (ev.kind, ev.text.as_str())), Some((EventKind::User, "hello-flow")));
+        assert_eq!(events.last().unwrap().event_id, format!("{}-{}", s.id, events.len()));
         // Raw input path too.
         e.input(&s.id, b"raw-bytes\n").unwrap();
         e.resize(&s.id, 90, 25).unwrap();
@@ -1499,7 +1579,7 @@ mod tests {
         e.detach(&s.id);
         let killed = e.kill(&s.id, false).unwrap();
         assert_eq!(killed.state, SessionState::Done);
-        assert!(!tmux::session_alive(&s.id));
+        assert!(!tmux::session_alive(&sock, &s.id));
         e.remove(&s.id).unwrap();
 
         // Death detection: a session whose command exits non-zero is dead
@@ -1509,6 +1589,7 @@ mod tests {
                 kind: SessionKind::Shell,
                 worktree: Some(tmp.path().to_string_lossy().into()),
                 argv: Some(vec!["sh".into(), "-c".into(), "exit 3".into()]),
+                tmux_socket: Some(sock.clone()),
                 ..Default::default()
             })
             .unwrap();
@@ -1522,7 +1603,71 @@ mod tests {
         let s2 = e.get(&s2.id).unwrap().unwrap();
         assert_eq!(s2.state, SessionState::Dead);
         assert_eq!(s2.exit_code, Some(3), "PTY-reported exit code");
-        tmux::kill_server();
-        std::env::remove_var("SMOOTH_FLOW_TMUX_SOCKET");
+        tmux::kill_server(&sock);
+    }
+
+    /// th-d33afa: hooks and state changes feed the per-session event stream
+    /// (the phone's Chat tab), buffered in the store for replay on attach.
+    #[test]
+    fn hooks_and_state_changes_feed_the_event_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Claude),
+                    agent_session_id: Some("uuid-ev".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let mut rx = e.subscribe();
+        let ev = |event: &str, payload: Value| HookEvent {
+            harness: "claude-code".into(),
+            event: event.into(),
+            session_id: "uuid-ev".into(),
+            cwd: None,
+            payload,
+        };
+        e.hook(ev("UserPromptSubmit", json!({"prompt":"fix it"}))).unwrap();
+        e.hook(ev("PreToolUse", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))).unwrap();
+        e.hook(ev("Stop", json!({"last_assistant_message":"done"}))).unwrap();
+        let reply = e
+            .hook(ev("PermissionRequest", json!({"tool_name":"Bash","tool_input":{"command":"rm x"}})))
+            .unwrap();
+        let HookReply::Pending { request_id, .. } = reply else {
+            panic!("expected pending")
+        };
+        e.approve(&s.id, &request_id, Decision::Deny).unwrap();
+
+        let lines: Vec<(EventKind, String)> = e.events(&s.id).unwrap().into_iter().map(|x| (x.kind, x.text)).collect();
+        assert_eq!(
+            lines,
+            vec![
+                (EventKind::User, "fix it".into()),
+                (EventKind::System, "working".into()),
+                (EventKind::Tool, "● Bash(ls)".into()),
+                (EventKind::Agent, "done".into()),
+                (EventKind::System, "idle".into()),
+                (EventKind::System, "needs_you · permission: Bash: rm x".into()),
+                (EventKind::User, "approve: deny".into()),
+                (EventKind::System, "working".into()),
+            ]
+        );
+        // Every line was also broadcast as flow.event, ids monotonic.
+        let mut ids = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            if let ServerFrame::Event { id, event } = f {
+                assert_eq!(id, s.id);
+                ids.push(event.event_id);
+            }
+        }
+        let want: Vec<String> = (1..=lines.len()).map(|n| format!("{}-{n}", s.id)).collect();
+        assert_eq!(ids, want);
+        // A store failure never fails the caller (unknown session id).
+        e.event("fs-ghost", EventKind::System, "x");
+        assert!(e.events("fs-ghost").unwrap().is_empty());
     }
 }
