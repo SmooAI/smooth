@@ -118,8 +118,17 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
         let v = TerminalSurfaceView(sessionId: id)
-        v.onInput = { [weak self] data in self?.client.send(.input(id: id, data: data)) }
-        v.onResize = { [weak self] cols, rows in self?.client.send(.resize(id: id, cols: cols, rows: rows)) }
+        // A done/dead row keeps its surface for scrollback; input and the
+        // layout-driven resize must not reach the engine (it answers
+        // "not running" for each, which used to land in the rail).
+        v.onInput = { [weak self] data in
+            guard let self, self.store.sessions[id]?.isLive == true else { return }
+            self.client.send(.input(id: id, data: data))
+        }
+        v.onResize = { [weak self] cols, rows in
+            guard let self, self.store.sessions[id]?.isLive == true else { return }
+            self.client.send(.resize(id: id, cols: cols, rows: rows))
+        }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
         surfaces[id] = v
         if store.sessions[id]?.isLive == true {
