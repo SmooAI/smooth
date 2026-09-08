@@ -1,0 +1,100 @@
+# xcodegen spec — `xcodegen generate` writes SmoothFlow.xcodeproj (gitignored).
+# Everything reviewable about the Xcode project lives here.
+name: SmoothFlow
+options:
+    bundleIdPrefix: ai.smoo
+    deploymentTarget:
+        macOS: '14.0'
+    xcodeVersion: '16.0'
+    createIntermediateGroups: true
+    generateEmptyDirectories: true
+
+settings:
+    base:
+        SWIFT_VERSION: '5.10'
+        MACOSX_DEPLOYMENT_TARGET: '14.0'
+        DEVELOPMENT_TEAM: DTX9733844
+        SWIFT_STRICT_CONCURRENCY: minimal
+        DEAD_CODE_STRIPPING: YES
+
+targets:
+    SmoothFlow:
+        type: application
+        platform: macOS
+        sources:
+            - path: Sources
+            - path: Resources
+              type: folder
+              buildPhase: resources
+            - path: LaunchAgents
+              buildPhase:
+                  copyFiles:
+                      destination: wrapper
+                      subpath: Contents/Library/LaunchAgents
+        dependencies:
+            - framework: Vendor/GhosttyKit.xcframework
+              embed: false
+            - sdk: Metal.framework
+            - sdk: QuartzCore.framework
+            - sdk: CoreText.framework
+            - sdk: Carbon.framework
+            - sdk: IOSurface.framework
+            - sdk: CoreVideo.framework
+            - sdk: EventKit.framework
+            - sdk: UserNotifications.framework
+            - sdk: ServiceManagement.framework
+        preBuildScripts:
+            - name: Ensure GhosttyKit
+              script: bash "$SRCROOT/scripts/ensure-ghosttykit.sh"
+              basedOnDependencyAnalysis: false
+        settings:
+            base:
+                PRODUCT_BUNDLE_IDENTIFIER: ai.smoo.smoothflow
+                PRODUCT_NAME: SmoothFlow
+                INFOPLIST_FILE: Info.plist
+                GENERATE_INFOPLIST_FILE: NO
+                ENABLE_HARDENED_RUNTIME: YES
+                CODE_SIGN_ENTITLEMENTS: entitlements.plist
+                CODE_SIGN_STYLE: Manual
+                OTHER_LDFLAGS: ['-lc++']
+                SWIFT_OBJC_BRIDGING_HEADER: ''
+                ENABLE_USER_SCRIPT_SANDBOXING: NO
+                ASSETCATALOG_COMPILER_APPICON_NAME: ''
+            configs:
+                Debug:
+                    # Ad-hoc: enough for local runs and TCC prompts (a real bundle
+                    # is what TCC keys on; the identity is not).
+                    CODE_SIGN_IDENTITY: '-'
+                Release:
+                    # Overridden by scripts/build-release.sh (SIGN_IDENTITY).
+                    CODE_SIGN_IDENTITY: 'Developer ID Application'
+    SmoothFlowTests:
+        type: bundle.unit-test
+        platform: macOS
+        sources:
+            - path: Tests
+        dependencies:
+            - target: SmoothFlow
+        settings:
+            base:
+                PRODUCT_BUNDLE_IDENTIFIER: ai.smoo.smoothflow.tests
+                GENERATE_INFOPLIST_FILE: YES
+                CODE_SIGN_IDENTITY: '-'
+                CODE_SIGN_STYLE: Manual
+                TEST_HOST: '$(BUILT_PRODUCTS_DIR)/SmoothFlow.app/Contents/MacOS/SmoothFlow'
+                BUNDLE_LOADER: '$(TEST_HOST)'
+
+schemes:
+    SmoothFlow:
+        build:
+            targets:
+                SmoothFlow: all
+                SmoothFlowTests: [test]
+        run:
+            config: Debug
+        test:
+            config: Debug
+            targets:
+                - SmoothFlowTests
+        archive:
+            config: Release
