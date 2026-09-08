@@ -205,7 +205,7 @@ not under a `cmux-cli-shims` directory, and records the resolved path as
 `argv[0]` in the session row. An explicit bare `claude`/`codex`/`opencode` in
 `flow.new.argv` gets the same treatment. Codex 0.153+ also reads Claude-style
 hooks from `~/.codex/hooks.json`; wiring `flow-hook.sh` into it is
-`th harness enable codex`'s job (pearl th-7a1c1e).
+`th harness enable codex`'s job (pearl th-4ad334).
 
 **Pane markers.** Scraping knows OpenCode (`esc interrupt` = working, the
 `ctrl+p commands` status line without it = idle) and Codex's menus (`› 1. …`

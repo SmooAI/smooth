@@ -779,6 +779,10 @@ impl Engine {
             }
         }
         let argv = resume_argv(s);
+        // A relaunched process hasn't reported a hook yet — let the scraper
+        // drive state until it does (a resumed opencode session emits no
+        // session.created; measured 2026-09-08).
+        self.with_store(|st| st.set_state_source(&s.id, "inferred"))?;
         let launched = self.launch(s, &argv)?;
         self.set_state(&launched.id, SessionState::Starting, None)?
             .ok_or_else(|| anyhow!("no such session"))
@@ -1380,6 +1384,13 @@ mod tests {
         assert_eq!(bound.agent_session_id.as_deref(), Some("ses_1"));
         assert_eq!(bound.state_source, "hooks");
         assert_eq!(e.get(&shell.id).unwrap().unwrap().agent_session_id, None);
+        // A relaunch (no tmux here ⇒ launch fails) still resets the source first.
+        assert!(e.relaunch(&bound).is_err());
+        assert_eq!(
+            e.get(&oc.id).unwrap().unwrap().state_source,
+            "inferred",
+            "scraping covers the gap until hooks speak again"
+        );
         // Later hooks find it by id; a second unknown id does not steal it.
         e.hook(ev("Stop", "ses_1", &wt)).unwrap();
         assert_eq!(e.get(&oc.id).unwrap().unwrap().state, SessionState::Idle);

@@ -71,9 +71,10 @@ const IDLE_MARKERS: &[&str] = &[
     "for shortcuts",
     "shift+tab to cycle",
     "> ",
-    // OpenCode's idle status line shows the cwd + this hint; while working the
-    // same line carries "esc interrupt", which is checked first.
-    "ctrl+p commands",
+    // OpenCode's idle status line shows the cwd + "ctrl+p commands"; a long
+    // cwd wraps it so "commands" lands on the next line — match the key only.
+    // While working the same line carries "esc interrupt", checked first.
+    "ctrl+p",
 ];
 
 /// The live signals (working / idle) render at the BOTTOM of the pane — the

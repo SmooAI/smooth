@@ -81,6 +81,37 @@ const events = posted.map((p) => p.body.event);
 // Every tool call posts (the Chat tab wants each one); only the th-mail
 // heartbeat above is throttled.
 assert.deepEqual(events.slice(0, 6), ['SessionStart', 'PreToolUse', 'PreToolUse', 'Stop', 'PreToolUse', 'SessionEnd'], JSON.stringify(events));
+
+// OpenCode ≥ 1.18: only the generic `event` hook fires. The bus shapes below
+// are verbatim from a probe on 1.18.29; they must drive the same lifecycle.
+const postedBefore = posted.length;
+calls.length = 0;
+const plugin3 = await SmoothAgent({ $, directory: '/Users/x/dev/bus' });
+const bus = (type, properties) => plugin3.event({ event: { type, properties } });
+const S = 'ses_bus00001';
+await bus('session.created', { sessionID: S, info: { id: S, slug: 'jolly-garden', directory: '/Users/x/dev/bus' } });
+await bus('session.created', { sessionID: S, info: { id: S } }); // duplicates are ignored
+await bus('message.updated', { sessionID: S, info: { id: 'msg_u', role: 'user' } });
+await bus('message.part.updated', { sessionID: S, part: { type: 'text', text: 'the prompt', messageID: 'msg_u' } });
+await bus('session.status', { sessionID: S, status: { type: 'busy' } });
+await bus('message.updated', { sessionID: S, info: { id: 'msg_a', role: 'assistant' } });
+await bus('message.part.updated', { sessionID: S, part: { type: 'text', text: 'ok', messageID: 'msg_a' } });
+await bus('session.status', { sessionID: S, status: { type: 'idle' } });
+await bus('session.idle', { sessionID: S });
+await bus('catalog.updated', {});
+await bus('session.deleted', { sessionID: S });
+await new Promise((r) => setTimeout(r, 200));
+const busPosts = posted.slice(postedBefore);
+assert.deepEqual(
+    busPosts.map((p) => p.body.event),
+    ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd'],
+    JSON.stringify(busPosts.map((p) => p.body.event)),
+);
+assert.equal(busPosts[2].body.payload.last_assistant_message, 'ok', "the Stop line carries the assistant's final text");
+assert.equal(busPosts[0].body.cwd, '/Users/x/dev/bus');
+assert.match(calls[0], /^agent register --name oc-bus-0001 --harness opencode/);
+assert.equal(calls.at(-1), 'agent status --name oc-bus-0001 --status offline');
+assert.equal(calls.length, 3, 'register, idle, offline — the bus path is the same lifecycle');
 assert.ok(posted.every((p) => p.url === '/api/flow/hooks'));
 const first = posted[0].body;
 assert.equal(first.harness, 'opencode');
