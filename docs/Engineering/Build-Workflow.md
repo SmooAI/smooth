@@ -22,7 +22,8 @@ cargo build -p smooth-operative --release   # Just the runner (auto-discovered f
 ## One-time dev setup
 
 ```bash
-# Build smooth-dolt (Go binary; embedded Dolt engine)
+# Build smooth-dolt (Go binary) — ONLY needed for `th pearls migrate-from-dolt`;
+# pearls are SQLite now and the shim is deleted in pearl th-c6ba83.
 brew install icu4c                           # macOS; required by the Dolt link
 bash scripts/build-smooth-dolt.sh            # → target/release/smooth-dolt (~145MB)
 ```

@@ -2,55 +2,72 @@
 
 #architecture
 
-> [!info] Work items, version-controlled
-> A pearl is a unit of work. The pearl store is Dolt-backed (one database per project), so pearl history is a real SQL log you can `pearls log`, push to a remote, or pull on another machine. Sessions, messages, and orchestrator snapshots live in the same database.
+> [!info] Work items, one database
+> A pearl is a unit of work. Every project's pearls live in **one SQLite file per machine**, `~/.smooth/pearls.db`, keyed by the project's canonical root (pearl th-d3e842). Reads are ~10ms, concurrent agents queue on SQLite's lock instead of wedging, and a pearl created inside a git worktree lands in the main checkout's project.
 
 ## Concepts
 
 - **Pearl** — title, description, status, priority, type, dependencies, labels, comments, history.
-- **Status** — `open`, `ready`, `in_progress`, `closed`, `blocked`.
+- **Status** — `open`, `in_progress`, `closed`, `deferred`.
 - **Type** — `task`, `bug`, `feature`, `epic`, `chore`.
-- **Dependencies** — DAG. `ready` pearls have no open dependencies.
+- **Dependencies** — DAG. `ready` pearls have no open blocking dependencies.
 - **Sub-pearls** — pearls created by operators mid-dispatch (`delegate` tool). Linked via parent.
+- **Memories** — free-form project notes (`th pearls remember`), same database, same project scoping.
 
 ## Storage layout
 
 ```
-   <repo>/.smooth/
-     └── dolt/
-         └── pearls/      # Dolt database (content-addressed; git-friendly)
-             ├── pearls
-             ├── pearl_dependencies
-             ├── pearl_labels
-             ├── pearl_comments
-             ├── pearl_history
-             ├── sessions
-             ├── session_messages
-             ├── orchestrator_snapshots
-             └── memories
+~/.smooth/pearls.db          # SQLite, WAL mode; $SMOOTH_PEARLS_DB overrides
+  pearls              (project, id) PRIMARY KEY
+  pearl_dependencies  (project, pearl_id, depends_on)
+  pearl_labels        (project, pearl_id, label)
+  pearl_comments      (project, id) UNIQUE, seq for ordering
+  pearl_history       (project, id) UNIQUE, seq for ordering
+  memories            (project, id) UNIQUE
+  config              (project, k)
+~/.smooth/registry.json      # every project root th has seen; dead paths pruned on open
 ```
 
-`~/.smooth/registry.json` tracks every project pearl store the local `th` knows about.
+**`project`** is the canonical project root. `PearlStore::open(any_path)` runs
+`git rev-parse --git-common-dir` and takes its parent, so the main checkout and
+every linked worktree of a repo share one project; outside git it is the
+directory itself. Ids stay `th-xxxxxx` and are unique **per project** — two
+projects may reuse an id (the Dolt-era stores generated them independently).
+
+Timestamps are UTC RFC3339 text with a fixed microsecond width, so `<=` in SQL
+is chronological. Queries compare against a Rust `Utc::now()` literal, never
+SQLite's `now`.
 
 ## `th pearls` quick reference
 
 ```bash
-th pearls init                        # create .smooth/dolt/ in current repo
+th pearls init                        # ensure the db exists + register this project
 th pearls create --title="…" --description="…"
 th pearls list --status=open
 th pearls list --status=in_progress
-th pearls show <id>                   # details + deps + comments
+th pearls show <id>                   # details + deps + comments + history
 th pearls update <id> --status=in_progress
 th pearls close <id1> <id2> …
 th pearls ready                       # open, no blockers
 th pearls blocked                     # open, unmet deps
-th pearls log                         # dolt commit history
-th pearls push                        # to a Dolt remote
-th pearls pull                        # from a Dolt remote
 th pearls projects                    # all registered projects
+th pearls migrate-from-dolt [PATH]    # one-shot import of a legacy .smooth/dolt store
+th pearls push / pull                 # exit-0 notice: sync is pearl th-19cca5
+th db path                            # where pearls.db lives
 ```
 
 There is no `th issues` or `th beads` alias. The naming lineage is beads → issues → **pearls**; only "pearls" is current.
+
+## Migrating from Dolt
+
+Until pearl th-d3e842 the store was an embedded Dolt database per project
+(`.smooth/dolt/`, `smooth-dolt` Go binary, sync over `refs/dolt/data`). Run
+`th pearls migrate-from-dolt` inside a project (or pass a path) to import every
+table — pearls, dependencies, labels, comments, history, memories, config —
+preserving ids and timestamps. Pearls upsert by `updated_at` (a Dolt edit after the first run overwrites the copy), everything else is insert-or-ignore, so re-running is a
+no-op, and the Dolt directory is left untouched for you to delete afterwards.
+`dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` exist only for this command and
+go away in th-c6ba83.
 
 ## Diver: the lifecycle wrapper
 
@@ -61,45 +78,7 @@ The pearl store is a passive CRUD surface. The [[The-Cast#Diver|Diver]] cast mem
 - `Diver::sub_pearl(parent, …)` — create a child pearl during a dispatch.
 - Jira sync (bidirectional) when `JIRA_URL` + `JIRA_API_TOKEN` are configured.
 
-`dispatch_ws_task_*` prefers Diver and falls back to the raw store if Diver is absent. See [[Dispatch]].
-
-## Sessions and resume
-
-Every dispatch records `session_messages` on the pearl as the agent runs. When the same pearl is re-dispatched later, `build_resumption_context` reads the last N messages and prepends them to the new task as a `## Resumption context` block. The agent picks up where the prior run left off.
-
-`orchestrator_snapshots` is the higher-level analog: the orchestrator's state machine writes snapshots that survive process restarts.
-
-## Memories
-
-The `memories` table is a free-form key-value scratchpad operators can read/write across pearls. Used by the chat agent to remember user preferences, project context, etc. Not the place for long-term knowledge — that goes in the source repo where the agent can `read_file` it.
-
-## smooth-dolt: the engine
-
-`smooth-pearls` doesn't speak Dolt natively. It shells out to `smooth-dolt`, a Go binary that embeds the Dolt SQL engine. Build it with:
-
-```bash
-scripts/build-smooth-dolt.sh
-# Produces target/release/smooth-dolt (~145MB; embedded Dolt engine + ICU)
-```
-
-Requires Go 1.21+ and ICU (macOS: `brew install icu4c`). The binary is mirrored to `~/.smooth/runner-bin/` by `pnpm install:th` so production installs find it.
-
-## Migrating from older stores
-
-Legacy state lives in `~/.smooth/smooth.db` (SQLite). It is no longer read
-by anything, and the `th pearls migrate-from-sqlite` command that used to
-convert it has been removed — the file is safe to delete.
-
-Migration from the `bd` CLI is still supported:
-
-```bash
-th pearls migrate-from-beads
-```
-
-Dolt is the only store.
-
 ## Related
 
-- [[Dispatch]]
 - [[Data-Storage]]
 - [[The-Cast]]

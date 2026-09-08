@@ -1,9 +1,8 @@
 //! Memory store — accumulating per-project notes the agent
 //! writes during a task and reads back on subsequent dispatch.
 //!
-//! Pearl th-893801 Phase 3 iter-5a. The `memories` table has
-//! lived in the pearl Dolt DB schema since the start but had
-//! no API; this module supplies CRUD on top of it. Each row:
+//! Pearl th-893801 Phase 3 iter-5a. Rows live in the `memories` table of
+//! the pearl database, scoped by project like everything else:
 //!
 //! * `id` — short uuid (`mem-XXXXXX`).
 //! * `content` — the note itself, free-form text.
@@ -11,18 +10,17 @@
 //!   `"manual"`, etc. Used for filtering.
 //! * `created_at` — insert time.
 //!
-//! The store is intentionally append-only. We don't delete or
-//! edit individual rows; the only way to drop entries is
-//! `clear_by_source` or `clear_older_than`. Long-term we'd
-//! add a summarize-and-collapse pass.
+//! The store is intentionally append-only. We don't edit individual
+//! rows; the only ways to drop entries are `forget`, `clear_by_source`
+//! and `clear_older_than`.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
-use crate::dolt::SmoothDolt;
+use crate::store::{fmt_ts, now_ts, parse_ts, PearlStore};
 
 /// A single learned-context note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,50 +41,37 @@ fn generate_id() -> String {
     format!("mem-{}", &hex[..6])
 }
 
-/// Parse a Dolt JSON row into a `Memory`.
-fn parse_memory(row: &Value) -> Memory {
-    Memory {
-        id: row["id"].as_str().unwrap_or_default().to_string(),
-        content: row["content"].as_str().unwrap_or_default().to_string(),
-        source: row["source"].as_str().unwrap_or_default().to_string(),
-        created_at: parse_datetime(&row["created_at"]),
-    }
+const COLS: &str = "id, content, source, created_at";
+
+fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: r.get(0)?,
+        content: r.get(1)?,
+        source: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        created_at: parse_ts(&r.get::<_, String>(3)?).unwrap_or_else(Utc::now),
+    })
 }
 
-fn parse_datetime(value: &Value) -> DateTime<Utc> {
-    let s = value.as_str().unwrap_or_default();
-    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return naive.and_utc();
-    }
-    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return naive.and_utc();
-    }
-    Utc::now()
-}
-
-use crate::dolt::sql_escape;
-
-/// API over the `memories` table. Cheap to clone (the
-/// underlying SmoothDolt is itself cheap to clone).
+/// API over the `memories` table. Cheap to clone (it shares the
+/// underlying [`PearlStore`] connection).
 #[derive(Clone)]
 pub struct MemoryStore {
-    dolt: SmoothDolt,
+    store: PearlStore,
 }
 
 impl MemoryStore {
-    /// Build a store from an existing SmoothDolt handle. The
-    /// `memories` table is created by `PearlStore::open`/`init`
-    /// so the caller has already ensured it exists.
+    /// Build a memory store over an existing pearl store (same project,
+    /// same connection).
     #[must_use]
-    pub fn new(dolt: SmoothDolt) -> Self {
-        Self { dolt }
+    pub fn new(store: PearlStore) -> Self {
+        Self { store }
     }
 
     /// Append a memory. Returns the freshly-generated id.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt insert fails.
+    /// Returns an error if the content is blank or the insert fails.
     pub fn append(&self, content: impl Into<String>, source: impl Into<String>) -> Result<String> {
         let content = content.into();
         let source = source.into();
@@ -94,49 +79,73 @@ impl MemoryStore {
             anyhow::bail!("memory content must not be empty");
         }
         let id = generate_id();
-        let sql = format!(
-            "INSERT INTO memories (id, content, source) VALUES ('{}', '{}', '{}')",
-            sql_escape(&id),
-            sql_escape(&content),
-            sql_escape(&source),
-        );
-        self.dolt.exec(&sql).context("insert memory row")?;
+        self.store
+            .conn()
+            .execute(
+                "INSERT INTO memories (project, id, content, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![self.store.project(), id, content, source, now_ts()],
+            )
+            .context("insert memory row")?;
         Ok(id)
+    }
+
+    /// Import a memory verbatim, keeping its id + timestamp (idempotent).
+    /// Used by `migrate-from-dolt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the insert fails.
+    pub fn import(&self, m: &Memory) -> Result<bool> {
+        let n = self
+            .store
+            .conn()
+            .execute(
+                "INSERT OR IGNORE INTO memories (project, id, content, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![self.store.project(), m.id, m.content, m.source, fmt_ts(m.created_at)],
+            )
+            .context("import memory row")?;
+        Ok(n > 0)
     }
 
     /// List the `limit` most-recent memories, newest first.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt query fails.
+    /// Returns an error if the query fails.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Memory>> {
-        let sql = format!("SELECT id, content, source, created_at FROM memories ORDER BY created_at DESC, id DESC LIMIT {limit}");
-        let rows = self.dolt.sql(&sql).context("list_recent memories")?;
-        Ok(rows.iter().map(parse_memory).collect())
+        let conn = self.store.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM memories WHERE project = ?1 ORDER BY created_at DESC, seq DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![self.store.project(), i64::try_from(limit).unwrap_or(i64::MAX)], row_to_memory)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("list_recent memories")
     }
 
     /// List memories filtered to a specific source, newest first.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt query fails.
+    /// Returns an error if the query fails.
     pub fn list_by_source(&self, source: &str, limit: usize) -> Result<Vec<Memory>> {
-        let sql = format!(
-            "SELECT id, content, source, created_at FROM memories WHERE source = '{}' ORDER BY created_at DESC, id DESC LIMIT {limit}",
-            sql_escape(source),
-        );
-        let rows = self.dolt.sql(&sql).context("list_by_source memories")?;
-        Ok(rows.iter().map(parse_memory).collect())
+        let conn = self.store.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM memories WHERE project = ?1 AND source = ?2 ORDER BY created_at DESC, seq DESC LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![self.store.project(), source, i64::try_from(limit).unwrap_or(i64::MAX)], row_to_memory)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("list_by_source memories")
     }
 
-    /// Total row count.
+    /// Total row count for this project.
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt query fails.
+    /// Returns an error if the query fails.
     pub fn count(&self) -> Result<usize> {
-        let rows = self.dolt.sql("SELECT COUNT(*) AS n FROM memories").context("count memories")?;
-        let n = rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+        let n: i64 = self
+            .store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories WHERE project = ?1", params![self.store.project()], |r| r.get(0))
+            .context("count memories")?;
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
@@ -145,12 +154,14 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt delete fails.
+    /// Returns an error if the delete fails.
     pub fn clear_by_source(&self, source: &str) -> Result<usize> {
-        let before = self.count_for_source(source)?;
-        let sql = format!("DELETE FROM memories WHERE source = '{}'", sql_escape(source));
-        self.dolt.exec(&sql).context("clear_by_source")?;
-        Ok(before)
+        let n = self
+            .store
+            .conn()
+            .execute("DELETE FROM memories WHERE project = ?1 AND source = ?2", params![self.store.project(), source])
+            .context("clear_by_source")?;
+        Ok(n)
     }
 
     /// Drop a single memory by id. Returns `true` if a row matched.
@@ -158,29 +169,14 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt query/delete fails.
+    /// Returns an error if the delete fails.
     pub fn forget(&self, id: &str) -> Result<bool> {
-        let exists_sql = format!("SELECT COUNT(*) AS n FROM memories WHERE id = '{}'", sql_escape(id));
         let n = self
-            .dolt
-            .sql(&exists_sql)
-            .context("forget existence check")?
-            .first()
-            .and_then(|r| r["n"].as_u64())
-            .unwrap_or(0);
-        if n == 0 {
-            return Ok(false);
-        }
-        let sql = format!("DELETE FROM memories WHERE id = '{}'", sql_escape(id));
-        self.dolt.exec(&sql).context("forget memory")?;
-        Ok(true)
-    }
-
-    fn count_for_source(&self, source: &str) -> Result<usize> {
-        let sql = format!("SELECT COUNT(*) AS n FROM memories WHERE source = '{}'", sql_escape(source));
-        let rows = self.dolt.sql(&sql).context("count_for_source")?;
-        let n = rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
-        Ok(usize::try_from(n).unwrap_or(0))
+            .store
+            .conn()
+            .execute("DELETE FROM memories WHERE project = ?1 AND id = ?2", params![self.store.project(), id])
+            .context("forget memory")?;
+        Ok(n > 0)
     }
 
     /// Drop every memory older than `cutoff`. Returns how many
@@ -188,20 +184,17 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Dolt delete fails.
+    /// Returns an error if the delete fails.
     pub fn clear_older_than(&self, cutoff: DateTime<Utc>) -> Result<usize> {
-        let cutoff_sql = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
-        let count_sql = format!("SELECT COUNT(*) AS n FROM memories WHERE created_at < '{cutoff_sql}'");
         let n = self
-            .dolt
-            .sql(&count_sql)
-            .context("count_older")?
-            .first()
-            .and_then(|r| r["n"].as_u64())
-            .unwrap_or(0);
-        let delete_sql = format!("DELETE FROM memories WHERE created_at < '{cutoff_sql}'");
-        self.dolt.exec(&delete_sql).context("clear_older_than")?;
-        Ok(usize::try_from(n).unwrap_or(0))
+            .store
+            .conn()
+            .execute(
+                "DELETE FROM memories WHERE project = ?1 AND created_at < ?2",
+                params![self.store.project(), fmt_ts(cutoff)],
+            )
+            .context("clear_older_than")?;
+        Ok(n)
     }
 }
 
@@ -209,32 +202,18 @@ impl MemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::store::PearlStore;
-    use std::time::Duration;
-    use tempfile::TempDir;
+    use crate::store::tests::test_store;
 
-    /// Spin up a fresh Dolt-backed PearlStore in a tempdir and
-    /// return its MemoryStore. Lets us exercise the real Dolt
-    /// path without a long-lived dev DB.
-    fn fresh_store() -> (TempDir, MemoryStore) {
-        let tmp = TempDir::new().unwrap();
-        let store = PearlStore::init(&tmp.path().join(".smooth/dolt")).expect("init pearl store");
-        let memory = MemoryStore::new(store.dolt().clone());
-        (tmp, memory)
+    fn fresh_store() -> MemoryStore {
+        test_store().memory()
     }
 
     #[test]
     fn append_and_list_recent_round_trips() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         assert_eq!(store.count().unwrap(), 0);
-        // Sleep ≥1s between inserts so the DATETIME column
-        // (1-second resolution in Dolt) gives a deterministic
-        // ordering. Production writes are normally seconds
-        // apart so this isn't a real constraint.
         let id1 = store.append("first note", "manual").unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
         let id2 = store.append("second note", "th-abc").unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
         let id3 = store.append("third note", "th-abc").unwrap();
         assert!(id1.starts_with("mem-"));
         assert_ne!(id1, id2);
@@ -243,32 +222,14 @@ mod tests {
         assert_eq!(store.count().unwrap(), 3);
         let recent = store.list_recent(10).unwrap();
         assert_eq!(recent.len(), 3);
+        // Microsecond timestamps + seq tiebreak make same-instant inserts ordered.
         assert_eq!(recent[0].content, "third note");
         assert_eq!(recent[2].content, "first note");
     }
 
     #[test]
-    fn appends_within_same_second_are_all_retrievable() {
-        // When two writes land in the same second the order
-        // between them is unspecified, but `list_recent` still
-        // returns every row. Most production callers care
-        // about the recent-set, not the exact internal
-        // ordering.
-        let (_tmp, store) = fresh_store();
-        store.append("a", "manual").unwrap();
-        store.append("b", "manual").unwrap();
-        store.append("c", "manual").unwrap();
-        let recent = store.list_recent(10).unwrap();
-        assert_eq!(recent.len(), 3);
-        let contents: std::collections::HashSet<&str> = recent.iter().map(|m| m.content.as_str()).collect();
-        assert!(contents.contains("a"));
-        assert!(contents.contains("b"));
-        assert!(contents.contains("c"));
-    }
-
-    #[test]
     fn list_by_source_filters_correctly() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         store.append("a", "pearl-x").unwrap();
         store.append("b", "pearl-y").unwrap();
         store.append("c", "pearl-x").unwrap();
@@ -279,61 +240,79 @@ mod tests {
         let ys = store.list_by_source("pearl-y", 10).unwrap();
         assert_eq!(ys.len(), 1);
         assert_eq!(ys[0].content, "b");
-        let none = store.list_by_source("pearl-z", 10).unwrap();
-        assert!(none.is_empty());
+        assert!(store.list_by_source("pearl-z", 10).unwrap().is_empty());
     }
 
     #[test]
     fn list_recent_honors_limit() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         for i in 0..7 {
             store.append(format!("note {i}"), "manual").unwrap();
         }
-        let three = store.list_recent(3).unwrap();
-        assert_eq!(three.len(), 3);
+        assert_eq!(store.list_recent(3).unwrap().len(), 3);
     }
 
     #[test]
     fn clear_by_source_drops_matching_rows() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         store.append("keep", "system").unwrap();
         store.append("drop1", "pearl-x").unwrap();
         store.append("drop2", "pearl-x").unwrap();
         assert_eq!(store.count().unwrap(), 3);
 
-        let dropped = store.clear_by_source("pearl-x").unwrap();
-        assert_eq!(dropped, 2);
+        assert_eq!(store.clear_by_source("pearl-x").unwrap(), 2);
         assert_eq!(store.count().unwrap(), 1);
         assert_eq!(store.list_recent(10).unwrap()[0].content, "keep");
     }
 
     #[test]
+    fn forget_drops_one_row_and_reports_misses() {
+        let store = fresh_store();
+        let id = store.append("x", "manual").unwrap();
+        assert!(store.forget(&id).unwrap());
+        assert!(!store.forget(&id).unwrap());
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
     fn clear_older_than_drops_old_rows() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         store.append("ancient", "manual").unwrap();
-        // The cutoff is well in the future, so this drops
-        // everything.
         let future = Utc::now() + chrono::Duration::hours(1);
-        let dropped = store.clear_older_than(future).unwrap();
-        assert_eq!(dropped, 1);
+        assert_eq!(store.clear_older_than(future).unwrap(), 1);
         assert_eq!(store.count().unwrap(), 0);
     }
 
     #[test]
     fn empty_content_is_rejected() {
-        let (_tmp, store) = fresh_store();
+        let store = fresh_store();
         let err = store.append("   ", "manual").unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
         assert_eq!(store.count().unwrap(), 0);
     }
 
     #[test]
-    fn sql_quotes_in_content_dont_break_insert() {
-        let (_tmp, store) = fresh_store();
+    fn quotes_in_content_dont_break_insert() {
+        let store = fresh_store();
         let id = store.append("it's a \"thing\"", "manual").unwrap();
         let row = store.list_recent(1).unwrap();
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].id, id);
         assert_eq!(row[0].content, "it's a \"thing\"");
+    }
+
+    #[test]
+    fn memories_are_project_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("pearls.db");
+        let a = PearlStore::open_with_db(&db, std::path::Path::new("/p/a")).unwrap().memory();
+        let b = PearlStore::open_with_db(&db, std::path::Path::new("/p/b")).unwrap().memory();
+        a.append("only a", "manual").unwrap();
+        assert_eq!(a.count().unwrap(), 1);
+        assert_eq!(b.count().unwrap(), 0);
+        let m = &a.list_recent(1).unwrap()[0];
+        assert!(b.import(m).unwrap());
+        assert!(!b.import(m).unwrap());
+        assert_eq!(b.count().unwrap(), 1);
     }
 }

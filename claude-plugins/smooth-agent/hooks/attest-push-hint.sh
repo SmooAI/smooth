@@ -44,7 +44,7 @@ echo "$CMD" | grep -q 'attest:ack' && exit 0
 
 # Only care about an actual `git push` that publishes commits. Skip the forms that
 # publish nothing a CI run would check: tag/branch deletion, --dry-run, and
-# `th pearls push` (a Dolt sync, not git).
+# `th pearls push` (a pearl-store notice, not git).
 # The `(-C|--git-dir|--work-tree) <arg>` alternative is load-bearing: those flags
 # take a VALUE, so a naive `(-[^ ]+\s+)*push` lets the value eat the `push` token
 # and `git -C /some/repo push` reads as "not a push". Caught in testing 2026-08-06.
