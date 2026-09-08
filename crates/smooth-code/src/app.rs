@@ -1776,6 +1776,12 @@ async fn run_agent_streaming(
                     prompt_tokens: usage.prompt_tokens,
                     completion_tokens: usage.completion_tokens,
                     cached_tokens: 0,
+                    // New in core 1.10 (th-126fe6): spend taint flags + response id.
+                    // This task-usage summary carries no estimation signal, so take
+                    // the serde defaults older output already produced — no change.
+                    cost_estimated: false,
+                    usage_estimated: false,
+                    response_id: None,
                 });
                 break;
             }
