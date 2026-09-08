@@ -426,6 +426,9 @@ th pearls show <id>                   # Pearl details with dependencies
 th pearls update <id> --status=in_progress   # Claim work
 th pearls close <id1> <id2> ...       # Close completed pearls
 th pearls ready                       # Show ready pearls (open, no blockers)
+th pearls checkpoint <id> --note "…" --next "…"   # Record a handoff checkpoint (worktree/branch/HEAD/dirty auto-collected)
+th pearls show <id> --handoff [--json]   # Handoff packet: what / where / what happened / next
+th pearls prime --in-progress [--cwd .]  # Handoff packets for in-progress pearls (this worktree's with --cwd)
 th pearls blocked                     # Show blocked pearls
 th pearls projects                    # List all registered pearl projects
 th pearls migrate-from-dolt [PATH]    # One-shot import of a legacy .smooth/dolt store

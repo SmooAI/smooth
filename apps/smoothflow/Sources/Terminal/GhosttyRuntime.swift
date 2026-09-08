@@ -40,7 +40,14 @@ final class GhosttyRuntime {
             DispatchQueue.main.async { me.tick() }
         }
         rt.action_cb = { app, target, action in
-            MainActor.assumeIsolated { GhosttyRuntime.handleAction(app: app, target: target, action: action) }
+            // Ghostty raises actions from its renderer/IO threads too (a full
+            // redraw from the real engine does it on the first attach); the
+            // mock never tripped this. Off-main, hop for anything that touches
+            // a view and acknowledge the rest — `assumeIsolated` there is a trap.
+            if Thread.isMainThread {
+                return MainActor.assumeIsolated { GhosttyRuntime.handleAction(app: app, target: target, action: action) }
+            }
+            return GhosttyRuntime.handleActionOffMain(target: target, action: action)
         }
         rt.read_clipboard_cb = { userdata, _, state in
             // Runs on the main thread (ghostty calls it from the app tick).
@@ -83,6 +90,34 @@ final class GhosttyRuntime {
         guard let surface = view.surface else { return }
         let text = NSPasteboard.general.string(forType: .string) ?? ""
         text.withCString { ghostty_surface_complete_clipboard_request(surface, $0, state, false) }
+    }
+
+    /// The subset of `handleAction` that is safe from a ghostty background
+    /// thread: copy what the action carries, then dispatch to the main actor.
+    nonisolated private static func handleActionOffMain(target: ghostty_target_s, action: ghostty_action_s) -> Bool {
+        guard target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
+              let ud = ghostty_surface_userdata(surface) else { return false }
+        let view = Unmanaged<TerminalSurfaceView>.fromOpaque(ud).takeUnretainedValue()
+        switch action.tag {
+        case GHOSTTY_ACTION_SET_TITLE, GHOSTTY_ACTION_SET_TAB_TITLE:
+            guard let t = action.action.set_title.title else { return true }
+            let title = String(cString: t)
+            DispatchQueue.main.async { view.onTitle?(title) }
+            return true
+        case GHOSTTY_ACTION_MOUSE_SHAPE:
+            let shape = action.action.mouse_shape
+            DispatchQueue.main.async { view.setMouseShape(shape) }
+            return true
+        case GHOSTTY_ACTION_RING_BELL:
+            DispatchQueue.main.async { NSSound.beep() }
+            return true
+        case GHOSTTY_ACTION_CELL_SIZE, GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY, GHOSTTY_ACTION_PWD,
+             GHOSTTY_ACTION_MOUSE_OVER_LINK, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
+             GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_SELECTION_CHANGED:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func handleAction(app: ghostty_app_t?, target: ghostty_target_s, action: ghostty_action_s) -> Bool {

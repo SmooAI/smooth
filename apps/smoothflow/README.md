@@ -29,6 +29,19 @@ Release: `SIGN_IDENTITY="Developer ID Application: Smoo LLC (DTX9733844)" script
 (bundles `~/.cargo/bin/smooth-daemon`, signs, notarizes when `NOTARY_*` are set,
 writes `dist/SmoothFlow.dmg`). CI: `.github/workflows/smoothflow-mac.yml`.
 
+## Run against a locally built engine
+
+```bash
+CARGO_TARGET_DIR=$HOME/.cargo/target-flow cargo build --release -p smooai-smooth-daemon
+defaults write ai.smoo.smoothflow daemonBinary "$HOME/.cargo/target-flow/release/smooth-daemon"   # or SMOOTHFLOW_DAEMON_BIN
+open -n build/DerivedData/Build/Products/Debug/SmoothFlow.app
+```
+
+The app spawns that daemon as its child with its own stores
+(`~/.smooth/smoothflow-{operator,flow}.db`), the `smoothflow` tmux socket and
+the local token; `th flow …` from a terminal talks to the same daemon. Logs:
+`~/.smooth/smoothflow-daemon.log`.
+
 ## Run against the mock engine
 
 The engine (lane A) may not be on your machine. The mock speaks the v0 flow
@@ -55,7 +68,8 @@ Permissions menu): macOS only shows a prompt to an app bundle's main
 executable, and children inherit. Never test TCC from a shell-launched
 binary — a process launched from a terminal reads the terminal's grants.
 `scripts/tcc-probe.sh <label>` prints what TCC thinks of the process it runs
-in; run it from a pane inside `tmux -L smoothflow` to see the app's view.
+in; run it from a pane inside `tmux -L smoothflow` (a shell session the engine
+created) to see the app's view.
 
 Full Disk Access has no prompt: the pane deep-links to System Settings and
 re-probes when the app activates.

@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addItem(item("Terminal", #selector(tabTerminal), "1", [.command, .option]))
         view.addItem(item("Diff", #selector(tabDiff), "2", [.command, .option]))
         view.addItem(item("PR", #selector(tabPR), "3", [.command, .option]))
+        view.addItem(item("Activity", #selector(tabActivity), "4", [.command, .option]))
         view.addItem(.separator())
         view.addItem(item("Split Surface", #selector(split), "d"))
         view.addItem(item("Close Split", #selector(closeSplit), "w", [.command, .shift]))
@@ -122,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func tabTerminal() { app.showTab(.terminal) }
     @objc private func tabDiff() { app.showTab(.diff) }
     @objc private func tabPR() { app.showTab(.pr) }
+    @objc private func tabActivity() { app.showTab(.activity) }
     @objc private func split() { app.mainWindow.center.splitActive() }
     @objc private func closeSplit() { app.mainWindow.center.closeActivePane() }
     @objc private func toggleSidebar() { app.mainWindow.toggleSidebar() }
