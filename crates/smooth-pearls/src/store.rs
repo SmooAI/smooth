@@ -1381,7 +1381,9 @@ pub(crate) mod tests {
 
     #[test]
     fn timestamps_round_trip_and_sort_lexically() {
-        let a = Utc::now();
+        // Storage is microsecond-precision; Linux clocks carry nanoseconds,
+        // so truncate before asserting the round trip.
+        let a = parse_ts(&fmt_ts(Utc::now())).unwrap();
         let b = a + chrono::Duration::milliseconds(1);
         assert!(fmt_ts(a) < fmt_ts(b));
         assert_eq!(parse_ts(&fmt_ts(a)).unwrap(), a);
