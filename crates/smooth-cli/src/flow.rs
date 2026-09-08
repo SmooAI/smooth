@@ -19,6 +19,8 @@ use owo_colors::OwoColorize;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::gradient::paint;
+
 /// Ctrl-\ — detaches `th flow attach`.
 const DETACH_BYTE: u8 = 0x1c;
 
@@ -252,20 +254,33 @@ async fn ws_call(frame: Value, want: &[&str], timeout: Duration) -> Result<Value
 
 // ── rendering ─────────────────────────────────────────────────────────────────
 
-/// State glyph + colour (CLI-Spec §4/§5). Returns `(cell, visible_width)`
-/// so tables can pad without counting escape codes.
+/// State cell per the Presence CLI rules (`smooth-glow-up`): the glyph
+/// carries the meaning (`●` live / `○` quiet / `◐` in between), styling is
+/// pipe-safe via `paint`, and **amber is spent only on "needs you"**.
+/// Returns `(cell, visible_width)` so tables pad without counting escapes.
 fn state_cell(state: &str) -> (String, usize) {
-    let (glyph, label): (String, &str) = match state {
-        "working" => ("●".cyan().to_string(), "working"),
-        "idle" => ("○".dimmed().to_string(), "idle"),
-        "needs_you" => ("●".yellow().bold().to_string(), "needs you"),
-        "limited" => ("◐".yellow().to_string(), "limited"),
-        "starting" => ("◐".dimmed().to_string(), "starting"),
-        "done" => ("○".green().to_string(), "done"),
-        "dead" => ("●".red().to_string(), "dead"),
+    let (glyph, label) = match state {
+        "working" => (paint("●", |g| g.bold().to_string()), "working"),
+        "idle" => (paint("○", |g| g.dimmed().to_string()), "idle"),
+        "needs_you" => (paint("●", |g| g.yellow().bold().to_string()), "needs you"),
+        "limited" => (paint("◐", |g| g.dimmed().to_string()), "limited"),
+        "starting" => (paint("◐", |g| g.dimmed().to_string()), "starting"),
+        "done" => (paint("○", |g| g.green().to_string()), "done"),
+        "dead" => (paint("●", |g| g.red().to_string()), "dead"),
         other => return (other.to_string(), other.chars().count()),
     };
     (format!("{glyph} {label}"), label.chars().count() + 2)
+}
+
+/// `[reason]` tag: amber only when the reason means Big Smooth needs you;
+/// a crash is an error; a scheduled usage-limit resume is quiet.
+fn attention_tag(reason: &str) -> String {
+    let tag = format!("[{reason}]");
+    match reason {
+        "permission" | "question" | "held" => paint(&tag, |t| t.yellow().to_string()),
+        "crashed" => paint(&tag, |t| t.red().to_string()),
+        _ => paint(&tag, |t| t.dimmed().to_string()),
+    }
 }
 
 /// Pad `cell` (whose visible width is `width`) to `to` columns.
@@ -285,18 +300,13 @@ fn short(s: &str, n: usize) -> String {
 fn print_sessions(sessions: &[Value]) {
     if sessions.is_empty() {
         println!("No flow sessions. This is a confirmed read of the engine, not a read failure.");
-        println!("  Start one: {}", "th flow new --kind claude --prompt \"…\"".bold());
+        println!("  Start one: th flow new --kind claude --prompt \"…\"");
         return;
     }
-    // Pad BEFORE colouring: escape codes would otherwise count toward width.
-    println!(
-        "{} {} {} {} {}",
-        format!("{:<12}", "ID").bold(),
-        format!("{:<9}", "KIND").bold(),
-        format!("{:<16}", "STATE").bold(),
-        format!("{:<34}", "TITLE").bold(),
-        "WORKTREE".bold()
-    );
+    // Boldness is spent once per screen: the header. Pad BEFORE styling —
+    // escape codes would otherwise count toward width.
+    let header = format!("{:<12} {:<9} {:<16} {:<34} {}", "ID", "KIND", "STATE", "TITLE", "WORKTREE");
+    println!("{}", paint(&header, |h| h.bold().to_string()));
     for s in sessions {
         let g = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let (mut state, mut width) = state_cell(&g("state"));
@@ -307,7 +317,7 @@ fn print_sessions(sessions: &[Value]) {
         let att = s
             .pointer("/attention/reason")
             .and_then(Value::as_str)
-            .map(|r| format!(" {}", format!("[{r}]").yellow()))
+            .map(|r| format!(" {}", attention_tag(r)))
             .unwrap_or_default();
         println!(
             "{:<12} {:<9} {} {:<34} {}{att}",
@@ -315,7 +325,7 @@ fn print_sessions(sessions: &[Value]) {
             g("kind"),
             pad(&state, width, 16),
             short(&g("title"), 33),
-            short(&g("worktree"), 48).dimmed()
+            paint(&short(&g("worktree"), 48), |w| w.dimmed().to_string())
         );
     }
 }
@@ -397,7 +407,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
                 bail!("nothing to send\n  → th flow send <id> \"text\"");
             }
             call(reqwest::Method::POST, &format!("/api/flow/sessions/{id}/send"), Some(json!({ "text": text }))).await?;
-            println!("{} sent to {id}", "●".green());
+            println!("{} sent to {id}", paint("●", |g| g.green().to_string()));
             Ok(())
         }
         FlowCommands::Approve { id, request, decision, json } => cmd_approve(&id, request, &decision, json).await,
@@ -410,7 +420,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             .await?;
             emit(json, &v, |v| {
                 let state = v.pointer("/session/state").and_then(Value::as_str).unwrap_or("?");
-                println!("{} {id} → {}", "●".green(), state_cell(state).0);
+                println!("{} {id} → {}", paint("●", |g| g.green().to_string()), state_cell(state).0);
             })
         }
         FlowCommands::Snapshot { id, json } => {
@@ -466,10 +476,18 @@ async fn cmd_new(a: NewArgs) -> Result<()> {
     let id = v.pointer("/session/id").and_then(Value::as_str).unwrap_or("").to_string();
     emit(json, &v, |v| {
         let s = v.get("session").cloned().unwrap_or(Value::Null);
-        println!("{} {} {}", "●".green(), id.bold(), s.get("title").and_then(Value::as_str).unwrap_or(""));
-        println!("  {}  {}", "worktree".dimmed(), s.get("worktree").and_then(Value::as_str).unwrap_or(""));
+        println!(
+            "{} {id} {}",
+            paint("●", |g| g.green().to_string()),
+            s.get("title").and_then(Value::as_str).unwrap_or("")
+        );
+        println!(
+            "  {}  {}",
+            paint("worktree", |l| l.dimmed().to_string()),
+            s.get("worktree").and_then(Value::as_str).unwrap_or("")
+        );
         if !attach {
-            println!("  {}  th flow attach {id}", "attach  ".dimmed());
+            println!("  {}  th flow attach {id}", paint("attach  ", |l| l.dimmed().to_string()));
         }
     })?;
     if attach {
@@ -499,7 +517,7 @@ async fn cmd_approve(id: &str, request: Option<String>, decision: &str, json: bo
         Some(json!({ "request_id": request_id, "decision": decision })),
     )
     .await?;
-    emit(json, &v, |_| println!("{} {decision} → {id}", "●".green()))
+    emit(json, &v, |_| println!("{} {decision} → {id}", paint("●", |g| g.green().to_string())))
 }
 
 async fn cmd_fanout(cmd: FanoutCommands) -> Result<()> {
@@ -520,8 +538,8 @@ async fn cmd_fanout(cmd: FanoutCommands) -> Result<()> {
             emit(json, &v, |v| {
                 println!(
                     "{} fan-out {}",
-                    "●".green(),
-                    v.pointer("/fan_out/id").and_then(Value::as_str).unwrap_or("?").bold()
+                    paint("●", |g| g.green().to_string()),
+                    v.pointer("/fan_out/id").and_then(Value::as_str).unwrap_or("?")
                 );
                 print_sessions(list_of(v, "candidates"));
             })
@@ -530,7 +548,7 @@ async fn cmd_fanout(cmd: FanoutCommands) -> Result<()> {
             let frame = json!({ "channel": "flow", "type": "flow.fanout.pick", "fan_out_id": fan_out_id, "winner_session_id": winner });
             let v = ws_call(frame, &["flow.fanout"], Duration::from_secs(600)).await?;
             emit(json, &v, |v| {
-                println!("{} merged {} (fan-out {})", "●".green(), winner.bold(), fan_out_id);
+                println!("{} merged {winner} (fan-out {fan_out_id})", paint("●", |g| g.green().to_string()));
                 print_sessions(list_of(v, "candidates"));
             })
         }
@@ -560,7 +578,7 @@ async fn attach_session(id: &str) -> Result<()> {
             .into(),
     ))
     .await?;
-    eprintln!("{} attached to {id} — {} to detach", "●".cyan(), "Ctrl-\\".bold());
+    eprintln!("{} attached to {id} — Ctrl-\\ to detach", paint("●", |g| g.bold().to_string()));
     crossterm::terminal::enable_raw_mode().context("enable raw mode")?;
     let raw_guard = RawGuard;
 
@@ -627,7 +645,10 @@ async fn attach_session(id: &str) -> Result<()> {
         }
     }
     drop(raw_guard);
-    eprintln!("\r\n{} detached from {id} (still running — `th flow attach {id}` to return)", "○".dimmed());
+    eprintln!(
+        "\r\n{} detached from {id} (still running — `th flow attach {id}` to return)",
+        paint("○", |g| g.dimmed().to_string())
+    );
     Ok(())
 }
 
@@ -654,6 +675,11 @@ mod tests {
             assert!((6..=11).contains(&width), "{s}: {width}");
         }
         assert_eq!(state_cell("weird"), ("weird".to_string(), 5));
+        // Amber is reserved for "needs you"; with color off (tests aren't a
+        // TTY) every tag is the plain bracketed reason.
+        for r in ["permission", "question", "held", "crashed", "usage_limit"] {
+            assert_eq!(attention_tag(r), format!("[{r}]"));
+        }
         // Padding counts visible width, not escape codes.
         assert_eq!(pad("ab", 2, 5), "ab   ");
         assert_eq!(pad("abcdef", 6, 5), "abcdef");
