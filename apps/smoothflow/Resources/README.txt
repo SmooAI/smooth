@@ -1,1 +1,1 @@
-Bundle resources (app icon lands here). Keep this folder so xcodegen's folder reference exists.
+Bundle resources: SmoothFlow.icns (CFBundleIconFile), the SVG masters, MenuBarTemplate.png (status item). Copied flat into Contents/Resources by the folder reference in project.yml.

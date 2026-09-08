@@ -1,0 +1,192 @@
+# Build, sign, notarize and publish SmoothFlow.app (apps/smoothflow) to its
+# Sparkle OTA channel on downloads.smoo.ai — the native-app twin of
+# desktop-publish.yml (Big Smooth / electron-updater).
+#
+# workflow_dispatch only. Version = CFBundleShortVersionString in
+# apps/smoothflow/Info.plist (bump with apps/smoothflow/scripts/bump-version.sh).
+#
+# Secrets/vars (same as desktop-publish.yml, plus one):
+#   MACOS_SIGN_IDENTITY / MACOS_CERT_P12 / MACOS_CERT_PASSWORD   Developer ID
+#   NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER                notarytool
+#   OTA_PUBLISH_ROLE_ARN + vars.DOWNLOADS_BUCKET                 S3 publish (OIDC)
+#   SMOOTHFLOW_SPARKLE_PRIVATE_KEY   EdDSA private key (generate_keys -x); its
+#                                    public half is SUPublicEDKey in Info.plist
+#
+# Layout on the CDN (https://downloads.smoo.ai/smoothflow/):
+#   SmoothFlow-<version>-arm64.dmg   immutable, what the appcast enclosure points at
+#   appcast.xml                      no-cache, what the installed app polls (SUFeedURL)
+#   latest-arm64.dmg                 no-cache alias for the download button
+
+name: SmoothFlow (macOS, OTA)
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Git ref to build (blank = current branch)'
+                required: false
+                type: string
+
+concurrency:
+    group: smoothflow-publish-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    mac:
+        name: Sign + notarize + publish (macOS arm64)
+        runs-on: macos-latest
+        timeout-minutes: 120
+        permissions:
+            contents: read
+            id-token: write # OIDC for aws-actions/configure-aws-credentials
+        env:
+            OTA_PUBLISH_ROLE_ARN: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref }}
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+
+            - name: Install build deps
+              run: brew install protobuf xcodegen
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Setup toolchains (mise)
+              uses: jdx/mise-action@v4
+
+            # Embedded into the daemon binary via rust-embed.
+            - name: Build web UI
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --no-frozen-lockfile
+                  pnpm build
+
+            - name: Build smooth-daemon + th (release)
+              run: cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
+
+            # th-76a353: a cached target dir once served a stale daemon stamped
+            # with the new version. Both binaries bake their build commit; refuse
+            # to bundle anything not built from HEAD.
+            - name: Guard against a stale bundled binary (th-76a353)
+              run: |
+                  HEAD_SHA="$(git rev-parse --short HEAD)"
+                  fail=0
+                  for bin in smooth-daemon th; do
+                      VER="$(target/release/$bin --version 2>&1 || true)"
+                      case "$VER" in *"($HEAD_SHA)"*) echo "$bin @ HEAD ✓ ($VER)";; *) echo "::error::bundled $bin ('$VER') is NOT built from HEAD ($HEAD_SHA); refusing to ship."; fail=1;; esac
+                  done
+                  exit $fail
+
+            - name: Import signing certificate
+              id: signing
+              env:
+                  CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+                  CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+                  SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+              run: |
+                  if [[ -z "${CERT_P12:-}" || -z "${SIGN_IDENTITY:-}" ]]; then
+                      echo "::error::MACOS_CERT_P12 / MACOS_SIGN_IDENTITY not set — refusing to publish an unsigned app."
+                      exit 1
+                  fi
+                  KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+                  PASS="$(uuidgen)"
+                  security create-keychain -p "$PASS" "$KEYCHAIN"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+                  security unlock-keychain -p "$PASS" "$KEYCHAIN"
+                  echo -n "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+                  security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+                  security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+                  rm -f "$RUNNER_TEMP/cert.p12"
+                  # codesign wants the full identity string; desktop-publish stores the bare org name.
+                  case "$SIGN_IDENTITY" in "Developer ID Application:"*) ID="$SIGN_IDENTITY";; *) ID="Developer ID Application: $SIGN_IDENTITY";; esac
+                  echo "identity=$ID" >> "$GITHUB_OUTPUT"
+
+            - name: Build, sign, notarize DMG
+              id: build
+              env:
+                  SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+                  SMOOTH_DAEMON_BIN: ${{ github.workspace }}/target/release/smooth-daemon
+                  SMOOTH_TH_BIN: ${{ github.workspace }}/target/release/th
+                  NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY_P8 }}
+                  NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+                  NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+              run: |
+                  if [[ -z "${NOTARY_KEY_B64:-}" ]]; then
+                      echo "::error::NOTARY_KEY_P8 not set — refusing to publish an un-notarized app."
+                      exit 1
+                  fi
+                  echo -n "$NOTARY_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+                  export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+                  bash apps/smoothflow/scripts/build-release.sh
+                  rm -f "$RUNNER_TEMP/notary.p8"
+                  echo "version=$(plutil -extract CFBundleShortVersionString raw apps/smoothflow/Info.plist)" >> "$GITHUB_OUTPUT"
+
+            - name: Verify Gatekeeper + entitlements
+              run: |
+                  APP=apps/smoothflow/build/DerivedData/Build/Products/Release/SmoothFlow.app
+                  spctl -a -vv -t install "$APP"
+                  codesign -dv --entitlements - "$APP" 2>&1 | grep -q personal-information.calendars
+
+            # Sparkle's generate_appcast from the SAME package xcodebuild resolved
+            # (build/DerivedData/SourcePackages), so tools == framework version.
+            - name: Generate appcast
+              env:
+                  SPARKLE_KEY: ${{ secrets.SMOOTHFLOW_SPARKLE_PRIVATE_KEY }}
+              run: |
+                  if [[ -z "${SPARKLE_KEY:-}" ]]; then
+                      echo "::error::SMOOTHFLOW_SPARKLE_PRIVATE_KEY not set — the appcast cannot be signed."
+                      exit 1
+                  fi
+                  printf '%s' "$SPARKLE_KEY" > "$RUNNER_TEMP/sparkle.key"
+                  BIN="$(ls -d apps/smoothflow/build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin)"
+                  "$BIN/generate_appcast" --ed-key-file "$RUNNER_TEMP/sparkle.key" \
+                      --download-url-prefix "https://downloads.smoo.ai/smoothflow/" \
+                      --link "https://smoo.ai/smoothflow" \
+                      apps/smoothflow/dist
+                  rm -f "$RUNNER_TEMP/sparkle.key"
+                  cat apps/smoothflow/dist/appcast.xml
+                  xmllint --noout apps/smoothflow/dist/appcast.xml
+
+            - name: Upload DMG artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: SmoothFlow-${{ steps.build.outputs.version }}-arm64
+                  path: |
+                      apps/smoothflow/dist/*.dmg
+                      apps/smoothflow/dist/appcast.xml
+
+            - name: Configure AWS credentials
+              if: vars.DOWNLOADS_BUCKET != '' && env.OTA_PUBLISH_ROLE_ARN != ''
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ env.OTA_PUBLISH_ROLE_ARN }}
+                  aws-region: us-east-2
+
+            - name: Publish to downloads.smoo.ai
+              if: vars.DOWNLOADS_BUCKET != '' && env.OTA_PUBLISH_ROLE_ARN != ''
+              env:
+                  BUCKET: ${{ vars.DOWNLOADS_BUCKET }}
+                  VERSION: ${{ steps.build.outputs.version }}
+              run: |
+                  cd apps/smoothflow/dist
+                  # Immutable, long-cached: the versioned DMG the appcast points at.
+                  aws s3 sync . "s3://$BUCKET/smoothflow/" --exclude "*" --include "*.dmg" \
+                      --cache-control "public,max-age=31536000,immutable" --content-type "application/x-apple-diskimage" --no-progress
+                  # Fixed-name feed: must never be stale, or updates lag a full TTL.
+                  aws s3 cp appcast.xml "s3://$BUCKET/smoothflow/appcast.xml" \
+                      --cache-control "no-cache" --content-type "application/xml" --no-progress
+                  # Stable download alias (mirrors bigsmooth/latest-arm64.dmg).
+                  aws s3 cp "SmoothFlow-$VERSION-arm64.dmg" "s3://$BUCKET/smoothflow/latest-arm64.dmg" \
+                      --cache-control "no-cache" --content-type "application/x-apple-diskimage" --no-progress
+                  echo "Published SmoothFlow $VERSION →"
+                  echo "  https://downloads.smoo.ai/smoothflow/SmoothFlow-$VERSION-arm64.dmg"
+                  echo "  https://downloads.smoo.ai/smoothflow/latest-arm64.dmg"
+                  echo "  https://downloads.smoo.ai/smoothflow/appcast.xml"

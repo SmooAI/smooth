@@ -16,6 +16,16 @@ settings:
         DEVELOPMENT_TEAM: DTX9733844
         SWIFT_STRICT_CONCURRENCY: minimal
         DEAD_CODE_STRIPPING: YES
+        SWIFT_INCLUDE_PATHS: '$(SRCROOT)/Vendor/GhosttyKit.xcframework/macos-arm64_x86_64/Headers'
+        HEADER_SEARCH_PATHS: '$(SRCROOT)/Vendor/GhosttyKit.xcframework/macos-arm64_x86_64/Headers'
+
+packages:
+    # OTA updates. The package also ships bin/generate_appcast + generate_keys under
+    # build/DerivedData/SourcePackages/artifacts/sparkle/Sparkle/bin — the release
+    # workflow uses those, so the tools and the framework are always the same version.
+    Sparkle:
+        url: https://github.com/sparkle-project/Sparkle
+        exactVersion: 2.9.6
 
 targets:
     SmoothFlow:
@@ -23,17 +33,19 @@ targets:
         platform: macOS
         sources:
             - path: Sources
+            # Files (not a folder reference): a folder reference copies the
+            # directory itself, so the .icns lands at Contents/Resources/Resources/
+            # and CFBundleIconFile never resolves.
             - path: Resources
-              type: folder
               buildPhase: resources
+              excludes: [README.txt]
             - path: LaunchAgents
               buildPhase:
                   copyFiles:
                       destination: wrapper
                       subpath: Contents/Library/LaunchAgents
         dependencies:
-            - framework: Vendor/GhosttyKit.xcframework
-              embed: false
+            - package: Sparkle
             - sdk: Metal.framework
             - sdk: QuartzCore.framework
             - sdk: CoreText.framework
@@ -56,7 +68,12 @@ targets:
                 ENABLE_HARDENED_RUNTIME: YES
                 CODE_SIGN_ENTITLEMENTS: entitlements.plist
                 CODE_SIGN_STYLE: Manual
-                OTHER_LDFLAGS: ['-lc++']
+                # GhosttyKit is linked as the raw static archive, not as an xcframework
+                # dependency: Xcode's package-enabled build description rejects the
+                # fork's xcframework ("There is no XCFramework found at") the moment a
+                # SwiftPM package (Sparkle) is in the project. Module paths are
+                # project-level (the test target imports the app module).
+                OTHER_LDFLAGS: ['-lc++', '$(SRCROOT)/Vendor/GhosttyKit.xcframework/macos-arm64_x86_64/ghostty-internal.a']
                 SWIFT_OBJC_BRIDGING_HEADER: ''
                 ENABLE_USER_SCRIPT_SANDBOXING: NO
                 ASSETCATALOG_COMPILER_APPICON_NAME: ''
