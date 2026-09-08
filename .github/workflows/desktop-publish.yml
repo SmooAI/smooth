@@ -86,7 +86,20 @@ jobs:
               run: |
                   export OPENSSL_DIR="$(brew --prefix openssl@3)"
                   cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
-                  otool -L target/release/smooth-daemon | grep -q homebrew && { echo "::error::smooth-daemon still links Homebrew dylibs"; otool -L target/release/smooth-daemon; exit 1; } || true
+
+            # A shipped binary may only depend on system dylibs; anything under
+            # /opt/homebrew or /usr/local exists on the runner, not on the user's Mac.
+            - name: Guard against non-system dylibs in the bundled binaries
+              run: |
+                  fail=0
+                  for bin in smooth-daemon th; do
+                      if otool -L "target/release/$bin" | grep -E "/opt/homebrew|/usr/local"; then
+                          echo "::error::$bin links non-system dylibs (above); refusing to ship."; fail=1
+                      else
+                          echo "$bin: system dylibs only ✓"
+                      fi
+                  done
+                  exit $fail
 
             # resolveDaemonBin()/resolveThBin() look in resources/current first, and
             # main.ts symlinks the bundled `th` onto PATH — so both ride every OTA update.
