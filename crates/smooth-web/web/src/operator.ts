@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { historyImages, historyText, type HistoryMessage } from './history';
 import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { normalizeTodos, type TodoItem } from './todos';
 
@@ -90,39 +91,6 @@ export interface ConversationSummary {
     messageCount: number;
 }
 
-/** A raw history message from `get_conversation_messages`. The server returns
- * the stored domain `Message`: `direction` ('inbound' = user, 'outbound' = agent)
- * + `content: { items: [{ type:'text', text }] }`. Fallbacks (`role`, string
- * content, `text`) tolerate other shapes. Past tool calls are NOT reconstructed;
- * only the text of each turn is rendered. */
-interface HistoryContentItem {
-    type?: string;
-    text?: string;
-}
-interface HistoryMessage {
-    direction?: string;
-    content?: { items?: HistoryContentItem[] } | string;
-    role?: string;
-    text?: string;
-    /** ISO-8601 send time — used to render history oldest-first (the server
-     * returns newest-first). */
-    createdAt?: string;
-}
-
-/** Flatten a history message's content to text (real shape = content.items[] of
- * text parts; tolerate a bare string or a `text` alias). */
-function historyText(m: HistoryMessage): string {
-    const c = m.content;
-    if (c && typeof c === 'object' && Array.isArray(c.items)) {
-        return c.items
-            .filter((i) => (i.type ?? 'text') === 'text')
-            .map((i) => i.text ?? '')
-            .join('');
-    }
-    if (typeof c === 'string') return c;
-    return m.text ?? '';
-}
-
 /** Render server history into our ChatMessage model: `inbound` = user turn,
  * `outbound`/other = assistant (or system). Assistant text becomes one text block.
  * The server returns messages newest-first, so we sort ascending by `createdAt`
@@ -133,6 +101,7 @@ function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
         const content = historyText(m);
         const isUser = m.direction === 'inbound' || m.role === 'user';
         const role: ChatMessage['role'] = isUser ? 'user' : m.role === 'system' ? 'system' : 'assistant';
+        const attachments = isUser ? historyImages(m) : [];
         return {
             id: nextId('h'),
             role,
@@ -141,6 +110,7 @@ function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
             tools: [],
             blocks: role === 'assistant' ? [{ kind: 'text', text: content }] : [],
             streaming: false,
+            attachments: attachments.length ? attachments : undefined,
         };
     });
 }
