@@ -199,6 +199,27 @@ on connect.
 
 ![shell](assets/smoothflow/engine-shell.png)
 
+### Harness kinds through the app (2026-09-08, engine @72c995eb)
+
+`flow.new` with `prompt: "reply with the word ok"` for each kind, then steer,
+then `flow.kill{resume:true}`. The daemon's `PATH` came from the app, which
+does **not** contain cmux's CLI shim directory, so `claude` resolved to the
+real binary; a daemon started from a cmux terminal would not (th-5c5457).
+
+| kind     | launched?                                                                                                                                                                                                                                 | state source                                                                                   | steer        | kill + resume                                                                                    |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
+| claude   | yes — engine default `claude --session-id <uuid> <prompt>`, real `~/.local/bin/claude`                                                                                                                                                    | hooks: starting → working → idle in ~5 s                                                       | yes          | yes — `claude --resume <id>`, same transcript, surface re-attaches                               |
+| opencode | **not with the engine default**: `opencode "<prompt>"` treats the prompt as the `[project]` positional, exits 0, and is reported `done` (th-b423aa). Yes with explicit argv `~/.opencode/bin/opencode --prompt "<prompt>"` — replied `ok` | none — no hooks and the scraper only knows Claude's pane, so it sits at `starting` (th-069c9e) | yes (`pong`) | relaunch of the original argv = a **fresh** opencode session (no `-s <id>`); surface re-attaches |
+| codex    | **no** — there is no codex CLI on this machine (only cmux's shim, and only inside cmux's PATH): exit 127, three resume attempts, then `dead` · `crashed`                                                                                  | —                                                                                              | —            | —                                                                                                |
+
+| Claude                                       | OpenCode (explicit argv)                         | Codex (no CLI installed)                   |
+| -------------------------------------------- | ------------------------------------------------ | ------------------------------------------ |
+| ![claude](assets/smoothflow/kind-claude.png) | ![opencode](assets/smoothflow/kind-opencode.png) | ![codex](assets/smoothflow/kind-codex.png) |
+
+Shell-side fix from this pass: a done/dead row's surface no longer sends
+`flow.input`/`flow.resize` (the engine answered "not running" for each and it
+landed in the rail).
+
 ### TCC probe from a pane the real engine created
 
 `scripts/tcc-probe.sh` run inside `fs-…`, a shell session the engine launched
