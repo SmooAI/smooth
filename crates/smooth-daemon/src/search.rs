@@ -34,7 +34,7 @@
 //!
 //! - **pearls**: open + in-progress pearls from the effective workspace's
 //!   pearl store for the workspace's project, matched on id and
-//!   title, capped and cached with a short TTL so a keystroke never pays a Dolt
+//!   title, capped and cached with a short TTL so a keystroke never pays a store
 //!   open (pearl th-8e9cf6 — resolves the v1 deferral).
 //!
 //! ## `?cwd=` — searching the CLIENT's workspace
@@ -67,11 +67,11 @@ const MAX_RESULTS: usize = 20;
 const WALK_BUDGET: usize = 20_000;
 
 /// Pearls shown per query — few, high-signal, never crowding out files (same
-/// cap the `th code` picker used when it read Dolt itself).
+/// cap the `th code` picker used when it read the store itself).
 const MAX_PEARLS: usize = 6;
 
 /// How long a loaded pearl set stays fresh. Pearls don't change mid-keystroke;
-/// this keeps the Dolt open off the per-request path.
+/// this keeps the store open off the per-request path.
 const PEARL_TTL: Duration = Duration::from_secs(30);
 
 /// One autocomplete suggestion. `kind` is the suggestion family the composer
@@ -103,7 +103,7 @@ struct SearchQuery {
     cwd: Option<String>,
 }
 
-/// One open/in-progress pearl, pre-fetched from the Dolt store.
+/// One open/in-progress pearl, pre-fetched from the pearl store.
 #[derive(Debug, Clone)]
 pub struct PearlEntry {
     pub id: String,
@@ -111,7 +111,7 @@ pub struct PearlEntry {
 }
 
 /// Router state: the daemon workspace plus a per-directory TTL cache of
-/// pearl sets, so `/search` never opens Dolt on the hot path twice in a row.
+/// pearl sets, so `/search` never opens the store on the hot path twice in a row.
 struct SearchState {
     workspace: PathBuf,
     pearls: tokio::sync::Mutex<HashMap<PathBuf, (Instant, Vec<PearlEntry>)>>,

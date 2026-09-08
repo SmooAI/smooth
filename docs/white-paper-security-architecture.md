@@ -177,7 +177,7 @@ Smooth is implemented as a single Rust binary (`th`) with 17 workspace crates:
 - **smooth-narc**: In-VM tool surveillance (regex + LLM judge)
 - **smooth-scribe**: In-VM structured logging
 - **smooth-archivist**: Central log aggregator
-- **smooth-pearls**: Dolt-backed work item tracker
+- **smooth-pearls**: SQLite-backed work item tracker
 - **smooth-bootstrap-bill**: microVM lifecycle manager (via Microsandbox)
 
 The entire stack compiles to a single binary with zero runtime dependencies. Operators are cross-compiled to `aarch64-unknown-linux-musl` and mounted into microVMs at runtime.

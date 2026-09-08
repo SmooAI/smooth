@@ -5,7 +5,7 @@ description: Track work as pearls (th pearls) — the dependency-graph work trac
 
 # pearls-flow — track work as pearls
 
-`th pearls` is the work tracker (Dolt-backed, dependency-aware) used across the
+`th pearls` is the work tracker (SQLite-backed, dependency-aware) used across the
 SmooAI repos. As a Big Smooth worker, wrap each unit of work in a pearl so the
 orchestrator and teammates can see what's in flight and what's done.
 

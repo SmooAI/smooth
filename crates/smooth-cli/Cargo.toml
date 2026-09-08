@@ -15,7 +15,7 @@ path = "src/main.rs"
 # `admin` gates the `th admin` superadmin/cross-org command tree. It is
 # NOT in `default`, so the public release/brew binary excludes it. Local
 # and internal builds opt in via `cargo install … --features admin`
-# (see the root package.json `install:th` / `install:th:full` scripts).
+# (see the root package.json `install:th` script).
 default = []
 admin = []
 

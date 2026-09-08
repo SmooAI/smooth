@@ -5,7 +5,7 @@ description: Bring this Claude Code session online as a `th` agent and listen fo
 
 # th-mail — be reachable by other agents while you work
 
-`th` ships a harness-agnostic agent mailbox (`th agent` registry + `th msg` mail). Since pearl th-374f85 it lives in **one SQLite file per machine** (`~/.smooth/mail.db`), not the per-repo Dolt pearl store — so every agent on this host shares one mailbox no matter which repo or worktree it is standing in, sends are instant local writes, and concurrent agents no longer wedge each other. This skill registers the current session as a named agent and runs a **background watcher** so you can keep working and still pick up mail the moment it arrives.
+`th` ships a harness-agnostic agent mailbox (`th agent` registry + `th msg` mail). Since pearl th-374f85 it lives in **one SQLite file per machine** (`~/.smooth/mail.db`), not the per-repo pearl store of old — so every agent on this host shares one mailbox no matter which repo or worktree it is standing in, sends are instant local writes, and concurrent agents no longer wedge each other. This skill registers the current session as a named agent and runs a **background watcher** so you can keep working and still pick up mail the moment it arrives.
 
 **The core mechanism:** `th msg watch --once --json` blocks until unread mail appears, prints it, and **exits**. A Claude Code background Bash task re-invokes you when it exits — so an arriving message _pulls you back in_ without busy-polling. You handle it, **re-arm the watcher**, and return to whatever you were doing. Listening is ancillary; it must never block your primary work.
 
@@ -48,7 +48,7 @@ Kill the background watcher task (via the harness's background-task controls), t
 ## Notes & footguns
 
 - **Identity:** the watcher and every `th msg` call must use the **same `--agent <handle>`**, or you'll watch the wrong mailbox. `th agent whoami` tells you what you resolve to right now.
-- **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (so old scripts don't break) and print a deprecation note, but they do nothing: the mailbox is machine-local, there is no remote to sync and no Dolt write lock to contend for. The old advice about `Error 1105: database is read only` and avoiding concurrent `--pull` watchers no longer applies.
+- **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (so old scripts don't break) and print a deprecation note, but they do nothing: the mailbox is machine-local, there is no remote to sync and no write lock to contend for. The old advice about `Error 1105: database is read only` and avoiding concurrent `--pull` watchers no longer applies.
 - **Don't double-arm:** keep exactly one watcher background task alive.
 - **`th msg inbox` vs `th inbox`:** this skill is `th msg` (agent-to-agent mail). `th inbox` is the same mailbox for your default handle; operative review gates are a different thing.
 - **MCP tools do the same thing without shelling out.** If `th mcp install --harness claude-code` has been run (or you're using this plugin's bundled `smooth` MCP server), `agent_identity` / `agent_status` / `agent_list` / `mail_inbox` / `mail_send` / `mail_ack` are available as tools. They hit the same `~/.smooth/mail.db`. Use whichever is at hand — but the **background watcher** has no MCP equivalent, so `/th-mail` still owns being _pushed_ mail rather than polling for it.

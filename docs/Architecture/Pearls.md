@@ -54,23 +54,22 @@ th pearls close <id1> <id2> …
 th pearls ready                       # open, no blockers
 th pearls blocked                     # open, unmet deps
 th pearls projects                    # all registered projects
-th pearls migrate-from-dolt [PATH]    # one-shot import of a legacy .smooth/dolt store
 th pearls push / pull                 # exit-0 notice: sync is pearl th-19cca5
 th db path                            # where pearls.db lives
 ```
 
 There is no `th issues` or `th beads` alias. The naming lineage is beads → issues → **pearls**; only "pearls" is current.
 
-## Migrating from Dolt
+## History
 
 Until pearl th-d3e842 the store was an embedded Dolt database per project
-(`.smooth/dolt/`, `smooth-dolt` Go binary, sync over `refs/dolt/data`). Run
-`th pearls migrate-from-dolt` inside a project (or pass a path) to import every
-table — pearls, dependencies, labels, comments, history, memories, config —
-preserving ids and timestamps. Pearls upsert by `updated_at` (a Dolt edit after the first run overwrites the copy), everything else is insert-or-ignore, so re-running is a
-no-op, and the Dolt directory is left untouched for you to delete afterwards.
-`dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` exist only for this command and
-go away in th-c6ba83.
+(`.smooth/dolt/`, a 140MB `smooth-dolt` Go binary, sync over `refs/dolt/data`).
+PR #522 retired it for the SQLite store above and shipped a one-shot
+`th pearls migrate-from-dolt` importer; pearl th-c6ba83 then deleted the Dolt
+shim, the Go binary and the Go/ICU CI steps. A straggler machine that still has
+a `.smooth/dolt/` store must install **th ≤ 0.42.x** (Homebrew v0.42.1 is the
+last release with `migrate-from-dolt`), run `th pearls migrate-from-dolt` in
+each repo, and only then upgrade — newer builds cannot read Dolt at all.
 
 ## Handoff model — checkpoints (pearl th-9483e8)
 

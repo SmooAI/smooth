@@ -77,7 +77,7 @@ enable codex|opencode` is `th pkg install <this dir> --harness <x>` plus the
       with `# attest:ack reason=...`.
     - `pearls-store-guard.sh` (PreToolUse Bash) — nudges away from the patterns
       that lose every project's pearls at once (hand-deleting
-      `~/.smooth/pearls.db` or a legacy `.smooth/dolt`, raw sqlite writes that bypass `th pearls`,
+      `~/.smooth/pearls.db`, raw sqlite writes that bypass `th pearls`,
       backgrounded pearl/msg watchers). Override with `# pearls-guard:ack`.
 
     Skills:

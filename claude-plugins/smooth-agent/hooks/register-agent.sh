@@ -14,7 +14,7 @@
 #     nudged once (on-first-prompt.sh) to rename itself to something meaningful.
 #
 # Registration is always safe and cheap: as of pearl th-374f85 the mailbox is a
-# machine-level SQLite file (`~/.smooth/mail.db`), not the per-repo Dolt store,
+# machine-level SQLite file (`~/.smooth/mail.db`), not a per-repo store,
 # so a register is a millisecond-scale local write with no remote to push and no
 # single-writer lock to contend for. `--pid "$PPID"` hands the store THIS claude
 # process, which is what lets `th agent list` reap the row when the session dies.

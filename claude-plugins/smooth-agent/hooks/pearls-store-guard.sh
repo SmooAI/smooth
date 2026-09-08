@@ -4,9 +4,7 @@
 # Pearls live in ONE machine-global SQLite file, `~/.smooth/pearls.db`
 # (pearl th-d3e842) — every project on this box is in it. Deleting or
 # hand-editing that file loses every project's pearls at once, so the
-# guard nudges on the two patterns that do that. The legacy `.smooth/dolt`
-# directories are read-only migration input (`th pearls migrate-from-dolt`)
-# and are protected the same way until pearl th-c6ba83 removes the shim.
+# guard nudges on the two patterns that do that.
 #
 # Exit codes: 0 allow silently, 1 nudge (stderr hint visible to Claude,
 # override by re-running), 2 hard block. We use 1 — non-blocking nudge.
@@ -35,10 +33,9 @@ MSG
 }
 
 # --- deleting the pearl database (every project's pearls) ----------------------
-if echo "$CMD" | grep -qE 'rm\s+(-[a-zA-Z]+\s+)*[^|;&]*(\.smooth/pearls\.db|\.smooth/dolt)'; then
+if echo "$CMD" | grep -qE 'rm\s+(-[a-zA-Z]+\s+)*[^|;&]*\.smooth/pearls\.db'; then
     emit "delete of the pearl store" \
-        "~/.smooth/pearls.db holds EVERY project's pearls on this machine; .smooth/dolt is the
-legacy store \`th pearls migrate-from-dolt\` imports from. Neither is safe to rm by hand.
+        "~/.smooth/pearls.db holds EVERY project's pearls on this machine; it is not safe to rm by hand.
 Copy the .db aside first (\`th db path\`) if you must."
     exit 1
 fi

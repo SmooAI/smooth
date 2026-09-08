@@ -15,7 +15,7 @@
   │  Big Smooth  (host process, ~/.smooth/smooth.pid)           │
   │  axum HTTP + WebSocket on 127.0.0.1:4400 (loopback default) │
   │                                                            │
-  │   ├── pearl store (Dolt, per project)                      │
+  │   ├── pearl store (SQLite, ~/.smooth/pearls.db)            │
   │   ├── sessions / messages / orchestrator snapshots         │
   │   ├── Diver        — pearl lifecycle + Jira sync           │
   │   ├── Archivist    — log + event aggregator (SSE)          │
@@ -58,7 +58,7 @@
 | `smooth-scribe`    | Per-actor structured logging.                                                                                   |
 | `smooth-archivist` | Central log + event aggregator. SSE stream backs the dashboard.                                                 |
 | `smooth-diver`     | Pearl lifecycle manager + Jira sync.                                                                            |
-| `smooth-pearls`    | Pearl store. Dolt-backed.                                                                                       |
+| `smooth-pearls`    | Pearl store. SQLite-backed.                                                                                     |
 | `smooth-cast`      | Skills discovery + agent role/persona resources.                                                                |
 | `smooth-code`      | Ratatui TUI (`th code`).                                                                                        |
 | `smooth-web`       | Embedded Vite SPA via `rust-embed`.                                                                             |
@@ -70,7 +70,7 @@
 - [[Dispatch]] — how a task flows from chat to an operative and back
 - [[Operatives]] — the agent runtime and the operative binary
 - [[Security-Model]] — Narc surveillance today, auto-mode permissions in progress
-- [[Data-Storage]] — Dolt, sessions, `~/.smooth/`
+- [[Data-Storage]] — pearls.db, sessions, `~/.smooth/`
 - [[Extension-System]] — SEP, the planned extension protocol
 - [[Daemon-Direction]] — where Big Smooth is headed (epic `th-c89c2a`)
 

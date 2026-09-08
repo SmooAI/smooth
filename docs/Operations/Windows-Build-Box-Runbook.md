@@ -1,5 +1,10 @@
 # Windows Build Box Runbook
 
+> **Historical.** The `smooth-dolt` binary this box was stood up for was
+> deleted in pearl th-c6ba83 (pearls are bundled SQLite now). The SSM
+> provisioning recipe below is still the way to get a Windows box; the
+> Go/CGO sections are kept as a record.
+
 A throwaway Windows EC2 driven entirely over **SSM** (no RDP, no inbound
 ports) for iterating on Windows builds faster than GitHub Actions
 round-trips. Used to bring up the CGO/ICU/gozstd toolchain and prove out

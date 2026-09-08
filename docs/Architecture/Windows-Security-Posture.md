@@ -138,9 +138,9 @@ userspace layers are, the kernel layer isn't there yet.
   the Windows tool registry simply doesn't contain them. Windows-native
   equivalents (Outlook / Microsoft Graph calendar + tasks) are a follow-up, not
   a regression.
-- **Pearl-store tests are skipped** on the Windows CI lane: the `smooth-dolt`
-  server transport is a Unix domain socket (TCP transport is th-5f35a5). The
-  `smooth-dolt` binary itself still compiles there.
+- **Pearl-store tests run** on the Windows CI lane since the store became
+  bundled SQLite (th-d3e842); the Unix-socket Dolt server that forced the skip
+  is gone (th-c6ba83).
 
 ## See also
 

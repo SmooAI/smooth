@@ -12,7 +12,7 @@ use crate::files::FileEntry;
 const MAX_RESULTS: usize = 20;
 
 /// A pearl exposed to the `@` picker — id + title, pre-fetched from
-/// `PearlStore` so autocomplete doesn't hit Dolt on every keystroke.
+/// `PearlStore` so autocomplete doesn't hit the store on every keystroke.
 #[derive(Debug, Clone)]
 pub struct PearlSuggestion {
     pub id: String,

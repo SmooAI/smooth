@@ -51,7 +51,7 @@ smooth/
 - **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` runs only inside `sandbox.rs`'s kernel OS sandbox. `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
 - **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults, plus `auto_mode` (permission modes/allow-lists), `ext_trust`, and `smooth_alias`.
 - **smooth-goalie** (`crates/smooth-goalie/`): HTTP forward proxy with an exact-host allowlist and JSON-lines audit logging. **Repurposed, not removed** — the microVM-era in-VM/Wonk-delegating mode is dead code paths; what the daemon actually uses is `AuditLogger` + `run_proxy_local` from `start_egress_proxy` (`crates/smooth-daemon/src/lib.rs`), making it the daemon's **egress boundary**. Enabled by `SMOOTH_EGRESS_ALLOWLIST`; the sandbox points `HTTP(S)_PROXY` at it and kernel-denies direct outbound.
-- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). One machine-global SQLite db, `~/.smooth/pearls.db`, rows scoped by canonical project root (pearl th-d3e842). Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `MemoryStore`, `Registry`. Agent mail + the agent roster live in a sibling SQLite file, `~/.smooth/mail.db` (`MailStore`, [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)). `dolt.rs`/`dolt_server.rs` remain only for `th pearls migrate-from-dolt` (deleted in th-c6ba83).
+- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). One machine-global SQLite db, `~/.smooth/pearls.db`, rows scoped by canonical project root (pearl th-d3e842). Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `MemoryStore`, `Registry`. Agent mail + the agent roster live in a sibling SQLite file, `~/.smooth/mail.db` (`MailStore`, [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)). No Dolt, no external binary — rusqlite is bundled.
 - **smooth-cast** (`crates/smooth-cast/`): the coding-harness specifics the published generic engine dropped — `coding_workflow` (the `th code` outer loop), `skills` discovery, the four harness cast roles (fixer / oracle / chief / intent_classifier), and field-preserving `providers.json` editing.
 - **smooth-code** (`crates/smooth-code/`): `th code` — ratatui AI coding TUI: streaming chat, tool calls, file browser, git, sessions, model picker, extensions.
 - **smooth-diver** (`crates/smooth-diver/`): Pearl Diver — pearl lifecycle (create on dispatch, close on completion, sub-pearls, deps/labels/costs) plus the bidirectional Jira client.
@@ -359,7 +359,7 @@ a tempdir). Every row carries a `project` column = the canonical project root,
 resolved from any cwd as the **main checkout** even inside a linked git
 worktree (`git rev-parse --git-common-dir`'s parent), so pearls created in a
 worktree no longer vanish with it. Pearl th-d3e842 replaced the embedded
-per-project Dolt store: reads went from ~0.7s to ~10ms, concurrent agents
+per-project Dolt store (deleted in th-c6ba83): reads went from ~0.7s to ~10ms, concurrent agents
 queue on SQLite's lock instead of wedging "database is read only", and
 `ADD COLUMN IF NOT EXISTS` / `NOW()`-timezone footguns are gone.
 
@@ -368,11 +368,11 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 `th-xxxxxx` and are unique per project. Timestamps are fixed-width UTC RFC3339
 text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 
-> **Migrating a legacy `.smooth/dolt` store**: `th pearls migrate-from-dolt`
-> inside the project (safe to re-run: pearls upsert by `updated_at`, the rest is insert-or-ignore, Dolt dir left in place).
-> `dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` survive ONLY for that command
-> and are deleted in pearl th-c6ba83. `th pearls push` / `pull` print a notice
-> and exit 0 — cross-machine sync against Smoo Projects is pearl th-19cca5.
+> **Dolt is gone** (PR #522 retired it, pearl th-c6ba83 deleted the shim).
+> A straggler machine with a legacy `.smooth/dolt` store must run
+> `th pearls migrate-from-dolt` with **th ≤ 0.42.x** BEFORE upgrading; newer
+> builds cannot read it. `th pearls push` / `pull` print a notice and exit 0 —
+> cross-machine sync against Smoo Projects is pearl th-19cca5.
 
 ### Global (`~/.smooth/`)
 
@@ -389,21 +389,10 @@ text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 
 ### Project-scoped (`<repo>/.smooth/`)
 
-- `dolt/` — Legacy Dolt pearl store, import with `th pearls migrate-from-dolt` then delete
 - `mcp.toml` — Project-specific MCP servers; merged with global,
   project wins on name collision
 - `plugins/<name>/plugin.toml` — Project-specific plugins; same
   merge rules
-
-### Building smooth-dolt (migration shim only)
-
-Only `th pearls migrate-from-dolt` still needs it; deleted in pearl th-c6ba83.
-
-```bash
-# Requires Go 1.21+, ICU (macOS: brew install icu4c)
-scripts/build-smooth-dolt.sh
-# Produces target/release/smooth-dolt (~145MB, embedded Dolt engine)
-```
 
 ---
 
@@ -438,7 +427,6 @@ th pearls show <id> --handoff [--json]   # Handoff packet: what / where / what h
 th pearls prime --in-progress [--cwd .]  # Handoff packets for in-progress pearls (this worktree's with --cwd)
 th pearls blocked                     # Show blocked pearls
 th pearls projects                    # List all registered pearl projects
-th pearls migrate-from-dolt [PATH]    # One-shot import of a legacy .smooth/dolt store
 th pearls push / pull                 # Exit-0 notice — sync is pearl th-19cca5
 ```
 

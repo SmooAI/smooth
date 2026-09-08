@@ -34,7 +34,7 @@
 //! already honor those env vars, so every `default_user()` / `default_m2m()` /
 //! `default_path()` call transparently reads the active profile's files.
 //!
-//! Only the **auth** tree moves here; the rest of `~/.smooth` (dolt, registry,
+//! Only the **auth** tree moves here; the rest of `~/.smooth` (pearls.db, registry,
 //! logs, …) is a later phase.
 
 use std::fs;

@@ -47,7 +47,7 @@ HOST                                          SANDBOX VM
 │                      │                      │  bind-mounts from host:                 │
 │                      │                      │    /workspace/                          │
 │                      │                      │    /var/smooth/grants.toml              │
-│                      │                      │    /var/smooth/pearls/  (Dolt)          │
+│                      │                      │    /var/smooth/pearls/                 │
 │                      │                      │    /var/smooth/learned/                 │
 │                      │                      │                                         │
 └──────────────────────┘                      └─────────────────────────────────────────┘

@@ -49,19 +49,8 @@ jobs:
                     # notifications (/push/* 503s there) and gains the whole
                     # agent engine. Do not re-add the exclude to make a red
                     # Windows build green — that is the bug it was hiding.
-                    #
-                    # smooth-diver's e2e and six smooth-pearls test modules
-                    # drive a real pearl store, which shells out to the
-                    # smooth-dolt binary — a CGO Go binary needing ICU, with no
-                    # Windows build (see the skipped build step above). They are
-                    # filtered out by name rather than passing vacuously. The
-                    # rest of smooth-pearls (dolt.rs, registry, the non-Unix
-                    # dolt_server stub) still runs here.
                     - os: windows-latest
-                      test_args: >-
-                          --workspace
-                          --exclude smooai-smooth-diver
-                          -E 'not (package(smooai-smooth-pearls) & test(/^(agents|memory|memory_tools|messaging|store|tools)::/))'
+                      test_args: ''
         steps:
             - uses: actions/checkout@v4
 
@@ -90,10 +79,8 @@ jobs:
                           - 'Cargo.lock'
                           - 'rust-toolchain.toml'
                           - 'rustfmt.toml'
-                          - 'go/**'
-                          - 'scripts/build-smooth-dolt.sh'
                           - '.github/workflows/pr-checks.yml'
-                          # mise.toml pins the Go/Node/Python toolchains this
+                          # mise.toml pins the Node/Python toolchains this
                           # lane compiles with. Without it here a toolchain bump
                           # touches no other path, so every step below gates off
                           # and the job reports success having compiled nothing.
@@ -109,7 +96,7 @@ jobs:
 
             - name: Install system dependencies
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev libicu-dev pkg-config protobuf-compiler
+              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
 
             # No apt on Windows — protoc is the only native build-time tool the
             # workspace needs there (tonic-build in smooth-scribe et al.).
@@ -142,24 +129,6 @@ jobs:
                   cd crates/smooth-web/web
                   pnpm install --no-frozen-lockfile
                   pnpm build
-
-            # smooth-dolt is a CGO Go binary. On Linux/macOS the gozstd +
-            # go-icu-regex CGO deps want ICU (build-smooth-dolt.sh points CGO
-            # at Homebrew/apt ICU). On Windows the `gms_pure_go` build tag drops
-            # the ICU path entirely, so only a C compiler (mingw gcc, present on
-            # the runner) is needed — proven on a Windows SSM box, see
-            # docs/Operations/Windows-Build-Box-Runbook.md. Pearl-store *tests*
-            # still skip on Windows (they need the Unix-socket dolt server; the
-            # TCP transport is pearl th-5f35a5) — but the binary must keep
-            # compiling so it can't silently regress with another unix-only call.
-            - name: Build smooth-dolt (embedded Dolt for pearl memory tests)
-              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
-              run: bash scripts/build-smooth-dolt.sh
-
-            - name: Build smooth-dolt (Windows — CGO via mingw, gms_pure_go drops ICU)
-              if: steps.gate.outputs.run == 'true' && runner.os == 'Windows'
-              shell: bash
-              run: cd go/smooth-dolt && CGO_ENABLED=1 go build -tags gms_pure_go -o smooth-dolt.exe .
 
             - name: Install nextest
               if: steps.gate.outputs.run == 'true'

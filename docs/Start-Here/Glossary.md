@@ -31,10 +31,9 @@
 
 ## Storage
 
-- **Dolt** — The former pearl backend (per-project `.smooth/dolt/`), retired by pearl th-d3e842; `th pearls migrate-from-dolt` imports a leftover store.
-- **`smooth-dolt`** — Go binary embedding the Dolt engine; only `th pearls migrate-from-dolt` still shells out to it (deleted in th-c6ba83).
+- **Dolt** — The former pearl backend (per-project `.smooth/dolt/`), retired by pearl th-d3e842 and deleted in th-c6ba83; stragglers migrate with th ≤ 0.42.x.
 - **`~/.smooth/`** — Global Smooth state: `providers.json`, `registry.json`, `audit/`, `plugins/`, `smooth.pid`/`smooth.log`.
-- **`.smooth/`** — Project-scoped state: `mcp.toml`, `plugins/` (and a legacy `dolt/` until migrated).
+- **`.smooth/`** — Project-scoped state: `mcp.toml`, `plugins/`.
 
 ## Extensibility
 

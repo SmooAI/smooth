@@ -1,7 +1,7 @@
 //! End-to-end test for the Diver pearl lifecycle.
 //!
 //! Exercises the full dispatch → sub-pearl → cost → complete cycle
-//! through the Diver HTTP API backed by a real Dolt pearl store.
+//! through the Diver HTTP API backed by a real SQLite pearl store.
 //! No VMs needed — this tests the Diver service in isolation.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -39,7 +39,7 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
 #[tokio::test]
 async fn diver_full_lifecycle() {
     let Some((app, store)) = test_app() else {
-        eprintln!("SKIP: smooth-dolt binary not available");
+        eprintln!("SKIP: pearl store not available");
         return;
     };
 

@@ -52,7 +52,7 @@ smooth-goalie.workspace = true
 smooth-flow.workspace = true
 # surface) via rust-embed.
 # th-bd0e22 (EPIC th-c89c2a): durable persistence for the daemon's per-instance
-# runtime state (events, sessions). SQLite (not Dolt) — this is ephemeral local
+# runtime state (events, sessions). SQLite — this is ephemeral local
 # state, not team-synced work items; rusqlite is bundled (no external binary).
 rusqlite.workspace = true
 axum = { workspace = true, features = ["ws"] }
@@ -87,7 +87,7 @@ smooai-client-shared.workspace = true
 # token trips reuse-detection and revokes the whole family.
 smooth-api-client.workspace = true
 base64 = "0.22"
-# /search pearl suggestions (th-8e9cf6) — open the project/global Dolt store
+# /search pearl suggestions (th-8e9cf6) — open the project/global pearl store
 smooth-pearls.workspace = true
 sha2 = "0.10"
 rand = "0.8"
