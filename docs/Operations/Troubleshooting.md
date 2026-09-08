@@ -48,7 +48,7 @@ th pearls migrate-from-dolt        # inside the project; idempotent
 th pearls stats                    # confirm the counts landed
 ```
 
-`th pearls push` / `pull` print a notice and exit 0 — sync is pearl th-ddce81.
+`th pearls push` / `pull` print a notice and exit 0 — sync is pearl th-19cca5.
 
 ## Tests pass locally, fail in CI
 

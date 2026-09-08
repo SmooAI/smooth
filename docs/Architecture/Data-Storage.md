@@ -37,7 +37,7 @@ The operative's tool calls and Narc verdicts are written to `~/.smooth/audit/<ac
 
 ## Backups & sync
 
-Pearls are the only state worth backing up: copy `~/.smooth/pearls.db` (plus its `-wal`/`-shm` siblings, or after `PRAGMA wal_checkpoint`). `th pearls push` / `pull` currently print a notice — cross-machine sync against Smoo Projects is pearl th-ddce81. Jira sync is the other replication channel (see [[The-Cast#Diver|Diver]]).
+Pearls are the only state worth backing up: copy `~/.smooth/pearls.db` (plus its `-wal`/`-shm` siblings, or after `PRAGMA wal_checkpoint`). `th pearls push` / `pull` currently print a notice — cross-machine sync against Smoo Projects is pearl th-19cca5. Jira sync is the other replication channel (see [[The-Cast#Diver|Diver]]).
 
 `providers.json` is per-machine. Treat it like `.aws/credentials`: do not check it in.
 

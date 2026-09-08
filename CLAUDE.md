@@ -352,10 +352,10 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 
 > **Migrating a legacy `.smooth/dolt` store**: `th pearls migrate-from-dolt`
-> inside the project (idempotent, `INSERT OR IGNORE`, Dolt dir left in place).
+> inside the project (safe to re-run: pearls upsert by `updated_at`, the rest is insert-or-ignore, Dolt dir left in place).
 > `dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` survive ONLY for that command
 > and are deleted in pearl th-c6ba83. `th pearls push` / `pull` print a notice
-> and exit 0 — cross-machine sync against Smoo Projects is pearl th-ddce81.
+> and exit 0 — cross-machine sync against Smoo Projects is pearl th-19cca5.
 
 ### Global (`~/.smooth/`)
 
@@ -419,7 +419,7 @@ th pearls ready                       # Show ready pearls (open, no blockers)
 th pearls blocked                     # Show blocked pearls
 th pearls projects                    # List all registered pearl projects
 th pearls migrate-from-dolt [PATH]    # One-shot import of a legacy .smooth/dolt store
-th pearls push / pull                 # Exit-0 notice — sync is pearl th-ddce81
+th pearls push / pull                 # Exit-0 notice — sync is pearl th-19cca5
 ```
 
 ---

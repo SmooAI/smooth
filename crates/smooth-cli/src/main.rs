@@ -2496,7 +2496,7 @@ fn cmd_db(cmd: DbCommands) -> Result<()> {
         DbCommands::Path => println!("{}", db.display()),
         DbCommands::Backup => {
             println!(
-                "Copy {} (plus its -wal/-shm siblings) — or wait for `th pearls sync` (pearl th-ddce81).",
+                "Copy {} (plus its -wal/-shm siblings) — or wait for `th pearls sync` (pearl th-19cca5).",
                 db.display()
             );
         }
@@ -5099,7 +5099,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
         PearlCommands::Push | PearlCommands::Pull => {
             println!(
-                "pearls are local SQLite now ({}); `th pearls sync` is th-ddce81 — see `th pearls list`",
+                "pearls are local SQLite now ({}); `th pearls sync` is th-19cca5 — see `th pearls list`",
                 store.db_path().display()
             );
         }
@@ -5110,7 +5110,8 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
 /// `th pearls migrate-from-dolt [PATH]` — import a legacy `.smooth/dolt`
 /// store (found by walking up from PATH, default cwd) into the SQLite
-/// store for that project. Idempotent; leaves the Dolt dir untouched.
+/// store for that project. Safe to re-run: pearls upsert by `updated_at`,
+/// everything else is insert-or-ignore; the Dolt dir is never touched.
 fn cmd_pearls_migrate_from_dolt(path: Option<&std::path::Path>) -> Result<()> {
     let start = match path {
         Some(p) => p.to_path_buf(),
@@ -5131,7 +5132,12 @@ fn cmd_pearls_migrate_from_dolt(path: Option<&std::path::Path>) -> Result<()> {
     println!("  before: {} pearl(s) in SQLite for this project", before.total);
     let report = smooth_pearls::migrate_dolt::migrate_from_dolt(&dolt_dir, &store)?;
     for (table, (read, inserted)) in report.rows() {
-        println!("  {table:<13} read {read:>5}  inserted {inserted:>5}");
+        let updated = if table == "pearls" {
+            format!("  updated {:>5}", report.pearls_updated)
+        } else {
+            String::new()
+        };
+        println!("  {table:<13} read {read:>5}  inserted {inserted:>5}{updated}");
     }
     let after = store.stats()?;
     println!(

@@ -2,9 +2,10 @@
 //! pearl database. Pearl th-d3e842.
 //!
 //! Reads every table through the `smooth-dolt` CLI (read-only, no server
-//! attach) and inserts with `INSERT OR IGNORE`, so running it twice is a
-//! no-op and the Dolt directory is never touched. Ids and timestamps are
-//! preserved.
+//! attach). Pearls are upserted by `updated_at` (a row edited in Dolt after
+//! the first run overwrites the SQLite copy); every other table is `INSERT
+//! OR IGNORE`. Running it repeatedly is safe and the Dolt directory is never
+//! touched. Ids and timestamps are preserved.
 //!
 //! ponytail: dolt shim — this module goes with `dolt.rs` in pearl th-c6ba83.
 
@@ -16,13 +17,15 @@ use serde_json::Value;
 
 use crate::dolt::SmoothDolt;
 use crate::memory::Memory;
-use crate::store::{parse_ts, PearlStore};
+use crate::store::{parse_ts, ImportOutcome, PearlStore};
 use crate::types::{Pearl, PearlComment, PearlDepType, PearlDependency, PearlHistoryEntry, PearlStatus, PearlType, Priority};
 
 /// Rows read from Dolt vs rows newly inserted, per table.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
     pub pearls: (usize, usize),
+    /// Pearls already present whose Dolt `updated_at` was newer.
+    pub pearls_updated: usize,
     pub dependencies: (usize, usize),
     pub labels: (usize, usize),
     pub comments: (usize, usize),
@@ -106,8 +109,10 @@ pub fn migrate_from_dolt(dolt_dir: &Path, store: &PearlStore) -> Result<Migratio
     let pearls = rows(&dolt, "pearls")?;
     report.pearls.0 = pearls.len();
     for row in &pearls {
-        if store.import_pearl(&pearl_from_row(row))? {
-            report.pearls.1 += 1;
+        match store.import_pearl(&pearl_from_row(row))? {
+            ImportOutcome::Inserted => report.pearls.1 += 1,
+            ImportOutcome::Updated => report.pearls_updated += 1,
+            ImportOutcome::Unchanged => {}
         }
     }
 
@@ -236,10 +241,10 @@ mod tests {
     fn imports_every_table_and_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let dolt_dir = tmp.path().join(".smooth/dolt");
-        if legacy_store(&dolt_dir).is_none() {
+        let Some(cli) = legacy_store(&dolt_dir) else {
             eprintln!("skipping: smooth-dolt binary not available");
             return;
-        }
+        };
         let store = PearlStore::open_with_db(&tmp.path().join("pearls.db"), tmp.path()).unwrap();
 
         let report = migrate_from_dolt(&dolt_dir, &store).expect("migrate");
@@ -271,8 +276,20 @@ mod tests {
         // Second run inserts nothing, changes nothing.
         let again = migrate_from_dolt(&dolt_dir, &store).expect("re-migrate");
         assert_eq!(again.pearls, (2, 0));
+        assert_eq!(again.pearls_updated, 0);
         assert_eq!(again.comments, (1, 0));
         assert_eq!(store.stats().unwrap().total, 2);
+
+        // Edits made in Dolt after the first run land on the next run.
+        cli.exec("UPDATE pearls SET title = 'B renamed', updated_at = '2026-02-01 00:00:00' WHERE id = 'th-bbbbbb'")
+            .expect("edit in dolt");
+        cli.exec("INSERT INTO pearl_comments (id, pearl_id, content, created_at) VALUES ('th-c2c2c2', 'th-bbbbbb', 'later', '2026-02-01 00:00:01')")
+            .expect("comment in dolt");
+        let third = migrate_from_dolt(&dolt_dir, &store).expect("re-migrate after edit");
+        assert_eq!(third.pearls, (2, 0));
+        assert_eq!(third.pearls_updated, 1);
+        assert_eq!(third.comments, (2, 1));
+        assert_eq!(store.get("th-bbbbbb").unwrap().unwrap().title, "B renamed");
     }
 
     #[test]

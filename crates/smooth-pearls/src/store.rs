@@ -24,6 +24,14 @@ use crate::types::{
     NewPearl, Pearl, PearlComment, PearlDepType, PearlDependency, PearlHistoryEntry, PearlStats, PearlStatus, PearlType, PearlUpdate, Priority,
 };
 
+/// What [`PearlStore::import_pearl`] did with a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    Inserted,
+    Updated,
+    Unchanged,
+}
+
 /// Thread-safe SQLite-backed pearl store, scoped to one project.
 #[derive(Clone)]
 pub struct PearlStore {
@@ -819,12 +827,48 @@ impl PearlStore {
 
     // ── Raw import (migration) ──────────────────────────────────────────
 
-    /// Insert a pearl row verbatim, keeping its id and timestamps. `INSERT
-    /// OR IGNORE` on `(project, id)`, so re-running an import is a no-op.
-    /// Returns whether a row was inserted. Used by `migrate-from-dolt`.
-    pub fn import_pearl(&self, pearl: &Pearl) -> Result<bool> {
-        let n = self.conn().execute(
-            "INSERT OR IGNORE INTO pearls (project, id, title, description, status, priority, pearl_type, parent_id, assigned_to, created_at, updated_at, closed_at, scheduled_at)
+    /// Import a pearl row verbatim, keeping its id and timestamps. Missing →
+    /// inserted; present with an older `updated_at` → overwritten; otherwise
+    /// left alone — so re-running an import is a no-op and edits made in
+    /// the source after the first run still land. Used by `migrate-from-dolt`.
+    pub fn import_pearl(&self, pearl: &Pearl) -> Result<ImportOutcome> {
+        let conn = self.conn();
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM pearls WHERE project = ?1 AND id = ?2",
+                params![self.project, pearl.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let incoming = fmt_ts(pearl.updated_at);
+        match existing {
+            Some(current) if current >= incoming => return Ok(ImportOutcome::Unchanged),
+            Some(_) => {
+                conn.execute(
+                    "UPDATE pearls SET title = ?3, description = ?4, status = ?5, priority = ?6, pearl_type = ?7, parent_id = ?8, assigned_to = ?9,
+                     created_at = ?10, updated_at = ?11, closed_at = ?12, scheduled_at = ?13 WHERE project = ?1 AND id = ?2",
+                    params![
+                        self.project,
+                        pearl.id,
+                        pearl.title,
+                        pearl.description,
+                        pearl.status.as_str(),
+                        i64::from(pearl.priority.as_u8()),
+                        pearl.pearl_type.as_str(),
+                        pearl.parent_id,
+                        pearl.assigned_to,
+                        fmt_ts(pearl.created_at),
+                        incoming,
+                        pearl.closed_at.map(fmt_ts),
+                        pearl.scheduled_at.map(fmt_ts),
+                    ],
+                )?;
+                return Ok(ImportOutcome::Updated);
+            }
+            None => {}
+        }
+        conn.execute(
+            "INSERT INTO pearls (project, id, title, description, status, priority, pearl_type, parent_id, assigned_to, created_at, updated_at, closed_at, scheduled_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 self.project,
@@ -837,12 +881,12 @@ impl PearlStore {
                 pearl.parent_id,
                 pearl.assigned_to,
                 fmt_ts(pearl.created_at),
-                fmt_ts(pearl.updated_at),
+                incoming,
                 pearl.closed_at.map(fmt_ts),
                 pearl.scheduled_at.map(fmt_ts),
             ],
         )?;
-        Ok(n > 0)
+        Ok(ImportOutcome::Inserted)
     }
 
     /// Import a dependency row verbatim (idempotent).
@@ -1332,9 +1376,17 @@ pub(crate) mod tests {
         assert!(b.get(&pa.id).unwrap().is_none(), "ids are project-scoped");
         assert_eq!(a.stats().unwrap().total, 1);
         // Same id in two projects is allowed (Dolt-era ids were per store).
-        assert!(b.import_pearl(&pa).unwrap());
-        assert!(!b.import_pearl(&pa).unwrap(), "re-import is a no-op");
+        assert_eq!(b.import_pearl(&pa).unwrap(), ImportOutcome::Inserted);
+        assert_eq!(b.import_pearl(&pa).unwrap(), ImportOutcome::Unchanged, "re-import is a no-op");
         assert_eq!(b.get(&pa.id).unwrap().unwrap().title, "in a");
+        // A newer source row overwrites; an older one is ignored.
+        let mut newer = pa.clone();
+        newer.title = "renamed".into();
+        newer.updated_at = pa.updated_at + chrono::Duration::seconds(1);
+        assert_eq!(b.import_pearl(&newer).unwrap(), ImportOutcome::Updated);
+        assert_eq!(b.get(&pa.id).unwrap().unwrap().title, "renamed");
+        assert_eq!(b.import_pearl(&pa).unwrap(), ImportOutcome::Unchanged, "older row never clobbers");
+        assert_eq!(b.get(&pa.id).unwrap().unwrap().title, "renamed");
     }
 
     /// Regression: a store opened from a linked git worktree must resolve
