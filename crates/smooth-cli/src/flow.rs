@@ -252,18 +252,25 @@ async fn ws_call(frame: Value, want: &[&str], timeout: Duration) -> Result<Value
 
 // ── rendering ─────────────────────────────────────────────────────────────────
 
-/// State glyph + colour (CLI-Spec §4/§5).
-fn state_cell(state: &str) -> String {
-    match state {
-        "working" => format!("{} working", "●".cyan()),
-        "idle" => format!("{} idle", "○".dimmed()),
-        "needs_you" => format!("{} needs you", "●".yellow().bold()),
-        "limited" => format!("{} limited", "◐".yellow()),
-        "starting" => format!("{} starting", "◐".dimmed()),
-        "done" => format!("{} done", "○".green()),
-        "dead" => format!("{} dead", "●".red()),
-        other => other.to_string(),
-    }
+/// State glyph + colour (CLI-Spec §4/§5). Returns `(cell, visible_width)`
+/// so tables can pad without counting escape codes.
+fn state_cell(state: &str) -> (String, usize) {
+    let (glyph, label): (String, &str) = match state {
+        "working" => ("●".cyan().to_string(), "working"),
+        "idle" => ("○".dimmed().to_string(), "idle"),
+        "needs_you" => ("●".yellow().bold().to_string(), "needs you"),
+        "limited" => ("◐".yellow().to_string(), "limited"),
+        "starting" => ("◐".dimmed().to_string(), "starting"),
+        "done" => ("○".green().to_string(), "done"),
+        "dead" => ("●".red().to_string(), "dead"),
+        other => return (other.to_string(), other.chars().count()),
+    };
+    (format!("{glyph} {label}"), label.chars().count() + 2)
+}
+
+/// Pad `cell` (whose visible width is `width`) to `to` columns.
+fn pad(cell: &str, width: usize, to: usize) -> String {
+    format!("{cell}{}", " ".repeat(to.saturating_sub(width)))
 }
 
 fn short(s: &str, n: usize) -> String {
@@ -281,19 +288,21 @@ fn print_sessions(sessions: &[Value]) {
         println!("  Start one: {}", "th flow new --kind claude --prompt \"…\"".bold());
         return;
     }
+    // Pad BEFORE colouring: escape codes would otherwise count toward width.
     println!(
-        "{:<12} {:<9} {:<16} {:<34} {}",
-        "ID".bold(),
-        "KIND".bold(),
-        "STATE".bold(),
-        "TITLE".bold(),
+        "{} {} {} {} {}",
+        format!("{:<12}", "ID").bold(),
+        format!("{:<9}", "KIND").bold(),
+        format!("{:<16}", "STATE").bold(),
+        format!("{:<34}", "TITLE").bold(),
         "WORKTREE".bold()
     );
     for s in sessions {
         let g = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let mut state = state_cell(&g("state"));
+        let (mut state, mut width) = state_cell(&g("state"));
         if s.get("unread").and_then(Value::as_bool).unwrap_or(false) {
             state.push_str(" ✦");
+            width += 2;
         }
         let att = s
             .pointer("/attention/reason")
@@ -301,14 +310,19 @@ fn print_sessions(sessions: &[Value]) {
             .map(|r| format!(" {}", format!("[{r}]").yellow()))
             .unwrap_or_default();
         println!(
-            "{:<12} {:<9} {:<16} {:<34} {}{att}",
+            "{:<12} {:<9} {} {:<34} {}{att}",
             g("id"),
             g("kind"),
-            state,
+            pad(&state, width, 16),
             short(&g("title"), 33),
             short(&g("worktree"), 48).dimmed()
         );
     }
+}
+
+/// The array under `key`, or empty.
+fn list_of<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+    v.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
 fn emit(json: bool, v: &Value, human: impl FnOnce(&Value)) -> Result<()> {
@@ -328,7 +342,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
         FlowCommands::Ls { json } => {
             let v = call(reqwest::Method::GET, "/api/flow/sessions", None).await?;
             emit(json, &v, |v| {
-                print_sessions(v.get("sessions").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]));
+                print_sessions(list_of(v, "sessions"));
             })
         }
         FlowCommands::Inbox { json } => {
@@ -342,7 +356,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
                 .filter(|s| s.get("state").and_then(Value::as_str) == Some("needs_you") || s.get("unread").and_then(Value::as_bool) == Some(true))
                 .collect();
             emit(json, &json!({ "sessions": inbox }), |v| {
-                let items = v.get("sessions").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+                let items = list_of(v, "sessions");
                 if items.is_empty() {
                     println!("Inbox empty — nothing needs you. This is a confirmed read of the engine.");
                 } else {
@@ -396,7 +410,7 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             .await?;
             emit(json, &v, |v| {
                 let state = v.pointer("/session/state").and_then(Value::as_str).unwrap_or("?");
-                println!("{} {id} → {}", "●".green(), state_cell(state));
+                println!("{} {id} → {}", "●".green(), state_cell(state).0);
             })
         }
         FlowCommands::Snapshot { id, json } => {
@@ -468,17 +482,16 @@ async fn cmd_approve(id: &str, request: Option<String>, decision: &str, json: bo
     if !matches!(decision, "allow" | "deny" | "allow_session") {
         bail!("decision must be allow | deny | allow_session");
     }
-    let request_id = match request {
-        Some(r) => r,
-        None => {
-            let v = call(reqwest::Method::GET, "/api/flow/sessions", None).await?;
-            v.get("sessions")
-                .and_then(Value::as_array)
-                .and_then(|a| a.iter().find(|s| s.get("id").and_then(Value::as_str) == Some(id)))
-                .and_then(|s| s.pointer("/attention/request_id").and_then(Value::as_str))
-                .map(str::to_string)
-                .ok_or_else(|| anyhow!("{id} has no pending permission request\n  → th flow ls"))?
-        }
+    let request_id = if let Some(r) = request {
+        r
+    } else {
+        let v = call(reqwest::Method::GET, "/api/flow/sessions", None).await?;
+        list_of(&v, "sessions")
+            .iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|s| s.pointer("/attention/request_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("{id} has no pending permission request\n  → th flow ls"))?
     };
     let v = call(
         reqwest::Method::POST,
@@ -510,7 +523,7 @@ async fn cmd_fanout(cmd: FanoutCommands) -> Result<()> {
                     "●".green(),
                     v.pointer("/fan_out/id").and_then(Value::as_str).unwrap_or("?").bold()
                 );
-                print_sessions(v.get("candidates").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]));
+                print_sessions(list_of(v, "candidates"));
             })
         }
         FanoutCommands::Pick { fan_out_id, winner, json } => {
@@ -518,9 +531,18 @@ async fn cmd_fanout(cmd: FanoutCommands) -> Result<()> {
             let v = ws_call(frame, &["flow.fanout"], Duration::from_secs(600)).await?;
             emit(json, &v, |v| {
                 println!("{} merged {} (fan-out {})", "●".green(), winner.bold(), fan_out_id);
-                print_sessions(v.get("candidates").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]));
+                print_sessions(list_of(v, "candidates"));
             })
         }
+    }
+}
+
+/// Restores the terminal when `attach_session` returns by any path.
+struct RawGuard;
+
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
@@ -540,13 +562,7 @@ async fn attach_session(id: &str) -> Result<()> {
     .await?;
     eprintln!("{} attached to {id} — {} to detach", "●".cyan(), "Ctrl-\\".bold());
     crossterm::terminal::enable_raw_mode().context("enable raw mode")?;
-    struct RawGuard;
-    impl Drop for RawGuard {
-        fn drop(&mut self) {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
-    }
-    let _guard = RawGuard;
+    let raw_guard = RawGuard;
 
     // stdin reader thread → channel (blocking read; a thread is the only
     // portable way to get raw bytes without a stdin future).
@@ -602,7 +618,7 @@ async fn attach_session(id: &str) -> Result<()> {
                         }
                     }
                     Some("flow.error") => {
-                        drop(_guard);
+                        drop(raw_guard);
                         bail!("{}", v.get("message").and_then(Value::as_str).unwrap_or("engine error"));
                     }
                     _ => {}
@@ -610,7 +626,7 @@ async fn attach_session(id: &str) -> Result<()> {
             }
         }
     }
-    drop(_guard);
+    drop(raw_guard);
     eprintln!("\r\n{} detached from {id} (still running — `th flow attach {id}` to return)", "○".dimmed());
     Ok(())
 }
@@ -633,10 +649,14 @@ mod tests {
     #[test]
     fn state_cells_carry_a_glyph() {
         for s in ["working", "idle", "needs_you", "limited", "starting", "done", "dead"] {
-            let cell = state_cell(s);
+            let (cell, width) = state_cell(s);
             assert!(cell.contains('●') || cell.contains('○') || cell.contains('◐'), "{cell}");
+            assert!((6..=11).contains(&width), "{s}: {width}");
         }
-        assert_eq!(state_cell("weird"), "weird");
+        assert_eq!(state_cell("weird"), ("weird".to_string(), 5));
+        // Padding counts visible width, not escape codes.
+        assert_eq!(pad("ab", 2, 5), "ab   ");
+        assert_eq!(pad("abcdef", 6, 5), "abcdef");
         assert_eq!(short("abcdef", 4), "abc…");
         assert_eq!(short("ab", 4), "ab");
     }
