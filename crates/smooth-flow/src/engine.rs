@@ -1054,11 +1054,7 @@ impl Engine {
         let s = self.require(id)?;
         let wt = Path::new(&s.worktree);
         let head = git(wt, &["rev-parse", "HEAD"]).ok();
-        let dirty: Vec<String> = git(wt, &["status", "--porcelain"])
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.get(3..).map(str::to_string))
-            .collect();
+        let dirty: Vec<String> = git(wt, &["status", "--porcelain"]).unwrap_or_default().lines().filter_map(dirty_path).collect();
         // `th pearls show <id> --handoff --json` (lane C, th-9483e8) is the
         // packet {pearl, handoff, checkpoints, blocks, pr}; an older `th`
         // degrades to the human text as `pearl.text`.
@@ -1095,6 +1091,15 @@ impl Engine {
             "pr": pr.unwrap_or(Value::Null),
         }))
     }
+}
+
+/// The path of one `git status --porcelain` line. Not a fixed offset: `git()`
+/// trims stdout, so the first line loses its leading status space
+/// (` M apps/x` → `M apps/x`) — th-f4073b's missing first character.
+fn dirty_path(line: &str) -> Option<String> {
+    let (_, path) = line.trim_start().split_once(' ')?;
+    let path = path.trim_start();
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// The system event line for a state change: `needs_you · permission: Bash: ls`.
@@ -1482,6 +1487,18 @@ mod tests {
         assert!(matches!(rx.try_recv().unwrap(), ServerFrame::SessionRemoved { id } if id == s.id));
         assert!(e.get(&s.id).unwrap().is_none());
         assert!(e.hello().unwrap().to_wire().contains("\"sessions\":[]"));
+    }
+
+    /// th-f4073b: the first porcelain line arrives without its leading space.
+    #[test]
+    fn dirty_path_survives_the_trimmed_first_line() {
+        assert_eq!(dirty_path("M apps/smoothflow/x.swift").as_deref(), Some("apps/smoothflow/x.swift"));
+        assert_eq!(dirty_path(" M apps/smoothflow/x.swift").as_deref(), Some("apps/smoothflow/x.swift"));
+        assert_eq!(dirty_path("?? new.rs").as_deref(), Some("new.rs"));
+        assert_eq!(dirty_path("MM both.rs").as_deref(), Some("both.rs"));
+        assert_eq!(dirty_path("R  old.rs -> new.rs").as_deref(), Some("old.rs -> new.rs"));
+        assert_eq!(dirty_path(""), None);
+        assert_eq!(dirty_path("??"), None);
     }
 
     #[test]
