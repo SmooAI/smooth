@@ -74,12 +74,47 @@ th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smo
 
 `enable` is the install AND the update command — re-run it after upgrading
 `th` or the plugin. All writes are preserving (user config keys, comments and
-key order survive); `disable` never touches user-owned entries. The canonical
-skill source is the installed smooth-agent plugin checkout; Claude Code and
-Codex consume skills through the plugin itself, OpenCode gets symlinks.
-Inbox delivery INTO a running OpenCode session (prompt-boundary context
-injection via the SDK client) is the remaining piece of pearl th-cc50cd; the
-write kill switch for `th mcp serve` is `SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
+key order survive); `disable` never touches user-owned entries. Since
+th-55b2c7 the Codex/OpenCode half is sugar for `th pkg install <smooth-agent
+checkout> --harness <x>` (§1c) — skills, the OpenCode lifecycle plugin and
+their provenance come from `th pkg`; `th harness` keeps the MCP entry and the
+per-harness extras. Inbox delivery INTO a running OpenCode session
+(prompt-boundary context injection via the SDK client) is the remaining piece
+of pearl th-cc50cd; the write kill switch for `th mcp serve` is
+`SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
+
+### 1c. `th pkg` — one package, N harness renderings (EPIC th-55b2c7)
+
+A package is a Claude Code plugin checkout used as the shared core
+(`.claude-plugin/plugin.json`, `skills/`, `commands/`, `agents/`, `hooks/`,
+`.mcp.json`, plus `rules/*.md`) with per-harness overlays under
+`harness/<name>/`. `install` renders each harness's NATIVE shape and records
+every written path (+ sha256) and every owned config key in
+`~/.smooth/pkg/index.toml`. Full layout + rules:
+[`Harness-Packages.md`](Harness-Packages.md).
+
+```bash
+th pkg install ./claude-plugins/smooth-agent --harness all   # path, copied to ~/.smooth/pkg/cache
+th pkg install SmooAI/smooth/claude-plugins/smooth-agent#v1  # owner/repo[/subdir][#ref] (git clone --depth 1)
+th pkg install ./repo-with-marketplace                       # .claude-plugin/marketplace.json → every plugin
+th pkg install https://x.dev/marketplace.json                # remote marketplace
+th pkg list                                                  # name, version, harnesses, source
+th pkg status [name]                                         # drift (hash/link/key), customization points per harness
+th pkg rm <name>                                             # removes exactly what the index says we own
+th pkg init [dir]                                            # scaffold core + harness/ overlays
+```
+
+What each harness gets in M0: **claude-code** → handed to Claude's own plugin
+system (`enabledPlugins` + `extraKnownMarketplaces` in `~/.claude/settings.json`;
+the repo's marketplace when it has one, else a composed copy under the local
+`th-pkg` directory marketplace) plus `rules/` → `~/.claude/rules/<pkg>/`;
+**codex** → skills symlinked into `~/.codex/skills`, MCP into
+`[mcp_servers.*]`, `harness/codex/config.toml` key-merged; **opencode** →
+skills into `~/.opencode/skills`, MCP into `mcp.*`, `harness/opencode/plugin.js`
+linked into `~/.config/opencode/plugins/`; **every** install also links skills
+into `~/.smooth/skills` for `th` itself. Hooks are never translated between
+harnesses. `--harness` takes a comma list or `all`; a harness that isn't
+installed is skipped with a note.
 
 ---
 
@@ -1133,6 +1168,40 @@ removal). Requires `tmux` on `PATH`.
 > Supervising a session you're present for is fine; running a large unattended
 > fleet to maximize a flat-rate plan is the gray zone — keep concurrency
 > tasteful, and use the metered API + smooth-operator for true fleet scale.
+
+### SmoothFlow — sessions Big Smooth keeps alive (`th flow`, pearl th-7f0af3)
+
+`th flow` is a thin client over the SmoothFlow engine inside the daemon
+([architecture](../Architecture/SmoothFlow.md)). Sessions — Claude Code, Codex,
+OpenCode, or a plain shell — run under one long-lived `tmux -L smooth-flow`
+server, so they survive this terminal, the app, and `th` itself. The engine is
+the only state holder; `th flow` connects and never launches the daemon.
+
+```bash
+th flow ls [--json]                                      # every session: state glyph, attention, worktree
+th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --session-id, launched under tmux
+th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
+th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
+th flow new --kind claude --attach -- claude --model opus # explicit argv after `--`
+th flow attach <id>                                      # raw-mode stream; Ctrl-\ detaches (session keeps running)
+th flow send <id> "also add a regression test"           # steer: bracketed-paste + Enter into the prompt
+th flow inbox                                            # sessions that need you or finished unread
+th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
+th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
+th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
+th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
+th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
+```
+
+States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
+`limited` (usage limit — the engine resumes at the parsed reset time) ·
+`done` · `dead`. Attention reasons in brackets: `permission`, `question`,
+`usage_limit`, `crashed`, `held` (another live pid owns that harness session).
+
+Discovery is `~/.smooth/daemon.addr`; auth is the daemon's local token
+(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Errors are two lines:
+what failed, then what to do.
 
 ### Worktree helpers
 

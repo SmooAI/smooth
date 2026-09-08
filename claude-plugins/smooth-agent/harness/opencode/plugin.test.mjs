@@ -4,7 +4,7 @@
 // and the th-missing degrade path. No frameworks.
 import assert from 'node:assert/strict';
 
-import { SmoothAgent } from './smooth-agent.js';
+import { SmoothAgent } from './plugin.js';
 
 const calls = [];
 let fail = false;

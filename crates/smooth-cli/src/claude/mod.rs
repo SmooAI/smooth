@@ -9,7 +9,8 @@
 //! `supervisor` + `registry`.
 
 pub mod control;
-pub mod detect;
+/// Pane-state heuristics — shared with the SmoothFlow engine via `smooth-tmux`.
+pub use smooth_tmux::detect;
 pub mod registry;
 pub mod supervisor;
 pub mod tui;

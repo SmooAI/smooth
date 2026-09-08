@@ -1,0 +1,35 @@
+[package]
+name = "smooai-smooth-flow"
+# Internal crate — hosted by smooth-daemon, not a public library.
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SmoothFlow engine — agent/shell sessions under tmux, PTY streaming, supervision, fan-out (epic th-6ac036)"
+
+[lib]
+name = "smooth_flow"
+
+[dependencies]
+smooth-tmux.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+base64 = "0.22"
+regex = "1"
+# PTY for streaming a `tmux attach` client's bytes to flow WS clients. Pinned:
+# the master/child API moved between minors before 0.9.
+portable-pty = "=0.9.0"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -20,6 +20,7 @@ mod daemon_launcher;
 mod destructive;
 mod ext;
 mod fda;
+mod flow;
 mod gradient;
 mod hooks;
 /// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
@@ -38,6 +39,8 @@ mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
 mod pearls_handoff;
+/// th-55b2c7: `th pkg` — one package, N harness renderings.
+mod pkg;
 /// Reclaimable-disk findings reported by `th doctor` (pearl th-91de11).
 mod reclaim;
 /// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
@@ -439,6 +442,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: WorktreeCommands,
     },
+    /// SmoothFlow — agent/shell sessions run by Big Smooth under tmux.
+    ///
+    /// `ls` / `new` / `attach` / `send` / `approve` / `kill` / `snapshot` /
+    /// `fanout` / `inbox`. A thin client: the engine in the daemon holds all
+    /// state, so sessions survive this terminal, the app, and `th` itself.
+    Flow {
+        #[command(subcommand)]
+        cmd: flow::FlowCommands,
+    },
     /// Tailscale status — show the tailnet devices Smooth can see.
     Tailscale {
         #[command(subcommand)]
@@ -508,6 +520,17 @@ enum Commands {
     Hooks {
         #[command(subcommand)]
         cmd: HooksCommands,
+    },
+    /// Install agent packages (skills, rules, MCP, hooks) into Claude Code,
+    /// Codex and OpenCode from one Claude-plugin-layout source.
+    ///
+    /// A package is one plugin with N harness renderings: the Claude plugin
+    /// layout is the shared core, `harness/<name>/` overlays hold what only
+    /// that harness understands. Provenance lives in ~/.smooth/pkg/index.toml.
+    /// Pearl th-55b2c7.
+    Pkg {
+        #[command(subcommand)]
+        cmd: pkg::Cmd,
     },
     /// Pearl tracking (built-in work-item tracker).
     ///
@@ -2081,6 +2104,7 @@ async fn main() -> Result<()> {
         Some(Commands::Attest(args)) => attest::cmd(&args),
         Some(Commands::Harness { cmd }) => harness::cmd(cmd),
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
+        Some(Commands::Pkg { cmd }) => pkg::cmd(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Agent { cmd }) => mail::cmd_agent(cmd).await,
         Some(Commands::Msg { cmd }) => mail::cmd_msg(cmd).await,
@@ -2092,6 +2116,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Claude { cmd }) => claude::cmd_claude(cmd).await,
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
+        Some(Commands::Flow { cmd }) => flow::cmd_flow(cmd).await,
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
@@ -7894,6 +7919,8 @@ mod cli_dispatch_tests {
             // provider/model registries, credential profiles.
             "th mcp",
             "th plugin",
+            // th-55b2c7: package renderings + ~/.smooth/pkg provenance — all local.
+            "th pkg",
             "th providers",
             "th model",
             "th auth profile",

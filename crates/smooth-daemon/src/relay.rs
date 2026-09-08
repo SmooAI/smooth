@@ -24,6 +24,13 @@
 //! and a signed-out daemon simply waits and retries: the relay is a
 //! reachability layer, never a reason the daemon can't boot.
 //!
+//! **Flow channel (th-7f0af3).** An envelope whose frame carries
+//! `"channel":"flow"` is bridged to the daemon's flow WS (`/api/flow/ws`)
+//! instead of the operator WS — a second loopback bridge per phone. No
+//! `channel` ⇒ operator, unchanged. Outbound `flow.output` to a phone is
+//! coalesced to ~30 fps and split into ≤16 KiB frames; phones never see raw
+//! scrollback.
+//!
 //! Config: `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the default
 //! relay endpoint; `SMOOTH_RELAY_DEVICE_ID` / `SMOOTH_RELAY_LABEL` pin the
 //! identity (the env-knob precedent of `config.rs`).
@@ -172,6 +179,8 @@ enum RelayMsg {
     PeerOffline(String),
     /// A relayed envelope: (sender device, the opaque frame as a wire string).
     Frame(String, String),
+    /// A relayed envelope for the flow channel (`"channel":"flow"` in the frame).
+    FlowFrame(String, String),
 }
 
 /// Classify one relay text frame.
@@ -195,8 +204,71 @@ fn classify_relay_msg(text: &str) -> RelayMsg {
         None => {}
     }
     match (v.get("from").and_then(Value::as_str), v.get("frame")) {
+        (Some(from), Some(frame)) if smooth_flow::protocol::is_flow_frame(frame) => RelayMsg::FlowFrame(from.to_string(), frame.to_string()),
         (Some(from), Some(frame)) => RelayMsg::Frame(from.to_string(), frame.to_string()),
         _ => RelayMsg::Ignore,
+    }
+}
+
+/// Phone cap on one `flow.output` frame's decoded bytes.
+pub const PHONE_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+/// Phone cap on output frame rate (~30 fps).
+pub const PHONE_OUTPUT_TICK: Duration = Duration::from_millis(33);
+
+/// Coalesces `flow.output` bytes per session between ticks and re-emits them
+/// as ≤[`PHONE_OUTPUT_MAX_BYTES`] frames — the phone-side throttle. Pure.
+#[derive(Default)]
+pub struct OutputCoalescer {
+    pending: Vec<(String, Vec<u8>)>,
+    seq: u64,
+}
+
+impl OutputCoalescer {
+    /// Absorb one wire frame. Returns `false` (untouched) when it is not a
+    /// `flow.output`, so the caller forwards it as-is.
+    pub fn absorb(&mut self, frame_text: &str) -> bool {
+        let Ok(v) = serde_json::from_str::<Value>(frame_text) else { return false };
+        if v.get("type").and_then(Value::as_str) != Some("flow.output") {
+            return false;
+        }
+        let Some(id) = v.get("id").and_then(Value::as_str) else { return false };
+        let bytes = v
+            .get("data_b64")
+            .and_then(Value::as_str)
+            .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+            .unwrap_or_default();
+        match self.pending.iter_mut().find(|(i, _)| i == id) {
+            Some((_, buf)) => buf.extend(bytes),
+            None => self.pending.push((id.to_string(), bytes)),
+        }
+        true
+    }
+
+    /// True when a tick would emit something.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Drain everything as wire frames, chunked to the byte cap.
+    pub fn drain(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (id, buf) in self.pending.drain(..) {
+            for chunk in buf.chunks(PHONE_OUTPUT_MAX_BYTES) {
+                self.seq += 1;
+                out.push(
+                    json!({
+                        "channel": "flow",
+                        "type": "flow.output",
+                        "id": id,
+                        "seq": self.seq,
+                        "data_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk),
+                    })
+                    .to_string(),
+                );
+            }
+        }
+        out
     }
 }
 
@@ -206,6 +278,17 @@ fn classify_relay_msg(text: &str) -> RelayMsg {
 fn wrap_out(to: &str, operator_text: &str) -> Option<String> {
     let frame: Value = serde_json::from_str(operator_text).ok()?;
     Some(json!({ "to": to, "frame": frame }).to_string())
+}
+
+/// The daemon's own flow WS, for the per-phone flow bridge.
+fn flow_ws_url(local_port: u16, token: &str) -> String {
+    format!("ws://127.0.0.1:{local_port}/api/flow/ws?token={}", urlencode(token))
+}
+
+/// The bridge-map key for a phone's flow bridge (distinct from its operator
+/// bridge, which is keyed by the bare device id).
+fn flow_bridge_key(device: &str) -> String {
+    format!("{device}\u{1}flow")
 }
 
 /// Percent-encode for a `?token=` query param (RFC 3986 unreserved passes).
@@ -237,11 +320,18 @@ impl Drop for Bridge {
 /// operator WS, pump `rx` → operator and operator → `out` (wrapped in a `{to}`
 /// envelope). Ends when either side closes; the caller reaps the entry lazily
 /// (a dead `to_operator` receiver surfaces as a failed `send`).
-fn spawn_bridge(
+fn spawn_bridge(device: String, local_ws_url: String, rx: mpsc::UnboundedReceiver<String>, out: mpsc::UnboundedSender<String>) -> tokio::task::JoinHandle<()> {
+    spawn_bridge_with(device, local_ws_url, rx, out, false)
+}
+
+/// The bridge body. `throttle_output` = the flow-channel flavour: coalesce
+/// `flow.output` to ~30 fps and ≤16 KiB per frame before it reaches a phone.
+fn spawn_bridge_with(
     device: String,
     local_ws_url: String,
     mut rx: mpsc::UnboundedReceiver<String>,
     out: mpsc::UnboundedSender<String>,
+    throttle_output: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let (stream, _) = match tokio_tungstenite::connect_async(&local_ws_url).await {
@@ -252,6 +342,9 @@ fn spawn_bridge(
             }
         };
         let (mut sink, mut source) = stream.split();
+        let mut coalescer = OutputCoalescer::default();
+        let mut tick = tokio::time::interval(PHONE_OUTPUT_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 frame = rx.recv() => match frame {
@@ -262,8 +355,20 @@ fn spawn_bridge(
                     }
                     None => break, // bridge dropped by the supervisor
                 },
+                _ = tick.tick(), if throttle_output && !coalescer.is_empty() => {
+                    for text in coalescer.drain() {
+                        if let Some(envelope) = wrap_out(&device, &text) {
+                            if out.send(envelope).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                },
                 msg = source.next() => match msg {
                     Some(Ok(Message::Text(text))) => {
+                        if throttle_output && coalescer.absorb(&text) {
+                            continue;
+                        }
                         if let Some(envelope) = wrap_out(&device, &text) {
                             if out.send(envelope).is_err() {
                                 break; // relay connection gone; supervisor rebuilds
@@ -344,6 +449,7 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
     tokio::spawn(async move {
         let http = reqwest::Client::default();
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
+        let flow_ws_url = flow_ws_url(local_port, &local_token);
         // Resolved once: the id must be identical across reconnects or the
         // relay sees a new device every backoff cycle.
         let device = resolve_device_id_from(
@@ -370,7 +476,7 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
                     tracing::info!(relay = %relay_url, "relay: connected — Big Smooth is reachable without tailscale");
-                    match run_connection(stream, &local_ws_url).await {
+                    match run_connection(stream, &local_ws_url, &flow_ws_url).await {
                         ConnEnd::AuthRejected => {
                             tracing::warn!("relay: token rejected (4401) — refreshing the Smoo session and reconnecting");
                             force_refresh = true;
@@ -413,7 +519,11 @@ enum ConnEnd {
 }
 
 /// One live relay connection: pump relay ⇄ bridges until the socket ends.
-async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, local_ws_url: &str) -> ConnEnd {
+async fn run_connection(
+    stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    local_ws_url: &str,
+    flow_ws_url: &str,
+) -> ConnEnd {
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
     // writer to the relay socket.
@@ -459,9 +569,10 @@ async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungste
                     }
                     RelayMsg::Ignore => {}
                     RelayMsg::PeerOffline(device) => {
-                        // The phone we last wrote to is gone — reap its bridge so a
-                        // reconnecting phone gets a fresh operator session.
+                        // The phone we last wrote to is gone — reap its bridges so a
+                        // reconnecting phone gets fresh sessions.
                         bridges.remove(&device);
+                        bridges.remove(&flow_bridge_key(&device));
                     }
                     RelayMsg::Frame(from, frame) => {
                         // Get-or-(re)spawn the bridge, then forward. A bridge whose
@@ -474,6 +585,19 @@ async fn run_connection(stream: tokio_tungstenite::WebSocketStream<tokio_tungste
                             let task = spawn_bridge(from.clone(), local_ws_url.to_string(), rx, out_tx.clone());
                             let _ = tx.send(frame);
                             bridges.insert(from, Bridge { to_operator: tx, task });
+                        }
+                    }
+                    RelayMsg::FlowFrame(from, frame) => {
+                        // Same shape onto the flow WS, with the phone output caps.
+                        let key = flow_bridge_key(&from);
+                        let delivered = bridges
+                            .get(&key)
+                            .is_some_and(|b| b.to_operator.send(frame.clone()).is_ok() && !b.task.is_finished());
+                        if !delivered {
+                            let (tx, rx) = mpsc::unbounded_channel();
+                            let task = spawn_bridge_with(from, flow_ws_url.to_string(), rx, out_tx.clone(), true);
+                            let _ = tx.send(frame);
+                            bridges.insert(key, Bridge { to_operator: tx, task });
                         }
                     }
                 }
@@ -665,6 +789,69 @@ mod tests {
         assert_eq!(from, "phone-a");
         let v: Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(v["action"], "send_message");
+    }
+
+    #[test]
+    fn classify_routes_flow_channel_frames_separately() {
+        let m = classify_relay_msg(r#"{"from":"phone-1","frame":{"channel":"flow","type":"flow.attach","id":"fs-1","cols":80,"rows":24}}"#);
+        match m {
+            RelayMsg::FlowFrame(from, frame) => {
+                assert_eq!(from, "phone-1");
+                assert!(frame.contains("flow.attach"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // No channel ⇒ operator, unchanged.
+        assert!(matches!(
+            classify_relay_msg(r#"{"from":"phone-1","frame":{"action":"send_message","message":"hi"}}"#),
+            RelayMsg::Frame(..)
+        ));
+        // A non-flow channel is still the operator's business.
+        assert!(matches!(
+            classify_relay_msg(r#"{"from":"phone-1","frame":{"channel":"other","type":"x"}}"#),
+            RelayMsg::Frame(..)
+        ));
+        assert_ne!(flow_bridge_key("phone-1"), "phone-1");
+        assert!(flow_ws_url(4400, "t k").ends_with("/api/flow/ws?token=t%20k"));
+    }
+
+    #[test]
+    fn output_coalescer_caps_frame_size_and_merges_chunks() {
+        let mut c = OutputCoalescer::default();
+        assert!(
+            !c.absorb(r#"{"channel":"flow","type":"flow.session","session":{}}"#),
+            "non-output passes through"
+        );
+        assert!(c.is_empty());
+        let big = vec![b'x'; PHONE_OUTPUT_MAX_BYTES + 10];
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &big);
+        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-1","seq":1,"data_b64":b64}).to_string()));
+        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-1","seq":2,"data_b64":"YWI="}).to_string()));
+        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-2","seq":1,"data_b64":"eg=="}).to_string()));
+        assert!(!c.is_empty());
+        let frames = c.drain();
+        assert!(c.is_empty());
+        assert_eq!(frames.len(), 3, "fs-1 = 16 KiB + 12 bytes, fs-2 = 1 byte: {}", frames.len());
+        let decoded: Vec<(String, Vec<u8>)> = frames
+            .iter()
+            .map(|f| {
+                let v: Value = serde_json::from_str(f).unwrap();
+                assert_eq!(v["type"], "flow.output");
+                assert_eq!(v["channel"], "flow");
+                (
+                    v["id"].as_str().unwrap().to_string(),
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, v["data_b64"].as_str().unwrap()).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(decoded[0].1.len(), PHONE_OUTPUT_MAX_BYTES);
+        assert_eq!(decoded[1].1.len(), 12, "the 10-byte tail merged with the 2-byte follow-up");
+        assert_eq!(decoded[2], ("fs-2".to_string(), b"z".to_vec()));
+        let seqs: Vec<u64> = frames
+            .iter()
+            .map(|f| serde_json::from_str::<Value>(f).unwrap()["seq"].as_u64().unwrap())
+            .collect();
+        assert!(seqs.windows(2).all(|w| w[1] > w[0]));
     }
 
     #[test]

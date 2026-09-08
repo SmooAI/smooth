@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
+pub mod detect;
+
 /// Default pane geometry. Wide enough that Claude Code's status line and
 /// boxes render without wrapping artifacts that confuse pane scraping.
 pub const PANE_WIDTH: u16 = 200;
@@ -48,6 +50,11 @@ pub struct TmuxDriver {
     socket: String,
     session: String,
     capture_max_bytes: usize,
+    /// True when this driver created the tmux server and must tear it down
+    /// on drop. False for [`TmuxDriver::open_existing`] handles, which
+    /// borrow a session on a long-lived server (SmoothFlow) and must never
+    /// kill anything on drop.
+    owns_server: bool,
 }
 
 /// Build the tmux socket name for a driver keyed on `session`.
@@ -163,6 +170,7 @@ impl TmuxDriver {
             socket,
             session: session.to_string(),
             capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
+            owns_server: true,
         };
 
         // Gate on the session being fully present (not on rendered
@@ -184,6 +192,27 @@ impl TmuxDriver {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Borrow an existing session on an existing tmux server (`-L socket`)
+    /// without owning it: dropping the handle leaves the session running and
+    /// [`kill`](Self::kill) only kills the session, never the server. This is
+    /// how SmoothFlow keeps agents alive across daemon restarts (th-7f0af3).
+    /// Nothing is verified here — a missing session surfaces on first use.
+    #[must_use]
+    pub fn open_existing(socket: &str, session: &str) -> Self {
+        Self {
+            socket: socket.to_string(),
+            session: session.to_string(),
+            capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
+            owns_server: false,
+        }
+    }
+
+    /// True when dropping this driver tears the tmux server down.
+    #[must_use]
+    pub const fn owns_server(&self) -> bool {
+        self.owns_server
     }
 
     /// The tmux socket this driver owns.
@@ -350,23 +379,27 @@ impl TmuxDriver {
         }
     }
 
-    /// Kill this driver's tmux session and server.
+    /// Kill this driver's tmux session — and the whole server when this
+    /// driver owns it (the [`start`](Self::start) case).
     ///
     /// # Errors
     /// On tmux failure. Killing an already-dead session is not an error.
     pub fn kill(&self) -> Result<()> {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.socket, "kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let args: &[&str] = if self.owns_server {
+            &["-L", &self.socket, "kill-server"]
+        } else {
+            &["-L", &self.socket, "kill-session", "-t", &self.session]
+        };
+        let _ = Command::new("tmux").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
         Ok(())
     }
 }
 
 impl Drop for TmuxDriver {
     fn drop(&mut self) {
-        let _ = self.kill();
+        if self.owns_server {
+            let _ = self.kill();
+        }
     }
 }
 
@@ -464,6 +497,17 @@ mod tests {
     fn stability_ignores_empty_panes() {
         let s = |x: &str| x.to_string();
         assert!(!samples_are_stable(&[s(""), s("")], 2), "blank panes are not 'idle'");
+    }
+
+    #[test]
+    fn open_existing_never_owns_the_server() {
+        let d = TmuxDriver::open_existing("some-socket", "some-session");
+        assert!(!d.owns_server());
+        assert_eq!(d.socket(), "some-socket");
+        assert_eq!(d.session(), "some-session");
+        // Dropping must be a no-op (no tmux invocation) — nothing to assert
+        // beyond "does not panic" without a live server.
+        drop(d);
     }
 
     /// Live tmux smoke test. Skips (does not fail) when tmux is absent so
