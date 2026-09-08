@@ -46,6 +46,9 @@ th pearls create --title="…" --description="…"
 th pearls list --status=open
 th pearls list --status=in_progress
 th pearls show <id>                   # details + deps + comments + history
+th pearls checkpoint <id> --note "…" --next "…"   # handoff checkpoint (see below)
+th pearls show <id> --handoff [--json]   # handoff packet
+th pearls prime --in-progress [--cwd .] [--assignee a] [--json]
 th pearls update <id> --status=in_progress
 th pearls close <id1> <id2> …
 th pearls ready                       # open, no blockers
@@ -68,6 +71,63 @@ preserving ids and timestamps. Pearls upsert by `updated_at` (a Dolt edit after 
 no-op, and the Dolt directory is left untouched for you to delete afterwards.
 `dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` exist only for this command and
 go away in th-c6ba83.
+
+## Handoff model — checkpoints (pearl th-9483e8)
+
+A pearl is the unit of work that outlives a context window, so it carries the
+state a fresh session needs to resume cold. `th pearls checkpoint <id>` appends
+a **checkpoint**: an optional note, a timestamp, an `auto` flag, and a
+**handoff** block collected from git at that moment — `worktree`, `branch`,
+`head`, `dirty` (`git status --porcelain`, capped at 50 rows),
+`agent_session_id` (`--session-id` or `$CLAUDE_SESSION_ID`), and `next`
+(`--next`, what to do first).
+
+**Storage.** Each checkpoint is one ordinary pearl comment whose content is
+`smooth-checkpoint:` followed by the JSON record. That rides on the public
+`PearlStore` comment API alone — no table, no migration. `th pearls show` folds these
+comments into a `Checkpoints` section instead of printing the JSON. The
+effective handoff is the field-wise merge of every checkpoint in order (latest
+non-null wins), so an `--auto` checkpoint refreshes `head`/`dirty` without
+erasing an earlier `next`; notes accumulate.
+
+**Packet.** `th pearls show <id> --handoff --json` and
+`th pearls prime --in-progress --json` emit the SmoothFlow "pearl rail" shape:
+
+```json
+{
+    "pearl": { "id": "th-9483e8", "title": "…", "status": "in_progress", "…": "…" },
+    "handoff": {
+        "worktree": "/…/smooth-th-9483e8-handoff",
+        "branch": "th-9483e8-handoff",
+        "head": "…",
+        "dirty": ["M …"],
+        "agent_session_id": "…",
+        "next": "…"
+    },
+    "checkpoints": [{ "at": "2026-09-07T22:10:00Z", "note": "…", "auto": false }],
+    "blocks": ["th-d3e842"],
+    "pr": { "number": 520, "url": "…", "state": "OPEN", "ci": "pending" }
+}
+```
+
+`blocks` is the open pearls this one still waits on; `pr` comes from
+`gh pr list --head <branch>` (null without `gh`, offline, or no PR), with `ci`
+folded from `statusCheckRollup` to `success` / `failure` / `pending`. The
+human form is a compact "resume cold" block: what it is, where it is, what
+happened, what is next.
+
+**Worktree matching.** `--cwd <dir>` keeps the pearls whose recorded worktree
+is `<dir>`'s repo root, or whose id appears in `<dir>`'s branch name — the
+`th worktree create th-<id>-…` convention — so a claimed-but-never-checkpointed
+pearl is still found. `PearlStore::open` resolves the project through the git
+common dir, so a checkpoint taken inside a linked worktree lands under the
+project's root, not the worktree's.
+
+**Hooks (smooth-agent plugin).** `PreCompact` runs
+`th pearls checkpoint --auto` for the matching in-progress pearls;
+`SessionStart` with matcher `compact|resume` injects
+`th pearls prime --in-progress --cwd .` as `additionalContext`. Both are
+silent no-ops without `th`, a store, or a match.
 
 ## Diver: the lifecycle wrapper
 
