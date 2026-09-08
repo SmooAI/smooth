@@ -1,5 +1,26 @@
 # @smooai/smooth
 
+## 0.44.0
+
+### Minor Changes
+
+- 8a7e132: SmoothFlow 0.2.0: app icon (the `th` mark on three Smoo-gradient streams), menu-bar status item, Sparkle 2 OTA updates (`SUFeedURL` → downloads.smoo.ai/smoothflow/appcast.xml, "Check for Updates…"), and `smoothflow-publish.yml` — the Developer-ID-signed, notarized, appcast-generating publish pipeline that mirrors desktop-publish.yml. `build-release.sh` now bundles `th` next to `smooth-daemon`, re-signs Sparkle.framework inside-out, and writes a versioned `SmoothFlow-<version>-arm64.dmg`. th-b4e4de.
+- 2a81dc8: SmoothFlow v0.1 frames for the phones (th-d33afa, epic th-6ac036). The engine
+  now keeps a per-session event stream — `flow.event {id, event_id, at, kind:
+user|agent|tool|system, text}` derived from Claude Code hooks, `flow.send`,
+  `flow.approve` and every state change — buffered to the last 200 in
+  `flow.db` and replayed on `flow.attach`. `flow.handoff {id}` answers over the
+  WS with the pearl-rail packet (`th pearls show --handoff --json` when the
+  installed `th` has it). A client `flow.hello` re-sends the hello, and the
+  relay bridge opens the flow WS on the first `channel:"flow"` envelope. Sessions
+  record the tmux socket they run on: `smooth-daemon operator --tmux-socket`
+  (`SMOOTH_FLOW_TMUX_SOCKET`) and `th flow new --tmux-socket` pick the server,
+  which on macOS decides whether agents inherit the SmoothFlow app's TCC grants.
+
+### Patch Changes
+
+- 131654b: SmoothFlow 0.2.1 — first over-the-air update on the Sparkle channel (proves an installed 0.2.0 is offered the next release). th-b4e4de.
+
 ## 0.43.0
 
 ### Minor Changes
