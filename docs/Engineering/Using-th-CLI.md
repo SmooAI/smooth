@@ -74,12 +74,47 @@ th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smo
 
 `enable` is the install AND the update command — re-run it after upgrading
 `th` or the plugin. All writes are preserving (user config keys, comments and
-key order survive); `disable` never touches user-owned entries. The canonical
-skill source is the installed smooth-agent plugin checkout; Claude Code and
-Codex consume skills through the plugin itself, OpenCode gets symlinks.
-Inbox delivery INTO a running OpenCode session (prompt-boundary context
-injection via the SDK client) is the remaining piece of pearl th-cc50cd; the
-write kill switch for `th mcp serve` is `SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
+key order survive); `disable` never touches user-owned entries. Since
+th-55b2c7 the Codex/OpenCode half is sugar for `th pkg install <smooth-agent
+checkout> --harness <x>` (§1c) — skills, the OpenCode lifecycle plugin and
+their provenance come from `th pkg`; `th harness` keeps the MCP entry and the
+per-harness extras. Inbox delivery INTO a running OpenCode session
+(prompt-boundary context injection via the SDK client) is the remaining piece
+of pearl th-cc50cd; the write kill switch for `th mcp serve` is
+`SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
+
+### 1c. `th pkg` — one package, N harness renderings (EPIC th-55b2c7)
+
+A package is a Claude Code plugin checkout used as the shared core
+(`.claude-plugin/plugin.json`, `skills/`, `commands/`, `agents/`, `hooks/`,
+`.mcp.json`, plus `rules/*.md`) with per-harness overlays under
+`harness/<name>/`. `install` renders each harness's NATIVE shape and records
+every written path (+ sha256) and every owned config key in
+`~/.smooth/pkg/index.toml`. Full layout + rules:
+[`Harness-Packages.md`](Harness-Packages.md).
+
+```bash
+th pkg install ./claude-plugins/smooth-agent --harness all   # path, copied to ~/.smooth/pkg/cache
+th pkg install SmooAI/smooth/claude-plugins/smooth-agent#v1  # owner/repo[/subdir][#ref] (git clone --depth 1)
+th pkg install ./repo-with-marketplace                       # .claude-plugin/marketplace.json → every plugin
+th pkg install https://x.dev/marketplace.json                # remote marketplace
+th pkg list                                                  # name, version, harnesses, source
+th pkg status [name]                                         # drift (hash/link/key), customization points per harness
+th pkg rm <name>                                             # removes exactly what the index says we own
+th pkg init [dir]                                            # scaffold core + harness/ overlays
+```
+
+What each harness gets in M0: **claude-code** → handed to Claude's own plugin
+system (`enabledPlugins` + `extraKnownMarketplaces` in `~/.claude/settings.json`;
+the repo's marketplace when it has one, else a composed copy under the local
+`th-pkg` directory marketplace) plus `rules/` → `~/.claude/rules/<pkg>/`;
+**codex** → skills symlinked into `~/.codex/skills`, MCP into
+`[mcp_servers.*]`, `harness/codex/config.toml` key-merged; **opencode** →
+skills into `~/.opencode/skills`, MCP into `mcp.*`, `harness/opencode/plugin.js`
+linked into `~/.config/opencode/plugins/`; **every** install also links skills
+into `~/.smooth/skills` for `th` itself. Hooks are never translated between
+harnesses. `--harness` takes a comma list or `all`; a harness that isn't
+installed is skipped with a note.
 
 ---
 

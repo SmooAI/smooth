@@ -135,6 +135,13 @@ th harness enable claude-code|codex|opencode|all / status / disable
 th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
 th flow fanout new / pick
 
+# Install an agent package (skills, rules, MCP, hooks) into every harness from
+# ONE Claude-plugin-layout source: path, owner/repo[/subdir][#ref], or a
+# marketplace.json. Native output per harness + provenance in
+# ~/.smooth/pkg/index.toml so rm/status are exact. `th harness enable` is
+# sugar for installing smooth-agent. Spec: docs/Engineering/Harness-Packages.md
+th pkg install <source> [--harness all|claude-code,codex,opencode] / list / status [name] / rm <name> / init [dir]
+
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
 th daemon · th up / down / status

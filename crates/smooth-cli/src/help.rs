@@ -89,6 +89,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("claude", "supervise Claude Code sessions in tmux"),
             ("skills", "list skills in this workspace"),
             ("harness", "set up Claude Code / Codex / OpenCode with the smooth toolbox"),
+            ("pkg", "install agent packages (skills, rules, MCP, hooks) into every harness from one source"),
             ("mcp", "MCP servers — including `th mcp serve`, the shared agent bus"),
             ("plugin", "file-based CLI-wrapper plugins"),
             ("ext", "SEP extensions"),
@@ -174,6 +175,7 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ("agent", &["th agent whoami", "th agent claim my-task-name", "th agent list"]),
     ("attest", &["th attest --all", "th attest rust --remote smoo-hub", "th attest --status"]),
     ("harness", &["th harness enable all", "th harness status"]),
+    ("pkg", &["th pkg install owner/repo --harness all", "th pkg status", "th pkg rm <name>"]),
 ];
 
 /// Render the custom top-level help. Called for bare `th --help` / `-h` /

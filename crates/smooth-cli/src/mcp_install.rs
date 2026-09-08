@@ -31,6 +31,35 @@ pub const SERVER_NAME: &str = "smooth";
 const COMMAND: &str = "th";
 const ARGS: [&str; 2] = ["mcp", "serve"];
 
+/// One stdio MCP server, harness-agnostic. `th pkg` (th-55b2c7) renders a
+/// package's `.mcp.json` entries through the same writers `th mcp install`
+/// uses for `smooth`, so the preserving behaviour is shared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Extra environment for the server process (`env` in every harness).
+    pub env: Vec<(String, String)>,
+}
+
+impl McpServer {
+    /// `th mcp serve` — the server every harness gets.
+    #[must_use]
+    pub fn smooth() -> Self {
+        Self {
+            name: SERVER_NAME.to_string(),
+            command: COMMAND.to_string(),
+            args: ARGS.iter().map(ToString::to_string).collect(),
+            env: Vec::new(),
+        }
+    }
+
+    fn env_json(&self) -> Option<serde_json::Value> {
+        (!self.env.is_empty()).then(|| serde_json::Value::Object(self.env.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect()))
+    }
+}
+
 /// A harness `th mcp install` knows how to write to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -126,14 +155,24 @@ impl Outcome {
 /// Returns an error if the existing config can't be read or parsed, or the
 /// write fails.
 pub fn install_into(harness: Harness, home: &Path, dry_run: bool) -> Result<Outcome> {
+    install_server_into(harness, home, &McpServer::smooth(), dry_run)
+}
+
+/// Install an arbitrary stdio server into one harness. Same preserving
+/// guarantees as [`install_into`].
+///
+/// # Errors
+/// Returns an error if the existing config can't be read or parsed, or the
+/// write fails.
+pub fn install_server_into(harness: Harness, home: &Path, server: &McpServer, dry_run: bool) -> Result<Outcome> {
     if !harness.marker_dir(home).is_dir() {
         return Ok(Outcome::NotInstalled);
     }
     let path = harness.config_path(home);
     let (outcome, rendered) = match harness {
-        Harness::ClaudeCode => render_claude_code(&path)?,
-        Harness::Codex => render_codex(&path)?,
-        Harness::OpenCode => render_opencode(&path)?,
+        Harness::ClaudeCode => render_claude_code(&path, server)?,
+        Harness::Codex => render_codex(&path, server)?,
+        Harness::OpenCode => render_opencode(&path, server)?,
     };
     if outcome.wrote() && !dry_run {
         if let Some(parent) = path.parent() {
@@ -159,13 +198,16 @@ fn load_json(path: &Path) -> Result<serde_json::Value> {
 }
 
 /// `~/.claude.json` → top-level `mcpServers.smooth`.
-fn render_claude_code(path: &Path) -> Result<(Outcome, String)> {
+fn render_claude_code(path: &Path, server: &McpServer) -> Result<(Outcome, String)> {
     let mut doc = load_json(path)?;
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "type": "stdio",
-        "command": COMMAND,
-        "args": ARGS,
+        "command": server.command,
+        "args": server.args,
     });
+    if let Some(env) = server.env_json() {
+        entry["env"] = env;
+    }
     let root = doc.as_object_mut().ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?;
     let servers = root
         .entry("mcpServers")
@@ -173,9 +215,9 @@ fn render_claude_code(path: &Path) -> Result<(Outcome, String)> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("`mcpServers` in {} is not an object", path.display()))?;
 
-    let outcome = classify(servers.get(SERVER_NAME), &entry);
+    let outcome = classify(servers.get(&server.name), &entry);
     if outcome.wrote() {
-        merge_entry(servers, entry);
+        merge_entry(servers, &server.name, entry);
     }
     Ok((outcome, format!("{}\n", serde_json::to_string_pretty(&doc)?)))
 }
@@ -183,29 +225,33 @@ fn render_claude_code(path: &Path) -> Result<(Outcome, String)> {
 /// Write our keys into the `smooth` entry, leaving any key the user added
 /// (`env`, `timeout`, …) in place. Replacing the whole object would silently
 /// revert their customisation every time this ran.
-fn merge_entry(servers: &mut serde_json::Map<String, serde_json::Value>, entry: serde_json::Value) {
+fn merge_entry(servers: &mut serde_json::Map<String, serde_json::Value>, name: &str, entry: serde_json::Value) {
     let Some(ours) = entry.as_object() else { return };
-    match servers.get_mut(SERVER_NAME).and_then(serde_json::Value::as_object_mut) {
+    match servers.get_mut(name).and_then(serde_json::Value::as_object_mut) {
         Some(existing) => {
             for (k, v) in ours {
                 existing.insert(k.clone(), v.clone());
             }
         }
         None => {
-            servers.insert(SERVER_NAME.to_string(), entry);
+            servers.insert(name.to_string(), entry);
         }
     }
 }
 
 /// `~/.config/opencode/opencode.json` → `mcp.smooth` (a `local` server).
-fn render_opencode(path: &Path) -> Result<(Outcome, String)> {
+fn render_opencode(path: &Path, server: &McpServer) -> Result<(Outcome, String)> {
     let mut doc = load_json(path)?;
     // OpenCode takes the command as ONE argv array, not command + args.
-    let entry = serde_json::json!({
+    let argv: Vec<&str> = std::iter::once(server.command.as_str()).chain(server.args.iter().map(String::as_str)).collect();
+    let mut entry = serde_json::json!({
         "type": "local",
-        "command": [COMMAND, ARGS[0], ARGS[1]],
+        "command": argv,
         "enabled": true,
     });
+    if let Some(env) = server.env_json() {
+        entry["environment"] = env;
+    }
     let root = doc.as_object_mut().ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?;
     root.entry("$schema").or_insert_with(|| serde_json::json!("https://opencode.ai/config.json"));
     let servers = root
@@ -214,9 +260,9 @@ fn render_opencode(path: &Path) -> Result<(Outcome, String)> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("`mcp` in {} is not an object", path.display()))?;
 
-    let outcome = classify(servers.get(SERVER_NAME), &entry);
+    let outcome = classify(servers.get(&server.name), &entry);
     if outcome.wrote() {
-        merge_entry(servers, entry);
+        merge_entry(servers, &server.name, entry);
     }
     Ok((outcome, format!("{}\n", serde_json::to_string_pretty(&doc)?)))
 }
@@ -237,7 +283,7 @@ fn classify(existing: Option<&serde_json::Value>, desired: &serde_json::Value) -
 
 /// `~/.codex/config.toml` → `[mcp_servers.smooth]`, edited in place so the
 /// user's comments, key order and formatting survive.
-fn render_codex(path: &Path) -> Result<(Outcome, String)> {
+fn render_codex(path: &Path, server: &McpServer) -> Result<(Outcome, String)> {
     let raw = if path.exists() {
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
     } else {
@@ -247,12 +293,16 @@ fn render_codex(path: &Path) -> Result<(Outcome, String)> {
         .parse()
         .with_context(|| format!("parse {} as TOML — fix or move it, then re-run", path.display()))?;
 
-    let existing = doc.get("mcp_servers").and_then(|t| t.get(SERVER_NAME));
+    let existing = doc.get("mcp_servers").and_then(|t| t.get(&server.name));
     let matches = existing.is_some_and(|e| {
-        e.get("command").and_then(|c| c.as_str()) == Some(COMMAND)
+        e.get("command").and_then(|c| c.as_str()) == Some(server.command.as_str())
             && e.get("args")
                 .and_then(|a| a.as_array())
-                .is_some_and(|a| a.iter().filter_map(toml_edit::Value::as_str).eq(ARGS))
+                .is_some_and(|a| a.iter().filter_map(toml_edit::Value::as_str).eq(server.args.iter().map(String::as_str)))
+            && server
+                .env
+                .iter()
+                .all(|(k, v)| e.get("env").and_then(|t| t.get(k)).and_then(|x| x.as_str()) == Some(v))
     });
     if matches {
         return Ok((Outcome::AlreadyPresent, raw));
@@ -266,19 +316,67 @@ fn render_codex(path: &Path) -> Result<(Outcome, String)> {
         t.set_implicit(true);
     }
     let mut args = toml_edit::Array::new();
-    for a in ARGS {
-        args.push(a);
+    for a in &server.args {
+        args.push(a.as_str());
     }
-    let entry = &mut doc["mcp_servers"][SERVER_NAME];
+    let entry = &mut doc["mcp_servers"][server.name.as_str()];
     // Indexing alone would materialise an inline `smooth = { … }`; Codex reads
     // either, but a standard `[mcp_servers.smooth]` header is what its own docs
     // and every other tool write, so hand-editing later isn't a surprise.
     if !entry.is_table() {
         *entry = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    entry["command"] = toml_edit::value(COMMAND);
+    entry["command"] = toml_edit::value(server.command.as_str());
     entry["args"] = toml_edit::value(args);
+    if !server.env.is_empty() {
+        let mut env = toml_edit::InlineTable::new();
+        for (k, v) in &server.env {
+            env.insert(k, v.as_str().into());
+        }
+        entry["env"] = toml_edit::value(env);
+    }
     Ok((outcome, doc.to_string()))
+}
+
+/// Remove a server entry from a harness config. Preserving edits only — same
+/// guarantees as the installers. Returns whether an entry was removed.
+///
+/// # Errors
+/// Returns an error if the config exists but can't be parsed or written.
+pub fn remove_server(harness: Harness, home: &Path, name: &str) -> Result<bool> {
+    let path = harness.config_path(home);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    match harness {
+        Harness::Codex => {
+            let mut doc: toml_edit::DocumentMut = raw.parse().with_context(|| format!("parse {}", path.display()))?;
+            let removed = doc
+                .get_mut("mcp_servers")
+                .and_then(toml_edit::Item::as_table_mut)
+                .is_some_and(|t| t.remove(name).is_some());
+            if removed {
+                std::fs::write(&path, doc.to_string())?;
+            }
+            Ok(removed)
+        }
+        Harness::ClaudeCode | Harness::OpenCode => {
+            if raw.trim().is_empty() {
+                return Ok(false);
+            }
+            let mut doc: serde_json::Value = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+            let key = if harness == Harness::ClaudeCode { "mcpServers" } else { "mcp" };
+            let removed = doc
+                .get_mut(key)
+                .and_then(serde_json::Value::as_object_mut)
+                .is_some_and(|m| m.remove(name).is_some());
+            if removed {
+                std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&doc)?))?;
+            }
+            Ok(removed)
+        }
+    }
 }
 
 /// The home directory `th mcp install` writes under. `$SMOOTH_HARNESS_HOME`

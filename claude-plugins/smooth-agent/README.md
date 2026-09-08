@@ -27,6 +27,12 @@ Code worker sessions in tmux, coordinate them over
   `mail_ack` (plus `pearls_ready`/`pearls_create`, `remember`/`recall`, and the
   org tier behind `th auth login`). Codex and OpenCode reach the same mailbox
   via `th mcp install --harness codex|opencode|all`.
+- **This directory is also the first `th pkg` package** (EPIC th-55b2c7): the
+  Claude plugin layout is the shared core, and `harness/<name>/` holds the
+  per-harness overlays — `harness/opencode/plugin.js` is the OpenCode lifecycle
+  plugin (session registration + presence on the th-mail bus). `th harness
+enable codex|opencode` is `th pkg install <this dir> --harness <x>` plus the
+  MCP entry. Layout spec: `docs/Engineering/Harness-Packages.md`.
 - **`smooth-statusline.sh`** — shows which agent this session is and how much
   mail is waiting: `⚙ th:fix-auth ✉3`. Not wired automatically (Claude Code
   allows exactly one `statusLine` and clobbering yours would be rude) — run
