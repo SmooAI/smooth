@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hardened-runtime entitlements for SmoothFlow.app (from desktop/build/
+  entitlements.mac.plist minus the Electron JIT entries).
+
+  `disable-library-validation` + `allow-dyld-environment-variables` let the
+  bundled `smooth-daemon` (a separate Mach-O signed alongside the app) and its
+  children load. `automation.apple-events` is for the Messages tool.
+  `personal-information.calendars` / `.reminders` are REQUIRED for the EventKit
+  prompt to appear under the hardened runtime — without them
+  requestFullAccessToEvents silently returns not-determined (th-36da65).
+  addressbook is intentionally absent: contacts is not on.
+
+  Referenced by CODE_SIGN_ENTITLEMENTS in project.yml — NOT via xcodegen's
+  `entitlements:` key, which rewrites this file as an empty plist.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.personal-information.reminders</key>
+    <true/>
+</dict>
+</plist>

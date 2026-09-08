@@ -1,0 +1,111 @@
+# SmoothFlow (apps/smoothflow) — the native macOS fleet console.
+#
+# pull_request: compile gate + XCTests, ad-hoc signed, nothing published.
+# workflow_dispatch: signed + notarized DMG using the same secrets
+# desktop-publish.yml uses (MACOS_CERT_P12 / MACOS_CERT_PASSWORD /
+# MACOS_SIGN_IDENTITY, NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER).
+name: smoothflow-mac
+
+on:
+    pull_request:
+        paths:
+            - 'apps/smoothflow/**'
+            - '.github/workflows/smoothflow-mac.yml'
+    workflow_dispatch:
+        inputs:
+            bundle_daemon:
+                description: 'Build smooth-daemon (cargo, release) and bundle it into the app'
+                type: boolean
+                default: true
+
+concurrency:
+    group: smoothflow-mac-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        runs-on: macos-latest
+        timeout-minutes: 90
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Tools
+              run: brew install xcodegen
+
+            - name: GhosttyKit (pinned prebuilt)
+              run: bash apps/smoothflow/scripts/ensure-ghosttykit.sh
+
+            - name: Generate project
+              working-directory: apps/smoothflow
+              run: xcodegen generate
+
+            - name: Build + test (ad-hoc)
+              working-directory: apps/smoothflow
+              run: |
+                  set -o pipefail
+                  xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- test 2>&1 \
+                      | grep -E "error:|warning: .*Swift|Test Case.*failed|Executed|BUILD|TEST" || true
+                  xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- test -quiet
+
+            - name: Rust toolchain
+              if: github.event_name == 'workflow_dispatch' && inputs.bundle_daemon
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Build smooth-daemon
+              if: github.event_name == 'workflow_dispatch' && inputs.bundle_daemon
+              run: |
+                  cargo build --release -p smooai-smooth-daemon
+                  echo "SMOOTH_DAEMON_BIN=$PWD/target/release/smooth-daemon" >> "$GITHUB_ENV"
+
+            - name: Import signing certificate
+              if: github.event_name == 'workflow_dispatch'
+              id: signing
+              env:
+                  CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+                  CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+                  SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+              run: |
+                  if [[ -z "${CERT_P12:-}" || -z "${SIGN_IDENTITY:-}" ]]; then
+                      echo "::warning::MACOS_CERT_P12 / MACOS_SIGN_IDENTITY not set — ad-hoc build only."
+                      echo "identity=" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+                  PASS="$(uuidgen)"
+                  security create-keychain -p "$PASS" "$KEYCHAIN"
+                  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+                  security unlock-keychain -p "$PASS" "$KEYCHAIN"
+                  echo -n "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+                  security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+                  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASS" "$KEYCHAIN" >/dev/null
+                  security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+                  rm -f "$RUNNER_TEMP/cert.p12"
+                  # codesign wants the full identity string; desktop-publish stores the bare org name.
+                  case "$SIGN_IDENTITY" in "Developer ID Application:"*) ID="$SIGN_IDENTITY";; *) ID="Developer ID Application: $SIGN_IDENTITY";; esac
+                  echo "identity=$ID" >> "$GITHUB_OUTPUT"
+
+            - name: Release DMG (sign + notarize)
+              if: github.event_name == 'workflow_dispatch'
+              env:
+                  SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+                  NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY_P8 }}
+                  NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+                  NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+              run: |
+                  if [[ -n "${NOTARY_KEY_B64:-}" ]]; then
+                      echo -n "$NOTARY_KEY_B64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+                      export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+                  else
+                      echo "::warning::NOTARY_KEY_P8 not set — DMG is signed but not notarized."
+                  fi
+                  bash apps/smoothflow/scripts/build-release.sh
+                  rm -f "$RUNNER_TEMP/notary.p8"
+
+            - name: Upload DMG
+              if: github.event_name == 'workflow_dispatch'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: SmoothFlow-dmg
+                  path: apps/smoothflow/dist/*.dmg

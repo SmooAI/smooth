@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SMAppService LaunchAgent (Settings ▸ Daemon ▸ "LaunchAgent inside the
+     bundle"). Copied to Contents/Library/LaunchAgents by the build; only
+     usable when smooth-daemon is bundled (release builds). Launchd runs it
+     with the app as the responsible process, so TCC attribution matches
+     child mode. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.smoo.smoothflow.daemon</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/smooth-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>smooth-daemon</string>
+        <string>operator</string>
+        <string>--addr</string>
+        <string>127.0.0.1:8791</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SMOOTH_ALLOW_SECOND_DAEMON</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ai.smoo.smoothflow.daemon.log</string>
+</dict>
+</plist>

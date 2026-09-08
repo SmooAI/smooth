@@ -1,0 +1,6 @@
+# Pinned prebuilt GhosttyKit.xcframework (manaflow-ai/ghostty fork: adds the
+# MANUAL I/O surface mode SmoothFlow needs to feed flow.output bytes into a
+# surface). Update both lines together in a reviewed PR.
+ghostty_sha=abd40f6e472d57f2d4bb182004bb5f3fac8df961
+tar_sha256=fdb0f7e844fa086a410f0b1df23badf2b0503c084e1c66c297e22930758b6971
+flavor=crashsubdir-cmux-crash-sentry-off-noi18n-v2
