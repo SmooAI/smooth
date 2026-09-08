@@ -18,11 +18,7 @@ use tower::ServiceExt;
 
 fn test_app() -> Option<(axum::Router, Arc<DiverStore>)> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let dolt_dir = tmp.path().join("dolt");
-    let pearl_store = match PearlStore::init(&dolt_dir) {
-        Ok(s) => s,
-        Err(_) => return None, // smooth-dolt binary not available
-    };
+    let pearl_store = PearlStore::open_with_db(&tmp.path().join("pearls.db"), tmp.path()).ok()?;
     let diver_store = Arc::new(DiverStore::new(pearl_store));
     let state = AppState {
         store: Arc::clone(&diver_store),

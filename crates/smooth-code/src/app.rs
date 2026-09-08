@@ -1552,32 +1552,21 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     (status, warnings)
 }
 
-/// Best-effort load of open + in-progress pearls for the `@`
-/// picker. Tries `<cwd>/.smooth/dolt/` first (project-scoped) and
-/// falls back to `~/.smooth/dolt/` (global). Returns an empty vec
-/// on any failure — the picker treats "no pearls" as "just show
-/// files and paths."
+/// Best-effort load of open + in-progress pearls for the `@` picker,
+/// from the project containing the cwd. Returns an empty vec on any
+/// failure — the picker treats "no pearls" as "just show files and paths."
 fn load_pearls_for_autocomplete() -> Vec<crate::autocomplete::PearlSuggestion> {
     use smooth_pearls::{PearlQuery, PearlStore};
 
-    let candidates = [
-        std::env::current_dir().ok().map(|d| d.join(".smooth/dolt")),
-        dirs_next::home_dir().map(|h| h.join(".smooth/dolt")),
-    ];
-    for dir in candidates.into_iter().flatten() {
-        if !dir.exists() {
-            continue;
-        }
-        let Ok(store) = PearlStore::open(&dir) else { continue };
-        let Ok(pearls) = store.list(&PearlQuery::new()) else { continue };
-        return pearls
-            .into_iter()
-            .filter(|p| !matches!(p.status, smooth_pearls::PearlStatus::Closed))
-            .take(100)
-            .map(|p| crate::autocomplete::PearlSuggestion { id: p.id, title: p.title })
-            .collect();
-    }
-    Vec::new()
+    let Ok(cwd) = std::env::current_dir() else { return Vec::new() };
+    let Ok(store) = PearlStore::open(&cwd) else { return Vec::new() };
+    let Ok(pearls) = store.list(&PearlQuery::new()) else { return Vec::new() };
+    pearls
+        .into_iter()
+        .filter(|p| !matches!(p.status, smooth_pearls::PearlStatus::Closed))
+        .take(100)
+        .map(|p| crate::autocomplete::PearlSuggestion { id: p.id, title: p.title })
+        .collect()
 }
 
 /// Generate a 3–6 word Title Case summary of the user's first

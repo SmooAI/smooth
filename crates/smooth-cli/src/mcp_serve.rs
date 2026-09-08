@@ -415,7 +415,7 @@ impl SmoothMcp {
         annotations(read_only_hint = true)
     )]
     pub async fn pearls_ready(&self) -> Result<String, ErrorData> {
-        let (store, _dir) = crate::open_pearl_store_with_path().map_err(|e| store_err(&e))?;
+        let store = crate::open_pearl_store().map_err(|e| store_err(&e))?;
         let ready = store.ready().map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         if ready.is_empty() {
             return Ok("No pearls are ready to work on.".to_string());
@@ -444,7 +444,7 @@ impl SmoothMcp {
             None => Priority::Medium,
             Some(v) => Priority::from_u8(v).ok_or_else(|| ErrorData::invalid_params(format!("priority {v} out of range (0–4)"), None))?,
         };
-        let (store, _dir) = crate::open_pearl_store_with_path().map_err(|e| store_err(&e))?;
+        let store = crate::open_pearl_store().map_err(|e| store_err(&e))?;
         let pearl = store
             .create(&NewPearl {
                 title: args.title,
@@ -1055,8 +1055,7 @@ fn store_err(e: &anyhow::Error) -> ErrorData {
 
 /// Open the local memory store for the workspace this server runs in.
 fn open_memory_store() -> Result<MemoryStore, ErrorData> {
-    let (store, _dir) = crate::open_pearl_store_with_path().map_err(|e| store_err(&e))?;
-    Ok(MemoryStore::new(store.dolt().clone()))
+    Ok(crate::open_pearl_store().map_err(|e| store_err(&e))?.memory())
 }
 
 /// The active Smoo org, or an actionable MCP error.

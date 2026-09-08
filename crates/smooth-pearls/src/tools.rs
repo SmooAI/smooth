@@ -370,21 +370,13 @@ pub fn register_pearl_tools(registry: &mut smooth_operator::ToolRegistry, store:
 mod tests {
     use super::*;
 
-    fn test_store() -> Option<Arc<PearlStore>> {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let dolt_dir = tmp.path().join("dolt");
-        match PearlStore::init(&dolt_dir) {
-            Ok(store) => {
-                std::mem::forget(tmp);
-                Some(Arc::new(store))
-            }
-            Err(_) => None, // smooth-dolt binary not available
-        }
+    fn test_store() -> Arc<PearlStore> {
+        Arc::new(crate::store::tests::test_store())
     }
 
     #[test]
     fn test_create_pearl_schema_has_correct_parameters() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let tool = CreatePearlTool { store };
         let schema = tool.schema();
 
@@ -402,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_pearl_execute_creates_issue() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let tool = CreatePearlTool { store: Arc::clone(&store) };
 
         let args = json!({
@@ -426,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_pearls_returns_formatted_list() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
 
         // Create a couple of issues
         store
@@ -464,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_pearl_changes_status() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store
             .create(&NewPearl {
                 title: "Update me".to_string(),
@@ -493,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_pearl_closes_issues() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store
             .create(&NewPearl {
                 title: "Close me".to_string(),
@@ -532,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_comment_issue_adds_comment() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store
             .create(&NewPearl {
                 title: "Comment target".to_string(),

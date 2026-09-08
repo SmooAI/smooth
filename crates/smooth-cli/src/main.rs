@@ -406,8 +406,8 @@ enum Commands {
         #[command(subcommand)]
         cmd: ProjectCommands,
     },
-    /// Local pearl Dolt database — `status` (health), `backup`, and
-    /// on-disk `path` of this project's `.smooth/dolt/` store.
+    /// Local pearl database (`~/.smooth/pearls.db`) — `status`, `path`,
+    /// `backup` hint.
     Db {
         #[command(subcommand)]
         cmd: DbCommands,
@@ -1631,89 +1631,20 @@ enum PearlCommands {
         #[command(subcommand)]
         cmd: LabelCommands,
     },
-    /// Initialize a Dolt pearl database in this repo (.smooth/dolt/)
+    /// Ensure the pearl database exists and register this project
+    /// (`~/.smooth/registry.json`). Idempotent.
     Init,
-    /// Show Dolt commit history for pearls
-    Log {
-        /// Number of entries to show
-        #[arg(short, default_value = "20")]
-        n: usize,
+    /// Pearls are local SQLite now — prints where sync is headed.
+    Push,
+    /// Pearls are local SQLite now — prints where sync is headed.
+    Pull,
+    /// One-shot import of a legacy `.smooth/dolt` store into `~/.smooth/pearls.db`.
+    /// PATH is any directory inside the project (default: cwd). Idempotent;
+    /// the Dolt directory is left untouched.
+    MigrateFromDolt {
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
     },
-    /// Push pearl data to git remote (refs/dolt/data)
-    Push {
-        /// Force-push, overwriting remote history. Useful when the
-        /// remote has a stale `Initialize data repository` commit
-        /// from an earlier `dolt init` that shares no ancestor with
-        /// the local store.
-        #[arg(short = 'f', long)]
-        force: bool,
-    },
-    /// Pull pearl data from git remote
-    Pull {
-        /// Pull even if local `main` has commits not yet on the remote
-        /// (which the pull could orphan). Without this, the pull refuses
-        /// and tells you to `th pearls push` first.
-        #[arg(short = 'f', long)]
-        force: bool,
-    },
-    /// Manage Dolt remotes for pearl sync
-    Remote {
-        #[command(subcommand)]
-        cmd: RemoteCommands,
-    },
-    /// Garbage collect the pearl database (compact for git)
-    Gc,
-    /// Diagnose + (optionally) auto-repair the on-disk dolt state.
-    ///
-    /// Cold-loads the pearl DB through the CLI (not the running server)
-    /// and reports whether the noms manifest reads cleanly. If it
-    /// doesn't, `--auto-repair` snapshots the broken dir and re-clones
-    /// from the configured `origin` remote. A store that reads cleanly
-    /// is NEVER re-cloned.
-    ///
-    /// Also reports which `smooth-dolt` processes hold this store, and
-    /// whether the store actually accepts WRITES — a store pinned by a
-    /// leaked one-shot reads perfectly while every write dies with
-    /// `Error 1105: cannot update manifest: database is read only`.
-    /// `--reap` (implied by `--auto-repair`) kills the leaked processes
-    /// and re-probes.
-    ///
-    /// Then checks REMOTE SYNC health: clones the remote `refs/dolt/data`
-    /// to a temp dir (bounded by SMOOTH_DOLT_SYNC_TIMEOUT_SECS, 30s
-    /// default) and compares histories — in-sync / local-ahead (push) /
-    /// remote-ahead (pull) / diverged with no common ancestor (incl. the
-    /// stray "Initialize data repository" re-init that deadlocks push AND
-    /// pull), plus whether the branch upstream is configured. Read-only:
-    /// it recommends the fix, it never force-pushes.
-    Doctor {
-        /// Apply the remedy each finding calls for: reap leaked
-        /// smooth-dolt processes when the store is write-locked, resolve
-        /// a conflicted manifest, and — ONLY when the manifest doesn't
-        /// read cleanly — snapshot + re-clone from `origin`. Without
-        /// this flag, `doctor` just reports.
-        #[arg(long)]
-        auto_repair: bool,
-        /// Kill the leaked `smooth-dolt` processes pinning this store
-        /// into read-only, without touching the manifest. The targeted
-        /// fix for `cannot update manifest: database is read only`.
-        #[arg(long)]
-        reap: bool,
-        /// Reap even a live `smooth-dolt serve`, and one-shots younger
-        /// than --reap-age-secs. Also allows repair when a server is
-        /// attached (it's stopped first) — without it, doctor refuses to
-        /// repair while a server is running, since in-memory state could
-        /// differ from disk.
-        #[arg(long)]
-        force: bool,
-        /// How long a one-shot `smooth-dolt` process must have been
-        /// alive before it counts as leaked. Healthy one-shots live
-        /// milliseconds; the bound only exists so a concurrently-running
-        /// query from another `th` isn't killed mid-write.
-        #[arg(long, default_value_t = smooth_pearls::dolt::DEFAULT_REAP_AGE_SECS)]
-        reap_age_secs: u64,
-    },
-    /// Migrate from beads
-    MigrateFromBeads,
     /// List all registered pearl projects
     Projects,
     /// Record a persistent project memory (an insight to recall later).
@@ -1763,16 +1694,6 @@ enum LabelCommands {
     Add { label: String },
     /// Remove a label
     Remove { label: String },
-}
-
-#[derive(Subcommand)]
-enum RemoteCommands {
-    /// Add a Dolt remote (e.g., git origin URL)
-    Add { name: String, url: String },
-    /// List configured remotes
-    List,
-    /// Remove a remote
-    Remove { name: String },
 }
 
 /// Validate and canonicalize a `--agent` CLI argument against the
@@ -2147,9 +2068,8 @@ async fn main() -> Result<()> {
 }
 
 /// `th project *` — the global registry view. `list` is the same data
-/// `th pearls projects` prints; `create` never had an implementation and
-/// can't have a sensible one (registration needs a real `.smooth/dolt/`
-/// store, which is what `th pearls init` makes).
+/// `th pearls projects` prints; `create` never had an implementation
+/// (`th pearls init` inside the project is what registers it).
 fn cmd_project(cmd: ProjectCommands) -> Result<()> {
     match cmd {
         ProjectCommands::List => print_registered_projects(),
@@ -2172,7 +2092,7 @@ fn print_registered_projects() -> Result<()> {
     println!("{}", "Registered Pearl Projects".bold().cyan());
     println!();
     for entry in &projects {
-        let exists = entry.path.join(".smooth").join("dolt").exists();
+        let exists = entry.path.exists();
         let status = if exists {
             "✓".green().bold().to_string()
         } else {
@@ -2363,7 +2283,7 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
         // running) look identical to the user.
         let indicator = boot_ui::BootIndicator::new();
         let step_vm = indicator.step("starting Big Smooth");
-        let step_cast = indicator.step("dolt store online");
+        let step_cast = indicator.step("pearl store online");
         let step_runner = indicator.step("dispatch ready");
         let step_health = indicator.step("health check");
 
@@ -2562,22 +2482,23 @@ fn format_uptime(secs: u64) -> String {
 }
 
 fn cmd_db(cmd: DbCommands) -> Result<()> {
-    // Smooth retired SQLite; all durable state (pearls, sessions,
-    // memories, config) now lives in the Dolt store at
-    // ~/.smooth/dolt/ (home) or <repo>/.smooth/dolt/ (per-project).
-    let dolt_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("dolt");
+    // All pearl state (every project) lives in one SQLite file.
+    let db = smooth_pearls::default_db_path();
     match cmd {
         DbCommands::Status => {
-            if dolt_dir.exists() {
-                println!("Dolt store: {}", dolt_dir.display());
-                println!("For per-project pearl counts: cd into a project and run `th pearls stats`.");
+            if db.exists() {
+                println!("Pearl store: {}", db.display());
+                println!("For per-project counts: cd into a project and run `th pearls stats`.");
             } else {
-                println!("Dolt store not created yet. Run: th up");
+                println!("Pearl store not created yet. Run: th pearls init");
             }
         }
-        DbCommands::Path => println!("{}", dolt_dir.display()),
+        DbCommands::Path => println!("{}", db.display()),
         DbCommands::Backup => {
-            println!("Backups go through Dolt's native push/pull. Run: `th pearls push` to a configured remote.");
+            println!(
+                "Copy {} (plus its -wal/-shm siblings) — or wait for `th pearls sync` (pearl th-ddce81).",
+                db.display()
+            );
         }
     }
     Ok(())
@@ -3684,25 +3605,6 @@ async fn cmd_code(
                 println!("  {} {}", "\u{26a0}".yellow().bold(), "No providers configured. Run: th model login".yellow());
             }
         }
-        let dolt_on_path = std::process::Command::new("smooth-dolt")
-            .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok();
-        if !dolt_on_path {
-            let in_target = std::env::current_dir()
-                .ok()
-                .map(|d| d.join("target/release/smooth-dolt").exists())
-                .unwrap_or(false);
-            if !in_target {
-                println!(
-                    "  {} {}",
-                    "\u{26a0}".yellow().bold(),
-                    "smooth-dolt binary not found. Pearl sync may not work. Run: scripts/build-smooth-dolt.sh".yellow()
-                );
-            }
-        }
     }
 
     // Check if Big Smooth is running. If not, boot it via the same
@@ -3719,7 +3621,7 @@ async fn cmd_code(
         // `th up` path so both cold-start routes look identical.
         let indicator = boot_ui::BootIndicator::new();
         let step_vm = indicator.step("starting Big Smooth");
-        let step_cast = indicator.step("dolt store online");
+        let step_cast = indicator.step("pearl store online");
         let step_runner = indicator.step("dispatch ready");
         let step_health = indicator.step("health check");
 
@@ -3950,12 +3852,12 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         }
     }
 
-    // 2. Check Dolt store
-    let dolt_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("dolt");
-    if dolt_dir.exists() {
-        println!("  {} Dolt store: {}", "✓".green().bold(), format!("OK ({})", dolt_dir.display()).green());
+    // 2. Check the pearl store
+    let pearls_db = smooth_pearls::default_db_path();
+    if pearls_db.exists() {
+        println!("  {} Pearl store: {}", "✓".green().bold(), format!("OK ({})", pearls_db.display()).green());
     } else {
-        println!("  {} Dolt store: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
+        println!("  {} Pearl store: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
     }
 
     // 3. Check providers
@@ -3998,9 +3900,8 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         }
     }
 
-    // 5. Check pearl store (Dolt)
-    let pearl_store = find_dolt_dir().and_then(|d| smooth_pearls::PearlStore::open(&d));
-    match pearl_store {
+    // 5. Check pearl store
+    match open_pearl_store() {
         Ok(store) => {
             let stats = store.stats();
             match stats {
@@ -4058,7 +3959,7 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
     // (pearl th-91de11), so the only honest advice is "delete it".
     let sqlite_path = dirs_next::home_dir().map(|h| h.join(".smooth/smooth.db"));
     if let Some(ref path) = sqlite_path {
-        if path.exists() && find_dolt_dir().is_ok() {
+        if path.exists() {
             println!(
                 "  {} SQLite: {}",
                 "○".dimmed(),
@@ -4756,605 +4657,11 @@ async fn jira_sync_push(
 
 // ── Pearls ─────────────────────────────────────────────────────────
 
+/// Open the pearl store for the project containing the cwd (the main
+/// checkout even from a linked worktree — pearl th-d3e842).
 fn open_pearl_store() -> Result<smooth_pearls::PearlStore> {
-    let dolt_dir = find_dolt_dir()?;
-    smooth_pearls::PearlStore::open(&dolt_dir)
-}
-
-/// Returns the pearl store along with the on-disk dolt_dir, so
-/// callers that need both don't have to walk the tree twice. The
-/// dolt_dir is what `auto_commit_pearl_state` needs to find the
-/// enclosing git repo.
-fn open_pearl_store_with_path() -> Result<(smooth_pearls::PearlStore, std::path::PathBuf)> {
-    let dolt_dir = find_dolt_dir()?;
-    let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
-    Ok((store, dolt_dir))
-}
-
-/// Commit the messaging write to the Dolt store and git, best-effort,
-/// so it syncs via refs/dolt/data. Mirrors what pearl mutations do.
-fn commit_messaging_state(store: &smooth_pearls::PearlStore, dolt_dir: &std::path::Path, action: &str) {
-    if let Err(e) = store.dolt().commit(action) {
-        // "nothing to commit" is normal when the write was a no-op.
-        tracing::debug!(error = %e, "messaging commit returned error (likely no-op)");
-    }
-    if let Err(e) = auto_commit_pearl_state(dolt_dir, action) {
-        tracing::debug!(error = %e, "messaging git auto-commit skipped");
-    }
-}
-
-/// Best-effort push of the pearl/messaging state to the repo's
-/// `refs/dolt/data` remote so other clones/machines on the same repo see
-/// it. Pearls and messages both live in the pearl store, which syncs over
-/// the repo's git origin via Dolt's own ref — so a mutation that only
-/// commits locally won't reach a teammate's clone until a push, and an
-/// un-pushed local commit is exactly what a later `th pearls pull` can
-/// orphan (pearl th-4a4559). Quiet by design: a missing remote (the global
-/// `~/.smooth/dolt`, or a project with no origin) or being offline is a
-/// silent no-op — never an error, and never a stray `fatal:` on stderr (we
-/// drive only `dolt push`, which captures its own output; the git-side
-/// `git_push_pearl_state` inherits git's stderr and is only for the legacy
-/// tracked-store model, so it's not used here). Pearls th-bdaaa7 / th-4a4559.
-fn sync_push_pearl_state(dolt_dir: &std::path::Path) {
-    let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) else { return };
-    match dolt.push_with(smooth_pearls::PushOpts {
-        force: false,
-        set_upstream: false,
-    }) {
-        Ok(_) => {}
-        Err(e) if is_no_upstream_error(&e) => {
-            // First push to a fresh remote — retry establishing upstream.
-            let _ = dolt.push_with(smooth_pearls::PushOpts {
-                force: false,
-                set_upstream: true,
-            });
-        }
-        Err(e) => match classify_push_error(&e) {
-            // The only genuinely quiet case: nowhere to push to.
-            PushOutcome::NoRemote => tracing::debug!(error = %e, "pearl push skipped (no remote configured)"),
-            PushOutcome::Fatal => {
-                tracing::warn!(error = %e, "pearl push FAILED — this state is local-only until it succeeds");
-                eprintln!(
-                    "  {} pearl push failed — your pearls are local-only until this succeeds: {e:#}",
-                    "!".yellow().bold()
-                );
-            }
-        },
-    }
-}
-
-/// How `sync_push_pearl_state` should react to a push error.
-///
-/// Pearl th-db25d4 item 7: the `Err(e)` arm used to funnel EVERY failure into
-/// `tracing::debug!("no remote / offline")` — a message that is only true for
-/// one of them. An expired SSH key, a rejected non-fast-forward, a wedged
-/// lock: all silently reclassified as "nothing to push to", at a level nobody
-/// sees, so pearls sat un-pushed on one laptop for weeks while every command
-/// reported success. `is_no_remote_error` — the predicate that draws the real
-/// line — was defined in this same file and never consulted.
-///
-/// Pulled out as a pure function so the routing itself is testable: the bug
-/// was never in the predicate, it was in which errors reached it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PushOutcome {
-    /// No remote is configured (the global `~/.smooth/dolt` store, or a
-    /// project with no origin). Nothing to report.
-    NoRemote,
-    /// A real failure. The user's pearls are local-only until it is fixed,
-    /// so say so out loud.
-    Fatal,
-}
-
-fn classify_push_error(e: &anyhow::Error) -> PushOutcome {
-    if is_no_remote_error(e) {
-        PushOutcome::NoRemote
-    } else {
-        PushOutcome::Fatal
-    }
-}
-
-/// Commit a pearl mutation to the on-disk store/git AND push it to the
-/// repo's `refs/dolt/data` remote, so the work is durable the moment it's
-/// made — closing the un-pushed window that a later pull/re-clone can drop
-/// (pearl th-4a4559). The git commit is propagated (callers `?` it); the
-/// push is best-effort + quiet (offline / no-remote is fine). Opt out of
-/// the push with `SMOOTH_PEARLS_NO_PUSH=1` (e.g. bulk/scripted creates that
-/// push once at the end).
-fn commit_and_push_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
-    auto_commit_pearl_state(dolt_dir, action)?;
-    if std::env::var_os("SMOOTH_PEARLS_NO_PUSH").is_none() {
-        sync_push_pearl_state(dolt_dir);
-    }
-    Ok(())
-}
-
-/// How many commits local `main` is ahead of `remotes/origin/main` — i.e.
-/// committed locally but not yet on the remote's `refs/dolt/data`. These
-/// are exactly the commits a `th pearls pull` could orphan. Returns `None`
-/// when it can't be determined (no `origin`, fetch fails, or the remote
-/// branch was never fetched) so callers skip the guard rather than wrongly
-/// block. Pearl th-4a4559.
-fn pearl_local_ahead_count(dolt_dir: &std::path::Path) -> Option<usize> {
-    let dolt = smooth_pearls::SmoothDolt::new(dolt_dir).ok()?;
-    // Refresh the remote-tracking ref so the comparison is current.
-    // Best-effort — a missing/unreachable remote just leaves
-    // `remotes/origin/main` stale or absent, handled below.
-    let _ = dolt.sql("CALL DOLT_FETCH('origin', 'main')");
-    // Commits reachable from local `main` but not from the remote tip.
-    let rows = dolt.sql("SELECT COUNT(*) AS n FROM dolt_log('remotes/origin/main..main')").ok()?;
-    let n = rows.first().and_then(|r| r["n"].as_u64())?;
-    usize::try_from(n).ok()
-}
-
-/// Auto-commit the on-disk pearl store state to the enclosing git
-/// repo, if there is one.
-///
-/// Pearl mutations write to `.smooth/dolt/<db>/.dolt/noms/...` files.
-/// If those changes never make it into git, the working tree silently
-/// accumulates drift forever — `git status` becomes noise, teammates
-/// can't sync via `git pull`, and the only "source of truth" is the
-/// one machine that ran `th pearls create`.
-///
-/// This wraps each mutating `th pearls` subcommand so the dolt state
-/// lands in git automatically. Scoped strictly to `.smooth/dolt/` so
-/// it never touches the user's index or in-progress code commits.
-///
-/// `--no-verify` is intentional: pearl commits aren't code, running
-/// clippy/fmt/tests on a status change is pure overhead and would
-/// regress the UX of `th pearls update <id> --status=in_progress`.
-///
-/// Silent no-ops when:
-/// - the global `~/.smooth/dolt` store is used (no enclosing repo
-///   expected; sessions/memories don't need cross-machine sync),
-/// - the project isn't a git repo,
-/// - **`.smooth/dolt/` is git-ignored** (pearl `th-975dfe` beads model
-///   — sync moved to `refs/dolt/data` via `th pearls push`, no git
-///   commit needed; pearl `th-016296` made this a quiet no-op
-///   instead of erroring on the `use -f` hint),
-/// - the call is from a linked worktree (SMOODEV-1836 — see below),
-/// - nothing under `.smooth/dolt/` actually changed (idempotent).
-///
-/// True when `dolt_dir` (relative to `repo_root`) matches a
-/// `.gitignore` rule. Implements pearl th-016296's beads-model skip:
-/// when the user has untracked `.smooth/dolt/`, auto-committing it
-/// back into the index errors with "use -f to force-add ignored files"
-/// on every pearl mutation.
-///
-/// `git check-ignore -q <path>` exits 0 when the path is ignored, 1
-/// when it's not, 128 on error (bad invocation, not a git repo). We
-/// treat anything other than 0 as "not ignored / unknown" so the
-/// caller falls through to the legacy auto-commit path — safer than
-/// silently skipping if git is unhappy.
-fn is_dolt_gitignored(repo_root: &std::path::Path, dolt_dir: &std::path::Path) -> bool {
-    let Ok(output) = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["check-ignore", "-q", "--"])
-        .arg(dolt_dir)
-        .output()
-    else {
-        return false;
-    };
-    output.status.code() == Some(0)
-}
-
-fn auto_commit_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
-    if is_global_pearl_store(dolt_dir) {
-        return Ok(());
-    }
-
-    let Some(repo_root) = git_toplevel(dolt_dir) else {
-        return Ok(());
-    };
-
-    // SMOODEV-1836: never auto-commit the dolt store from a linked worktree.
-    // Each worktree checks out its own copy of `.smooth/dolt/`, and Dolt
-    // rewrites mutable pointer files (journal.idx, manifest, the journal
-    // chunk) on every open — committing those onto a feature branch produces
-    // binary pointer divergence that can't be merged back to main. Pearl
-    // state belongs on the primary worktree's lineage; from a linked worktree
-    // we skip the git commit (the dolt mutation + `th pearls push` to
-    // refs/dolt/data still capture the change) and tell the user where to run.
-    if is_linked_worktree(&repo_root) {
-        tracing::warn!(
-            "th pearls: skipping git auto-commit of pearl state — this is a linked \
-             worktree. Run pearl mutations from the primary worktree so the dolt \
-             store stays on one lineage; sync with `th pearls push`."
-        );
-        return Ok(());
-    }
-
-    // Pearl th-016296. Beads-model repos gitignore `.smooth/dolt/`; the
-    // git add below would otherwise fail with "use -f to force-add ignored
-    // files" on every pearl mutation. Check ahead of time with
-    // `git check-ignore -q .smooth/dolt/` (exit 0 = ignored, 1 = not
-    // ignored, 128 = error). Silent skip on the ignored case is correct:
-    // sync happens via `th pearls push` to refs/dolt/data, not via git
-    // commits of the on-disk files.
-    if is_dolt_gitignored(&repo_root, dolt_dir) {
-        return Ok(());
-    }
-
-    let canonical_repo = repo_root.canonicalize().unwrap_or_else(|_| repo_root.clone());
-    let canonical_dolt = dolt_dir.canonicalize().unwrap_or_else(|_| dolt_dir.to_path_buf());
-    let Ok(relative) = canonical_dolt.strip_prefix(&canonical_repo) else {
-        // Symlink or unrelated layout: skip rather than committing
-        // something the user wouldn't expect.
-        return Ok(());
-    };
-
-    let add_status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&canonical_repo)
-        .args(["add", "--"])
-        .arg(relative)
-        .status()
-        .map_err(|e| anyhow::anyhow!("git add for pearl auto-commit failed to launch: {e}"))?;
-    if !add_status.success() {
-        anyhow::bail!("git add .smooth/dolt/ failed (exit {add_status})");
-    }
-
-    let diff_status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&canonical_repo)
-        .args(["diff", "--cached", "--quiet", "--"])
-        .arg(relative)
-        .status()
-        .map_err(|e| anyhow::anyhow!("git diff for pearl auto-commit failed to launch: {e}"))?;
-    if diff_status.success() {
-        // Exit 0 from --quiet means "no diff" → nothing to commit.
-        return Ok(());
-    }
-
-    let msg = format!("pearl: {action}");
-    let commit_status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&canonical_repo)
-        .args(["commit", "--no-verify", "-m", &msg, "--"])
-        .arg(relative)
-        .status()
-        .map_err(|e| anyhow::anyhow!("git commit for pearl auto-commit failed to launch: {e}"))?;
-    if !commit_status.success() {
-        anyhow::bail!("git commit for pearl auto-commit failed (exit {commit_status})");
-    }
-    Ok(())
-}
-
-/// `git rev-parse --show-toplevel` rooted at the given directory.
-/// Returns `None` if not in a git repo (worktree-safe — works whether
-/// `.git` is a directory or a worktree pointer file).
-fn git_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(start)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(output.stdout).ok()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(trimmed))
-}
-
-/// True if `repo_root` is a *linked* git worktree (created by
-/// `git worktree add`) rather than the repository's primary worktree.
-///
-/// Detection: in a linked worktree `git rev-parse --git-dir` resolves to
-/// `<common>/.git/worktrees/<name>`, which differs from
-/// `--git-common-dir` (`<common>/.git`). In the primary worktree the two
-/// resolve to the same path. We canonicalize both before comparing so
-/// relative-vs-absolute output doesn't produce a false positive. On any
-/// git error we return `false` (fail toward the existing behaviour rather
-/// than silently dropping a primary-worktree commit).
-fn is_linked_worktree(repo_root: &std::path::Path) -> bool {
-    let rev = |flag: &str| -> Option<std::path::PathBuf> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
-            .args(["rev-parse", flag])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let s = String::from_utf8(out.stdout).ok()?;
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        // git prints paths relative to repo_root unless they're absolute.
-        let p = std::path::Path::new(trimmed);
-        let abs = if p.is_absolute() { p.to_path_buf() } else { repo_root.join(p) };
-        Some(abs.canonicalize().unwrap_or(abs))
-    };
-    match (rev("--git-dir"), rev("--git-common-dir")) {
-        (Some(git_dir), Some(common_dir)) => git_dir != common_dir,
-        _ => false,
-    }
-}
-
-/// Trim a pearl title down to a length that fits comfortably in a
-/// one-line commit subject (keeps `git log --oneline` readable).
-fn truncate_for_msg(s: &str) -> String {
-    const MAX: usize = 72;
-    if s.chars().count() <= MAX {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(MAX - 1).collect();
-    out.push('…');
-    out
-}
-
-/// Run `git push` for the enclosing repo if there are pearl auto-commits
-/// ahead of `@{u}`. Best-effort; returns Err with a short reason on
-/// failure so the caller can log and continue with the dolt push.
-fn git_push_pearl_state(dolt_dir: &std::path::Path) -> Result<()> {
-    if is_global_pearl_store(dolt_dir) {
-        return Ok(());
-    }
-    let Some(repo_root) = git_toplevel(dolt_dir) else {
-        anyhow::bail!("not a git repo");
-    };
-    // Check whether there's anything ahead of the upstream. If
-    // `@{u}` doesn't resolve (no upstream configured), just attempt
-    // a `git push` which will produce its own clear error.
-    let ahead = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["rev-list", "--count", "@{u}..HEAD"])
-        .output();
-    if let Ok(out) = ahead {
-        if out.status.success() {
-            let n: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
-            if n == 0 {
-                return Ok(());
-            }
-        }
-    }
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .arg("push")
-        .status()
-        .map_err(|e| anyhow::anyhow!("failed to launch git push: {e}"))?;
-    if !status.success() {
-        anyhow::bail!("git push failed (exit {status})");
-    }
-    Ok(())
-}
-
-/// Run `git pull --rebase` for the enclosing repo. Best-effort — see
-/// [`git_push_pearl_state`].
-fn git_pull_pearl_state(dolt_dir: &std::path::Path) -> Result<()> {
-    if is_global_pearl_store(dolt_dir) {
-        return Ok(());
-    }
-    let Some(repo_root) = git_toplevel(dolt_dir) else {
-        anyhow::bail!("not a git repo");
-    };
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["pull", "--rebase"])
-        .status()
-        .map_err(|e| anyhow::anyhow!("failed to launch git pull: {e}"))?;
-    if !status.success() {
-        anyhow::bail!("git pull --rebase failed (exit {status})");
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod pearl_autocommit_tests {
-    use super::*;
-    use std::process::Command;
-
-    fn git(args: &[&str], cwd: &std::path::Path) {
-        let out = Command::new("git").arg("-C").arg(cwd).args(args).output().expect("git");
-        assert!(out.status.success(), "git {args:?} in {cwd:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    fn init_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        git(&["init", "--initial-branch=main"], dir.path());
-        git(&["config", "user.email", "test@example.com"], dir.path());
-        git(&["config", "user.name", "Test"], dir.path());
-        git(&["config", "commit.gpgsign", "false"], dir.path());
-        std::fs::create_dir_all(dir.path().join(".smooth/dolt")).unwrap();
-        std::fs::write(dir.path().join("README.md"), "init\n").unwrap();
-        git(&["add", "."], dir.path());
-        git(&["commit", "--no-verify", "-m", "initial"], dir.path());
-        dir
-    }
-
-    #[test]
-    fn truncate_for_msg_short_passes_through() {
-        assert_eq!(truncate_for_msg("hello"), "hello");
-    }
-
-    #[test]
-    fn truncate_for_msg_long_truncates_with_ellipsis() {
-        let long: String = "x".repeat(100);
-        let out = truncate_for_msg(&long);
-        assert!(out.chars().count() <= 72);
-        assert!(out.ends_with('…'));
-    }
-
-    #[test]
-    fn auto_commit_skips_outside_git_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        let dolt = dir.path().join(".smooth/dolt");
-        std::fs::create_dir_all(&dolt).unwrap();
-        std::fs::write(dolt.join("foo"), "bar").unwrap();
-        // No git init — should be a silent no-op.
-        auto_commit_pearl_state(&dolt, "test").expect("should not error outside git repo");
-    }
-
-    #[test]
-    fn auto_commit_skips_when_nothing_changed() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        let before = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        auto_commit_pearl_state(&dolt, "no-op").expect("idempotent");
-        let after = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        assert_eq!(before, after, "no commit should have been created");
-    }
-
-    #[test]
-    fn auto_commit_creates_commit_on_change() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        std::fs::write(dolt.join("new_file"), "pearl state").unwrap();
-        auto_commit_pearl_state(&dolt, "create th-deadbe Test pearl").expect("commits");
-        let log = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["log", "--oneline", "-1"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        assert!(log.contains("pearl: create th-deadbe Test pearl"), "got: {log}");
-    }
-
-    #[test]
-    fn auto_commit_only_stages_smooth_dolt() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        // User has unstaged code changes in their working tree.
-        std::fs::write(dir.path().join("src.rs"), "user code").unwrap();
-        // Pearl state changes too.
-        std::fs::write(dolt.join("new_file"), "pearl state").unwrap();
-
-        auto_commit_pearl_state(&dolt, "test scoped").expect("commits");
-
-        // The user's `src.rs` should still be untracked — auto-commit
-        // must not have swept up files outside `.smooth/dolt/`.
-        let status = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["status", "--porcelain", "src.rs"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        assert!(status.contains("?? src.rs"), "expected src.rs to remain untracked, got: {status:?}");
-
-        // Verify the pearl commit landed by name-pattern (the legacy
-        // tracked-binary model). Continued below.
-        let files = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["show", "--name-only", "--pretty=format:", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        for line in files.lines().filter(|l| !l.is_empty()) {
-            assert!(line.starts_with(".smooth/dolt/"), "auto-commit included non-pearl path: {line}");
-        }
-    }
-
-    /// Pearl th-016296: when `.smooth/dolt/` is gitignored (the
-    /// beads-model repos after pearl `th-975dfe`), auto-commit must
-    /// silently no-op. Previously the function ran `git add
-    /// .smooth/dolt/` unconditionally and errored with "use -f to
-    /// force-add ignored files" on every pearl mutation.
-    #[test]
-    fn auto_commit_silent_noop_when_dolt_gitignored() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        // Add the gitignore entry the way pearl th-975dfe writes it.
-        std::fs::write(dir.path().join(".gitignore"), ".smooth/dolt/\n").unwrap();
-        git(&["add", ".gitignore"], dir.path());
-        git(&["commit", "--no-verify", "-m", "gitignore"], dir.path());
-
-        let head_before = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-
-        // Touch the dolt store like a pearl mutation would.
-        std::fs::write(dolt.join("noms_file"), "pearl state changed").unwrap();
-
-        // Must not error, must not create a new commit.
-        auto_commit_pearl_state(&dolt, "mutation that should not commit").expect("noop");
-
-        let head_after = String::from_utf8(
-            Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
-        assert_eq!(head_before, head_after, "beads-model repo must NOT create a pearl auto-commit");
-    }
-
-    #[test]
-    fn is_dolt_gitignored_returns_true_when_ignored() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        std::fs::write(dir.path().join(".gitignore"), ".smooth/dolt/\n").unwrap();
-        git(&["add", ".gitignore"], dir.path());
-        git(&["commit", "--no-verify", "-m", "gitignore"], dir.path());
-        assert!(is_dolt_gitignored(dir.path(), &dolt));
-    }
-
-    #[test]
-    fn is_dolt_gitignored_returns_false_when_not_ignored() {
-        let dir = init_repo();
-        let dolt = dir.path().join(".smooth/dolt");
-        assert!(!is_dolt_gitignored(dir.path(), &dolt));
-    }
-
-    #[test]
-    fn is_dolt_gitignored_returns_false_on_non_git_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let dolt = dir.path().join(".smooth/dolt");
-        std::fs::create_dir_all(&dolt).unwrap();
-        // git check-ignore returns 128 outside a repo; helper treats
-        // that as "not ignored / unknown" so callers fall through to
-        // the legacy auto-commit path.
-        assert!(!is_dolt_gitignored(dir.path(), &dolt));
-    }
+    let cwd = std::env::current_dir()?;
+    smooth_pearls::PearlStore::open(&cwd)
 }
 
 /// Parse a `th pearls schedule` WHEN argument into an absolute UTC instant,
@@ -5475,13 +4782,13 @@ mod schedule_tests {
 }
 
 async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
-    // `Init` runs *before* a store exists, so opening one here would
-    // fail with "no .smooth/dolt/ found". Handle it up front; every
-    // other subcommand needs an existing store.
     if matches!(cmd, PearlCommands::Init) {
-        return cmd_pearls_init().await;
+        return cmd_pearls_init();
     }
-    let (store, dolt_dir) = open_pearl_store_with_path()?;
+    if let PearlCommands::MigrateFromDolt { path } = cmd {
+        return cmd_pearls_migrate_from_dolt(path.as_deref());
+    }
+    let store = open_pearl_store()?;
 
     match cmd {
         PearlCommands::Create {
@@ -5506,7 +4813,6 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let issue = store.create(&new)?;
             println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
             println!("  {}", format_pearl_line(&issue));
-            commit_and_push_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
         }
 
         PearlCommands::List { status } => {
@@ -5600,21 +4906,18 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let updated = store.update(&id, &updates)?;
             println!("{} Updated {}", "✓".green().bold(), updated.id);
             println!("  {}", format_pearl_line(&updated));
-            commit_and_push_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
         }
 
         PearlCommands::Close { ids } => {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let count = store.close(&id_refs)?;
             println!("{} Closed {count} issue(s)", "✓".green().bold());
-            commit_and_push_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
         }
 
         PearlCommands::Reopen { id } => {
             let issue = store.reopen(&id)?;
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
             println!("  {}", format_pearl_line(&issue));
-            commit_and_push_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
         }
 
         PearlCommands::Schedule { id, when } => {
@@ -5631,7 +4934,6 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 Some(dt) => println!("{} Scheduled {} for {}", "✓".green().bold(), updated.id, dt.format("%Y-%m-%d %H:%M UTC")),
                 None => println!("{} Cleared schedule on {}", "✓".green().bold(), updated.id),
             }
-            commit_and_push_pearl_state(&dolt_dir, &format!("schedule {}", updated.id))?;
         }
 
         PearlCommands::Due => {
@@ -5651,19 +4953,16 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             DepCommands::Add { issue, depends_on } => {
                 store.add_dep(&issue, &depends_on)?;
                 println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
-                commit_and_push_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
             }
             DepCommands::Remove { issue, depends_on } => {
                 store.remove_dep(&issue, &depends_on)?;
                 println!("{} Removed dependency {issue} → {depends_on}", "✓".green().bold());
-                commit_and_push_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
             }
         },
 
         PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
-            commit_and_push_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
         }
 
         PearlCommands::Search { query } => {
@@ -5721,31 +5020,23 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             LabelCommands::Add { label } => {
                 store.add_label(&id, &label)?;
                 println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
-                commit_and_push_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
             }
             LabelCommands::Remove { label } => {
                 store.remove_label(&id, &label)?;
                 println!("{} Removed label \"{label}\" from {id}", "✓".green().bold());
-                commit_and_push_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
             }
         },
-
-        PearlCommands::MigrateFromBeads => {
-            cmd_migrate_from_beads(&store)?;
-            commit_and_push_pearl_state(&dolt_dir, "migrate from beads")?;
-        }
 
         PearlCommands::Projects => print_registered_projects()?,
 
         // ── Memory + prime (pearl th-202885) ─────────────────────────
         PearlCommands::Remember { text, source } => {
-            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let mem = store.memory();
             let id = mem.append(&text, &source)?;
-            commit_messaging_state(&store, &dolt_dir, &format!("remember {id}"));
             println!("{} remembered {} ({})", "✓".green().bold(), id.green().bold(), source.dimmed());
         }
         PearlCommands::Memories { limit, source, json } => {
-            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let mem = store.memory();
             let items = match &source {
                 Some(s) => mem.list_by_source(s, limit)?,
                 None => mem.list_recent(limit)?,
@@ -5767,16 +5058,15 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
         PearlCommands::Forget { id } => {
-            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let mem = store.memory();
             if mem.forget(&id)? {
-                commit_messaging_state(&store, &dolt_dir, &format!("forget {id}"));
                 println!("{} forgot {id}", "✓".green().bold());
             } else {
                 println!("{} no memory with id {id}", "✗".red());
             }
         }
         PearlCommands::Prime { memories, json } => {
-            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let mem = store.memory();
             let open = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Open))?;
             let in_progress = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::InProgress))?;
             let notes = mem.list_recent(memories)?;
@@ -5804,791 +5094,74 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
-        // ── Dolt commands ────────────────────────────────────────────
-        // `Init` is handled before the match above (no store exists yet).
-        PearlCommands::Init => unreachable!("Init is handled at the top of cmd_pearls"),
+        // Handled before the match above.
+        PearlCommands::Init | PearlCommands::MigrateFromDolt { .. } => unreachable!("handled at the top of cmd_pearls"),
 
-        PearlCommands::Log { n } => {
-            let dolt_dir = find_dolt_dir()?;
-            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            let entries = dolt.log(n)?;
-            if entries.is_empty() {
-                println!("No commits yet.");
-            } else {
-                for (line, _, _, _) in &entries {
-                    println!("{line}");
-                }
-            }
-        }
-
-        PearlCommands::Push { force } => {
-            // Before pushing dolt, push any pending git commits under
-            // `.smooth/dolt/` so teammates' `git pull` brings the same
-            // pearl state down. Best-effort: log and continue on a
-            // git failure (e.g. no remote, detached HEAD) so the
-            // dolt push still runs.
-            if let Err(e) = git_push_pearl_state(&dolt_dir) {
-                eprintln!("(git push for pearl state skipped: {e})");
-            }
-            // Global store at `~/.smooth/dolt` is intentionally
-            // single-machine — sessions, memories, and personal-scope
-            // pearls don't need cross-machine sync. Treat "no remote
-            // configured" there as a no-op rather than an error so
-            // `th pearls push` is safe to script unconditionally.
-            // Project stores still surface the error so the user
-            // notices a missing remote on a shared board.
-            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-
-            // Try a plain push first. Two recoverable failures get
-            // a friendlier outcome than the raw Dolt error:
-            //   1. "no upstream branch" — first push to a fresh
-            //      remote. Auto-retry with -u so the user doesn't
-            //      need to know the flag exists.
-            //   2. "no common ancestor" — the remote was init'd
-            //      independently (typically by an earlier abandoned
-            //      th pearls init somewhere else) and shares no
-            //      history with the local store. The bare Dolt
-            //      error is opaque; we surface a clear next step.
-            let opts = smooth_pearls::PushOpts { force, set_upstream: false };
-            match dolt.push_with(opts) {
-                Ok(output) => println!("{output}"),
-                Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
-                    println!("(global pearl store at {} has no remote — push skipped, this is expected)", dolt_dir.display());
-                }
-                Err(e) if is_no_upstream_error(&e) => {
-                    println!("(no upstream — retrying with --set-upstream)");
-                    let retry = smooth_pearls::PushOpts { force, set_upstream: true };
-                    let output = dolt.push_with(retry)?;
-                    println!("{output}");
-                }
-                Err(e) if is_no_common_ancestor_error(&e) && !force => {
-                    anyhow::bail!(
-                        "{e}\n\nThe remote `refs/dolt/data` was initialized independently and shares no \
-                         ancestor with the local pearl store. Two ways to fix:\n\n  \
-                         1. If the remote has no real pearl data (just a bare \"Initialize data \
-                         repository\" commit from an earlier setup):\n     \
-                         th pearls push --force\n\n  \
-                         2. To wipe the remote ref and start clean:\n     \
-                         git push origin --delete refs/dolt/data && th pearls push\n\n\
-                         Inspect first with: smooth-dolt clone <remote-url> /tmp/check && \
-                         smooth-dolt log /tmp/check"
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        PearlCommands::Pull { force } => {
-            // Guard against the data-loss footgun: if local `main` carries
-            // commits the remote doesn't have, a pull can orphan them
-            // (the refs/dolt/data divergence). Refuse by default and tell
-            // the user to push first; `--force` opts into the old
-            // behaviour. Skipped silently when we can't determine ahead-ness
-            // (no remote / fetch fails) so a remote-less store still pulls.
-            // Pearl th-4a4559.
-            if !force {
-                if let Some(ahead) = pearl_local_ahead_count(&dolt_dir) {
-                    if ahead > 0 {
-                        anyhow::bail!(
-                            "Refusing to pull: {ahead} local pearl commit(s) aren't on the remote yet, and \
-                             pulling could orphan them.\n  • Recommended: `th pearls push` first, then pull.\n  \
-                             • Or `th pearls pull --force` to pull anyway (your local-only commits stay in the \
-                             Dolt history and can be recovered, but `main` will move to the remote)."
-                        );
-                    }
-                }
-            }
-            // Pull git first so any auto-commits from teammates
-            // (under `.smooth/dolt/`) land in the working tree before
-            // the dolt layer reads it. Best-effort: failure to git
-            // pull doesn't block the dolt pull (e.g. no remote, no
-            // upstream branch).
-            if let Err(e) = git_pull_pearl_state(&dolt_dir) {
-                eprintln!("(git pull for pearl state skipped: {e})");
-            }
-            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            match dolt.pull() {
-                Ok(output) => println!("{output}"),
-                Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
-                    println!("(global pearl store at {} has no remote — pull skipped, this is expected)", dolt_dir.display());
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        PearlCommands::Remote { cmd } => {
-            let dolt_dir = find_dolt_dir()?;
-            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            match cmd {
-                RemoteCommands::Add { name, url } => {
-                    let output = dolt.remote_add(&name, &url)?;
-                    println!("{output}");
-                }
-                RemoteCommands::List => {
-                    let output = dolt.remote_list()?;
-                    if output.is_empty() {
-                        println!("No remotes configured. Run: th pearls remote add origin <url>");
-                    } else {
-                        println!("{output}");
-                    }
-                }
-                RemoteCommands::Remove { name } => {
-                    // Remove via SQL: CALL DOLT_REMOTE('remove', ?)
-                    let output = dolt.exec(&format!("CALL DOLT_REMOTE('remove', '{name}')"))?;
-                    println!("removed remote {name}");
-                    let _ = output;
-                }
-            }
-        }
-
-        PearlCommands::Gc => {
-            let dolt_dir = find_dolt_dir()?;
-            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            let output = dolt.gc()?;
-            println!("{output}");
-        }
-
-        PearlCommands::Doctor {
-            auto_repair,
-            reap,
-            force,
-            reap_age_secs,
-        } => {
-            use smooth_pearls::dolt::{find_store_holders, probe_writable, reap_store_holders, select_remedy, DoctorDiagnosis, HolderKind, Remedy, WriteProbe};
-
-            let dolt_root = find_dolt_dir()?;
-            // .smooth/dolt/ is a multi-db root — each subdir with its own
-            // `.dolt/` is an independent dolt repo. Probe each.
-            let db_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&dolt_root)
-                .with_context(|| format!("read {}", dolt_root.display()))?
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.path().join(".dolt").is_dir())
-                .map(|entry| entry.path())
-                .collect();
-            if db_dirs.is_empty() {
-                anyhow::bail!("no dolt dbs found under {} — is this an initialized pearl root?", dolt_root.display());
-            }
-
-            let mut any_bad_remote = false;
-
-            // ── REMOTE URL — the root cause of the wedge ─────────────
-            // A `/./`-mangled origin makes git reject the path, so
-            // `smooth-dolt push` hangs forever holding the write lock and
-            // the whole store goes read-only for every agent. Check and
-            // repair this FIRST: reaping a hung push against a still-
-            // broken remote just buys time until the next auto-push.
-            for db_dir in &db_dirs {
-                let cli = smooth_pearls::SmoothDolt::new_cli_only(db_dir)?;
-                let Some(fixed) = smooth_pearls::dolt::repair_malformed_remote_url(&cli.origin_url().unwrap_or_default()) else {
-                    continue;
-                };
-                println!("✗ malformed `origin` remote on {}", db_dir.display());
-                println!("    the `/./` makes git reject the path — every push hangs holding the write lock,");
-                println!("    which is what turns the whole store read-only for every writer.");
-                println!("    repaired URL: {fixed}");
-                if !auto_repair {
-                    println!("    fix: th pearls doctor --auto-repair   (repoints the remote; never touches history)");
-                    any_bad_remote = true;
-                    continue;
-                }
-                match cli.repair_origin_remote() {
-                    Ok(Some(url)) => println!("  ✓ origin repointed to {url}"),
-                    Ok(None) => {}
-                    Err(e) => {
-                        println!("  ✗ could not repair origin: {e:#}");
-                        any_bad_remote = true;
-                    }
-                }
-            }
-
-            // ── PROCESSES holding this store ─────────────────────────
-            // The write-lock class (pearl th-118847): a hung `smooth-dolt
-            // push` (or a leaked one-shot queued behind it) keeps the
-            // store open, so every write fails read-only while every read
-            // still works. Doctor used to call that "✓ healthy" and offer
-            // only the destructive re-clone. Name the holders first.
-            let holders = find_store_holders(&dolt_root);
-            if holders.is_empty() {
-                println!("smooth-dolt processes holding this store: none");
-            } else {
-                println!("smooth-dolt processes holding this store: {}", holders.len());
-                for h in &holders {
-                    let kind = match h.kind {
-                        HolderKind::Serve => "serve",
-                        HolderKind::Sync => "sync (push/pull)",
-                        HolderKind::OneShot => "one-shot",
-                        HolderKind::Child => "child of a holder",
-                    };
-                    println!(
-                        "  pid {} [{}] alive {}s: {}",
-                        h.pid,
-                        kind,
-                        h.age_secs,
-                        h.cmd.chars().take(100).collect::<String>()
-                    );
-                }
-            }
-            println!();
-
-            let mut any_corrupt = false;
-            let mut any_failed_repair = false;
-            let mut any_write_locked = false;
-            let mut healthy_dbs: Vec<std::path::PathBuf> = Vec::new();
-            for db_dir in &db_dirs {
-                let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                println!("probing db: {} at {}", name, db_dir.display());
-                let diagnosis = smooth_pearls::SmoothDolt::diagnose(db_dir);
-
-                // A cold `log` probe only proves the store READS. Probe
-                // writes too — otherwise a write-locked store is reported
-                // healthy while `th pearls create` dies.
-                let write = matches!(diagnosis, DoctorDiagnosis::Healthy).then(|| probe_writable(db_dir));
-                let write_locked = matches!(write, Some(WriteProbe::ReadOnly { .. }));
-                let remedy = select_remedy(&diagnosis, write_locked);
-
-                match diagnosis {
-                    DoctorDiagnosis::Healthy if write_locked => {
-                        println!("  ✓ manifest reads cleanly — the db is NOT corrupt");
-                        if holders.is_empty() {
-                            println!("  ✗ store is write-locked — writes will fail with \"database is read only\"");
-                            println!("    but no smooth-dolt process was found holding it, so there is nothing to reap.");
-                            println!("    Something outside this store's own machinery has it open — investigate with:");
-                            println!("      lsof {}", db_dir.join(".dolt/noms/LOCK").display());
-                        } else if holders.iter().any(|h| h.kind == HolderKind::Sync) {
-                            // The real causal chain, named explicitly.
-                            println!(
-                                "  ✗ store is write-locked by a hung `smooth-dolt push` against a malformed/unreachable remote \
-                                 — writes will fail with \"database is read only\""
-                            );
-                            println!("    → fix the remote, then reap the push. Other leaked processes are queued BEHIND it, not the cause.");
-                        } else {
-                            println!(
-                                "  ✗ store is write-locked by {} leaked smooth-dolt process(es) — writes will fail with \"database is read only\"",
-                                holders.len()
-                            );
-                        }
-                        if let Some(WriteProbe::ReadOnly { detail }) = &write {
-                            println!("    {detail}");
-                        }
-
-                        if remedy != Remedy::Reap || !(reap || auto_repair) {
-                            any_write_locked = true;
-                            println!("    fix: th pearls doctor --reap");
-                            println!("         (add --force to also stop an attached `smooth-dolt serve`)");
-                            continue;
-                        }
-
-                        // REAP — never a re-clone. The store is healthy;
-                        // only the processes pinning it need to go.
-                        let (reaped, refused) = reap_store_holders(&dolt_root, reap_age_secs, force);
-                        for h in &reaped {
-                            println!(
-                                "  ✓ reaped pid {} (alive {}s): {}",
-                                h.pid,
-                                h.age_secs,
-                                h.cmd.chars().take(100).collect::<String>()
-                            );
-                        }
-                        for h in &refused {
-                            let why = match h.kind {
-                                HolderKind::Serve => "a live `smooth-dolt serve` — re-run with --force to stop it".to_string(),
-                                HolderKind::Sync | HolderKind::OneShot | HolderKind::Child => {
-                                    format!(
-                                        "only {}s old (< --reap-age-secs {reap_age_secs}) — may still be working; --force to reap anyway",
-                                        h.age_secs
-                                    )
-                                }
-                            };
-                            println!("  ○ left alone pid {}: {why}", h.pid);
-                        }
-                        if reaped.is_empty() {
-                            println!("  ✗ nothing eligible to reap — see above");
-                        }
-
-                        match probe_writable(db_dir) {
-                            WriteProbe::Writable => {
-                                println!("  ✓ store accepts writes again");
-                                healthy_dbs.push(db_dir.clone());
-                            }
-                            other => {
-                                println!("  ✗ store still refuses writes: {other:?}");
-                                any_write_locked = true;
-                            }
-                        }
-                    }
-                    DoctorDiagnosis::Healthy => {
-                        match &write {
-                            Some(WriteProbe::Failed { detail }) => {
-                                println!("  ✓ healthy (reads OK)");
-                                println!("  ! write probe could not run: {detail}");
-                            }
-                            _ => println!("  ✓ healthy (reads + writes OK)"),
-                        }
-                        healthy_dbs.push(db_dir.clone());
-                    }
-                    DoctorDiagnosis::NotInitialized { detail } => {
-                        println!("  ✗ not a valid dolt dir: {detail}");
-                        any_failed_repair = true;
-                    }
-                    DoctorDiagnosis::ConflictMarkers { candidates } => {
-                        any_corrupt = true;
-                        println!("  ✗ manifest has unresolved git merge-conflict markers ({} candidate lines)", candidates.len());
-                        println!("    cause: git's text-merger ran on the binary noms/manifest file.");
-                        println!("    fix:  pick the right pre-merge manifest line (the longest is usually the most-recent state).");
-                        for (idx, line) in candidates.iter().enumerate() {
-                            println!("      [{idx}] {} chars: {}…", line.len(), line.chars().take(60).collect::<String>());
-                        }
-                        if !auto_repair {
-                            continue;
-                        }
-                        match smooth_pearls::SmoothDolt::repair_manifest_conflict(db_dir, &candidates) {
-                            Ok(chosen) => {
-                                println!(
-                                    "  ✓ wrote chosen candidate ({} chars) — original kept at manifest.with-conflicts-<ts>",
-                                    chosen.len()
-                                );
-                            }
-                            Err(e) => {
-                                println!("  ✗ manifest repair failed: {e:#}");
-                                any_failed_repair = true;
-                                continue;
-                            }
-                        }
-                        match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => {
-                                println!("  ✓ post-repair probe healthy");
-                                healthy_dbs.push(db_dir.clone());
-                            }
-                            other => {
-                                println!("  ✗ post-repair probe still unhealthy: {other:?}");
-                                println!("    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>");
-                                println!("    into .dolt/noms/manifest (no trailing newline) and re-run doctor.");
-                                any_failed_repair = true;
-                            }
-                        }
-                    }
-                    DoctorDiagnosis::Corrupt { detail } => {
-                        any_corrupt = true;
-                        println!("  ✗ corrupt: {detail}");
-                        // The re-clone is the ONE destructive remedy, and
-                        // it is reachable only from here — a store whose
-                        // manifest reads cleanly can never land on this
-                        // arm, so a healthy-but-write-locked db can never
-                        // be re-cloned away (pearl th-118847).
-                        if !auto_repair || remedy != Remedy::RecloneFromRemote {
-                            continue;
-                        }
-
-                        // Auto-repair path
-                        let server_attached = smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir).is_some();
-                        if server_attached && !force {
-                            println!(
-                                "  ! a smooth-dolt server is attached to this db — skipping repair.\n    \
-                                 • Run `th pearls push` first if you have local writes to preserve.\n    \
-                                 • Then re-run with `--force` to stop the server and re-clone."
-                            );
-                            any_failed_repair = true;
-                            continue;
-                        }
-                        if server_attached {
-                            println!("  stopping attached smooth-dolt server...");
-                            // Drop the attach handle so the socket is released.
-                            drop(smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir));
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                        }
-
-                        let cli = match smooth_pearls::SmoothDolt::new_cli_only(db_dir) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                println!("  ✗ couldn't construct CLI handle: {e:#}");
-                                any_failed_repair = true;
-                                continue;
-                            }
-                        };
-                        match cli.recover_from_remote() {
-                            Ok(broken) => {
-                                println!("  ✓ snapshot at: {}", broken.display());
-                                println!("    delete with `rm -rf {}` once verified", broken.display());
-                            }
-                            Err(e) => {
-                                println!("  ✗ repair failed: {e:#}");
-                                any_failed_repair = true;
-                                continue;
-                            }
-                        }
-
-                        // Re-probe
-                        match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => {
-                                println!("  ✓ post-repair probe healthy");
-                                healthy_dbs.push(db_dir.clone());
-                            }
-                            other => {
-                                println!("  ✗ post-repair probe still unhealthy: {other:?}");
-                                any_failed_repair = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // REMOTE SYNC — the 2026-07-02 incident class: local store
-            // perfectly healthy, but push/pull dead (unset upstream,
-            // stray remote re-init, remote-ahead, …). Diagnose-only.
-            let any_diverged = doctor_remote_sync(&healthy_dbs);
-
-            if any_corrupt && !auto_repair {
-                anyhow::bail!(
-                    "one or more dbs are corrupt. Re-run with `--auto-repair` to snapshot + re-clone\n\
-                     from the configured `origin` remote for each affected db."
-                );
-            }
-            if any_failed_repair {
-                anyhow::bail!("some repairs failed — see output above");
-            }
-            if any_bad_remote {
-                anyhow::bail!(
-                    "the dolt `origin` remote is malformed (the `/./` mangling) — git rejects the path, so every\n\
-                     `smooth-dolt push` hangs holding the write lock and the store goes read-only for every agent.\n  \
-                     • Fix: th pearls doctor --auto-repair   (repoints the remote — it never touches history)"
-                );
-            }
-            if any_write_locked {
-                anyhow::bail!(
-                    "the pearl store reads fine but refuses WRITES — leaked smooth-dolt process(es) are holding it.\n\
-                     `th pearls create` / `th msg send` will keep failing with \"cannot update manifest: database is read only\".\n  \
-                     • Fix: th pearls doctor --reap\n  \
-                     • If a `smooth-dolt serve` is holding it: th pearls doctor --reap --force\n\
-                     This does NOT re-clone — your local pearl history is intact."
-                );
-            }
-            if any_diverged {
-                anyhow::bail!(
-                    "local and remote pearl histories have diverged — push AND pull are deadlocked.\n\
-                     See the remote sync section above for the recommended fix."
-                );
-            }
+        PearlCommands::Push | PearlCommands::Pull => {
+            println!(
+                "pearls are local SQLite now ({}); `th pearls sync` is th-ddce81 — see `th pearls list`",
+                store.db_path().display()
+            );
         }
     }
 
     Ok(())
 }
 
-/// Find the .smooth/dolt/ directory by walking up from cwd.
-fn find_dolt_dir() -> Result<std::path::PathBuf> {
+/// `th pearls migrate-from-dolt [PATH]` — import a legacy `.smooth/dolt`
+/// store (found by walking up from PATH, default cwd) into the SQLite
+/// store for that project. Idempotent; leaves the Dolt dir untouched.
+fn cmd_pearls_migrate_from_dolt(path: Option<&std::path::Path>) -> Result<()> {
+    let start = match path {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let dolt_dir = smooth_pearls::dolt::find_repo_dolt_dir(&start)
+        .ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found at or above {} — nothing to migrate", start.display()))?;
+    // Project = the directory holding `.smooth/`, git-resolved to the main checkout.
+    let project = dolt_dir.parent().and_then(std::path::Path::parent).unwrap_or(&start);
+    let store = smooth_pearls::PearlStore::open(project)?;
+    let before = store.stats()?;
+    println!(
+        "Importing {} → {} (project {})",
+        dolt_dir.display(),
+        store.db_path().display(),
+        store.project_root().display()
+    );
+    println!("  before: {} pearl(s) in SQLite for this project", before.total);
+    let report = smooth_pearls::migrate_dolt::migrate_from_dolt(&dolt_dir, &store)?;
+    for (table, (read, inserted)) in report.rows() {
+        println!("  {table:<13} read {read:>5}  inserted {inserted:>5}");
+    }
+    let after = store.stats()?;
+    println!(
+        "  after:  {} pearl(s) ({} open, {} in progress, {} closed)",
+        after.total, after.open, after.in_progress, after.closed
+    );
+    println!(
+        "{} Dolt store left in place; delete it when you're satisfied: rm -rf {}",
+        "✓".green().bold(),
+        dolt_dir.display()
+    );
+    Ok(())
+}
+
+/// `th pearls init` — ensure the pearl database exists and register the
+/// cwd's project (idempotent). Also installs the git hooks and the
+/// AGENTS.md messaging block.
+fn cmd_pearls_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
-}
-
-/// `th pearls doctor` — REMOTE SYNC section. Read-only diagnosis of the
-/// local↔remote `refs/dolt/data` relationship. A cheap tip-level check
-/// runs first (see [`smooth_pearls::dolt::classify_tip_check`]) — when
-/// it proves in-sync, no clone happens. Otherwise it temp-clones the
-/// remote (bounded, see [`smooth_pearls::dolt::clone_from_bounded`]),
-/// compares bounded logs via
-/// [`smooth_pearls::dolt::classify_remote_sync`], and reports whether
-/// the branch upstream is configured (an unset upstream makes a bare
-/// push fail with `remote '' not found`).
-///
-/// Returns whether any db is diverged (no common ancestor with the
-/// remote) — the push/pull-deadlock class the doctor previously missed
-/// (2026-07-02 incident: remote stray-re-initialized with a single bare
-/// "Initialize data repository" commit while the local store held 2547
-/// commits; push refused as diverged, pull refused by the data-loss
-/// guard, and doctor said nothing).
-fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
-    use smooth_pearls::dolt::{
-        branch_hash, classify_remote_sync, classify_tip_check, clone_from_bounded, last_synced_dolt_data_tip, remote_dolt_data_tip, RemoteSyncStatus, TipCheck,
-    };
-
-    println!();
-    println!("remote sync:");
-    if healthy_dbs.is_empty() {
-        println!("  - skipped (no healthy local db to compare against)");
-        return false;
+    let store = smooth_pearls::PearlStore::init(&cwd)?;
+    println!(
+        "{} Pearl store ready: {} (project {})",
+        "✓".green().bold(),
+        store.db_path().display(),
+        store.project_root().display()
+    );
+    if smooth_pearls::dolt::find_repo_dolt_dir(&cwd).is_some() && store.stats()?.total == 0 {
+        println!("  Legacy .smooth/dolt store found — import it with: th pearls migrate-from-dolt");
     }
-    // Probe the primary `pearls` db for remote config — every db under
-    // one root shares the same git remote (refs/dolt/data).
-    let probe = healthy_dbs
-        .iter()
-        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some("pearls"))
-        .unwrap_or(&healthy_dbs[0]);
-
-    let remotes = match smooth_pearls::SmoothDolt::new_cli_only(probe).and_then(|d| d.remote_list()) {
-        Ok(out) => out,
-        Err(e) => {
-            println!("  ✗ couldn't list remotes: {e:#}");
-            return false;
-        }
-    };
-    // smooth-dolt prints one `name<TAB>url` per line; prefer `origin`.
-    let remote = remotes
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.split_whitespace();
-            Some((parts.next()?, parts.next()?))
-        })
-        .max_by_key(|(name, _)| *name == "origin");
-    let Some((remote_name, remote_url)) = remote else {
-        println!("  - no remote configured — nothing to sync with (add one: th pearls remote add origin <url>)");
-        return false;
-    };
-    println!("  remote: {remote_name} {remote_url}");
-
-    // Upstream check — cheap repo_state.json read. Plain `th pearls
-    // push` auto-repairs a missing upstream via its `-u` retry (PR #123),
-    // so this is informational.
-    match pearl_upstream_remote(probe) {
-        Some(up) => println!("  ✓ branch upstream configured ({up})"),
-        None => {
-            println!("  ! branch upstream not set — a bare dolt push fails with `remote '' not found`.");
-            println!("    Plain `th pearls push` auto-repairs this (retries with -u).");
-        }
-    }
-
-    // Tip-level check FIRST (pearl th-c42cc4). The deep probe below
-    // clones the full remote refs/dolt/data — measured ~5 minutes at 96%
-    // CPU on a 2547-commit store, which always exceeds the default 30s
-    // sync bound, so on large stores the doctor used to skip the
-    // comparison entirely. Four cheap signals answer the common case
-    // without any clone: local dolt head vs remote-tracking head (no
-    // unpushed commits?) and last-synced git tip vs `git ls-remote`
-    // (remote ref unmoved?). Anything short of a clean "in sync" falls
-    // through to the deep probe unchanged.
-    let remote_tip = match remote_dolt_data_tip(remote_url) {
-        Ok(tip) => tip,
-        Err(e) => {
-            println!("  ! tip check skipped — git ls-remote failed: {e:#}");
-            None
-        }
-    };
-    let tip_verdicts: Vec<(String, TipCheck)> = healthy_dbs
-        .iter()
-        .map(|db_dir| {
-            let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
-            let (local, tracking) = smooth_pearls::SmoothDolt::new_cli_only(db_dir).map_or((None, None), |dolt| {
-                let head = |query: &str, branch: &str| dolt.sql(query).ok().and_then(|rows| branch_hash(&rows, branch));
-                (
-                    head("select name, hash from dolt_branches", "main"),
-                    head("select name, hash from dolt_remote_branches", "remotes/origin/main"),
-                )
-            });
-            let last_synced = last_synced_dolt_data_tip(db_dir);
-            let verdict = classify_tip_check(local.as_deref(), tracking.as_deref(), last_synced.as_deref(), remote_tip.as_deref());
-            (name, verdict)
-        })
-        .collect();
-    if tip_verdicts.iter().all(|(_, v)| *v == TipCheck::InSync) {
-        for (name, _) in &tip_verdicts {
-            println!("  ✓ {name}: in sync with remote (tip-level check — no local commits since last sync, remote ref unmoved)");
-        }
-        return false;
-    }
-    for (name, verdict) in &tip_verdicts {
-        match verdict {
-            TipCheck::InSync => {}
-            TipCheck::LocalMoved => println!("  … {name}: tip check found local commits since the last sync — running the deep probe to classify"),
-            TipCheck::RemoteMoved => println!("  … {name}: tip check found the remote ref moved since the last sync — running the deep probe to classify"),
-            TipCheck::Unknown => println!("  … {name}: tip check inconclusive (missing sync marker or remote ref) — running the deep probe to classify"),
-        }
-    }
-
-    // Bounded temp clone of the remote's refs/dolt/data.
-    let tmp = match tempfile::TempDir::new() {
-        Ok(t) => t,
-        Err(e) => {
-            println!("  ✗ couldn't create temp dir for remote clone: {e}");
-            return false;
-        }
-    };
-    let clone_root = tmp.path().join("remote");
-    if let Err(e) = clone_from_bounded(remote_url, &clone_root) {
-        // A deadline hit is NOT "unreachable" — a full clone of a large
-        // store is legitimately minutes of CPU (measured ~5min for a
-        // 2547-commit history; pearl th-6c6843). Say what actually
-        // happened and how to get the diagnosis anyway.
-        if smooth_pearls::dolt::is_sync_timeout_err(&e) {
-            println!("  ! remote comparison skipped — the probe clone exceeded its time bound: {e:#}");
-            println!("    A large store can take minutes to clone. Re-run with a bigger bound, e.g.:");
-            println!("    SMOOTH_DOLT_SYNC_TIMEOUT_SECS=600 th pearls doctor");
-        } else {
-            println!("  ✗ remote unreachable — clone of {remote_url} failed: {e:#}");
-        }
-        return false;
-    }
-
-    // Compare histories per db. `log` is bounded, so the classification
-    // is a heuristic over the last 500 commits on each side.
-    let bounded_log = |dir: &std::path::Path| -> Result<Vec<String>> {
-        let entries = smooth_pearls::SmoothDolt::new_cli_only(dir)?.log(500)?;
-        Ok(entries.into_iter().map(|(line, ..)| line).collect())
-    };
-    let mut any_diverged = false;
-    for db_dir in healthy_dbs {
-        let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        let remote_db = clone_root.join(name);
-        if !remote_db.join(".dolt").is_dir() {
-            println!("  ! {name}: remote has no `{name}` db — never pushed? run: th pearls push");
-            continue;
-        }
-        let (local, remote) = match (bounded_log(db_dir), bounded_log(&remote_db)) {
-            (Ok(l), Ok(r)) => (l, r),
-            (Err(e), _) => {
-                println!("  ✗ {name}: couldn't read local log: {e:#}");
-                continue;
-            }
-            (_, Err(e)) => {
-                println!("  ✗ {name}: couldn't read remote log: {e:#}");
-                continue;
-            }
-        };
-        match classify_remote_sync(&local, &remote) {
-            RemoteSyncStatus::InSync => println!("  ✓ {name}: in sync with remote"),
-            RemoteSyncStatus::LocalAhead => {
-                println!("  → {name}: local is ahead of the remote (remote tip found in local history within the last 500 commits) — run: th pearls push");
-            }
-            RemoteSyncStatus::RemoteAhead => {
-                println!("  ← {name}: remote is ahead of local (local tip found in remote history within the last 500 commits) — run: th pearls pull");
-            }
-            RemoteSyncStatus::DivergedBareInit => {
-                any_diverged = true;
-                println!("  ✗ {name}: DIVERGED — the remote refs/dolt/data has exactly ONE commit (\"Initialize data repository\")");
-                println!(
-                    "    sharing no ancestor with the {} local commits. This is a stray re-init of the remote ref:",
-                    local.len()
-                );
-                println!("    push is refused (diverged) and pull is refused (data-loss guard).");
-                println!("    `th pearls push --force` would overwrite ONLY that bare init commit — recommended.");
-            }
-            RemoteSyncStatus::Diverged => {
-                any_diverged = true;
-                println!("  ✗ {name}: DIVERGED — no common ancestor with the remote within the last 500 commits,");
-                println!("    and the remote has real commits. Inspect before any force:");
-                println!("    smooth-dolt clone {remote_url} /tmp/check && smooth-dolt log /tmp/check/{name}");
-            }
-            RemoteSyncStatus::EmptyRemote => println!("  ! {name}: remote history is empty — run: th pearls push"),
-            RemoteSyncStatus::EmptyLocal => println!("  ! {name}: local history is empty — run: th pearls pull"),
-        }
-    }
-    any_diverged
-}
-
-/// Cheap upstream detection for the doctor: dolt records the branch
-/// upstream in `.dolt/repo_state.json` under `branches.<name>.remote`.
-/// `None` when the file/field is missing or the remote is empty —
-/// exactly the state that makes a bare `CALL DOLT_PUSH()` resolve the
-/// remote name to `''`.
-fn pearl_upstream_remote(db_dir: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read_to_string(db_dir.join(".dolt").join("repo_state.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("branches")?.as_object()?.iter().find_map(|(branch, b)| {
-        let remote = b.get("remote")?.as_str()?;
-        if remote.is_empty() {
-            None
-        } else {
-            Some(format!("{branch} → {remote}"))
-        }
-    })
-}
-
-#[cfg(test)]
-mod pearl_upstream_remote_tests {
-    use super::pearl_upstream_remote;
-
-    fn write_repo_state(json: &str) -> tempfile::TempDir {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dolt = tmp.path().join(".dolt");
-        std::fs::create_dir_all(&dolt).unwrap();
-        std::fs::write(dolt.join("repo_state.json"), json).unwrap();
-        tmp
-    }
-
-    #[test]
-    fn detects_configured_upstream() {
-        let tmp = write_repo_state(r#"{"head":"refs/heads/main","branches":{"main":{"head":"refs/heads/main","remote":"origin"}}}"#);
-        assert_eq!(pearl_upstream_remote(tmp.path()), Some("main → origin".to_string()));
-    }
-
-    #[test]
-    fn missing_branches_key_is_none() {
-        let tmp = write_repo_state(r#"{"head":"refs/heads/main","remotes":{}}"#);
-        assert_eq!(pearl_upstream_remote(tmp.path()), None);
-    }
-
-    #[test]
-    fn empty_remote_is_none() {
-        let tmp = write_repo_state(r#"{"branches":{"main":{"head":"refs/heads/main","remote":""}}}"#);
-        assert_eq!(pearl_upstream_remote(tmp.path()), None);
-    }
-
-    #[test]
-    fn missing_file_is_none() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        assert_eq!(pearl_upstream_remote(tmp.path()), None);
-    }
-}
-
-/// `th pearls init` — set up a pearl board in the cwd repo.
-///
-/// **Beads model** (pearl `th-975dfe`, 2026-06-13): `.smooth/dolt/` is
-/// **not git-tracked**. Sync happens via dolt's own `refs/dolt/data`
-/// ref pushed alongside normal git refs, the same way beads uses
-/// `.beads/embeddeddolt/` + `bd dolt push/pull`. Eliminates the
-/// merge-conflict class we were paying down with PR #94 + smooai
-/// #1513.
-///
-/// Logic:
-/// 1. Ensure `.gitignore` has `.smooth/dolt/` so future mutations don't
-///    sweep the noms binaries back into git.
-/// 2. If `.smooth/dolt/` already exists, no-op (existing local store).
-/// 3. If missing AND the enclosing git repo has an `origin` URL
-///    AND `refs/dolt/data` exists on that remote, clone from it.
-///    This is the post-`git clone` bootstrap path: a contributor
-///    checks out the repo fresh, runs `th pearls init`, and gets the
-///    project's pearl history without any prior setup.
-/// 4. If missing AND no origin / no remote ref, create a fresh empty
-///    store. Caller can wire a remote later with `th pearls remote add`.
-async fn cmd_pearls_init() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let dolt_dir = cwd.join(".smooth").join("dolt");
-
-    // Step 1: .gitignore protection. Idempotent.
     let repo_root = hooks::find_git_root(&cwd);
-    if let Some(root) = repo_root.as_ref() {
-        match ensure_dolt_gitignored(root) {
-            Ok(true) => println!("{} Added `.smooth/dolt/` to {}/.gitignore", "✓".green().bold(), root.display()),
-            Ok(false) => {} // already ignored, quiet
-            Err(e) => eprintln!("  Could not update .gitignore: {e}"),
-        }
-    }
-
-    if dolt_dir.exists() {
-        println!("Pearl database already initialized at {}", dolt_dir.display());
-    } else if let Some(remote_url) = repo_root.as_ref().and_then(|r| read_git_origin_url(r).ok().flatten()) {
-        // Step 3: post-`git clone` bootstrap. The clone subprocess
-        // succeeds even when the ref doesn't exist on the remote, but
-        // produces an empty store — so we accept "empty" as a valid
-        // outcome rather than treating it as failure.
-        println!("Bootstrapping pearl database from {remote_url} (refs/dolt/data) …");
-        match smooth_pearls::dolt::clone_from(&remote_url, &dolt_dir) {
-            Ok(()) => {
-                println!("{} Pearl database cloned to {}", "✓".green().bold(), dolt_dir.display());
-            }
-            Err(e) => {
-                eprintln!("  smooth-dolt clone failed: {e}");
-                eprintln!("  Falling back to fresh empty store.");
-                smooth_pearls::PearlStore::init(&dolt_dir)?;
-                println!("{} Pearl database initialized empty at {}", "✓".green().bold(), dolt_dir.display());
-            }
-        }
-    } else {
-        // Step 4: no remote to bootstrap from — create empty.
-        smooth_pearls::PearlStore::init(&dolt_dir)?;
-        println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
-        println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
-        println!("  Run: th pearls remote add origin <git-remote-url>");
-        println!("  Then: th pearls push");
-    }
 
     // Inject the agent-messaging protocol into AGENTS.md so any agent
     // (any harness) that reads it learns to register + poll. Idempotent.
@@ -6741,180 +5314,6 @@ mod agents_md_tests {
     }
 }
 
-/// Append `.smooth/dolt/` to `.gitignore` at `repo_root` if not already
-/// present. Returns Ok(true) when the file was modified, Ok(false) when
-/// the entry already existed.
-///
-/// Match is line-prefix based against `.smooth/dolt` so variants like
-/// `.smooth/dolt/`, `.smooth/dolt/**`, or `/.smooth/dolt/` all count
-/// as "already ignored." Avoids duplicating entries when init is
-/// re-run.
-fn ensure_dolt_gitignored(repo_root: &std::path::Path) -> Result<bool> {
-    let path = repo_root.join(".gitignore");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    for line in existing.lines() {
-        let trimmed = line.trim().trim_start_matches('/');
-        if trimmed.starts_with(".smooth/dolt") {
-            return Ok(false);
-        }
-    }
-    let mut out = existing;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("\n# Pearl Dolt store — beads model: synced via refs/dolt/data, not tracked.\n");
-    out.push_str(".smooth/dolt/\n");
-    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
-    Ok(true)
-}
-
-/// Read `git remote get-url origin` for the given repo root. Returns
-/// Ok(None) when there is no `origin` remote configured. Used by
-/// `cmd_pearls_init` to decide whether to bootstrap from a remote
-/// (beads-model post-clone path) or initialize empty.
-fn read_git_origin_url(repo_root: &std::path::Path) -> Result<Option<String>> {
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_root)
-        .output()
-        .context("exec git remote get-url origin")?;
-    if !output.status.success() {
-        // git prints "error: No such remote 'origin'" with exit 2 when
-        // the remote isn't configured — that's a normal case, not an
-        // error to bubble up.
-        return Ok(None);
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(url))
-    }
-}
-
-/// True if `dolt_dir` resolves to the global `~/.smooth/dolt` store.
-/// We treat the global store as single-machine: sessions, memories,
-/// and personal pearls don't need cross-machine sync, so push/pull
-/// without a configured remote is a no-op there rather than an error.
-fn is_global_pearl_store(dolt_dir: &std::path::Path) -> bool {
-    let Some(home) = dirs_next::home_dir() else { return false };
-    let global = home.join(".smooth").join("dolt");
-    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    canon(dolt_dir) == canon(&global)
-}
-
-/// Heuristic: dolt push/pull surfacing "no configured push destination"
-/// (or the equivalent for pull) is what we want to swallow on the
-/// global store. SQL/lock errors etc. should still propagate.
-///
-/// "No upstream" used to live here, but it's actually a recoverable
-/// first-push case (auto-retry with `-u`), not a "no remote at all"
-/// case — handled separately by [`is_no_upstream_error`].
-fn is_no_remote_error(e: &anyhow::Error) -> bool {
-    let s = format!("{e:#}").to_lowercase();
-    s.contains("no configured push destination") || s.contains("no configured pull destination") || s.contains("remote not found")
-}
-
-/// Heuristic: first push to a fresh remote without `-u` returns this.
-/// The CLI auto-retries with `set_upstream = true`.
-///
-/// `remote '' not found` (pearl th-2681fd) is the same condition with a
-/// newer Dolt error string: the branch's upstream remote is empty, so a
-/// bare `CALL DOLT_PUSH()` resolves the remote name to `''`. Note the
-/// quoted-empty form does NOT overlap with [`is_no_remote_error`]'s
-/// `remote not found` (that one matches a *named* missing remote).
-fn is_no_upstream_error(e: &anyhow::Error) -> bool {
-    let s = format!("{e:#}").to_lowercase();
-    s.contains("no upstream branch") || s.contains("has no upstream") || s.contains("remote '' not found")
-}
-
-/// Heuristic: the local store and remote `refs/dolt/data` share no
-/// commit history. Typically because someone ran `dolt init` on the
-/// remote independently of this machine. Recovery is force-push or
-/// delete-the-ref; the CLI surfaces that as actionable text instead
-/// of the bare Dolt error.
-fn is_no_common_ancestor_error(e: &anyhow::Error) -> bool {
-    let s = format!("{e:#}").to_lowercase();
-    s.contains("no common ancestor")
-}
-
-#[cfg(test)]
-mod push_error_predicate_tests {
-    use super::*;
-
-    fn err(msg: &str) -> anyhow::Error {
-        anyhow::anyhow!("smooth-dolt push failed (exit 1): smooth-dolt: push: {msg}")
-    }
-
-    // Regression for pearl th-2681fd: newer Dolt reports a missing branch
-    // upstream as `remote '' not found`, which must trigger the `-u` retry
-    // — and must NOT be classified as "no remote at all" (the global-store
-    // skip), which only matches a *named* missing remote.
-    #[test]
-    fn empty_remote_is_no_upstream_not_no_remote() {
-        let e = err("Error 1105: fatal: remote '' not found.");
-        assert!(is_no_upstream_error(&e));
-        assert!(!is_no_remote_error(&e));
-    }
-
-    #[test]
-    fn classic_no_upstream_strings_still_match() {
-        assert!(is_no_upstream_error(&err("no upstream branch")));
-        assert!(is_no_upstream_error(&err("branch has no upstream")));
-    }
-
-    #[test]
-    fn named_missing_remote_is_no_remote_not_no_upstream() {
-        let e = err("fatal: remote not found: origin");
-        assert!(is_no_remote_error(&e));
-        assert!(!is_no_upstream_error(&e));
-    }
-
-    #[test]
-    fn divergence_matches_neither() {
-        let e = err("hint: Integrate the remote changes (e.g. 'dolt pull ...') before pushing again.");
-        assert!(!is_no_upstream_error(&e));
-        assert!(!is_no_remote_error(&e));
-        assert!(!is_no_common_ancestor_error(&e));
-    }
-
-    /// Pearl th-db25d4 item 7. `sync_push_pearl_state` funnelled EVERY push
-    /// error into `tracing::debug!("no remote / offline")`, so an expired SSH
-    /// key or a rejected non-fast-forward looked exactly like a laptop with
-    /// no remote configured — and pearls lived only locally for weeks with
-    /// nothing on screen.
-    ///
-    /// This asserts the ROUTING, not the predicate. `is_no_remote_error` was
-    /// always correct; the bug was that nothing called it, so a test of the
-    /// predicate alone would have passed throughout the outage.
-    #[test]
-    fn real_push_failures_route_to_fatal_not_silence() {
-        for msg in [
-            "Permission denied (publickey).",
-            "git@github.com: Permission denied (publickey). fatal: Could not read from remote repository.",
-            "error: failed to push some refs",
-            "Updates were rejected because the remote contains work that you do not have locally",
-            "Error 1105: database is locked",
-            "dial tcp: i/o timeout",
-        ] {
-            assert_eq!(
-                classify_push_error(&err(msg)),
-                PushOutcome::Fatal,
-                "`{msg}` would be swallowed as a quiet no-remote no-op, hiding an un-pushed pearl store"
-            );
-        }
-    }
-
-    /// The one case that IS legitimately silent stays silent — otherwise the
-    /// fix just trades a hidden failure for a nag on every command run in the
-    /// global store.
-    #[test]
-    fn a_genuinely_absent_remote_stays_quiet() {
-        assert_eq!(classify_push_error(&err("fatal: remote not found: origin")), PushOutcome::NoRemote);
-        assert_eq!(classify_push_error(&err("no configured push destination")), PushOutcome::NoRemote);
-    }
-}
-
 #[cfg(test)]
 mod http_status_tests {
     use super::require_success;
@@ -6946,108 +5345,6 @@ mod http_status_tests {
             assert!(require_success(status, "http://x/y", "").is_ok(), "HTTP {code} should pass");
         }
     }
-}
-
-fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
-    println!("{}", "Migrating from Beads...".bold().cyan());
-
-    let mut total = 0;
-    let mut migrated = 0;
-    let mut skipped = 0;
-
-    // Try to get beads issues as JSON
-    for status in &["open", "in_progress", "closed", "deferred"] {
-        let output = std::process::Command::new("bd")
-            .args(["list", &format!("--status={status}"), "--json"])
-            .output();
-
-        let output = match output {
-            Ok(o) if o.status.success() => o,
-            Ok(_) => continue,
-            Err(e) => {
-                if status == &"open" {
-                    // First try — bd might not be installed
-                    println!("  {} Cannot run bd: {e}", "✗".red().bold());
-                    println!("  beads not installed (migration requires bd CLI)");
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let beads: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        for bead in &beads {
-            total += 1;
-            let bead_title = bead["title"].as_str().unwrap_or("Untitled");
-            let bead_desc = bead["description"].as_str().unwrap_or("");
-            let bead_type = bead["type"].as_str().unwrap_or("task");
-            let bead_priority = bead["priority"].as_u64().unwrap_or(2);
-            let bead_labels: Vec<String> = bead["labels"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-
-            let pearl_type = smooth_pearls::PearlType::from_str_loose(bead_type).unwrap_or(smooth_pearls::PearlType::Task);
-            #[allow(clippy::cast_possible_truncation)]
-            let priority = smooth_pearls::Priority::from_u8(bead_priority as u8).unwrap_or(smooth_pearls::Priority::Medium);
-
-            let new = smooth_pearls::NewPearl {
-                title: bead_title.to_string(),
-                description: bead_desc.to_string(),
-                pearl_type,
-                priority,
-                assigned_to: bead["assigned_to"].as_str().map(String::from),
-                parent_id: None,
-                labels: bead_labels,
-            };
-
-            match store.create(&new) {
-                Ok(issue) => {
-                    // If the bead was closed/in_progress/deferred, update status
-                    let target_status = smooth_pearls::PearlStatus::from_str_loose(status);
-                    let mut status_note = String::new();
-                    if let Some(st) = target_status {
-                        if st != smooth_pearls::PearlStatus::Open {
-                            // Discarding this printed a ✓ for a pearl
-                            // migrated with the WRONG status — a closed bead
-                            // silently reappearing as open work
-                            // (pearl th-db25d4 item 7).
-                            if let Err(e) = store.update(
-                                &issue.id,
-                                &smooth_pearls::PearlUpdate {
-                                    status: Some(st),
-                                    ..Default::default()
-                                },
-                            ) {
-                                status_note = format!(" {} status stayed `open` ({e})", "!".yellow());
-                            }
-                        }
-                    }
-                    migrated += 1;
-                    println!("  {} {} ← {}{status_note}", "✓".green(), issue.id, bead_title.dimmed());
-                }
-                Err(e) => {
-                    skipped += 1;
-                    println!("  {} {}: {e}", "✗".red(), bead_title);
-                }
-            }
-        }
-    }
-
-    println!();
-    println!("{}", "Migration Summary".bold());
-    println!("  Total beads found: {total}");
-    println!("  Migrated:          {}", format!("{migrated}").green());
-    if skipped > 0 {
-        println!("  Skipped/errors:    {}", format!("{skipped}").red());
-    }
-
-    Ok(())
 }
 
 fn cmd_tailscale(cmd: TailscaleCommands) -> Result<()> {
@@ -8855,156 +7152,6 @@ mod plugin_tests {
         assert_eq!(extract_placeholders("plain"), Vec::<String>::new());
         assert_eq!(extract_placeholders("{{ a }}-{{b}}"), vec!["a", "b"]);
         assert_eq!(extract_placeholders("dangle {{ unterminated"), Vec::<String>::new());
-    }
-}
-
-#[cfg(test)]
-mod worktree_guard_tests {
-    use super::is_linked_worktree;
-    use std::process::Command;
-
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .expect("git launches")
-            .status
-            .success();
-        assert!(ok, "git {args:?} failed in {dir:?}");
-    }
-
-    /// SMOODEV-1836: the primary worktree must NOT be treated as linked
-    /// (so pearl auto-commit keeps working there), while a worktree created
-    /// by `git worktree add` MUST be (so it's skipped).
-    #[test]
-    fn distinguishes_primary_from_linked_worktree() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let primary = tmp.path().join("primary");
-        std::fs::create_dir(&primary).unwrap();
-
-        git(&primary, &["init", "-q", "-b", "main"]);
-        git(&primary, &["config", "user.email", "t@t.test"]);
-        git(&primary, &["config", "user.name", "Test"]);
-        std::fs::write(primary.join("f.txt"), "x").unwrap();
-        git(&primary, &["add", "."]);
-        git(&primary, &["commit", "-q", "-m", "init"]);
-
-        // Primary worktree: not linked.
-        assert!(!is_linked_worktree(&primary), "primary worktree should not be detected as linked");
-
-        // Linked worktree via `git worktree add`.
-        let linked = tmp.path().join("linked");
-        git(&primary, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "feat"]);
-        assert!(is_linked_worktree(&linked), "git-worktree-add tree should be detected as linked");
-    }
-
-    /// A non-git directory must fail toward `false` (preserve existing
-    /// behaviour rather than silently dropping a commit).
-    #[test]
-    fn non_git_dir_is_not_linked() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(!is_linked_worktree(tmp.path()));
-    }
-}
-
-#[cfg(test)]
-mod beads_model_tests {
-    //! Pearl th-975dfe: `.smooth/dolt/` is gitignored under the beads
-    //! model; `cmd_pearls_init` ensures the entry exists and (on fresh
-    //! clones) bootstraps from `refs/dolt/data` via the git origin URL.
-
-    use super::{ensure_dolt_gitignored, read_git_origin_url};
-    use std::process::Command;
-
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let ok = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .expect("git launches")
-            .status
-            .success();
-        assert!(ok, "git {args:?} failed in {dir:?}");
-    }
-
-    #[test]
-    fn ensure_dolt_gitignored_creates_file_when_absent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
-        assert!(added, "should report change when file did not exist");
-        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(contents.contains(".smooth/dolt/"), "missing entry: {contents}");
-    }
-
-    #[test]
-    fn ensure_dolt_gitignored_appends_when_unrelated_entries_present() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(".gitignore"), "target/\nnode_modules/\n").unwrap();
-        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
-        assert!(added);
-        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(contents.contains("target/"));
-        assert!(contents.contains("node_modules/"));
-        assert!(contents.contains(".smooth/dolt/"));
-    }
-
-    #[test]
-    fn ensure_dolt_gitignored_is_idempotent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(".gitignore"), "foo/\n.smooth/dolt/\nbar/\n").unwrap();
-        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
-        assert!(!added, "should report no change when entry already present");
-        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        // Count exactly one occurrence of `.smooth/dolt` — no duplicates.
-        let occurrences = contents.matches(".smooth/dolt").count();
-        assert_eq!(occurrences, 1, "got {occurrences} occurrences: {contents}");
-    }
-
-    #[test]
-    fn ensure_dolt_gitignored_recognizes_wildcard_variant() {
-        // smooai uses `.smooth/dolt/**/.dolt/noms/manifest` style entries;
-        // a more permissive variant like `.smooth/dolt/**` should also
-        // count as "already ignored" so init doesn't add a duplicate.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(".gitignore"), ".smooth/dolt/**\n").unwrap();
-        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
-        assert!(!added);
-    }
-
-    #[test]
-    fn ensure_dolt_gitignored_recognizes_leading_slash_variant() {
-        // `/.smooth/dolt/` (anchored) — same semantic as ours.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(".gitignore"), "/.smooth/dolt/\n").unwrap();
-        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
-        assert!(!added);
-    }
-
-    #[test]
-    fn read_git_origin_url_returns_none_when_no_origin() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        git(tmp.path(), &["init", "-q", "-b", "main"]);
-        assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
-    }
-
-    #[test]
-    fn read_git_origin_url_returns_origin_when_configured() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        git(tmp.path(), &["init", "-q", "-b", "main"]);
-        git(tmp.path(), &["remote", "add", "origin", "https://example.com/team/repo.git"]);
-        assert_eq!(read_git_origin_url(tmp.path()).unwrap().as_deref(), Some("https://example.com/team/repo.git"));
-    }
-
-    #[test]
-    fn read_git_origin_url_non_git_dir_returns_none() {
-        // Outside a git repo `git remote get-url` exits non-zero; the
-        // helper must swallow that as "no origin" rather than bubbling
-        // up — caller treats None as "no remote to bootstrap from."
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
     }
 }
 

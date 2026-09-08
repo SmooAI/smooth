@@ -1,26 +1,36 @@
-//! Dolt-backed pearl store.
+//! SQLite-backed pearl store.
 //!
-//! All pearl data lives in an embedded Dolt database (`.smooth/dolt/`),
-//! accessed via the `smooth-dolt` Go binary subprocess. Queries return
-//! JSON which we parse into Pearl structs. Mutations auto-commit.
+//! Pearl th-d3e842. One machine-global database (`~/.smooth/pearls.db`,
+//! `$SMOOTH_PEARLS_DB` overrides) holds every project's pearls; each
+//! row carries a `project` column = the canonical project root. The
+//! root is resolved from any cwd as the **main** checkout even inside a
+//! linked git worktree, which is what fixes "pearls created in
+//! worktrees vanish". Not a git repo → the directory itself.
+//!
+//! Timestamps are UTC RFC3339 text with fixed microsecond width, so
+//! lexical `<=` in SQL is chronological; comparisons always use a
+//! Rust `Utc::now()` literal, never SQLite's `now`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::Result;
-use chrono::{DateTime, NaiveDateTime, Utc};
-use serde_json::Value;
+use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
-use crate::dolt::SmoothDolt;
 use crate::query::PearlQuery;
 use crate::types::{
     NewPearl, Pearl, PearlComment, PearlDepType, PearlDependency, PearlHistoryEntry, PearlStats, PearlStatus, PearlType, PearlUpdate, Priority,
 };
 
-/// Thread-safe Dolt-backed pearl store.
+/// Thread-safe SQLite-backed pearl store, scoped to one project.
 #[derive(Clone)]
 pub struct PearlStore {
-    dolt: SmoothDolt,
+    conn: Arc<Mutex<Connection>>,
+    db_path: PathBuf,
+    project_root: PathBuf,
+    project: String,
 }
 
 /// Generate a short ID: "th-" + first 6 hex chars of a UUID v4.
@@ -30,473 +40,302 @@ fn generate_id() -> String {
     format!("th-{}", &hex[..6])
 }
 
-use crate::dolt::sql_escape;
+/// Where the pearl database lives: `$SMOOTH_PEARLS_DB`, else `~/.smooth/pearls.db`.
+#[must_use]
+pub fn default_db_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("SMOOTH_PEARLS_DB") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    dirs_next::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".smooth").join("pearls.db")
+}
+
+/// Canonical project root for `start`.
+///
+/// The MAIN repository checkout when `start` is inside a git repo (linked
+/// worktrees included — we take the parent of `--git-common-dir`), else
+/// `start` itself. Never fails.
+///
+/// ponytail: a submodule's common dir is `<super>/.git/modules/<x>`, so it
+/// would resolve to the wrong parent; nobody tracks pearls in a submodule.
+#[must_use]
+pub fn resolve_project_root(start: &Path) -> PathBuf {
+    let fallback = || start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+    else {
+        return fallback();
+    };
+    if !out.status.success() {
+        return fallback();
+    }
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let common = Path::new(&common);
+    common
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(fallback, |p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// Fixed-width UTC RFC3339 (`2026-09-07T21:23:00.123456Z`) — lexically ordered.
+pub(crate) fn fmt_ts(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+pub(crate) fn now_ts() -> String {
+    fmt_ts(Utc::now())
+}
+
+/// Naive timestamp shapes the Dolt store used; accepted on read so
+/// migrated rows parse like fresh ones.
+const LEGACY_TS_FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"];
+
+/// Parse a stored timestamp: RFC3339 (what we write) or a legacy naive form.
+pub(crate) fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    LEGACY_TS_FORMATS
+        .iter()
+        .find_map(|f| NaiveDateTime::parse_from_str(s, f).ok())
+        .map(|n| n.and_utc())
+}
+
+fn ts_or_now(s: &str) -> DateTime<Utc> {
+    parse_ts(s).unwrap_or_else(Utc::now)
+}
+
+/// Column list every pearl SELECT uses, so `row_to_pearl` indexes are stable.
+const PEARL_COLS: &str =
+    "p.id, p.title, p.description, p.status, p.priority, p.pearl_type, p.parent_id, p.assigned_to, p.created_at, p.updated_at, p.closed_at, p.scheduled_at";
+
+fn row_to_pearl(row: &Row<'_>) -> rusqlite::Result<Pearl> {
+    let status: String = row.get(3)?;
+    let priority: i64 = row.get(4)?;
+    let pearl_type: String = row.get(5)?;
+    Ok(Pearl {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        status: PearlStatus::from_str_loose(&status).unwrap_or(PearlStatus::Open),
+        priority: u8::try_from(priority).ok().and_then(Priority::from_u8).unwrap_or(Priority::Medium),
+        pearl_type: PearlType::from_str_loose(&pearl_type).unwrap_or(PearlType::Task),
+        labels: Vec::new(), // filled by attach_labels
+        parent_id: row.get(6)?,
+        assigned_to: row.get(7)?,
+        created_at: ts_or_now(&row.get::<_, String>(8)?),
+        updated_at: ts_or_now(&row.get::<_, String>(9)?),
+        closed_at: row.get::<_, Option<String>>(10)?.as_deref().and_then(parse_ts),
+        scheduled_at: row.get::<_, Option<String>>(11)?.as_deref().and_then(parse_ts),
+    })
+}
 
 impl PearlStore {
-    /// Open the pearl store at the given Dolt data directory.
-    ///
-    /// Runs an idempotent schema-migration check: stores created before
-    /// a later table (e.g. `config`, added in the retire-sqlite change)
-    /// get the missing table(s) created and committed. On an up-to-date
-    /// store this costs a single `SHOW TABLES` round-trip.
-    ///
-    /// **Auto-heal** (pearl th-03cdb8): if the first store touch fails
-    /// because the on-disk dolt state is corrupt (missing
-    /// `noms/manifest` / `repo_state.json`, torn manifest, git-conflict
-    /// markers), and the store is reachable from a remote, recover
-    /// in-place (snapshot the broken dir + re-clone from origin) and
-    /// re-open — instead of surfacing a raw smooth-dolt error to every
-    /// `th pearls` command. Only fires in CLI mode; never yanks a store
-    /// out from under a live `smooth-dolt serve` (Big Smooth).
-    pub fn open(dolt_dir: &Path) -> Result<Self> {
-        let dolt = SmoothDolt::new(dolt_dir)?;
-        match Self::migrate_schema(&dolt) {
-            Ok(()) => {}
-            Err(e) => {
-                if Self::try_auto_heal(dolt_dir, &dolt) {
-                    // Recovered — re-open fresh (CLI mode) and migrate.
-                    let healed = SmoothDolt::new(dolt_dir)?;
-                    Self::migrate_schema(&healed)?;
-                    Self::auto_register_project(dolt_dir);
-                    return Ok(Self { dolt: healed });
-                }
-                return Err(e);
-            }
+    /// Open the store for the project containing `project_root` (any path
+    /// inside the repo works — see [`resolve_project_root`]). Creates the
+    /// database and schema on first use and registers the project in
+    /// `~/.smooth/registry.json`.
+    pub fn open(project_root: &Path) -> Result<Self> {
+        let root = resolve_project_root(project_root);
+        let store = Self::open_with_db(&default_db_path(), &root)?;
+        // Best-effort registry update; never fails the open.
+        let _ = crate::registry::auto_register(&store.project_root);
+        Ok(store)
+    }
+
+    /// Alias of [`Self::open`] — the database is created on demand, so
+    /// "init" is just "open + register". Kept for callers and docs that
+    /// spell it `th pearls init`.
+    pub fn init(project_root: &Path) -> Result<Self> {
+        Self::open(project_root)
+    }
+
+    /// Open the store at an explicit database file for `project_root`
+    /// (taken verbatim, not git-resolved). Does NOT touch the global
+    /// registry — this is the constructor tests use so they never write
+    /// to `~/.smooth/`.
+    pub fn open_with_db(db_path: &Path, project_root: &Path) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        // Auto-register in global registry (best-effort)
-        Self::auto_register_project(dolt_dir);
-        Ok(Self { dolt })
-    }
-
-    /// Attempt in-place recovery of a store that failed to open. Returns
-    /// `true` if a recovery was performed (caller should re-open), `false`
-    /// if no recovery was appropriate (caller should surface the original
-    /// error). Best-effort and loud: prints what it did to stderr so the
-    /// user understands why their command paused. Pearl th-03cdb8.
-    fn try_auto_heal(dolt_dir: &Path, dolt: &SmoothDolt) -> bool {
-        use crate::dolt::DoctorDiagnosis;
-
-        // Never re-clone out from under a live server (Big Smooth holds
-        // the dir; the rename would fail and could yank the store from a
-        // running daemon). Let those callers surface the error and run
-        // `th pearls doctor --force` deliberately.
-        if dolt.server().is_some() {
-            return false;
-        }
-
-        // The dolt repo lives in the `pearls` subdir of the multi-db root.
-        let pearls_dir = dolt_dir.join("pearls");
-        match SmoothDolt::diagnose(&pearls_dir) {
-            // Healthy probe means the open failure was something else
-            // (transient, permissions, a genuine SQL error) — don't
-            // re-clone over a working store. Surface the original error.
-            DoctorDiagnosis::Healthy | DoctorDiagnosis::NotInitialized { .. } => false,
-            DoctorDiagnosis::ConflictMarkers { candidates } => match SmoothDolt::repair_manifest_conflict(&pearls_dir, &candidates) {
-                Ok(chosen) => {
-                    eprintln!(
-                        "th pearls: auto-healed noms manifest git-conflict markers (chose {}-char candidate)",
-                        chosen.len()
-                    );
-                    true
-                }
-                Err(e) => {
-                    eprintln!("th pearls: could not auto-repair manifest conflict ({e:#}); run `th pearls doctor`");
-                    false
-                }
-            },
-            DoctorDiagnosis::Corrupt { detail } => {
-                eprintln!("th pearls: store unreadable ({detail})");
-                eprintln!("th pearls: recovering — snapshotting the broken store and re-cloning from origin…");
-                let cli = match SmoothDolt::new_cli_only(dolt_dir) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("th pearls: auto-heal aborted ({e:#}); run `th pearls doctor`");
-                        return false;
-                    }
-                };
-                match cli.recover_from_remote() {
-                    Ok(broken) => {
-                        eprintln!("th pearls: re-cloned from origin. Broken store snapshotted at {}", broken.display());
-                        eprintln!(
-                            "th pearls: delete it with `rm -rf {}` once you've confirmed everything's intact.",
-                            broken.display()
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        eprintln!("th pearls: auto-heal could not re-clone ({e:#}); run `th pearls doctor`");
-                        false
-                    }
-                }
-            }
-        }
-    }
-
-    /// Cheap migration: list tables; if any required table added after
-    /// the initial schema is missing, run the full `CREATE IF NOT EXISTS`
-    /// pass and commit. Idempotent and safe against concurrent opens.
-    fn migrate_schema(dolt: &SmoothDolt) -> Result<()> {
-        // Extend this list whenever a new table is added to ensure_schema
-        // so pre-existing stores get healed on next open.
-        const REQUIRED_TABLES: &[&str] = &["config", "agents", "messages"];
-
-        let rows = dolt.sql("SHOW TABLES")?;
-        let present: std::collections::HashSet<String> = rows
-            .iter()
-            .filter_map(|row| row.as_object()?.values().next()?.as_str().map(String::from))
-            .collect();
-
-        // Column-level heal: pearl_comments gained a `seq` AUTO_INCREMENT
-        // column so get_comments can order by insertion sequence (created_at
-        // alone ties when two comments land in the same NOW() tick — a flaky
-        // ordering bug; SMOODEV-1464).
-        //
-        // Dolt has NO `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (it errors
-        // with "syntax error near IF"). The original heal used exactly that
-        // form, so the ALTER failed on every open and the error was swallowed
-        // as a debug log — meaning the seq column was never actually added to
-        // any pre-messaging store, and `th pearls show` blew up with "column
-        // seq could not be found" on them (hit on the smooblue restore,
-        // 2026-06-23; pearl th-f89a3c). Probe information_schema first, then
-        // run the bare ALTER only when the column is genuinely absent —
-        // running it unconditionally would error "duplicate column" on every
-        // already-migrated store. Best-effort: concurrent-migrator failures
-        // are logged, not fatal.
-        if present.contains("pearl_comments") && !Self::column_exists(dolt, "pearl_comments", "seq")? {
-            if let Err(e) = dolt.exec("ALTER TABLE pearl_comments ADD COLUMN seq BIGINT AUTO_INCREMENT UNIQUE") {
-                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq add returned error");
-            } else if let Err(e) = dolt.commit("schema migration: add pearl_comments.seq") {
-                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq commit returned error (likely no-op)");
-            }
-        }
-
-        // Same column-heal shape for columns whose original migration wrongly
-        // used `ADD COLUMN IF NOT EXISTS` (a Dolt syntax error, so they never
-        // landed on pre-existing stores): pearls.scheduled_at (th-01aa6a) and
-        // session_messages.tool_calls (th-880f2c). Probe first, bare ALTER only
-        // when absent. (table, column, ddl) tuples — all trusted literals.
-        const COLUMN_HEALS: &[(&str, &str, &str)] = &[
-            ("pearls", "scheduled_at", "ALTER TABLE pearls ADD COLUMN scheduled_at DATETIME"),
-            ("session_messages", "tool_calls", "ALTER TABLE session_messages ADD COLUMN tool_calls TEXT NULL"),
-        ];
-        for (table, column, ddl) in COLUMN_HEALS {
-            if present.contains(*table) && !Self::column_exists(dolt, table, column)? {
-                if let Err(e) = dolt.exec(ddl) {
-                    tracing::debug!(error = %e, table, column, "migrate_schema: column add returned error");
-                } else if let Err(e) = dolt.commit(&format!("schema migration: add {table}.{column}")) {
-                    tracing::debug!(error = %e, table, column, "migrate_schema: column commit returned error (likely no-op)");
-                }
-            }
-        }
-
-        if REQUIRED_TABLES.iter().all(|t| present.contains(*t)) {
-            return Ok(());
-        }
-
-        Self::ensure_schema(dolt)?;
-        // Best-effort commit — if there's nothing to commit (concurrent
-        // migrator already landed the DDL), smooth-dolt exits non-zero;
-        // log and continue rather than fail the open.
-        if let Err(e) = dolt.commit("schema migration: add missing tables") {
-            tracing::debug!(error = %e, "migrate_schema: commit returned error (likely no-op)");
-        }
-        Ok(())
-    }
-
-    /// True when `table.column` exists, per `information_schema.columns`.
-    /// Column-level heals in [`Self::migrate_schema`] must gate their
-    /// `ALTER TABLE ... ADD COLUMN` on this probe because Dolt has no
-    /// `ADD COLUMN IF NOT EXISTS` — the bare ALTER errors "duplicate
-    /// column" on an already-migrated store, and the `IF NOT EXISTS`
-    /// form is a hard syntax error. `table`/`column` are always trusted
-    /// schema literals here, never user input.
-    fn column_exists(dolt: &SmoothDolt, table: &str, column: &str) -> Result<bool> {
-        let q = format!("SELECT 1 AS present FROM information_schema.columns WHERE table_name = '{table}' AND column_name = '{column}' LIMIT 1");
-        Ok(!dolt.sql(&q)?.is_empty())
-    }
-
-    /// Create a store with an explicit `SmoothDolt` handle (for testing).
-    #[must_use]
-    pub fn from_dolt(dolt: SmoothDolt) -> Self {
-        Self { dolt }
-    }
-
-    /// Path to the Dolt data directory backing this store.
-    #[must_use]
-    pub fn dolt_path(&self) -> &Path {
-        self.dolt.data_dir()
-    }
-
-    /// Underlying long-running smooth-dolt server, if this store was
-    /// constructed with one. Returns `None` for CLI-mode stores.
-    /// Used by Big Smooth to register the global store in the
-    /// periodic health-check loop.
-    #[must_use]
-    pub fn dolt_server(&self) -> Option<&std::sync::Arc<crate::dolt_server::SmoothDoltServer>> {
-        self.dolt.server()
-    }
-
-    /// Initialize the Dolt database and create the pearl schema.
-    ///
-    /// Uses the CLI-only constructor because `dolt init` must run
-    /// before any long-running server could reasonably attach.
-    pub fn init(dolt_dir: &Path) -> Result<Self> {
-        let cli = SmoothDolt::new_cli_only(dolt_dir)?;
-        cli.init()?;
-        Self::ensure_schema(&cli)?;
-        cli.commit("initialize pearl schema")?;
-        // Auto-register in global registry (best-effort)
-        Self::auto_register_project(dolt_dir);
-        // Re-open via the attach-or-spawn path so subsequent
-        // operations share a server with any other process.
-        let dolt = SmoothDolt::new(dolt_dir)?;
-        Ok(Self { dolt })
-    }
-
-    /// Register this project in `~/.smooth/registry.json` (best-effort, never fails).
-    fn auto_register_project(dolt_dir: &Path) {
-        // dolt_dir is typically `.smooth/dolt/`, so project root is grandparent
-        if let Some(project_root) = dolt_dir.parent().and_then(|p| p.parent()) {
-            let _ = crate::registry::auto_register(project_root);
-        }
-    }
-
-    /// Ensure all required tables exist.
-    fn ensure_schema(dolt: &SmoothDolt) -> Result<()> {
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS pearls (
-                id VARCHAR(20) PRIMARY KEY,
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                status VARCHAR(20) NOT NULL DEFAULT 'open',
-                priority INT NOT NULL DEFAULT 2,
-                pearl_type VARCHAR(20) NOT NULL DEFAULT 'task',
-                parent_id VARCHAR(20),
-                assigned_to VARCHAR(100),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                closed_at DATETIME,
-                scheduled_at DATETIME
-            )",
-        )?;
-        // NOTE: pre-existing stores gain `pearls.scheduled_at` via a
-        // column_exists-gated ALTER in migrate_schema (th-eba7b4) — Dolt has no
-        // `ADD COLUMN IF NOT EXISTS`, so it can't go here.
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS pearl_dependencies (
-                pearl_id VARCHAR(20) NOT NULL,
-                depends_on VARCHAR(20) NOT NULL,
-                dep_type VARCHAR(20) DEFAULT 'blocks',
-                PRIMARY KEY (pearl_id, depends_on)
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS pearl_labels (
-                pearl_id VARCHAR(20) NOT NULL,
-                label VARCHAR(100) NOT NULL,
-                PRIMARY KEY (pearl_id, label)
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS pearl_comments (
-                id VARCHAR(20) PRIMARY KEY,
-                pearl_id VARCHAR(20) NOT NULL,
-                content TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                seq BIGINT AUTO_INCREMENT UNIQUE
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS pearl_history (
-                id VARCHAR(20) PRIMARY KEY,
-                pearl_id VARCHAR(20) NOT NULL,
-                field_name VARCHAR(50) NOT NULL,
-                old_value TEXT,
-                new_value TEXT,
-                changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id VARCHAR(40) PRIMARY KEY,
-                title TEXT,
-                model VARCHAR(100),
-                started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                ended_at DATETIME,
-                message_count INT DEFAULT 0,
-                token_count INT DEFAULT 0
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS session_messages (
-                id VARCHAR(40) PRIMARY KEY,
-                session_id VARCHAR(40) NOT NULL,
-                from_actor VARCHAR(100) NOT NULL,
-                to_actor VARCHAR(100) NOT NULL,
-                content TEXT NOT NULL,
-                message_type VARCHAR(20) NOT NULL DEFAULT 'Command',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                tool_calls TEXT NULL
-            )",
-        )?;
-        // NOTE: pre-existing stores gain `session_messages.tool_calls` via a
-        // column_exists-gated ALTER in migrate_schema (th-eba7b4). This used to
-        // be an `ADD COLUMN IF NOT EXISTS` here (th-880f2c) — which Dolt rejects
-        // as a syntax error, so the column was silently never added.
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS orchestrator_snapshots (
-                id VARCHAR(40) PRIMARY KEY,
-                session_id VARCHAR(40) NOT NULL,
-                bead_id VARCHAR(40) NOT NULL,
-                phase VARCHAR(40) NOT NULL,
-                operator_id VARCHAR(100) NOT NULL,
-                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_checkpoint_id VARCHAR(40),
-                status VARCHAR(20) NOT NULL DEFAULT 'Active'
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id VARCHAR(40) PRIMARY KEY,
-                content TEXT NOT NULL,
-                source VARCHAR(100),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS config (
-                k VARCHAR(255) PRIMARY KEY,
-                v TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-        )?;
-        // Agent messaging (pearl th-70aaef). `agents` is the persistent,
-        // harness-agnostic registry: any process that runs `th agent
-        // register` lands a row here keyed by its chosen name. `messages`
-        // is the Dolt-backed mailbox — recipient `to_agent` is an agent
-        // name or the literal `all` for a broadcast; `read_at IS NULL`
-        // means unread. Both sync via refs/dolt/data like everything else,
-        // so agents in otherwise-unconnected sessions/machines see each
-        // other after a push/pull.
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS agents (
-                name VARCHAR(100) PRIMARY KEY,
-                harness VARCHAR(60),
-                pid INT,
-                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-                status VARCHAR(20) NOT NULL DEFAULT 'online'
-            )",
-        )?;
-        dolt.exec(
-            "CREATE TABLE IF NOT EXISTS messages (
-                id VARCHAR(40) PRIMARY KEY,
-                from_agent VARCHAR(100) NOT NULL,
-                to_agent VARCHAR(100) NOT NULL,
-                body TEXT NOT NULL,
-                thread_id VARCHAR(40),
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                read_at DATETIME,
-                seq BIGINT AUTO_INCREMENT UNIQUE
-            )",
-        )?;
-        Ok(())
-    }
-
-    /// Access the underlying `SmoothDolt` handle.
-    #[must_use]
-    pub fn dolt(&self) -> &SmoothDolt {
-        &self.dolt
-    }
-
-    // ── JSON → Pearl parsing ────────────────────────────────────────────
-
-    fn parse_pearl(row: &Value) -> Result<Pearl> {
-        let id = row["id"].as_str().unwrap_or_default().to_string();
-        let title = row["title"].as_str().unwrap_or_default().to_string();
-        let description = row["description"].as_str().unwrap_or_default().to_string();
-        let status_str = row["status"].as_str().unwrap_or("open");
-        let priority_val = row["priority"].as_u64().unwrap_or(2) as u8;
-        let type_str = row["pearl_type"].as_str().unwrap_or("task");
-        let assigned_to = row["assigned_to"].as_str().map(String::from);
-        let parent_id = row["parent_id"].as_str().map(String::from);
-        let created_at = Self::parse_datetime(&row["created_at"]);
-        let updated_at = Self::parse_datetime(&row["updated_at"]);
-        let closed_at = if row["closed_at"].is_null() {
-            None
-        } else {
-            Some(Self::parse_datetime(&row["closed_at"]))
-        };
-        let scheduled_at = if row["scheduled_at"].is_null() {
-            None
-        } else {
-            Some(Self::parse_datetime(&row["scheduled_at"]))
-        };
-
-        Ok(Pearl {
-            id,
-            title,
-            description,
-            status: PearlStatus::from_str_loose(status_str).unwrap_or(PearlStatus::Open),
-            priority: Priority::from_u8(priority_val).unwrap_or(Priority::Medium),
-            pearl_type: PearlType::from_str_loose(type_str).unwrap_or(PearlType::Task),
-            labels: Vec::new(), // filled after query
-            assigned_to,
-            parent_id,
-            created_at,
-            updated_at,
-            closed_at,
-            scheduled_at,
+        let conn = Connection::open(db_path).with_context(|| format!("open pearl db {}", db_path.display()))?;
+        // WAL so readers never block writers; the busy timeout turns
+        // concurrent agents into a queue instead of "database is locked".
+        let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+        conn.busy_timeout(std::time::Duration::from_secs(10)).context("set busy_timeout")?;
+        Self::ensure_schema(&conn)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+            project: project_root.to_string_lossy().into_owned(),
         })
     }
 
-    fn parse_datetime(val: &Value) -> DateTime<Utc> {
-        if let Some(s) = val.as_str() {
-            // Dolt returns datetimes as "2024-01-15 12:30:45" or ISO format
-            if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                return ndt.and_utc();
-            }
-            if let Ok(dt) = s.parse::<DateTime<Utc>>() {
-                return dt;
+    fn ensure_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pearls (
+                 project      TEXT NOT NULL,
+                 id           TEXT NOT NULL,
+                 title        TEXT NOT NULL,
+                 description  TEXT NOT NULL DEFAULT '',
+                 status       TEXT NOT NULL DEFAULT 'open',
+                 priority     INTEGER NOT NULL DEFAULT 2,
+                 pearl_type   TEXT NOT NULL DEFAULT 'task',
+                 parent_id    TEXT,
+                 assigned_to  TEXT,
+                 created_at   TEXT NOT NULL,
+                 updated_at   TEXT NOT NULL,
+                 closed_at    TEXT,
+                 scheduled_at TEXT,
+                 PRIMARY KEY (project, id)
+             );
+             CREATE INDEX IF NOT EXISTS pearls_project_status_idx ON pearls(project, status);
+             CREATE TABLE IF NOT EXISTS pearl_dependencies (
+                 project    TEXT NOT NULL,
+                 pearl_id   TEXT NOT NULL,
+                 depends_on TEXT NOT NULL,
+                 dep_type   TEXT NOT NULL DEFAULT 'blocks',
+                 PRIMARY KEY (project, pearl_id, depends_on)
+             );
+             CREATE TABLE IF NOT EXISTS pearl_labels (
+                 project  TEXT NOT NULL,
+                 pearl_id TEXT NOT NULL,
+                 label    TEXT NOT NULL,
+                 PRIMARY KEY (project, pearl_id, label)
+             );
+             CREATE TABLE IF NOT EXISTS pearl_comments (
+                 seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 project    TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 pearl_id   TEXT NOT NULL,
+                 content    TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 UNIQUE (project, id)
+             );
+             CREATE INDEX IF NOT EXISTS pearl_comments_pearl_idx ON pearl_comments(project, pearl_id);
+             CREATE TABLE IF NOT EXISTS pearl_history (
+                 seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 project    TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 pearl_id   TEXT NOT NULL,
+                 field_name TEXT NOT NULL,
+                 old_value  TEXT,
+                 new_value  TEXT,
+                 changed_at TEXT NOT NULL,
+                 UNIQUE (project, id)
+             );
+             CREATE INDEX IF NOT EXISTS pearl_history_pearl_idx ON pearl_history(project, pearl_id);
+             CREATE TABLE IF NOT EXISTS memories (
+                 seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 project    TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 content    TEXT NOT NULL,
+                 source     TEXT NOT NULL DEFAULT '',
+                 created_at TEXT NOT NULL,
+                 UNIQUE (project, id)
+             );
+             CREATE TABLE IF NOT EXISTS config (
+                 project    TEXT NOT NULL,
+                 k          TEXT NOT NULL,
+                 v          TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 PRIMARY KEY (project, k)
+             );",
+        )
+        .context("apply pearl schema")?;
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`; columns added after the
+        // first release heal here, gated on `column_exists` (a bare ALTER
+        // errors "duplicate column" on an already-migrated db).
+        for (table, column, ddl) in Self::COLUMN_HEALS {
+            if !Self::column_exists(conn, table, column)? {
+                conn.execute(ddl, []).with_context(|| format!("add {table}.{column}"))?;
             }
         }
-        Utc::now()
+        Ok(())
     }
 
-    fn load_labels(&self, pearl_id: &str) -> Result<Vec<String>> {
-        let rows = self.dolt.sql(&format!(
-            "SELECT label FROM pearl_labels WHERE pearl_id = '{}' ORDER BY label",
-            sql_escape(pearl_id)
-        ))?;
-        Ok(rows.iter().filter_map(|r| r["label"].as_str().map(String::from)).collect())
+    /// (table, column, ddl) for columns added after the initial schema.
+    const COLUMN_HEALS: &'static [(&'static str, &'static str, &'static str)] = &[];
+
+    /// True when `table.column` exists, per `PRAGMA table_info`.
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for n in names {
+            if n? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    fn load_pearl_with_labels(&self, mut pearl: Pearl) -> Result<Pearl> {
-        pearl.labels = self.load_labels(&pearl.id)?;
-        Ok(pearl)
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Populate `.labels` for a whole batch of pearls in a SINGLE Dolt query.
-    ///
-    /// The per-pearl [`load_pearl_with_labels`](Self::load_pearl_with_labels)
-    /// path is an N+1: every list-style query (`ready`/`list`/`blocked`/…) then
-    /// cold-boots Dolt once per row just to fetch labels, which dominated
-    /// session-start latency (`th prime` → `th pearls ready` ≈ 5.7s for ~40
-    /// open pearls). One `WHERE pearl_id IN (…)` collapses that to 2 queries
-    /// total. Order of `pearls` is preserved; labels come back label-sorted.
-    fn attach_labels(&self, mut pearls: Vec<Pearl>) -> Result<Vec<Pearl>> {
+    /// The canonical project root this store is scoped to.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// The `project` column value (the root as a string).
+    #[must_use]
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// Path of the SQLite file backing this store.
+    #[must_use]
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// A [`crate::MemoryStore`] over the same project + connection.
+    #[must_use]
+    pub fn memory(&self) -> crate::memory::MemoryStore {
+        crate::memory::MemoryStore::new(self.clone())
+    }
+
+    /// Fresh pearl id unused in this project.
+    fn fresh_id(&self, conn: &Connection) -> Result<String> {
+        loop {
+            let id = generate_id();
+            let taken: Option<i64> = conn
+                .query_row("SELECT 1 FROM pearls WHERE project = ?1 AND id = ?2", params![self.project, id], |r| r.get(0))
+                .optional()?;
+            if taken.is_none() {
+                return Ok(id);
+            }
+        }
+    }
+
+    /// Populate `.labels` for a whole batch of pearls in ONE query (the
+    /// per-pearl path was an N+1 that dominated `th prime` latency).
+    fn attach_labels(&self, conn: &Connection, mut pearls: Vec<Pearl>) -> Result<Vec<Pearl>> {
         if pearls.is_empty() {
             return Ok(pearls);
         }
-        let in_list = pearls.iter().map(|p| format!("'{}'", sql_escape(&p.id))).collect::<Vec<_>>().join(",");
-        let rows = self.dolt.sql(&format!(
-            "SELECT pearl_id, label FROM pearl_labels WHERE pearl_id IN ({in_list}) ORDER BY label"
-        ))?;
+        let placeholders = std::iter::repeat_n("?", pearls.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT pearl_id, label FROM pearl_labels WHERE project = ? AND pearl_id IN ({placeholders}) ORDER BY label");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.project];
+        for p in &pearls {
+            args.push(&p.id);
+        }
+        let rows = stmt.query_map(args.as_slice(), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut by_id: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        for r in &rows {
-            if let (Some(pid), Some(label)) = (r["pearl_id"].as_str(), r["label"].as_str()) {
-                by_id.entry(pid.to_string()).or_default().push(label.to_string());
-            }
+        for r in rows {
+            let (pid, label) = r?;
+            by_id.entry(pid).or_default().push(label);
         }
         for p in &mut pearls {
             if let Some(labels) = by_id.remove(&p.id) {
@@ -506,373 +345,324 @@ impl PearlStore {
         Ok(pearls)
     }
 
-    // ── Dolt version control ────────────────────────────────────────────
-
-    /// View the Dolt commit log.
-    pub fn dolt_log(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
-        self.dolt.log(limit)
+    fn query_pearls(&self, conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Pearl>> {
+        let mut stmt = conn.prepare(sql)?;
+        let pearls = stmt.query_map(args, row_to_pearl)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        self.attach_labels(conn, pearls)
     }
 
-    /// Garbage collect the Dolt database.
-    pub fn dolt_gc(&self) -> Result<()> {
-        self.dolt.gc()?;
-        Ok(())
+    fn get_in(&self, conn: &Connection, id: &str) -> Result<Option<Pearl>> {
+        let mut found = self.query_pearls(
+            conn,
+            &format!("SELECT {PEARL_COLS} FROM pearls p WHERE p.project = ?1 AND p.id = ?2"),
+            &[&self.project, &id],
+        )?;
+        Ok(found.pop())
     }
 
     // ── CRUD ────────────────────────────────────────────────────────────
 
     /// Create a new pearl.
     pub fn create(&self, new: &NewPearl) -> Result<Pearl> {
-        let id = generate_id();
-        let sql = format!(
-            "INSERT INTO pearls (id, title, description, status, priority, pearl_type, assigned_to, parent_id, created_at, updated_at) \
-             VALUES ('{}', '{}', '{}', '{}', {}, '{}', {}, {}, NOW(), NOW())",
-            sql_escape(&id),
-            sql_escape(&new.title),
-            sql_escape(&new.description),
-            PearlStatus::Open.as_str(),
-            new.priority.as_u8(),
-            new.pearl_type.as_str(),
-            new.assigned_to.as_ref().map_or("NULL".to_string(), |a| format!("'{}'", sql_escape(a))),
-            new.parent_id.as_ref().map_or("NULL".to_string(), |p| format!("'{}'", sql_escape(p))),
-        );
-        self.dolt.exec(&sql)?;
-
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id = self.fresh_id(&tx)?;
+        let now = now_ts();
+        tx.execute(
+            "INSERT INTO pearls (project, id, title, description, status, priority, pearl_type, assigned_to, parent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                self.project,
+                id,
+                new.title,
+                new.description,
+                PearlStatus::Open.as_str(),
+                i64::from(new.priority.as_u8()),
+                new.pearl_type.as_str(),
+                new.assigned_to,
+                new.parent_id,
+                now,
+            ],
+        )?;
         for label in &new.labels {
-            self.dolt.exec(&format!(
-                "INSERT INTO pearl_labels (pearl_id, label) VALUES ('{}', '{}')",
-                sql_escape(&id),
-                sql_escape(label),
-            ))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO pearl_labels (project, pearl_id, label) VALUES (?1, ?2, ?3)",
+                params![self.project, id, label],
+            )?;
         }
-
-        let pearl = self.get(&id)?.ok_or_else(|| anyhow::anyhow!("pearl not found after create: {id}"))?;
-        self.dolt.commit(&format!("create pearl {id}: {}", new.title))?;
+        let pearl = self.get_in(&tx, &id)?.ok_or_else(|| anyhow::anyhow!("pearl not found after create: {id}"))?;
+        tx.commit()?;
         Ok(pearl)
     }
 
     /// Get a pearl by ID.
     pub fn get(&self, id: &str) -> Result<Option<Pearl>> {
-        let rows = self.dolt.sql(&format!("SELECT * FROM pearls WHERE id = '{}'", sql_escape(id)))?;
-        match rows.first() {
-            Some(row) => {
-                let pearl = Self::parse_pearl(row)?;
-                Ok(Some(self.load_pearl_with_labels(pearl)?))
-            }
-            None => Ok(None),
-        }
+        let conn = self.conn();
+        self.get_in(&conn, id)
     }
 
     /// List pearls matching the given query.
     pub fn list(&self, query: &PearlQuery) -> Result<Vec<Pearl>> {
-        let mut sql = String::from("SELECT p.* FROM pearls p");
-        let mut conditions: Vec<String> = Vec::new();
+        let mut sql = format!("SELECT {PEARL_COLS} FROM pearls p");
+        let mut conditions: Vec<String> = vec!["p.project = ?".into()];
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(self.project.clone())];
 
         if query.label.is_some() {
-            sql.push_str(" JOIN pearl_labels l ON l.pearl_id = p.id");
+            sql.push_str(" JOIN pearl_labels l ON l.project = p.project AND l.pearl_id = p.id");
         }
-
         if let Some(ref status) = query.status {
-            conditions.push(format!("p.status = '{}'", status.as_str()));
+            conditions.push("p.status = ?".into());
+            args.push(Box::new(status.as_str()));
         }
         if let Some(ref priority) = query.priority {
-            conditions.push(format!("p.priority = {}", priority.as_u8()));
+            conditions.push("p.priority = ?".into());
+            args.push(Box::new(i64::from(priority.as_u8())));
         }
         if let Some(ref pearl_type) = query.pearl_type {
-            conditions.push(format!("p.pearl_type = '{}'", pearl_type.as_str()));
+            conditions.push("p.pearl_type = ?".into());
+            args.push(Box::new(pearl_type.as_str()));
         }
         if let Some(ref label) = query.label {
-            conditions.push(format!("l.label = '{}'", sql_escape(label)));
+            conditions.push("l.label = ?".into());
+            args.push(Box::new(label.clone()));
         }
         if let Some(ref assigned_to) = query.assigned_to {
-            conditions.push(format!("p.assigned_to = '{}'", sql_escape(assigned_to)));
+            conditions.push("p.assigned_to = ?".into());
+            args.push(Box::new(assigned_to.clone()));
         }
         if let Some(ref parent_id) = query.parent_id {
-            conditions.push(format!("p.parent_id = '{}'", sql_escape(parent_id)));
+            conditions.push("p.parent_id = ?".into());
+            args.push(Box::new(parent_id.clone()));
         }
-
-        if !conditions.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        // `limit == 0` is the "no limit" sentinel — useful for the web UI
-        // which needs every pearl for counts, kanban columns, etc.
-        // Non-zero values cap the result set so LLM tool calls don't
-        // blow their context window.
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+        // `limit == 0` is the "no limit" sentinel (web UI needs every pearl);
+        // non-zero caps the result so LLM tool calls don't blow their context.
         sql.push_str(" ORDER BY p.priority ASC, p.created_at DESC");
         if query.limit > 0 {
-            sql.push_str(&format!(" LIMIT {}", query.limit));
+            use std::fmt::Write as _;
+            let _ = write!(sql, " LIMIT {}", query.limit);
         }
-
-        let rows = self.dolt.sql(&sql)?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let conn = self.conn();
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(AsRef::as_ref).collect();
+        self.query_pearls(&conn, &sql, &refs)
     }
 
     /// Update a pearl with partial changes. Records history for each changed field.
     pub fn update(&self, id: &str, updates: &PearlUpdate) -> Result<Pearl> {
-        let current = self.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let current = self.get_in(&tx, id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))?;
+        let now = now_ts();
+        let set = |tx: &Connection, column: &str, val: &dyn rusqlite::ToSql| -> Result<()> {
+            tx.execute(
+                &format!("UPDATE pearls SET {column} = ?4, updated_at = ?3 WHERE project = ?1 AND id = ?2"),
+                params![self.project, id, now, val],
+            )?;
+            Ok(())
+        };
 
         if let Some(ref title) = updates.title {
             if *title != current.title {
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET title = '{}', updated_at = NOW() WHERE id = '{}'",
-                    sql_escape(title),
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "title", Some(&current.title), Some(title))?;
+                set(&tx, "title", title)?;
+                self.record_history(&tx, id, "title", Some(&current.title), Some(title))?;
             }
         }
-
         if let Some(ref desc) = updates.description {
             if *desc != current.description {
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET description = '{}', updated_at = NOW() WHERE id = '{}'",
-                    sql_escape(desc),
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "description", Some(&current.description), Some(desc))?;
+                set(&tx, "description", desc)?;
+                self.record_history(&tx, id, "description", Some(&current.description), Some(desc))?;
             }
         }
-
         if let Some(ref status) = updates.status {
             if *status != current.status {
-                let closed_at = if *status == PearlStatus::Closed { "NOW()" } else { "NULL" };
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET status = '{}', updated_at = NOW(), closed_at = {} WHERE id = '{}'",
-                    status.as_str(),
-                    closed_at,
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "status", Some(current.status.as_str()), Some(status.as_str()))?;
+                let closed_at = if *status == PearlStatus::Closed { Some(now.clone()) } else { None };
+                tx.execute(
+                    "UPDATE pearls SET status = ?4, closed_at = ?5, updated_at = ?3 WHERE project = ?1 AND id = ?2",
+                    params![self.project, id, now, status.as_str(), closed_at],
+                )?;
+                self.record_history(&tx, id, "status", Some(current.status.as_str()), Some(status.as_str()))?;
             }
         }
-
         if let Some(ref priority) = updates.priority {
             if *priority != current.priority {
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET priority = {}, updated_at = NOW() WHERE id = '{}'",
-                    priority.as_u8(),
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "priority", Some(&current.priority.as_u8().to_string()), Some(&priority.as_u8().to_string()))?;
+                set(&tx, "priority", &i64::from(priority.as_u8()))?;
+                self.record_history(
+                    &tx,
+                    id,
+                    "priority",
+                    Some(&current.priority.as_u8().to_string()),
+                    Some(&priority.as_u8().to_string()),
+                )?;
             }
         }
-
         if let Some(ref pearl_type) = updates.pearl_type {
             if *pearl_type != current.pearl_type {
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET pearl_type = '{}', updated_at = NOW() WHERE id = '{}'",
-                    pearl_type.as_str(),
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "pearl_type", Some(current.pearl_type.as_str()), Some(pearl_type.as_str()))?;
+                set(&tx, "pearl_type", &pearl_type.as_str())?;
+                self.record_history(&tx, id, "pearl_type", Some(current.pearl_type.as_str()), Some(pearl_type.as_str()))?;
             }
         }
-
         if let Some(ref assigned) = updates.assigned_to {
-            let val = assigned.as_ref().map_or("NULL".to_string(), |a| format!("'{}'", sql_escape(a)));
-            self.dolt.exec(&format!(
-                "UPDATE pearls SET assigned_to = {val}, updated_at = NOW() WHERE id = '{}'",
-                sql_escape(id)
-            ))?;
+            set(&tx, "assigned_to", assigned)?;
         }
-
         if let Some(ref parent) = updates.parent_id {
-            let val = parent.as_ref().map_or("NULL".to_string(), |p| format!("'{}'", sql_escape(p)));
-            self.dolt.exec(&format!(
-                "UPDATE pearls SET parent_id = {val}, updated_at = NOW() WHERE id = '{}'",
-                sql_escape(id)
-            ))?;
+            set(&tx, "parent_id", parent)?;
         }
-
         if let Some(ref scheduled) = updates.scheduled_at {
-            // Store as UTC "YYYY-MM-DD HH:MM:SS" — the same shape parse_datetime reads back.
-            let val = scheduled
-                .as_ref()
-                .map_or("NULL".to_string(), |dt| format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S")));
-            self.dolt.exec(&format!(
-                "UPDATE pearls SET scheduled_at = {val}, updated_at = NOW() WHERE id = '{}'",
-                sql_escape(id)
-            ))?;
-            let old = current.scheduled_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-            let new = scheduled.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-            self.record_history(id, "scheduled_at", old.as_deref(), new.as_deref())?;
+            let new = scheduled.map(fmt_ts);
+            set(&tx, "scheduled_at", &new)?;
+            let old = current.scheduled_at.map(fmt_ts);
+            self.record_history(&tx, id, "scheduled_at", old.as_deref(), new.as_deref())?;
         }
 
-        self.dolt.commit(&format!("update pearl {id}"))?;
-        self.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl disappeared after update"))
+        let pearl = self.get_in(&tx, id)?.ok_or_else(|| anyhow::anyhow!("pearl disappeared after update"))?;
+        tx.commit()?;
+        Ok(pearl)
     }
 
     /// Close one or more pearls. Returns the number actually closed.
     pub fn close(&self, ids: &[&str]) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let now = now_ts();
         let mut count = 0;
         for id in ids {
-            let rows = self
-                .dolt
-                .sql(&format!("SELECT id FROM pearls WHERE id = '{}' AND status != 'closed'", sql_escape(id),))?;
-            if !rows.is_empty() {
-                self.dolt.exec(&format!(
-                    "UPDATE pearls SET status = 'closed', closed_at = NOW(), updated_at = NOW() WHERE id = '{}'",
-                    sql_escape(id),
-                ))?;
-                self.record_history(id, "status", Some("open"), Some("closed"))?;
+            let changed = tx.execute(
+                "UPDATE pearls SET status = 'closed', closed_at = ?3, updated_at = ?3 WHERE project = ?1 AND id = ?2 AND status != 'closed'",
+                params![self.project, id, now],
+            )?;
+            if changed > 0 {
+                self.record_history(&tx, id, "status", Some("open"), Some("closed"))?;
                 count += 1;
             }
         }
-        if count > 0 {
-            let closed: Vec<_> = ids.iter().take(3).copied().collect();
-            self.dolt.commit(&format!("close {} pearl(s): {}", count, closed.join(", ")))?;
-        }
+        tx.commit()?;
         Ok(count)
     }
 
     /// Reopen a closed pearl.
     pub fn reopen(&self, id: &str) -> Result<Pearl> {
-        self.dolt.exec(&format!(
-            "UPDATE pearls SET status = 'open', closed_at = NULL, updated_at = NOW() WHERE id = '{}'",
-            sql_escape(id),
-        ))?;
-        self.record_history(id, "status", Some("closed"), Some("open"))?;
-        self.dolt.commit(&format!("reopen pearl {id}"))?;
-        self.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE pearls SET status = 'open', closed_at = NULL, updated_at = ?3 WHERE project = ?1 AND id = ?2",
+            params![self.project, id, now_ts()],
+        )?;
+        self.record_history(&tx, id, "status", Some("closed"), Some("open"))?;
+        let pearl = self.get_in(&tx, id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))?;
+        tx.commit()?;
+        Ok(pearl)
     }
 
-    /// Delete a pearl entirely.
+    /// Delete a pearl entirely (labels, comments, deps, history included).
     pub fn delete(&self, id: &str) -> Result<()> {
-        // Delete child rows first (Dolt may not support CASCADE)
-        self.dolt.exec(&format!("DELETE FROM pearl_labels WHERE pearl_id = '{}'", sql_escape(id)))?;
-        self.dolt.exec(&format!("DELETE FROM pearl_comments WHERE pearl_id = '{}'", sql_escape(id)))?;
-        self.dolt.exec(&format!(
-            "DELETE FROM pearl_dependencies WHERE pearl_id = '{}' OR depends_on = '{}'",
-            sql_escape(id),
-            sql_escape(id)
-        ))?;
-        self.dolt.exec(&format!("DELETE FROM pearl_history WHERE pearl_id = '{}'", sql_escape(id)))?;
-        self.dolt.exec(&format!("DELETE FROM pearls WHERE id = '{}'", sql_escape(id)))?;
-        self.dolt.commit(&format!("delete pearl {id}"))?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let p = params![self.project, id];
+        tx.execute("DELETE FROM pearl_labels WHERE project = ?1 AND pearl_id = ?2", p)?;
+        tx.execute("DELETE FROM pearl_comments WHERE project = ?1 AND pearl_id = ?2", p)?;
+        tx.execute("DELETE FROM pearl_dependencies WHERE project = ?1 AND (pearl_id = ?2 OR depends_on = ?2)", p)?;
+        tx.execute("DELETE FROM pearl_history WHERE project = ?1 AND pearl_id = ?2", p)?;
+        tx.execute("DELETE FROM pearls WHERE project = ?1 AND id = ?2", p)?;
+        tx.commit()?;
         Ok(())
     }
 
     // ── History ─────────────────────────────────────────────────────────
 
-    fn record_history(&self, pearl_id: &str, field: &str, old_value: Option<&str>, new_value: Option<&str>) -> Result<()> {
-        let hid = generate_id();
-        let old_sql = old_value.map_or("NULL".to_string(), |v| format!("'{}'", sql_escape(v)));
-        let new_sql = new_value.map_or("NULL".to_string(), |v| format!("'{}'", sql_escape(v)));
-        self.dolt.exec(&format!(
-            "INSERT INTO pearl_history (id, pearl_id, field_name, old_value, new_value, changed_at) VALUES ('{}', '{}', '{}', {}, {}, NOW())",
-            sql_escape(&hid),
-            sql_escape(pearl_id),
-            sql_escape(field),
-            old_sql,
-            new_sql,
-        ))?;
+    fn record_history(&self, conn: &Connection, pearl_id: &str, field: &str, old_value: Option<&str>, new_value: Option<&str>) -> Result<()> {
+        conn.execute(
+            "INSERT INTO pearl_history (project, id, pearl_id, field_name, old_value, new_value, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![self.project, generate_id(), pearl_id, field, old_value, new_value, now_ts()],
+        )?;
         Ok(())
     }
 
-    /// Get change history for a pearl.
+    /// Get change history for a pearl, oldest first.
     pub fn get_history(&self, pearl_id: &str) -> Result<Vec<PearlHistoryEntry>> {
-        let rows = self.dolt.sql(&format!(
-            "SELECT id, pearl_id, field_name, old_value, new_value, changed_at FROM pearl_history WHERE pearl_id = '{}' ORDER BY changed_at ASC",
-            sql_escape(pearl_id),
-        ))?;
-        let mut entries = Vec::with_capacity(rows.len());
-        for row in &rows {
-            entries.push(PearlHistoryEntry {
-                id: row["id"].as_str().unwrap_or_default().to_string(),
-                pearl_id: row["pearl_id"].as_str().unwrap_or_default().to_string(),
-                field: row["field_name"].as_str().unwrap_or_default().to_string(),
-                old_value: row["old_value"].as_str().map(String::from),
-                new_value: row["new_value"].as_str().map(String::from),
-                changed_at: Self::parse_datetime(&row["changed_at"]),
-            });
-        }
-        Ok(entries)
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, pearl_id, field_name, old_value, new_value, changed_at FROM pearl_history WHERE project = ?1 AND pearl_id = ?2 ORDER BY changed_at ASC, seq ASC",
+        )?;
+        let rows = stmt.query_map(params![self.project, pearl_id], |r| {
+            Ok(PearlHistoryEntry {
+                id: r.get(0)?,
+                pearl_id: r.get(1)?,
+                field: r.get(2)?,
+                old_value: r.get(3)?,
+                new_value: r.get(4)?,
+                changed_at: ts_or_now(&r.get::<_, String>(5)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ── Dependencies ────────────────────────────────────────────────────
 
-    /// Add a blocking dependency: `pearl_id` depends on `depends_on`.
+    /// Add a blocking dependency: `pearl_id` depends on `depends_on`. Idempotent.
     pub fn add_dep(&self, pearl_id: &str, depends_on: &str) -> Result<()> {
-        // Use REPLACE to handle "INSERT OR IGNORE" semantics
-        self.dolt.exec(&format!(
-            "REPLACE INTO pearl_dependencies (pearl_id, depends_on, dep_type) VALUES ('{}', '{}', '{}')",
-            sql_escape(pearl_id),
-            sql_escape(depends_on),
-            PearlDepType::Blocks.as_str(),
-        ))?;
-        self.dolt.commit(&format!("add dep: {pearl_id} depends on {depends_on}"))?;
+        self.conn().execute(
+            "INSERT OR REPLACE INTO pearl_dependencies (project, pearl_id, depends_on, dep_type) VALUES (?1, ?2, ?3, ?4)",
+            params![self.project, pearl_id, depends_on, PearlDepType::Blocks.as_str()],
+        )?;
         Ok(())
     }
 
     /// Remove a dependency.
     pub fn remove_dep(&self, pearl_id: &str, depends_on: &str) -> Result<()> {
-        self.dolt.exec(&format!(
-            "DELETE FROM pearl_dependencies WHERE pearl_id = '{}' AND depends_on = '{}'",
-            sql_escape(pearl_id),
-            sql_escape(depends_on),
-        ))?;
-        self.dolt.commit(&format!("remove dep: {pearl_id} no longer depends on {depends_on}"))?;
+        self.conn().execute(
+            "DELETE FROM pearl_dependencies WHERE project = ?1 AND pearl_id = ?2 AND depends_on = ?3",
+            params![self.project, pearl_id, depends_on],
+        )?;
         Ok(())
     }
 
     /// Get all pearls that block the given pearl (unresolved blockers).
     pub fn get_blockers(&self, id: &str) -> Result<Vec<Pearl>> {
-        let rows = self.dolt.sql(&format!(
-            "SELECT p.* FROM pearls p \
-             JOIN pearl_dependencies d ON d.depends_on = p.id \
-             WHERE d.pearl_id = '{}' AND d.dep_type = 'blocks' AND p.status != 'closed'",
-            sql_escape(id),
-        ))?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let conn = self.conn();
+        self.query_pearls(
+            &conn,
+            &format!(
+                "SELECT {PEARL_COLS} FROM pearls p
+                 JOIN pearl_dependencies d ON d.project = p.project AND d.depends_on = p.id
+                 WHERE p.project = ?1 AND d.pearl_id = ?2 AND d.dep_type = 'blocks' AND p.status != 'closed'"
+            ),
+            &[&self.project, &id],
+        )
     }
 
     /// Get all dependencies for a pearl.
     pub fn get_deps(&self, id: &str) -> Result<Vec<PearlDependency>> {
-        let rows = self.dolt.sql(&format!(
-            "SELECT pearl_id, depends_on, dep_type FROM pearl_dependencies WHERE pearl_id = '{}'",
-            sql_escape(id),
-        ))?;
-        let mut deps = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let dep_type_str = row["dep_type"].as_str().unwrap_or("blocks");
-            deps.push(PearlDependency {
-                pearl_id: row["pearl_id"].as_str().unwrap_or_default().to_string(),
-                depends_on: row["depends_on"].as_str().unwrap_or_default().to_string(),
-                dep_type: if dep_type_str == "related" {
-                    PearlDepType::Related
-                } else {
-                    PearlDepType::Blocks
-                },
-            });
-        }
-        Ok(deps)
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT pearl_id, depends_on, dep_type FROM pearl_dependencies WHERE project = ?1 AND pearl_id = ?2")?;
+        let rows = stmt.query_map(params![self.project, id], |r| {
+            let dep_type: String = r.get(2)?;
+            Ok(PearlDependency {
+                pearl_id: r.get(0)?,
+                depends_on: r.get(1)?,
+                dep_type: if dep_type == "related" { PearlDepType::Related } else { PearlDepType::Blocks },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ── Labels ──────────────────────────────────────────────────────────
 
-    /// Add a label to a pearl.
+    /// Add a label to a pearl. Idempotent.
     pub fn add_label(&self, id: &str, label: &str) -> Result<()> {
-        self.dolt.exec(&format!(
-            "REPLACE INTO pearl_labels (pearl_id, label) VALUES ('{}', '{}')",
-            sql_escape(id),
-            sql_escape(label),
-        ))?;
-        self.dolt.commit(&format!("label {id}: +{label}"))?;
+        self.conn().execute(
+            "INSERT OR IGNORE INTO pearl_labels (project, pearl_id, label) VALUES (?1, ?2, ?3)",
+            params![self.project, id, label],
+        )?;
         Ok(())
     }
 
     /// Remove a label from a pearl.
     pub fn remove_label(&self, id: &str, label: &str) -> Result<()> {
-        self.dolt.exec(&format!(
-            "DELETE FROM pearl_labels WHERE pearl_id = '{}' AND label = '{}'",
-            sql_escape(id),
-            sql_escape(label),
-        ))?;
-        self.dolt.commit(&format!("label {id}: -{label}"))?;
+        self.conn().execute(
+            "DELETE FROM pearl_labels WHERE project = ?1 AND pearl_id = ?2 AND label = ?3",
+            params![self.project, id, label],
+        )?;
         Ok(())
     }
 
@@ -881,144 +671,141 @@ impl PearlStore {
     /// Add a comment to a pearl.
     pub fn add_comment(&self, pearl_id: &str, content: &str) -> Result<PearlComment> {
         let id = generate_id();
-        self.dolt.exec(&format!(
-            "INSERT INTO pearl_comments (id, pearl_id, content, created_at) VALUES ('{}', '{}', '{}', NOW())",
-            sql_escape(&id),
-            sql_escape(pearl_id),
-            sql_escape(content),
-        ))?;
-        let truncated = if content.len() > 60 { &content[..60] } else { content };
-        self.dolt.commit(&format!("comment on {pearl_id}: {truncated}"))?;
+        let now = Utc::now();
+        self.conn().execute(
+            "INSERT INTO pearl_comments (project, id, pearl_id, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![self.project, id, pearl_id, content, fmt_ts(now)],
+        )?;
         Ok(PearlComment {
             id,
             pearl_id: pearl_id.to_string(),
             content: content.to_string(),
-            created_at: Utc::now(),
+            created_at: now,
         })
     }
 
     /// Get all comments for a pearl, ordered by creation time.
     pub fn get_comments(&self, pearl_id: &str) -> Result<Vec<PearlComment>> {
-        let rows = self.dolt.sql(&format!(
-            "SELECT id, pearl_id, content, created_at FROM pearl_comments WHERE pearl_id = '{}' ORDER BY created_at ASC, seq ASC",
-            sql_escape(pearl_id),
-        ))?;
-        let mut comments = Vec::with_capacity(rows.len());
-        for row in &rows {
-            comments.push(PearlComment {
-                id: row["id"].as_str().unwrap_or_default().to_string(),
-                pearl_id: row["pearl_id"].as_str().unwrap_or_default().to_string(),
-                content: row["content"].as_str().unwrap_or_default().to_string(),
-                created_at: Self::parse_datetime(&row["created_at"]),
-            });
-        }
-        Ok(comments)
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT id, pearl_id, content, created_at FROM pearl_comments WHERE project = ?1 AND pearl_id = ?2 ORDER BY created_at ASC, seq ASC")?;
+        let rows = stmt.query_map(params![self.project, pearl_id], |r| {
+            Ok(PearlComment {
+                id: r.get(0)?,
+                pearl_id: r.get(1)?,
+                content: r.get(2)?,
+                created_at: ts_or_now(&r.get::<_, String>(3)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ── Query helpers ───────────────────────────────────────────────────
 
     /// Pearls that are open with no unresolved blocking dependencies.
     pub fn ready(&self) -> Result<Vec<Pearl>> {
-        let rows = self.dolt.sql(
-            "SELECT p.* FROM pearls p \
-             WHERE p.status = 'open' \
-             AND NOT EXISTS ( \
-                 SELECT 1 FROM pearl_dependencies d \
-                 JOIN pearls blocker ON blocker.id = d.depends_on \
-                 WHERE d.pearl_id = p.id AND d.dep_type = 'blocks' AND blocker.status != 'closed' \
-             ) \
-             ORDER BY p.priority ASC, p.created_at DESC",
-        )?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let conn = self.conn();
+        self.query_pearls(
+            &conn,
+            &format!(
+                "SELECT {PEARL_COLS} FROM pearls p
+                 WHERE p.project = ?1 AND p.status = 'open'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pearl_dependencies d
+                     JOIN pearls blocker ON blocker.project = d.project AND blocker.id = d.depends_on
+                     WHERE d.project = p.project AND d.pearl_id = p.id AND d.dep_type = 'blocks' AND blocker.status != 'closed'
+                 )
+                 ORDER BY p.priority ASC, p.created_at DESC"
+            ),
+            &[&self.project],
+        )
     }
 
-    /// Scheduled pearls whose time has arrived: `scheduled_at <= now` and not
-    /// yet closed. Soonest-due first. This is what the prime hook surfaces so a
-    /// scheduled pearl "speaks up" when it comes due (pearl th-01aa6a).
+    /// Scheduled pearls whose time has arrived (`scheduled_at <= now`, not
+    /// closed), soonest-due first. Compared against a Rust UTC literal.
     pub fn due_scheduled(&self) -> Result<Vec<Pearl>> {
-        // Compare against a Rust-computed UTC instant, NOT Dolt's `NOW()`:
-        // scheduled_at is stored as UTC (Rust-formatted), but Dolt's NOW()
-        // returns the server's *local* time, so `scheduled_at <= NOW()` would
-        // be off by the local UTC offset.
-        let now = Utc::now().format("%Y-%m-%d %H:%M:%S");
-        let rows = self.dolt.sql(&format!(
-            "SELECT p.* FROM pearls p \
-             WHERE p.scheduled_at IS NOT NULL AND p.scheduled_at <= '{now}' AND p.status != 'closed' \
-             ORDER BY p.scheduled_at ASC",
-        ))?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let now = now_ts();
+        let conn = self.conn();
+        self.query_pearls(
+            &conn,
+            &format!(
+                "SELECT {PEARL_COLS} FROM pearls p
+                 WHERE p.project = ?1 AND p.scheduled_at IS NOT NULL AND p.scheduled_at <= ?2 AND p.status != 'closed'
+                 ORDER BY p.scheduled_at ASC"
+            ),
+            &[&self.project, &now],
+        )
     }
 
     /// Pearls that have unresolved blocking dependencies.
     pub fn blocked(&self) -> Result<Vec<Pearl>> {
-        let rows = self.dolt.sql(
-            "SELECT DISTINCT p.* FROM pearls p \
-             JOIN pearl_dependencies d ON d.pearl_id = p.id \
-             JOIN pearls blocker ON blocker.id = d.depends_on \
-             WHERE d.dep_type = 'blocks' AND blocker.status != 'closed' AND p.status != 'closed' \
-             ORDER BY p.priority ASC",
-        )?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let conn = self.conn();
+        self.query_pearls(
+            &conn,
+            &format!(
+                "SELECT DISTINCT {PEARL_COLS} FROM pearls p
+                 JOIN pearl_dependencies d ON d.project = p.project AND d.pearl_id = p.id
+                 JOIN pearls blocker ON blocker.project = d.project AND blocker.id = d.depends_on
+                 WHERE p.project = ?1 AND d.dep_type = 'blocks' AND blocker.status != 'closed' AND p.status != 'closed'
+                 ORDER BY p.priority ASC"
+            ),
+            &[&self.project],
+        )
     }
 
-    /// Full-text search on title and description (LIKE-based).
+    /// Substring search on title and description (case-insensitive LIKE).
     pub fn search(&self, text: &str) -> Result<Vec<Pearl>> {
-        let pattern = sql_escape(text);
-        let rows = self.dolt.sql(&format!(
-            "SELECT * FROM pearls WHERE title LIKE '%{pattern}%' OR description LIKE '%{pattern}%' ORDER BY priority ASC, created_at DESC",
-        ))?;
-        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
-        self.attach_labels(pearls)
+        let pattern = format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let conn = self.conn();
+        self.query_pearls(
+            &conn,
+            &format!(
+                "SELECT {PEARL_COLS} FROM pearls p
+                 WHERE p.project = ?1 AND (p.title LIKE ?2 ESCAPE '\\' OR p.description LIKE ?2 ESCAPE '\\')
+                 ORDER BY p.priority ASC, p.created_at DESC"
+            ),
+            &[&self.project, &pattern],
+        )
     }
 
-    /// Aggregate stats across all pearls.
-    /// Read a key/value from the Dolt `config` table. Returns `None`
-    /// when the key is missing. This replaces the legacy SQLite
-    /// `smooth.db::config` table — all config now lives in the same
-    /// Dolt store as pearls, which means it's version-controlled and
-    /// syncable across machines via `th pearls push/pull`.
+    // ── Config ──────────────────────────────────────────────────────────
+
+    /// Read a per-project config value. `None` when the key is missing.
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
-        let rows = self.dolt.sql(&format!("SELECT v FROM config WHERE k = '{}'", sql_escape(key)))?;
-        Ok(rows.first().and_then(|row| row["v"].as_str().map(String::from)))
+        Ok(self
+            .conn()
+            .query_row("SELECT v FROM config WHERE project = ?1 AND k = ?2", params![self.project, key], |r| r.get(0))
+            .optional()?)
     }
 
-    /// Upsert a key/value into the Dolt `config` table.
+    /// Upsert a per-project config value.
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        self.dolt.exec(&format!(
-            "INSERT INTO config (k, v, updated_at) VALUES ('{}', '{}', NOW()) \
-             ON DUPLICATE KEY UPDATE v = '{}', updated_at = NOW()",
-            sql_escape(key),
-            sql_escape(value),
-            sql_escape(value),
-        ))?;
-        self.dolt.commit(&format!("config: set {key}"))?;
+        self.conn().execute(
+            "INSERT INTO config (project, k, v, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project, k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at",
+            params![self.project, key, value, now_ts()],
+        )?;
         Ok(())
     }
 
-    /// List all config key/value pairs.
+    /// List all config key/value pairs for this project.
     pub fn list_config(&self) -> Result<Vec<(String, String)>> {
-        let rows = self.dolt.sql("SELECT k, v FROM config ORDER BY k")?;
-        Ok(rows
-            .iter()
-            .filter_map(|row| {
-                let k = row["k"].as_str()?.to_string();
-                let v = row["v"].as_str()?.to_string();
-                Some((k, v))
-            })
-            .collect())
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT k, v FROM config WHERE project = ?1 ORDER BY k")?;
+        let rows = stmt.query_map(params![self.project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Aggregate stats across this project's pearls.
     pub fn stats(&self) -> Result<PearlStats> {
-        let rows = self.dolt.sql("SELECT status, COUNT(*) as cnt FROM pearls GROUP BY status")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM pearls WHERE project = ?1 GROUP BY status")?;
+        let rows = stmt.query_map(params![self.project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut stats = PearlStats::default();
-        for row in &rows {
-            let status_val = row["status"].as_str().unwrap_or_default();
-            #[allow(clippy::cast_possible_truncation)]
-            let count = row["cnt"].as_u64().unwrap_or(0) as usize;
-            match status_val {
+        for row in rows {
+            let (bucket, n) = row?;
+            let count = usize::try_from(n).unwrap_or(0);
+            match bucket.as_str() {
                 "open" => stats.open = count,
                 "in_progress" => stats.in_progress = count,
                 "closed" => stats.closed = count,
@@ -1029,28 +816,94 @@ impl PearlStore {
         stats.total = stats.open + stats.in_progress + stats.closed + stats.deferred;
         Ok(stats)
     }
+
+    // ── Raw import (migration) ──────────────────────────────────────────
+
+    /// Insert a pearl row verbatim, keeping its id and timestamps. `INSERT
+    /// OR IGNORE` on `(project, id)`, so re-running an import is a no-op.
+    /// Returns whether a row was inserted. Used by `migrate-from-dolt`.
+    pub fn import_pearl(&self, pearl: &Pearl) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO pearls (project, id, title, description, status, priority, pearl_type, parent_id, assigned_to, created_at, updated_at, closed_at, scheduled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                self.project,
+                pearl.id,
+                pearl.title,
+                pearl.description,
+                pearl.status.as_str(),
+                i64::from(pearl.priority.as_u8()),
+                pearl.pearl_type.as_str(),
+                pearl.parent_id,
+                pearl.assigned_to,
+                fmt_ts(pearl.created_at),
+                fmt_ts(pearl.updated_at),
+                pearl.closed_at.map(fmt_ts),
+                pearl.scheduled_at.map(fmt_ts),
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Import a dependency row verbatim (idempotent).
+    pub fn import_dep(&self, dep: &PearlDependency) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO pearl_dependencies (project, pearl_id, depends_on, dep_type) VALUES (?1, ?2, ?3, ?4)",
+            params![self.project, dep.pearl_id, dep.depends_on, dep.dep_type.as_str()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Import a label row verbatim (idempotent).
+    pub fn import_label(&self, pearl_id: &str, label: &str) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO pearl_labels (project, pearl_id, label) VALUES (?1, ?2, ?3)",
+            params![self.project, pearl_id, label],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Import a comment row verbatim, keeping its id + timestamp (idempotent).
+    pub fn import_comment(&self, c: &PearlComment) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO pearl_comments (project, id, pearl_id, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![self.project, c.id, c.pearl_id, c.content, fmt_ts(c.created_at)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Import a history row verbatim, keeping its id + timestamp (idempotent).
+    pub fn import_history(&self, h: &PearlHistoryEntry) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO pearl_history (project, id, pearl_id, field_name, old_value, new_value, changed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![self.project, h.id, h.pearl_id, h.field, h.old_value, h.new_value, fmt_ts(h.changed_at)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Import a config row (idempotent — an existing key is left alone).
+    pub fn import_config(&self, key: &str, value: &str, updated_at: DateTime<Utc>) -> Result<bool> {
+        let n = self.conn().execute(
+            "INSERT OR IGNORE INTO config (project, k, v, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![self.project, key, value, fmt_ts(updated_at)],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod tests {
     use super::*;
     use crate::types::PearlType;
 
-    /// Create a test store in a temp directory. Requires smooth-dolt binary.
-    fn test_store() -> Option<PearlStore> {
+    /// A store on a private tempdir DB. The tempdir is leaked so the file
+    /// outlives the returned store.
+    pub fn test_store() -> PearlStore {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let dolt_dir = tmp.path().join("dolt");
-        match PearlStore::init(&dolt_dir) {
-            Ok(store) => {
-                // Leak the tempdir so it stays alive for the test
-                std::mem::forget(tmp);
-                Some(store)
-            }
-            Err(_) => {
-                // smooth-dolt binary not available — skip test
-                None
-            }
-        }
+        let store = PearlStore::open_with_db(&tmp.path().join("pearls.db"), &tmp.path().join("proj")).expect("open store");
+        std::mem::forget(tmp);
+        store
     }
 
     fn new_task(title: &str) -> NewPearl {
@@ -1081,7 +934,7 @@ mod tests {
 
     #[test]
     fn test_create_returns_pearl_with_generated_id() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store.create(&new_task("Test pearl")).unwrap();
         assert!(pearl.id.starts_with("th-"), "ID should start with 'th-': {}", pearl.id);
         assert_eq!(pearl.id.len(), 9);
@@ -1090,21 +943,31 @@ mod tests {
     }
 
     #[test]
-    fn test_create_roundtrips_backslash_quote_text() {
-        // Regression for th-944230: `\'` in field text broke the quotes-only
-        // escape (`\''` — the backslash ate the first quote → Error 1105).
-        let Some(store) = test_store() else { return };
+    fn test_create_roundtrips_awkward_text() {
+        // Regression for th-944230 in the Dolt era: `\'` in field text broke
+        // the hand-rolled escape. Bound parameters make it a non-issue, but
+        // the guard stays.
+        let store = test_store();
         let title = r"backslash-quote \' title";
         let desc = "text with \\' backslash-quote, lone trailing \\, doubled \\\\, quote ', \n newline, unicode 世界 🦀, '; DROP TABLE pearls; --";
         let created = store.create(&new_pearl(title, desc, PearlType::Task, Priority::Medium)).unwrap();
         let fetched = store.get(&created.id).unwrap().expect("pearl should exist");
-        assert_eq!(fetched.title, title, "title must read back byte-identical");
-        assert_eq!(fetched.description, desc, "description must read back byte-identical");
+        assert_eq!(fetched.title, title);
+        assert_eq!(fetched.description, desc);
+    }
+
+    #[test]
+    fn test_create_with_labels() {
+        let store = test_store();
+        let mut new = new_task("labelled");
+        new.labels = vec!["b".into(), "a".into(), "a".into()];
+        let pearl = store.create(&new).unwrap();
+        assert_eq!(pearl.labels, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
     fn test_get_by_id() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let created = store.create(&new_task("Find me")).unwrap();
         let fetched = store.get(&created.id).unwrap().expect("should find pearl");
         assert_eq!(fetched.id, created.id);
@@ -1113,24 +976,22 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_returns_none() {
-        let Some(store) = test_store() else { return };
-        let result = store.get("th-000000").unwrap();
-        assert!(result.is_none());
+        let store = test_store();
+        assert!(store.get("th-000000").unwrap().is_none());
     }
 
     #[test]
     fn test_list_all() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         store.create(&new_task("A")).unwrap();
         store.create(&new_task("B")).unwrap();
         store.create(&new_task("C")).unwrap();
-        let all = store.list(&PearlQuery::new()).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(store.list(&PearlQuery::new()).unwrap().len(), 3);
     }
 
     #[test]
     fn test_list_filtered_by_status() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Open one")).unwrap();
         store.create(&new_task("Open two")).unwrap();
         store.close(&[&a.id]).unwrap();
@@ -1146,35 +1007,34 @@ mod tests {
 
     #[test]
     fn test_list_limit_zero_is_unbounded() {
-        let Some(store) = test_store() else { return };
-        // Create >100 pearls so the old default would have truncated.
+        let store = test_store();
         for i in 0..150 {
             store.create(&new_task(&format!("p{i}"))).unwrap();
         }
-
-        // Default limit (100) caps the result.
-        let capped = store.list(&PearlQuery::new()).unwrap();
-        assert_eq!(capped.len(), 100);
-
-        // limit == 0 returns all rows.
-        let all = store.list(&PearlQuery::new().with_limit(0)).unwrap();
-        assert_eq!(all.len(), 150);
+        assert_eq!(store.list(&PearlQuery::new()).unwrap().len(), 100);
+        assert_eq!(store.list(&PearlQuery::new().with_limit(0)).unwrap().len(), 150);
     }
 
     #[test]
-    fn test_list_filtered_by_priority() {
-        let Some(store) = test_store() else { return };
-        store.create(&new_pearl("Critical", "", PearlType::Bug, Priority::Critical)).unwrap();
-        store.create(&new_pearl("Backlog", "", PearlType::Task, Priority::Backlog)).unwrap();
+    fn test_list_filtered_by_priority_type_assignee_parent() {
+        let store = test_store();
+        let root = store.create(&new_pearl("Critical", "", PearlType::Bug, Priority::Critical)).unwrap();
+        let mut child = new_pearl("Backlog", "", PearlType::Task, Priority::Backlog);
+        child.assigned_to = Some("alice".into());
+        child.parent_id = Some(root.id.clone());
+        store.create(&child).unwrap();
 
         let critical = store.list(&PearlQuery::new().with_priority(Priority::Critical)).unwrap();
         assert_eq!(critical.len(), 1);
         assert_eq!(critical[0].title, "Critical");
+        assert_eq!(store.list(&PearlQuery::new().with_type(PearlType::Bug)).unwrap().len(), 1);
+        assert_eq!(store.list(&PearlQuery::new().with_assigned_to("alice")).unwrap().len(), 1);
+        assert_eq!(store.list(&PearlQuery::new().with_parent(root.id)).unwrap().len(), 1);
     }
 
     #[test]
     fn test_update_changes_fields_and_records_history() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store.create(&new_task("Original title")).unwrap();
 
         let updated = store
@@ -1189,67 +1049,91 @@ mod tests {
         assert_eq!(updated.title, "New title");
 
         let history = store.get_history(&pearl.id).unwrap();
-        assert!(!history.is_empty());
+        assert_eq!(history.len(), 1);
         assert_eq!(history[0].field, "title");
         assert_eq!(history[0].old_value.as_deref(), Some("Original title"));
         assert_eq!(history[0].new_value.as_deref(), Some("New title"));
+
+        // Unchanged value → no history row.
+        store
+            .update(
+                &pearl.id,
+                &PearlUpdate {
+                    title: Some("New title".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.get_history(&pearl.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_update_missing_pearl_errors() {
+        let store = test_store();
+        assert!(store.update("th-nope00", &PearlUpdate::default()).is_err());
     }
 
     #[test]
     fn test_close_sets_status_and_closed_at() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store.create(&new_task("Close me")).unwrap();
         assert!(pearl.closed_at.is_none());
 
-        let count = store.close(&[&pearl.id]).unwrap();
-        assert_eq!(count, 1);
-
+        assert_eq!(store.close(&[&pearl.id]).unwrap(), 1);
         let closed = store.get(&pearl.id).unwrap().unwrap();
         assert_eq!(closed.status, PearlStatus::Closed);
         assert!(closed.closed_at.is_some());
+        // Idempotent: already-closed counts 0.
+        assert_eq!(store.close(&[&pearl.id, "th-nope00"]).unwrap(), 0);
     }
 
     #[test]
     fn test_reopen_clears_closed_status() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store.create(&new_task("Reopen me")).unwrap();
         store.close(&[&pearl.id]).unwrap();
-
         let reopened = store.reopen(&pearl.id).unwrap();
         assert_eq!(reopened.status, PearlStatus::Open);
         assert!(reopened.closed_at.is_none());
     }
 
     #[test]
-    fn test_delete_removes_pearl() {
-        let Some(store) = test_store() else { return };
+    fn test_delete_removes_pearl_and_children() {
+        let store = test_store();
         let pearl = store.create(&new_task("Delete me")).unwrap();
+        let other = store.create(&new_task("Other")).unwrap();
+        store.add_label(&pearl.id, "x").unwrap();
+        store.add_comment(&pearl.id, "c").unwrap();
+        store.add_dep(&other.id, &pearl.id).unwrap();
         store.delete(&pearl.id).unwrap();
         assert!(store.get(&pearl.id).unwrap().is_none());
+        assert!(store.get_comments(&pearl.id).unwrap().is_empty());
+        assert!(store.get_deps(&other.id).unwrap().is_empty(), "deps pointing at the deleted pearl go too");
     }
 
     // ── Dependency tests ────────────────────────────────────────────────
 
     #[test]
     fn test_add_dep_creates_blocking_relationship() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Blocked")).unwrap();
         let b = store.create(&new_task("Blocker")).unwrap();
-
         store.add_dep(&a.id, &b.id).unwrap();
+        store.add_dep(&a.id, &b.id).unwrap(); // idempotent
         let deps = store.get_deps(&a.id).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].depends_on, b.id);
         assert_eq!(deps[0].dep_type, PearlDepType::Blocks);
+        store.remove_dep(&a.id, &b.id).unwrap();
+        assert!(store.get_deps(&a.id).unwrap().is_empty());
     }
 
     #[test]
     fn test_get_blockers_returns_blocking_pearls() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Blocked")).unwrap();
         let b = store.create(&new_task("Blocker")).unwrap();
         store.add_dep(&a.id, &b.id).unwrap();
-
         let blockers = store.get_blockers(&a.id).unwrap();
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].id, b.id);
@@ -1257,7 +1141,7 @@ mod tests {
 
     #[test]
     fn test_ready_excludes_pearls_with_open_blockers() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Ready")).unwrap();
         let b = store.create(&new_task("Blocked")).unwrap();
         let c = store.create(&new_task("Blocker")).unwrap();
@@ -1272,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_blocked_returns_pearls_with_open_blockers() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Blocked")).unwrap();
         let b = store.create(&new_task("Blocker")).unwrap();
         store.add_dep(&a.id, &b.id).unwrap();
@@ -1282,34 +1166,52 @@ mod tests {
         assert_eq!(blocked[0].id, a.id);
 
         store.close(&[&b.id]).unwrap();
-        let blocked = store.blocked().unwrap();
-        assert!(blocked.is_empty());
+        assert!(store.blocked().unwrap().is_empty());
     }
 
     // ── Labels & Comments ───────────────────────────────────────────────
 
     #[test]
     fn test_add_label_and_query_by_label() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("Labeled")).unwrap();
         store.create(&new_task("No label")).unwrap();
-
         store.add_label(&a.id, "backend").unwrap();
 
         let labeled = store.list(&PearlQuery::new().with_label("backend")).unwrap();
         assert_eq!(labeled.len(), 1);
         assert_eq!(labeled[0].id, a.id);
         assert!(labeled[0].labels.contains(&"backend".to_string()));
+
+        store.remove_label(&a.id, "backend").unwrap();
+        assert!(store.list(&PearlQuery::new().with_label("backend")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_batch_loads_labels_per_pearl() {
+        // Regression for th-2e1ad2: labels are batch-loaded in one query;
+        // each pearl gets exactly its own, label-less pearls stay empty.
+        let store = test_store();
+        let a = store.create(&new_task("alpha")).unwrap();
+        let b = store.create(&new_task("bravo")).unwrap();
+        let c = store.create(&new_task("charlie")).unwrap();
+        store.add_label(&a.id, "backend").unwrap();
+        store.add_label(&a.id, "auth").unwrap();
+        store.add_label(&b.id, "frontend").unwrap();
+
+        let all = store.list(&PearlQuery::new()).unwrap();
+        let get = |id: &str| all.iter().find(|p| p.id == id).unwrap().labels.clone();
+        assert_eq!(get(&a.id), vec!["auth".to_string(), "backend".to_string()]);
+        assert_eq!(get(&b.id), vec!["frontend".to_string()]);
+        assert!(get(&c.id).is_empty());
     }
 
     #[test]
     fn test_add_comment_and_get_comments() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let pearl = store.create(&new_task("Commented")).unwrap();
-
         store.add_comment(&pearl.id, "First comment").unwrap();
         store.add_comment(&pearl.id, "Second comment").unwrap();
-
         let comments = store.get_comments(&pearl.id).unwrap();
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].content, "First comment");
@@ -1320,12 +1222,12 @@ mod tests {
 
     #[test]
     fn test_search_finds_by_title_substring() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         store
             .create(&new_pearl("Fix login bug", "auth related", PearlType::Bug, Priority::High))
             .unwrap();
         store
-            .create(&new_pearl("Add dashboard", "new feature", PearlType::Feature, Priority::Medium))
+            .create(&new_pearl("Add dashboard", "new feature 100%", PearlType::Feature, Priority::Medium))
             .unwrap();
 
         let results = store.search("login").unwrap();
@@ -1335,18 +1237,21 @@ mod tests {
         let results = store.search("new feature").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Add dashboard");
+
+        // LIKE metacharacters are literal.
+        assert_eq!(store.search("100%").unwrap().len(), 1);
+        assert!(store.search("_ogin").unwrap().is_empty());
     }
 
-    // ── Stats ───────────────────────────────────────────────────────────
+    // ── Stats / config ──────────────────────────────────────────────────
 
     #[test]
     fn test_stats_returns_correct_counts() {
-        let Some(store) = test_store() else { return };
+        let store = test_store();
         let a = store.create(&new_task("One")).unwrap();
         store.create(&new_task("Two")).unwrap();
         store.create(&new_task("Three")).unwrap();
         store.close(&[&a.id]).unwrap();
-
         let b = store.create(&new_task("Four")).unwrap();
         store
             .update(
@@ -1367,16 +1272,27 @@ mod tests {
     }
 
     #[test]
-    fn test_due_scheduled_uses_utc_not_dolt_local_now() {
-        let Some(store) = test_store() else { return };
+    fn test_config_round_trip() {
+        let store = test_store();
+        assert!(store.get_config("k").unwrap().is_none());
+        store.set_config("k", "v1").unwrap();
+        store.set_config("k", "v2").unwrap();
+        store.set_config("a", "z").unwrap();
+        assert_eq!(store.get_config("k").unwrap().as_deref(), Some("v2"));
+        assert_eq!(
+            store.list_config().unwrap(),
+            vec![("a".to_string(), "z".to_string()), ("k".to_string(), "v2".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_due_scheduled_uses_utc_literal() {
+        let store = test_store();
         let past = store.create(&new_task("due already")).unwrap();
         let future = store.create(&new_task("due later")).unwrap();
         let unscheduled = store.create(&new_task("no schedule")).unwrap();
 
-        // A pearl scheduled an hour ago is due; one scheduled an hour out is not.
-        // The gap is small enough that a local-vs-UTC NOW() mismatch would flip
-        // the result — this is the regression guard.
-        let set = |id: &str, dt: chrono::DateTime<Utc>| {
+        let set = |id: &str, dt: DateTime<Utc>| {
             store
                 .update(
                     id,
@@ -1392,138 +1308,114 @@ mod tests {
 
         let due = store.due_scheduled().unwrap();
         let ids: Vec<&str> = due.iter().map(|p| p.id.as_str()).collect();
-        assert!(ids.contains(&past.id.as_str()), "past-scheduled pearl should be due");
-        assert!(!ids.contains(&future.id.as_str()), "future-scheduled pearl should not be due");
-        assert!(!ids.contains(&unscheduled.id.as_str()), "unscheduled pearl should never be due");
+        assert!(ids.contains(&past.id.as_str()));
+        assert!(!ids.contains(&future.id.as_str()));
+        assert!(!ids.contains(&unscheduled.id.as_str()));
+        assert_eq!(store.get_history(&past.id).unwrap()[0].field, "scheduled_at");
 
-        // Closing a due pearl drops it from the list.
         store.close(&[&past.id]).unwrap();
         assert!(store.due_scheduled().unwrap().is_empty());
     }
 
-    /// Regression: stores created before the `config` table was part of
-    /// the schema (before the retire-sqlite commit) were leaving every
-    /// subsequent `get_config` call failing, which surfaced as a red
-    /// "Dolt store" card on the dashboard. `open()` must heal such
-    /// stores by re-running `ensure_schema` idempotently.
+    // ── Multi-project isolation ─────────────────────────────────────────
+
     #[test]
-    fn test_open_migrates_missing_config_table() {
-        let Some(store) = test_store() else { return };
-        let dolt_dir = store.dolt_path().to_path_buf();
-
-        // Drop the config table to simulate a pre-migration store.
-        store.dolt.exec("DROP TABLE config").expect("drop config");
-        store.dolt.commit("simulate legacy store: remove config table").expect("commit drop");
-        drop(store);
-
-        // Re-open. Migration should recreate the table so get_config works.
-        let reopened = PearlStore::open(&dolt_dir).expect("open heals missing table");
-        reopened.set_config("__health_check", "ok").expect("set_config after migration");
-        let got = reopened.get_config("__health_check").expect("get_config succeeds").expect("value present");
-        assert_eq!(got, "ok");
+    fn projects_are_isolated_in_one_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("pearls.db");
+        let a = PearlStore::open_with_db(&db, Path::new("/proj/a")).unwrap();
+        let b = PearlStore::open_with_db(&db, Path::new("/proj/b")).unwrap();
+        let pa = a.create(&new_task("in a")).unwrap();
+        b.create(&new_task("in b")).unwrap();
+        assert_eq!(a.list(&PearlQuery::new()).unwrap().len(), 1);
+        assert_eq!(b.list(&PearlQuery::new()).unwrap().len(), 1);
+        assert!(b.get(&pa.id).unwrap().is_none(), "ids are project-scoped");
+        assert_eq!(a.stats().unwrap().total, 1);
+        // Same id in two projects is allowed (Dolt-era ids were per store).
+        assert!(b.import_pearl(&pa).unwrap());
+        assert!(!b.import_pearl(&pa).unwrap(), "re-import is a no-op");
+        assert_eq!(b.get(&pa.id).unwrap().unwrap().title, "in a");
     }
 
-    /// `column_exists` reports presence/absence against the real schema.
+    /// Regression: a store opened from a linked git worktree must resolve
+    /// to the SAME project as the main checkout, so pearls created in a
+    /// worktree no longer vanish when the worktree is removed.
     #[test]
-    fn test_column_exists_probe() {
-        let Some(store) = test_store() else { return };
-        assert!(PearlStore::column_exists(&store.dolt, "pearls", "title").expect("probe existing"));
-        assert!(!PearlStore::column_exists(&store.dolt, "pearls", "no_such_column").expect("probe missing"));
-        assert!(!PearlStore::column_exists(&store.dolt, "no_such_table", "x").expect("probe missing table"));
+    fn worktree_resolves_to_main_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().expect("git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "--initial-branch=main"], &main);
+        git(&["config", "user.email", "t@example.com"], &main);
+        git(&["config", "user.name", "T"], &main);
+        git(&["config", "commit.gpgsign", "false"], &main);
+        std::fs::write(main.join("README"), "x").unwrap();
+        git(&["add", "."], &main);
+        git(&["commit", "-q", "--no-verify", "-m", "init"], &main);
+        let wt = tmp.path().join("wt-feature");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feature"], &main);
+        let sub = wt.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let main_root = resolve_project_root(&main);
+        assert_eq!(resolve_project_root(&wt), main_root);
+        assert_eq!(resolve_project_root(&sub), main_root, "any subdir of a worktree resolves too");
+        assert_eq!(main_root, main.canonicalize().unwrap());
+
+        // Not a repo → the directory itself.
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(resolve_project_root(&plain), plain.canonicalize().unwrap());
     }
 
-    /// Regression (pearl th-f89a3c): the `pearl_comments.seq` column-level
-    /// heal used `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, which Dolt
-    /// rejects as a syntax error. The failure was swallowed as a debug log,
-    /// so pre-messaging stores never got the column and `get_comments`
-    /// (ORDER BY ... seq) blew up with "column seq could not be found".
-    /// migrate_schema must re-add the column on such a store, and be
-    /// idempotent on an already-healed one.
     #[test]
-    fn test_migrate_heals_missing_pearl_comments_seq() {
-        let Some(store) = test_store() else { return };
-
-        // Simulate a legacy store whose pearl_comments predates the seq
-        // column. Dolt has no DROP COLUMN IF EXISTS, so a bare DROP.
-        store
-            .dolt
-            .exec("ALTER TABLE pearl_comments DROP COLUMN seq")
-            .expect("drop seq to simulate legacy");
-        assert!(!PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq absent after drop"));
-
-        // Migration must re-add it (the old IF NOT EXISTS form silently no-op'd).
-        PearlStore::migrate_schema(&store.dolt).expect("migrate re-adds seq");
-        assert!(PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq present after migrate"));
-
-        // get_comments must work again — proves the ORDER BY seq query is valid.
-        let pearl = store.create(&new_task("has comments")).expect("create");
-        store.add_comment(&pearl.id, "first").expect("comment");
-        let comments = store.get_comments(&pearl.id).expect("get_comments after heal");
-        assert_eq!(comments.len(), 1);
-
-        // Idempotent: a second migration on the healed store is a no-op, not a
-        // "duplicate column" error.
-        PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
-        assert!(PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq still present"));
+    fn default_db_path_points_at_pearls_db() {
+        // The env override branch is exercised end-to-end by the CLI; no env
+        // mutation here since tests share a process.
+        assert!(default_db_path().ends_with("pearls.db"));
     }
 
-    /// Regression (pearl th-eba7b4): `pearls.scheduled_at` (th-01aa6a) and
-    /// `session_messages.tool_calls` (th-880f2c) shipped their migration as
-    /// `ADD COLUMN IF NOT EXISTS`, which Dolt rejects — so pre-existing stores
-    /// never got the columns and `th pearls due` errored "table p does not have
-    /// column scheduled_at". The COLUMN_HEALS loop in migrate_schema must re-add
-    /// them, and be idempotent on an already-healed store.
     #[test]
-    fn test_migrate_heals_column_if_not_exists_columns() {
-        let Some(store) = test_store() else { return };
+    fn timestamps_round_trip_and_sort_lexically() {
+        let a = Utc::now();
+        let b = a + chrono::Duration::milliseconds(1);
+        assert!(fmt_ts(a) < fmt_ts(b));
+        assert_eq!(parse_ts(&fmt_ts(a)).unwrap(), a);
+        // Dolt-era shapes still parse.
+        assert!(parse_ts("2026-06-22 16:24:02").is_some());
+        assert!(parse_ts("2026-06-22T16:24:02Z").is_some());
+        assert!(parse_ts("").is_none());
+    }
 
-        for (table, column) in [("pearls", "scheduled_at"), ("session_messages", "tool_calls")] {
-            store
-                .dolt
-                .exec(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
-                .unwrap_or_else(|e| panic!("drop {table}.{column} to simulate legacy: {e}"));
-            assert!(
-                !PearlStore::column_exists(&store.dolt, table, column).expect("probe after drop"),
-                "{table}.{column} should be absent after drop"
-            );
+    #[test]
+    fn column_exists_probe() {
+        let store = test_store();
+        let conn = store.conn();
+        assert!(PearlStore::column_exists(&conn, "pearls", "title").unwrap());
+        assert!(!PearlStore::column_exists(&conn, "pearls", "no_such_column").unwrap());
+        assert!(!PearlStore::column_exists(&conn, "no_such_table", "x").unwrap());
+    }
+
+    #[test]
+    fn concurrent_writers_all_succeed() {
+        let store = test_store();
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let s = store.clone();
+                std::thread::spawn(move || {
+                    for j in 0..5 {
+                        s.create(&new_task(&format!("t{i}-{j}"))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
         }
-
-        PearlStore::migrate_schema(&store.dolt).expect("migrate re-adds the columns");
-        for (table, column) in [("pearls", "scheduled_at"), ("session_messages", "tool_calls")] {
-            assert!(
-                PearlStore::column_exists(&store.dolt, table, column).expect("probe after migrate"),
-                "{table}.{column} should be present after migrate"
-            );
-        }
-
-        // due_scheduled must work now (it queries scheduled_at) — this is the
-        // exact call that failed in the field before the fix.
-        assert!(store.due_scheduled().expect("due_scheduled works after heal").is_empty());
-
-        // Idempotent second pass: no "duplicate column" error.
-        PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
-        assert!(PearlStore::column_exists(&store.dolt, "pearls", "scheduled_at").expect("still present"));
-    }
-
-    #[test]
-    fn list_batch_loads_labels_per_pearl() {
-        // Regression for th-2e1ad2: list-style queries batch-load labels in one
-        // query instead of N+1. Verify each pearl gets exactly its own labels
-        // (no cross-contamination) and a label-less pearl stays empty.
-        let Some(store) = test_store() else { return };
-        let a = store.create(&new_task("alpha")).unwrap();
-        let b = store.create(&new_task("bravo")).unwrap();
-        let _c = store.create(&new_task("charlie")).unwrap(); // no labels
-        store.add_label(&a.id, "backend").unwrap();
-        store.add_label(&a.id, "auth").unwrap();
-        store.add_label(&b.id, "frontend").unwrap();
-
-        let all = store.list(&PearlQuery::new()).unwrap();
-        let get = |id: &str| all.iter().find(|p| p.id == id).unwrap().labels.clone();
-
-        // add_label uses ORDER BY label → alphabetical.
-        assert_eq!(get(&a.id), vec!["auth".to_string(), "backend".to_string()]);
-        assert_eq!(get(&b.id), vec!["frontend".to_string()]);
-        assert!(get(&_c.id).is_empty(), "unlabelled pearl must have no labels");
+        assert_eq!(store.stats().unwrap().total, 40);
     }
 }

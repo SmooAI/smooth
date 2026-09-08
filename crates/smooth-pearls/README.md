@@ -1,15 +1,14 @@
 # smooth-pearls
 
-Dolt-backed work item tracker with dependency graphs, version control, and git sync. Built for AI agent orchestration workflows where every task is a "pearl" with full history, comments, and status tracking.
+SQLite-backed work item tracker with dependency graphs and per-field history. Built for AI agent orchestration workflows where every task is a "pearl" with full history, comments, and status tracking. One database per machine (`~/.smooth/pearls.db`) holds every project's pearls, keyed by the project's canonical root — so a pearl created inside a git worktree is the same pearl you see from the main checkout.
 
 ## Features
 
-- **Dependency Graph** -- Pearls can block/depend on other pearls with cycle detection
-- **Version Control** -- Backed by embedded Dolt for full commit history and branching
-- **Git Sync** -- Push/pull pearl data to Dolt remotes for team collaboration
+- **Dependency Graph** -- Pearls can block/depend on other pearls; `ready()` = open with no open blockers
+- **History** -- every field change is recorded per pearl
+- **Memories** -- free-form project notes next to the pearls
 - **Jira Integration** -- Bidirectional sync with Jira for external project management
-- **Session Messages** -- Store conversation history and orchestrator snapshots alongside work items
-- **Global Registry** -- Track pearl databases across multiple projects from `~/.smooth/`
+- **Global Registry** -- Track projects across the machine from `~/.smooth/registry.json`
 
 ## Quick Start
 
@@ -18,8 +17,8 @@ use smooth_pearls::{PearlStore, PearlQuery, PearlStatus, NewPearl, Priority, Pea
 use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
-    // Initialize a pearl store in the current project
-    let store = PearlStore::init(Path::new(".smooth/dolt"))?;
+    // Open the store for the project containing the cwd (creates ~/.smooth/pearls.db on first use)
+    let store = PearlStore::open(Path::new("."))?;
 
     // Create a pearl
     let pearl = store.create(&NewPearl {

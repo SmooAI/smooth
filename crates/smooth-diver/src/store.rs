@@ -274,14 +274,9 @@ mod tests {
 
     fn test_store() -> Option<DiverStore> {
         let tmp = tempfile::tempdir().ok()?;
-        let dolt_dir = tmp.path().join("dolt");
-        match PearlStore::init(&dolt_dir) {
-            Ok(store) => {
-                std::mem::forget(tmp); // keep temp dir alive
-                Some(DiverStore::new(store))
-            }
-            Err(_) => None, // smooth-dolt binary not available
-        }
+        let store = PearlStore::open_with_db(&tmp.path().join("pearls.db"), tmp.path()).ok()?;
+        std::mem::forget(tmp); // keep temp dir alive
+        Some(DiverStore::new(store))
     }
 
     #[test]

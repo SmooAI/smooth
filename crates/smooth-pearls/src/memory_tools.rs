@@ -199,13 +199,8 @@ pub fn register_memory_tools(registry: &mut smooth_operator::ToolRegistry, store
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::store::PearlStore;
-    use tempfile::TempDir;
-
-    fn fresh_store() -> (TempDir, Arc<MemoryStore>) {
-        let tmp = TempDir::new().unwrap();
-        let pearl_store = PearlStore::init(&tmp.path().join(".smooth/dolt")).expect("init pearl store");
-        (tmp, Arc::new(MemoryStore::new(pearl_store.dolt().clone())))
+    fn fresh_store() -> ((), Arc<MemoryStore>) {
+        ((), Arc::new(crate::store::tests::test_store().memory()))
     }
 
     #[tokio::test]
@@ -290,10 +285,7 @@ mod tests {
 
     #[test]
     fn tool_schemas_advertise_read_only_correctly() {
-        let store = Arc::new(MemoryStore::new(
-            // Cheap to clone — use a temp dolt
-            PearlStore::init(&TempDir::new().unwrap().path().join(".smooth/dolt")).unwrap().dolt().clone(),
-        ));
+        let store = Arc::new(crate::store::tests::test_store().memory());
         let remember = RememberTool { store: Arc::clone(&store) };
         let recall_recent = RecallRecentTool { store: Arc::clone(&store) };
         let recall_source = RecallBySourceTool { store };
