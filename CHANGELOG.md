@@ -1,5 +1,19 @@
 # @smooai/smooth
 
+## 0.41.5
+
+### Patch Changes
+
+- ac1877c: th-1d8007: the daemon serves the model catalog as a single source of truth.
+
+  The bench-scored model lineup was hand-copied across `smooth-web` (`model-scores.json` + `modes.ts`), iOS, Android, and the TUI, so it drifted (mobile showed the old Flash/Code/UI modes while desktop was bench-derived). The daemon now serves the canonical bench output (`docs/model-scores.json`) at `GET /api/model-catalog` — ungated public data. `smooth-web`'s picker fetches it on open (`fetchModelRows`) and derives its rows from the live data, falling back to the bundled copy when the daemon is unreachable. A bench refresh now reaches every client that fetches this route without a per-platform re-copy. Mobile clients consuming the route land separately.
+
+- 3c61a47: th-1fca98: render images another client attached, and bump the engine to persist them.
+
+  A photo sent from the iOS app showed only as text in the desktop app's view of the same conversation. The engine now persists a user turn's images as `image` content items (smooth-operator #564), and `smooth-web` renders them from history: history parsing moved to a pure, unit-tested `history.ts` that turns persisted `image` items into renderable attachments (the composer's live-send path already showed them).
+
+  Engine bump: `smooth-operator-server`/`svc` git rev `b6c6b84` → `9b30ed7b` (includes the image-persistence fix), which moves core `1.7.10` → `1.10.0`. That core carries three additive `AgentEvent::Completed` fields (spend taint flags + response id, th-126fe6) and makes `Session.agent_id` optional; the few construction sites were updated to the serde defaults older output already produced (no behavior change).
+
 ## 0.41.4
 
 ### Patch Changes
