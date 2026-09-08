@@ -24,17 +24,17 @@
 
 ## Work model
 
-- **Pearl** — A single work item. Dolt-backed. Has status, dependencies, comments, history. See [[Architecture/Pearls]].
+- **Pearl** — A single work item, stored in `~/.smooth/pearls.db` (SQLite). Has status, dependencies, comments, history. See [[Architecture/Pearls]].
 - **Teammate** — A registered operative the UI knows about. One per active dispatch.
 - **Dispatch** — Handing a pearl to an operative and running the agent loop. See [[Architecture/Dispatch]].
 - **Coding workflow** — The single-agent loop with a test-feedback governor that coding roles run (`smooth_cast::coding_workflow`). Not a multi-phase pipeline — that was dropped.
 
 ## Storage
 
-- **Dolt** — Versioned SQL database backing pearls + sessions. Per-project at `.smooth/dolt/`.
-- **`smooth-dolt`** — Go binary embedding the Dolt engine. Spawned as a subprocess by `smooth-pearls`.
+- **Dolt** — The former pearl backend (per-project `.smooth/dolt/`), retired by pearl th-d3e842; `th pearls migrate-from-dolt` imports a leftover store.
+- **`smooth-dolt`** — Go binary embedding the Dolt engine; only `th pearls migrate-from-dolt` still shells out to it (deleted in th-c6ba83).
 - **`~/.smooth/`** — Global Smooth state: `providers.json`, `registry.json`, `audit/`, `plugins/`, `smooth.pid`/`smooth.log`.
-- **`.smooth/`** — Project-scoped state: `dolt/`, `mcp.toml`, `plugins/`.
+- **`.smooth/`** — Project-scoped state: `mcp.toml`, `plugins/` (and a legacy `dolt/` until migrated).
 
 ## Extensibility
 

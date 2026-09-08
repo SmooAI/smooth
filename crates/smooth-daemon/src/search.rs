@@ -33,7 +33,7 @@
 //!   like* a path — directory listing filtered by the partial final component.
 //!
 //! - **pearls**: open + in-progress pearls from the effective workspace's
-//!   `.smooth/dolt` store (falling back to `~/.smooth/dolt`), matched on id and
+//!   pearl store for the workspace's project, matched on id and
 //!   title, capped and cached with a short TTL so a keystroke never pays a Dolt
 //!   open (pearl th-8e9cf6 — resolves the v1 deferral).
 //!
@@ -171,7 +171,7 @@ pub(crate) fn allowed_cwd(requested: &str, home: Option<&Path>, workspace: &Path
 }
 
 /// The pearl set for `workspace`, from the TTL cache or a fresh (blocking,
-/// off-runtime) Dolt load. Any failure — no store, no dolt binary — caches an
+/// off-runtime) SQLite load. Any failure caches an
 /// empty set so a broken store doesn't retry-hammer on every keystroke.
 async fn cached_pearls(state: &SearchState, workspace: &Path) -> Vec<PearlEntry> {
     let mut cache = state.pearls.lock().await;
@@ -186,27 +186,18 @@ async fn cached_pearls(state: &SearchState, workspace: &Path) -> Vec<PearlEntry>
     entries
 }
 
-/// Best-effort load of open + in-progress pearls: `<workspace>/.smooth/dolt`
-/// first (project store), then `~/.smooth/dolt` (global) — the same candidate
-/// order the `th code` picker used when it read Dolt itself. Empty on any
-/// failure.
+/// Best-effort load of open + in-progress pearls for the project containing
+/// `workspace`. Empty on any failure.
 fn load_pearls(workspace: &Path) -> Vec<PearlEntry> {
     use smooth_pearls::{PearlQuery, PearlStatus, PearlStore};
-    let candidates = [Some(workspace.join(".smooth/dolt")), dirs_next::home_dir().map(|h| h.join(".smooth/dolt"))];
-    for dir in candidates.into_iter().flatten() {
-        if !dir.exists() {
-            continue;
-        }
-        let Ok(store) = PearlStore::open(&dir) else { continue };
-        let Ok(pearls) = store.list(&PearlQuery::new()) else { continue };
-        return pearls
-            .into_iter()
-            .filter(|p| !matches!(p.status, PearlStatus::Closed))
-            .take(100)
-            .map(|p| PearlEntry { id: p.id, title: p.title })
-            .collect();
-    }
-    Vec::new()
+    let Ok(store) = PearlStore::open(workspace) else { return Vec::new() };
+    let Ok(pearls) = store.list(&PearlQuery::new()) else { return Vec::new() };
+    pearls
+        .into_iter()
+        .filter(|p| !matches!(p.status, PearlStatus::Closed))
+        .take(100)
+        .map(|p| PearlEntry { id: p.id, title: p.title })
+        .collect()
 }
 
 /// Filter `pearls` to those whose id or title contains `query`

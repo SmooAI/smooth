@@ -38,18 +38,17 @@ lsof -i :4400                        # find the offending pid
 
 Or pick a different port: `th up --port 4500`.
 
-## `pearls push` / `pearls pull` complains about Dolt
+## `th pearls` errors mentioning `.smooth/dolt` or `smooth-dolt`
 
-Cause: `smooth-dolt` binary missing or stale.
-
-Fix:
+Pearls moved to one SQLite file, `~/.smooth/pearls.db` (pearl th-d3e842). Nothing
+reads `.smooth/dolt` any more except the one-shot importer:
 
 ```bash
-brew install icu4c                   # macOS
-bash scripts/build-smooth-dolt.sh
+th pearls migrate-from-dolt        # inside the project; idempotent
+th pearls stats                    # confirm the counts landed
 ```
 
-The build produces `target/release/smooth-dolt`; `pnpm install:th` mirrors it into place.
+`th pearls push` / `pull` print a notice and exit 0 — sync is pearl th-19cca5.
 
 ## Tests pass locally, fail in CI
 

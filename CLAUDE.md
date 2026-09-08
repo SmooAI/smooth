@@ -26,7 +26,7 @@ smooth/
 │   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the kernel OS sandbox
 │   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
 │   ├── smooth-goalie/       # Library + bin — HTTP forward proxy = the egress boundary
-│   ├── smooth-pearls/       # Library — Dolt-backed pearl tracker, memories, agent registry
+│   ├── smooth-pearls/       # Library — SQLite pearl tracker, memories, agent mail
 │   ├── smooth-cast/         # Library — coding-harness bits the published engine dropped
 │   ├── smooth-code/         # Library — `th code` ratatui coding TUI
 │   ├── smooth-diver/        # Library — pearl lifecycle manager + Jira sync
@@ -50,7 +50,7 @@ smooth/
 - **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` runs only inside `sandbox.rs`'s kernel OS sandbox. `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
 - **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults, plus `auto_mode` (permission modes/allow-lists), `ext_trust`, and `smooth_alias`.
 - **smooth-goalie** (`crates/smooth-goalie/`): HTTP forward proxy with an exact-host allowlist and JSON-lines audit logging. **Repurposed, not removed** — the microVM-era in-VM/Wonk-delegating mode is dead code paths; what the daemon actually uses is `AuditLogger` + `run_proxy_local` from `start_egress_proxy` (`crates/smooth-daemon/src/lib.rs`), making it the daemon's **egress boundary**. Enabled by `SMOOTH_EGRESS_ALLOWLIST`; the sandbox points `HTTP(S)_PROXY` at it and kernel-denies direct outbound.
-- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). Dolt-backed via the `smooth-dolt` Go binary for version control and git sync. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `SmoothDolt`, `Registry`. Also stores session messages and memories. **Agent mail + the agent roster are NOT in Dolt** — `MailStore` (`mail_store.rs`) keeps them in one machine-level SQLite file, `~/.smooth/mail.db` ([ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md), pearl th-374f85). The old `Mailbox`/`AgentRegistry` Dolt types remain only so pre-migration per-repo data stays readable.
+- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). One machine-global SQLite db, `~/.smooth/pearls.db`, rows scoped by canonical project root (pearl th-d3e842). Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `MemoryStore`, `Registry`. Agent mail + the agent roster live in a sibling SQLite file, `~/.smooth/mail.db` (`MailStore`, [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)). `dolt.rs`/`dolt_server.rs` remain only for `th pearls migrate-from-dolt` (deleted in th-c6ba83).
 - **smooth-cast** (`crates/smooth-cast/`): the coding-harness specifics the published generic engine dropped — `coding_workflow` (the `th code` outer loop), `skills` discovery, the four harness cast roles (fixer / oracle / chief / intent_classifier), and field-preserving `providers.json` editing.
 - **smooth-code** (`crates/smooth-code/`): `th code` — ratatui AI coding TUI: streaming chat, tool calls, file browser, git, sessions, model picker, extensions.
 - **smooth-diver** (`crates/smooth-diver/`): Pearl Diver — pearl lifecycle (create on dispatch, close on completion, sub-pearls, deps/labels/costs) plus the bidirectional Jira client.
@@ -336,50 +336,33 @@ and the "Big Smooth is READ-ONLY inside The Safehouse VM" isolation model.
 
 ## 5. Data
 
-### Per-project (Dolt)
+### Pearls (`~/.smooth/pearls.db`)
 
-Pearl data lives in `.smooth/dolt/` per project, backed by an embedded
-Dolt database (via the `smooth-dolt` Go binary). Full version control,
-sync via dolt's own `refs/dolt/data` git ref + push/pull to remotes.
-
-```
-.smooth/dolt/          # Dolt database (content-addressed)
-  └── pearls/          # Dolt "pearls" database
-```
+Pearl data for **every project on the machine** lives in one SQLite file,
+`~/.smooth/pearls.db` (WAL; `$SMOOTH_PEARLS_DB` overrides — tests point it at
+a tempdir). Every row carries a `project` column = the canonical project root,
+resolved from any cwd as the **main checkout** even inside a linked git
+worktree (`git rev-parse --git-common-dir`'s parent), so pearls created in a
+worktree no longer vanish with it. Pearl th-d3e842 replaced the embedded
+per-project Dolt store: reads went from ~0.7s to ~10ms, concurrent agents
+queue on SQLite's lock instead of wedging "database is read only", and
+`ADD COLUMN IF NOT EXISTS` / `NOW()`-timezone footguns are gone.
 
 Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
-`pearl_history`, `sessions`, `session_messages`, `orchestrator_snapshots`,
-`memories`.
+`pearl_history`, `memories`, `config` — all keyed `(project, …)`. Ids stay
+`th-xxxxxx` and are unique per project. Timestamps are fixed-width UTC RFC3339
+text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 
-> **Beads model — `.smooth/dolt/` is NOT git-tracked.** Pearl
-> th-975dfe (2026-06-13) flipped this repo to match how beads stores
-> its DB at `.beads/embeddeddolt/`: the on-disk store is gitignored
-> and sync happens via dolt's custom `refs/dolt/data` ref pushed
-> alongside normal git refs. Reason: noms files are mutable binary
-> pointers Dolt rewrites on every open; tracking them in git produced
-> recurring merge conflicts when main moved forward while a feature
-> worktree was open, even when the worktree never touched dolt. The
-> ref-based sync was always available; we just don't materialize the
-> files in git anymore.
->
-> **Implications:**
->
-> - `git clone` of a fresh checkout has no `.smooth/dolt/` on disk.
->   `th pearls init` detects the missing dir + the `origin` remote
->   and runs `smooth-dolt clone` to bootstrap from `refs/dolt/data`
->   automatically. No manual `th pearls pull` needed for first-time
->   setup.
-> - `.gitignore` carries the entry — `th pearls init` adds it
->   idempotently if missing, so existing repos onboard with one
->   command.
-> - PR #94 (linked-worktree auto-commit guard) becomes
->   belt-and-suspenders. Same with smooai's
->   `.gitattributes merge=binary` lines on noms files (any repo
->   that still tracks dolt should keep those as a transitional fix).
+> **Migrating a legacy `.smooth/dolt` store**: `th pearls migrate-from-dolt`
+> inside the project (safe to re-run: pearls upsert by `updated_at`, the rest is insert-or-ignore, Dolt dir left in place).
+> `dolt.rs` / `dolt_server.rs` / `go/smooth-dolt` survive ONLY for that command
+> and are deleted in pearl th-c6ba83. `th pearls push` / `pull` print a notice
+> and exit 0 — cross-machine sync against Smoo Projects is pearl th-19cca5.
 
 ### Global (`~/.smooth/`)
 
-- `registry.json` — Multi-project registry (auto-updated on pearl store open)
+- `pearls.db` — Every project's pearls (SQLite; see above)
+- `registry.json` — Multi-project registry (auto-updated on pearl store open; entries whose path is gone are pruned)
 - `smooth.db` — Legacy SQLite. No migration command ships any more (`th pearls migrate-from-sqlite` was removed); the file is unread and safe to delete.
 - `mail.db` — Agent mail + the agent roster (SQLite; `$SMOOTH_MAIL_DB` overrides). Machine-level on purpose — see [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)
 - `agent-sessions/<session_id>` — Handle each harness session registered under (written by the smooth-agent SessionStart hook, rewritten by `th agent claim`/`rename`)
@@ -391,13 +374,15 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 
 ### Project-scoped (`<repo>/.smooth/`)
 
-- `dolt/` — Pearl database (see above)
+- `dolt/` — Legacy Dolt pearl store, import with `th pearls migrate-from-dolt` then delete
 - `mcp.toml` — Project-specific MCP servers; merged with global,
   project wins on name collision
 - `plugins/<name>/plugin.toml` — Project-specific plugins; same
   merge rules
 
-### Building smooth-dolt
+### Building smooth-dolt (migration shim only)
+
+Only `th pearls migrate-from-dolt` still needs it; deleted in pearl th-c6ba83.
 
 ```bash
 # Requires Go 1.21+, ICU (macOS: brew install icu4c)
@@ -407,24 +392,25 @@ scripts/build-smooth-dolt.sh
 
 ---
 
-## 6. Pearl Tracking — Dolt-backed + Jira Integration
+## 6. Pearl Tracking — SQLite + Jira Integration
 
 **Philosophy**: Built-in pearl tracking (`th pearls`) is the primary work
-tracker. Backed by embedded Dolt for version control and team sync.
-Jira (SMOODEV project) is the external source of truth for project management.
+tracker. Jira (SMOODEV project) is the external source of truth for project
+management.
 
 **Pearls is the only spelling.** There are no `th issues` or `th beads`
 aliases.
 
-**Storage**: Dolt-only. No SQLite fallback. Each project has its own
-`.smooth/dolt/` database. `~/.smooth/registry.json` tracks all projects.
+**Storage**: one SQLite file, `~/.smooth/pearls.db`, for every project
+(see §5). `~/.smooth/registry.json` tracks all projects. Run `th pearls` from
+anywhere inside a repo — worktrees included — and it hits that repo's project.
 
 **Naming lineage**: beads → issues → pearls.
 
 ### Quick reference
 
 ```bash
-th pearls init                        # Initialize .smooth/dolt/ in current repo
+th pearls init                        # Ensure pearls.db exists + register this project
 th pearls create --title="Title" --description="..."
 th pearls list --status=open          # All open pearls
 th pearls list --status=in_progress   # Active work
@@ -432,12 +418,13 @@ th pearls show <id>                   # Pearl details with dependencies
 th pearls update <id> --status=in_progress   # Claim work
 th pearls close <id1> <id2> ...       # Close completed pearls
 th pearls ready                       # Show ready pearls (open, no blockers)
+th pearls checkpoint <id> --note "…" --next "…"   # Record a handoff checkpoint (worktree/branch/HEAD/dirty auto-collected)
+th pearls show <id> --handoff [--json]   # Handoff packet: what / where / what happened / next
+th pearls prime --in-progress [--cwd .]  # Handoff packets for in-progress pearls (this worktree's with --cwd)
 th pearls blocked                     # Show blocked pearls
-th pearls log                         # Dolt commit history
-th pearls push                        # Push to Dolt remote
-th pearls pull                        # Pull from Dolt remote
 th pearls projects                    # List all registered pearl projects
-th pearls migrate-from-beads          # Migrate from beads (bd CLI)
+th pearls migrate-from-dolt [PATH]    # One-shot import of a legacy .smooth/dolt store
+th pearls push / pull                 # Exit-0 notice — sync is pearl th-19cca5
 ```
 
 ---

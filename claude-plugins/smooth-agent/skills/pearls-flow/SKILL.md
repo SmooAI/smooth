@@ -42,3 +42,34 @@ label flag. Add dependencies with `th pearls dep add <issue> <depends-on>`.
   / `--status` rather than looking for an `$EDITOR` flow (there isn't one).
 - `th pearls prime` prints open/in-progress pearls plus recent project memories —
   load it at session start to pick up where the last session left off.
+
+## Checkpoint at milestones (compaction-proof handoff)
+
+Context windows compact and sessions die; the pearl is what survives. At every
+milestone — a passing test suite, a commit, a design decision, a PR opened —
+record where the work stands:
+
+```bash
+th pearls checkpoint <id> --note "tests green, PR #123 open" --next "address review, then merge"
+```
+
+A checkpoint stores your note plus the auto-collected handoff state (worktree
+path, branch, HEAD, dirty files, your session id). `--next` is the single most
+valuable field: the next session reads it first. The `PreCompact` hook takes a
+silent `--auto` checkpoint of the in-progress pearls for this worktree right
+before compaction, so state is never older than the last compaction — but auto
+checkpoints carry no note, so write one yourself whenever something happened.
+
+## Resume from a handoff
+
+```bash
+th pearls prime --in-progress --cwd .      # every in-progress pearl for this worktree
+th pearls show <id> --handoff [--json]     # one pearl: what/where/what happened/next
+```
+
+After a compaction or `claude --resume`, the `SessionStart` hook injects these
+packets automatically. Read `next:` first, `cd` to the recorded worktree, check
+`dirty:` against `git status`, and continue — do not re-derive the plan from the
+description. A pearl matches a worktree when its recorded worktree is that
+repo, or its id is in the branch name (`th-9483e8-handoff`), so claim a pearl
+and work on a branch named after it and the hooks find it with no setup.

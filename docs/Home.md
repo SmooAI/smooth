@@ -59,8 +59,8 @@ One process, one operative per task. The microVM sandbox stack was removed in Ju
 | [[Architecture/Dispatch]]              | How a task flows from chat to an operative and back           |
 | [[Architecture/Operatives]]            | The agent runtime, the operative binary, tool surface         |
 | [[Architecture/Security-Model]]        | Narc surveillance today; auto-mode + kernel sandbox planned   |
-| [[Architecture/Pearls]]                | The work-item tracker (Dolt-backed)                           |
-| [[Architecture/Data-Storage]]          | Dolt, smooth-dolt, sessions, audit                            |
+| [[Architecture/Pearls]]                | The work-item tracker (one SQLite db, all projects)           |
+| [[Architecture/Data-Storage]]          | pearls.db, ~/.smooth, audit                                   |
 | [[Architecture/Extension-System]]      | SEP — the planned extension protocol                          |
 | [[Architecture/Daemon-Direction]]      | Where Big Smooth is headed (epic `th-c89c2a`)                 |
 

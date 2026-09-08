@@ -1,17 +1,16 @@
 #!/bin/bash
-# pearls-store-guard: PreToolUse Bash hook that catches the patterns that
-# wedge the Dolt-backed pearl store into "database is read only" — the
-# single most recurring pearl-store failure. Dolt is single-writer; a
-# stray manual delete of its internals, a raw `dolt` write that bypasses
-# smooth-dolt's serialized server, or a swarm of background watchers all
-# pin the store read-only for every other agent on the machine.
+# pearls-store-guard: PreToolUse Bash hook for the pearl store.
+#
+# Pearls live in ONE machine-global SQLite file, `~/.smooth/pearls.db`
+# (pearl th-d3e842) — every project on this box is in it. Deleting or
+# hand-editing that file loses every project's pearls at once, so the
+# guard nudges on the two patterns that do that. The legacy `.smooth/dolt`
+# directories are read-only migration input (`th pearls migrate-from-dolt`)
+# and are protected the same way until pearl th-c6ba83 removes the shim.
 #
 # Exit codes: 0 allow silently, 1 nudge (stderr hint visible to Claude,
 # override by re-running), 2 hard block. We use 1 — non-blocking nudge.
 # Bypass any hit with ` # pearls-guard:ack reason=...` on the command.
-#
-# Background: docs/Operations/Troubleshooting.md, pearls th-20f330 /
-# th-5f35a5, memory "Pearls Dolt single-writer under parallel agents".
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
@@ -26,50 +25,31 @@ if echo "$CMD" | grep -q 'pearls-guard:ack'; then
 fi
 
 emit() {
-    cat >&2 <<EOF
+    cat >&2 <<MSG
 ⚠️  pearls-store-guard: $1
 
 $2
 
-If you genuinely need this (recovering a truly dead store, debugging the
-engine itself), append \` # pearls-guard:ack reason=...\` and re-run.
-EOF
+If you genuinely need this, append \` # pearls-guard:ack reason=...\` and re-run.
+MSG
 }
 
-# --- manual deletion of Dolt internals ------------------------------------------
-# The noms LOCK / manifest / git-remote-cache are managed by smooth-dolt.
-# rm'ing them by hand to "unstick" a read-only store races the engine and
-# can corrupt the manifest — `th pearls doctor` reaps stale holders safely.
-if echo "$CMD" | grep -qE 'rm\s+(-[a-zA-Z]+\s+)*[^|;&]*\.smooth/dolt'; then
-    emit "manual delete under .smooth/dolt (the pearl store)" \
-        "Don't hand-remove Dolt internals (noms/LOCK, manifest, git-remote-cache) to
-unwedge a read-only store — that races the engine and can corrupt the manifest.
-Use \`th pearls doctor --reap\` to clear stale lock holders, or \`th pearls pull\`
-to re-sync. The git-remote cache is now shared + self-healing (pearl th-20f330)."
+# --- deleting the pearl database (every project's pearls) ----------------------
+if echo "$CMD" | grep -qE 'rm\s+(-[a-zA-Z]+\s+)*[^|;&]*(\.smooth/pearls\.db|\.smooth/dolt)'; then
+    emit "delete of the pearl store" \
+        "~/.smooth/pearls.db holds EVERY project's pearls on this machine; .smooth/dolt is the
+legacy store \`th pearls migrate-from-dolt\` imports from. Neither is safe to rm by hand.
+Copy the .db aside first (\`th db path\`) if you must."
     exit 1
 fi
 
-# --- raw `dolt` / `smooth-dolt` writes that bypass the serialized server --------
-# Writing to the store outside `th pearls` skips smooth-dolt's single-writer
-# queue and can collide with the running server on the noms lock.
-if echo "$CMD" | grep -qE '(^|[|;&]|\s)(smooth-)?dolt\s+(sql|commit|push|pull|gc|reset|merge|branch)\b' \
-   && echo "$CMD" | grep -qE '\.smooth/dolt|pearls'; then
-    emit "raw dolt write against the pearl store" \
-        "Go through \`th pearls …\` (create/update/close/push/pull) instead of raw
-\`dolt\`/\`smooth-dolt\` writes. The CLI routes through smooth-dolt's single-writer
-server so concurrent agents serialize instead of colliding on the noms lock."
-    exit 1
-fi
-
-# --- background pearl/msg watchers (single-writer contention) -------------------
-# Each long-lived `th msg watch` / backgrounded pearl sync holds a writer;
-# several at once reproduce the "database is read only" wedge.
-if echo "$CMD" | grep -qE 'th\s+(msg\s+watch|pearls\s+(push|pull))' \
-   && echo "$CMD" | grep -qE '(&\s*$|nohup|--watch|while\s+true)'; then
-    emit "backgrounding a pearl/msg watcher" \
-        "Dolt is single-writer — multiple background \`th msg watch\` / pearl-sync loops
-pin the store read-only for every other agent. Start at most one watcher (the
-/th-mail skill manages this), and let the coordinator do pearl pushes sequentially."
+# --- raw sqlite writes that bypass `th pearls` ---------------------------------
+# Hand-rolled UPDATE/DELETE skips history rows and the project scoping.
+if echo "$CMD" | grep -qE '(^|[|;&]|\s)sqlite3?\s+[^|;&]*pearls\.db' \
+   && echo "$CMD" | grep -qiE '\b(insert|update|delete|drop|alter)\b'; then
+    emit "raw sqlite write against the pearl store" \
+        "Go through \`th pearls …\` (create/update/close/dep/label/comment) instead of raw
+sqlite writes — the CLI records history and scopes every row to its project."
     exit 1
 fi
 

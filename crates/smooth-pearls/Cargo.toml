@@ -8,9 +8,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Smooth Pearls — built-in pearl tracker. Dolt-backed dependency-graph work items with version control and git sync."
+description = "Smooth Pearls — built-in pearl tracker. SQLite-backed dependency-graph work items, one database per machine."
 readme = "README.md"
-keywords = ["issue-tracker", "work-items", "dolt", "project-management"]
+keywords = ["issue-tracker", "work-items", "sqlite", "project-management"]
 categories = ["development-tools", "database"]
 
 [lib]
@@ -29,9 +29,8 @@ smooth-operator.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 fs4.workspace = true
-# th-374f85: machine-level agent mail (`~/.smooth/mail.db`). SQLite, not Dolt —
-# mail is ephemeral local coordination, and Dolt's single writer wedged under
-# concurrent agents. Bundled, so no external binary.
+# Pearls (`~/.smooth/pearls.db`, th-d3e842) and agent mail (`~/.smooth/mail.db`,
+# th-374f85) are both SQLite. Bundled, so no external binary.
 rusqlite.workspace = true
 
 [dev-dependencies]

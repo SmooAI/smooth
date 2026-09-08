@@ -84,7 +84,7 @@ check 'last cd wins'                         2 "cd $WITHOUT; cd $WITH && git pus
 check 'repo with no scripts/ci at all'       0 'git push'                              "$WITHOUT"
 check 'scripts/ci with no runnable checks'   0 'git push'                              "$EMPTY"
 check 'no push at all'                       0 'git status'                            "$WITH"
-check 'th pearls push is a Dolt sync'        0 'th pearls push'                        "$WITH"
+check 'th pearls push is not git push'      0 'th pearls push'                        "$WITH"
 check 'dry run publishes nothing'            0 'git push --dry-run'                    "$WITH"
 check 'branch deletion'                      0 'git push --delete origin old-branch'   "$WITH"
 check 'tags only'                            0 'git push origin --tags'                "$WITH"
