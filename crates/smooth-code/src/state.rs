@@ -456,7 +456,7 @@ pub struct AppState {
     /// Autocomplete state for @ references.
     pub autocomplete: AutocompleteState,
     /// Pearls exposed to the `@` picker. Pre-fetched once at app
-    /// startup from `~/.smooth/dolt/` so the autocomplete refresh
+    /// startup from the pearl store so the autocomplete refresh
     /// doesn't pay a Dolt query per keystroke. `None` when the
     /// store isn't reachable (no pearls created yet, smooth-dolt
     /// missing, etc.) — picker silently omits pearls in that case.

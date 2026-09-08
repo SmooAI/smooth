@@ -1,7 +1,8 @@
 //! Global project registry at `~/.smooth/registry.json`.
 //!
-//! Tracks which repos have pearl stores (`.smooth/dolt/`), enabling
-//! multi-project views and cross-repo pearl queries.
+//! Tracks which projects have pearls in `~/.smooth/pearls.db`, enabling
+//! multi-project views and cross-repo pearl queries. Entries whose path
+//! no longer exists on disk are dropped on every registration.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// A registered project with its pearl store location.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectEntry {
-    /// Absolute path to the project root (parent of `.smooth/`).
+    /// Absolute path to the project root (the `project` column in pearls.db).
     pub path: PathBuf,
     /// Human-readable name (derived from directory name or git remote).
     pub name: String,
@@ -110,7 +111,7 @@ impl Registry {
     /// Prune entries whose project paths no longer exist on disk.
     pub fn prune(&mut self) -> usize {
         let before = self.projects.len();
-        self.projects.retain(|_, entry| entry.path.join(".smooth").join("dolt").exists());
+        self.projects.retain(|_, entry| entry.path.exists());
         before - self.projects.len()
     }
 
@@ -180,6 +181,8 @@ pub fn auto_register_at(project_root: &Path, registry_path: &Path) -> Result<()>
         Registry::default()
     };
     registry.register(project_root, &name);
+    // Drop entries whose directory is gone (deleted worktrees, old tempdirs).
+    registry.prune();
     let json = serde_json::to_string_pretty(&registry)?;
     std::fs::write(registry_path, json)?;
     Ok(())
@@ -270,6 +273,22 @@ mod tests {
         let contents = std::fs::read_to_string(&registry_file).expect("read registry");
         let registry: Registry = serde_json::from_str(&contents).expect("healed registry must be valid JSON");
         assert_eq!(registry.projects.len(), 1);
+    }
+
+    #[test]
+    fn auto_register_prunes_dead_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry_file = tmp.path().join("registry.json");
+        let gone = tmp.path().join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        auto_register_at(&gone, &registry_file).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+        let alive = tmp.path().join("alive");
+        std::fs::create_dir_all(&alive).unwrap();
+        auto_register_at(&alive, &registry_file).unwrap();
+        let registry = Registry::parse(&std::fs::read_to_string(&registry_file).unwrap()).unwrap();
+        assert_eq!(registry.projects.len(), 1);
+        assert!(registry.projects.values().all(|e| e.path == alive));
     }
 
     /// Pearl `th-96e525`: prior to the process-wide mutex in

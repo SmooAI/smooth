@@ -10,7 +10,7 @@
 //! ```text
 //! ✻ Smooth booting
 //!   ⠋ starting Big Smooth…
-//!   ⠋ dolt store online…
+//!   ⠋ pearl store online…
 //!   ⠋ dispatch ready…
 //!   ⠋ health check…
 //! ```
@@ -181,7 +181,7 @@ mod tests {
     fn multiple_steps_finalize_in_arbitrary_order() {
         let ind = BootIndicator::new();
         let s1 = ind.step("starting Big Smooth");
-        let s2 = ind.step("dolt store online");
+        let s2 = ind.step("pearl store online");
         let s3 = ind.step("dispatch ready");
         let s4 = ind.step("health check");
 
@@ -199,8 +199,8 @@ mod tests {
     #[test]
     fn step_update_is_safe() {
         let ind = BootIndicator::new();
-        let step = ind.step("dolt store online");
-        step.update("dolt store online (pearls)");
+        let step = ind.step("pearl store online");
+        step.update("pearl store online (pearls)");
         step.ok();
         ind.finish();
     }

@@ -234,56 +234,17 @@ impl HooksStatus {
 /// Execute pearl-specific logic for the given git hook.
 pub fn run_hook(hook_name: &str, args: &[String]) -> Result<()> {
     match hook_name {
-        "pre-commit" => run_pre_commit(),
-        "pre-push" => run_pre_push(),
+        // pre-commit / pre-push / post-merge used to commit + push the Dolt
+        // pearl store; pearls are SQLite now (`~/.smooth/pearls.db`, pearl
+        // th-d3e842). Kept as no-ops so hooks installed by an older `th`
+        // keep resolving. post-checkout was always a placeholder.
+        "pre-commit" | "pre-push" | "post-checkout" | "post-merge" => Ok(()),
         "prepare-commit-msg" => run_prepare_commit_msg(args),
-        "post-checkout" => run_post_checkout(),
-        "post-merge" => run_post_merge(),
         _ => {
             eprintln!("smooth: unknown hook {hook_name:?}, skipping");
             Ok(())
         }
     }
-}
-
-/// pre-commit: auto-commit any pending pearl Dolt changes so they're
-/// included in the git commit's tree.
-fn run_pre_commit() -> Result<()> {
-    let Some(dolt_dir) = find_dolt_dir_quiet() else {
-        return Ok(());
-    };
-    let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-
-    // Check if there are uncommitted Dolt changes
-    let status = dolt.status()?;
-    if !status.trim().is_empty() {
-        dolt.commit("auto-commit pearl changes")?;
-    }
-
-    Ok(())
-}
-
-/// pre-push: push pearl data to Dolt remote (best-effort).
-fn run_pre_push() -> Result<()> {
-    let Some(dolt_dir) = find_dolt_dir_quiet() else {
-        return Ok(());
-    };
-    let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-
-    // Only push if a remote is configured
-    let remotes = dolt.remote_list().unwrap_or_default();
-    if !remotes.trim().is_empty() {
-        match dolt.push() {
-            Ok(output) => {
-                if !output.trim().is_empty() {
-                    eprintln!("smooth: pearl push: {output}");
-                }
-            }
-            Err(e) => eprintln!("smooth: pearl push failed (non-fatal): {e}"),
-        }
-    }
-
-    Ok(())
 }
 
 /// prepare-commit-msg: if the branch name starts with a pearl ID (th-XXXXXX),
@@ -319,24 +280,7 @@ fn run_prepare_commit_msg(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// post-checkout: no-op for now (placeholder for future pearl state refresh).
-fn run_post_checkout() -> Result<()> {
-    Ok(())
-}
-
-/// post-merge: auto-commit any Dolt changes that came from the merge.
-fn run_post_merge() -> Result<()> {
-    // Same logic as pre-commit: capture any pearl state changes
-    run_pre_commit()
-}
-
 // ── Helpers ───────────────────────────────────────────────────────
-
-/// Try to find `.smooth/dolt/` without printing errors.
-fn find_dolt_dir_quiet() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    smooth_pearls::dolt::find_repo_dolt_dir(&cwd)
-}
 
 /// Get the current git branch name.
 fn current_branch() -> Option<String> {

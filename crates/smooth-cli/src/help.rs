@@ -167,7 +167,7 @@ const EXAMPLES: &[(&str, &[&str])] = &[
             "th pearls ready",
             "th pearls create --title=\"Fix X\" --type=bug --priority=2",
             "th pearls update th-xxxxxx --status=in_progress",
-            "th pearls close th-xxxxxx && th pearls push",
+            "th pearls close th-xxxxxx",
         ],
     ),
     ("msg", &["th msg send <agent|all> \"body\"", "th msg inbox", "th msg watch --once --json"]),

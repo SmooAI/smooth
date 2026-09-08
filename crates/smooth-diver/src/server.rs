@@ -178,19 +178,13 @@ mod tests {
 
     fn test_app() -> Option<Router> {
         let tmp = tempfile::tempdir().ok()?;
-        let dolt_dir = tmp.path().join("dolt");
-        match PearlStore::init(&dolt_dir) {
-            Ok(store) => {
-                std::mem::forget(tmp);
-                let diver_store = DiverStore::new(store);
-                let state = AppState {
-                    store: Arc::new(diver_store),
-                    jira: None,
-                };
-                Some(build_router_with_state(state))
-            }
-            Err(_) => None,
-        }
+        let store = PearlStore::open_with_db(&tmp.path().join("pearls.db"), tmp.path()).ok()?;
+        std::mem::forget(tmp);
+        let state = AppState {
+            store: Arc::new(DiverStore::new(store)),
+            jira: None,
+        };
+        Some(build_router_with_state(state))
     }
 
     #[tokio::test]
