@@ -2,20 +2,19 @@
 
 #architecture
 
-> [!info] Three buckets
-> Per-project Dolt for pearls + sessions. Global `~/.smooth/` for cross-project state. Project `.smooth/` for repo-scoped config. No VM volumes — dispatch runs on the host against your working directory.
+> [!info] Two buckets
+> Global `~/.smooth/` for machine state — including **every project's pearls** in one SQLite file. Project `.smooth/` for repo-scoped config. No VM volumes — dispatch runs on the host against your working directory.
 
-## Per-project: `.smooth/dolt/`
+## Pearls: `~/.smooth/pearls.db`
 
-Pearl data + session messages + orchestrator snapshots + memories. See [[Pearls#Storage-layout]]. The database is a real Dolt database — versioned, push/pullable.
-
-Engine: the `smooth-dolt` Go binary (built from `scripts/build-smooth-dolt.sh`). `smooth-pearls` shells out to it; nothing in the Rust workspace links Dolt directly.
+One SQLite database (WAL) holding pearls, dependencies, labels, comments, history, memories and config for every project on the machine, each row tagged with its canonical project root. See [[Pearls#Storage-layout]]. `$SMOOTH_PEARLS_DB` relocates it (tests point it at a tempdir).
 
 ## Global: `~/.smooth/`
 
 | Path                         | What                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------- |
-| `registry.json`              | Index of every project pearl store this `th` knows about                        |
+| `pearls.db`                  | All pearls, every project (SQLite; see [[Pearls]])                              |
+| `registry.json`              | Index of every project root this `th` knows about (dead paths pruned on open)   |
 | `providers.json`             | LLM provider credentials                                                        |
 | `audit/`                     | Rotating tool-usage logs per actor (Big Smooth, operatives, …)                  |
 | `mcp.toml`                   | Global MCP server configs                                                       |
@@ -26,11 +25,11 @@ Engine: the `smooth-dolt` Go binary (built from `scripts/build-smooth-dolt.sh`).
 
 ## Project: `<repo>/.smooth/`
 
-| Path                         | What                                                         |
-| ---------------------------- | ------------------------------------------------------------ |
-| `dolt/`                      | Pearl database (see above)                                   |
-| `mcp.toml`                   | Project-scoped MCP servers; merged with global, project wins |
-| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                     |
+| Path                         | What                                                                             |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `dolt/`                      | Legacy Dolt pearl store — import with `th pearls migrate-from-dolt`, then delete |
+| `mcp.toml`                   | Project-scoped MCP servers; merged with global, project wins                     |
+| `plugins/<name>/plugin.toml` | Project-scoped plugins; same merge rules                                         |
 
 ## Audit log
 
@@ -38,14 +37,7 @@ The operative's tool calls and Narc verdicts are written to `~/.smooth/audit/<ac
 
 ## Backups & sync
 
-Pearls are the only state worth backing up — and they're already a Dolt DB:
-
-```bash
-th pearls push    # push to a Dolt remote (DoltHub or self-hosted)
-th pearls pull    # pull from a remote
-```
-
-For team workflows: share a Dolt remote so everyone sees the same pearls + history. Jira sync is the other replication channel (see [[The-Cast#Diver|Diver]]).
+Pearls are the only state worth backing up: copy `~/.smooth/pearls.db` (plus its `-wal`/`-shm` siblings, or after `PRAGMA wal_checkpoint`). `th pearls push` / `pull` currently print a notice — cross-machine sync against Smoo Projects is pearl th-ddce81. Jira sync is the other replication channel (see [[The-Cast#Diver|Diver]]).
 
 `providers.json` is per-machine. Treat it like `.aws/credentials`: do not check it in.
 
