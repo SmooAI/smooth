@@ -16,7 +16,7 @@ Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary*
 
 ## 1. Workspace Structure
 
-Twelve crates. `ls crates/` is the source of truth; this list is kept in sync with it.
+Fourteen crates. `ls crates/` is the source of truth; this list is kept in sync with it.
 
 ```
 smooth/
@@ -30,6 +30,7 @@ smooth/
 │   ├── smooth-cast/         # Library — coding-harness bits the published engine dropped
 │   ├── smooth-code/         # Library — `th code` ratatui coding TUI
 │   ├── smooth-diver/        # Library — pearl lifecycle manager + Jira sync
+│   ├── smooth-flow/         # Library — SmoothFlow engine: sessions under tmux, PTY streaming, supervision, fan-out
 │   ├── smooth-tmux/         # Library — tmux driver (drives Claude Code for `th claude`)
 │   ├── smooth-api-client/   # Library — generated api.smoo.ai client + auth wrapper
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
@@ -52,7 +53,8 @@ smooth/
 - **smooth-cast** (`crates/smooth-cast/`): the coding-harness specifics the published generic engine dropped — `coding_workflow` (the `th code` outer loop), `skills` discovery, the four harness cast roles (fixer / oracle / chief / intent_classifier), and field-preserving `providers.json` editing.
 - **smooth-code** (`crates/smooth-code/`): `th code` — ratatui AI coding TUI: streaming chat, tool calls, file browser, git, sessions, model picker, extensions.
 - **smooth-diver** (`crates/smooth-diver/`): Pearl Diver — pearl lifecycle (create on dispatch, close on completion, sub-pearls, deps/labels/costs) plus the bidirectional Jira client.
-- **smooth-tmux** (`crates/smooth-tmux/`): dependency-light tmux driver (per-driver socket isolation, bracketed-paste send, full scrollback capture) — how `th claude` supervises Claude Code.
+- **smooth-tmux** (`crates/smooth-tmux/`): dependency-light tmux driver (per-driver socket isolation, bracketed-paste send, full scrollback capture) — how `th claude` supervises Claude Code. Also carries `detect` (the Claude Code pane-state heuristics), shared by `th claude` and SmoothFlow.
+- **smooth-flow** (`crates/smooth-flow/`): **SmoothFlow** (epic th-6ac036). Agent/shell sessions run under one long-lived `tmux -L smooth-flow` server (they outlive the daemon), PTY bytes stream to attached clients via a `portable-pty` on `tmux attach`, Claude Code hooks drive state, a supervision tick resumes crashes / schedules usage-limit resumes / guards duplicate resumes, and fan-out races N worktrees. SQLite at `~/.smooth/flow.db`. Hosted by smooth-daemon (`/api/flow/*`); `th flow` is the CLI. See [`docs/Architecture/SmoothFlow.md`](docs/Architecture/SmoothFlow.md).
 - **smooth-api-client** (`crates/smooth-api-client/`): api.smoo.ai client generated at build time by progenitor from `openapi.json`, plus the auth wrapper (token store, bearer middleware, refresh-on-401).
 - **smooth-web** (`crates/smooth-web/`): rust-embed serves the compiled Vite SPA.
 - Removed 2026-07 (pearl th-f4a801, in git history): **smooth-bigsmooth** (its role is now smooth-daemon), **smooth-operative** (the per-task worker binary), **smooth-narc** (re-homed as `smooth-daemon/src/hooks/narc.rs`), **smooth-scribe**, **smooth-archivist**, **smooth-wonk**, **smooth-bootstrap-bill**, **smooth-host-stub**, **smooth-credential-helper**.
@@ -126,6 +128,10 @@ th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 # with the smooth toolbox: MCP server, smooth-agent plugin, shared skills,
 # statusline. enable is idempotent and doubles as the update command.
 th harness enable claude-code|codex|opencode|all / status / disable
+
+# SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux
+th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
+th flow fanout new / pick
 
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
@@ -273,6 +279,8 @@ own routes through the engine's `serve_routes` seam. Entry point:
 | `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver`                                   |
 | `search.rs`                    | `GET /search` — the `@`-mention autocomplete backend for the web composer                                                                     |
 | `cwd_route.rs`                 | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd`                                                                                     |
+| `flow_route.rs`                | `/api/flow/*` — the SmoothFlow WS (`/api/flow/ws`), HTTP siblings, the Claude Code hooks long-poll, and the supervision tick (th-7f0af3)      |
+| `relay.rs`                     | Smoo Relay bridge; routes `channel:"flow"` envelopes to the flow WS and caps phone-bound `flow.output` (16 KiB / ~30 fps)                     |
 | `auth_login.rs`                | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin)                                             |
 | `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                    |
 | `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                               |

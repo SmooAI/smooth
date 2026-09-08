@@ -20,6 +20,7 @@ mod daemon_launcher;
 mod destructive;
 mod ext;
 mod fda;
+mod flow;
 mod gradient;
 mod hooks;
 /// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
@@ -437,6 +438,15 @@ enum Commands {
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCommands,
+    },
+    /// SmoothFlow — agent/shell sessions run by Big Smooth under tmux.
+    ///
+    /// `ls` / `new` / `attach` / `send` / `approve` / `kill` / `snapshot` /
+    /// `fanout` / `inbox`. A thin client: the engine in the daemon holds all
+    /// state, so sessions survive this terminal, the app, and `th` itself.
+    Flow {
+        #[command(subcommand)]
+        cmd: flow::FlowCommands,
     },
     /// Tailscale status — show the tailnet devices Smooth can see.
     Tailscale {
@@ -2128,6 +2138,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Claude { cmd }) => claude::cmd_claude(cmd).await,
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
+        Some(Commands::Flow { cmd }) => flow::cmd_flow(cmd).await,
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,

@@ -1,5 +1,9 @@
 //! Pure pane-state detection for Claude Code TUIs.
 //!
+//! Lives in `smooth-tmux` (moved from `smooth-cli::claude::detect`, th-7f0af3)
+//! so `th claude`'s supervisor and the SmoothFlow engine share ONE copy of the
+//! heuristics.
+//!
 //! A supervisor decides what to do by scraping the captured pane text.
 //! All logic here is pure string analysis so it is exhaustively unit
 //! testable on captured fixtures without a live tmux or a live Claude.
