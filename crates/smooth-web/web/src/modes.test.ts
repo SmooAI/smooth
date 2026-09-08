@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { bestValueModel, badgesFor, costPerPass, deriveRows, topScorePct, type ModelScore } from './modes.ts';
+import { bestValueModel, badgesFor, costPerPass, deriveRows, fetchModelRows, topScorePct, type ModelScore } from './modes.ts';
 
 // A trimmed fixture mirroring the real bench: two tied leaders, a cheap-but-not-top
 // value winner, a clean-safety model, a premium model with an inconclusive-driven
@@ -133,4 +133,52 @@ test('rows are ordered best-first: pass rate desc, then cheapest $/pass, unknown
     assert.equal(order[1], 'deepseek-v4-pro'); // 89.3, pricier
     assert.equal(order[2], 'gemini-3.6-flash'); // 85.7, cheapest at its tier
     assert.equal(order[order.length - 1], 'groq-gpt-oss-20b'); // lowest rate, unknown cost
+});
+
+// ── fetchModelRows (th-1d8007): the live-catalog fetch clients derive against ──
+
+/** Run `body` with `globalThis.fetch` stubbed to `stub`, always restoring it. */
+async function withFetch<T>(stub: typeof fetch, body: () => Promise<T>): Promise<T> {
+    const original = globalThis.fetch;
+    globalThis.fetch = stub;
+    try {
+        return await body();
+    } finally {
+        globalThis.fetch = original;
+    }
+}
+
+test('fetchModelRows derives ordered rows from the daemon catalog', async () => {
+    const payload = { suite: 'agentic', trials: 1, scenario_count: 28, models: fixture };
+    const rows = await withFetch(
+        (async () => new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch,
+        () => fetchModelRows(),
+    );
+    assert.ok(rows);
+    // Same derivation as the bundled path — best-first.
+    assert.equal(rows![0].model, 'gpt-5.6-luna');
+    assert.deepEqual(
+        rows!.map((r) => r.model),
+        deriveRows(fixture).map((r) => r.model),
+    );
+});
+
+test('fetchModelRows returns null on a non-ok response (caller falls back to bundled)', async () => {
+    const rows = await withFetch((async () => new Response('nope', { status: 503 })) as typeof fetch, () => fetchModelRows());
+    assert.equal(rows, null);
+});
+
+test('fetchModelRows returns null on an empty/malformed body', async () => {
+    const rows = await withFetch((async () => new Response(JSON.stringify({ models: [] }), { status: 200 })) as typeof fetch, () => fetchModelRows());
+    assert.equal(rows, null);
+});
+
+test('fetchModelRows returns null when fetch throws (offline)', async () => {
+    const rows = await withFetch(
+        (async () => {
+            throw new Error('offline');
+        }) as typeof fetch,
+        () => fetchModelRows(),
+    );
+    assert.equal(rows, null);
 });
