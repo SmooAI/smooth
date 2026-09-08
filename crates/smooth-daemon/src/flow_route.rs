@@ -173,6 +173,8 @@ struct NewBody {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    tmux_socket: Option<String>,
 }
 
 impl From<NewBody> for NewRequest {
@@ -187,6 +189,7 @@ impl From<NewBody> for NewRequest {
             title: b.title,
             model: b.model,
             fan_out_id: None,
+            tmux_socket: b.tmux_socket,
         }
     }
 }
@@ -440,8 +443,12 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
         ClientFrame::Attach { id, cols, rows } => {
             let sid = id.clone();
             run(engine, move |e| e.attach(&sid, cols, rows)).await?;
-            attached.insert(id);
-            Ok(vec![])
+            attached.insert(id.clone());
+            // th-d33afa: replay the buffered event stream so a phone's Chat
+            // tab isn't empty for what happened before it looked.
+            let sid = id.clone();
+            let replay = run(engine, move |e| e.events(&sid)).await?;
+            Ok(replay.into_iter().map(|event| ServerFrame::Event { id: id.clone(), event }).collect())
         }
         ClientFrame::Detach { id } => {
             if attached.remove(&id) {
@@ -467,6 +474,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
             prompt,
             argv,
             title,
+            tmux_socket,
         } => {
             let req = NewRequest {
                 kind,
@@ -478,6 +486,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
                 title,
                 model: None,
                 fan_out_id: None,
+                tmux_socket,
             };
             let s = run(engine, move |e| e.new_session(req)).await?;
             Ok(vec![ServerFrame::Session { session: s }])
@@ -519,6 +528,27 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
             run(engine, move |e| e.mark_read(&id)).await?;
             Ok(vec![])
         }
+        // th-d33afa: the phone's bridge nudge — say hello again.
+        ClientFrame::Hello {} => Ok(vec![run(engine, |e| e.hello()).await?]),
+        // th-d33afa: the pearl-rail packet over WS (the relay brokers WS only).
+        ClientFrame::Handoff { id } => {
+            let sid = id.clone();
+            let v = run(engine, move |e| e.handoff(&sid)).await?;
+            Ok(vec![handoff_frame(id, &v)])
+        }
+    }
+}
+/// The HTTP handoff body as the `flow.handoff` frame (nulls kept, so a phone
+/// can tell "no pearl" from "field missing").
+fn handoff_frame(id: String, v: &Value) -> ServerFrame {
+    let take = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
+    ServerFrame::Handoff {
+        id,
+        pearl: take("pearl"),
+        handoff: take("handoff"),
+        checkpoints: take("checkpoints"),
+        blocks: take("blocks"),
+        pr: take("pr"),
     }
 }
 
@@ -542,6 +572,20 @@ mod tests {
         .unwrap()
     }
 
+    /// The next text frame as JSON (5 s cap).
+    async fn next<S>(source: &mut S) -> Value
+    where
+        S: StreamExt<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        let text = tokio::time::timeout(Duration::from_secs(5), source.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        serde_json::from_str::<Value>(&text).unwrap()
+    }
     async fn body_json(resp: Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
@@ -673,6 +717,132 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["code"], "bad_request");
+    }
+
+    /// th-d33afa: a client `flow.hello` gets the hello again, `flow.handoff`
+    /// answers over WS with the HTTP route's shape, and hook events reach
+    /// every flow client as `flow.event`.
+    #[tokio::test]
+    async fn hello_nudge_handoff_and_events_over_ws() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = engine(tmp.path());
+        let sid = {
+            use smooth_flow::store::NewSession;
+            let st = smooth_flow::FlowStore::open(&tmp.path().join("flow.db")).unwrap();
+            st.create(NewSession {
+                kind: Some(SessionKind::Claude),
+                agent_session_id: Some("uuid-ev".into()),
+                project: tmp.path().to_string_lossy().into(),
+                worktree: tmp.path().to_string_lossy().into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+        };
+        let app = flow_router(engine.clone(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/flow/ws")).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        assert_eq!(next(&mut source).await["type"], "flow.hello");
+
+        sink.send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"channel":"flow","type":"flow.hello"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        let v = next(&mut source).await;
+        assert_eq!(v["type"], "flow.hello", "{v}");
+        assert_eq!(v["sessions"][0]["id"], sid);
+
+        sink.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"channel":"flow","type":"flow.handoff","id":sid}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let v = next(&mut source).await;
+        assert_eq!(v["type"], "flow.handoff", "{v}");
+        assert_eq!(v["id"], sid);
+        assert_eq!(v["handoff"]["agent_session_id"], "uuid-ev");
+        assert!(v["checkpoints"].is_array() && v["blocks"].is_array());
+        assert!(v.get("pearl").is_some() && v.get("pr").is_some(), "nulls are present, not omitted: {v}");
+
+        reqwest::Client::new()
+            .post(format!("http://{addr}/api/flow/hooks"))
+            .json(&json!({"harness":"claude-code","event":"UserPromptSubmit","session_id":"uuid-ev","payload":{"prompt":"go"}}))
+            .send()
+            .await
+            .unwrap();
+        // user line, then the working state line — both flow.event, both for sid.
+        let mut kinds = Vec::new();
+        for _ in 0..6 {
+            let v = next(&mut source).await;
+            if v["type"] == "flow.event" {
+                assert_eq!(v["id"], sid);
+                assert!(v["event_id"].is_string() && v["at"].is_string());
+                kinds.push((v["kind"].as_str().unwrap().to_string(), v["text"].as_str().unwrap().to_string()));
+                if kinds.len() == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            kinds,
+            vec![("user".to_string(), "go".to_string()), ("system".to_string(), "working".to_string())]
+        );
+    }
+
+    /// th-d33afa: `flow.attach` replays the buffered stream (needs a live
+    /// tmux; skips without one).
+    #[tokio::test]
+    async fn attach_replays_the_event_stream() {
+        if !smooth_flow::tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = engine(tmp.path());
+        let sock = format!("flow-r-{}", std::process::id());
+        let s = engine
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                argv: Some(vec!["sh".into(), "-c".into(), "cat".into()]),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        engine.send(&s.id, "first steer").unwrap();
+        let app = flow_router(engine.clone(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/flow/ws")).await.unwrap();
+        let (mut sink, mut source) = ws.split();
+        let _hello = source.next().await.unwrap().unwrap();
+        sink.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"channel":"flow","type":"flow.attach","id":s.id,"cols":80,"rows":24}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let mut replayed = Vec::new();
+        while replayed.len() < 2 {
+            let text = tokio::time::timeout(Duration::from_secs(5), source.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            let v: Value = serde_json::from_str(&text).unwrap();
+            if v["type"] == "flow.event" {
+                replayed.push(v["text"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(replayed, vec!["idle".to_string(), "first steer".to_string()]);
+        engine.kill(&s.id, false).unwrap();
+        smooth_flow::tmux::kill_server(&sock);
     }
 
     #[tokio::test]

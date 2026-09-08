@@ -1183,6 +1183,7 @@ th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --sessio
 th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
 th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
 th flow new --kind claude --attach -- claude --model opus # explicit argv after `--`
+th flow new --kind claude --tmux-socket smoothflow       # on the SmoothFlow app's tmux server (its TCC grants)
 th flow attach <id>                                      # raw-mode stream; Ctrl-\ detaches (session keeps running)
 th flow send <id> "also add a regression test"           # steer: bracketed-paste + Enter into the prompt
 th flow inbox                                            # sessions that need you or finished unread
