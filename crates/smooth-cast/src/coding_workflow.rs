@@ -464,6 +464,13 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         prompt_tokens: total_prompt_tokens,
         completion_tokens: total_completion_tokens,
         cached_tokens: total_cached_tokens,
+        // New in core 1.10 (th-126fe6): spend-attribution taint flags + response
+        // id. The coding workflow doesn't track per-call estimation, so these take
+        // the serde defaults older runner output already produced — no behavior
+        // change. Thread real taint through if this event ever feeds a billed surface.
+        cost_estimated: false,
+        usage_estimated: false,
+        response_id: None,
     });
 
     Ok(total_cost_usd)
