@@ -69,7 +69,16 @@ jobs:
                   pnpm build
 
             - name: Build smooth-daemon + th (release)
-              run: cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
+              # OPENSSL_STATIC: web-push → ece/curl → openssl-sys otherwise links
+              # /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib dynamically, and the
+              # shipped daemon dyld-fails on any Mac without Homebrew openssl (and
+              # under the hardened runtime even with it: different Team IDs).
+              env:
+                  OPENSSL_STATIC: '1'
+              run: |
+                  export OPENSSL_DIR="$(brew --prefix openssl@3)"
+                  cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
+                  otool -L target/release/smooth-daemon | grep -q homebrew && { echo "::error::smooth-daemon still links Homebrew dylibs"; otool -L target/release/smooth-daemon; exit 1; } || true
 
             # th-76a353: a cached target dir once served a stale daemon stamped
             # with the new version. Both binaries bake their build commit; refuse
