@@ -21,6 +21,7 @@ apps/smoothflow/
 ├── project.yml                  xcodegen spec (the .xcodeproj is generated, gitignored)
 ├── Info.plist / entitlements.plist   hand-maintained — see "xcodegen traps"
 ├── LaunchAgents/…daemon.plist   SMAppService agent, copied to Contents/Library/LaunchAgents
+├── Resources/   SmoothFlow.icns + SVG masters, MenuBarTemplate.png (status item glyph)
 ├── Sources/
 │   ├── Flow/        FlowFrame (codec) · FlowStore (reducer) · FlowClient (WS) · DaemonAddress · DaemonManager
 │   ├── Terminal/    GhosttyRuntime (one ghostty_app) · TerminalSurfaceView (NSView per session)
@@ -30,7 +31,7 @@ apps/smoothflow/
 │   └── App/         AppController (coordinator) · AppDelegate (menus, shortcuts)
 ├── Tests/           XCTest: frame codec, store reducer, notification mapping, address resolution
 ├── mock/server.mjs  zero-dependency mock flow engine (node)
-└── scripts/         ensure-ghosttykit.sh · ghosttykit.lock · build-release.sh · tcc-probe.sh
+└── scripts/         ensure-ghosttykit.sh · ghosttykit.lock · build-release.sh · bump-version.sh · tcc-probe.sh
 ```
 
 AppKit owns the window, splits, terminal, tab strip, steer bar and menus;
@@ -46,7 +47,13 @@ bytes are pushed in with `ghostty_surface_process_output`, and whatever the
 user types comes back out of the `io_write_cb` already terminal-encoded and is
 sent as `flow.input`. Upstream ghostty has no such API — this is why the pinned
 `GhosttyKit.xcframework` is the fork's prebuilt (see `scripts/ghosttykit.lock`;
-`ensure-ghosttykit.sh` verifies the sha256 and refuses anything else).
+`ensure-ghosttykit.sh` verifies the sha256 and refuses anything else). It is
+linked as the raw static archive + module map (`OTHER_LDFLAGS` /
+`SWIFT_INCLUDE_PATHS` in `project.yml`), not as an xcframework dependency: the
+moment a SwiftPM package (Sparkle) is in the project, Xcode's build description
+rejects the fork's xcframework with "There is no XCFramework found at …" even
+though it is right there. Fetch it **before** `xcodegen generate` — a project
+generated against a missing `Vendor/` fails the same way after the fetch.
 
 One `TerminalSurfaceView` per session, created on first focus and kept for the
 session's life, so scrollback lives in the surface. Keys go through
@@ -265,15 +272,73 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![fan-out](assets/smoothflow/fanout.png)
 
-## Signing and release
+## Icon
 
-`scripts/build-release.sh`: Release build → bundle `smooth-daemon` → codesign
-(nested first, then the bundle with `entitlements.plist`, hardened runtime) →
-DMG → `scripts/macos/notarize-and-staple.sh`. `.github/workflows/smoothflow-mac.yml`
-builds and tests ad-hoc on PRs touching `apps/smoothflow/**`, and signs +
-notarizes on `workflow_dispatch` with the secrets `desktop-publish.yml` already
-uses. The Developer ID identity string differs from desktop-publish's bare org
-name; the workflow normalizes it.
+`Resources/SmoothFlow.icns` (wired by `CFBundleIconFile`; the `.icns` is built
+with Apple's 824-in-1024 squircle geometry) — the `th` mark floating on three
+Smoo-gradient streams (gold / orange / coral) on the Presence ground. Masters:
+`Resources/macos-1024.svg` and `Resources/icon-source.svg`.
+`Resources/MenuBarTemplate.png` (+`@2x`) is the monochrome glyph the menu-bar
+status item uses (`isTemplate = true`, so it follows the bar's appearance). The
+status item is how you get the window back after closing it — the app keeps
+running the fleet without one — and carries Open / Inbox / Check for Updates /
+Settings / Quit.
+
+## Release and OTA
+
+**Version** lives in one place: `Info.plist` `CFBundleShortVersionString`, kept
+equal to `CFBundleVersion` (Sparkle compares the latter, so it has to move on
+every release). Bump with `scripts/bump-version.sh 0.2.1`; `build-release.sh`
+refuses a mismatch. Big Smooth's desktop version is likewise manual and separate
+from the root `package.json`/changeset version — `sync-versions.mjs` does not
+touch either app.
+
+**Build** — `scripts/build-release.sh`: xcodegen → Release `xcodebuild`
+(Sparkle 2 resolved via SwiftPM, `project.yml` `packages:`) → bundle
+`smooth-daemon` **and** `th` into `Contents/MacOS` (`SMOOTH_DAEMON_BIN` /
+`SMOOTH_TH_BIN`, default `~/.cargo/bin`; `DaemonManager` puts that dir first on
+the child's `PATH`) → codesign inside-out (the two binaries, then
+Sparkle.framework's XPC services / Autoupdate / Updater.app / framework, then
+the bundle with `entitlements.plist` + hardened runtime — never `--deep`) →
+`dist/SmoothFlow-<version>-arm64.dmg` → `scripts/macos/notarize-and-staple.sh`.
+The script greps the calendar entitlement, the usage strings, `SUPublicEDKey`
+and the `.icns` back out of the signed app and fails if any is missing.
+
+**OTA** — Sparkle 2 (`SPUStandardUpdaterController` in `AppDelegate`, checks
+hourly + "Check for Updates…" in the app menu and the status item). `Info.plist`
+carries `SUFeedURL = https://downloads.smoo.ai/smoothflow/appcast.xml` and
+`SUPublicEDKey`. The app is not sandboxed, so no installer-launcher service or
+XPC entitlements are needed; `disable-library-validation` is already on for
+the bundled daemon.
+
+**Sparkle key** — one EdDSA pair, generated with Sparkle's `generate_keys
+--account SmoothFlow` (private half in the generating Mac's keychain, exported
+with `-x`). The public key is `SUPublicEDKey`; the private key is the
+`SMOOTHFLOW_SPARKLE_PRIVATE_KEY` GitHub Actions secret (set with `gh secret set
+… --body "$(cat key)"` — command substitution strips the trailing newline,
+which is what a byte-comparing consumer needs). Losing the private key means
+shipping a new public key, which installed apps will refuse — so an installed
+0.x can never update again and every user reinstalls. Keep the keychain copy.
+
+**Cutting a release**
+
+1. `apps/smoothflow/scripts/bump-version.sh <x.y.z>` + a changeset, merge to `main`.
+2. `gh workflow run smoothflow-publish.yml --ref main` (or `-f tag=<ref>`).
+   Manual dispatch, not on merge — same as `desktop-publish.yml`. The run:
+   builds `smooth-daemon` + `th` (release, stale-binary guard th-76a353), runs
+   `build-release.sh` with the Developer ID cert + notary key from the
+   `desktop-publish.yml` secrets, verifies `spctl`, then runs the resolved
+   package's own `generate_appcast` over `dist/` (signed with the secret) and
+   `aws s3 sync`s to the Downloads bucket under `smoothflow/`:
+   `SmoothFlow-<v>-arm64.dmg` (immutable), `appcast.xml` (no-cache) and the
+   `latest-arm64.dmg` alias (no-cache).
+3. Verify: `curl -s https://downloads.smoo.ai/smoothflow/appcast.xml | grep shortVersionString`.
+   Installed apps offer it on the next hourly check.
+
+The publish role (`OtaPublishRole`, smooai `infra/ci/github-oidc.ts`) grants
+`smoothflow/*` next to `bigsmooth/*`; the CDN serves the whole bucket.
+`.github/workflows/smoothflow-mac.yml` stays the ad-hoc compile + XCTest gate on
+PRs touching `apps/smoothflow/**`.
 
 ## Gaps (pearls filed from the main checkout)
 
@@ -285,5 +350,3 @@ name; the workflow normalizes it.
 - th-e126cc — "Close pearl + GC worktree" from the inbox is not in the v0
   protocol; the PR tab only shows what the handoff endpoint reports, "Merge"
   opens the PR.
-- th-b4e4de — the Developer ID / notarized release path is wired but only the
-  ad-hoc and locally re-signed builds were exercised.

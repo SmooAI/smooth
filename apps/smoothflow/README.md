@@ -26,8 +26,11 @@ build settings. Do **not** add xcodegen's `info:`/`entitlements:` keys: they
 regenerate the files empty, and every TCC prompt then silently fails.
 
 Release: `SIGN_IDENTITY="Developer ID Application: Smoo LLC (DTX9733844)" scripts/build-release.sh`
-(bundles `~/.cargo/bin/smooth-daemon`, signs, notarizes when `NOTARY_*` are set,
-writes `dist/SmoothFlow.dmg`). CI: `.github/workflows/smoothflow-mac.yml`.
+(bundles `~/.cargo/bin/smooth-daemon` + `th`, signs, notarizes when `NOTARY_*`
+are set, writes `dist/SmoothFlow-<version>-arm64.dmg`). Bump the version with
+`scripts/bump-version.sh x.y.z`. CI: `.github/workflows/smoothflow-mac.yml` (PR
+gate) and `smoothflow-publish.yml` (signed + notarized + Sparkle appcast →
+downloads.smoo.ai/smoothflow/). OTA + release details: the architecture doc.
 
 ## Run against a locally built engine
 
