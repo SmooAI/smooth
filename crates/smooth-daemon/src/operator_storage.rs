@@ -539,7 +539,7 @@ mod tests {
             session_id: id.into(),
             conversation_id: conv.into(),
             organization_id: "org-1".into(),
-            agent_id: "a".into(),
+            agent_id: Some("a".into()),
             agent_name: "S".into(),
             user_participant_id: "u".into(),
             agent_participant_id: "ag".into(),

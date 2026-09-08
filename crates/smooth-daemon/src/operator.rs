@@ -1217,6 +1217,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // faces can show a real name at idle instead of "unknown"
                 // (pearl th-7630a7). Name only; credentials never leave.
                 .merge(crate::mode_route::mode_router())
+                // The bench-scored model lineup, single source of truth for every
+                // client's model picker (th-1d8007). Public data, ungated.
+                .merge(crate::model_catalog_route::model_catalog_router())
                 .merge(crate::push::push_router(push_state.clone()))
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
