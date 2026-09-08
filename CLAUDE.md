@@ -34,6 +34,8 @@ smooth/
 │   ├── smooth-api-client/   # Library — generated api.smoo.ai client + auth wrapper
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
 │       └── web/             # React + Vite source (TypeScript)
+├── apps/
+│   └── smoothflow/          # macOS app (Swift/AppKit + libghostty) — the SmoothFlow fleet console; docs/Architecture/SmoothFlow-macOS.md
 ├── Cargo.toml               # Workspace root
 ├── rustfmt.toml             # Format: 160 width, field init shorthand
 ├── install.sh               # Curl installer
