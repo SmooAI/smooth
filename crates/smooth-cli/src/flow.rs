@@ -310,7 +310,7 @@ fn print_sessions(sessions: &[Value]) {
     }
     // Boldness is spent once per screen: the header. Pad BEFORE styling —
     // escape codes would otherwise count toward width.
-    let header = format!("{:<12} {:<9} {:<16} {:<34} {}", "ID", "KIND", "STATE", "TITLE", "WORKTREE");
+    let header = format!("{:<12} {:<9} {:<16} {:<9} {:<34} {}", "ID", "KIND", "STATE", "VIA", "TITLE", "WORKTREE");
     println!("{}", paint(&header, |h| h.bold().to_string()));
     for s in sessions {
         let g = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -324,11 +324,18 @@ fn print_sessions(sessions: &[Value]) {
             .and_then(Value::as_str)
             .map(|r| format!(" {}", attention_tag(r)))
             .unwrap_or_default();
+        // VIA: how the engine knows the state — `hooks` (the harness told it)
+        // or `inferred` (pane scraping) — th-5c5457.
+        let via = match g("state_source").as_str() {
+            "" => "-".to_string(),
+            v => v.to_string(),
+        };
         println!(
-            "{:<12} {:<9} {} {:<34} {}{att}",
+            "{:<12} {:<9} {} {} {:<34} {}{att}",
             g("id"),
             g("kind"),
             pad(&state, width, 16),
+            paint(&format!("{via:<9}"), |v| v.dimmed().to_string()),
             short(&g("title"), 33),
             paint(&short(&g("worktree"), 48), |w| w.dimmed().to_string())
         );

@@ -182,6 +182,37 @@ FDA/Calendar access, and the failures are silent (empty listings, "not
 authorized" from EventKit), not prompts. `th flow new` from a terminal
 therefore lands on the app's server only with `--tmux-socket smoothflow`.
 
+## Session kinds — the launch table (th-5c5457)
+
+| kind       | launch (default argv)                                | harness session id                                 | restore (`flow.kill {resume:true}`, rule 2) | state                                                        |
+| ---------- | ---------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `claude`   | `claude --session-id <uuid> [--model m] [prompt]`    | pre-assigned by the engine                         | `claude --resume <uuid>`                    | `hooks` (smooth-agent plugin → `flow-hook.sh`)               |
+| `opencode` | `opencode [--model m] --prompt <prompt>` (th-b423aa) | learned from the plugin's `session.created` by cwd | `opencode --session <id>`                   | `hooks` (smooth-agent OpenCode plugin posts the same body)   |
+| `codex`    | `codex [--model m] <prompt>`                         | learned from a hook by cwd when hooks are wired    | `codex resume <id>`                         | `inferred` (pane scraping) until `~/.codex/hooks.json` posts |
+| `shell`    | `$SHELL -l`                                          | —                                                  | never (shells don't resume)                 | `idle` from launch                                           |
+
+Without a known harness session id, resume **relaunches the original argv**
+— a fresh session, not a continuation. `Session.state_source` (`hooks` |
+`inferred`) says how the engine knows the state; `th flow ls` shows it in
+the VIA column.
+
+**Binaries.** `which claude`/`codex` on a machine running cmux resolves to
+cmux's CLI shims (`…/cmux-cli-shims/<uuid>/claude`), which inject cmux's own
+`--session-id` and hooks. `engine::resolve_binary` therefore prefers the real
+installs (`~/.claude/local/claude`, `~/.local/bin/claude`,
+`~/.opencode/bin/opencode`, `~/.local/bin/codex`), then the first `PATH` hit
+not under a `cmux-cli-shims` directory, and records the resolved path as
+`argv[0]` in the session row. An explicit bare `claude`/`codex`/`opencode` in
+`flow.new.argv` gets the same treatment. Codex 0.153+ also reads Claude-style
+hooks from `~/.codex/hooks.json`; wiring `flow-hook.sh` into it is
+`th harness enable codex`'s job (pearl th-7a1c1e).
+
+**Pane markers.** Scraping knows OpenCode (`esc interrupt` = working, the
+`ctrl+p commands` status line without it = idle) and Codex's menus (`› 1. …`
+
+- `press enter to confirm` = approval, e.g. the trust-this-directory and
+  hooks-need-review dialogs).
+
 ## Hooks — state comes from hooks, scraping is the fallback
 
 `POST /api/flow/hooks` body `{harness, event, session_id, cwd, payload}`. The

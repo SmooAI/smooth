@@ -8,6 +8,7 @@
 //! ([`Engine::supervise_tick`]) is driven by a tokio interval in the host.
 
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -104,9 +105,6 @@ struct PendingApproval {
 
 #[derive(Default)]
 struct Runtime {
-    /// Sessions that have reported at least one hook (scraping then only
-    /// covers what hooks can't: usage limits and approvals hooks missed).
-    hook_seen: std::collections::HashSet<String>,
     resume_attempts: HashMap<String, u32>,
     /// Session id → when its pending relaunch may fire.
     relaunch_at: HashMap<String, Instant>,
@@ -223,49 +221,89 @@ pub fn slugify(s: &str, max: usize) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Build the argv for a fresh session of `kind`.
-#[must_use]
-pub fn default_argv(kind: SessionKind, agent_session_id: Option<&str>, model: Option<&str>, prompt: Option<&str>) -> Vec<String> {
-    match kind {
-        SessionKind::Shell => {
-            let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-            vec![shell, "-l".into()]
-        }
-        SessionKind::Claude => {
-            let mut v = vec!["claude".to_string()];
-            if let Some(id) = agent_session_id {
-                v.push("--session-id".into());
-                v.push(id.into());
-            }
-            if let Some(m) = model {
-                v.push("--model".into());
-                v.push(m.into());
-            }
-            if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-                v.push(p.into());
-            }
-            v
-        }
-        SessionKind::Codex | SessionKind::Opencode => {
-            let mut v = vec![kind.as_str().to_string()];
-            if let Some(m) = model {
-                v.push("--model".into());
-                v.push(m.into());
-            }
-            if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-                v.push(p.into());
-            }
-            v
-        }
-    }
+/// Where each agent CLI really lives, before `PATH` (th-5c5457). `which
+/// claude` on a cmux machine resolves to cmux's shim, which injects its own
+/// `--session-id` and hooks; these are the installs that are never shims.
+const PREFERRED_HOMES: &[(SessionKind, &[&str])] = &[
+    (SessionKind::Claude, &[".claude/local/claude", ".local/bin/claude"]),
+    (SessionKind::Opencode, &[".opencode/bin/opencode", ".local/bin/opencode"]),
+    (SessionKind::Codex, &[".local/bin/codex"]),
+];
+
+/// Any `PATH` entry under a directory with this name is a cmux CLI shim.
+const CMUX_SHIM_DIR: &str = "cmux-cli-shims";
+
+fn is_executable(p: &Path) -> bool {
+    p.is_file() && std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
-/// The argv that resumes a dead agent session (`claude --resume <id>`); other
-/// kinds relaunch their original argv.
+/// The real binary for `kind`, pure.
+///
+/// Preferred homes under `home`, then the first executable on `path` not
+/// inside a [`CMUX_SHIM_DIR`], else the bare name (so a missing CLI still
+/// fails loudly as exit 127 in the pane).
+#[must_use]
+pub fn resolve_binary_in(kind: SessionKind, home: &Path, path: &std::ffi::OsStr) -> String {
+    let name = kind.as_str();
+    let homes = PREFERRED_HOMES.iter().find(|(k, _)| *k == kind).map(|(_, h)| *h).unwrap_or_default();
+    if let Some(p) = homes.iter().map(|rel| home.join(rel)).find(|p| is_executable(p)) {
+        return p.to_string_lossy().into_owned();
+    }
+    std::env::split_paths(path)
+        .filter(|dir| !dir.components().any(|c| c.as_os_str() == CMUX_SHIM_DIR))
+        .map(|dir| dir.join(name))
+        .find(|p| is_executable(p))
+        .map_or_else(|| name.to_string(), |p| p.to_string_lossy().into_owned())
+}
+
+/// [`resolve_binary_in`] against this process's `HOME` and `PATH`.
+#[must_use]
+pub fn resolve_binary(kind: SessionKind) -> String {
+    let home = dirs_next::home_dir().unwrap_or_default();
+    resolve_binary_in(kind, &home, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Build the argv for a fresh session of `kind` — the per-kind launch table.
+///
+/// th-5c5457: claude gets the pre-assigned `--session-id`; opencode takes
+/// `--prompt` (its positional is the project dir, th-b423aa); codex takes a
+/// positional prompt.
+#[must_use]
+pub fn default_argv(kind: SessionKind, agent_session_id: Option<&str>, model: Option<&str>, prompt: Option<&str>) -> Vec<String> {
+    if kind == SessionKind::Shell {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+        return vec![shell, "-l".into()];
+    }
+    let mut v = vec![resolve_binary(kind)];
+    if let (SessionKind::Claude, Some(id)) = (kind, agent_session_id) {
+        v.push("--session-id".into());
+        v.push(id.into());
+    }
+    if let Some(m) = model {
+        v.push("--model".into());
+        v.push(m.into());
+    }
+    if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
+        if kind == SessionKind::Opencode {
+            v.push("--prompt".into());
+        }
+        v.push(p.into());
+    }
+    v
+}
+
+/// The argv that resumes a dead agent session — the per-kind restore mode.
+///
+/// `claude --resume <id>`, `opencode --session <id>`, `codex resume <id>`.
+/// Without a known harness session id (opencode/codex learn theirs from the
+/// first hook) the original argv is relaunched: a fresh session, not a resume.
 #[must_use]
 pub fn resume_argv(session: &Session) -> Vec<String> {
+    let bin = || session.argv.first().cloned().unwrap_or_else(|| resolve_binary(session.kind));
     match (session.kind, session.agent_session_id.as_deref()) {
-        (SessionKind::Claude, Some(id)) => vec!["claude".into(), "--resume".into(), id.into()],
+        (SessionKind::Claude, Some(id)) => vec![bin(), "--resume".into(), id.into()],
+        (SessionKind::Opencode, Some(id)) => vec![bin(), "--session".into(), id.into()],
+        (SessionKind::Codex, Some(id)) => vec![bin(), "resume".into(), id.into()],
         _ => session.argv.clone(),
     }
 }
@@ -468,11 +506,16 @@ impl Engine {
             SessionKind::Claude => Some(uuid::Uuid::new_v4().to_string()),
             _ => None,
         };
-        let argv = req
+        let mut argv = req
             .argv
             .clone()
             .filter(|a| !a.is_empty())
             .unwrap_or_else(|| default_argv(req.kind, agent_session_id.as_deref(), req.model.as_deref(), req.prompt.as_deref()));
+        // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
+        // resolution as the default argv.
+        if req.kind.is_agent() && argv.first().is_some_and(|a| a == req.kind.as_str()) {
+            argv[0] = resolve_binary(req.kind);
+        }
         let branch = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
         let title = req
             .title
@@ -750,11 +793,24 @@ impl Engine {
     /// On a store failure. An unknown `session_id` is NOT an error (the
     /// hook script must never block the harness) — it returns `Immediate({})`.
     pub fn hook(&self, ev: HookEvent) -> Result<HookReply> {
-        let Some(s) = self.with_store(|st| st.get_by_agent_session(&ev.session_id))? else {
+        let mut found = self.with_store(|st| st.get_by_agent_session(&ev.session_id))?;
+        // opencode / codex can't pre-assign a session id: their first hook
+        // from a worktree binds to the newest id-less agent row there.
+        if found.is_none() && !ev.session_id.is_empty() {
+            if let Some(cwd) = ev.cwd.as_deref().filter(|c| !c.is_empty()) {
+                found = self.bind_by_cwd(cwd, &ev.session_id)?;
+            }
+        }
+        let Some(s) = found else {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
             return Ok(HookReply::Immediate(json!({})));
         };
-        self.rt().hook_seen.insert(s.id.clone());
+        if s.state_source != "hooks" {
+            self.with_store(|st| st.set_state_source(&s.id, "hooks"))?;
+            if let Some(s) = self.get(&s.id)? {
+                self.emit_session(&s);
+            }
+        }
         if let Some((kind, text)) = hook_event_text(&ev.event, &ev.payload) {
             self.event(&s.id, kind, &text);
         }
@@ -794,6 +850,20 @@ impl Engine {
             HookOutcome::Ended | HookOutcome::None => {}
         }
         Ok(HookReply::Immediate(json!({})))
+    }
+
+    /// Bind harness session `agent_session_id` to the newest id-less agent
+    /// row in `cwd`, so later hooks (and `--session`/`resume`) find it.
+    fn bind_by_cwd(&self, cwd: &str, agent_session_id: &str) -> Result<Option<Session>> {
+        let Some(row) = self.with_store(|st| st.find_bindable(cwd))? else {
+            return Ok(None);
+        };
+        self.with_store(|st| st.set_agent_session(&row.id, agent_session_id))?;
+        if let Some(pid) = row.pid {
+            self.rt().claims.insert(agent_session_id.to_string(), (pid, Instant::now()));
+        }
+        tracing::info!(session = %row.id, harness_session = %agent_session_id, "flow: bound harness session id from its first hook");
+        self.get(&row.id)
     }
 
     /// Finish a pending permission request (called by the host after the
@@ -875,7 +945,7 @@ impl Engine {
         // Scrape the visible pane: limits always; approvals when hooks
         // didn't report one; working/idle only when hooks never spoke.
         let pane = tmux::capture_visible(&sock, t)?;
-        let hooks_seen = self.rt().hook_seen.contains(&s.id);
+        let hooks_seen = s.state_source == "hooks";
         match detect_state(&pane) {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
@@ -1227,13 +1297,100 @@ mod tests {
         assert_eq!(default_title(SessionKind::Claude, Some("  do it  "), None, Path::new("/a/b")), "do it");
         assert_eq!(default_title(SessionKind::Claude, None, Some("th-1"), Path::new("/a/b")), "th-1");
         assert_eq!(default_title(SessionKind::Shell, None, None, Path::new("/a/b")), "shell · b");
+        // argv[0] is the resolved binary (whatever this machine has); the
+        // per-kind launch table is the rest (th-5c5457 / th-b423aa).
+        let tail = |kind, id, model, prompt| default_argv(kind, id, model, prompt)[1..].to_vec();
+        assert!(default_argv(SessionKind::Claude, None, None, None)[0].ends_with("claude"));
         assert_eq!(
-            default_argv(SessionKind::Claude, Some("u"), Some("opus"), Some("hi")),
-            vec!["claude", "--session-id", "u", "--model", "opus", "hi"]
+            tail(SessionKind::Claude, Some("u"), Some("opus"), Some("hi")),
+            vec!["--session-id", "u", "--model", "opus", "hi"]
         );
-        assert_eq!(default_argv(SessionKind::Claude, None, None, Some("  ")), vec!["claude"]);
-        assert_eq!(default_argv(SessionKind::Codex, None, None, Some("p")), vec!["codex", "p"]);
+        assert!(tail(SessionKind::Claude, None, None, Some("  ")).is_empty());
+        assert_eq!(tail(SessionKind::Codex, None, None, Some("p")), vec!["p"]);
+        assert_eq!(tail(SessionKind::Opencode, None, Some("m"), Some("p")), vec!["--model", "m", "--prompt", "p"]);
+        assert!(default_argv(SessionKind::Opencode, None, None, None)[0].ends_with("opencode"));
         assert_eq!(default_argv(SessionKind::Shell, None, None, None)[1], "-l");
+    }
+
+    /// th-5c5457: `which claude` on a cmux machine is cmux's shim; the resolver
+    /// prefers the known real installs and never picks a `cmux-cli-shims` dir.
+    #[test]
+    fn resolve_binary_skips_cmux_shims_and_prefers_real_homes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let shim = mk("T/cmux-cli-shims/ABC/claude");
+        mk("T/cmux-cli-shims/ABC/codex");
+        let real = mk("usr/bin/claude");
+        let path = std::env::join_paths([shim.parent().unwrap(), real.parent().unwrap()]).unwrap();
+        let home = tmp.path().join("home");
+        // Only PATH: the shim comes first on PATH but is skipped.
+        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), real.to_string_lossy());
+        // Nothing but the shim ⇒ the bare name (exit 127 in the pane, loudly), never the shim.
+        assert_eq!(resolve_binary_in(SessionKind::Codex, &home, &path), "codex");
+        // A preferred home wins over PATH.
+        let local = mk("home/.local/bin/claude");
+        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), local.to_string_lossy());
+        let oc = mk("home/.opencode/bin/opencode");
+        assert_eq!(resolve_binary_in(SessionKind::Opencode, &home, &path), oc.to_string_lossy());
+        // A non-executable file is not a binary.
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), real.to_string_lossy());
+    }
+
+    /// th-5c5457: opencode/codex learn their harness session id from the
+    /// first hook out of their worktree; from then on hooks and resume work.
+    #[test]
+    fn first_hook_from_a_worktree_binds_an_idless_agent_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let wt = tmp.path().to_string_lossy().into_owned();
+        let mk = |kind: SessionKind, argv: Vec<&str>| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(kind),
+                    argv: argv.into_iter().map(String::from).collect(),
+                    project: wt.clone(),
+                    worktree: wt.clone(),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        let shell = mk(SessionKind::Shell, vec!["sh"]);
+        let oc = mk(SessionKind::Opencode, vec!["/x/opencode", "--prompt", "hi"]);
+        let ev = |event: &str, sid: &str, cwd: &str| HookEvent {
+            harness: "opencode".into(),
+            event: event.into(),
+            session_id: sid.into(),
+            cwd: Some(cwd.into()),
+            payload: json!({}),
+        };
+        // Wrong cwd ⇒ nothing binds.
+        e.hook(ev("SessionStart", "ses_1", "/elsewhere")).unwrap();
+        assert_eq!(e.get(&oc.id).unwrap().unwrap().agent_session_id, None);
+        // Right cwd ⇒ the newest id-less AGENT row binds (never the shell).
+        e.hook(ev("SessionStart", "ses_1", &wt)).unwrap();
+        let bound = e.get(&oc.id).unwrap().unwrap();
+        assert_eq!(bound.agent_session_id.as_deref(), Some("ses_1"));
+        assert_eq!(bound.state_source, "hooks");
+        assert_eq!(e.get(&shell.id).unwrap().unwrap().agent_session_id, None);
+        // Later hooks find it by id; a second unknown id does not steal it.
+        e.hook(ev("Stop", "ses_1", &wt)).unwrap();
+        assert_eq!(e.get(&oc.id).unwrap().unwrap().state, SessionState::Idle);
+        e.hook(ev("SessionStart", "ses_2", &wt)).unwrap();
+        assert_eq!(e.get(&oc.id).unwrap().unwrap().agent_session_id.as_deref(), Some("ses_1"));
+        // Restore mode per kind.
+        assert_eq!(resume_argv(&e.get(&oc.id).unwrap().unwrap()), vec!["/x/opencode", "--session", "ses_1"]);
+        let mut cx = mk(SessionKind::Codex, vec!["/x/codex", "hi"]);
+        assert_eq!(resume_argv(&cx), cx.argv, "no id yet ⇒ relaunch, not resume");
+        cx.agent_session_id = Some("t-9".into());
+        assert_eq!(resume_argv(&cx), vec!["/x/codex", "resume", "t-9"]);
     }
 
     #[test]
@@ -1251,7 +1408,13 @@ mod tests {
             .unwrap();
         assert_eq!(resume_argv(&s), vec!["claude", "--resume", "u"]);
         s.kind = SessionKind::Codex;
-        assert_eq!(resume_argv(&s), s.argv);
+        assert_eq!(
+            resume_argv(&s),
+            vec!["claude", "resume", "u"],
+            "argv[0] is reused, the restore verb is per kind"
+        );
+        s.agent_session_id = None;
+        assert_eq!(resume_argv(&s), s.argv, "no id ⇒ relaunch");
         assert_eq!(resume_backoff(0), Duration::from_secs(5));
         assert_eq!(resume_backoff(1), Duration::from_secs(10));
         assert_eq!(resume_backoff(2), Duration::from_secs(20));
