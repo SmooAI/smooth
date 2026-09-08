@@ -24,9 +24,9 @@
          CFBundleVersion, so it must move on every release; keeping it equal to the
          marketing version is the one-number rule. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>0.2.1</string>
     <key>CFBundleVersion</key>
-    <string>0.2.0</string>
+    <string>0.2.1</string>
     <key>CFBundleIconFile</key>
     <string>SmoothFlow</string>
     <key>LSMinimumSystemVersion</key>
