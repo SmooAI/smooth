@@ -11,8 +11,12 @@ LOCK="$HERE/ghosttykit.lock"
 DEST="$APP_DIR/Vendor/GhosttyKit.xcframework"
 STAMP="$DEST/.ghostty_sha"
 
-# shellcheck disable=SC1090
-source <(grep -E '^(ghostty_sha|tar_sha256|flavor)=' "$LOCK")
+# Plain awk reads: the runner's /bin/bash is 3.2, where `source <(...)` misbehaves.
+lockval() { awk -F= -v k="$1" '$1 == k { print $2; exit }' "$LOCK"; }
+ghostty_sha="$(lockval ghostty_sha)"
+tar_sha256="$(lockval tar_sha256)"
+flavor="$(lockval flavor)"
+[[ -n "$ghostty_sha" && -n "$tar_sha256" && -n "$flavor" ]] || { echo "error: $LOCK is missing ghostty_sha/tar_sha256/flavor" >&2; exit 1; }
 
 if [[ -f "$STAMP" && "$(cat "$STAMP")" == "$ghostty_sha" ]]; then
   echo "==> GhosttyKit.xcframework already at $ghostty_sha"
