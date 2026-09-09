@@ -504,9 +504,15 @@ pub const DEFAULT_NEEDS_YOU: &[&str] = &[
     "do you want to proceed",
     "\\(y/n\\)",
     "\\[y/n\\]",
+    "\\(y\\)es/\\(n\\)o",
     "1\\. yes",
     "allow once",
     "press enter to confirm",
+    // First-run dialogs (gemini's folder trust + auth method, any select
+    // dialog): a real session must surface them as needs_you.
+    "do you trust",
+    "use enter to select",
+    "press any key",
 ];
 pub const DEFAULT_USAGE_LIMIT: &[&str] = &[
     "usage limit reached",
@@ -857,6 +863,11 @@ mod tests {
         assert_eq!(s.idle, vec![">"]);
         assert_eq!(s.working, vec!["esc to interrupt"]);
         assert!(!s.needs_you.is_empty() && !s.usage_limit.is_empty() && !s.error.is_empty());
+        // First-run dialogs are needs_you by default (th-473294: gemini's trust
+        // + auth dialogs, aider's (Y)es/(N)o, cursor's "press any key").
+        for p in ["do you trust", "use enter to select", "press any key", "\\(y\\)es/\\(n\\)o"] {
+            assert!(s.needs_you.iter().any(|n| n == p), "{p} missing from {:?}", s.needs_you);
+        }
         // Every derived pattern compiles under the manifest validator.
         crate::harness::ScrapeRules::compile(&s).unwrap();
     }

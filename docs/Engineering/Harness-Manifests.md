@@ -115,6 +115,12 @@ otherwise the whole pane is); then `needs_you`; then `error`; then `idle` in
 the tail; else unknown. For `hooks`/`native` sources the engine scrapes only
 limits and approvals; working/idle come from the harness.
 
+One refinement over "an approval anywhere" (th-473294): a `needs_you` hit
+with an `idle` hit on a **later line** is not pending. Scrolling CLIs (aider)
+keep the answered question on screen — `… (Y)es/(N)o [Yes]: y` — and print
+their `>` prompt under it; a modal dialog (gemini's folder trust, Claude
+Code's approval box) has nothing idle below it, so it still wins.
+
 ### State sources
 
 - **hooks** — the harness posts to `POST /api/flow/hooks` (`{harness, event,
@@ -253,12 +259,48 @@ the gate answers `configured` + `restart_required` and the CLI says so:
 `th down && th up`, then rerun. Non-TTY runs get the two commands instead of
 a prompt.
 
-What it cannot prove is reported, not assumed: a CLI that opens an auth /
-trust dialog on first run stops at `first turn reached idle — FAILED: the
-harness is waiting on an approval/auth/trust prompt…` with the pane, and is
-not installed unless `--install-unverified`. Sign the CLI in (or trust the
-directory) and rerun.
+**First-run prompts.** The private engine runs the CLI in a scratch folder,
+so the validator meets exactly what a user meets on a fresh machine: gemini's
+_"Do you trust the files in this folder?"_ then its auth-method dialog,
+aider's _"Add .aider\* to .gitignore? (Y)es/(N)o"_. Before the first idle (and
+after a resume — never during a steer, where a prompt is the harness's real
+answer) it answers those the way a person would: `harness_validate::
+FIRST_RUN_PROMPTS` names each dialog and the key that accepts its default
+(`Enter`; the exceptions, _"open the documentation url?"_ and _"see what's
+new in this version?"_, get `n` so no browser pops mid-validation). A visible
+prompt is checked _before_ the scraped state is believed (gemini paints its
+`>` composer a beat before the trust dialog covers it), a scraped `idle` must
+hold for three polls, the prompt **nearest the cursor** is the pending one
+(scrolling CLIs keep the answered questions visible above the live one, with
+the typed answer echoed onto them), each is answered once while it stays on
+screen, at most `MAX_ANSWERS` (4) per run. Every answer is recorded in the verdict (`answered`), shown in
+the report (`◐ answered a first-run prompt by pressing its default: …`) and
+handed to the drafter with the rule that `needs_you` must match each one — a
+real SmoothFlow session must surface them to the user, never skip them with a
+flag.
 
-Proven on this machine (2026-09-09): `gemini` (`@google/gemini-cli` via npm),
-`aider` (`aider-chat` via `uv tool`, Python 3.12) and `cursor-agent` — see the
-PR for the manifests each run produced.
+Two things are never pressed: a **sign-in** (_"Press any key to sign in…"_,
+_"Sign in with Google"_ highlighted — `Enter` there starts a browser login on
+the user's desk; gemini's auth dialog is answered only when it says an API
+key was detected, because that is then the default), and any `needs_you` the
+table does not name (an approval, an unknown dialog) — that is the harness
+asking, and it stays the blocking reason with the pane tail.
+
+What it cannot prove is reported, not assumed: a CLI that needs a sign-in, or
+a dialog the default key does not clear, stops at `first turn reached idle —
+FAILED: …` with the pane tail (and what was already pressed), and is not
+installed unless `--install-unverified`. Sign the CLI in and rerun.
+
+Smoke-tested on this machine (2026-09-09) against a private daemon
+(`deepseek-v4-flash` via llm.smoo.ai), one `th harness add --agentic <cli>` each:
+
+| CLI                                       | version    | result                  | reached                                                                                                                                                                        | blocker                                                                                                               |
+| ----------------------------------------- | ---------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `gemini` (`@google/gemini-cli`, npm)      | 0.59.0     | **installed** (partial) | launch, working, first idle, **steered turn idle, kill+resume, resume reused the session id**; steer-acknowledged unproven (its turn is too fast to catch `working` mid-steer) | folder-trust dialog — answered by the validator                                                                       |
+| `aider` (`aider-chat`, `uv tool`, py3.12) | 0.86.2     | drafted, not installed  | launch; three first-run prompts answered (`.gitignore` → Enter, docs → n, "what's new" → n)                                                                                    | `prompt_as="paste"` pastes on a timer and lands inside a first-run question, so the turn never runs — pearl th-d2a1e4 |
+| `cursor-agent`                            | 2025.10.01 | drafted, not installed  | launch                                                                                                                                                                         | browser sign-in wall ("Press any key to sign in…") — never pressed by design; sign in once, then rerun                |
+
+`gemini`'s installed manifest launches with `--session-id {session_id} --model
+{model} {prompt}` (prompt as argv, preassigned session id), resumes with
+`--resume {session_id}`, scrapes state (its `hooks` subcommand is undocumented
+for our transport), steers by bracketed paste, kills with TERM.

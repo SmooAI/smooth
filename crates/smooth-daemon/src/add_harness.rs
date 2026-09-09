@@ -370,6 +370,7 @@ Rules:\n\
 - state.source: use \"scrape\" unless the CLI documents hooks AND you can state how to wire them to POST /api/flow/hooks; then \"hooks\" with an `install` note, keeping scrape patterns as the fallback.\n\
 - Scrape patterns are regexes over the LAST 12 visible lines for working/idle. When a captured pane is given, derive `idle` from its prompt marker / footer and `working` from what changes while it thinks. Escape regex metacharacters. Keep patterns short and specific.\n\
 - Resume: `resume_session` only when the CLI takes a session id; otherwise `relaunch_command`.\n\
+- First-run prompts the validator answered (folder trust, auth method, .gitignore) are what a real session shows the user: make `needs_you` match each one; do NOT add flags or env to skip them.\n\
 - When a previous attempt failed, change ONLY what the verdict points at.";
 
 /// Render the drafter's user message.
@@ -432,6 +433,12 @@ pub fn draft_user_message(brief: &Brief, attempts: &[Attempt]) -> String {
                 m.push_str(&format!("Idle pattern derived from that pane: {:?}\n", derived.idle));
             }
             m.push_str(&format!("state_source the engine reported: {}\n", v.state_source));
+            if !v.answered.is_empty() {
+                m.push_str("First-run prompts the validator answered by pressing the default (a real session shows these to the user — `needs_you` must match each):\n");
+                for a in &v.answered {
+                    m.push_str(&format!("  - {a}\n"));
+                }
+            }
         }
     }
     m.push_str("\nNow answer with the manifest.");
@@ -517,6 +524,10 @@ pub struct Report {
     pub unproven: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pane_tail: String,
+    /// First-run prompts the validator answered by pressing the default
+    /// (`"<line> → <keys>"`), so the user knows what was clicked through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answered: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -537,6 +548,7 @@ impl Report {
             proven: Vec::new(),
             unproven: Vec::new(),
             pane_tail: String::new(),
+            answered: Vec::new(),
             error: Some(error),
             next_steps: Vec::new(),
             provider: None,
@@ -557,6 +569,7 @@ impl Report {
             proven: Vec::new(),
             unproven: Vec::new(),
             pane_tail: String::new(),
+            answered: Vec::new(),
             error: Some("Big Smooth has no LLM provider configured — drafting a manifest needs a model".into()),
             next_steps,
             provider: Some(provider),
@@ -592,6 +605,9 @@ impl Report {
         }
         for (s, why) in &self.unproven {
             out.push_str(&format!("○ {s} — {}\n", why.lines().next().unwrap_or("")));
+        }
+        for a in &self.answered {
+            out.push_str(&format!("◐ answered a first-run prompt by pressing its default: {a}\n"));
         }
         if !self.next_steps.is_empty() {
             out.push_str("next:\n");
@@ -788,6 +804,16 @@ pub async fn run(req: &Request, home: &Path, path: &std::ffi::OsStr, cwd: &Path,
             }
         };
         let complete = verdict.complete;
+        tracing::info!(
+            harness = %req.name,
+            iteration = iterations,
+            usable = verdict.usable,
+            complete,
+            answered = ?verdict.answered,
+            summary = ?verdict.summary_lines(),
+            pane_tail = %verdict.pane_tail,
+            "add_harness: validation verdict"
+        );
         attempts.push(Attempt {
             iteration: iterations,
             toml,
@@ -841,13 +867,13 @@ pub async fn run(req: &Request, home: &Path, path: &std::ffi::OsStr, cwd: &Path,
         (
             Status::Drafted,
             None,
-            Some(match best.parse_error.as_deref() {
-                Some(e) => format!("the last draft did not validate: {e}"),
-                None => {
+            Some(best.parse_error.as_deref().map_or_else(
+                || {
                     "no attempt reached launch + idle; the best draft is below — fix it by hand (`th harness add <file>`) or rerun with install_unverified=true"
                         .to_string()
-                }
-            }),
+                },
+                |e| format!("the last draft did not validate: {e}"),
+            )),
         )
     };
     if path_written.is_some() {
@@ -860,6 +886,14 @@ pub async fn run(req: &Request, home: &Path, path: &std::ffi::OsStr, cwd: &Path,
             next_steps.push("state is scraped (inferred); wire hooks to POST /api/flow/hooks for exact working/idle and a learned session id".into());
         }
     } else {
+        // A sign-in wall is the one blocker no draft can fix.
+        let sign_in = verdict.pane_tail.to_ascii_lowercase();
+        if sign_in.contains("sign in") || sign_in.contains("log in") || sign_in.contains("login") {
+            next_steps.push(format!(
+                "sign `{bin_name}` in once yourself (it is waiting on a browser login the validator will never press), then rerun: th harness add --agentic {}",
+                req.name
+            ));
+        }
         next_steps.push(format!(
             "save the TOML below and run: th harness add <file>   # after editing; or th harness add --agentic {} --force",
             req.name
@@ -879,6 +913,7 @@ pub async fn run(req: &Request, home: &Path, path: &std::ffi::OsStr, cwd: &Path,
             .map(|(s, why)| (harness_validate::step_label(s).to_string(), why))
             .collect(),
         pane_tail: verdict.pane_tail.clone(),
+        answered: verdict.answered,
         error,
         next_steps,
         provider: None,
@@ -1249,6 +1284,26 @@ mod tests {
         let r = run(&rq, &home, std::ffi::OsStr::new(""), tmp.path(), &drafter, &validator).await.unwrap();
         assert_eq!(r.status, Status::InstalledPartial);
         assert!(install_path(&home, "tool").exists());
+        assert!(!r.next_steps.iter().any(|n| n.contains("sign")), "{:?}", r.next_steps);
+    }
+
+    /// cursor-agent: a sign-in wall is named as the next step, not "edit the TOML".
+    #[tokio::test]
+    async fn a_sign_in_wall_names_signing_in_as_the_next_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fake_cli(&home.join(".local"), "faketool");
+        let m = format!("```toml\n{}```", manifest_toml("tool"));
+        let drafter = ScriptDrafter::new(&[&m]);
+        let mut v = bad_verdict();
+        v.pane_tail = "CURSOR AGENT\nPress any key to sign in...".into();
+        let validator = ScriptValidator::new(vec![v]);
+        let mut rq = req("tool");
+        rq.max_iterations = 1;
+        let r = run(&rq, &home, std::ffi::OsStr::new(""), tmp.path(), &drafter, &validator).await.unwrap();
+        assert_eq!(r.status, Status::Drafted);
+        assert!(r.next_steps[0].contains("sign `faketool` in once yourself"), "{:?}", r.next_steps);
+        assert!(r.render().contains("browser login"));
     }
 
     #[tokio::test]
