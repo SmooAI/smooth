@@ -1,5 +1,0 @@
----
-'@smooai/smooth': minor
----
-
-`th pkg` M1 — overlays that merge instead of replace (pearl th-6ad314, epic th-55b2c7): `hooks.json` is key-merged (events union, per-matcher append, identical commands deduped) both for the composed Claude plugin and for a new `harness/codex/hooks.json` overlay rendered into `~/.codex/hooks.json`; `rules/*.md` render as Cursor `.mdc` rules (`cursor` is a first-class harness with its own MCP file) and as a marker-delimited `<!-- th-pkg:<name> -->` managed section in Codex's and OpenCode's global `AGENTS.md`, idempotent and never touching text outside the markers. Every hook entry and section is tracked in `index.toml`, so `th pkg rm` and the new per-harness `th harness disable <h>` remove exactly ours. `th harness enable codex` (th-4ad334) wires the smooth-agent SmoothFlow flow hook into Codex 0.153's Claude-style `~/.codex/hooks.json` (keeping whatever the user already has there), adds `~/.smooth` to the workspace-write sandbox's `writable_roots` once with a comment, and `th harness status` reports both; `flow-hook.sh` takes the harness as its second argument.
