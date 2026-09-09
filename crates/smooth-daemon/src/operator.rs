@@ -1041,6 +1041,13 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // the app bundle) funnels through here, so this is the choke point. Held
     // to shutdown; the OS releases it if we die (pearl th-c71e6f).
     let _instance = crate::single_instance::acquire_default().await?;
+    // Port 0 (an ephemeral port — what the e2e suites bind) has to be
+    // resolved BEFORE the server is built: `{daemon_url}` (the address a
+    // `th code` / fake-agent pane posts its hooks back to) is rendered from
+    // this value when the flow router is installed below, and the bound port
+    // is only known after `spawn()`. th-8e3087 caught every hook of a port-0
+    // daemon going to `http://127.0.0.1:0`.
+    let addr = resolve_ephemeral_port(addr)?;
     let token = provision_local_token()?;
     // The local flavor's tools: the workspace-confined fs/grep set + an
     // OS-sandboxed `bash` whose egress is routed through the goalie proxy (when
@@ -1294,6 +1301,19 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     tracing::info!("shutdown signal received");
     server.shutdown().await.context("shutting down local operator")?;
     Ok(())
+}
+
+/// `addr` with a port of 0 replaced by a port the OS just handed out (bound
+/// and released — the same tiny race every "pick a free port" helper has).
+/// Any other port is returned unchanged.
+fn resolve_ephemeral_port(addr: SocketAddr) -> Result<SocketAddr> {
+    if addr.port() != 0 {
+        return Ok(addr);
+    }
+    let probe = std::net::TcpListener::bind(addr).with_context(|| format!("probing an ephemeral port on {addr}"))?;
+    let bound = probe.local_addr().context("reading the probed ephemeral port")?;
+    drop(probe);
+    Ok(bound)
 }
 
 /// The URL a process on this host reaches the daemon at (th-0f6126: the
@@ -2310,6 +2330,20 @@ mod tests {
         // A later run on a different port overwrites cleanly.
         let path = super::persist_daemon_addr_to(&nested, "127.0.0.1:9999").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "127.0.0.1:9999");
+    }
+
+    /// th-8e3087: a port-0 bind is resolved to a real port BEFORE the flow
+    /// router renders `{daemon_url}` from it; fixed ports pass through.
+    #[test]
+    fn ephemeral_port_is_resolved_and_fixed_ports_pass_through() {
+        let fixed: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        assert_eq!(resolve_ephemeral_port(fixed).unwrap(), fixed);
+        let zero: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let resolved = resolve_ephemeral_port(zero).unwrap();
+        assert_ne!(resolved.port(), 0);
+        assert_eq!(resolved.ip(), zero.ip());
+        assert!(loopback_url(resolved).ends_with(&format!(":{}", resolved.port())));
+        assert_eq!(loopback_url("0.0.0.0:8787".parse().unwrap()), "http://127.0.0.1:8787");
     }
 
     #[test]
