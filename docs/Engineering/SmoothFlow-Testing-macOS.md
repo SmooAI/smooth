@@ -35,6 +35,25 @@ sheet: `inbox.close.pearl` / `inbox.close.worktree` toggles, `inbox.close.confir
 / `inbox.close.cancel`), `inbox.close.refusal.<id>` / `inbox.close.force.<id>`,
 `settings.pane.{permissions,attention,daemon}`.
 
+## The unit bundle runs inside the app (th-dccc80)
+
+`SmoothFlowTests` is hosted by `SmoothFlow.app` (`TEST_HOST`), so the real
+`applicationDidFinishLaunching` runs on every `xcodebuild test`. It used to
+start the fleet for real — spawn mode against the developer's HOME:
+`tmux -L smoothflow kill-server`, a `smooth-daemon` child from `~/.cargo/bin`,
+and (before #546) a rewritten `~/.smooth/daemon.addr`. Two guards now:
+
+- `AppController.shouldStart(env:)` — under XCTest (`XCTestConfigurationFilePath`
+  & co.) the delegate builds the menu and stops: no status item, no window, no
+  daemon, and `shutdown()` is a no-op before `start()`, so quitting the host
+  never reaches tmux. A test that needs the live app opts in with
+  `SMOOTHFLOW_TEST_START=1`. The XCUITest lane is untouched (the app under test
+  is a separate process without those variables).
+- The `SmoothFlow` scheme's test action pins `HOME` / `CFFIXED_USER_HOME` to
+  `/tmp/smoothflow-xctest-home`, so anything a future test forgets to sandbox
+  lands there. `TestHostIsolationTests` pins both: the host is inert and its
+  `~/.smooth` never gains a `daemon.addr` or `smoothflow-*` state.
+
 ## Run locally
 
 ```sh

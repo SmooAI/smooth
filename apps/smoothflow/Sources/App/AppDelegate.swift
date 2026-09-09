@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = buildMenu()
+        // Hosting the unit tests: no status item, no window, no daemon, no tmux
+        // (th-dccc80). Everything below `start()` is what a test would observe.
+        guard AppController.shouldStart(env: ProcessInfo.processInfo.environment) else { return }
         installStatusItem()
         app.start()
         NSApp.activate(ignoringOtherApps: true)
@@ -34,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        app.mainWindow.window?.makeKeyAndOrderFront(nil)
+        app.mainWindow?.window?.makeKeyAndOrderFront(nil)
         return true
     }
 

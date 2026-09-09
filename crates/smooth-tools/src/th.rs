@@ -122,7 +122,7 @@ impl Tool for ThTool {
 /// `$ th … / exit code / stdout / stderr` string (streams truncated at
 /// [`OUTPUT_CAP`]). Shared by [`ThTool`] and the typed convenience tools
 /// (`web_search`, …) that shell specific `th` subcommands. No shell — argv only.
-pub(crate) async fn run_th(args: &[String], cwd: &std::path::Path) -> anyhow::Result<String> {
+pub async fn run_th(args: &[String], cwd: &std::path::Path) -> anyhow::Result<String> {
     let bin = resolve_th()
         .ok_or_else(|| anyhow::anyhow!("could not find the `th` binary (looked at SMOOTH_TH_BIN, next to the executable, ~/.cargo/bin/th, and PATH)"))?;
 

@@ -211,6 +211,17 @@ impl ToolProvider for SandboxedToolProvider {
         tools.push(Arc::new(smooth_tools::RecallTool {
             memory: Arc::clone(&self.memory),
         }) as Arc<dyn Tool>);
+        // add_harness (th-473294): Big Smooth onboards a coding-agent CLI into
+        // SmoothFlow by itself — probe --help, draft a manifest with the daemon's
+        // model, validate it on a PRIVATE flow engine, install it. Lives here
+        // (not in smooth-tools) because it needs smooth-flow + the daemon's
+        // gateway resolution; the model config is resolved per call so a
+        // provider added while the daemon runs is seen. Mutating — dropped by
+        // the Plan-mode filter below like every other writer.
+        tools.push(Arc::new(crate::add_harness::AddHarnessTool {
+            workspace: dir.clone(),
+            llm: Arc::new(agent_llm_config),
+        }) as Arc<dyn Tool>);
         // notify (th-c29d34): proactively push to the user's devices via the
         // daemon's web-push + phone fan-out. Injected here (like the calendar
         // allowlist / send_file) because it needs the daemon's notify sink, which
@@ -688,7 +699,7 @@ fn provider_by_id<'a>(providers: &'a [serde_json::Value], id: Option<&str>) -> O
 }
 
 /// [`gateway_from_providers`] against an explicit path — the testable core.
-fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
+pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let providers = v.get("providers")?.as_array()?;
     // Resolve the provider BY the routing slot's own `provider` id rather than a
@@ -809,6 +820,25 @@ fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
         // coding-route default. Small token budget: it returns one JSON line.
         model: FAST_MODEL.to_owned(),
         max_tokens: 512,
+        temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
+        retry_policy: smooth_operator::llm::RetryPolicy::default(),
+        api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
+    })
+}
+
+/// The daemon's own model as an [`LlmConfig`](smooth_operator::llm::LlmConfig)
+/// — the coding route with assistant-grade headroom — for in-process callers
+/// that need a plain chat (the `add_harness` drafter, th-473294). `None` when
+/// no gateway key is available, which is the tool's cue to answer
+/// `needs_provider` instead of failing mid-run.
+pub(crate) fn agent_llm_config() -> Option<smooth_operator::llm::LlmConfig> {
+    let cfg = resolve_gateway_config();
+    let key = cfg.gateway_key.filter(|k| !k.trim().is_empty())?;
+    Some(smooth_operator::llm::LlmConfig {
+        api_url: cfg.gateway_url,
+        api_key: key,
+        model: cfg.model,
+        max_tokens: cfg.max_tokens,
         temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
@@ -1158,12 +1188,16 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         crate::flow_e2e::PairingState::required_from_env(),
     ));
 
+    // The gateway is read ONCE here; `llm_provider` remembers whether it had a
+    // key so a provider added later is reported as "restart required".
+    let gateway_config = resolve_gateway_config();
+    crate::llm_provider::mark_boot(gateway_config.gateway_key.as_deref().is_some_and(|k| !k.trim().is_empty()));
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
         // `th model login` creds from providers.json — so `th code` works
         // in a plain terminal without exporting a key.
-        .config(resolve_gateway_config())
+        .config(gateway_config)
         .storage(storage)
         // Same local-token gate as the engine's `LocalTokenVerifier`, but the
         // principal carries the operator's REAL Smoo org (read fresh from the
@@ -1237,6 +1271,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // faces can show a real name at idle instead of "unknown"
                 // (pearl th-7630a7). Name only; credentials never leave.
                 .merge(crate::mode_route::mode_router())
+                // GET /api/llm/provider — does this daemon have model creds, and
+                // if not, the two ways to get some (th-473294). `th harness add
+                // --agentic` asks before driving a turn. Name + host only.
+                .merge(crate::llm_provider::provider_router())
                 // The bench-scored model lineup, single source of truth for every
                 // client's model picker (th-1d8007). Public data, ungated.
                 .merge(crate::model_catalog_route::model_catalog_router())

@@ -192,7 +192,7 @@ pub enum FanoutCommands {
 // ── daemon discovery ──────────────────────────────────────────────────────────
 
 /// `host:port` of the running daemon from `~/.smooth/daemon.addr`.
-fn daemon_addr() -> Result<String> {
+pub(crate) fn daemon_addr() -> Result<String> {
     let path = dirs_next::home_dir().context("no home dir")?.join(".smooth").join("daemon.addr");
     let addr = std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
@@ -203,7 +203,7 @@ fn daemon_addr() -> Result<String> {
 }
 
 /// `SMOOTH_LOCAL_TOKEN` → `~/.smooth/operator-token`.
-fn local_token() -> Option<String> {
+pub(crate) fn local_token() -> Option<String> {
     if let Ok(t) = std::env::var("SMOOTH_LOCAL_TOKEN") {
         let t = t.trim().to_string();
         if !t.is_empty() {
