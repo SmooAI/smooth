@@ -43,6 +43,14 @@ class FlowUITestCase: XCTestCase {
         }
         app?.terminate()
         for p in processes where p.isRunning { p.terminate() }
+        // A stubborn daemon the app failed to take down must not outlive the test.
+        if let f = stubbornPidFile, let t = try? String(contentsOf: f, encoding: .utf8), let pid = pid_t(t.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
+            kill(pid, SIGKILL)
+        }
+        if let tmp, let tmux = Self.which("tmux") {
+            let sock = tmp.appendingPathComponent("tmux/tmux-\(getuid())/smoothflow").path
+            if FileManager.default.fileExists(atPath: sock) { _ = try? Process.run(URL(fileURLWithPath: tmux), arguments: ["-S", sock, "kill-server"]) }
+        }
         if let sock = tmuxSocket, let tmux = Self.which("tmux") {
             _ = try? Process.run(URL(fileURLWithPath: tmux), arguments: ["-L", sock, "kill-server"])
         }
@@ -133,6 +141,36 @@ class FlowUITestCase: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 20) { self.label("sidebar.connection").hasPrefix("daemon connected") },
                       "connected to \(addr): connection='\(label("sidebar.connection"))'")
     }
+
+    /// Spawn mode (no `SMOOTHFLOW_DAEMON_ADDR`) with `SMOOTHFLOW_DAEMON_BIN` pointed at
+    /// a "daemon" that ignores SIGTERM — the th-6198bf shape. Nothing connects, so
+    /// this only waits for the window and for the supervisor's pid file. The app's
+    /// `tmux -L smoothflow` server is confined to the temp dir via `TMUX_TMPDIR`, so
+    /// its kill-server never reaches a real SmoothFlow's fleet.
+    func launchAppSpawningStubbornDaemon() throws {
+        if !NSRunningApplication.runningApplications(withBundleIdentifier: "ai.smoo.smoothflow").isEmpty {
+            throw XCTSkip("SmoothFlow.app is running — quit it before running the UI tests")
+        }
+        let bin = tmp.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tmp.appendingPathComponent("tmux"), withIntermediateDirectories: true)
+        let daemon = bin.appendingPathComponent("stubborn-daemon")
+        try "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 1; done\n".write(to: daemon, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: daemon.path)
+        stubbornPidFile = tmp.appendingPathComponent("home/.smooth/smoothflow-daemon.pid")
+        let a = XCUIApplication()
+        let home = tmp.appendingPathComponent("home").path
+        a.launchEnvironment = ["SMOOTHFLOW_DAEMON_BIN": daemon.path, "SMOOTHFLOW_UI_TEST": "1", "HOME": home, "CFFIXED_USER_HOME": home,
+                               "TMPDIR": tmp.appendingPathComponent("tmux").path, "TMUX_TMPDIR": tmp.appendingPathComponent("tmux").path]
+        a.launchArguments = ["-onboarded", "YES", "-ApplePersistenceIgnoreState", "YES", "-NSQuitAlwaysKeepsWindows", "NO"]
+        a.launch()
+        app = a
+        XCTAssertTrue(app.windows["SmoothFlow"].waitForExistence(timeout: 20), "main window")
+        XCTAssertTrue(waitUntil(timeout: 20) { FileManager.default.fileExists(atPath: self.stubbornPidFile!.path) },
+                      "the supervisor spawned the stubborn daemon and recorded its pid; connection='\(label("sidebar.connection"))'")
+    }
+
+    private var stubbornPidFile: URL?
 
     /// A Settings tab by its title. The grouped `TabView` exposes its tabs as
     /// `Tab` elements on the macOS 26 runner and as radio buttons / buttons on
