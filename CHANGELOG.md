@@ -1,5 +1,16 @@
 # @smooai/smooth
 
+## 0.48.0
+
+### Minor Changes
+
+- 7ea4bfc: Agentic "add a harness" (th-473294, phase 2 of th-faa590): the daemon tool `add_harness` probes a coding-agent CLI's `--help` (and a docs URL), drafts a SmoothFlow harness manifest with Big Smooth's model, validates it by launching a real session on a private flow engine (launch → working → idle, steer, kill+resume — each step proven, unproven or failed), iterates on failures, installs it to `~/.smooth/harnesses/<name>.toml` and reports what it could not prove. `th harness add --agentic <name>` drives it over the daemon's canonical WebSocket. `GET /api/llm/provider` is the provider gate: with no model the tool answers `needs_provider` and the CLI offers the Smoo AI Gateway (sign in, mint the org's llm.smoo.ai key, save it) or bring-your-own-key. Deterministic parts — help parsing → ranked argv candidates, scrape patterns from captured panes, the validation state machine — live in `smooth-flow` (`harness_draft`, `harness_validate`) with tests against real help texts (gemini, aider, cursor-agent, claude). The validator answers first-run dialogs the way a person would (gemini's folder-trust and auth-method dialogs, aider's `.gitignore` question: `Enter` accepts the default, "open the docs?" gets `n`), capped and recorded in the verdict so the manifest's `needs_you` matches each; sign-in prompts are never pressed through. The manifest scraper no longer reports `needs_you` for an answered question that a scrolling CLI keeps on screen above its own `>` prompt (an idle marker on a later line wins). Also fixes th-0a3c7f: the harness-prefs engine test no longer depends on whether `aider` is installed on the host.
+
+### Patch Changes
+
+- 4638a20: SmoothFlow terminal font and glyphs (th-bcd819). The 0.2.1 blank starship prompt (`_` for `❯`, no branch/cloud icons) was tmux: a Finder-launched app has no `LANG`, so the child daemon's `tmux attach` client was treated as non-UTF-8 and every non-ASCII cell became `_`. The flow engine now passes `-u` to every tmux client and the app gives the child a UTF-8 `LANG`/`LC_CTYPE`. On top: JetBrainsMono Nerd Font ships in the bundle (OFL), registered per process and named in the ghostty overrides with a 13 pt default; Settings ▸ Terminal picks family / size / ligatures live; a `font-family` / `font-size` in the user's own Ghostty config still wins over the bundled default, a Settings choice over both; the app's monospace text uses the same face. `theme = …` in the user's Ghostty config now applies too: the bundle carries libghostty's themes and exports `GHOSTTY_RESOURCES_DIR`.
+- 9337424: SmoothFlow no longer shares Big Smooth's relay identity (th-a1bb12). The app mints and keeps its own relay device id (`~/.smooth/smoothflow-relay-device-id`) and starts its child daemon with `SMOOTH_RELAY_DEVICE_ID`, `SMOOTH_RELAY_LABEL="<host> · SmoothFlow"` and the new `SMOOTH_RELAY_KIND=flow`, so a phone's device list shows Big Smooth and SmoothFlow as two peers instead of one identity whose presence flapped between two sockets. `smooth-daemon` also holds an advisory lock per relay device id: a second daemon on the same machine that resolves the same id logs an error and stays off the relay until the first exits.
+
 ## 0.47.1
 
 ### Patch Changes
