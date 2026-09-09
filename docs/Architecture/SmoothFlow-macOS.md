@@ -257,6 +257,21 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
 
+### Closing a finished session (th-883ce9)
+
+The finished card's **Close…** is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
+sheet names each action with its target — _close pearl `<id>`_ (on when the
+row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
+when the row lives in its own worktree; the main checkout is never offered) —
+and states the rule up front: a dirty or unmerged worktree is refused with
+nothing touched. The frame carries a client `seq`; the engine echoes it as
+`flow.error.ref`, so a refusal lands on **that card** in the engine's words
+with **Force close** (resends with `force`) and **Keep it**. Success is just
+`flow.session.removed`: the card and the sidebar row go. The mock
+(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
+covers both paths without a real worktree.
+
 ## Keyboard
 
 | Keys      | Action                                     |
@@ -395,10 +410,10 @@ Launch contract, identifiers and how to run:
   contract and the app sets `SMOOTH_FLOW_TMUX_SOCKET`.
 - th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
   by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
-- th-e126cc — engine side closed: `flow.close {id, close_pearl,
+- th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
 remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
   `th flow close`) closes the pearl, removes the merged worktree + branch and
-  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The inbox
-  card does not send it yet; wiring the Swift side is th-883ce9. Until then
-  the PR tab only shows what the handoff endpoint reports, "Merge" opens the
-  PR.
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
+  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  still opens the PR: merging is a review act, not something the shell does
+  blind.

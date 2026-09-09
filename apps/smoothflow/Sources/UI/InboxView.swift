@@ -6,6 +6,8 @@ import SwiftUI
 struct InboxView: View {
     @ObservedObject var store: FlowStore
     @ObservedObject var app: AppController
+    /// th-883ce9: the finished session whose Close confirm sheet is up.
+    @State private var closing: Session?
 
     var body: some View {
         ScrollView {
@@ -40,6 +42,11 @@ struct InboxView: View {
             .padding(20)
         }
         .frame(minWidth: 520, minHeight: 400)
+        .sheet(item: $closing) { s in
+            CloseSessionSheet(session: s, handoff: app.handoffs[s.id]) { closePearl, removeWorktree in
+                app.close(s, closePearl: closePearl, removeWorktree: removeWorktree)
+            }
+        }
     }
 
     private func group<C: View>(_ title: String, @ViewBuilder _ c: () -> C) -> some View {
@@ -106,9 +113,28 @@ struct InboxView: View {
                 Button("Review diff") { app.focus(s.id); app.showTab(.diff); app.toggleInbox() }
                 Button("Merge") { app.merge(s) }.disabled(h?.pr?.url == nil)
                 Button("Open session") { app.focus(s.id); app.toggleInbox() }
+                Spacer()
+                // Close = pearl closed + merged worktree gone + row dropped
+                // (th-883ce9). Quiet, at the end: the affirmative act is on the sheet.
+                Button("Close…") { closing = s }.accessibilityIdentifier("inbox.close.\(s.id)")
             }
+            if let r = app.closeRefusals[s.id] { refusal(s, r) }
         }
         .task { await app.loadHandoff(for: s.id) }
+    }
+
+    /// The engine refused (dirty or unmerged worktree, nothing touched): say
+    /// why in its words, and offer force — the one destructive path, and only
+    /// after the reason was read. Amber is for "needs you"; this is not that.
+    private func refusal(_ s: Session, _ r: CloseRefusal) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Not closed: \(r.message)").font(.caption).foregroundStyle(Color(Theme.ink)).accessibilityIdentifier("inbox.close.refusal.\(s.id)")
+            HStack {
+                Button("Force close") { app.forceClose(s) }.accessibilityIdentifier("inbox.close.force.\(s.id)")
+                Button("Keep it") { app.dismissCloseRefusal(s.id) }
+            }
+        }
+        .padding(.top, 2)
     }
 
     private func fanOutCard(_ f: FanOut) -> some View {
@@ -138,6 +164,67 @@ struct InboxView: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(accent).opacity(0.5)))
             .controlSize(.small)
+    }
+}
+
+/// "What will happen" before `flow.close` goes out: each action is named with
+/// its target and can be left out; the refusal rule is stated up front so a
+/// dirty worktree is never a surprise. Confirm is the default button.
+struct CloseSessionSheet: View {
+    let session: Session
+    let handoff: Handoff?
+    let confirm: (_ closePearl: Bool, _ removeWorktree: Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var closePearl: Bool
+    @State private var removeWorktree: Bool
+
+    init(session: Session, handoff: Handoff?, confirm: @escaping (_ closePearl: Bool, _ removeWorktree: Bool) -> Void) {
+        self.session = session
+        self.handoff = handoff
+        self.confirm = confirm
+        _closePearl = State(initialValue: session.pearlId != nil)
+        _removeWorktree = State(initialValue: Self.hasOwnWorktree(session))
+    }
+
+    /// The main checkout is never removed (the engine refuses too); only a
+    /// row that lives in its own worktree offers the toggle.
+    static func hasOwnWorktree(_ s: Session) -> Bool { !s.worktree.isEmpty && s.worktree != s.project }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Close \(session.label)").font(.headline)
+            Text("This finishes the session for good. It leaves the fleet; its scrollback stays until you quit.").font(.caption).foregroundStyle(Color(Theme.muted))
+            if let p = session.pearlId {
+                Toggle(isOn: $closePearl) { Text("Close pearl \(p)").font(.body.monospaced()) }.accessibilityIdentifier("inbox.close.pearl")
+            } else {
+                Text("No pearl on this session.").font(.caption).foregroundStyle(Color(Theme.faint))
+            }
+            if Self.hasOwnWorktree(session) {
+                Toggle(isOn: $removeWorktree) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remove worktree \(session.worktree)").font(.body.monospaced())
+                        if let b = session.branch { Text("and delete branch \(b)").font(.caption).foregroundStyle(Color(Theme.muted)) }
+                    }
+                }.accessibilityIdentifier("inbox.close.worktree")
+                Text("Only once the branch is merged and the worktree is clean; otherwise the engine refuses and touches nothing — you can force it from the card.")
+                    .font(.caption).foregroundStyle(Color(Theme.muted))
+                if let dirty = handoff?.handoff?.dirty, !dirty.isEmpty {
+                    Text("\(dirty.count) uncommitted files right now.").font(.caption).foregroundStyle(Color(Theme.ink))
+                }
+            } else {
+                Text("Main checkout — the worktree is kept.").font(.caption).foregroundStyle(Color(Theme.faint))
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).accessibilityIdentifier("inbox.close.cancel")
+                Button("Close session") { confirm(closePearl, removeWorktree); dismiss() }
+                    .keyboardShortcut(.defaultAction).accessibilityIdentifier("inbox.close.confirm")
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("inbox.close.sheet")
     }
 }
 

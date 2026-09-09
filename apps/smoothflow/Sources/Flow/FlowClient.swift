@@ -34,10 +34,12 @@ final class FlowClient {
         store.connection = .disconnected(reason: nil)
     }
 
-    func send(_ frame: ClientFrame) {
+    /// `seq` rides on the frame so the engine's reply (`flow.error.ref`) can be
+    /// matched to it; most frames need none.
+    func send(_ frame: ClientFrame, seq: Int? = nil) {
         guard let task, store.connection.isConnected else { return }
         // Text, not binary: the engine's WS loop only reads `Message::Text`.
-        task.send(.string(frame.encodeText())) { [weak self] error in
+        task.send(.string(frame.encodeText(seq: seq))) { [weak self] error in
             if let error { Task { @MainActor in self?.dropped("send failed: \(error.localizedDescription)") } }
         }
     }
