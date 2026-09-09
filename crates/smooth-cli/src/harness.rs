@@ -74,11 +74,37 @@ pub enum Cmd {
     /// Validate a manifest and copy it into ~/.smooth/harnesses/<name>.toml.
     /// SOURCE is a .toml file, a directory holding harness.toml (or
     /// harness/<name>/harness.toml), or owner/repo[/subdir][#ref] on GitHub.
+    ///
+    /// With --agentic, SOURCE is a harness NAME and Big Smooth writes the
+    /// manifest itself: it probes the CLI's --help (and --docs), drafts a
+    /// manifest, validates it by launching a real session on a private
+    /// engine (launch → working → idle, steer, kill+resume), iterates, installs
+    /// it, and reports what it could not prove. Needs a running daemon with an
+    /// LLM provider — you are offered the Smoo AI Gateway or your own key.
     Add {
         source: String,
         /// Overwrite an existing ~/.smooth/harnesses/<name>.toml.
         #[arg(long)]
         force: bool,
+        /// Let Big Smooth draft + validate the manifest (SOURCE = harness name).
+        #[arg(long)]
+        agentic: bool,
+        /// The executable's name or path when it differs from the name
+        /// (e.g. `gemini-cli` → `gemini`). --agentic only.
+        #[arg(long, requires = "agentic")]
+        binary: Option<String>,
+        /// A docs page (CLI reference / hooks) to give the drafter. --agentic only.
+        #[arg(long, requires = "agentic", value_name = "URL")]
+        docs: Option<String>,
+        /// Draft → validate rounds before giving up (1–6). --agentic only.
+        #[arg(long, requires = "agentic", default_value_t = 3)]
+        iterations: u8,
+        /// Install the best draft even when no run reached idle. --agentic only.
+        #[arg(long, requires = "agentic")]
+        install_unverified: bool,
+        /// Model to pass through `{model}` while validating. --agentic only.
+        #[arg(long, requires = "agentic")]
+        model: Option<String>,
     },
     /// Set up (or update) a harness: register the `th mcp serve` MCP server,
     /// install/update the smooth-agent plugin where the harness has a plugin
@@ -117,7 +143,31 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             print_harnesses(&infos_of(&v), true);
             Ok(())
         }
-        Cmd::Add { source, force } => add(&home, &source, force),
+        Cmd::Add {
+            source,
+            force,
+            agentic,
+            binary,
+            docs,
+            iterations,
+            install_unverified,
+            model,
+        } => {
+            if agentic {
+                add_agentic(crate::harness_agentic::AgenticArgs {
+                    name: source,
+                    binary,
+                    docs,
+                    iterations: iterations.clamp(1, 6),
+                    force,
+                    install_unverified,
+                    model,
+                })
+                .await
+            } else {
+                add(&home, &source, force)
+            }
+        }
         Cmd::Enable { provider } => {
             for h in providers(&provider)? {
                 enable(h, &home);
@@ -368,6 +418,57 @@ fn add(home: &Path, source: &str, force: bool) -> Result<()> {
             .dimmed()
             .to_string())
     );
+    Ok(())
+}
+
+/// `th harness add --agentic <name>`: the provider gate, then one turn of
+/// Big Smooth calling its `add_harness` tool; the manifest lands in
+/// ~/.smooth/harnesses via the daemon (pearl th-473294).
+async fn add_agentic(args: crate::harness_agentic::AgenticArgs) -> Result<()> {
+    if !manifests::Manifest::parse(&format!(
+        "name = \"{}\"\n[binary]\nnames = [\"x\"]\n[launch]\nargv = [\"{{prompt}}\"]\n",
+        args.name
+    ))
+    .is_ok()
+    {
+        bail!(
+            "`{}` is not a valid harness name (lowercase letters, digits, dashes)\n  → th harness add --agentic gemini",
+            args.name
+        );
+    }
+    if !crate::harness_agentic::ensure_provider().await? {
+        return Ok(());
+    }
+    let reply = crate::harness_agentic::run_turn(&args).await?;
+    // The report is authoritative: if the daemon installed it, it is on disk now.
+    let home = mcp_install::harness_home()?;
+    let dest = user_manifests_dir(&home).join(format!("{}.toml", args.name));
+    if dest.is_file() {
+        let m = manifests::load_file(&dest)?;
+        let binary = m.resolve_binary_in(&home, &std::env::var_os("PATH").unwrap_or_default());
+        println!(
+            "{} {} → {}  ({})",
+            paint("●", |g| g.bold().to_string()),
+            m.name,
+            dest.display(),
+            binary.map_or_else(|| format!("`{}` not on PATH", m.binary.names.join("`/`")), |b| b.display().to_string())
+        );
+        println!(
+            "{}",
+            paint(
+                &format!("  th flow new --kind {} --prompt \"say hi\"   ·   th harness show {}", m.name, m.name),
+                |t| t.dimmed().to_string()
+            )
+        );
+    } else if !reply.to_ascii_lowercase().contains("needs_provider") {
+        println!(
+            "{}",
+            paint(
+                "  not installed — the report above has the draft; th harness add <file> installs an edited one",
+                |t| t.dimmed().to_string()
+            )
+        );
+    }
     Ok(())
 }
 

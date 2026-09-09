@@ -2514,15 +2514,15 @@ mod tests {
         let dir = tmp.path().join("home/.smooth/harnesses");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("aider.toml"),
-            "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+            dir.join("nosuchtool.toml"),
+            "name=\"nosuchtool\"\n[binary]\nnames=[\"nosuchtool-xyzzy\"]\n[launch]\nargv=[\"{prompt}\"]\n",
         )
         .unwrap();
         let all = e.harnesses(true).unwrap();
-        let aider = all.iter().find(|h| h.name == "aider").unwrap();
-        assert_eq!(aider.origin, "user");
-        assert!(!aider.installed);
-        assert!(aider.reason.as_deref().unwrap().contains("`aider` not found on PATH"));
+        let user = all.iter().find(|h| h.name == "nosuchtool").unwrap();
+        assert_eq!(user.origin, "user");
+        assert!(!user.installed);
+        assert!(user.reason.as_deref().unwrap().contains("`nosuchtool-xyzzy` not found on PATH"));
     }
 
     /// th-0f6126: an unknown kind is refused before anything is created.

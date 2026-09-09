@@ -185,5 +185,80 @@ note; `hide`/`unhide`/`order` need the daemon.
    it didn't resolve). `th flow new --kind mytool --prompt "say ok"`.
 4. To ship it: put it at `harness/<name>/harness.toml` in a `th pkg` package.
 
-The agentic version of this (draft from `--help`, validate against the
-fake-agent rig, install) is phase 2 of th-faa590.
+## Agentic add — `th harness add --agentic <name>` (pearl th-473294)
+
+Big Smooth can write the manifest itself. The daemon tool `add_harness(name,
+binary_hint?, docs_url?, max_iterations?, force?, install_unverified?,
+model?)` is the agentic loop; every piece it composes is deterministic and
+unit-tested in `smooth-flow`:
+
+1. **Probe** — resolve the binary (`~/.local/bin`, `~/.cargo/bin`, … before
+   `PATH`, skipping cmux shims), run `--help` (`-h` / `help` fallbacks) and
+   `--version`; fetch `docs_url` as markdown through `th crawl scrape` (the
+   `crawl` tool's egress rules apply).
+2. **Facts** — `harness_draft::parse_help` reads clap / commander / yargs /
+   argparse layouts into flags, subcommands and positionals, then
+   `argv_candidates` ranks launch shapes: an interactive positional prompt
+   (80), an "…and stay interactive" flag (70), a plain `--prompt`/`--message`
+   flag that is not a batch mode (60), else **paste** (40). Print/headless/
+   "then exit" flags are never the prompt slot. `--session-id` ⇒
+   `preassigned`; `--resume <id>` / `resume <id>` ⇒ `resume_session`; a
+   `hooks` subcommand ⇒ "documents hooks". The best candidate becomes the
+   skeleton TOML.
+3. **Draft** — the daemon's model (`operator::agent_llm_config`, the coding
+   route) gets the schema, the built-in `claude.toml` as the reference, the
+   help text, the docs, the ranked candidates and the skeleton, and answers
+   with one ```toml block. Parse errors are fed straight back.
+4. **Validate** — `harness_validate::validate` runs the draft on a **private
+   engine** (`EngineDriver::private`: its own `flow.db`, its own
+   `tmux -L smooth-flow-validate-<pid>-…` server, a scratch `$HOME` holding
+   only the draft, a scratch git repo as the worktree — the user's flow.db,
+   tmux server and `~/.smooth/harnesses/` are never touched). The state
+   machine proves, in order: launch · working observed · first turn idle ·
+   steer acknowledged · steered turn idle · kill+resume came back · the
+   relaunch argv carried the session id. Each step ends **proven**,
+   **unproven** (could not be shown either way — e.g. no session id was
+   learned because state is scraped) or **failed** (shown not to work, with
+   the pane tail). Budgets: 60 s to boot, 120 s per turn.
+5. **Iterate** — on failure the verdict, the last 12 pane lines and an idle
+   pattern derived from that pane (`scrape_from_panes`) go back to the
+   drafter, up to `max_iterations` (default 3, max 6). The attempt with the
+   most proofs wins.
+6. **Install** — a _usable_ draft (launch + idle proven) is written to
+   `~/.smooth/harnesses/<name>.toml` (`force` to replace) with a provenance
+   header; `install_unverified` writes the best draft regardless. The report
+   lists the manifest, every proven step, every unproven/failed step with
+   why, and next steps (`th flow new --kind <name>`, wire hooks, …).
+
+`th harness add --agentic <name> [--binary <exe>] [--docs <url>]
+[--iterations N] [--force] [--install-unverified] [--model <m>]` drives this
+over the daemon's canonical WebSocket (one `send_message` turn asking the
+agent to call `add_harness` with exactly those arguments): tool progress on
+stderr, the agent's report on stdout, then the installed manifest line.
+
+**Provider gate.** Drafting needs a model. `GET /api/llm/provider` reports
+`{configured, source, model, gateway_host, restart_required, options}` (never
+a key). With nothing configured the tool answers a structured
+`needs_provider` report and the CLI prompts:
+
+- **Smoo AI Gateway (recommended)** — `smoo auth login` if needed, mint the
+  org's `llm.smoo.ai` key (`/llm-gateway/create-key`; on 409 offer a rotate
+  or paste the existing key), save it as the `smooai-gateway` provider in
+  `~/.smooth/providers.json` (other providers survive; coding default
+  `deepseek-v4-flash`).
+- **Bring your own key** — `th model login`.
+
+The daemon reads its gateway **once at boot**, so after a provider is saved
+the gate answers `configured` + `restart_required` and the CLI says so:
+`th down && th up`, then rerun. Non-TTY runs get the two commands instead of
+a prompt.
+
+What it cannot prove is reported, not assumed: a CLI that opens an auth /
+trust dialog on first run stops at `first turn reached idle — FAILED: the
+harness is waiting on an approval/auth/trust prompt…` with the pane, and is
+not installed unless `--install-unverified`. Sign the CLI in (or trust the
+directory) and rerun.
+
+Proven on this machine (2026-09-09): `gemini` (`@google/gemini-cli` via npm),
+`aider` (`aider-chat` via `uv tool`, Python 3.12) and `cursor-agent` — see the
+PR for the manifests each run produced.

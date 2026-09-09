@@ -28,8 +28,8 @@ toml.workspace = true
 # PTY for streaming a `tmux attach` client's bytes to flow WS clients. Pinned:
 # the master/child API moved between minors before 0.9.
 portable-pty = "=0.9.0"
-
-[dev-dependencies]
+# th-473294: the harness validator runs a PRIVATE engine (scratch $HOME +
+# worktree + flow.db) so a draft manifest never touches the user's state.
 tempfile.workspace = true
 
 [lints]

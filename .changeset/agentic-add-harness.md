@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+Agentic "add a harness" (th-473294, phase 2 of th-faa590): the daemon tool `add_harness` probes a coding-agent CLI's `--help` (and a docs URL), drafts a SmoothFlow harness manifest with Big Smooth's model, validates it by launching a real session on a private flow engine (launch → working → idle, steer, kill+resume — each step proven, unproven or failed), iterates on failures, installs it to `~/.smooth/harnesses/<name>.toml` and reports what it could not prove. `th harness add --agentic <name>` drives it over the daemon's canonical WebSocket. `GET /api/llm/provider` is the provider gate: with no model the tool answers `needs_provider` and the CLI offers the Smoo AI Gateway (sign in, mint the org's llm.smoo.ai key, save it) or bring-your-own-key. Deterministic parts — help parsing → ranked argv candidates, scrape patterns from captured panes, the validation state machine — live in `smooth-flow` (`harness_draft`, `harness_validate`) with tests against real help texts (gemini, aider, cursor-agent, claude).
