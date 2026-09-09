@@ -1214,6 +1214,7 @@ th flow send <id> "also add a regression test"           # steer: bracketed-past
 th flow inbox                                            # sessions that need you or finished unread
 th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
 th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
