@@ -1134,7 +1134,7 @@ Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooa
 th up                                              # boot Smooth platform (host daemon)
 th down                                            # stop — the daemon and its whole process tree, verified (th-eed3de)
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
+th run <pearl-id | "task text">                    # one headless turn on Big Smooth (title+description of the pearl, or the text); a daemon that is down or refuses = non-zero exit
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
