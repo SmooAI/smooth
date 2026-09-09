@@ -1255,7 +1255,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // daemon) must not repoint `th`, the hooks and Big Smooth's own clients at
     // itself — that is exactly what happened every time SmoothFlow launched
     // (pearl th-3e6b1b).
-    if advertise_daemon_addr(std::env::var_os("SMOOTH_ALLOW_SECOND_DAEMON").is_some()) {
+    if advertise_daemon_addr(crate::single_instance::allow_second()) {
         persist_daemon_addr(&server.addr().to_string());
     } else {
         tracing::info!(addr = %server.addr(), "second daemon instance — not advertising in ~/.smooth/daemon.addr");
