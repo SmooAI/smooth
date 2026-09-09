@@ -384,6 +384,20 @@ impl Daemon {
         v["text"].as_str().map_or_else(|| format!("<no pane: {v}>"), str::to_string)
     }
 
+    /// Poll the pane until it shows anything at all (a real CLI painting
+    /// its first screen).
+    pub async fn wait_screen_nonblank(&self, id: &str, timeout: Duration) -> String {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let s = self.screen(id).await;
+            if !s.trim().is_empty() {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        panic!("pane of {id} stayed blank for {timeout:?}\nagent log:\n{}", self.agent_log());
+    }
+
     // ── waits (always polled, never slept-and-hoped) ─────────────────────
 
     /// Poll the session until `pred` holds; panics with the session, the

@@ -256,20 +256,29 @@ async fn real_harnesses_launch_through_their_manifests() {
             }
             _ => unreachable!(),
         }
-        // Whatever the CLI does without credentials, the engine has a live
-        // pane for it; th code reports natively, the rest are inferred
-        // until their hooks are installed on this machine.
-        let live = d.wait_until(&id, "left starting", Duration::from_secs(90), |s| state(s) != "starting").await;
+        // Without credentials a real CLI paints onboarding / sign-in in the
+        // fresh HOME — a pane no scrape pattern matches, so `starting` is the
+        // engine's honest reading. What is provable creds-free: the process
+        // came up and painted, its pid is live, the row's shape is right;
+        // th code additionally reports natively (its first turn_start
+        // happens before any model call).
+        let painted = d.wait_screen_nonblank(&id, Duration::from_secs(60)).await;
+        assert!(!painted.trim().is_empty());
+        let live = d.session(&id).await;
+        assert!(Daemon::pid_alive(live["pid"].as_u64().unwrap() as u32), "{live}");
+        assert_ne!(state(&live), "dead", "{live}");
+        if name == "th-code" {
+            d.wait_until(&id, "native report", Duration::from_secs(60), |s| s["state_source"] == "native")
+                .await;
+        }
+        let live = d.session(&id).await;
         matrix.push((
             name,
             live["state"].as_str().unwrap().to_string(),
             live["state_source"].as_str().unwrap().to_string(),
         ));
-        if name == "th-code" {
-            d.wait_until(&id, "native report", Duration::from_secs(60), |s| s["state_source"] == "native")
-                .await;
-        }
-        d.kill(&id, false).await;
+        let killed = d.kill(&id, false).await;
+        assert_eq!(state(&killed), "done", "{killed}");
     }
     eprintln!("real harness matrix (kind, state, source): {matrix:?}");
     assert!(!matrix.is_empty(), "SMOOTH_E2E_REAL_HARNESSES is set but no real harness is installed");
