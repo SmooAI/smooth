@@ -481,6 +481,7 @@ mod tests {
             argv: vec!["claude".into()],
             tmux_session: None,
             tmux_socket: Some("smooth-flow".into()),
+            owner: Some("smooth-flow".into()),
             state_source: "inferred".into(),
             pid: None,
             pid_start: Some(1),
