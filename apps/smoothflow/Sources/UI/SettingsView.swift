@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// ⌘, — Permissions (live TCC status + asks), Attention (per-reason toggles),
-/// Harnesses (order + hide, th-0f6126), Daemon (child vs LaunchAgent, address
+/// Harnesses (order + hide, th-0f6126), Phones (QR pairing for end-to-end
+/// encrypted relay frames, th-d98fde), Daemon (child vs LaunchAgent, address
 /// override).
 struct SettingsView: View {
     @ObservedObject var app: AppController
@@ -18,6 +19,7 @@ struct SettingsView: View {
             PermissionsPane(permissions: permissions, daemon: daemon).accessibilityIdentifier("settings.pane.permissions").tabItem { Text("Permissions") }
             attention.accessibilityIdentifier("settings.pane.attention").tabItem { Text("Attention") }
             HarnessesPane(app: app).accessibilityIdentifier("settings.pane.harnesses").tabItem { Text("Harnesses") }
+            PhonesPane(app: app).accessibilityIdentifier("settings.pane.phones").tabItem { Text("Phones") }
             daemonPane.accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
         .padding(16)
@@ -113,6 +115,79 @@ struct HarnessesPane: View {
 
     private func toggle(_ name: String) {
         Task { await app.setHarnessPrefs(hidden: HarnessOrdering.toggled(hidden, name)) }
+    }
+}
+
+
+/// Settings ▸ Phones: pair a phone (QR → the phone derives a key only the two
+/// of them hold; the relay carries ciphertext), see who is paired and when
+/// they were last here, revoke. Presence is a glyph, not a color: ● here,
+/// ◐ today, ○ away. Teal marks the engine's own presence; amber is not used —
+/// nothing here needs you.
+struct PhonesPane: View {
+    @ObservedObject var app: AppController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("A paired phone talks to this Mac through the Smoo Relay in frames only the two of them can read. Scan the QR with the SmoothFlow app (Connect ▸ Pair a Mac) or the Camera app. Re-pairing a phone rotates its key.")
+                .font(.caption).foregroundStyle(Color(Theme.muted))
+            if let list = app.pairedPhones, !list.relayEnabled {
+                Text("The relay is off for this engine (SMOOTH_RELAY=0) — phones cannot reach it.").font(.caption).foregroundStyle(Color(Theme.amber))
+            }
+            if let pending = app.pendingPairing {
+                HStack(alignment: .top, spacing: 14) {
+                    if let img = PairingQR.image(for: pending.url) {
+                        Image(nsImage: img).interpolation(.none).resizable().frame(width: 168, height: 168)
+                            .accessibilityIdentifier("settings.phones.qr").accessibilityLabel("Pairing QR")
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Waiting for the scan…").font(.headline)
+                        }
+                        Text("Pairs with \(pending.label) · \(pending.device)").font(.caption).foregroundStyle(Color(Theme.muted))
+                        Text("Code \(pending.code)").font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).textSelection(.enabled)
+                        if let exp = pending.expiresAt { Text("Expires \(Theme.clock(exp))").font(.caption).foregroundStyle(Color(Theme.faint)) }
+                        HStack {
+                            Button("Copy link") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(pending.url, forType: .string)
+                            }
+                            Button("Cancel") { app.cancelPairing() }
+                        }.controlSize(.small)
+                    }
+                }
+            } else {
+                Button("Pair a phone…") { Task { await app.beginPairing() } }.accessibilityIdentifier("settings.phones.pair")
+            }
+            if let msg = app.pairingMessage {
+                Text(msg).font(.caption).foregroundStyle(msg.hasPrefix("Paired") ? Color(Theme.teal) : Color(Theme.muted)).accessibilityIdentifier("settings.phones.message")
+            }
+            Divider()
+            let phones = app.pairedPhones?.pairings ?? []
+            if phones.isEmpty {
+                Text("No paired phones.").font(.caption).foregroundStyle(Color(Theme.faint))
+            }
+            ForEach(phones) { p in
+                let presence = PhonePresence.of(lastSeen: p.lastSeenAt)
+                HStack(spacing: 8) {
+                    Text(presence.glyph).foregroundStyle(presence == .here ? Color(Theme.teal) : Color(Theme.faint)).font(.title3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(p.label).font(.headline)
+                            Text(p.platform).font(.caption.monospaced()).foregroundStyle(Color(Theme.faint))
+                        }
+                        Text("\(p.device) · paired \(Theme.relative(p.createdAt)) · \(p.lastSeenAt.map { "seen " + Theme.relative($0) } ?? "never seen")")
+                            .font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Revoke") { Task { await app.revokePairing(p.device) } }.controlSize(.small).accessibilityIdentifier("settings.phones.revoke.\(p.device)")
+                }
+            }
+            Spacer()
+        }
+        .task { await app.loadPairings() }
+        .onDisappear { app.cancelPairing() }
     }
 }
 

@@ -1218,7 +1218,21 @@ th flow snapshot <id>                                    # plain-text visible pa
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
+th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
+th flow pair --timeout 0                                 # just print the smoothflow://pair?… link (open it on the phone)
+th flow pair list                                        # paired phones: device, label, platform, paired, last seen
+th flow pair revoke <phone-device>                       # its next encrypted frame is refused
 ```
+
+**Phones are end-to-end encrypted (th-d98fde).** A paired phone's flow frames
+are sealed with a key only the phone and this daemon hold; the Smoo Relay
+brokers ciphertext. The QR carries the daemon's relay device id, a fresh
+X25519 public key and a one-time code that never crosses the relay; the
+SmoothFlow app (Connect ▸ Pair a Mac) or the Camera app scans it. Once a phone
+is paired, plaintext frames from it are rejected with a visible `flow.error`
+(`e2e_required`); re-pairing rotates the key. `SMOOTH_FLOW_E2E_REQUIRED=1`
+makes the daemon refuse plaintext from unpaired phones too. Protocol:
+`docs/Architecture/SmoothFlow.md` → _End-to-end encryption_.
 
 States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `limited` (usage limit — the engine resumes at the parsed reset time) ·

@@ -349,6 +349,22 @@ setInterval(() => {
         });
 }, 45000);
 
+// ---------- phone pairing state (th-d98fde) ----------
+const pendingPairs = new Map();
+const pairings = new Map([
+    [
+        'phone-mock0000000',
+        {
+            device: 'phone-mock0000000',
+            label: 'Brent\u2019s Pixel',
+            platform: 'android',
+            public_key: 'ROBtiZm7GEsCMK0Ke9PbGlaMk21hD-HPJmTq-a8asZg',
+            created_at: '2026-09-01T12:00:00.000Z',
+            last_seen_at: '2026-09-01T18:00:00.000Z',
+        },
+    ],
+]);
+
 // ---------- http ----------
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -363,6 +379,43 @@ const server = http.createServer((req, res) => {
         return s ? json(200, handoff(s)) : json(404, { code: 'not_found', message: m[1] });
     }
     if (req.method === 'POST' && url.pathname === '/api/flow/hooks') return json(200, {});
+    // ---- phone pairing (th-d98fde): a scan "happens" on the 3rd poll ----
+    if (req.method === 'POST' && url.pathname === '/api/flow/pair') {
+        const id = Math.random().toString(16).slice(2, 10);
+        pendingPairs.set(id, { polls: 0 });
+        const code = 'EDJUdpi63P4BI0VniavN7w';
+        return json(200, {
+            pairing_id: id,
+            url: `smoothflow://pair?v=1&p=${id}&d=daemon-mock00000000&k=hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr06NxOql-OKqo&c=${code}&l=mock`,
+            code,
+            device: 'daemon-mock00000000',
+            label: 'mock',
+            daemon_public_key: 'hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr06NxOql-OKqo',
+            expires_at: new Date(Date.now() + 300_000).toISOString(),
+            relay_enabled: true,
+        });
+    }
+    if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/flow\/pair\/([^/]+)$/))) {
+        const p = pendingPairs.get(m[1]);
+        if (!p) return json(200, { state: 'unknown', pairing_id: m[1] });
+        p.polls += 1;
+        if (p.polls < 3) return json(200, { state: 'pending', pairing_id: m[1], expires_at: new Date(Date.now() + 300_000).toISOString() });
+        pendingPairs.delete(m[1]);
+        const phone = {
+            device: 'phone-mock0000001',
+            label: 'Mock iPhone',
+            platform: 'ios',
+            public_key: 'd8IOd4V6q4WY1RGMlAbmaOfzsY_QyeRpttXIdD4RPtA',
+            created_at: new Date().toISOString(),
+            last_seen_at: new Date().toISOString(),
+        };
+        pairings.set(phone.device, phone);
+        return json(200, { state: 'paired', pairing_id: m[1], device: phone.device, label: phone.label, platform: phone.platform });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/flow/pairings')
+        return json(200, { device: 'daemon-mock00000000', label: 'mock', relay_enabled: true, pairings: [...pairings.values()] });
+    if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/flow\/pairings\/([^/]+)$/)))
+        return json(200, { device: m[1], revoked: pairings.delete(m[1]) });
     json(404, { code: 'not_found', message: url.pathname });
 });
 
