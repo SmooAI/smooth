@@ -202,7 +202,10 @@ class FlowUITestCase: XCTestCase {
     func waitForSnapshot(_ id: String, containing needle: String, timeout: TimeInterval = 30) {
         var last = ""
         let ok = waitUntil(timeout: timeout) {
-            last = self.http("GET", "/api/flow/sessions/\(id)/snapshot").text
+            // Compare the decoded pane text, not the JSON body (quotes are escaped there).
+            let body = self.http("GET", "/api/flow/sessions/\(id)/snapshot").text
+            let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
+            last = json?["text"] as? String ?? body
             return last.contains(needle)
         }
         XCTAssertTrue(ok, "pane of \(id) never showed \(needle); last: \(last.suffix(400))")
