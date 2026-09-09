@@ -1,5 +1,37 @@
 # @smooai/smooth
 
+## 0.45.0
+
+### Minor Changes
+
+- 93c203a: Harness manifests (th-0f6126, epic th-faa590): any coding agent CLI can be a
+  SmoothFlow session kind. One TOML per harness — binary names + real-install
+  paths + shim skip list, launch/resume argv templates with `{prompt}`
+  `{session_id}` `{cwd}` `{model}` `{daemon_url}` placeholders, state source
+  (`hooks` with an event map | `scrape` regexes | `native`), steer/kill/install
+  paths — loaded built-in < `~/.smooth/harnesses/` < project `.smooth/harnesses/`
+  < `th pkg` packages. The engine's launch table, resolver and scraper now read
+  manifests; `claude`, `opencode`, `codex` are the built-ins byte-for-byte, and
+  `th code` joins as a fourth with NATIVE state (the engine exports
+  `SMOOTH_FLOW_SESSION`/`SMOOTH_URL` into the pane and `th code` reports its own
+  turn_start/turn_end — no plugin, no scraping). Sort/hide prefs persist in
+  flow.db (`GET /api/flow/harnesses`, `PUT /api/flow/harnesses/prefs`);
+  `flow.hello` carries the visible `harnesses` list and `flow.harnesses` follows
+  changes; `th harness list|show|add|hide|unhide|order` manage them; the macOS
+  New-session and fan-out pickers render the engine's list (uninstalled shown
+  disabled with the reason) and Settings ▸ Harnesses reorders/hides it.
+- 93c203a: SmoothFlow runs OpenCode and Codex sessions first-class (th-5c5457, th-b423aa,
+  th-069c9e). Per-kind launch table: `opencode --prompt <p>` (the positional was
+  its project dir, so the prompt exited at once as "done") and `codex <p>`;
+  restore per kind (`opencode --session <id>`, `codex resume <id>`) once the
+  harness session id is known — the smooth-agent OpenCode plugin now posts every
+  lifecycle event to `/api/flow/hooks` with the Claude event names, and the
+  engine binds an id-less row by cwd on the first event. `Session.state_source`
+  (`hooks` | `inferred`) says how state is derived and `th flow ls` shows it as
+  VIA; pane scraping learned OpenCode's working/idle lines and Codex's menus.
+  Agent binaries are resolved past cmux's `cmux-cli-shims` (which inject their
+  own `--session-id` and hooks) to the real installs, recorded as `argv[0]`.
+
 ## 0.44.3
 
 ### Patch Changes
