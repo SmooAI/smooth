@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# fake-claude — a scripted stand-in for Claude Code, for SmoothFlow e2e tests
+# (pearl th-8e3087). Same idea as orca's golden-stub-agent: a PTY program the
+# engine launches as `claude` that behaves like the real harness where the
+# engine can tell, and nowhere else. No LLM, no network beyond the flow daemon.
+#
+# Contract (docs/Engineering/SmoothFlow-Testing.md):
+#   argv     honours `--session-id <id>`, `--resume <id>` (sets resume=1) and
+#            `--model <m>`; everything else is ignored.
+#   daemon   `./.flow-e2e-addr` in the cwd (host:port or http://…), else
+#            `$HOME/.smooth/daemon.addr` — the same discovery flow-hook.sh uses.
+#   hooks    POST {harness:"claude-code", event, session_id, cwd, payload} to
+#            /api/flow/hooks, exactly like flow-hook.sh: SessionStart on boot,
+#            UserPromptSubmit → PreToolUse → PostToolUse → Stop per `/work`,
+#            PermissionRequest (long-poll; the decision body is printed) per
+#            `/perm`, SessionEnd per `/exit`.
+#   stdin    one command per line:
+#              /work <text>   run a "turn" (working → idle via hooks)
+#              /perm          ask permission and print the daemon's decision
+#              /limit         print Claude Code's usage-limit banner
+#              /exit [code]   SessionEnd hook, then exit (default 0)
+#              /crash [code]  exit without any hook (default 3)
+#              anything else  echoed back as `echo: <line>`
+#   screen   `fake-claude ready sid=<id> resume=<0|1>` so a test can prove a
+#            relaunch used `--resume`, then a `> ` prompt after every line.
+set -u
+
+sid=""
+resume=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --session-id) sid="$2"; shift 2 ;;
+        --resume) sid="$2"; resume=1; shift 2 ;;
+        --model) shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+addr="$(cat ./.flow-e2e-addr 2>/dev/null || cat "$HOME/.smooth/daemon.addr" 2>/dev/null || true)"
+addr="$(printf '%s' "$addr" | tr -d '[:space:]')"
+case "$addr" in
+    http://* | https://*) ;;
+    *) addr="http://$addr" ;;
+esac
+
+# hook <Event> <payload-json> [timeout-s] — prints the daemon's reply body.
+hook() {
+    curl -sS -m "${3:-5}" -X POST -H 'Content-Type: application/json' \
+        --data-binary "{\"harness\":\"claude-code\",\"event\":\"$1\",\"session_id\":\"$sid\",\"cwd\":\"$PWD\",\"payload\":$2}" \
+        "$addr/api/flow/hooks" 2>/dev/null
+}
+
+hook SessionStart '{"source":"startup"}' >/dev/null
+printf 'fake-claude ready sid=%s resume=%s\n> ' "$sid" "$resume"
+
+while IFS= read -r line; do
+    case "$line" in
+        /work*)
+            prompt="${line#/work}"
+            prompt="${prompt# }"
+            hook UserPromptSubmit "{\"prompt\":\"$prompt\"}" >/dev/null
+            hook PreToolUse '{"tool_name":"Bash","tool_input":{"command":"echo hi"}}' >/dev/null
+            hook PostToolUse '{"tool_name":"Bash","tool_response":{"stdout":"hi"}}' >/dev/null
+            hook Stop "{\"last_assistant_message\":\"done: $prompt\"}" >/dev/null
+            printf 'worked: %s\n' "$prompt"
+            ;;
+        /perm*)
+            reply="$(hook PermissionRequest '{"tool_name":"Bash","tool_input":{"command":"git push"}}' 130)"
+            printf 'decision: %s\n' "$reply"
+            ;;
+        /limit*)
+            printf "You've hit your usage limit. Your limit will reset at 11:59pm\n"
+            ;;
+        /exit*)
+            code="${line#/exit}"
+            code="${code// /}"
+            hook SessionEnd '{"reason":"exit"}' >/dev/null
+            exit "${code:-0}"
+            ;;
+        /crash*)
+            code="${line#/crash}"
+            code="${code// /}"
+            exit "${code:-3}"
+            ;;
+        *)
+            printf 'echo: %s\n' "$line"
+            ;;
+    esac
+    printf '> '
+done
