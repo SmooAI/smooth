@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.45.2
+
+### Patch Changes
+
+- ad1c4a5: SmoothFlow macOS: the ghostty clipboard callbacks no longer `assumeIsolated` on the main actor unconditionally. Ghostty's renderer/IO threads can invoke runtime callbacks (the source of the 2026-09-08 SIGTRAP crash report); they now hop to main when off it, matching the action callback fix in #527.
+
 ## 0.45.1
 
 ### Patch Changes
