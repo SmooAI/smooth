@@ -73,19 +73,17 @@ jobs:
 
             - name: UI tests (mock server + real engine)
               working-directory: apps/smoothflow
-              # TEST_RUNNER_<VAR> is how xcodebuild forwards an env var to the
-              # xctrunner process (testmanagerd spawns it; it does not inherit ours).
+              # The harness finds the engine at target/debug/examples/ (built above);
+              # xctrunner inherits neither our env nor TEST_RUNNER_ forwarding.
               run: |
                   set -o pipefail
                   time xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
                       -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
                       -resultBundlePath build/UITests.xcresult \
-                      TEST_RUNNER_SMOOTHFLOW_E2E_SERVER="$GITHUB_WORKSPACE/target/debug/examples/flow_e2e_server" \
                       -only-testing:SmoothFlowUITests test 2>&1 \
                       | grep -E "error:|Test Case.*(failed|passed|skipped)|Test skipped|Executed|BUILD|TEST" || true
                   xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
                       -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
-                      TEST_RUNNER_SMOOTHFLOW_E2E_SERVER="$GITHUB_WORKSPACE/target/debug/examples/flow_e2e_server" \
                       -only-testing:SmoothFlowUITests test -quiet
 
             # Failure screenshots (XCTAttachment) live in the result bundle.

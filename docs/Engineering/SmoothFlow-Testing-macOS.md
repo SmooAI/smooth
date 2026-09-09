@@ -41,10 +41,10 @@ xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug
 # one suite: -only-testing:SmoothFlowUITests/RealEngineUITests
 ```
 
-`RealEngineUITests` looks for the server at
-`~/.cargo/target-e2e/debug/examples/flow_e2e_server` (override with
-`SMOOTHFLOW_E2E_SERVER`; from xcodebuild pass it as
-`TEST_RUNNER_SMOOTHFLOW_E2E_SERVER=…` — the runner does not inherit the shell's env) and skips — with the reason — when it, `tmux` or
+`RealEngineUITests` looks for the server at `<repo>/target/debug/examples/`
+then `~/.cargo/target-e2e/debug/examples/` (`SMOOTHFLOW_E2E_SERVER` overrides,
+but `xctrunner` inherits neither the shell's env nor `TEST_RUNNER_` forwarding
+on macOS — build into one of those two paths) and skips — with the reason — when it, `tmux` or
 `node` is missing. Each test gets its own temp HOME, flow.db and tmux socket
 (`flow-ui-<pid>`), torn down with the test; nothing touches `~/.smooth`.
 
