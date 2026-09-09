@@ -335,6 +335,33 @@ shipping a new public key, which installed apps will refuse — so an installed
 3. Verify: `curl -s https://downloads.smoo.ai/smoothflow/appcast.xml | grep shortVersionString`.
    Installed apps offer it on the next hourly check.
 
+What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
+
+- **The appcast carries only the version just published.** `generate_appcast`
+  runs over the run's own `dist/`, which holds one DMG, so each publish
+  replaces the feed rather than appending to it. Sparkle only needs the newest
+  item; older `SmoothFlow-<v>-arm64.dmg` objects stay in the bucket (the sync
+  never deletes) but drop out of the feed.
+- **The notarization ticket is stapled to the DMG, not the app inside it.**
+  `xcrun stapler validate` on the DMG passes; on `/Applications/SmoothFlow.app`
+  it reports no ticket, while `spctl -a -t install` still says
+  `Notarized Developer ID` (the online check). Both are correct — Sparkle
+  installs from the DMG, and Gatekeeper accepts the app either way.
+- **The bundled daemon rewrites `~/.smooth/daemon.addr` on every launch** with
+  its own random loopback port, clobbering the address Big Smooth advertised.
+  The app never reads that file, but `th`-driven tooling on the same machine
+  does; PR #546 stops the child from writing it. Until it lands, restore the
+  file after running SmoothFlow.
+- **The OTA loop end to end:** Check for Updates… → "SmoothFlow 0.2.1 is now
+  available—you have 0.2.0" → Install Update → the 48 MB DMG downloads and
+  the EdDSA signature verifies → "Ready to Install / Install and Relaunch" →
+  the app relaunches as 0.2.1 in a few seconds, `spctl` still accepts it, and
+  `otool -L` on the bundled daemon still shows only system libraries. The
+  whole thing took about a minute on marvin.
+- `tell application "SmoothFlow" to quit` from AppleScript was ignored by a
+  running 0.2.0; `kill <pid>` (or ⌘Q) is what actually stops it before an
+  install-over.
+
 The publish role (`OtaPublishRole`, smooai `infra/ci/github-oidc.ts`) grants
 `smoothflow/*` next to `bigsmooth/*`; the CDN serves the whole bucket.
 `.github/workflows/smoothflow-mac.yml` stays the ad-hoc compile + XCTest gate on
