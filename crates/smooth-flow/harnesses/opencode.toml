@@ -1,0 +1,47 @@
+# OpenCode (th-5c5457 / th-b423aa): the positional is its project dir, so the
+# prompt goes through --prompt; the session id is learned from the plugin's
+# first hook by cwd; resume is --session <id>.
+name = "opencode"
+display_name = "OpenCode"
+
+[binary]
+names = ["opencode"]
+prefer_paths = [".opencode/bin/opencode", ".local/bin/opencode"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--model", "{model}", "--prompt", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+argv = ["--session", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th harness enable opencode  # smooth-agent lifecycle plugin posts session.* events to /api/flow/hooks"
+
+[state.scrape]
+# Captured live 2026-09-08: the status line carries "esc interrupt" while the
+# model streams; idle shows the cwd + "ctrl+p commands" (a long cwd wraps it,
+# so match the key only).
+working = ["esc interrupt"]
+idle = ["ctrl\\+p"]
+needs_you = ["do you want to proceed", "1\\. yes"]
+usage_limit = ["usage limit reached", "approaching usage limit", "limit will reset", "limit resets at", "out of credits"]
+error = ["api error", "fatal error", "request failed"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.opencode/skills"
+mcp_config = "~/.config/opencode/opencode.json"

@@ -53,6 +53,33 @@ final class FlowClient {
         return try JSONDecoder().decode(Handoff.self, from: data)
     }
 
+    /// `GET /api/flow/harnesses` — every manifest, hidden ones flagged (Settings).
+    func allHarnesses() async throws -> [HarnessInfo] {
+        try await harnessCall(method: "GET", path: "api/flow/harnesses", body: nil)
+    }
+
+    /// `PUT /api/flow/harnesses/prefs {order?, hidden?}` — returns the full list.
+    func putHarnessPrefs(order: [String]?, hidden: [String]?) async throws -> [HarnessInfo] {
+        var obj: [String: Any] = [:]
+        if let order { obj["order"] = order }
+        if let hidden { obj["hidden"] = hidden }
+        return try await harnessCall(method: "PUT", path: "api/flow/harnesses/prefs", body: try JSONSerialization.data(withJSONObject: obj))
+    }
+
+    private struct HarnessList: Decodable { var harnesses: [HarnessInfo] }
+
+    private func harnessCall(method: String, path: String, body: Data?) async throws -> [HarnessInfo] {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var req = URLRequest(url: address.httpBase.appendingPathComponent(path))
+        req.httpMethod = method
+        req.httpBody = body
+        if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse) }
+        return try JSONDecoder().decode(HarnessList.self, from: data).harnesses
+    }
+
     private func open() {
         guard let address, !closed else { return }
         store.connection = .connecting

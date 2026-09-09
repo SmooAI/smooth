@@ -21,6 +21,34 @@ final class FlowStoreTests: XCTestCase {
         XCTAssertEqual(store.focusedId, "c")
     }
 
+    /// th-0f6126: pickers render the engine's harness list in its order, never
+    /// a hidden one; `flow.harnesses` replaces it; the pure ordering helpers.
+    func testHarnessListOrderHidingAndDisplayNames() {
+        let store = FlowStore()
+        let h = [HarnessInfo(name: "th-code", displayName: "th code", installed: true, stateSource: "native", orderIndex: 0),
+                 HarnessInfo(name: "claude", displayName: "Claude Code", installed: true, orderIndex: 1),
+                 HarnessInfo(name: "codex", displayName: "Codex", installed: false, hidden: true, orderIndex: 2, reason: "`codex` not found on PATH")]
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [], harnesses: h))
+        XCTAssertEqual(store.harnesses.map(\.name), ["th-code", "claude"], "hidden dropped, order kept")
+        XCTAssertEqual(store.displayName(forKind: "th-code"), "th code")
+        XCTAssertEqual(store.displayName(forKind: "shell"), "Shell")
+        XCTAssertEqual(store.displayName(forKind: "codex"), "codex", "a hidden kind falls back to the raw name")
+        XCTAssertEqual(store.apply(.harnesses([h[1]])), [])
+        XCTAssertEqual(store.harnesses.map(\.name), ["claude"])
+        XCTAssertEqual(HarnessPicker.defaultKind(store), "claude")
+        store.apply(.harnesses([]))
+        XCTAssertEqual(HarnessPicker.defaultKind(store), "shell")
+        XCTAssertEqual(HarnessPicker.defaultKind(store, includeShell: false), "claude")
+        XCTAssertEqual(FanOutSheet.defaultCandidates(h).map(\.label), ["th-code", "claude · opus 5", "claude · fable 5.1"], "one per installed harness, in order")
+        // Pure ordering helpers behind Settings ▸ Harnesses.
+        XCTAssertEqual(HarnessOrdering.moved(["a", "b", "c"], at: 1, by: -1), ["b", "a", "c"])
+        XCTAssertEqual(HarnessOrdering.moved(["a", "b", "c"], at: 0, by: -1), ["a", "b", "c"], "off the top is a no-op")
+        XCTAssertEqual(HarnessOrdering.moved(["a", "b", "c"], at: 2, by: 1), ["a", "b", "c"], "off the bottom is a no-op")
+        XCTAssertEqual(HarnessOrdering.toggled(["x"], "y"), ["x", "y"])
+        XCTAssertEqual(HarnessOrdering.toggled(["x", "y"], "x"), ["y"])
+        XCTAssertEqual(HarnessOrdering.visible(h).map(\.name), ["th-code", "claude"])
+    }
+
     func testSessionUpsertKeepsOrderAndEmitsAttentionOnce() {
         let store = FlowStore()
         store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a"), s("b")]))

@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// ⌘, — Permissions (live TCC status + asks), Attention (per-reason toggles),
-/// Daemon (child vs LaunchAgent, address override).
+/// Harnesses (order + hide, th-0f6126), Daemon (child vs LaunchAgent, address
+/// override).
 struct SettingsView: View {
     @ObservedObject var app: AppController
     @ObservedObject var permissions: Permissions
@@ -16,6 +17,7 @@ struct SettingsView: View {
         TabView {
             PermissionsPane(permissions: permissions, daemon: daemon).tabItem { Text("Permissions") }
             attention.tabItem { Text("Attention") }
+            HarnessesPane(app: app).tabItem { Text("Harnesses") }
             daemonPane.tabItem { Text("Daemon") }
         }
         .padding(16)
@@ -61,6 +63,56 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(Color(Theme.muted))
             Button("Restart daemon") { app.restartConnection() }
         }
+    }
+}
+
+/// Settings ▸ Harnesses: the engine's full list (hidden ones too), reordered
+/// with ▲/▼ and hidden with a toggle — every change is a PUT to the engine,
+/// and the engine's `flow.harnesses` then updates every picker and phone.
+struct HarnessesPane: View {
+    @ObservedObject var app: AppController
+
+    private var order: [String] { app.allHarnesses.map(\.name) }
+    private var hidden: [String] { app.allHarnesses.filter(\.hidden).map(\.name) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("The order here is the order in every picker — New session, fan-out candidates, the phones. Hidden harnesses keep their manifest and come back with one toggle. `th harness add` installs a new one.")
+                .font(.caption).foregroundStyle(Color(Theme.muted))
+            if app.allHarnesses.isEmpty {
+                Text("No harness list yet — connect to the engine.").font(.caption).foregroundStyle(Color(Theme.faint))
+            }
+            ForEach(Array(app.allHarnesses.enumerated()), id: \.element.id) { i, h in
+                HStack(spacing: 8) {
+                    Text(h.installed ? "●" : "○").foregroundStyle(h.installed ? Color(Theme.teal) : Color(Theme.faint))
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(h.displayName).font(.headline).foregroundStyle(h.hidden ? Color(Theme.muted) : .primary)
+                            Text(h.stateSource).font(.caption.monospaced()).foregroundStyle(Color(Theme.faint))
+                            Text(h.origin).font(.caption2).foregroundStyle(Color(Theme.faint))
+                        }
+                        Text(h.binaryPath ?? h.reason ?? "").font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).lineLimit(1)
+                    }
+                    Spacer()
+                    Button("▲") { move(i, -1) }.disabled(i == 0)
+                    Button("▼") { move(i, 1) }.disabled(i == app.allHarnesses.count - 1)
+                    Toggle("Shown", isOn: Binding(get: { !h.hidden }, set: { _ in toggle(h.name) })).toggleStyle(.switch).labelsHidden()
+                }
+                .controlSize(.small)
+            }
+            Spacer()
+        }
+        .task { await app.loadAllHarnesses() }
+    }
+
+    private func move(_ i: Int, _ delta: Int) {
+        let next = HarnessOrdering.moved(order, at: i, by: delta)
+        guard next != order else { return }
+        Task { await app.setHarnessPrefs(order: next) }
+    }
+
+    private func toggle(_ name: String) {
+        Task { await app.setHarnessPrefs(hidden: HarnessOrdering.toggled(hidden, name)) }
     }
 }
 

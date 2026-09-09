@@ -12,6 +12,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     private(set) lazy var client = FlowClient(store: store)
 
     @Published private(set) var handoffs: [String: Handoff] = [:]
+    /// Every harness incl. hidden (Settings ▸ Harnesses); the pickers read
+    /// `store.harnesses` (visible only) instead.
+    @Published private(set) var allHarnesses: [HarnessInfo] = []
     @Published var thOutput: String?
     var notifySettings = NotifySettings.load()
 
@@ -189,6 +192,16 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         client.send(.fanoutNew(prompt: prompt, pearlId: pearlId, candidates: candidates))
     }
     func fanoutPick(fanOutId: String, winner: String) { client.send(.fanoutPick(fanOutId: fanOutId, winnerSessionId: winner)) }
+
+    func loadAllHarnesses() async {
+        if let h = try? await client.allHarnesses() { allHarnesses = h }
+    }
+
+    /// Persist a reorder / hide in the engine; the reply is the full list and
+    /// the engine's `flow.harnesses` updates every picker.
+    func setHarnessPrefs(order: [String]? = nil, hidden: [String]? = nil) async {
+        do { allHarnesses = try await client.putHarnessPrefs(order: order, hidden: hidden) } catch { thOutput = "harness prefs: \(error.localizedDescription)" }
+    }
 
     func loadHandoff(for id: String) async {
         guard let h = try? await client.handoff(for: id) else { return }

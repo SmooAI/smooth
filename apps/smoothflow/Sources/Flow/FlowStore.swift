@@ -46,6 +46,9 @@ final class FlowStore: ObservableObject {
     /// at `eventCap` per session; page from the engine if history matters.
     @Published private(set) var events: [String: [FlowEvent]] = [:]
     static let eventCap = 500
+    /// The harnesses a picker offers (th-0f6126): the engine's order, hidden
+    /// ones already dropped. From `flow.hello`, replaced by `flow.harnesses`.
+    @Published private(set) var harnesses: [HarnessInfo] = []
 
     var ordered: [Session] { order.compactMap { sessions[$0] } }
     var focused: Session? { focusedId.flatMap { sessions[$0] } }
@@ -83,8 +86,9 @@ final class FlowStore: ObservableObject {
     @discardableResult
     func apply(_ frame: FlowFrame) -> [StoreEffect] {
         switch frame {
-        case let .hello(daemon, list):
+        case let .hello(daemon, list, harnessList):
             connection = .connected(daemon)
+            harnesses = HarnessOrdering.visible(harnessList)
             sessions = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
             order = list.map(\.id)
             if let f = focusedId, sessions[f] == nil { focusedId = nil }
@@ -145,6 +149,10 @@ final class FlowStore: ObservableObject {
         case let .handoff(id, h):
             return sessions[id] != nil ? [.handoff(id: id, h)] : []
 
+        case let .harnesses(list):
+            harnesses = HarnessOrdering.visible(list)
+            return []
+
         case let .error(_, code, message):
             lastError = "\(code): \(message)"
             return [.error(lastError!)]
@@ -158,6 +166,13 @@ final class FlowStore: ObservableObject {
         if sessions[s.id] == nil { order.append(s.id) }
         sessions[s.id] = s
         if focusedId == nil { focusedId = s.id }
+    }
+
+    /// The human name of a session kind — the harness's display name when the
+    /// engine listed it, else the raw kind (`shell`, a hidden harness).
+    func displayName(forKind kind: String) -> String {
+        if kind == "shell" { return "Shell" }
+        return harnesses.first { $0.name == kind }?.displayName ?? kind
     }
 
     /// Local-only echo so the badge clears immediately; the engine confirms via `flow.session`.

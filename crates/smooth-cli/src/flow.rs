@@ -36,7 +36,8 @@ pub enum FlowCommands {
     /// engine launches it under tmux in `--worktree` (or creates
     /// `../<repo>-<pearl>-<slug>` when `--pearl` is given).
     New {
-        /// shell | claude | codex | opencode
+        /// shell, or any harness manifest name — `th harness list`
+        /// (claude | codex | opencode | th-code | …)
         #[arg(long, default_value = "claude")]
         kind: String,
         /// Directory the PTY runs in (default: the daemon's workspace).
@@ -182,11 +183,11 @@ pub fn parse_candidate(spec: &str) -> Result<Value> {
         bail!("candidate needs a label: `label[:kind[:model]]`");
     }
     let kind = parts.next().map(str::trim).filter(|k| !k.is_empty()).unwrap_or("claude");
-    if !matches!(kind, "shell" | "claude" | "codex" | "opencode") {
-        bail!("unknown candidate kind `{kind}` (shell|claude|codex|opencode)");
-    }
+    // Any harness manifest name is a kind (th-0f6126); the engine refuses one
+    // it has no manifest for, with the list to run.
+    let kind = kind.parse::<smooth_flow::SessionKind>().map_err(|e| anyhow!("candidate `{label}`: {e}"))?;
     let model = parts.next().map(str::trim).filter(|m| !m.is_empty());
-    Ok(json!({ "label": label, "kind": kind, "model": model }))
+    Ok(json!({ "label": label, "kind": kind.as_str(), "model": model }))
 }
 
 /// The two-line error contract: what failed, then what to do.
@@ -203,7 +204,7 @@ fn api_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
     anyhow!("{msg}\n  → {hint}")
 }
 
-async fn call(method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
+pub(crate) async fn call(method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
     let url = format!("{}{path}", http_base()?);
     let client = reqwest::Client::builder().timeout(Duration::from_secs(600)).build()?;
     let mut req = client.request(method, &url);
@@ -681,7 +682,11 @@ mod tests {
         assert_eq!(parse_candidate("c:claude:opus").unwrap(), json!({"label":"c","kind":"claude","model":"opus"}));
         assert_eq!(parse_candidate("d::sonnet").unwrap()["kind"], "claude");
         assert!(parse_candidate("").is_err());
-        assert!(parse_candidate("x:bogus").is_err());
+        // th-0f6126: any manifest name is a kind (the engine validates it);
+        // junk that can't be a name is refused here.
+        assert_eq!(parse_candidate("e:th-code").unwrap()["kind"], "th-code");
+        assert_eq!(parse_candidate("f:aider").unwrap()["kind"], "aider");
+        assert!(parse_candidate("x:Bad Kind").is_err());
     }
 
     #[test]

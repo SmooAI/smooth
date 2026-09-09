@@ -149,7 +149,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     }
 
     func refreshHeaders() {
-        for p in panes { if let id = p.sessionId, let s = app.store.sessions[id] { p.setHeader(s) } }
+        for p in panes { if let id = p.sessionId, let s = app.store.sessions[id] { p.setHeader(s, kindLabel: app.store.displayName(forKind: s.kind)) } }
         // argv changes under a session (`claude --resume …` after a kill/resume).
         if let s = app.store.focused { pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))" }
     }
@@ -223,8 +223,8 @@ final class SessionPane: NSView {
         }
     }
 
-    func setHeader(_ s: Session) {
-        header.stringValue = "\(s.pearlId ?? s.title) · \(s.kind == "claude" ? "Claude Code" : s.kind) · \(Theme.stateLabel(s))"
+    func setHeader(_ s: Session, kindLabel: String) {
+        header.stringValue = "\(s.pearlId ?? s.title) · \(kindLabel) · \(Theme.stateLabel(s))"
         dot.layer?.backgroundColor = NSColor(Theme.dot(for: s)).cgColor
     }
 }

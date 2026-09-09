@@ -22,7 +22,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::Engine as _;
 use serde::Deserialize;
@@ -64,6 +64,9 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/sessions/{id}/snapshot", get(snapshot))
         .route("/api/flow/sessions/{id}/handoff", get(handoff))
         .route("/api/flow/hooks", post(hooks))
+        // th-0f6126: the harness manifests + the user's sort/hide prefs.
+        .route("/api/flow/harnesses", get(list_harnesses))
+        .route("/api/flow/harnesses/prefs", put(put_harness_prefs))
         .with_state(state)
 }
 
@@ -72,8 +75,11 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
 ///
 /// # Errors
 /// When the flow store cannot be opened.
-pub fn install(workspace: std::path::PathBuf, token: String) -> anyhow::Result<Router> {
-    let engine = Engine::open(smooth_flow::EngineConfig::new(workspace))?;
+pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<Router> {
+    let engine = Engine::open(smooth_flow::EngineConfig {
+        daemon_url,
+        ..smooth_flow::EngineConfig::new(workspace)
+    })?;
     drop(spawn_supervisor(engine.clone()));
     Ok(flow_router(engine, Some(token)))
 }
@@ -332,6 +338,37 @@ async fn handoff(
 
 /// `POST /api/flow/hooks` — always 200 with a JSON body, so a hook script can
 /// pass it straight through to the harness.
+/// `GET /api/flow/harnesses` — every manifest (hidden ones included, flagged),
+/// in the user's order, with the resolved binary.
+async fn list_harnesses(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let harnesses = blocking(move || e.harnesses(true)).await?;
+    Ok(Json(json!({ "harnesses": harnesses })))
+}
+
+#[derive(Deserialize)]
+struct PrefsBody {
+    #[serde(default)]
+    order: Option<Vec<String>>,
+    #[serde(default)]
+    hidden: Option<Vec<String>>,
+}
+
+/// `PUT /api/flow/harnesses/prefs {order?, hidden?}` — replace either half,
+/// broadcast `flow.harnesses`, return the full list.
+async fn put_harness_prefs(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<PrefsBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let harnesses = blocking(move || e.set_harness_prefs(body.order, body.hidden)).await?;
+    Ok(Json(json!({ "harnesses": harnesses })))
+}
+
 async fn hooks(State(st): State<FlowState>, Json(ev): Json<HookEvent>) -> Json<Value> {
     let e = st.engine.clone();
     let reply = match tokio::task::spawn_blocking(move || e.hook(ev)).await {
@@ -568,8 +605,64 @@ mod tests {
             default_project: tmp.to_path_buf(),
             version: "t".into(),
             machine_label: "m".into(),
+            home: tmp.join("home"),
+            daemon_url: Some("http://127.0.0.1:1".into()),
         })
         .unwrap()
+    }
+
+    /// th-0f6126: the harness list + prefs over HTTP, and the hello carries
+    /// the visible list.
+    #[tokio::test]
+    async fn harness_routes_list_and_prefs() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = engine(tmp.path());
+        let app = flow_router(engine.clone(), Some("tok".into()));
+        let get = |path: &str| Request::builder().uri(path).header("x-smooth-token", "tok").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(get("/api/flow/harnesses")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let v = body_json(resp).await;
+        let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(v["harnesses"][3]["state_source"], "native");
+        // Gated like the rest.
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/api/flow/harnesses").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        // PUT reorders + hides; the reply is the full list.
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/flow/harnesses/prefs")
+            .header("x-smooth-token", "tok")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"order":["th-code"],"hidden":["codex"]}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let v = body_json(resp).await;
+        let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(v["harnesses"][3]["hidden"], true);
+        // An unknown name is a 4xx with the reason, not a 500.
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/flow/harnesses/prefs")
+            .header("x-smooth-token", "tok")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"hidden":["cursor"]}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), 200);
+        // The hello lists visible ones only, in order.
+        let hello = engine.hello().unwrap().to_wire();
+        let v: Value = serde_json::from_str(&hello).unwrap();
+        let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["th-code", "claude", "opencode"]);
     }
 
     /// The next text frame as JSON (5 s cap).

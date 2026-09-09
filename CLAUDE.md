@@ -126,9 +126,14 @@ th pearls create / ready / list / show / update / close / push / pull
 # because a status is a claim about the COMMIT, not about your laptop.
 th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 
-# Set up this machine's coding harnesses (Claude Code / Codex / OpenCode)
-# with the smooth toolbox: MCP server, smooth-agent plugin, shared skills,
-# statusline. enable is idempotent and doubles as the update command.
+# Coding harnesses. The manifests SmoothFlow launches (built-in claude /
+# opencode / codex / th-code + ~/.smooth/harnesses + th pkg packages;
+# docs/Engineering/Harness-Manifests.md) — list/show/add, and sort/hide
+# what every picker offers (th-0f6126) …
+th harness list [--all] [--json] / show <name> / add <path|owner/repo> / hide|unhide <name> / order <name…>
+# … and this machine's toolbox setup for Claude Code / Codex / OpenCode: MCP
+# server, smooth-agent plugin, shared skills, statusline. enable is
+# idempotent and doubles as the update command.
 th harness enable claude-code|codex|opencode|all / status / disable
 
 # SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux

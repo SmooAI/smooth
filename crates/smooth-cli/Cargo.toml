@@ -21,6 +21,7 @@ admin = []
 
 [dependencies]
 smooth-tmux.workspace = true
+smooth-flow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 smooth-code.workspace = true

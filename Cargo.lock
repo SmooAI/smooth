@@ -5228,6 +5228,7 @@ dependencies = [
  "smooai-smooth-cast",
  "smooai-smooth-code",
  "smooai-smooth-diver",
+ "smooai-smooth-flow",
  "smooai-smooth-menubar",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
@@ -5362,6 +5363,7 @@ dependencies = [
  "smooai-smooth-tmux",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "uuid",
 ]

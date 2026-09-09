@@ -1,25 +1,53 @@
 import AppKit
 import SwiftUI
 
+/// The kind picker every sheet shares (th-0f6126): the engine's harness list
+/// (`flow.hello` / `flow.harnesses`) in the user's order, hidden ones already
+/// gone, a missing binary shown disabled with the engine's reason, and Shell
+/// last. Never a hard-coded kind.
+struct HarnessPicker: View {
+    @ObservedObject var store: FlowStore
+    @Binding var kind: String
+    var includeShell = true
+
+    var body: some View {
+        Picker("Kind", selection: $kind) {
+            ForEach(store.harnesses) { h in
+                Text(h.pickerLabel).tag(h.name).selectionDisabled(!h.installed)
+            }
+            if includeShell { Text("Shell").tag("shell") }
+        }
+        .pickerStyle(.menu)
+    }
+
+    /// The first launchable harness (or shell) — what a fresh sheet selects.
+    static func defaultKind(_ store: FlowStore, includeShell: Bool = true) -> String {
+        store.harnesses.first { $0.installed }?.name ?? (includeShell ? "shell" : store.harnesses.first?.name ?? "claude")
+    }
+}
+
 /// ⌘N — `flow.new`.
 struct NewSessionSheet: View {
     @ObservedObject var app: AppController
-    @State private var kind = "claude"
+    @State private var kind = ""
     @State private var worktree = ""
     @State private var pearlId = ""
     @State private var prompt = ""
     @State private var title = ""
     var dismiss: () -> Void = {}
 
+    private var selected: HarnessInfo? { app.store.harnesses.first { $0.name == kind } }
+    private var launchable: Bool { kind == "shell" || selected?.installed == true }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New session").font(.title3.bold())
-            Picker("Kind", selection: $kind) {
-                Text("Claude Code").tag("claude")
-                Text("Codex").tag("codex")
-                Text("OpenCode").tag("opencode")
-                Text("Shell").tag("shell")
-            }.pickerStyle(.segmented)
+            HarnessPicker(store: app.store, kind: $kind)
+            if let h = selected, !h.installed {
+                Text(h.reason ?? "not installed").font(.caption).foregroundStyle(Color(Theme.muted))
+            } else if let h = selected, h.stateSource == "native" {
+                Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
+            }
             TextField("Pearl id (th-xxxxxx) — the engine creates the worktree", text: $pearlId).font(.body.monospaced())
             TextField("Worktree path (blank = derive from pearl / cwd)", text: $worktree).font(.body.monospaced())
             TextField("Title (optional)", text: $title)
@@ -31,11 +59,12 @@ struct NewSessionSheet: View {
                     app.newSession(NewSession(kind: kind, worktree: worktree.nilIfEmpty, project: nil, pearlId: pearlId.nilIfEmpty,
                                               prompt: prompt.nilIfEmpty, argv: nil, title: title.nilIfEmpty))
                     dismiss()
-                }.keyboardShortcut(.defaultAction)
+                }.keyboardShortcut(.defaultAction).disabled(!launchable)
             }
         }
         .padding(20)
         .frame(width: 520)
+        .onAppear { if kind.isEmpty { kind = HarnessPicker.defaultKind(app.store) } }
     }
 }
 
@@ -46,12 +75,24 @@ struct FanOutSheet: View {
     var existingId: String?
     @State private var prompt = ""
     @State private var pearlId = ""
-    @State private var candidates: [FanOutCandidate] = [
-        FanOutCandidate(kind: "claude", model: "opus-5", label: "claude · opus 5"),
-        FanOutCandidate(kind: "claude", model: "fable-5.1", label: "claude · fable 5.1"),
-        FanOutCandidate(kind: "codex", model: nil, label: "codex"),
-    ]
+    @State private var candidates: [FanOutCandidate] = []
     var dismiss: () -> Void = {}
+
+    /// One candidate per visible, installed harness — the engine's list, in
+    /// the user's order (th-0f6126); the Claude Code row gets the two flagship
+    /// models when it is there.
+    static func defaultCandidates(_ harnesses: [HarnessInfo]) -> [FanOutCandidate] {
+        var out: [FanOutCandidate] = []
+        for h in harnesses where h.installed {
+            if h.name == "claude" {
+                out.append(FanOutCandidate(kind: h.name, model: "opus-5", label: "\(h.name) · opus 5"))
+                out.append(FanOutCandidate(kind: h.name, model: "fable-5.1", label: "\(h.name) · fable 5.1"))
+            } else {
+                out.append(FanOutCandidate(kind: h.name, model: nil, label: h.name))
+            }
+        }
+        return out
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -64,6 +105,7 @@ struct FanOutSheet: View {
         }
         .padding(20)
         .frame(width: 720)
+        .onAppear { if candidates.isEmpty { candidates = Self.defaultCandidates(store.harnesses) } }
     }
 
     private var compose: some View {
@@ -73,19 +115,23 @@ struct FanOutSheet: View {
             Text("CANDIDATES").font(.caption).foregroundStyle(Color(Theme.muted))
             ForEach(candidates.indices, id: \.self) { i in
                 HStack {
-                    TextField("kind", text: $candidates[i].kind).frame(width: 90)
+                    HarnessPicker(store: store, kind: $candidates[i].kind, includeShell: false).labelsHidden().frame(width: 150)
                     TextField("model", text: Binding(get: { candidates[i].model ?? "" }, set: { candidates[i].model = $0.nilIfEmpty })).frame(width: 140)
                     TextField("label", text: $candidates[i].label)
                     Button("−") { candidates.remove(at: i) }
                 }.font(.body.monospaced())
             }
-            Button("+ add") { candidates.append(FanOutCandidate(kind: "claude", model: nil, label: "claude")) }
+            Button("+ add") {
+                let k = HarnessPicker.defaultKind(store, includeShell: false)
+                candidates.append(FanOutCandidate(kind: k, model: nil, label: k))
+            }
             Text("one child pearl each · stale-base guard is the engine's").font(.caption2).foregroundStyle(Color(Theme.faint))
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Fan out") { app.fanoutNew(prompt: prompt, pearlId: pearlId.nilIfEmpty, candidates: candidates); dismiss() }
-                    .keyboardShortcut(.defaultAction).disabled(prompt.isEmpty || candidates.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(prompt.isEmpty || candidates.isEmpty || candidates.contains { c in store.harnesses.first { $0.name == c.kind }?.installed != true })
             }
         }
     }

@@ -7,12 +7,31 @@ final class FlowFrameTests: XCTestCase {
 
     func testHello() throws {
         let f = try decode(#"{"channel":"flow","type":"flow.hello","daemon":{"version":"1.2","machine_label":"marvin"},"sessions":[{"id":"fs-1","kind":"claude","title":"t","project":"/p","worktree":"/w","branch":"b","pearl_id":"th-1","argv":["claude"],"state":"working","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","unread":true}]}"#)
-        guard case let .hello(daemon, sessions) = f else { return XCTFail("\(f)") }
+        guard case let .hello(daemon, sessions, harnesses) = f else { return XCTFail("\(f)") }
         XCTAssertEqual(daemon.machineLabel, "marvin")
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions[0].pearlId, "th-1")
         XCTAssertEqual(sessions[0].state, .working)
         XCTAssertTrue(sessions[0].unread)
+        XCTAssertEqual(harnesses, [], "a v0 hello without harnesses decodes")
+    }
+
+    /// th-0f6126: the harness list rides in the hello and in `flow.harnesses`;
+    /// `hidden` is omitted when false on the wire.
+    func testHelloWithHarnessesAndHarnessesFrame() throws {
+        let f = try decode(#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"m"},"sessions":[],"harnesses":[{"name":"th-code","display_name":"th code","kind":"th-code","installed":true,"binary_path":"/x/th","state_source":"native","order_index":0,"origin":"builtin"},{"name":"aider","installed":false,"reason":"`aider` not found on PATH","state_source":"hooks","hidden":true,"order_index":1,"origin":"user"}]}"#)
+        guard case let .hello(_, _, harnesses) = f else { return XCTFail("\(f)") }
+        XCTAssertEqual(harnesses.map(\.name), ["th-code", "aider"])
+        XCTAssertEqual(harnesses[0].displayName, "th code")
+        XCTAssertEqual(harnesses[0].stateSource, "native")
+        XCTAssertTrue(harnesses[0].installed)
+        XCTAssertFalse(harnesses[0].hidden)
+        XCTAssertEqual(harnesses[1].displayName, "aider", "display_name defaults to the name")
+        XCTAssertEqual(harnesses[1].pickerLabel, "aider — `aider` not found on PATH")
+        XCTAssertTrue(harnesses[1].hidden)
+        guard case let .harnesses(list) = try decode(#"{"type":"flow.harnesses","harnesses":[{"name":"codex"}]}"#) else { return XCTFail() }
+        XCTAssertEqual(list.map(\.name), ["codex"])
+        XCTAssertFalse(list[0].installed, "installed defaults to false")
     }
 
     func testSessionWithAttentionAndArgvAsJsonText() throws {

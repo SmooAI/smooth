@@ -54,10 +54,31 @@ versions|rollback|source|content`, `smoo api observability metrics` +
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).
 
-### 1b. `th harness` — per-provider toolbox setup (pearl th-19dac1)
+### 1b. `th harness` — harness manifests + per-provider toolbox setup
 
-One idempotent command sets up (or updates) each coding harness with the
-smooth toolbox:
+**Manifests (pearl th-0f6126).** Every coding agent CLI SmoothFlow can launch
+is a TOML manifest ([Harness-Manifests.md](Harness-Manifests.md)) — built-in
+`claude`, `opencode`, `codex`, `th-code`, plus anything under
+`~/.smooth/harnesses/`, the project's `.smooth/harnesses/`, or a `th pkg`
+package's `harness/<name>/harness.toml`:
+
+```bash
+th harness list [--all] [--json]   # picker order, resolved binary (● installed / ○ not, with the reason); --all shows hidden
+th harness show <name> [--json]    # origin, binary, the full TOML
+th harness hide codex              # drop it from every picker (manifest stays)
+th harness unhide codex
+th harness order th-code claude    # these first, in this order; the rest follow
+th harness add ./aider.toml        # validate + copy into ~/.smooth/harnesses/aider.toml
+th harness add owner/repo[/subdir][#ref]   # same, from a GitHub repo's harness.toml / harness/<name>/harness.toml
+```
+
+`list`/`show` read the files directly (with the daemon's order/hide prefs
+when it runs); `hide`/`unhide`/`order` write the prefs through the daemon
+(`PUT /api/flow/harnesses/prefs`), which then updates every picker via
+`flow.harnesses`. `th flow new --kind <any name>` launches it.
+
+**Toolbox setup (pearl th-19dac1).** One idempotent command sets up (or
+updates) each coding harness with the smooth toolbox:
 
 ```bash
 th harness enable claude-code   # smooth-agent plugin install/update (claude CLI),
@@ -1186,6 +1207,8 @@ th flow new --kind claude --attach -- claude --model opus # explicit argv after 
 th flow new --kind claude --tmux-socket smoothflow       # on the SmoothFlow app's tmux server (its TCC grants)
 th flow new --kind opencode --prompt "…"                 # opencode --prompt; resumes with --session <id> once its plugin reported the id
 th flow new --kind codex --prompt "…"                    # codex <prompt>; state is scraped (VIA inferred) until ~/.codex/hooks.json posts hooks
+th flow new --kind th-code --prompt "…"                  # th code in the pane; the prompt is pasted once the TUI is up; VIA native (th code reports its own turns)
+th flow new --kind <name> …                              # any harness manifest — th harness list
 th flow attach <id>                                      # raw-mode stream; Ctrl-\ detaches (session keeps running)
 th flow send <id> "also add a regression test"           # steer: bracketed-paste + Enter into the prompt
 th flow inbox                                            # sessions that need you or finished unread

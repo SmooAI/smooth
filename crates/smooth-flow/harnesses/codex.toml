@@ -1,0 +1,45 @@
+# Codex CLI (th-5c5457): positional prompt; the session id is learned from a
+# hook by cwd once ~/.codex/hooks.json posts (pearl th-4ad334) — until then
+# state is scraped; resume is `codex resume <id>`.
+name = "codex"
+display_name = "Codex"
+
+[binary]
+names = ["codex"]
+prefer_paths = [".local/bin/codex"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+argv = ["resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th harness enable codex  # wires flow-hook.sh into ~/.codex/hooks.json (Codex 0.153+)"
+
+[state.scrape]
+working = ["esc to interrupt", "esc to cancel", "\\(running", "tokens · esc"]
+idle = ["\\? for shortcuts", "for shortcuts", "shift\\+tab to cycle", "> "]
+# Codex menus (trust this directory / hooks need review): "› 1. …" + this footer.
+needs_you = ["do you want to proceed", "do you want to make this edit", "❯ 1\\. yes", "1\\. yes", "would you like to proceed", "press enter to confirm"]
+usage_limit = ["usage limit reached", "approaching usage limit", "limit will reset", "limit resets at", "out of credits"]
+error = ["api error", "fatal error", "request failed", "execution error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.codex/skills"
+mcp_config = "~/.codex/config.toml"

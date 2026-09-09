@@ -8,7 +8,6 @@
 //! ([`Engine::supervise_tick`]) is driven by a tokio interval in the host.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -18,12 +17,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use smooth_tmux::detect::{detect_state, PaneState};
+use smooth_tmux::detect::PaneState;
 use tokio::sync::{broadcast, oneshot};
 
+use crate::harness::{FlowEventName, HarnessInfo, Manifest, Prefs, PromptAs, Registry, ResumeMode, ScrapeRules, SessionIdMode, StateSource, Vars};
 use crate::protocol::{
-    approval_keystroke, hook_event_text, map_hook_event, permission_reply, CandidateSpec, DaemonInfo, Decision, EventKind, FlowEvent, HookEvent, HookOutcome,
-    ServerFrame,
+    approval_keystroke, hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, DaemonInfo, Decision, EventKind, FlowEvent,
+    HookEvent, HookOutcome, ServerFrame,
 };
 use crate::pty::{OnOutput, PtyAttach};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Session, SessionKind, SessionState};
@@ -42,6 +42,12 @@ const LIMIT_REARM_GRACE: Duration = Duration::from_secs(90);
 const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
+/// harness's composer. ponytail: a fixed delay; scrape-for-idle first if a
+/// harness turns out to boot slower than this.
+const PASTE_DELAY: Duration = Duration::from_secs(4);
+/// The `config` key harness prefs are stored under.
+const HARNESS_PREFS_KEY: &str = "harness_prefs";
 
 /// How the engine is configured by its host.
 #[derive(Debug, Clone)]
@@ -53,6 +59,12 @@ pub struct EngineConfig {
     /// Reported in `flow.hello`.
     pub version: String,
     pub machine_label: String,
+    /// `$HOME` — where `~/.smooth/harnesses/` and the `th pkg` index live
+    /// (tests point this at a tempdir).
+    pub home: PathBuf,
+    /// `http://host:port` of the daemon hosting this engine, for the
+    /// `{daemon_url}` placeholder (a `th code` pane connects back to it).
+    pub daemon_url: Option<String>,
 }
 
 impl EngineConfig {
@@ -65,6 +77,8 @@ impl EngineConfig {
             default_project,
             version: env!("CARGO_PKG_VERSION").to_string(),
             machine_label: short_hostname(),
+            home: dirs_next::home_dir().unwrap_or_default(),
+            daemon_url: None,
         }
     }
 }
@@ -112,6 +126,10 @@ struct Runtime {
     claims: HashMap<String, (u32, Instant)>,
     /// Session id → when it was last resumed from a usage limit.
     limit_resumed_at: HashMap<String, Instant>,
+    /// Session id → (prompt, when to paste it) for `prompt_as = "paste"`.
+    paste_at: HashMap<String, (String, Instant)>,
+    /// Compiled `[state.scrape]` rules per kind.
+    rules: HashMap<String, Arc<ScrapeRules>>,
 }
 
 struct Inner {
@@ -122,6 +140,8 @@ struct Inner {
     rt: Mutex<Runtime>,
     info: DaemonInfo,
     default_project: PathBuf,
+    home: PathBuf,
+    daemon_url: Option<String>,
 }
 
 /// The SmoothFlow engine handle.
@@ -221,89 +241,61 @@ pub fn slugify(s: &str, max: usize) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Where each agent CLI really lives, before `PATH` (th-5c5457). `which
-/// claude` on a cmux machine resolves to cmux's shim, which injects its own
-/// `--session-id` and hooks; these are the installs that are never shims.
-const PREFERRED_HOMES: &[(SessionKind, &[&str])] = &[
-    (SessionKind::Claude, &[".claude/local/claude", ".local/bin/claude"]),
-    (SessionKind::Opencode, &[".opencode/bin/opencode", ".local/bin/opencode"]),
-    (SessionKind::Codex, &[".local/bin/codex"]),
-];
-
-/// Any `PATH` entry under a directory with this name is a cmux CLI shim.
-const CMUX_SHIM_DIR: &str = "cmux-cli-shims";
-
-fn is_executable(p: &Path) -> bool {
-    p.is_file() && std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+/// The login shell argv for `kind = shell`.
+fn shell_argv() -> Vec<String> {
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+    vec![shell, "-l".into()]
 }
 
-/// The real binary for `kind`, pure.
+/// Build the argv for a fresh session: the login shell, or the manifest's
+/// resolved binary + rendered `launch.argv` (th-0f6126; the per-kind launch
+/// table of th-5c5457 is now the built-in manifests).
 ///
-/// Preferred homes under `home`, then the first executable on `path` not
-/// inside a [`CMUX_SHIM_DIR`], else the bare name (so a missing CLI still
-/// fails loudly as exit 127 in the pane).
-#[must_use]
-pub fn resolve_binary_in(kind: SessionKind, home: &Path, path: &std::ffi::OsStr) -> String {
-    let name = kind.as_str();
-    let homes = PREFERRED_HOMES.iter().find(|(k, _)| *k == kind).map(|(_, h)| *h).unwrap_or_default();
-    if let Some(p) = homes.iter().map(|rel| home.join(rel)).find(|p| is_executable(p)) {
-        return p.to_string_lossy().into_owned();
+/// # Errors
+/// When `kind` has no manifest.
+pub fn default_argv(registry: &Registry, kind: &SessionKind, vars: &Vars<'_>) -> Result<Vec<String>> {
+    if !kind.is_agent() {
+        return Ok(shell_argv());
     }
-    std::env::split_paths(path)
-        .filter(|dir| !dir.components().any(|c| c.as_os_str() == CMUX_SHIM_DIR))
-        .map(|dir| dir.join(name))
-        .find(|p| is_executable(p))
-        .map_or_else(|| name.to_string(), |p| p.to_string_lossy().into_owned())
+    let m = manifest_for(registry, kind)?;
+    let mut v = vec![m.resolve_binary()];
+    v.extend(crate::harness::render_argv(&m.launch.argv, vars));
+    Ok(v)
 }
 
-/// [`resolve_binary_in`] against this process's `HOME` and `PATH`.
-#[must_use]
-pub fn resolve_binary(kind: SessionKind) -> String {
-    let home = dirs_next::home_dir().unwrap_or_default();
-    resolve_binary_in(kind, &home, &std::env::var_os("PATH").unwrap_or_default())
-}
-
-/// Build the argv for a fresh session of `kind` — the per-kind launch table.
+/// The manifest for an agent kind, or the error a caller should surface.
 ///
-/// th-5c5457: claude gets the pre-assigned `--session-id`; opencode takes
-/// `--prompt` (its positional is the project dir, th-b423aa); codex takes a
-/// positional prompt.
+/// # Errors
+/// When no manifest carries that name.
+pub fn manifest_for<'r>(registry: &'r Registry, kind: &SessionKind) -> Result<&'r Manifest> {
+    registry
+        .get(kind.as_str())
+        .ok_or_else(|| anyhow!("unknown harness kind `{kind}` — `th harness list` shows what this machine knows"))
+}
+
+/// The argv that resumes a dead agent session — the manifest's `[resume]`.
+///
+/// `resume_session` with a known harness session id renders `resume.argv`
+/// behind the row's `argv[0]`; otherwise (no id yet, or `relaunch_command`,
+/// or no manifest) the original argv is relaunched: a fresh session, not a
+/// continuation.
 #[must_use]
-pub fn default_argv(kind: SessionKind, agent_session_id: Option<&str>, model: Option<&str>, prompt: Option<&str>) -> Vec<String> {
-    if kind == SessionKind::Shell {
-        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-        return vec![shell, "-l".into()];
-    }
-    let mut v = vec![resolve_binary(kind)];
-    if let (SessionKind::Claude, Some(id)) = (kind, agent_session_id) {
-        v.push("--session-id".into());
-        v.push(id.into());
-    }
-    if let Some(m) = model {
-        v.push("--model".into());
-        v.push(m.into());
-    }
-    if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-        if kind == SessionKind::Opencode {
-            v.push("--prompt".into());
+pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
+    let Some(m) = registry.get(session.kind.as_str()) else {
+        return session.argv.clone();
+    };
+    match (m.resume.mode, session.agent_session_id.as_deref()) {
+        (ResumeMode::ResumeSession, Some(id)) => {
+            let bin = session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary());
+            let vars = Vars {
+                session_id: Some(id),
+                cwd: Some(&session.worktree),
+                ..Default::default()
+            };
+            let mut v = vec![bin];
+            v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
+            v
         }
-        v.push(p.into());
-    }
-    v
-}
-
-/// The argv that resumes a dead agent session — the per-kind restore mode.
-///
-/// `claude --resume <id>`, `opencode --session <id>`, `codex resume <id>`.
-/// Without a known harness session id (opencode/codex learn theirs from the
-/// first hook) the original argv is relaunched: a fresh session, not a resume.
-#[must_use]
-pub fn resume_argv(session: &Session) -> Vec<String> {
-    let bin = || session.argv.first().cloned().unwrap_or_else(|| resolve_binary(session.kind));
-    match (session.kind, session.agent_session_id.as_deref()) {
-        (SessionKind::Claude, Some(id)) => vec![bin(), "--resume".into(), id.into()],
-        (SessionKind::Opencode, Some(id)) => vec![bin(), "--session".into(), id.into()],
-        (SessionKind::Codex, Some(id)) => vec![bin(), "resume".into(), id.into()],
         _ => session.argv.clone(),
     }
 }
@@ -316,7 +308,7 @@ pub fn resume_backoff(attempt: u32) -> Duration {
 
 /// Default title for a new session.
 #[must_use]
-pub fn default_title(kind: SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, worktree: &Path) -> String {
+pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, worktree: &Path) -> String {
     if let Some(p) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
         let short: String = p.chars().take(60).collect();
         return short;
@@ -361,8 +353,101 @@ impl Engine {
                     machine_label: cfg.machine_label,
                 },
                 default_project: cfg.default_project,
+                home: cfg.home,
+                daemon_url: cfg.daemon_url,
             }),
         })
+    }
+
+    // ── harnesses (th-0f6126) ─────────────────────────────────────────────
+
+    /// Every manifest this engine knows: built-ins, `~/.smooth/harnesses/`,
+    /// the project's `.smooth/harnesses/`, `th pkg` packages. Loaded fresh
+    /// each call so `th harness add` needs no daemon restart.
+    // ponytail: a few small files per call; cache when a profile says so.
+    #[must_use]
+    pub fn registry(&self) -> Registry {
+        Registry::load(&self.inner.home, Some(&self.inner.default_project))
+    }
+
+    /// The stored sort/hide prefs.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn harness_prefs(&self) -> Result<Prefs> {
+        Ok(self
+            .with_store(|st| st.get_config(HARNESS_PREFS_KEY))?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default())
+    }
+
+    /// The harness rows — `all = false` is the `flow.hello` list (hidden
+    /// ones dropped), `all = true` is `GET /api/flow/harnesses`.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn harnesses(&self, all: bool) -> Result<Vec<HarnessInfo>> {
+        let prefs = self.harness_prefs()?;
+        Ok(self
+            .registry()
+            .infos(&prefs, all, &self.inner.home, &std::env::var_os("PATH").unwrap_or_default()))
+    }
+
+    /// `PUT /api/flow/harnesses/prefs`: replace `order` and/or `hidden`
+    /// (a `None` leaves that half alone), persist, broadcast
+    /// `flow.harnesses`, return the full list.
+    ///
+    /// # Errors
+    /// When a name is not a known harness, or on a store failure.
+    pub fn set_harness_prefs(&self, order: Option<Vec<String>>, hidden: Option<Vec<String>>) -> Result<Vec<HarnessInfo>> {
+        let registry = self.registry();
+        let mut prefs = self.harness_prefs()?;
+        for (field, names) in [("order", &order), ("hidden", &hidden)] {
+            if let Some(names) = names {
+                if let Some(bad) = names.iter().find(|n| registry.get(n).is_none()) {
+                    bail!("{field}: `{bad}` is not a known harness (th harness list --all)");
+                }
+            }
+        }
+        if let Some(o) = order {
+            prefs.order = o;
+        }
+        if let Some(h) = hidden {
+            prefs.hidden = h;
+        }
+        let raw = serde_json::to_string(&prefs)?;
+        self.with_store(|st| st.set_config(HARNESS_PREFS_KEY, &raw))?;
+        self.emit(ServerFrame::Harnesses {
+            harnesses: self.harnesses(false)?,
+        });
+        self.harnesses(true)
+    }
+
+    /// Compiled scrape rules for a kind (cached per engine).
+    fn rules_for(&self, registry: &Registry, kind: &SessionKind) -> Option<Arc<ScrapeRules>> {
+        if let Some(r) = self.rt().rules.get(kind.as_str()) {
+            return Some(r.clone());
+        }
+        let m = registry.get(kind.as_str())?;
+        let rules = Arc::new(ScrapeRules::compile(&m.state.scrape).ok()?);
+        self.rt().rules.insert(kind.as_str().to_string(), rules.clone());
+        Some(rules)
+    }
+
+    /// The pane environment a manifest asks for, rendered for `s`.
+    fn launch_env(&self, m: Option<&Manifest>, s: &Session) -> Vec<(String, String)> {
+        m.map(|m| {
+            crate::harness::render_env(
+                &m.launch.env,
+                &Vars {
+                    session_id: s.agent_session_id.as_deref(),
+                    cwd: Some(&s.worktree),
+                    daemon_url: self.inner.daemon_url.as_deref(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap_or_default()
     }
 
     /// Subscribe to every broadcast frame.
@@ -396,6 +481,7 @@ impl Engine {
         Ok(ServerFrame::Hello {
             daemon: self.inner.info.clone(),
             sessions: self.list()?,
+            harnesses: self.harnesses(false)?,
         })
     }
 
@@ -502,28 +588,44 @@ impl Engine {
         if !worktree.is_dir() {
             bail!("worktree does not exist: {}", worktree.display());
         }
-        let agent_session_id = match req.kind {
-            SessionKind::Claude => Some(uuid::Uuid::new_v4().to_string()),
-            _ => None,
+        let registry = self.registry();
+        let manifest = if req.kind.is_agent() {
+            Some(manifest_for(&registry, &req.kind)?)
+        } else {
+            None
         };
-        let mut argv = req
-            .argv
-            .clone()
-            .filter(|a| !a.is_empty())
-            .unwrap_or_else(|| default_argv(req.kind, agent_session_id.as_deref(), req.model.as_deref(), req.prompt.as_deref()));
+        let agent_session_id = manifest
+            .filter(|m| m.launch.session_id == SessionIdMode::Preassigned)
+            .map(|_| uuid::Uuid::new_v4().to_string());
+        let prompt = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        let paste = manifest.is_some_and(|m| m.launch.prompt_as == PromptAs::Paste);
+        let worktree_s = worktree.to_string_lossy().into_owned();
+        let vars = Vars {
+            prompt: if paste { None } else { prompt },
+            session_id: agent_session_id.as_deref(),
+            cwd: Some(&worktree_s),
+            model: req.model.as_deref(),
+            daemon_url: self.inner.daemon_url.as_deref(),
+        };
+        let mut argv = match req.argv.clone().filter(|a| !a.is_empty()) {
+            Some(a) => a,
+            None => default_argv(&registry, &req.kind, &vars)?,
+        };
         // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
         // resolution as the default argv.
-        if req.kind.is_agent() && argv.first().is_some_and(|a| a == req.kind.as_str()) {
-            argv[0] = resolve_binary(req.kind);
+        if let Some(m) = manifest {
+            if argv.first().is_some_and(|a| m.is_bare_name(a)) {
+                argv[0] = m.resolve_binary();
+            }
         }
         let branch = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
         let title = req
             .title
             .clone()
-            .unwrap_or_else(|| default_title(req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), &worktree));
+            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), &worktree));
         let session = self.with_store(|st| {
             st.create(NewSession {
-                kind: Some(req.kind),
+                kind: Some(req.kind.clone()),
                 title,
                 project: project.to_string_lossy().into_owned(),
                 worktree: worktree.to_string_lossy().into_owned(),
@@ -536,23 +638,27 @@ impl Engine {
                 fan_out_id: req.fan_out_id.clone(),
             })
         })?;
-        let session = self.launch(&session, &argv)?;
+        let env = self.launch_env(manifest, &session);
+        let session = self.launch(&session, &argv, &env)?;
         // A shell has no hooks and nothing to scrape — it is simply ready.
         if !session.kind.is_agent() {
             return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
+        }
+        if let (true, Some(p)) = (paste, prompt) {
+            self.rt().paste_at.insert(session.id.clone(), (p.to_string(), Instant::now() + PASTE_DELAY));
         }
         Ok(session)
     }
 
     /// Launch `argv` in the session's tmux session (named after the id),
     /// record pid + start time, broadcast.
-    fn launch(&self, session: &Session, argv: &[String]) -> Result<Session> {
+    fn launch(&self, session: &Session, argv: &[String], env: &[(String, String)]) -> Result<Session> {
         let tmux_name = session.id.clone();
         let sock = socket_of(session);
         if tmux::session_alive(&sock, &tmux_name) {
             tmux::kill_session(&sock, &tmux_name);
         }
-        let pid = tmux::launch(&sock, &tmux_name, Path::new(&session.worktree), argv)?;
+        let pid = tmux::launch_env(&sock, &tmux_name, Path::new(&session.worktree), argv, env)?;
         let start = proc::start_time(pid);
         self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
         if let Some(agent) = &session.agent_session_id {
@@ -778,12 +884,14 @@ impl Engine {
                     .ok_or_else(|| anyhow!("no such session"));
             }
         }
-        let argv = resume_argv(s);
+        let registry = self.registry();
+        let argv = resume_argv(s, &registry);
+        let env = self.launch_env(registry.get(s.kind.as_str()), s);
         // A relaunched process hasn't reported a hook yet — let the scraper
         // drive state until it does (a resumed opencode session emits no
         // session.created; measured 2026-09-08).
         self.with_store(|st| st.set_state_source(&s.id, "inferred"))?;
-        let launched = self.launch(s, &argv)?;
+        let launched = self.launch(s, &argv, &env)?;
         self.set_state(&launched.id, SessionState::Starting, None)?
             .ok_or_else(|| anyhow!("no such session"))
     }
@@ -809,8 +917,16 @@ impl Engine {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
             return Ok(HookReply::Immediate(json!({})));
         };
-        if s.state_source != "hooks" {
-            self.with_store(|st| st.set_state_source(&s.id, "hooks"))?;
+        // th-0f6126: the manifest says how this harness's events read
+        // (`state.hooks.event_map`), and whether they count as `hooks` or
+        // `native` state; an empty map is the Claude Code table.
+        let manifest = self.registry().get(s.kind.as_str()).cloned();
+        let source = manifest
+            .as_ref()
+            .filter(|m| m.state.source == StateSource::Native)
+            .map_or("hooks", |_| StateSource::Native.as_str());
+        if s.state_source != source {
+            self.with_store(|st| st.set_state_source(&s.id, source))?;
             if let Some(s) = self.get(&s.id)? {
                 self.emit_session(&s);
             }
@@ -818,7 +934,11 @@ impl Engine {
         if let Some((kind, text)) = hook_event_text(&ev.event, &ev.payload) {
             self.event(&s.id, kind, &text);
         }
-        match map_hook_event(&ev.event, &ev.payload) {
+        let outcome = manifest
+            .as_ref()
+            .filter(|m| !m.state.hooks.event_map.is_empty())
+            .map_or_else(|| map_hook_event(&ev.event, &ev.payload), |m| mapped_outcome(m, &ev));
+        match outcome {
             HookOutcome::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
             }
@@ -935,6 +1055,12 @@ impl Engine {
         if !s.kind.is_agent() {
             return Ok(());
         }
+        // `prompt_as = "paste"`: the composer should be up by now.
+        let paste = self.rt().paste_at.get(&s.id).filter(|(_, at)| Instant::now() >= *at).map(|(p, _)| p.clone());
+        if let Some(p) = paste {
+            self.rt().paste_at.remove(&s.id);
+            self.send(&s.id, &p)?;
+        }
         // Usage-limit resume due?
         if s.state == SessionState::Limited {
             let due = s.attention.as_ref().and_then(|a| a.resume_at).is_some_and(|at| now >= at);
@@ -949,12 +1075,16 @@ impl Engine {
         // Scrape the visible pane: limits always; approvals when hooks
         // didn't report one; working/idle only when hooks never spoke.
         let pane = tmux::capture_visible(&sock, t)?;
-        let hooks_seen = s.state_source == "hooks";
-        match detect_state(&pane) {
+        let hooks_seen = s.state_source != "inferred";
+        let Some(rules) = self.rules_for(&self.registry(), &s.kind) else {
+            return Ok(());
+        };
+        let scrape = rules.detect(&pane);
+        match scrape.state {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
                 if !recently_resumed {
-                    let at = limit::resume_at(&pane, now);
+                    let at = limit::resume_at(scrape.reset_text.as_deref().unwrap_or(&pane), now);
                     let mut att = Attention::new("usage_limit").with_detail(format!("resumes at {}", at.to_rfc3339()));
                     att.resume_at = Some(at);
                     self.set_state(&s.id, SessionState::Limited, Some(att))?;
@@ -1034,7 +1164,7 @@ impl Engine {
             let worktree = Self::create_worktree(&project, pearl_id, &label, &base)?;
             let child = create_child_pearl(&project, pearl_id, &fo.id, &c.label, prompt).ok();
             let s = self.new_session(NewRequest {
-                kind: c.kind,
+                kind: c.kind.clone(),
                 worktree: Some(worktree.to_string_lossy().into_owned()),
                 project: Some(project.to_string_lossy().into_owned()),
                 pearl_id: child.clone().or_else(|| Some(pearl_id.to_string())),
@@ -1167,6 +1297,25 @@ impl Engine {
     }
 }
 
+/// A hook event through a manifest's `state.hooks.event_map`.
+fn mapped_outcome(m: &Manifest, ev: &HookEvent) -> HookOutcome {
+    match m.map_event(&ev.event) {
+        Some(FlowEventName::Working) => HookOutcome::Working,
+        Some(FlowEventName::Idle) => HookOutcome::Idle,
+        Some(FlowEventName::NeedsYou) => {
+            let reason = ev.payload.get("reason").and_then(Value::as_str).unwrap_or("question");
+            let detail = ev
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map_or_else(|| permission_detail(&ev.payload), str::to_string);
+            HookOutcome::NeedsYou(Attention::new(reason).with_detail(detail))
+        }
+        Some(FlowEventName::Ended) => HookOutcome::Ended,
+        Some(FlowEventName::Ignore) | None => HookOutcome::None,
+    }
+}
+
 /// The path of one `git status --porcelain` line. Not a fixed offset: `git()`
 /// trims stdout, so the first line loses its leading status space
 /// (` M apps/x` → `M apps/x`) — th-f4073b's missing first character.
@@ -1289,62 +1438,101 @@ mod tests {
             default_project: tmp.to_path_buf(),
             version: "t".into(),
             machine_label: "m".into(),
+            home: tmp.join("home"),
+            daemon_url: Some("http://127.0.0.1:1".into()),
         })
         .unwrap()
     }
 
+    fn reg() -> Registry {
+        Registry::builtin()
+    }
+
     #[test]
-    fn slug_and_title_and_argv_helpers() {
+    fn slug_and_title_helpers() {
         assert_eq!(slugify("Fix the Auth bug!!", 24), "fix-the-auth-bug");
         assert_eq!(slugify("   ", 24), "");
         assert!(slugify(&"x".repeat(100), 10).len() <= 10);
-        assert_eq!(default_title(SessionKind::Claude, Some("  do it  "), None, Path::new("/a/b")), "do it");
-        assert_eq!(default_title(SessionKind::Claude, None, Some("th-1"), Path::new("/a/b")), "th-1");
-        assert_eq!(default_title(SessionKind::Shell, None, None, Path::new("/a/b")), "shell · b");
-        // argv[0] is the resolved binary (whatever this machine has); the
-        // per-kind launch table is the rest (th-5c5457 / th-b423aa).
-        let tail = |kind, id, model, prompt| default_argv(kind, id, model, prompt)[1..].to_vec();
-        assert!(default_argv(SessionKind::Claude, None, None, None)[0].ends_with("claude"));
-        assert_eq!(
-            tail(SessionKind::Claude, Some("u"), Some("opus"), Some("hi")),
-            vec!["--session-id", "u", "--model", "opus", "hi"]
-        );
-        assert!(tail(SessionKind::Claude, None, None, Some("  ")).is_empty());
-        assert_eq!(tail(SessionKind::Codex, None, None, Some("p")), vec!["p"]);
-        assert_eq!(tail(SessionKind::Opencode, None, Some("m"), Some("p")), vec!["--model", "m", "--prompt", "p"]);
-        assert!(default_argv(SessionKind::Opencode, None, None, None)[0].ends_with("opencode"));
-        assert_eq!(default_argv(SessionKind::Shell, None, None, None)[1], "-l");
+        assert_eq!(default_title(&SessionKind::Claude, Some("  do it  "), None, Path::new("/a/b")), "do it");
+        assert_eq!(default_title(&SessionKind::Claude, None, Some("th-1"), Path::new("/a/b")), "th-1");
+        assert_eq!(default_title(&SessionKind::Shell, None, None, Path::new("/a/b")), "shell · b");
+        assert_eq!(default_title(&"th-code".parse().unwrap(), None, None, Path::new("/a/b")), "th-code · b");
     }
 
-    /// th-5c5457: `which claude` on a cmux machine is cmux's shim; the resolver
-    /// prefers the known real installs and never picks a `cmux-cli-shims` dir.
+    /// th-0f6126 regression: the three built-in manifests reproduce EXACTLY
+    /// the launch table, restore verbs and binary resolution the engine had
+    /// hard-coded (th-5c5457 / th-b423aa) — argv[0] is whatever this machine
+    /// resolves, the tail is the table.
     #[test]
-    fn resolve_binary_skips_cmux_shims_and_prefers_real_homes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mk = |rel: &str| {
-            let p = tmp.path().join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            p
+    fn builtin_manifests_reproduce_the_hardcoded_launch_table() {
+        let r = reg();
+        let argv = |kind: &str, id: Option<&str>, model: Option<&str>, prompt: Option<&str>| {
+            default_argv(
+                &r,
+                &kind.parse().unwrap(),
+                &Vars {
+                    prompt,
+                    session_id: id,
+                    model,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
         };
-        let shim = mk("T/cmux-cli-shims/ABC/claude");
-        mk("T/cmux-cli-shims/ABC/codex");
-        let real = mk("usr/bin/claude");
-        let path = std::env::join_paths([shim.parent().unwrap(), real.parent().unwrap()]).unwrap();
-        let home = tmp.path().join("home");
-        // Only PATH: the shim comes first on PATH but is skipped.
-        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), real.to_string_lossy());
-        // Nothing but the shim ⇒ the bare name (exit 127 in the pane, loudly), never the shim.
-        assert_eq!(resolve_binary_in(SessionKind::Codex, &home, &path), "codex");
-        // A preferred home wins over PATH.
-        let local = mk("home/.local/bin/claude");
-        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), local.to_string_lossy());
-        let oc = mk("home/.opencode/bin/opencode");
-        assert_eq!(resolve_binary_in(SessionKind::Opencode, &home, &path), oc.to_string_lossy());
-        // A non-executable file is not a binary.
-        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(resolve_binary_in(SessionKind::Claude, &home, &path), real.to_string_lossy());
+        let tail = |kind: &str, id: Option<&str>, model: Option<&str>, prompt: Option<&str>| argv(kind, id, model, prompt)[1..].to_vec();
+        assert!(argv("claude", None, None, None)[0].ends_with("claude"));
+        assert_eq!(
+            tail("claude", Some("u"), Some("opus"), Some("hi")),
+            vec!["--session-id", "u", "--model", "opus", "hi"]
+        );
+        assert!(tail("claude", None, None, Some("  ")).is_empty());
+        assert_eq!(tail("codex", None, None, Some("p")), vec!["p"]);
+        assert_eq!(tail("codex", None, Some("m"), Some("p")), vec!["--model", "m", "p"]);
+        assert_eq!(tail("opencode", None, Some("m"), Some("p")), vec!["--model", "m", "--prompt", "p"]);
+        assert!(argv("opencode", None, None, None)[0].ends_with("opencode"));
+        assert_eq!(argv("shell", None, None, None)[1], "-l");
+        // th code: the prompt is pasted, not passed; env carries the flow id + daemon.
+        assert_eq!(tail("th-code", Some("fs-1"), Some("m"), Some("p")), vec!["code", "--model", "m"]);
+        assert!(argv("th-code", None, None, None)[0].ends_with("th"));
+        assert!(default_argv(&r, &"aider".parse().unwrap(), &Vars::default())
+            .unwrap_err()
+            .to_string()
+            .contains("unknown harness kind"));
+
+        // Restore per kind, argv[0] reused.
+        let row = |kind: &str, id: Option<&str>, argv: &[&str]| Session {
+            kind: kind.parse().unwrap(),
+            agent_session_id: id.map(String::from),
+            argv: argv.iter().map(|s| (*s).to_string()).collect(),
+            ..blank()
+        };
+        assert_eq!(resume_argv(&row("claude", Some("u"), &["claude"]), &r), vec!["claude", "--resume", "u"]);
+        assert_eq!(
+            resume_argv(&row("opencode", Some("s"), &["/x/opencode", "--prompt", "hi"]), &r),
+            vec!["/x/opencode", "--session", "s"]
+        );
+        assert_eq!(
+            resume_argv(&row("codex", Some("t-9"), &["/x/codex", "hi"]), &r),
+            vec!["/x/codex", "resume", "t-9"]
+        );
+        let no_id = row("codex", None, &["/x/codex", "hi"]);
+        assert_eq!(resume_argv(&no_id, &r), no_id.argv, "no id yet ⇒ relaunch, not resume");
+        let th = row("th-code", Some("fs-1"), &["/x/th", "code"]);
+        assert_eq!(resume_argv(&th, &r), th.argv, "relaunch_command ⇒ the original argv");
+        let unknown = row("aider", Some("x"), &["aider"]);
+        assert_eq!(resume_argv(&unknown, &r), unknown.argv, "no manifest ⇒ relaunch");
+    }
+
+    /// A blank session row for pure-function tests.
+    fn blank() -> Session {
+        crate::store::FlowStore::open_in_memory()
+            .unwrap()
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                ..Default::default()
+            })
+            .unwrap()
     }
 
     /// th-5c5457: opencode/codex learn their harness session id from the
@@ -1354,6 +1542,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let wt = tmp.path().to_string_lossy().into_owned();
+        // A throwaway tmux server: the relaunch below really launches when tmux
+        // is installed, and must never land on the user's flow socket.
+        let sock = format!("flow-test-{}", std::process::id());
         let mk = |kind: SessionKind, argv: Vec<&str>| {
             e.with_store(|st| {
                 st.create(NewSession {
@@ -1361,6 +1552,7 @@ mod tests {
                     argv: argv.into_iter().map(String::from).collect(),
                     project: wt.clone(),
                     worktree: wt.clone(),
+                    tmux_socket: Some(sock.clone()),
                     ..Default::default()
                 })
             })
@@ -1384,8 +1576,11 @@ mod tests {
         assert_eq!(bound.agent_session_id.as_deref(), Some("ses_1"));
         assert_eq!(bound.state_source, "hooks");
         assert_eq!(e.get(&shell.id).unwrap().unwrap().agent_session_id, None);
-        // A relaunch (no tmux here ⇒ launch fails) still resets the source first.
-        assert!(e.relaunch(&bound).is_err());
+        // A relaunch (fails without tmux, launches a dead `/x/opencode` pane
+        // with it) resets the source first either way.
+        let relaunched = e.relaunch(&bound);
+        let _ = std::process::Command::new("tmux").args(["-L", &sock, "kill-server"]).output();
+        drop(relaunched);
         assert_eq!(
             e.get(&oc.id).unwrap().unwrap().state_source,
             "inferred",
@@ -1397,11 +1592,11 @@ mod tests {
         e.hook(ev("SessionStart", "ses_2", &wt)).unwrap();
         assert_eq!(e.get(&oc.id).unwrap().unwrap().agent_session_id.as_deref(), Some("ses_1"));
         // Restore mode per kind.
-        assert_eq!(resume_argv(&e.get(&oc.id).unwrap().unwrap()), vec!["/x/opencode", "--session", "ses_1"]);
+        assert_eq!(resume_argv(&e.get(&oc.id).unwrap().unwrap(), &reg()), vec!["/x/opencode", "--session", "ses_1"]);
         let mut cx = mk(SessionKind::Codex, vec!["/x/codex", "hi"]);
-        assert_eq!(resume_argv(&cx), cx.argv, "no id yet ⇒ relaunch, not resume");
+        assert_eq!(resume_argv(&cx, &reg()), cx.argv, "no id yet ⇒ relaunch, not resume");
         cx.agent_session_id = Some("t-9".into());
-        assert_eq!(resume_argv(&cx), vec!["/x/codex", "resume", "t-9"]);
+        assert_eq!(resume_argv(&cx, &reg()), vec!["/x/codex", "resume", "t-9"]);
     }
 
     #[test]
@@ -1417,15 +1612,15 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(resume_argv(&s), vec!["claude", "--resume", "u"]);
+        assert_eq!(resume_argv(&s, &reg()), vec!["claude", "--resume", "u"]);
         s.kind = SessionKind::Codex;
         assert_eq!(
-            resume_argv(&s),
+            resume_argv(&s, &reg()),
             vec!["claude", "resume", "u"],
             "argv[0] is reused, the restore verb is per kind"
         );
         s.agent_session_id = None;
-        assert_eq!(resume_argv(&s), s.argv, "no id ⇒ relaunch");
+        assert_eq!(resume_argv(&s, &reg()), s.argv, "no id ⇒ relaunch");
         assert_eq!(resume_backoff(0), Duration::from_secs(5));
         assert_eq!(resume_backoff(1), Duration::from_secs(10));
         assert_eq!(resume_backoff(2), Duration::from_secs(20));
@@ -1573,8 +1768,8 @@ mod tests {
         let mk = |kind: SessionKind| {
             e.with_store(|st| {
                 st.create(NewSession {
-                    kind: Some(kind),
                     agent_session_id: (kind == SessionKind::Claude).then(|| "u".to_string()),
+                    kind: Some(kind),
                     argv: vec!["x".into()],
                     project: tmp.path().to_string_lossy().into(),
                     worktree: tmp.path().to_string_lossy().into(),
@@ -1860,5 +2055,135 @@ mod tests {
         // A store failure never fails the caller (unknown session id).
         e.event("fs-ghost", EventKind::System, "x");
         assert!(e.events("fs-ghost").unwrap().is_empty());
+    }
+
+    /// th-0f6126: a native harness (th code) reports its own turns; the
+    /// manifest's event_map drives state and the row reads VIA native.
+    #[test]
+    fn native_harness_events_map_through_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some("th-code".parse().unwrap()),
+                    agent_session_id: Some("fs-native".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let ev = |event: &str, payload: Value| HookEvent {
+            harness: "th-code".into(),
+            event: event.into(),
+            session_id: "fs-native".into(),
+            cwd: None,
+            payload,
+        };
+        e.hook(ev("turn_start", json!({}))).unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Working);
+        assert_eq!(row.state_source, "native");
+        e.hook(ev("turn_end", json!({}))).unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Idle);
+        assert!(row.unread);
+        // Claude's names mean nothing to a mapped harness.
+        e.hook(ev("UserPromptSubmit", json!({}))).unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Idle);
+        // A generic needs_you through the map carries reason + message.
+        let m = Manifest::parse(
+            "name=\"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[state.hooks.event_map]\nask=\"needs_you\"\nbye=\"ended\"\nmeh=\"ignore\"",
+        )
+        .unwrap();
+        let mk = |event: &str, payload: Value| HookEvent {
+            harness: "x".into(),
+            event: event.into(),
+            session_id: "s".into(),
+            cwd: None,
+            payload,
+        };
+        match mapped_outcome(&m, &mk("ask", json!({"reason":"permission","message":"rm -rf"}))) {
+            HookOutcome::NeedsYou(a) => {
+                assert_eq!(a.reason, "permission");
+                assert_eq!(a.detail.as_deref(), Some("rm -rf"));
+            }
+            other => panic!("{other:?}"),
+        }
+        match mapped_outcome(&m, &mk("ask", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))) {
+            HookOutcome::NeedsYou(a) => {
+                assert_eq!(a.reason, "question");
+                assert_eq!(a.detail.as_deref(), Some("Bash: ls"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(mapped_outcome(&m, &mk("bye", json!({}))), HookOutcome::Ended);
+        assert_eq!(mapped_outcome(&m, &mk("meh", json!({}))), HookOutcome::None);
+        assert_eq!(mapped_outcome(&m, &mk("Stop", json!({}))), HookOutcome::None, "unlisted ⇒ nothing");
+    }
+
+    /// th-0f6126: prefs persist in flow.db, order/hide the list, reach
+    /// `flow.hello` and broadcast `flow.harnesses`.
+    #[test]
+    fn harness_prefs_persist_order_and_hide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let names = |v: &[HarnessInfo]| v.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&e.harnesses(true).unwrap()), ["claude", "opencode", "codex", "th-code"]);
+        let mut rx = e.subscribe();
+        let all = e.set_harness_prefs(Some(vec!["th-code".into()]), Some(vec!["codex".into()])).unwrap();
+        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
+        assert!(all[3].hidden);
+        match rx.try_recv().unwrap() {
+            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            other => panic!("{other:?}"),
+        }
+        // Visible list + hello omit the hidden one; a partial PUT keeps the other half.
+        assert_eq!(names(&e.harnesses(false).unwrap()), ["th-code", "claude", "opencode"]);
+        match e.hello().unwrap() {
+            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            other => panic!("{other:?}"),
+        }
+        let all = e.set_harness_prefs(None, Some(vec![])).unwrap();
+        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
+        assert!(all.iter().all(|h| !h.hidden));
+        // Persisted: a fresh engine on the same db sees the order.
+        let e2 = engine(tmp.path());
+        assert_eq!(e2.harness_prefs().unwrap().order, vec!["th-code".to_string()]);
+        // Unknown names are refused, nothing changes.
+        let err = e.set_harness_prefs(None, Some(vec!["cursor".into()])).unwrap_err().to_string();
+        assert!(err.contains("`cursor` is not a known harness"), "{err}");
+        assert!(e.harness_prefs().unwrap().hidden.is_empty());
+        // A user manifest under the engine's home shows up with its origin.
+        let dir = tmp.path().join("home/.smooth/harnesses");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("aider.toml"),
+            "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+        )
+        .unwrap();
+        let all = e.harnesses(true).unwrap();
+        let aider = all.iter().find(|h| h.name == "aider").unwrap();
+        assert_eq!(aider.origin, "user");
+        assert!(!aider.installed);
+        assert!(aider.reason.as_deref().unwrap().contains("`aider` not found on PATH"));
+    }
+
+    /// th-0f6126: an unknown kind is refused before anything is created.
+    #[test]
+    fn new_session_refuses_an_unknown_harness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let err = e
+            .new_session(NewRequest {
+                kind: "aider".parse().unwrap(),
+                worktree: Some(tmp.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown harness kind `aider`"), "{err}");
+        assert!(e.list().unwrap().is_empty());
     }
 }
