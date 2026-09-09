@@ -16,7 +16,7 @@ final class MockServerUITests: FlowUITestCase {
         waitForState("fs-3033cccc") { $0 == "done" }
         waitForState("fs-shell001") { $0 == "idle" }
         XCTAssertTrue(app.staticTexts["sidebar.header"].label.contains("sessions"))
-        XCTAssertTrue(app.buttons["sidebar.needsYou"].exists, "needs-you pill for the permission request")
+        XCTAssertTrue(app.descendants(matching: .any)["sidebar.needsYou"].exists, "needs-you pill for the permission request")
     }
 
     func testSelectingSessionShowsSurfaceAndHeader() {
@@ -29,7 +29,9 @@ final class MockServerUITests: FlowUITestCase {
     func testInboxPermissionAllowFlipsSessionToWorking() {
         waitForState("fs-d3e842aa") { $0 == "approve" }
         app.typeKey("i", modifierFlags: .command)
-        let card = app.otherElements["inbox.card.fs-d3e842aa"]
+        XCTAssertTrue(app.windows["Inbox"].waitForExistence(timeout: 10), "⌘I opens the inbox window")
+        // The card is a SwiftUI container (AX group), so match by any type.
+        let card = app.windows["Inbox"].descendants(matching: .any)["inbox.card.fs-d3e842aa"]
         XCTAssertTrue(card.waitForExistence(timeout: 10), "permission card in the inbox")
         app.buttons["inbox.allow.fs-d3e842aa"].click()
         // The mock answers flow.approve with flow.session{state: working}: the card

@@ -92,7 +92,9 @@ class FlowUITestCase: XCTestCase {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: server)
         p.arguments = ["--addr", "127.0.0.1:0", "--workspace", ws.path, "--db", ws.appendingPathComponent("flow.db").path, "--token", token!, "--tmux-socket", sock]
-        p.environment = env.merging(["PATH": "\(bin.path):\(env["PATH"] ?? "/usr/bin:/bin")", "HOME": tmp.appendingPathComponent("home").path]) { $1 }
+        // xctrunner's PATH is the bare system one; the engine shells out to tmux (Homebrew).
+        let path = ([bin.path, "/opt/homebrew/bin", "/usr/local/bin"] + (env["PATH"] ?? "/usr/bin:/bin").split(separator: ":").map(String.init)).joined(separator: ":")
+        p.environment = env.merging(["PATH": path, "HOME": tmp.appendingPathComponent("home").path]) { $1 }
         p.standardOutput = FileHandle.nullDevice
         try p.run()
         processes.append(p)

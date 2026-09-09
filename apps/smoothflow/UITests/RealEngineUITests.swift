@@ -34,7 +34,8 @@ final class RealEngineUITests: FlowUITestCase {
         steer("/perm")
         waitForState(id) { $0 == "approve" }
         app.typeKey("i", modifierFlags: .command)
-        XCTAssertTrue(app.otherElements["inbox.card.\(id)"].waitForExistence(timeout: 10), "hook-reported permission in the inbox")
+        XCTAssertTrue(app.windows["Inbox"].waitForExistence(timeout: 10), "⌘I opens the inbox window")
+        XCTAssertTrue(app.windows["Inbox"].descendants(matching: .any)["inbox.card.\(id)"].waitForExistence(timeout: 10), "hook-reported permission in the inbox")
         app.buttons["inbox.allow.\(id)"].click()
         // fake-claude prints the long-polled hook reply verbatim.
         waitForSnapshot(id, containing: "\"behavior\":\"allow\"")
