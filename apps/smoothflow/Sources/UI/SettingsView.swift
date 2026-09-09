@@ -15,12 +15,16 @@ struct SettingsView: View {
     @State private var mode: DaemonManager.Mode = .child
 
     var body: some View {
+        // Each pane is an AX container (`children: .contain`) so its identifier
+        // names the pane and the buttons inside keep their own — without it the
+        // macOS 26 runner stamped `settings.pane.<x>` on EVERY child and
+        // `settings.phones.pair` never existed (th-2ecc1c).
         TabView {
-            PermissionsPane(permissions: permissions, daemon: daemon).accessibilityIdentifier("settings.pane.permissions").tabItem { Text("Permissions") }
-            attention.accessibilityIdentifier("settings.pane.attention").tabItem { Text("Attention") }
-            HarnessesPane(app: app).accessibilityIdentifier("settings.pane.harnesses").tabItem { Text("Harnesses") }
-            PhonesPane(app: app).accessibilityIdentifier("settings.pane.phones").tabItem { Text("Phones") }
-            daemonPane.accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
+            PermissionsPane(permissions: permissions, daemon: daemon).accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.permissions").tabItem { Text("Permissions") }
+            attention.accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.attention").tabItem { Text("Attention") }
+            HarnessesPane(app: app).accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.harnesses").tabItem { Text("Harnesses") }
+            PhonesPane(app: app).accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.phones").tabItem { Text("Phones") }
+            daemonPane.accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
         .classicTabs()
         .padding(16)
