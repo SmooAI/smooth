@@ -114,17 +114,17 @@ completes in ~4 s instead of never; a TERM-honoring daemon is gone in ~1 s.
 
 ### What the child daemon is started with
 
-| env                          | value                              | why                                                                                 |
-| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
-| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                       | agents run under the **app-owned** tmux server (the TCC story below)                |
-| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new  | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
-| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db` | never share Big Smooth's operator store                                             |
-| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`     | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
-| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                | Big Smooth may be running; we are a separate product on our own port                |
-| `SMOOTH_TAILSCALE_SERVE`     | `0`                                | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
-| `SMOOTH_RELAY_DEVICE_ID`     | `~/.smooth/smoothflow-relay-device-id` | its OWN relay identity — Big Smooth's is `~/.smooth/relay-device-id` (th-a1bb12) |
-| `SMOOTH_RELAY_LABEL`         | `<host> · SmoothFlow`              | what a phone's device list calls this daemon                                        |
-| `SMOOTH_RELAY_KIND`          | `flow`                             | relay presence kind: SmoothFlow phones prefer it, Big Smooth phones skip it         |
+| env                          | value                                  | why                                                                                 |
+| ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                           | agents run under the **app-owned** tmux server (the TCC story below)                |
+| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new      | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
+| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db`     | never share Big Smooth's operator store                                             |
+| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`         | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
+| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                    | Big Smooth may be running; we are a separate product on our own port                |
+| `SMOOTH_TAILSCALE_SERVE`     | `0`                                    | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+| `SMOOTH_RELAY_DEVICE_ID`     | `~/.smooth/smoothflow-relay-device-id` | its OWN relay identity — Big Smooth's is `~/.smooth/relay-device-id` (th-a1bb12)    |
+| `SMOOTH_RELAY_LABEL`         | `<host> · SmoothFlow`                  | what a phone's device list calls this daemon                                        |
+| `SMOOTH_RELAY_KIND`          | `flow`                                 | relay presence kind: SmoothFlow phones prefer it, Big Smooth phones skip it         |
 
 The token rides as `?token=` on the WebSocket and `X-Smooth-Token` on HTTP.
 
@@ -134,16 +134,16 @@ Big Smooth (`th up` / the Big Smooth app) and the SmoothFlow child are two
 `smooth-daemon` processes on one Mac. They must not share anything that names
 a machine-wide singleton. Every isolation knob, and what went wrong before it:
 
-| Resource          | Big Smooth                       | SmoothFlow child                                                                      | Without it                                                                                                     |
-| ----------------- | -------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| HTTP/WS port      | `:8899` app / `:4400` `th up`    | a free port per launch (`--addr 127.0.0.1:0`-style pick in `DaemonManager`)           | bind failure                                                                                                   |
-| single-instance   | `~/.smooth/daemon.lock`          | `SMOOTH_ALLOW_SECOND_DAEMON=1`                                                        | the child refuses to start                                                                                     |
-| operator store    | `~/.smooth/operator-storage.db`  | `SMOOTH_OPERATOR_DB=~/.smooth/smoothflow-operator.db`                                 | shared conversations + SQLite lock fights (th-2c8c1f)                                                          |
-| flow store        | `~/.smooth/flow.db`              | `SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`                                         | Big Smooth supervised our rows on its socket → "process vanished" (th-4f7866)                                  |
-| tmux server       | `tmux -L smooth-flow`            | `SMOOTH_FLOW_TMUX_SOCKET=smoothflow` (the app-owned server, TCC)                      | panes attributed to the wrong process                                                                          |
-| tailnet           | `tailscale serve` → `:443`       | `SMOOTH_TAILSCALE_SERVE=0`                                                            | the child re-pointed the tailnet port at itself                                                                |
-| `daemon.addr`     | written                          | not written (a `SMOOTH_ALLOW_SECOND_DAEMON` instance never advertises, #546)          | `th flow` and clients discovered the child instead of Big Smooth (th-3e6b1b)                                   |
-| relay identity    | `~/.smooth/relay-device-id`, `kind=daemon` | `SMOOTH_RELAY_DEVICE_ID` from `~/.smooth/smoothflow-relay-device-id`, `kind=flow`, label `<host> · SmoothFlow` | both dialed `relay.smoo.ai` as ONE device; presence flapped and phones landed on whichever connected last (th-a1bb12) |
+| Resource        | Big Smooth                                 | SmoothFlow child                                                                                               | Without it                                                                                                            |
+| --------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| HTTP/WS port    | `:8899` app / `:4400` `th up`              | a free port per launch (`--addr 127.0.0.1:0`-style pick in `DaemonManager`)                                    | bind failure                                                                                                          |
+| single-instance | `~/.smooth/daemon.lock`                    | `SMOOTH_ALLOW_SECOND_DAEMON=1`                                                                                 | the child refuses to start                                                                                            |
+| operator store  | `~/.smooth/operator-storage.db`            | `SMOOTH_OPERATOR_DB=~/.smooth/smoothflow-operator.db`                                                          | shared conversations + SQLite lock fights (th-2c8c1f)                                                                 |
+| flow store      | `~/.smooth/flow.db`                        | `SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`                                                                  | Big Smooth supervised our rows on its socket → "process vanished" (th-4f7866)                                         |
+| tmux server     | `tmux -L smooth-flow`                      | `SMOOTH_FLOW_TMUX_SOCKET=smoothflow` (the app-owned server, TCC)                                               | panes attributed to the wrong process                                                                                 |
+| tailnet         | `tailscale serve` → `:443`                 | `SMOOTH_TAILSCALE_SERVE=0`                                                                                     | the child re-pointed the tailnet port at itself                                                                       |
+| `daemon.addr`   | written                                    | not written (a `SMOOTH_ALLOW_SECOND_DAEMON` instance never advertises, #546)                                   | `th flow` and clients discovered the child instead of Big Smooth (th-3e6b1b)                                          |
+| relay identity  | `~/.smooth/relay-device-id`, `kind=daemon` | `SMOOTH_RELAY_DEVICE_ID` from `~/.smooth/smoothflow-relay-device-id`, `kind=flow`, label `<host> · SmoothFlow` | both dialed `relay.smoo.ai` as ONE device; presence flapped and phones landed on whichever connected last (th-a1bb12) |
 
 The relay id is minted once by the app (`RelayIdentity.load`, mode 600, same
 `daemon-<12 hex>` shape the daemon mints for itself) and passed down on every
