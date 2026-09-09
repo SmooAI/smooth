@@ -70,6 +70,10 @@ th harness unhide codex
 th harness order th-code claude    # these first, in this order; the rest follow
 th harness add ./aider.toml        # validate + copy into ~/.smooth/harnesses/aider.toml
 th harness add owner/repo[/subdir][#ref]   # same, from a GitHub repo's harness.toml / harness/<name>/harness.toml
+th harness add --agentic gemini [--binary gemini] [--docs <url>] [--iterations 3] [--force] [--install-unverified] [--model m]
+                                   # Big Smooth probes --help, drafts the manifest, VALIDATES it on a private engine
+                                   # (launch → idle, steer, kill+resume), iterates, installs, reports what it could not prove.
+                                   # Needs a provider: you're offered the Smoo AI Gateway or your own key (th-473294)
 ```
 
 `list`/`show` read the files directly (with the daemon's order/hide prefs
