@@ -134,6 +134,15 @@ class FlowUITestCase: XCTestCase {
                       "connected to \(addr): connection='\(label("sidebar.connection"))'")
     }
 
+    /// A Settings tab by its title. The grouped `TabView` exposes its tabs as
+    /// `Tab` elements on the macOS 26 runner and as radio buttons / buttons on
+    /// older systems (th-2ecc1c: the lane was red on every PR while the lookup
+    /// only knew the last two).
+    func settingsTab(_ title: String, in window: XCUIElement) -> XCUIElement {
+        let candidates = [window.tabs[title], window.radioButtons[title], window.buttons[title]]
+        return candidates.first(where: { $0.exists }) ?? window.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
+    }
+
     // MARK: waiting
 
     /// Poll `cond` on the main run loop until it holds or `timeout` passes.
