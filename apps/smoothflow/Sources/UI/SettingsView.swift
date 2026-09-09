@@ -22,6 +22,7 @@ struct SettingsView: View {
             PhonesPane(app: app).accessibilityIdentifier("settings.pane.phones").tabItem { Text("Phones") }
             daemonPane.accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
+        .classicTabs()
         .padding(16)
         .frame(width: 560, height: 440)
         .onAppear { mode = daemon.mode; permissions.refresh() }
@@ -276,4 +277,16 @@ final class SettingsWindowController: NSWindowController {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+}
+
+extension View {
+    /// The classic segmented tab strip. Under the macOS 26 SDK a plain `TabView`
+    /// becomes a window-toolbar tab bar, and in a titled window that has no
+    /// toolbar every tab collapses into a `»` overflow menu — the CI runner
+    /// (Xcode 26.6) showed an empty toolbar and `radioButtons["Daemon"]` never
+    /// existed (th-2ecc1c). Grouped tabs are radio buttons on every macOS.
+    @ViewBuilder
+    func classicTabs() -> some View {
+        if #available(macOS 15, *) { tabViewStyle(.grouped) } else { self }
+    }
 }

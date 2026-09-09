@@ -115,6 +115,14 @@ if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.payload.raw')" = "not json a
 out=$(printf '' | bash "$HOOK" SessionEnd 2>&1); rc=$?
 if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.event')" = "SessionEnd" ] && [ "$(tail -1 "$LOG" | jq -r '.body.cwd')" = "$PWD" ] && [ "$rc" = 0 ]; then ok "empty stdin still posts (cwd falls back to \$PWD)"; else bad "empty stdin (rc=$rc)"; fi
 
+# --- harness argument (th-4ad334: Codex reads the same hooks.json schema) ----------
+: >"$LOG"
+out=$(echo "$PAYLOAD" | bash "$HOOK" Stop codex 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.harness')" = "codex" ] && [ "$rc" = 0 ] && [ -z "$out" ]; then ok "second argument sets the harness (codex)"; else bad "harness argument (rc=$rc out='$out')"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | FLOW_HOOK_HARNESS=opencode bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.harness')" = "opencode" ] && [ "$rc" = 0 ]; then ok "FLOW_HOOK_HARNESS overrides the default"; else bad "FLOW_HOOK_HARNESS (rc=$rc)"; fi
+
 # --- PermissionRequest: decision passthrough --------------------------------------
 echo decide >"$MODE"
 out=$(echo "$PAYLOAD" | bash "$HOOK" PermissionRequest 2>/dev/null); rc=$?
