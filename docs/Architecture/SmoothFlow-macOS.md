@@ -367,6 +367,18 @@ What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
   The app never reads that file, but `th`-driven tooling on the same machine
   does; PR #546 stops the child from writing it. Until it lands, restore the
   file after running SmoothFlow.
+- **Two daemons, two supervisors.** On a Mac running both apps there are two
+  `smooth-daemon` children: Big Smooth's (the advertised one, typically `:8899`
+  or `:8787`) and SmoothFlow's (a second instance, random port, not advertised).
+  Each app supervises only the child it spawned. Big Smooth's side is
+  described in [`desktop/README.md`](../../desktop/README.md) ("Daemon
+  supervision", th-4b189c): exit → `~/Library/Logs/Big Smooth/daemon.log` +
+  respawn with backoff, `/api/mode` probed every 30s, tray line + About box.
+  The daemon's own tracing lands in `~/Library/Logs/Big Smooth/smooth-daemon.log`
+  via `SMOOTH_LOG_FILE`; SmoothFlow's child can be given the same env var to
+  get its own file. When "the daemon" looks dead, check which one — the port
+  and the log folder tell them apart (see the two-daemons note in the Big Smooth
+  desktop doc).
 - **The OTA loop end to end:** Check for Updates… → "SmoothFlow 0.2.1 is now
   available—you have 0.2.0" → Install Update → the 48 MB DMG downloads and
   the EdDSA signature verifies → "Ready to Install / Install and Relaunch" →

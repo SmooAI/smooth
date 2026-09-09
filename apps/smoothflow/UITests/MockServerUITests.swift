@@ -83,7 +83,7 @@ final class MockServerUITests: FlowUITestCase {
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.permissions"].waitForExistence(timeout: 10), "Permissions pane is the first tab")
-        let daemonTab = settings.radioButtons["Daemon"].exists ? settings.radioButtons["Daemon"] : settings.buttons["Daemon"]
+        let daemonTab = settingsTab("Daemon", in: settings)
         XCTAssertTrue(daemonTab.waitForExistence(timeout: 5), "Daemon tab")
         daemonTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.daemon"].waitForExistence(timeout: 10), "Daemon pane")
@@ -96,7 +96,7 @@ final class MockServerUITests: FlowUITestCase {
         app.typeKey(",", modifierFlags: .command)
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        let phonesTab = settings.radioButtons["Phones"].exists ? settings.radioButtons["Phones"] : settings.buttons["Phones"]
+        let phonesTab = settingsTab("Phones", in: settings)
         XCTAssertTrue(phonesTab.waitForExistence(timeout: 5), "Phones tab")
         phonesTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")

@@ -96,7 +96,14 @@ jobs:
 
             - name: Install system dependencies
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
+              # ubuntu-latest ships a google-chrome apt source that intermittently
+              # fails `apt-get update` with "Hash Sum mismatch" (2026-09-09: three
+              # runs in a row, the default branch included). Nothing here installs
+              # Chrome, so drop that source before updating instead of retrying
+              # a mirror we don't use (pearl th-79cef7).
+              run: |
+                  sudo rm -f /etc/apt/sources.list.d/google-chrome*
+                  sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
 
             # No apt on Windows — protoc is the only native build-time tool the
             # workspace needs there (tonic-build in smooth-scribe et al.).
