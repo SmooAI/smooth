@@ -384,6 +384,10 @@ enum ClientFrame: Equatable {
     case fanoutNew(prompt: String, pearlId: String?, candidates: [FanOutCandidate])
     case fanoutPick(fanOutId: String, winnerSessionId: String)
     case markRead(id: String)
+    /// th-e126cc / th-883ce9: finish a session for good — close its pearl,
+    /// remove the merged worktree + branch, drop the row. The engine refuses a
+    /// dirty or unmerged worktree (`flow.error`, nothing touched) unless `force`.
+    case close(id: String, closePearl: Bool, removeWorktree: Bool, force: Bool)
 
     var type: String {
         switch self {
@@ -400,6 +404,7 @@ enum ClientFrame: Equatable {
         case .fanoutNew: "flow.fanout.new"
         case .fanoutPick: "flow.fanout.pick"
         case .markRead: "flow.mark_read"
+        case .close: "flow.close"
         }
     }
 
@@ -419,13 +424,19 @@ enum ClientFrame: Equatable {
             ["prompt": prompt, "pearl_id": pearlId as Any, "candidates": candidates.map(\.fields)]
         case let .fanoutPick(fanOutId, winner): ["fan_out_id": fanOutId, "winner_session_id": winner]
         case let .markRead(id): ["id": id]
+        case let .close(id, closePearl, removeWorktree, force):
+            ["id": id, "close_pearl": closePearl, "remove_worktree": removeWorktree, "force": force]
         }
     }
 
-    func encode() -> Data {
+    /// `seq` is a client-chosen correlation id: the engine echoes it back as
+    /// `flow.error.ref`, which is how a refused `flow.close` finds its card.
+    /// Omitted from the wire when nil, so every frame without one is unchanged.
+    func encode(seq: Int? = nil) -> Data {
         var obj = fields
         obj["channel"] = "flow"
         obj["type"] = type
+        if let seq { obj["seq"] = seq }
         // `Any?` nils become NSNull so optional keys serialize as JSON null.
         let cleaned = obj.mapValues { v -> Any in if case Optional<Any>.none = v { return NSNull() } else { return v } }
         return (try? JSONSerialization.data(withJSONObject: cleaned)) ?? Data()
@@ -433,7 +444,7 @@ enum ClientFrame: Equatable {
 
     /// The wire text. The engine reads TEXT WebSocket messages only (a binary
     /// frame is silently skipped), so this is what actually goes on the socket.
-    func encodeText() -> String { String(decoding: encode(), as: UTF8.self) }
+    func encodeText(seq: Int? = nil) -> String { String(decoding: encode(seq: seq), as: UTF8.self) }
 }
 
 enum ApproveDecision: String { case allow, deny, allowSession = "allow_session" }

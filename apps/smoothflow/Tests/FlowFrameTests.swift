@@ -122,6 +122,7 @@ final class FlowFrameTests: XCTestCase {
             .approve(id: "a", requestId: "r", decision: .allowSession), .kill(id: "a", resume: true),
             .fanoutNew(prompt: "p", pearlId: nil, candidates: [FanOutCandidate(kind: "claude", model: "opus", label: "A")]),
             .fanoutPick(fanOutId: "fo", winnerSessionId: "a"), .markRead(id: "a"),
+            .close(id: "a", closePearl: true, removeWorktree: true, force: false),
         ]
         let types = try all.map { f -> String in
             let o = try fields(f)
@@ -129,7 +130,34 @@ final class FlowFrameTests: XCTestCase {
             return try XCTUnwrap(o["type"] as? String)
         }
         XCTAssertEqual(types, ["flow.attach", "flow.detach", "flow.input", "flow.resize", "flow.snapshot", "flow.new", "flow.send", "flow.approve",
-                               "flow.kill", "flow.fanout.new", "flow.fanout.pick", "flow.mark_read"])
+                               "flow.kill", "flow.fanout.new", "flow.fanout.pick", "flow.mark_read", "flow.close"])
+    }
+
+    /// th-883ce9: `flow.close {id, close_pearl, remove_worktree, force}` — the
+    /// engine's names, booleans always present (its serde defaults are off).
+    func testCloseFrameShape() throws {
+        let o = try fields(.close(id: "fs-1", closePearl: true, removeWorktree: false, force: true))
+        XCTAssertEqual(o["id"] as? String, "fs-1")
+        XCTAssertEqual(o["close_pearl"] as? Bool, true)
+        XCTAssertEqual(o["remove_worktree"] as? Bool, false)
+        XCTAssertEqual(o["force"] as? Bool, true)
+        XCTAssertNil(o["seq"], "no seq unless asked for")
+        XCTAssertEqual(Set(o.keys), ["channel", "type", "id", "close_pearl", "remove_worktree", "force"])
+    }
+
+    /// A client `seq` rides at the top level (what `client_seq` reads) and is
+    /// echoed by the engine as `flow.error.ref`; frames without one are unchanged.
+    func testSeqIsOptionalAndTopLevel() throws {
+        let tagged = try XCTUnwrap(JSONSerialization.jsonObject(with: ClientFrame.close(id: "a", closePearl: false, removeWorktree: true, force: false).encode(seq: 42)) as? [String: Any])
+        XCTAssertEqual(tagged["seq"] as? Int, 42)
+        XCTAssertEqual(tagged["type"] as? String, "flow.close")
+        XCTAssertTrue(ClientFrame.markRead(id: "a").encodeText(seq: 7).contains("\"seq\":7"))
+        XCTAssertEqual(ClientFrame.markRead(id: "a").encodeText(), ClientFrame.markRead(id: "a").encodeText(seq: nil))
+        XCTAssertFalse(ClientFrame.markRead(id: "a").encodeText().contains("seq"))
+        guard case let .error(ref, code, message) = try decode(#"{"type":"flow.error","ref":42,"code":"refused","message":"branch not merged"}"#) else { return XCTFail() }
+        XCTAssertEqual(ref, 42)
+        XCTAssertEqual(code, "refused")
+        XCTAssertEqual(message, "branch not merged")
     }
 
     func testClientFrameFieldShapes() throws {
