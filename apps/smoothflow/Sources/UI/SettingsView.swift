@@ -23,7 +23,9 @@ struct SettingsView: View {
             daemonPane.accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
         .padding(16)
-        .frame(width: 560, height: 440)
+        // Five tabs: below ~640pt NSTabView collapses the tab strip into a pop-up
+        // menu (and the UI tests lose the tab buttons) — keep the window wide.
+        .frame(width: 680, height: 440)
         .onAppear { mode = daemon.mode; permissions.refresh() }
     }
 
@@ -267,7 +269,7 @@ struct OnboardingView: View {
 @MainActor
 final class SettingsWindowController: NSWindowController {
     init(app: AppController) {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "SmoothFlow Settings"
         w.contentView = NSHostingView(rootView: SettingsView(app: app, permissions: app.permissions, daemon: app.daemon))
         w.center()

@@ -39,14 +39,27 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { !card.exists })
     }
 
+    /// Pick a Settings tab. NSTabView exposes the strip as radio buttons (or
+    /// buttons); when the strip overflows the window it becomes a pop-up menu.
+    private func selectTab(_ settings: XCUIElement, _ name: String) {
+        for candidate in [settings.radioButtons[name], settings.buttons[name], settings.tabs[name]] where candidate.waitForExistence(timeout: 2) {
+            candidate.click()
+            return
+        }
+        let popup = settings.popUpButtons.firstMatch
+        XCTAssertTrue(popup.waitForExistence(timeout: 5), "\(name) tab (no tab strip, no pop-up)")
+        popup.click()
+        let item = settings.menuItems[name].exists ? settings.menuItems[name] : app.menuItems[name]
+        XCTAssertTrue(item.waitForExistence(timeout: 5), "\(name) menu item")
+        item.click()
+    }
+
     func testSettingsPanesRender() {
         app.typeKey(",", modifierFlags: .command)
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.permissions"].waitForExistence(timeout: 10), "Permissions pane is the first tab")
-        let daemonTab = settings.radioButtons["Daemon"].exists ? settings.radioButtons["Daemon"] : settings.buttons["Daemon"]
-        XCTAssertTrue(daemonTab.waitForExistence(timeout: 5), "Daemon tab")
-        daemonTab.click()
+        selectTab(settings, "Daemon")
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.daemon"].waitForExistence(timeout: 10), "Daemon pane")
         XCTAssertTrue(settings.staticTexts["Restart daemon"].exists || settings.buttons["Restart daemon"].exists)
     }
@@ -57,9 +70,7 @@ final class MockServerUITests: FlowUITestCase {
         app.typeKey(",", modifierFlags: .command)
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        let phonesTab = settings.radioButtons["Phones"].exists ? settings.radioButtons["Phones"] : settings.buttons["Phones"]
-        XCTAssertTrue(phonesTab.waitForExistence(timeout: 5), "Phones tab")
-        phonesTab.click()
+        selectTab(settings, "Phones")
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")
         XCTAssertTrue(settings.staticTexts["Brent’s Pixel"].waitForExistence(timeout: 10), "seeded pairing is listed")
         settings.buttons["settings.phones.pair"].click()
