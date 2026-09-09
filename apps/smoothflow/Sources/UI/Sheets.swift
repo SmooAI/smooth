@@ -48,8 +48,8 @@ struct NewSessionSheet: View {
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }
-            TextField("Pearl id (th-xxxxxx) — the engine creates the worktree", text: $pearlId).font(.body.monospaced())
-            TextField("Worktree path (blank = derive from pearl / cwd)", text: $worktree).font(.body.monospaced())
+            TextField("Pearl id (th-xxxxxx) — the engine creates the worktree", text: $pearlId).font(Theme.mono(.body))
+            TextField("Worktree path (blank = derive from pearl / cwd)", text: $worktree).font(Theme.mono(.body))
             TextField("Title (optional)", text: $title)
             TextField("Prompt (optional)", text: $prompt, axis: .vertical).lineLimit(3...6)
             HStack {
@@ -110,7 +110,7 @@ struct FanOutSheet: View {
 
     private var compose: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Pearl id", text: $pearlId).font(.body.monospaced())
+            TextField("Pearl id", text: $pearlId).font(Theme.mono(.body))
             TextField("Prompt", text: $prompt, axis: .vertical).lineLimit(3...8)
             Text("CANDIDATES").font(.caption).foregroundStyle(Color(Theme.muted))
             ForEach(candidates.indices, id: \.self) { i in
@@ -119,7 +119,7 @@ struct FanOutSheet: View {
                     TextField("model", text: Binding(get: { candidates[i].model ?? "" }, set: { candidates[i].model = $0.nilIfEmpty })).frame(width: 140)
                     TextField("label", text: $candidates[i].label)
                     Button("−") { candidates.remove(at: i) }
-                }.font(.body.monospaced())
+                }.font(Theme.mono(.body))
             }
             Button("+ add") {
                 let k = HarnessPicker.defaultKind(store, includeShell: false)
@@ -140,13 +140,13 @@ struct FanOutSheet: View {
         let cands = (store.fanOutCandidates[f.id] ?? []).compactMap { store.sessions[$0] }
         return VStack(alignment: .leading, spacing: 10) {
             Text(f.prompt).font(.body)
-            if let b = f.baseCommit { Text("base: \(b)").font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)) }
+            if let b = f.baseCommit { Text("base: \(b)").font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)) }
             HStack(alignment: .top, spacing: 12) {
                 ForEach(Array(cands.enumerated()), id: \.element.id) { i, s in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack { StateDot(session: s); Text("\(Character(UnicodeScalar(65 + i)!)) · \(s.title)").font(.headline) }
                         Text(Theme.stateLabel(s) + " · " + Theme.relative(s.updatedAt)).font(.caption)
-                        Text(s.worktree).font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).lineLimit(1)
+                        Text(s.worktree).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)).lineLimit(1)
                         if let d = app.handoffs[s.id]?.handoff?.dirty { Text("\(d.count) files").font(.caption) }
                         HStack {
                             Button("Pick winner") { app.fanoutPick(fanOutId: f.id, winner: s.id); dismiss() }

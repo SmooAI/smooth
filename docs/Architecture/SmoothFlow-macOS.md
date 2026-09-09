@@ -266,6 +266,56 @@ build, so a rebuilt Debug app is asked again); after Allow the pane reads
 FDA the other way round. Attribution follows the app through the real
 engine's daemon → tmux → pane chain, exactly as the matrix predicted.
 
+## Terminal font (th-bcd819)
+
+The panes use **JetBrainsMono Nerd Font** (OFL, four faces in
+`Resources/Fonts`, ~10 MB), registered for the process at launch with
+`CTFontManagerRegisterFontsForURL(.process)` — nothing is installed for the
+user. libghostty already compiled in JetBrains Mono + a Symbols Nerd Font
+fallback, which is why starship glyphs rendered before; now the font is named,
+picked, and the same face carries the app's own monospace text (`Theme.mono`:
+pearl rail, activity, paths, sheets), so chrome and panes match.
+
+Precedence, highest first (`TerminalFont.overrides`):
+
+1. **Settings ▸ Terminal** — family (bundled first, then every installed
+   fixed-pitch family), size, ligatures. Saved to UserDefaults and applied live
+   to every open surface through `ghostty_app_update_config`.
+2. **The user's Ghostty config** — a `font-family` / `font-size` in
+   `~/.config/ghostty/config` (or the Application Support config) is left alone.
+   `config-file` includes are not followed.
+3. **The bundled default** at 13 pt.
+
+Ghostty treats `font-family` as a list (a repeat adds a fallback), so the
+overrides clear each key (`font-family =`) before setting it. Ligatures off
+becomes `font-feature = -calt/-liga/-dlig`.
+
+### The 0.2.1 blank-prompt bug was tmux, not fonts
+
+Brent's starship prompt rendered `_` for `❯` and blanks for the branch / cloud
+icons in the shipped 0.2.1 while Ghostty.app drew them. The release binary's
+embedded Symbols Nerd Font was fine (an isolated 0.2.1 copy fed the same
+glyphs through the mock rendered every one). The cause: a Finder-launched app
+has **no `LANG`**, the child daemon inherits that, and **tmux treats a client
+without a UTF-8 locale as a non-UTF-8 terminal and draws `_` for every
+non-ASCII cell** — the daemon's `tmux attach` is exactly such a client, and its
+bytes are what the pane shows. (A dev build launched from a terminal inherited
+`LANG`, which is why it never showed.) Two fixes: the engine passes `-u` to
+every tmux client (`smooth-flow/src/tmux.rs`), and the app gives the child
+`LANG` / `LC_CTYPE` (`DaemonManager.utf8Locale`, the user's locale when
+`/usr/share/locale` knows it, else `en_US.UTF-8`) so agents' shells speak UTF-8
+too. `GlyphUITests` runs the engine with no locale and asserts the streamed
+`flow.output` carries `❯ \u{e0a0} ☁` intact.
+
+The **theme** not applying was separate and older: `theme = …` resolves under
+libghostty's resources dir, which Ghostty.app sets for itself and SmoothFlow
+never did. The bundle now carries `Contents/Resources/ghostty/themes` (Ghostty
+1.3.1's set, MIT) and `GhosttyRuntime` exports `GHOSTTY_RESOURCES_DIR` before
+`ghostty_init` (an explicit env value is respected; an installed Ghostty.app's
+dir is the fallback).
+
+![terminal font](assets/smoothflow/terminal-font.png)
+
 ## Attention → notifications
 
 `AttentionNotifier.notification(for:settings:)` is a pure map from a session

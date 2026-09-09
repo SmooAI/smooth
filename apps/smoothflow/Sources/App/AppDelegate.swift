@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any surface or view asks for a font (th-bcd819).
+        TerminalFont.registerBundled()
         NSApp.mainMenu = buildMenu()
         installStatusItem()
         app.start()
