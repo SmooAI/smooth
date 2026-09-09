@@ -80,7 +80,15 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         connect()
     }
 
+    /// Take the fleet down with the app: disconnect, stop the child daemon
+    /// (bounded — see `DaemonManager.stop`), kill the app-owned tmux server.
+    /// Idempotent: `applicationShouldTerminate` runs it, and
+    /// `applicationWillTerminate` runs it again for the paths that skip the
+    /// former (a SIGTERM to the app, a forced logout).
+    private(set) var didShutdown = false
     func shutdown() {
+        guard !didShutdown else { return }
+        didShutdown = true
         client.disconnect()
         daemon.stop()
         if UserDefaults.standard.object(forKey: "tmuxOwnedByApp") as? Bool ?? true { daemon.stopTmuxServer() }
