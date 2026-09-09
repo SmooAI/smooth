@@ -47,17 +47,13 @@ xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug
 `node` is missing. Each test gets its own temp HOME, flow.db and tmux socket
 (`flow-ui-<pid>`), torn down with the test; nothing touches `~/.smooth`.
 
-Two local preconditions, both enforced by the harness rather than assumed:
+**Quit SmoothFlow.app first.** `XCUIApplication.launch()` kills any running
+instance of `ai.smoo.smoothflow` — i.e. your real app. The harness skips with
+that message instead of taking it down.
 
-- **Quit SmoothFlow.app first.** `XCUIApplication.launch()` kills any running
-  instance of `ai.smoo.smoothflow` — i.e. your real app. The harness skips
-  with that message instead of taking it down.
-- **Accessibility trust for the runner.** `xctrunner` is spawned by
-  `testmanagerd`, not your shell, so it does not inherit the terminal's
-  Accessibility grant. Without it every element reads back with an empty
-  label and the connection assertion fails at launch. Grant System Settings →
-  Privacy & Security → Accessibility to Xcode (and Xcode Helper), or run the
-  suite from Xcode once and accept the prompt. CI runners have it.
+Reading text: on macOS an `AXStaticText` carries its string in `value`, not
+`label` (`label` is the AXDescription, usually empty) — `FlowUITestCase.label(_:)`
+reads `value` first. Match elements by identifier, never by copy.
 
 ## CI
 

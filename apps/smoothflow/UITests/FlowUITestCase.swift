@@ -126,7 +126,7 @@ class FlowUITestCase: XCTestCase {
         app = a
         XCTAssertTrue(app.windows["SmoothFlow"].waitForExistence(timeout: 20), "main window")
         XCTAssertTrue(waitUntil(timeout: 20) { self.label("sidebar.connection").hasPrefix("daemon connected") },
-                      "connected to \(addr): connection='\(label("sidebar.connection"))' texts=\(app.staticTexts.allElementsBoundByIndex.prefix(30).map(\.label))")
+                      "connected to \(addr): connection='\(label("sidebar.connection"))'")
     }
 
     // MARK: waiting
@@ -142,7 +142,13 @@ class FlowUITestCase: XCTestCase {
         return cond()
     }
 
-    func label(_ id: String) -> String { app.staticTexts[id].exists ? app.staticTexts[id].label : "" }
+    /// The text of a static text. On macOS an AXStaticText carries its string in
+    /// `value`, not `label` (label is the AXDescription, usually empty).
+    func label(_ id: String) -> String {
+        let e = app.staticTexts[id]
+        guard e.exists else { return "" }
+        return (e.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? e.label
+    }
 
     func waitForState(_ sessionId: String, timeout: TimeInterval = 20, _ predicate: @escaping (String) -> Bool) {
         let ok = waitUntil(timeout: timeout) { predicate(self.label("sidebar.state.\(sessionId)")) }
