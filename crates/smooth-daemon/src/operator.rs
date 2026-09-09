@@ -1270,7 +1270,16 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // `:8788`); without this a double-clicked app defaults to `:8787` and loads
     // the wrong app. Best-effort: an unwritable `~/.smooth` just falls back to
     // the client's own default. (th-8af70d)
-    persist_daemon_addr(&server.addr().to_string());
+    // …but only the PRIMARY daemon advertises. A deliberate second instance
+    // (SMOOTH_ALLOW_SECOND_DAEMON=1: the SmoothFlow app's child daemon, a test
+    // daemon) must not repoint `th`, the hooks and Big Smooth's own clients at
+    // itself — that is exactly what happened every time SmoothFlow launched
+    // (pearl th-3e6b1b).
+    if advertise_daemon_addr(crate::single_instance::allow_second()) {
+        persist_daemon_addr(&server.addr().to_string());
+    } else {
+        tracing::info!(addr = %server.addr(), "second daemon instance — not advertising in ~/.smooth/daemon.addr");
+    }
 
     // Reachability: if Tailscale is present and the node is up, expose the daemon
     // over the user's *tailnet* via `tailscale serve` (never funnel — tailnet-
@@ -1342,6 +1351,13 @@ fn persist_daemon_addr(addr: &str) {
     }
 }
 
+/// Whether this instance may write `~/.smooth/daemon.addr`. Only the primary
+/// (single-instance-locked) daemon advertises; a second instance is by
+/// definition not the one `th` and the hooks should discover. (th-3e6b1b)
+const fn advertise_daemon_addr(second_instance: bool) -> bool {
+    !second_instance
+}
+
 /// Pure over its dir so it's testable without touching the real `$HOME`. Writes
 /// `<dir>/daemon.addr` (mode 600 on unix) and returns the path.
 fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<std::path::PathBuf> {
@@ -1354,6 +1370,15 @@ fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_primary_daemon_advertises_its_addr() {
+        assert!(advertise_daemon_addr(false), "the single-instance daemon must advertise");
+        assert!(
+            !advertise_daemon_addr(true),
+            "a SMOOTH_ALLOW_SECOND_DAEMON instance must not repoint clients (th-3e6b1b)"
+        );
+    }
 
     #[tokio::test]
     async fn provider_registers_remember_and_recall_tools() {

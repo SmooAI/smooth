@@ -864,7 +864,16 @@ impl BigSmoothClient {
             return Ok(());
         }
 
-        // Try to start Big Smooth
+        // Try to start Big Smooth — only when we are aimed at the port `th up`
+        // binds. Any other address (SMOOTH_URL, an advertised daemon.addr that
+        // went stale) would just spawn a stray daemon on :4400 that this client
+        // never connects to (th-9d4b09).
+        if !autostart_serves(&self.url) {
+            anyhow::bail!(
+                "Big Smooth is not running at {} (nothing listening; not auto-starting a daemon on another port)",
+                self.url
+            );
+        }
         let th_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("th"));
         let _child = tokio::process::Command::new(&th_bin)
             .arg("up")
@@ -883,6 +892,15 @@ impl BigSmoothClient {
 
         anyhow::bail!("Big Smooth failed to start within 10 seconds")
     }
+}
+
+/// Whether `th up` (loopback, port 4400) would satisfy a client aimed at `url`.
+fn autostart_serves(url: &str) -> bool {
+    let Some(hostport) = url.split("://").nth(1).and_then(|s| s.split('/').next()) else {
+        return false;
+    };
+    let (host, port) = hostport.rsplit_once(':').unwrap_or((hostport, "80"));
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]") && port == "4400"
 }
 
 impl std::fmt::Debug for BigSmoothClient {
@@ -1170,6 +1188,17 @@ mod tests {
         // Trailing slash stripped
         let client2 = BigSmoothClient::new("http://localhost:4400/");
         assert_eq!(client2.url, "http://localhost:4400");
+    }
+
+    /// th-9d4b09: auto-start only when `th up`'s :4400 is what we are aimed at.
+    #[test]
+    fn autostart_only_for_the_default_loopback_port() {
+        assert!(autostart_serves("http://localhost:4400"));
+        assert!(autostart_serves("http://127.0.0.1:4400/"));
+        assert!(!autostart_serves("http://127.0.0.1:47432"), "a private daemon's port");
+        assert!(!autostart_serves("http://127.0.0.1:8899"), "the Big Smooth app's port");
+        assert!(!autostart_serves("http://smoo-hub:4400"), "another host");
+        assert!(!autostart_serves("nonsense"));
     }
 
     #[test]

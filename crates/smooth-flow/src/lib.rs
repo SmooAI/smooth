@@ -17,5 +17,5 @@ pub mod store;
 pub mod tmux;
 
 pub use engine::{Engine, EngineConfig, HookReply, NewRequest};
-pub use protocol::{ClientFrame, DaemonInfo, Decision, HookEvent, ServerFrame};
+pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ServerFrame};
 pub use store::{Attention, FanOut, FlowStore, Session, SessionKind, SessionState};

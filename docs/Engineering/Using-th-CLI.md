@@ -1132,9 +1132,9 @@ Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooa
 
 ```bash
 th up                                              # boot Smooth platform (host daemon)
-th down                                            # stop
+th down                                            # stop — the daemon and its whole process tree, verified (th-eed3de)
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
+th run <pearl-id | "task text">                    # one headless turn on Big Smooth (title+description of the pearl, or the text); a daemon that is down or refuses = non-zero exit
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
@@ -1214,6 +1214,7 @@ th flow send <id> "also add a regression test"           # steer: bracketed-past
 th flow inbox                                            # sessions that need you or finished unread
 th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
 th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus

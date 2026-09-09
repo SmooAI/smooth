@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.45.2
+
+### Patch Changes
+
+- ad1c4a5: SmoothFlow macOS: the ghostty clipboard callbacks no longer `assumeIsolated` on the main actor unconditionally. Ghostty's renderer/IO threads can invoke runtime callbacks (the source of the 2026-09-08 SIGTRAP crash report); they now hop to main when off it, matching the action callback fix in #527.
+
+## 0.45.1
+
+### Patch Changes
+
+- 9da2021: SmoothFlow macOS UI tests (th-a58a97): a `SmoothFlowUITests` XCUITest target that drives the built app against `mock/server.mjs` and against the real flow engine (`flow_e2e_server` + `fake-claude`) — sidebar states, surface + header on select, inbox permission Allow, steer → hooks → idle, hook-reported permission answered from the inbox, Kill & Resume relaunching with `--resume`, settings panes. Accessibility identifiers on the shell's views, `SMOOTHFLOW_UI_TEST=1` keeps Sparkle quiet, and `smoothflow-mac.yml` runs both suites on PR with GhosttyKit cached.
+
 ## 0.45.0
 
 ### Minor Changes

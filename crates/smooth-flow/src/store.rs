@@ -226,6 +226,15 @@ pub struct Session {
     /// from before th-d33afa ⇒ the daemon's default socket.
     #[serde(default)]
     pub tmux_socket: Option<String>,
+    /// The daemon that created the row and supervises it (th-4f7866): the
+    /// tmux socket name that daemon was configured with (`tmux::socket_name`
+    /// at creation), which is stable across its restarts. Distinct from
+    /// `tmux_socket` — `th flow new --tmux-socket smoothflow` through the
+    /// default daemon lands the pane on the app's server but is still owned
+    /// (supervised) by the default daemon. `None` on rows from before this
+    /// column ⇒ owned by whichever daemon's socket matches `tmux_socket`.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// How `state` is derived (th-5c5457): `hooks` once the harness has
     /// reported one hook event, else `inferred` (pane scraping).
     #[serde(default = "inferred")]
@@ -275,6 +284,7 @@ pub struct NewSession {
     pub argv: Vec<String>,
     pub tmux_session: Option<String>,
     pub tmux_socket: Option<String>,
+    pub owner: Option<String>,
     pub fan_out_id: Option<String>,
 }
 
@@ -378,7 +388,8 @@ impl FlowStore {
                  exit_code        INTEGER,
                  unread           INTEGER NOT NULL DEFAULT 0,
                  tmux_socket      TEXT,
-                 state_source     TEXT NOT NULL DEFAULT 'inferred'
+                 state_source     TEXT NOT NULL DEFAULT 'inferred',
+                 owner            TEXT
              );
              CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_session_id);
              CREATE INDEX IF NOT EXISTS sessions_fanout_idx ON sessions(fan_out_id);
@@ -431,6 +442,14 @@ impl FlowStore {
             conn.execute("ALTER TABLE sessions ADD COLUMN state_source TEXT NOT NULL DEFAULT 'inferred'", [])
                 .context("add state_source")?;
         }
+        // th-4f7866: the supervising daemon's identity.
+        let has_owner = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'owner'")?
+            .exists([])
+            .context("probe owner column")?;
+        if !has_owner {
+            conn.execute("ALTER TABLE sessions ADD COLUMN owner TEXT", []).context("add owner")?;
+        }
         Ok(Self { conn })
     }
 
@@ -463,6 +482,7 @@ impl FlowStore {
             argv: serde_json::from_str(&argv).unwrap_or_default(),
             tmux_session: row.get("tmux_session")?,
             tmux_socket: row.get("tmux_socket")?,
+            owner: row.get("owner")?,
             state_source: row.get("state_source")?,
             pid: row.get::<_, Option<i64>>("pid")?.and_then(|p| u32::try_from(p).ok()),
             pid_start: row.get("pid_start")?,
@@ -489,8 +509,8 @@ impl FlowStore {
         self.conn
             .execute(
                 "INSERT INTO sessions (id, kind, title, project, worktree, branch, pearl_id, agent_session_id, argv, tmux_session,
-                                       state, fan_out_id, created_at, updated_at, tmux_socket)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13)",
+                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14)",
                 params![
                     id,
                     kind.as_str(),
@@ -505,6 +525,7 @@ impl FlowStore {
                     new.fan_out_id,
                     now.to_rfc3339(),
                     new.tmux_socket,
+                    new.owner,
                 ],
             )
             .context("insert session")?;
@@ -1002,6 +1023,7 @@ mod tests {
         let st = FlowStore::open(&path).unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().tmux_socket, None);
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "inferred", "th-5c5457 column migrated too");
+        assert_eq!(st.get("fs-old").unwrap().unwrap().owner, None, "th-4f7866 column migrated too");
         st.set_state_source("fs-old", "hooks").unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "hooks");
         let st2 = FlowStore::open(&path).unwrap(); // idempotent
@@ -1010,10 +1032,13 @@ mod tests {
                 project: "/p".into(),
                 worktree: "/p".into(),
                 tmux_socket: Some("smoothflow".into()),
+                owner: Some("smooth-flow".into()),
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(st2.get(&s.id).unwrap().unwrap().tmux_socket.as_deref(), Some("smoothflow"));
+        let s = st2.get(&s.id).unwrap().unwrap();
+        assert_eq!(s.tmux_socket.as_deref(), Some("smoothflow"));
+        assert_eq!(s.owner.as_deref(), Some("smooth-flow"), "the creating daemon is recorded");
     }
 
     #[test]
