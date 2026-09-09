@@ -1,0 +1,43 @@
+# fake-agent — hooks state, pre-assigned session id (the Claude Code shape).
+# Installed into ~/.smooth/harnesses/ of a test HOME by the e2e harness
+# (crates/smooth-daemon/tests/flow_e2e). The binary is tests/fixtures/fake-agent,
+# copied to ~/.local/bin/fake-agent so `prefer_paths` resolves it under any PATH.
+name = "fake-agent"
+display_name = "Fake Agent (hooks)"
+
+[binary]
+names = ["fake-agent"]
+prefer_paths = [".local/bin/fake-agent"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[launch.env]
+SMOOTH_URL = "{daemon_url}"
+FAKE_AGENT_MODE = "hooks"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "none — fake-agent posts to /api/flow/hooks itself"
+
+[state.scrape]
+working = ["esc to interrupt"]
+idle = ["(?m)^> ?$"]
+needs_you = ["do you want to proceed"]
+usage_limit = ["usage limit", "limit will reset"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 1000

@@ -1034,6 +1034,11 @@ impl Engine {
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
             }
+            HookOutcome::Started => {
+                if s.state == SessionState::Starting {
+                    self.set_state(&s.id, SessionState::Idle, None)?;
+                }
+            }
             HookOutcome::Ended | HookOutcome::None => {}
         }
         Ok(HookReply::Immediate(json!({})))
@@ -1099,12 +1104,24 @@ impl Engine {
             }
             return Ok(());
         }
+        // Rule 4 parked this row (`held`: its harness session is owned by a
+        // live pid). Its tmux session is gone, which is NOT an unexpected
+        // death — a human unholds it (`kill --resume` once the holder is
+        // gone). Without this the tick re-scheduled a resume every backoff,
+        // the guard refused it again, and the row flapped starting ↔ held
+        // forever (th-8e3087).
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+            return Ok(());
+        }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
         let sock = socket_of(s);
-        if !tmux::session_alive(&sock, t) {
+        let alive = tmux::session_alive(&sock, t);
+        let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
+        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
+        if !alive {
             return self.on_death(s, None);
         }
-        if let Some(code) = tmux::pane_exit_status(&sock, t)? {
+        if let Some(code) = exit? {
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
@@ -1798,9 +1815,23 @@ mod tests {
             cwd: None,
             payload,
         };
+        // th-8e3087: SessionStart on a starting row ⇒ idle, not unread — a
+        // resumed / prompt-less harness is otherwise `starting` for good.
+        assert_eq!(s.state, SessionState::Starting);
+        e.hook(ev("SessionStart", json!({"source":"resume"}))).unwrap();
+        let up = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(up.state, SessionState::Idle);
+        assert!(!up.unread, "nothing happened yet");
+        assert_eq!(up.state_source, "hooks");
+        while rx.try_recv().is_ok() {}
+
         e.hook(ev("UserPromptSubmit", json!({}))).unwrap();
         assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working);
         assert!(matches!(rx.try_recv().unwrap(), ServerFrame::Session { .. }));
+        // …and a SessionStart mid-turn changes nothing.
+        e.hook(ev("SessionStart", json!({}))).unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working);
+        while rx.try_recv().is_ok() {}
 
         e.hook(ev("Stop", json!({}))).unwrap();
         let after = e.get(&s.id).unwrap().unwrap();
@@ -2074,11 +2105,21 @@ mod tests {
         e.with_store(|st| st.set_process(&holder.id, Some("x"), Some(me), proc::start_time(me), &["claude".into()]))
             .unwrap();
         let victim = mk();
+        // The victim's own pane is gone (that is why it is being resumed).
+        e.with_store(|st| st.set_process(&victim.id, Some("gone-pane"), Some(4_000_000), None, &["claude".into()]))
+            .unwrap();
         let out = e.relaunch(&victim).unwrap();
         assert_eq!(out.state, SessionState::NeedsYou);
-        let att = out.attention.unwrap();
+        let att = out.attention.clone().unwrap();
         assert_eq!(att.reason, "held");
         assert!(att.detail.unwrap().contains(&me.to_string()));
+        // th-8e3087: the supervisor leaves a held row alone — its dead tmux
+        // session is not an unexpected death to schedule a resume for.
+        e.supervise_tick().unwrap();
+        let still = e.get(&victim.id).unwrap().unwrap();
+        assert_eq!(still.state, SessionState::NeedsYou, "{still:?}");
+        assert_eq!(still.attention.as_ref().map(|a| a.reason.as_str()), Some("held"));
+        assert!(e.rt().relaunch_at.get(&victim.id).is_none(), "no resume scheduled for a held row");
     }
 
     #[test]
@@ -2409,16 +2450,18 @@ mod tests {
         // A user manifest under the engine's home shows up with its origin.
         let dir = tmp.path().join("home/.smooth/harnesses");
         std::fs::create_dir_all(&dir).unwrap();
+        // A binary name nothing installs, so the assertion holds on a
+        // machine that happens to have the real tool (th-8e3087 hit `aider`).
         std::fs::write(
             dir.join("aider.toml"),
-            "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+            "name=\"aider\"\n[binary]\nnames=[\"aider-not-installed-here\"]\n[launch]\nargv=[\"{prompt}\"]\n",
         )
         .unwrap();
         let all = e.harnesses(true).unwrap();
         let aider = all.iter().find(|h| h.name == "aider").unwrap();
         assert_eq!(aider.origin, "user");
         assert!(!aider.installed);
-        assert!(aider.reason.as_deref().unwrap().contains("`aider` not found on PATH"));
+        assert!(aider.reason.as_deref().unwrap().contains("`aider-not-installed-here` not found on PATH"));
     }
 
     /// th-0f6126: an unknown kind is refused before anything is created.

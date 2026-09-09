@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# fake-agent — a scripted coding-agent CLI for SmoothFlow e2e tests
+# (pearl th-8e3087). The engine launches it through a HARNESS MANIFEST
+# (tests/fixtures/harnesses/*.toml → ~/.smooth/harnesses/ in the test HOME),
+# exactly the way it launches claude / codex / opencode, and it behaves like a
+# real harness everywhere the engine can tell: argv, hook posts, the
+# permission long-poll, the usage-limit banner, exit codes. No LLM, no network
+# beyond the flow daemon. A superset of `fake-claude` (the macOS lane's stub).
+#
+# Contract (docs/Engineering/SmoothFlow-Testing.md):
+#   argv     `--session-id <id>` (preassigned), `--resume <id>` (resume=1),
+#            `--model <m>`; the first positional is a PROMPT: commands
+#            separated by `;`, run after the start-up script.
+#   daemon   `$SMOOTH_URL` (the manifest's `{daemon_url}`), else
+#            `./.flow-e2e-addr` in the cwd, else `$HOME/.smooth/daemon.addr`.
+#   mode     `$FAKE_AGENT_MODE`: hooks (default) — Claude Code's event names;
+#            native — th code's `turn_start`/`turn_end`/`ask`/`bye` (the
+#            manifest's event_map); scrape — posts NOTHING, paints the pane
+#            so the engine's scraper drives state.
+#   id       learned mode (no --session-id): `./.fake-agent-session-id` in
+#            the cwd, else `$FAKE_AGENT_SESSION_ID`, else a fresh uuid — the
+#            first hook binds it to the row by cwd, like opencode/codex.
+#   script   `./.fake-agent-script` — one command per line, run on EVERY
+#            start (fresh and resumed) before the prompt. How a test makes a
+#            relaunch crash again, or a resumed agent do work.
+#   stdin    one command per line (what `flow.send` pastes):
+#              /work <text>   a turn: working → idle
+#              /perm          ask permission; prints `decision: <reply>`
+#              /ask <text>    a question notification (needs_you · question)
+#              /limit [time]  the usage-limit banner (default `11:59pm`)
+#              /exit [code]   SessionEnd / bye, then exit (default 0)
+#              /crash [code]  exit with no hook at all (default 3)
+#              /sleep <secs>
+#              anything else  echoed back as `echo: <line>`
+#   log      `$FAKE_AGENT_LOG` (default `./.fake-agent.log`): one line per
+#            launch (`argv …`), hook (`hook <Event> → <reply>`) and command.
+#   screen   `fake-agent ready sid=<id> resume=<0|1> mode=<mode>` on boot
+#            (proves a relaunch used `--resume`), then `> ` after each line.
+set -u
+
+sid=""
+resume=0
+prompt=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --session-id) sid="$2"; shift 2 ;;
+        --resume) sid="$2"; resume=1; shift 2 ;;
+        --model) shift 2 ;;
+        --*) shift ;;
+        *) if [ -z "$prompt" ]; then prompt="$1"; fi; shift ;;
+    esac
+done
+
+mode="${FAKE_AGENT_MODE:-hooks}"
+harness="${FAKE_AGENT_HARNESS:-fake-agent}"
+log="${FAKE_AGENT_LOG:-./.fake-agent.log}"
+
+if [ -z "$sid" ]; then
+    if [ -r ./.fake-agent-session-id ]; then
+        sid="$(tr -d '[:space:]' <./.fake-agent-session-id)"
+    elif [ -n "${FAKE_AGENT_SESSION_ID:-}" ]; then
+        sid="$FAKE_AGENT_SESSION_ID"
+    else
+        sid="learned-$(date +%s)-$$"
+    fi
+fi
+
+addr="${SMOOTH_URL:-}"
+[ -n "$addr" ] || addr="$(cat ./.flow-e2e-addr 2>/dev/null || cat "$HOME/.smooth/daemon.addr" 2>/dev/null || true)"
+addr="$(printf '%s' "$addr" | tr -d '[:space:]')"
+case "$addr" in
+    http://* | https://*) ;;
+    *) addr="http://$addr" ;;
+esac
+addr="${addr%/}"
+
+logline() { printf '%s\n' "$*" >>"$log" 2>/dev/null || true; }
+logline "argv sid=$sid resume=$resume mode=$mode model_prompt=[$prompt]"
+
+# hook <Event> <payload-json> [timeout-s] — prints the daemon's reply body.
+# Scrape mode never posts: the engine must learn everything from the pane.
+hook() {
+    if [ "$mode" = scrape ]; then
+        return 0
+    fi
+    local reply
+    reply="$(curl -sS -m "${3:-5}" -X POST -H 'Content-Type: application/json' \
+        --data-binary "{\"harness\":\"$harness\",\"event\":\"$1\",\"session_id\":\"$sid\",\"cwd\":\"$PWD\",\"payload\":$2}" \
+        "$addr/api/flow/hooks" 2>/dev/null)"
+    logline "hook $1 → ${reply:-<none>}"
+    printf '%s' "$reply"
+}
+
+json_str() {
+    # Minimal JSON string escaping for the text we generate.
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# The scraper's "working" marker is painted on its own line and ERASED when
+# the turn ends, so the engine's last-12-lines rule sees an idle pane again.
+paint_working() { printf 'Thinking... (esc to interrupt)\n'; }
+erase_working() { printf '\033[1A\r\033[2K'; }
+
+run_cmd() {
+    local line="$1"
+    logline "cmd $line"
+    case "$line" in
+        /work*)
+            local text="${line#/work}"
+            text="${text# }"
+            case "$mode" in
+                native)
+                    hook turn_start '{}' >/dev/null
+                    sleep "${FAKE_AGENT_WORK_SECS:-0}"
+                    hook turn_end "{\"message\":\"done: $(json_str "$text")\"}" >/dev/null
+                    ;;
+                scrape)
+                    paint_working
+                    sleep "${FAKE_AGENT_WORK_SECS:-3}"
+                    erase_working
+                    ;;
+                *)
+                    hook UserPromptSubmit "{\"prompt\":\"$(json_str "$text")\"}" >/dev/null
+                    hook PreToolUse '{"tool_name":"Bash","tool_input":{"command":"echo hi"}}' >/dev/null
+                    sleep "${FAKE_AGENT_WORK_SECS:-0}"
+                    hook PostToolUse '{"tool_name":"Bash","tool_response":{"stdout":"hi"}}' >/dev/null
+                    hook Stop "{\"last_assistant_message\":\"done: $(json_str "$text")\"}" >/dev/null
+                    ;;
+            esac
+            printf 'worked: %s\n' "$text"
+            ;;
+        /perm*)
+            case "$mode" in
+                native)
+                    hook ask '{"reason":"permission","message":"run git push?"}' >/dev/null
+                    printf 'asked\n'
+                    ;;
+                scrape)
+                    printf 'Bash(git push)\nDo you want to proceed?\n > 1. Yes\n   2. Yes, and don'"'"'t ask again\n   3. No (esc)\n'
+                    local key
+                    IFS= read -r -s -n1 key || key=""
+                    case "$key" in
+                        1) printf 'decision: allow\n' ;;
+                        2) printf 'decision: allow_session\n' ;;
+                        *) printf 'decision: deny\n' ;;
+                    esac
+                    ;;
+                *)
+                    local reply
+                    reply="$(hook PermissionRequest '{"tool_name":"Bash","tool_input":{"command":"git push"}}' 130)"
+                    printf 'decision: %s\n' "$reply"
+                    ;;
+            esac
+            ;;
+        /ask*)
+            local text="${line#/ask}"
+            text="${text# }"
+            if [ "$mode" = native ]; then
+                hook ask "{\"reason\":\"question\",\"message\":\"$(json_str "$text")\"}" >/dev/null
+            else
+                hook Notification "{\"notification_type\":\"idle_prompt\",\"message\":\"$(json_str "$text")\"}" >/dev/null
+            fi
+            printf 'asked: %s\n' "$text"
+            ;;
+        /limit*)
+            local at="${line#/limit}"
+            at="${at# }"
+            printf "You've hit your usage limit. Your limit will reset at %s\n" "${at:-11:59pm}"
+            ;;
+        /exit*)
+            local code="${line#/exit}"
+            code="${code// /}"
+            if [ "$mode" = native ]; then
+                hook bye '{}' >/dev/null
+            else
+                hook SessionEnd '{"reason":"exit"}' >/dev/null
+            fi
+            logline "exit ${code:-0}"
+            exit "${code:-0}"
+            ;;
+        /crash*)
+            local code="${line#/crash}"
+            code="${code// /}"
+            logline "crash ${code:-3}"
+            exit "${code:-3}"
+            ;;
+        /sleep*)
+            local secs="${line#/sleep}"
+            sleep "${secs// /}"
+            ;;
+        *)
+            printf 'echo: %s\n' "$line"
+            ;;
+    esac
+}
+
+if [ "$mode" = native ]; then
+    : # th code has no SessionStart; its first report is turn_start.
+else
+    hook SessionStart "{\"source\":\"$([ "$resume" = 1 ] && echo resume || echo startup)\"}" >/dev/null
+fi
+printf 'fake-agent ready sid=%s resume=%s mode=%s\n' "$sid" "$resume" "$mode"
+
+if [ -r ./.fake-agent-script ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        run_cmd "$line"
+    done <./.fake-agent-script
+fi
+if [ -n "$prompt" ]; then
+    IFS=';' read -r -a parts <<<"$prompt"
+    for part in "${parts[@]}"; do
+        run_cmd "${part# }"
+    done
+fi
+
+printf '> '
+while IFS= read -r line; do
+    run_cmd "$line"
+    printf '> '
+done
+logline "stdin closed"

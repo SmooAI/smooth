@@ -343,3 +343,11 @@ bridge and — when `tmux` is on `PATH` — a live shell session end to end
 `relay` tests pin the channel routing and the phone caps. All live tests name a
 private tmux socket per call (`tmux_socket` on the request) so they never
 touch a running daemon's sessions.
+
+End to end (th-8e3087): `crates/smooth-daemon/tests/flow_e2e` boots a REAL
+`smooth-daemon` per test — its own HOME, port, tmux server — and drives it the
+way the apps, `th flow` and a harness's hook script do, with `fake-agent`
+installed through a manifest in the four state-source flavours. The full
+strategy (what runs where, the fake-agent contract, runtimes, the CI split) is
+[SmoothFlow-Testing.md](../Engineering/SmoothFlow-Testing.md); the macOS UI
+lane is [SmoothFlow-Testing-macOS.md](../Engineering/SmoothFlow-Testing-macOS.md).

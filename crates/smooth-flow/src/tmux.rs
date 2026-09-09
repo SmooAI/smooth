@@ -206,13 +206,26 @@ pub fn pane_pid(socket: &str, session: &str) -> Result<u32> {
 /// # Errors
 /// When the session is gone or tmux fails.
 pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
-    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}\t#{pane_dead_status}"])?;
-    let mut parts = s.split('\t');
+    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}|#{pane_dead_status}"])?;
+    tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
+    Ok(parse_pane_dead(&s))
+}
+
+/// Parse `#{pane_dead}|#{pane_dead_status}`: `None` while the pane runs,
+/// `Some(status)` once it died (`-1` when tmux has no status for it).
+///
+/// The separator is `|`, NOT a tab: under a non-UTF-8 locale (no `LANG` —
+/// a launchd-started daemon, a CI runner, an `env -i`) tmux rewrites every
+/// control character in `display-message -p` output to `_`, so a tab-joined
+/// format read as `1_2` and the engine never saw a pane die (th-8e3087).
+#[must_use]
+pub fn parse_pane_dead(raw: &str) -> Option<i32> {
+    let mut parts = raw.split('|');
     let dead = parts.next().unwrap_or("0").trim() == "1";
     if !dead {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(-1)))
+    Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(-1))
 }
 
 /// `(cols, rows)` of the pane.
@@ -220,11 +233,18 @@ pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
 /// # Errors
 /// When the session is gone or tmux fails.
 pub fn pane_size(socket: &str, session: &str) -> Result<(u16, u16)> {
-    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_width}\t#{pane_height}"])?;
-    let mut parts = s.split('\t');
+    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_width}|#{pane_height}"])?;
+    Ok(parse_pane_size(&s))
+}
+
+/// Parse `#{pane_width}|#{pane_height}` (80×24 when a half is unreadable).
+/// `|`-joined for the same locale reason as [`parse_pane_dead`].
+#[must_use]
+pub fn parse_pane_size(raw: &str) -> (u16, u16) {
+    let mut parts = raw.split('|');
     let cols = parts.next().unwrap_or("80").trim().parse().unwrap_or(80);
     let rows = parts.next().unwrap_or("24").trim().parse().unwrap_or(24);
-    Ok((cols, rows))
+    (cols, rows)
 }
 
 /// Plain-text capture of the visible pane.
@@ -318,6 +338,23 @@ mod tests {
             exec_command(&["claude".into(), "--session-id".into(), "u".into(), "say hi".into()]),
             "exec claude --session-id u 'say hi'"
         );
+    }
+
+    /// th-8e3087: tmux under a C locale turns a tab into `_` — the joined
+    /// format must survive that, and the parsers must read what tmux prints.
+    #[test]
+    fn pane_queries_parse_without_a_tab_separator() {
+        assert_eq!(parse_pane_dead("0|"), None);
+        assert_eq!(parse_pane_dead("0|0"), None);
+        assert_eq!(parse_pane_dead("1|2"), Some(2));
+        assert_eq!(parse_pane_dead("1|0"), Some(0));
+        assert_eq!(parse_pane_dead("1|"), Some(-1));
+        assert_eq!(parse_pane_dead(""), None);
+        // What a tab-joined format came back as under `LANG` unset.
+        assert_eq!(parse_pane_dead("1_2"), None, "the old format read as alive — the bug");
+        assert_eq!(parse_pane_size("120|40"), (120, 40));
+        assert_eq!(parse_pane_size("garbage"), (80, 24));
+        assert_eq!(parse_pane_size("100|"), (100, 24));
     }
 
     #[test]
