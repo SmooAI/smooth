@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.44.3
+
+### Patch Changes
+
+- b4c50b4: `th prime`'s pearls primer now describes the SQLite-era workflow: worktrees share the machine-global store (no hop to `main`), `push`/`pull` are notices, checkpoints + `show --handoff` / `prime --in-progress` for handoff, and `th pearls sync` for Smoo Projects. Pearl th-d85dfa.
+
 ## 0.44.2
 
 ### Patch Changes
