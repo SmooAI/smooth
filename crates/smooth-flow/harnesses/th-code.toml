@@ -1,0 +1,54 @@
+# `th code` — Smooth's own coding TUI (th-0f6126). It speaks the daemon's
+# canonical WS, so its state is NATIVE: with SMOOTH_FLOW_SESSION set, th code
+# itself reports turn_start / turn_end to /api/flow/hooks. No hook install, no
+# pane scraping for working/idle. The prompt is pasted into the composer once
+# the TUI is up (prompt_as = "paste"); th code has no TUI-mode prompt flag.
+name = "th-code"
+display_name = "th code"
+
+[binary]
+names = ["th"]
+# The menu-bar app's symlink and Homebrew both put a real `th` here; the
+# cargo dev build is the fallback.
+prefer_paths = [".cargo/bin/th"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["code", "--model", "{model}"]
+prompt_as = "paste"
+session_id = "preassigned"
+
+[launch.env]
+SMOOTH_FLOW_SESSION = "{session_id}"
+SMOOTH_URL = "{daemon_url}"
+
+[resume]
+# th code's own --resume takes a saved-session query, not the daemon
+# conversation id the engine could learn — relaunch the original command.
+argv = []
+mode = "relaunch_command"
+
+[state]
+source = "native"
+
+[state.hooks]
+install = "none — th code reports its own turns when launched by the engine"
+
+[state.hooks.event_map]
+turn_start = "working"
+turn_end = "idle"
+
+[state.scrape]
+usage_limit = ["usage limit reached", "limit will reset", "limit resets at", "out of credits"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.smooth/skills"
+mcp_config = "~/.smooth/mcp.toml"

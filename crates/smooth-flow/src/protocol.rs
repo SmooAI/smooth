@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::harness::HarnessInfo;
 use crate::store::{Attention, FanOut, Session, SessionKind, SessionState};
 
 /// The `channel` value every flow frame carries.
@@ -196,7 +197,18 @@ pub fn client_seq(text: &str) -> Option<Value> {
 #[allow(clippy::large_enum_variant, reason = "a Session row rides in the broadcast; boxing buys nothing at 4096 slots")]
 pub enum ServerFrame {
     #[serde(rename = "flow.hello")]
-    Hello { daemon: DaemonInfo, sessions: Vec<Session> },
+    Hello {
+        daemon: DaemonInfo,
+        sessions: Vec<Session>,
+        /// Additive (th-0f6126): the harnesses a picker offers, in the
+        /// user's order, hidden ones dropped.
+        #[serde(default)]
+        harnesses: Vec<HarnessInfo>,
+    },
+    /// Additive (th-0f6126): the visible harness list changed
+    /// (`PUT /api/flow/harnesses/prefs`); same shape as `flow.hello.harnesses`.
+    #[serde(rename = "flow.harnesses")]
+    Harnesses { harnesses: Vec<HarnessInfo> },
     #[serde(rename = "flow.session")]
     Session { session: Session },
     #[serde(rename = "flow.session.removed")]
@@ -469,6 +481,7 @@ mod tests {
             argv: vec!["claude".into()],
             tmux_session: None,
             tmux_socket: Some("smooth-flow".into()),
+            state_source: "inferred".into(),
             pid: None,
             pid_start: Some(1),
             state: SessionState::Working,
@@ -673,7 +686,20 @@ mod tests {
                     machine_label: "m".into(),
                 },
                 sessions: vec![session()],
+                harnesses: vec![HarnessInfo {
+                    name: "claude".into(),
+                    display_name: "Claude Code".into(),
+                    kind: "claude".into(),
+                    installed: true,
+                    binary_path: Some("/x/claude".into()),
+                    state_source: "hooks".into(),
+                    hidden: false,
+                    order_index: 0,
+                    reason: None,
+                    origin: "builtin".into(),
+                }],
             },
+            ServerFrame::Harnesses { harnesses: vec![] },
             ServerFrame::Session { session: session() },
             ServerFrame::SessionRemoved { id: "x".into() },
             ServerFrame::Output {

@@ -51,13 +51,31 @@ const APPROVAL_MARKERS: &[&str] = &[
     "❯ 1. yes",
     "1. yes",
     "would you like to proceed",
+    // Codex menus (trust this directory / hooks need review): "› 1. …" + this footer.
+    "press enter to confirm",
 ];
 
 /// Substrings that mark active work (interrupt hint).
-const WORKING_MARKERS: &[&str] = &["esc to interrupt", "esc to cancel", "(running", "tokens · esc"];
+const WORKING_MARKERS: &[&str] = &[
+    "esc to interrupt",
+    "esc to cancel",
+    "(running",
+    "tokens · esc",
+    // OpenCode's status line while the model streams (th-5c5457, captured 2026-09-08).
+    "esc interrupt",
+];
 
 /// Substrings that mark an idle, ready prompt (the composer + its hint line).
-const IDLE_MARKERS: &[&str] = &["? for shortcuts", "for shortcuts", "shift+tab to cycle", "> "];
+const IDLE_MARKERS: &[&str] = &[
+    "? for shortcuts",
+    "for shortcuts",
+    "shift+tab to cycle",
+    "> ",
+    // OpenCode's idle status line shows the cwd + "ctrl+p commands"; a long
+    // cwd wraps it so "commands" lands on the next line — match the key only.
+    // While working the same line carries "esc interrupt", checked first.
+    "ctrl+p",
+];
 
 /// The live signals (working / idle) render at the BOTTOM of the pane — the
 /// status line under the composer. Only this many trailing lines are
@@ -116,6 +134,19 @@ pub fn detect_state(pane: &str) -> PaneState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// th-5c5457: OpenCode and Codex panes as captured live on 2026-09-08.
+    #[test]
+    fn opencode_and_codex_panes() {
+        let oc_working = "  ┃  Build · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀\n   ⬝⬝⬝⬝■■■■  esc interrupt        tab agents  ctrl+p commands";
+        assert_eq!(detect_state(oc_working), PaneState::Working);
+        let oc_idle = "     ok\n     ▣  Build · GPT-5.6 Sol · 5.4s\n  ┃  Build · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀\n   /tmp/probe         12.5K (3% ctrl+p\n                       commands";
+        assert_eq!(detect_state(oc_idle), PaneState::Idle);
+        let codex_trust = "  Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit\n  Press enter to continue";
+        assert_eq!(detect_state(codex_trust), PaneState::AwaitingApproval);
+        let codex_hooks = "  Hooks need review\n› 1. Review hooks\n  2. Trust all and continue\n  Press enter to confirm or esc to go back";
+        assert_eq!(detect_state(codex_hooks), PaneState::AwaitingApproval);
+    }
 
     #[test]
     fn usage_limit_is_detected() {

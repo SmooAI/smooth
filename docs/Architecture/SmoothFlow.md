@@ -93,9 +93,11 @@ sessions(id TEXT PK,             -- "fs-" + 8 hex
          state,                  -- starting|working|idle|needs_you|limited|done|dead
          attention,              -- JSON {reason, detail, resume_at, request_id}
          fan_out_id, created_at, updated_at, ended_at, exit_code, unread,
-         tmux_socket)            -- the `tmux -L` server the session lives on (v0.1)
+         tmux_socket,            -- the `tmux -L` server the session lives on (v0.1)
+         state_source)           -- hooks | native | inferred (th-5c5457 / th-0f6126)
 fan_outs(id TEXT PK, prompt, base_commit, pearl_id, created_at, winner_session_id)
 events(session_id, seq, at, kind, text, PK(session_id, seq))  -- last 200 per session (v0.1)
+config(key TEXT PK, value)      -- harness_prefs = {order, hidden} (th-0f6126)
 ```
 
 Timestamps are UTC RFC3339 text written from Rust `Utc::now()`. Terminal
@@ -107,8 +109,8 @@ real signals).
 
 Engine → clients (broadcast; `flow.output` only to clients that attached
 the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
-`flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`, and (v0.1)
-`flow.event`, `flow.handoff`.
+`flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`, (v0.1)
+`flow.event`, `flow.handoff`, and (th-0f6126) `flow.harnesses`.
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
@@ -182,11 +184,72 @@ FDA/Calendar access, and the failures are silent (empty listings, "not
 authorized" from EventKit), not prompts. `th flow new` from a terminal
 therefore lands on the app's server only with `--tmux-socket smoothflow`.
 
+## Session kinds — harness manifests (th-0f6126)
+
+A session's `kind` is `shell` or the `name` of a **harness manifest** — one
+TOML file per coding agent CLI describing its binary, launch/resume argv,
+state source, scrape patterns, steer and kill semantics
+([Harness-Manifests.md](../Engineering/Harness-Manifests.md)). The engine's
+launch table, binary resolver and pane scraper read manifests; the former
+hard-coded table (th-5c5457) is now the built-ins, byte-for-byte:
+
+| kind       | launch (binary + rendered `launch.argv`)             | harness session id                                        | restore (`flow.kill {resume:true}`, rule 2) | state                                                        |
+| ---------- | ---------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `claude`   | `claude --session-id <uuid> [--model m] [prompt]`    | pre-assigned by the engine                                | `claude --resume <uuid>`                    | `hooks` (smooth-agent plugin → `flow-hook.sh`)               |
+| `opencode` | `opencode [--model m] --prompt <prompt>` (th-b423aa) | learned from the plugin's `session.created` by cwd        | `opencode --session <id>`                   | `hooks` (smooth-agent OpenCode plugin posts the same body)   |
+| `codex`    | `codex [--model m] <prompt>`                         | learned from a hook by cwd when hooks are wired           | `codex resume <id>`                         | `inferred` (pane scraping) until `~/.codex/hooks.json` posts |
+| `th-code`  | `th code [--model m]`, prompt pasted ~4 s later      | pre-assigned; `SMOOTH_FLOW_SESSION` + `SMOOTH_URL` in env | relaunch (th code resumes by its own query) | `native` — th code POSTs `turn_start`/`turn_end` itself      |
+| `shell`    | `$SHELL -l`                                          | —                                                         | never (shells don't resume)                 | `idle` from launch                                           |
+
+Manifests load, lowest precedence first, from the built-ins,
+`~/.smooth/harnesses/`, `<project>/.smooth/harnesses/`, and `th pkg`
+packages' `harness/<name>/harness.toml`; `th harness list|show|add` manage
+them. An unknown kind is refused at `flow.new` with the list to run.
+
+Without a known harness session id, resume **relaunches the original argv**
+— a fresh session, not a continuation. `Session.state_source` (`hooks` |
+`native` | `inferred`) says how the engine knows the state; `th flow ls`
+shows it in the VIA column.
+
+**Binaries.** `which claude`/`codex` on a machine running cmux resolves to
+cmux's CLI shims (`…/cmux-cli-shims/<uuid>/claude`), which inject cmux's own
+`--session-id` and hooks. The manifest's `[binary]` therefore lists the real
+installs first (`prefer_paths`: `~/.claude/local/claude`,
+`~/.local/bin/claude`, `~/.opencode/bin/opencode`, `~/.local/bin/codex`),
+then the first `PATH` hit not under a `skip_path_patterns` directory
+(`cmux-cli-shims` by default), and the engine records the resolved path as
+`argv[0]` in the session row. An explicit bare binary name in `flow.new.argv`
+gets the same treatment. Codex 0.153+ also reads Claude-style hooks from
+`~/.codex/hooks.json`; wiring `flow-hook.sh` into it is
+`th harness enable codex`'s job (pearl th-4ad334).
+
+**Pane markers** are each manifest's `[state.scrape]` regexes: OpenCode
+(`esc interrupt` = working, the `ctrl+p commands` status line without it =
+idle) and Codex's menus (`› 1. …` + `press enter to confirm` = approval, e.g.
+the trust-this-directory and hooks-need-review dialogs). A `usage_limit`
+pattern may name a `reset` capture for the resume time.
+
+### Harness list + prefs
+
+`flow.hello` carries `harnesses: [{name, display_name, kind, installed,
+binary_path, state_source, order_index, reason?, origin}]` — the pickers'
+list, in the user's order, hidden ones dropped — and `flow.harnesses
+{harnesses}` is broadcast when it changes. `GET /api/flow/harnesses` returns
+every manifest (hidden flagged); `PUT /api/flow/harnesses/prefs {order?,
+hidden?}` persists `{order, hidden}` in flow.db's `config` table and
+broadcasts. Every picker (macOS New-session sheet, fan-out candidates, the
+phones) renders exactly this list: an uninstalled harness is disabled with
+`reason`, never hidden, so the user learns what to install.
+
 ## Hooks — state comes from hooks, scraping is the fallback
 
 `POST /api/flow/hooks` body `{harness, event, session_id, cwd, payload}`. The
 engine matches `session_id` to `sessions.agent_session_id` — that is why
-session ids are pre-assigned. Mapping (`protocol::map_hook_event`):
+session ids are pre-assigned. The session's manifest decides the mapping: an
+empty `state.hooks.event_map` means the Claude Code table below
+(`protocol::map_hook_event`); a mapped harness (th code: `turn_start` →
+working, `turn_end` → idle) uses its own names, and a `native` source marks
+the row `native` instead of `hooks`.
 
 | Event                                           | State                                                             |
 | ----------------------------------------------- | ----------------------------------------------------------------- |

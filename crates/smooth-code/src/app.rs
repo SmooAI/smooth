@@ -1608,6 +1608,47 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
     }
 }
 
+/// The SmoothFlow engine's hook endpoint, when this `th code` was launched by
+/// it (th-0f6126). The engine sets `SMOOTH_FLOW_SESSION` (the harness session
+/// id it pre-assigned) and `SMOOTH_URL` in the pane; every turn boundary is
+/// POSTed to `/api/flow/hooks` with the `th-code` manifest's event names.
+/// Fire-and-forget: the engine being gone must never break a chat.
+struct FlowReporter {
+    url: Option<String>,
+    session_id: String,
+    cwd: Option<String>,
+}
+
+impl FlowReporter {
+    fn from_env(daemon_url: &str, cwd: Option<String>) -> Self {
+        let session_id = std::env::var("SMOOTH_FLOW_SESSION").unwrap_or_default();
+        Self {
+            url: (!session_id.trim().is_empty()).then(|| format!("{}/api/flow/hooks", daemon_url.trim_end_matches('/'))),
+            session_id,
+            cwd,
+        }
+    }
+
+    /// The body the engine expects (`HookEvent`).
+    fn body(&self, event: &str) -> serde_json::Value {
+        serde_json::json!({
+            "harness": "th-code",
+            "event": event,
+            "session_id": self.session_id,
+            "cwd": self.cwd,
+            "payload": {},
+        })
+    }
+
+    async fn report(&self, event: &str) {
+        let Some(url) = &self.url else { return };
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build();
+        if let Ok(client) = client {
+            let _ = client.post(url).json(&self.body(event)).send().await;
+        }
+    }
+}
+
 /// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
 /// execution happens inside a hardware-isolated sandbox — smooth-code is
@@ -1657,6 +1698,11 @@ async fn run_agent_streaming(
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    // th-0f6126: launched by the SmoothFlow engine? Report our own turn
+    // boundaries — that is what makes the `th-code` harness's state NATIVE
+    // (no hook install, no pane scraping).
+    let flow = FlowReporter::from_env(&url, cwd.clone());
+    flow.report("turn_start").await;
 
     // History replay happens SERVER-SIDE: the client resumes the daemon
     // conversation (th-255d2a) and the engine replays its stored history by
@@ -1768,6 +1814,7 @@ async fn run_agent_streaming(
                 })
             }
             ServerEvent::TaskComplete { iterations, usage, .. } => {
+                flow.report("turn_end").await;
                 let usage = usage.unwrap_or_default();
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: "task".into(),
@@ -1786,6 +1833,7 @@ async fn run_agent_streaming(
                 break;
             }
             ServerEvent::TaskError { message, .. } => {
+                flow.report("turn_end").await;
                 let _ = tx.send(AgentEvent::Error { message });
                 break;
             }
@@ -2068,5 +2116,29 @@ mod exec_mode_tests {
 
         let body = session_mode_body("conv-123", ExecMode::Auto);
         assert_eq!(body["mode"], "auto");
+    }
+
+    /// th-0f6126: the flow reporter is inert without SMOOTH_FLOW_SESSION and
+    /// posts the engine's HookEvent shape with it.
+    #[test]
+    fn flow_reporter_shape_and_gating() {
+        use super::FlowReporter;
+        let off = FlowReporter {
+            url: None,
+            session_id: String::new(),
+            cwd: None,
+        };
+        assert!(off.url.is_none());
+        let on = FlowReporter {
+            url: Some("http://127.0.0.1:1/api/flow/hooks".into()),
+            session_id: "fs-1".into(),
+            cwd: Some("/w".into()),
+        };
+        let b = on.body("turn_start");
+        assert_eq!(b["harness"], "th-code");
+        assert_eq!(b["event"], "turn_start");
+        assert_eq!(b["session_id"], "fs-1");
+        assert_eq!(b["cwd"], "/w");
+        assert!(b["payload"].is_object());
     }
 }

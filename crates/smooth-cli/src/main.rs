@@ -505,13 +505,13 @@ enum Commands {
         #[arg(long, value_name = "MODE", default_value = "deny")]
         auto_approve: String,
     },
-    /// Set up this machine's coding harnesses (Claude Code, Codex, OpenCode)
-    /// with the smooth toolbox — MCP server, smooth-agent plugin, shared
-    /// skills, statusline.
+    /// Coding harnesses: the manifests SmoothFlow launches (`list`, `show`,
+    /// `add`, `hide`/`unhide`/`order` — pearl th-0f6126) and this machine's
+    /// toolbox setup for Claude Code / Codex / OpenCode (`enable`, `status`,
+    /// `disable` — pearl th-19dac1).
     ///
-    /// `enable` is idempotent and doubles as the update command; `status`
-    /// verifies each harness; `disable` removes only what smooth wrote.
-    /// Pearl th-19dac1.
+    /// `enable` is idempotent and doubles as the update command; `disable`
+    /// removes only what smooth wrote.
     Harness {
         #[command(subcommand)]
         cmd: harness::Cmd,
@@ -2095,7 +2095,7 @@ async fn main() -> Result<()> {
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Attest(args)) => attest::cmd(&args),
-        Some(Commands::Harness { cmd }) => harness::cmd(cmd),
+        Some(Commands::Harness { cmd }) => harness::cmd(cmd).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pkg { cmd }) => pkg::cmd(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,

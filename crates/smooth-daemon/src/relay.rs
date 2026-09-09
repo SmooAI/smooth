@@ -997,6 +997,8 @@ mod tests {
             default_project: tmp.path().to_path_buf(),
             version: "t".into(),
             machine_label: "m".into(),
+            home: tmp.path().join("home"),
+            daemon_url: None,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));

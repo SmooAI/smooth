@@ -71,8 +71,19 @@ pub fn shell_quote(s: &str) -> String {
 /// pid, not a wrapper shell's.
 #[must_use]
 pub fn exec_command(argv: &[String]) -> String {
+    exec_command_env(argv, &[])
+}
+
+/// [`exec_command`] preceded by `export K=V;` for each env pair.
+#[must_use]
+pub fn exec_command_env(argv: &[String], env: &[(String, String)]) -> String {
     let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
-    format!("exec {}", quoted.join(" "))
+    let exports = env.iter().fold(String::new(), |mut acc, (k, v)| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "export {k}={}; ", shell_quote(v));
+        acc
+    });
+    format!("{exports}exec {}", quoted.join(" "))
 }
 
 /// Start the flow server (if needed) with the options every session relies
@@ -141,10 +152,19 @@ pub fn session_alive(socket: &str, session: &str) -> bool {
 /// # Errors
 /// When tmux is missing or the session cannot be created.
 pub fn launch(socket: &str, session: &str, cwd: &Path, argv: &[String]) -> Result<u32> {
+    launch_env(socket, session, cwd, argv, &[])
+}
+
+/// [`launch`] with extra environment exported into the pane's shell before
+/// the `exec` (th-0f6126: a manifest's `launch.env`).
+///
+/// # Errors
+/// When tmux is missing or the session cannot be created.
+pub fn launch_env(socket: &str, session: &str, cwd: &Path, argv: &[String], env: &[(String, String)]) -> Result<u32> {
     if argv.is_empty() {
         return Err(anyhow!("cannot launch an empty argv"));
     }
-    let cmd = exec_command(argv);
+    let cmd = exec_command_env(argv, env);
     let cwd_s = cwd.to_string_lossy();
     ensure_server(socket);
     let out = tmux(

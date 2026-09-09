@@ -143,6 +143,75 @@ struct FanOut: Codable, Equatable, Identifiable {
     }
 }
 
+/// One harness the engine can launch (th-0f6126) — a row of
+/// `flow.hello.harnesses` / `flow.harnesses` / `GET /api/flow/harnesses`.
+/// Pickers never invent a kind: they render exactly this list.
+struct HarnessInfo: Codable, Equatable, Identifiable {
+    var name: String
+    var displayName: String
+    var kind: String
+    var installed: Bool
+    var binaryPath: String?
+    /// `hooks` | `scrape` | `native`
+    var stateSource: String
+    var hidden: Bool
+    var orderIndex: Int
+    /// Why `installed` is false.
+    var reason: String?
+    var origin: String
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, kind, installed, hidden, reason, origin
+        case displayName = "display_name", binaryPath = "binary_path", stateSource = "state_source", orderIndex = "order_index"
+    }
+
+    init(name: String, displayName: String? = nil, kind: String? = nil, installed: Bool = true, binaryPath: String? = nil,
+         stateSource: String = "hooks", hidden: Bool = false, orderIndex: Int = 0, reason: String? = nil, origin: String = "builtin") {
+        self.name = name; self.displayName = displayName ?? name; self.kind = kind ?? name; self.installed = installed
+        self.binaryPath = binaryPath; self.stateSource = stateSource; self.hidden = hidden; self.orderIndex = orderIndex
+        self.reason = reason; self.origin = origin
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName) ?? name
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? name
+        installed = try c.decodeIfPresent(Bool.self, forKey: .installed) ?? false
+        binaryPath = try c.decodeIfPresent(String.self, forKey: .binaryPath)
+        stateSource = try c.decodeIfPresent(String.self, forKey: .stateSource) ?? "hooks"
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        orderIndex = try c.decodeIfPresent(Int.self, forKey: .orderIndex) ?? 0
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        origin = try c.decodeIfPresent(String.self, forKey: .origin) ?? ""
+    }
+
+    /// The picker label: the display name, and why it is greyed out when it is.
+    var pickerLabel: String { installed ? displayName : "\(displayName) — \(reason ?? "not installed")" }
+}
+
+/// Pure helpers behind the Settings ▸ Harnesses pane (XCTested without UI).
+enum HarnessOrdering {
+    /// `names` with the element at `index` moved one step (`-1` up / `+1` down);
+    /// a move off either end is a no-op.
+    static func moved(_ names: [String], at index: Int, by delta: Int) -> [String] {
+        let target = index + delta
+        guard names.indices.contains(index), names.indices.contains(target) else { return names }
+        var out = names
+        out.swapAt(index, target)
+        return out
+    }
+
+    /// The `hidden` list with `name` toggled.
+    static func toggled(_ hidden: [String], _ name: String) -> [String] {
+        hidden.contains(name) ? hidden.filter { $0 != name } : hidden + [name]
+    }
+
+    /// Picker candidates: `all` in order, hidden ones dropped.
+    static func visible(_ all: [HarnessInfo]) -> [HarnessInfo] { all.filter { !$0.hidden } }
+}
+
 struct DaemonInfo: Codable, Equatable {
     var version: String
     var machineLabel: String
@@ -223,7 +292,9 @@ struct FlowEvent: Codable, Equatable, Identifiable {
 
 /// Engine → client.
 enum FlowFrame: Equatable {
-    case hello(daemon: DaemonInfo, sessions: [Session])
+    case hello(daemon: DaemonInfo, sessions: [Session], harnesses: [HarnessInfo] = [])
+    /// Additive (th-0f6126): the visible harness list changed.
+    case harnesses([HarnessInfo])
     case session(Session)
     case sessionRemoved(id: String)
     case output(id: String, seq: UInt64, data: Data)
@@ -258,7 +329,10 @@ enum FlowFrame: Equatable {
             switch type {
             case "flow.hello":
                 frame = .hello(daemon: try c.decodeIfPresent(DaemonInfo.self, forKey: Key("daemon")) ?? DaemonInfo(version: "?", machineLabel: ""),
-                               sessions: try c.decodeIfPresent([Session].self, forKey: Key("sessions")) ?? [])
+                               sessions: try c.decodeIfPresent([Session].self, forKey: Key("sessions")) ?? [],
+                               harnesses: (try? c.decodeIfPresent([HarnessInfo].self, forKey: Key("harnesses"))) ?? [])
+            case "flow.harnesses":
+                frame = .harnesses((try? c.decodeIfPresent([HarnessInfo].self, forKey: Key("harnesses"))) ?? [])
             case "flow.session":
                 frame = .session(try c.decode(Session.self, forKey: Key("session")))
             case "flow.session.removed":

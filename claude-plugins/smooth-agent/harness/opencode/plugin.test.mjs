@@ -3,8 +3,30 @@
 // register on session.created, throttled working heartbeat, idle, offline,
 // and the th-missing degrade path. No frameworks.
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 
-import { SmoothAgent } from './plugin.js';
+import { SmoothAgent, flowHooksUrl } from './plugin.js';
+
+// SmoothFlow hooks (th-5c5457): a fake daemon captures what the plugin posts.
+const posted = [];
+const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+        posted.push({ url: req.url, body: JSON.parse(body) });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+    });
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const addrFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'flow-addr-')), 'daemon.addr');
+await fs.writeFile(addrFile, `127.0.0.1:${server.address().port}\n`);
+process.env.SMOOTH_DAEMON_ADDR_FILE = addrFile;
+assert.equal(await flowHooksUrl(addrFile), `http://127.0.0.1:${server.address().port}/api/flow/hooks`);
+assert.equal(await flowHooksUrl('/nonexistent/daemon.addr'), '', 'no daemon advertised ⇒ no URL, no throw');
 
 const calls = [];
 let fail = false;
@@ -51,5 +73,51 @@ fail = false;
 const before = calls.length;
 await plugin2['tool.execute.before']({ sessionID: 'ses_zzzz9999' });
 assert.equal(calls.length, before, 'after one failure the plugin stays silent');
+
+// The flow engine saw the same lifecycle as Claude Code hook events, with the
+// harness name, the opencode session id and the cwd it must bind by.
+await new Promise((r) => setTimeout(r, 200));
+const events = posted.map((p) => p.body.event);
+// Every tool call posts (the Chat tab wants each one); only the th-mail
+// heartbeat above is throttled.
+assert.deepEqual(events.slice(0, 6), ['SessionStart', 'PreToolUse', 'PreToolUse', 'Stop', 'PreToolUse', 'SessionEnd'], JSON.stringify(events));
+
+// OpenCode ≥ 1.18: only the generic `event` hook fires. The bus shapes below
+// are verbatim from a probe on 1.18.29; they must drive the same lifecycle.
+const postedBefore = posted.length;
+calls.length = 0;
+const plugin3 = await SmoothAgent({ $, directory: '/Users/x/dev/bus' });
+const bus = (type, properties) => plugin3.event({ event: { type, properties } });
+const S = 'ses_bus00001';
+await bus('session.created', { sessionID: S, info: { id: S, slug: 'jolly-garden', directory: '/Users/x/dev/bus' } });
+await bus('session.created', { sessionID: S, info: { id: S } }); // duplicates are ignored
+await bus('message.updated', { sessionID: S, info: { id: 'msg_u', role: 'user' } });
+await bus('message.part.updated', { sessionID: S, part: { type: 'text', text: 'the prompt', messageID: 'msg_u' } });
+await bus('session.status', { sessionID: S, status: { type: 'busy' } });
+await bus('message.updated', { sessionID: S, info: { id: 'msg_a', role: 'assistant' } });
+await bus('message.part.updated', { sessionID: S, part: { type: 'text', text: 'ok', messageID: 'msg_a' } });
+await bus('session.status', { sessionID: S, status: { type: 'idle' } });
+await bus('session.idle', { sessionID: S });
+await bus('catalog.updated', {});
+await bus('session.deleted', { sessionID: S });
+await new Promise((r) => setTimeout(r, 200));
+const busPosts = posted.slice(postedBefore);
+assert.deepEqual(
+    busPosts.map((p) => p.body.event),
+    ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd'],
+    JSON.stringify(busPosts.map((p) => p.body.event)),
+);
+assert.equal(busPosts[2].body.payload.last_assistant_message, 'ok', "the Stop line carries the assistant's final text");
+assert.equal(busPosts[0].body.cwd, '/Users/x/dev/bus');
+assert.match(calls[0], /^agent register --name oc-bus-0001 --harness opencode/);
+assert.equal(calls.at(-1), 'agent status --name oc-bus-0001 --status offline');
+assert.equal(calls.length, 3, 'register, idle, offline — the bus path is the same lifecycle');
+assert.ok(posted.every((p) => p.url === '/api/flow/hooks'));
+const first = posted[0].body;
+assert.equal(first.harness, 'opencode');
+assert.equal(first.session_id, 'ses_abcd1234');
+assert.equal(first.cwd, '/Users/x/dev/My Repo');
+assert.deepEqual(posted[1].body.payload, { tool_name: 'tool', tool_input: {} });
+server.close();
 
 console.log('ok — smooth-agent opencode plugin lifecycle');

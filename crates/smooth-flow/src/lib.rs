@@ -8,6 +8,7 @@
 //! app and the phones are dumb views over it.
 
 pub mod engine;
+pub mod harness;
 pub mod limit;
 pub mod proc;
 pub mod protocol;

@@ -1204,7 +1204,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // ~/.smooth/flow.db, starts the supervisor, serves the flow WS +
                 // HTTP siblings + the Claude Code hooks endpoint. Token-gated
                 // (except hooks): a flow session is a shell on this host.
-                .merge(crate::flow_route::install(workspace.clone(), token.clone()).context("opening the SmoothFlow engine")?)
+                .merge(crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?)
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
@@ -1294,6 +1294,18 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     tracing::info!("shutdown signal received");
     server.shutdown().await.context("shutting down local operator")?;
     Ok(())
+}
+
+/// The URL a process on this host reaches the daemon at (th-0f6126: the
+/// `{daemon_url}` a `th code` pane connects back to). An unspecified bind
+/// address is reachable on loopback.
+fn loopback_url(addr: SocketAddr) -> String {
+    let ip = if addr.ip().is_unspecified() {
+        "127.0.0.1".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+    format!("http://{ip}:{}", addr.port())
 }
 
 /// Write the daemon's bound `host:port` to `~/.smooth/daemon.addr` so clients

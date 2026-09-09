@@ -1,5 +1,12 @@
-//! `th harness` — one idempotent setup/update/status command per coding
-//! harness (Claude Code, Codex, OpenCode). Pearl th-19dac1 / EPIC th-1945b9.
+//! `th harness` — the harness manifests SmoothFlow launches (`list` / `show`
+//! / `add` / `hide` / `unhide` / `order`, pearl th-0f6126) and one idempotent
+//! setup/update/status command per coding harness on this machine (`enable`
+//! / `status` / `disable`, pearl th-19dac1 / EPIC th-1945b9).
+//!
+//! Manifests are files (`smooth_flow::harness::Registry`), so `list`/`show`
+//! read them directly; the sort/hide prefs live in the daemon's flow.db, so
+//! `list` merges them when the daemon is up and `hide`/`unhide`/`order` need
+//! it. `add` validates a manifest and copies it into `~/.smooth/harnesses/`.
 //!
 //! `enable` is also the update command: re-run it after upgrading `th` or the
 //! smooth-agent plugin, the way `tsx agents enable <provider>` works in the
@@ -24,15 +31,54 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
 
+use serde_json::{json, Value};
+use smooth_flow::harness::{self as manifests, HarnessInfo, Prefs, Registry};
+
+use crate::gradient::paint;
 use crate::mcp_install::{self, Harness, Outcome};
 use crate::pkg;
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// List the harness manifests this machine knows — built-ins,
+    /// ~/.smooth/harnesses, the project's .smooth/harnesses, th pkg packages —
+    /// in the picker order, with the resolved binary. Hidden ones need --all.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Include hidden harnesses.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One manifest in full: origin, resolved binary, the TOML.
+    Show {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drop a harness from every picker (the manifest stays; `unhide` restores it).
+    Hide { name: String },
+    /// Put a hidden harness back in the pickers.
+    Unhide { name: String },
+    /// Put NAME… first in every picker, in this order; the rest follow.
+    Order {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Validate a manifest and copy it into ~/.smooth/harnesses/<name>.toml.
+    /// SOURCE is a .toml file, a directory holding harness.toml (or
+    /// harness/<name>/harness.toml), or owner/repo[/subdir][#ref] on GitHub.
+    Add {
+        source: String,
+        /// Overwrite an existing ~/.smooth/harnesses/<name>.toml.
+        #[arg(long)]
+        force: bool,
+    },
     /// Set up (or update) a harness: register the `th mcp serve` MCP server,
     /// install/update the smooth-agent plugin where the harness has a plugin
     /// system, and link the shared skills where it doesn't.
@@ -58,9 +104,19 @@ pub enum Cmd {
 /// # Errors
 /// Returns an error when the provider name is unknown or a config file is
 /// malformed (never silently clobbered).
-pub fn cmd(cmd: Cmd) -> Result<()> {
+pub async fn cmd(cmd: Cmd) -> Result<()> {
     let home = mcp_install::harness_home()?;
     match cmd {
+        Cmd::List { all, json } => list(&home, all, json).await,
+        Cmd::Show { name, json } => show(&home, &name, json),
+        Cmd::Hide { name } => set_hidden(&name, true).await,
+        Cmd::Unhide { name } => set_hidden(&name, false).await,
+        Cmd::Order { names } => {
+            let v = crate::flow::call(reqwest::Method::PUT, "/api/flow/harnesses/prefs", Some(json!({ "order": names }))).await?;
+            print_harnesses(&infos_of(&v), true);
+            Ok(())
+        }
+        Cmd::Add { source, force } => add(&home, &source, force),
         Cmd::Enable { provider } => {
             for h in providers(&provider)? {
                 enable(h, &home);
@@ -80,6 +136,238 @@ pub fn cmd(cmd: Cmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+// ------------------------------------------------------------- manifests ----
+
+/// The registry as the daemon would see it from this cwd.
+fn local_registry(home: &Path) -> Registry {
+    let project = std::env::current_dir().ok().map(|d| smooth_flow::engine::project_root(&d));
+    Registry::load(home, project.as_deref())
+}
+
+fn infos_of(v: &Value) -> Vec<HarnessInfo> {
+    v.get("harnesses").cloned().and_then(|h| serde_json::from_value(h).ok()).unwrap_or_default()
+}
+
+/// `th harness list`: the daemon's view (prefs applied) when it runs, else
+/// the files on disk with a note.
+async fn list(home: &Path, all: bool, json: bool) -> Result<()> {
+    let (infos, source, note) = match crate::flow::call(reqwest::Method::GET, "/api/flow/harnesses", None).await {
+        Ok(v) => (infos_of(&v), "daemon", None),
+        Err(e) => {
+            let reg = local_registry(home);
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let note = format!(
+                "daemon not reachable — order/hidden prefs not applied ({})",
+                e.to_string().lines().next().unwrap_or("")
+            );
+            (reg.infos(&Prefs::default(), true, home, &path), "local", Some(note))
+        }
+    };
+    let shown: Vec<HarnessInfo> = infos.into_iter().filter(|h| all || !h.hidden).collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&json!({ "harnesses": shown, "source": source }))?);
+        return Ok(());
+    }
+    print_harnesses(&shown, all);
+    if let Some(n) = note {
+        println!("{}", paint(&format!("  {n}"), |t| t.dimmed().to_string()));
+    }
+    for (file, err) in local_registry(home).errors {
+        println!("{} {}: {err}", paint("!", |t| t.yellow().to_string()), file.display());
+    }
+    Ok(())
+}
+
+/// Presence CLI rules: `●` installed, `○` not; teal is the presence, amber
+/// only where something needs you (a missing binary is quiet, not amber).
+fn print_harnesses(infos: &[HarnessInfo], all: bool) {
+    if infos.is_empty() {
+        println!("No harness manifests. This is a confirmed read, not a read failure.");
+        return;
+    }
+    let header = format!("   {:<10} {:<14} {:<8} {}", "NAME", "DISPLAY", "STATE", "BINARY");
+    println!("{}", paint(&header, |h| h.bold().to_string()));
+    for h in infos {
+        let glyph = if h.installed {
+            paint("●", |g| g.bold().to_string())
+        } else {
+            paint("○", |g| g.dimmed().to_string())
+        };
+        let tail = match (&h.binary_path, &h.reason) {
+            (Some(p), _) => p.clone(),
+            (None, Some(r)) => paint(r, |t| t.dimmed().to_string()),
+            (None, None) => String::new(),
+        };
+        let hidden = if h.hidden && all {
+            paint(" (hidden)", |t| t.dimmed().to_string())
+        } else {
+            String::new()
+        };
+        println!(
+            "{glyph}  {:<10} {:<14} {:<8} {tail}{hidden}",
+            h.name,
+            short(&h.display_name, 14),
+            h.state_source
+        );
+    }
+}
+
+fn short(s: &str, n: usize) -> String {
+    let c: Vec<char> = s.chars().collect();
+    if c.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", c[..n.saturating_sub(1)].iter().collect::<String>())
+    }
+}
+
+fn show(home: &Path, name: &str, json: bool) -> Result<()> {
+    let reg = local_registry(home);
+    let m = reg.get(name).ok_or_else(|| anyhow!("no harness named `{name}`\n  → th harness list --all"))?;
+    let binary = m.resolve_binary_in(home, &std::env::var_os("PATH").unwrap_or_default());
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "manifest": m,
+                "origin": m.origin.label(),
+                "path": m.origin.path(),
+                "binary_path": binary,
+                "installed": binary.is_some(),
+            }))?
+        );
+        return Ok(());
+    }
+    println!("{}", paint(&format!("== {} ({})", m.name, m.display_name), |t| t.bold().to_string()));
+    println!(
+        "   origin: {}{}",
+        m.origin.label(),
+        m.origin.path().map(|p| format!(" {}", p.display())).unwrap_or_default()
+    );
+    match &binary {
+        Some(p) => println!("   binary: {}", p.display()),
+        None => println!(
+            "   binary: {} — `{}` not found on PATH",
+            paint("missing", |t| t.dimmed().to_string()),
+            m.binary.names.join("`/`")
+        ),
+    }
+    println!(
+        "   state:  {:?} — {}",
+        m.state.source,
+        if m.state.hooks.install.is_empty() {
+            "(no install note)"
+        } else {
+            &m.state.hooks.install
+        }
+    );
+    println!();
+    print!("{}", toml::to_string_pretty(m).unwrap_or_default());
+    Ok(())
+}
+
+async fn set_hidden(name: &str, hide: bool) -> Result<()> {
+    let current = infos_of(&crate::flow::call(reqwest::Method::GET, "/api/flow/harnesses", None).await?);
+    if !current.iter().any(|h| h.name == name) {
+        bail!("no harness named `{name}`\n  → th harness list --all");
+    }
+    let mut hidden: Vec<String> = current.iter().filter(|h| h.hidden).map(|h| h.name.clone()).collect();
+    hidden.retain(|n| n != name);
+    if hide {
+        hidden.push(name.to_string());
+    }
+    let v = crate::flow::call(reqwest::Method::PUT, "/api/flow/harnesses/prefs", Some(json!({ "hidden": hidden }))).await?;
+    print_harnesses(&infos_of(&v), true);
+    Ok(())
+}
+
+/// Where `th harness add` puts manifests.
+fn user_manifests_dir(home: &Path) -> PathBuf {
+    home.join(".smooth").join("harnesses")
+}
+
+/// Resolve SOURCE to manifest files: a `.toml`, a dir (its `harness.toml`
+/// or `harness/*/harness.toml`), or a GitHub `owner/repo[/subdir][#ref]`
+/// shallow-cloned into a temp dir.
+fn manifest_files(source: &str) -> Result<(Vec<PathBuf>, Option<tempfile::TempDir>)> {
+    let p = Path::new(source);
+    if p.is_file() {
+        return Ok((vec![p.to_path_buf()], None));
+    }
+    if p.is_dir() {
+        return Ok((manifests_in(p), None));
+    }
+    let github = source.split('#').next().unwrap_or(source);
+    let mut parts = github.splitn(3, '/');
+    let (Some(owner), Some(repo)) = (parts.next(), parts.next()) else {
+        bail!("{source}: not a file, a directory, or owner/repo[/subdir][#ref]");
+    };
+    let subdir = parts.next();
+    let git_ref = source.split_once('#').map(|(_, r)| r);
+    let tmp = tempfile::tempdir()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["clone", "--depth", "1", "--quiet"]);
+    if let Some(r) = git_ref {
+        cmd.args(["--branch", r]);
+    }
+    cmd.arg(format!("https://github.com/{owner}/{repo}.git")).arg(tmp.path());
+    let out = cmd.output().context("run git clone")?;
+    if !out.status.success() {
+        bail!("git clone {owner}/{repo} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let root = subdir.map_or_else(|| tmp.path().to_path_buf(), |s| tmp.path().join(s));
+    let files = manifests_in(&root);
+    if files.is_empty() {
+        bail!("{source}: no harness.toml (or harness/<name>/harness.toml) in {}", root.display());
+    }
+    Ok((files, Some(tmp)))
+}
+
+fn manifests_in(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if dir.join("harness.toml").is_file() {
+        out.push(dir.join("harness.toml"));
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join("harness")) {
+        let mut found: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("harness.toml")).filter(|p| p.is_file()).collect();
+        found.sort();
+        out.extend(found);
+    }
+    out
+}
+
+fn add(home: &Path, source: &str, force: bool) -> Result<()> {
+    let (files, _tmp) = manifest_files(source)?;
+    if files.is_empty() {
+        bail!("{source}: no harness.toml found");
+    }
+    let dir = user_manifests_dir(home);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    for f in files {
+        let m = manifests::load_file(&f)?;
+        let dest = dir.join(format!("{}.toml", m.name));
+        if dest.exists() && !force {
+            bail!("{} exists — pass --force to replace it", dest.display());
+        }
+        std::fs::copy(&f, &dest).with_context(|| format!("copy {} → {}", f.display(), dest.display()))?;
+        let binary = m.resolve_binary_in(home, &std::env::var_os("PATH").unwrap_or_default());
+        println!(
+            "{} {} → {}  ({})",
+            paint("●", |g| g.bold().to_string()),
+            m.name,
+            dest.display(),
+            binary.map_or_else(|| format!("`{}` not on PATH yet", m.binary.names.join("`/`")), |b| b.display().to_string())
+        );
+    }
+    println!(
+        "{}",
+        paint("  pickers pick it up on their next flow.hello; th flow new --kind <name>", |t| t
+            .dimmed()
+            .to_string())
+    );
+    Ok(())
 }
 
 fn providers(spec: &str) -> Result<Vec<Harness>> {
@@ -484,6 +772,53 @@ mod tests {
         assert!(!smooth_owned_link(&link, tmp.path()));
         disable(Harness::OpenCode, tmp.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "my own plugin");
+    }
+
+    /// th-0f6126: `add` validates then copies into ~/.smooth/harnesses;
+    /// refuses to clobber without --force; a dir source finds every overlay.
+    #[test]
+    fn add_copies_valid_manifests_and_refuses_to_clobber() {
+        let tmp = home();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("harness/amp")).unwrap();
+        let good = "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n";
+        std::fs::write(src.join("harness.toml"), good).unwrap();
+        std::fs::write(src.join("harness/amp/harness.toml"), good.replace("aider", "amp")).unwrap();
+        add(tmp.path(), src.to_str().unwrap(), false).unwrap();
+        let dir = user_manifests_dir(tmp.path());
+        assert!(dir.join("aider.toml").is_file() && dir.join("amp.toml").is_file());
+        assert!(add(tmp.path(), src.join("harness.toml").to_str().unwrap(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("--force"));
+        add(tmp.path(), src.join("harness.toml").to_str().unwrap(), true).unwrap();
+        // Invalid never lands.
+        std::fs::write(src.join("bad.toml"), "name = \"bad\"\n").unwrap();
+        let err = format!("{:#}", add(tmp.path(), src.join("bad.toml").to_str().unwrap(), false).unwrap_err());
+        assert!(err.contains("binary.names"), "{err}");
+        assert!(!dir.join("bad.toml").exists());
+        assert!(add(tmp.path(), "not-a-source", false).unwrap_err().to_string().contains("owner/repo"));
+        // The local registry now lists them with origin user, and show finds one.
+        let reg = Registry::load(tmp.path(), None);
+        assert_eq!(reg.get("aider").unwrap().origin.label(), "user");
+        show(tmp.path(), "amp", true).unwrap();
+        assert!(show(tmp.path(), "nope", false).is_err());
+    }
+
+    /// th-0f6126: the list JSON shape (what the pickers and `--json` consumers read).
+    #[test]
+    fn list_rows_render_and_serialize() {
+        let tmp = home();
+        let reg = Registry::load(tmp.path(), None);
+        let rows = reg.infos(&Prefs::default(), true, tmp.path(), &std::ffi::OsString::new());
+        assert_eq!(rows.len(), 4);
+        let v = serde_json::to_value(&rows).unwrap();
+        assert_eq!(v[0]["name"], "claude");
+        assert_eq!(v[0]["installed"], false);
+        assert_eq!(v[0]["order_index"], 0);
+        assert_eq!(infos_of(&json!({ "harnesses": v })).len(), 4);
+        print_harnesses(&rows, true);
+        print_harnesses(&[], false);
     }
 
     #[test]

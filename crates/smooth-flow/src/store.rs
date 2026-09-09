@@ -25,32 +25,37 @@ pub fn default_path() -> PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("flow.db")
 }
 
-/// What runs in the session's PTY.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+/// What runs in the session's PTY: `shell`, or any harness manifest name.
+///
+/// th-0f6126: `claude`, `codex`, `opencode`, `th-code`, or a user-added one.
+/// The named variants exist for the built-ins; `Other` carries the rest. On
+/// the wire and in the store it is the plain lowercase name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum SessionKind {
     #[default]
     Shell,
     Claude,
     Codex,
     Opencode,
+    Other(String),
 }
 
 impl SessionKind {
     /// The wire/storage spelling.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Shell => "shell",
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
+            Self::Other(s) => s,
         }
     }
 
     /// True for kinds that are AI agents (supervised, hook-reporting).
     #[must_use]
-    pub const fn is_agent(self) -> bool {
+    pub const fn is_agent(&self) -> bool {
         !matches!(self, Self::Shell)
     }
 }
@@ -59,19 +64,38 @@ impl FromStr for SessionKind {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "shell" => Ok(Self::Shell),
-            "claude" => Ok(Self::Claude),
-            "codex" => Ok(Self::Codex),
-            "opencode" => Ok(Self::Opencode),
-            other => bail!("unknown session kind '{other}' (expected shell|claude|codex|opencode)"),
-        }
+        let s = s.trim().to_ascii_lowercase();
+        Ok(match s.as_str() {
+            "shell" => Self::Shell,
+            "claude" => Self::Claude,
+            "codex" => Self::Codex,
+            "opencode" => Self::Opencode,
+            other => {
+                if other.is_empty() || other.starts_with('-') || !other.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+                    bail!("invalid session kind '{other}' (a harness name: lowercase letters, digits, dashes — see `th harness list`)");
+                }
+                Self::Other(s.clone())
+            }
+        })
     }
 }
 
 impl std::fmt::Display for SessionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for SessionKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -202,6 +226,10 @@ pub struct Session {
     /// from before th-d33afa ⇒ the daemon's default socket.
     #[serde(default)]
     pub tmux_socket: Option<String>,
+    /// How `state` is derived (th-5c5457): `hooks` once the harness has
+    /// reported one hook event, else `inferred` (pane scraping).
+    #[serde(default = "inferred")]
+    pub state_source: String,
     #[serde(default)]
     pub pid: Option<u32>,
     /// Process start time (epoch seconds) — with `pid`, the liveness index.
@@ -271,6 +299,10 @@ pub fn new_fan_out_id() -> String {
     format!("fo-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
 }
 
+fn inferred() -> String {
+    "inferred".to_string()
+}
+
 fn parse_ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |d| d.with_timezone(&Utc))
 }
@@ -322,7 +354,8 @@ impl FlowStore {
                  ended_at         TEXT,
                  exit_code        INTEGER,
                  unread           INTEGER NOT NULL DEFAULT 0,
-                 tmux_socket      TEXT
+                 tmux_socket      TEXT,
+                 state_source     TEXT NOT NULL DEFAULT 'inferred'
              );
              CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_session_id);
              CREATE INDEX IF NOT EXISTS sessions_fanout_idx ON sessions(fan_out_id);
@@ -341,6 +374,10 @@ impl FlowStore {
                  pearl_id          TEXT NOT NULL,
                  created_at        TEXT NOT NULL,
                  winner_session_id TEXT
+             );
+             CREATE TABLE IF NOT EXISTS config (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
              );",
         )
         .context("apply flow schema")?;
@@ -353,6 +390,14 @@ impl FlowStore {
         if !has_socket {
             conn.execute("ALTER TABLE sessions ADD COLUMN tmux_socket TEXT", [])
                 .context("add tmux_socket")?;
+        }
+        let has_source = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'state_source'")?
+            .exists([])
+            .context("probe state_source column")?;
+        if !has_source {
+            conn.execute("ALTER TABLE sessions ADD COLUMN state_source TEXT NOT NULL DEFAULT 'inferred'", [])
+                .context("add state_source")?;
         }
         Ok(Self { conn })
     }
@@ -386,6 +431,7 @@ impl FlowStore {
             argv: serde_json::from_str(&argv).unwrap_or_default(),
             tmux_session: row.get("tmux_session")?,
             tmux_socket: row.get("tmux_socket")?,
+            state_source: row.get("state_source")?,
             pid: row.get::<_, Option<i64>>("pid")?.and_then(|p| u32::try_from(p).ok()),
             pid_start: row.get("pid_start")?,
             state: state.parse().unwrap_or(SessionState::Dead),
@@ -579,6 +625,72 @@ impl FlowStore {
         Ok(self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).context("remove session")? > 0)
     }
 
+    /// A `config` value (th-0f6126: harness prefs live here as JSON).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn get_config(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM config WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .context("get config")
+    }
+
+    /// Upsert a `config` value.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .context("set config")?;
+        Ok(())
+    }
+
+    /// Mark how the session's state is derived (th-5c5457).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_state_source(&self, id: &str, source: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE sessions SET state_source = ?2 WHERE id = ?1", params![id, source])
+            .context("set state_source")?;
+        Ok(())
+    }
+
+    /// Bind a harness session id learned from its first hook to a row that
+    /// launched without one (opencode / codex can't pre-assign ids).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_agent_session(&self, id: &str, agent_session_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET agent_session_id = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, agent_session_id, Utc::now().to_rfc3339()],
+            )
+            .context("set agent_session_id")?;
+        Ok(())
+    }
+
+    /// The newest live agent session running in `worktree` that has no
+    /// harness session id yet — the row a first hook from that cwd binds to.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn find_bindable(&self, worktree: &str) -> Result<Option<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM sessions WHERE worktree = ?1 AND agent_session_id IS NULL AND kind != 'shell'
+             AND state NOT IN ('done', 'dead') ORDER BY created_at DESC LIMIT 1",
+        )?;
+        stmt.query_row(params![worktree], Self::row_to_session)
+            .optional()
+            .context("find bindable session")
+    }
+
     /// Append one event line to `session_id`'s stream (`flow.event`,
     /// th-d33afa) and prune the stream to the last [`EVENT_BUFFER`].
     ///
@@ -767,6 +879,9 @@ mod tests {
         }
         let st = FlowStore::open(&path).unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().tmux_socket, None);
+        assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "inferred", "th-5c5457 column migrated too");
+        st.set_state_source("fs-old", "hooks").unwrap();
+        assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "hooks");
         let st2 = FlowStore::open(&path).unwrap(); // idempotent
         let s = st2
             .create(NewSession {
@@ -804,9 +919,17 @@ mod tests {
         ] {
             assert_eq!(s.as_str().parse::<SessionState>().unwrap(), s);
         }
-        assert!("bogus".parse::<SessionKind>().is_err());
+        // th-0f6126: kind is open — any harness name parses; junk does not.
+        assert_eq!("aider".parse::<SessionKind>().unwrap(), SessionKind::Other("aider".into()));
+        assert_eq!("th-code".parse::<SessionKind>().unwrap().as_str(), "th-code");
+        assert_eq!("Claude".parse::<SessionKind>().unwrap(), SessionKind::Claude);
+        assert!("Bad Name".parse::<SessionKind>().is_err());
+        assert!("".parse::<SessionKind>().is_err());
+        assert!("-x".parse::<SessionKind>().is_err());
+        assert_eq!(serde_json::to_string(&SessionKind::Other("pi".into())).unwrap(), "\"pi\"");
+        assert_eq!(serde_json::from_str::<SessionKind>("\"codex\"").unwrap(), SessionKind::Codex);
         assert!("bogus".parse::<SessionState>().is_err());
-        assert!(SessionKind::Claude.is_agent() && !SessionKind::Shell.is_agent());
+        assert!(SessionKind::Claude.is_agent() && SessionKind::Other("pi".into()).is_agent() && !SessionKind::Shell.is_agent());
     }
 
     #[test]
