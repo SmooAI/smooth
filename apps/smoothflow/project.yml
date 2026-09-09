@@ -143,5 +143,13 @@ schemes:
             targets:
                 - SmoothFlowTests
                 - SmoothFlowUITests
+            # The unit bundle runs inside SmoothFlow.app (TEST_HOST). Even with
+            # the app inert under XCTest (AppController.shouldStart), keep the
+            # host's HOME away from the developer's: UserDefaults, ~/.smooth/*
+            # and anything a future test forgets to sandbox land here instead.
+            # The XCUITest harness sets its own temp HOME per test on top.
+            environmentVariables:
+                HOME: /tmp/smoothflow-xctest-home
+                CFFIXED_USER_HOME: /tmp/smoothflow-xctest-home
         archive:
             config: Release

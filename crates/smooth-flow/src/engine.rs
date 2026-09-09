@@ -811,6 +811,18 @@ impl Engine {
         Ok(())
     }
 
+    /// A named tmux key (`Enter`, `Escape`, `1`) into the pane — answering a
+    /// dialog, not steering: no bracketed paste, no `User` event row. Harness
+    /// validation uses it to accept a first-run prompt's default (th-473294).
+    ///
+    /// # Errors
+    /// When the session is unknown or tmux refuses.
+    pub fn send_key(&self, id: &str, key: &str) -> Result<()> {
+        let s = self.require(id)?;
+        let (k, t) = pane(&s)?;
+        tmux::send_key(&k, &t, key)
+    }
+
     /// `flow.snapshot`: plain-text visible pane.
     ///
     /// # Errors
@@ -2480,6 +2492,16 @@ mod tests {
 
     /// th-0f6126: prefs persist in flow.db, order/hide the list, reach
     /// `flow.hello` and broadcast `flow.harnesses`.
+    /// th-473294: a key press addresses a pane, so an unknown session is an
+    /// error, not a silent no-op.
+    #[test]
+    fn send_key_needs_a_known_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let err = e.send_key("fs-nope", "Enter").unwrap_err().to_string();
+        assert!(err.contains("no such session"), "{err}");
+    }
+
     #[test]
     fn harness_prefs_persist_order_and_hide() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2514,15 +2536,15 @@ mod tests {
         let dir = tmp.path().join("home/.smooth/harnesses");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("aider.toml"),
-            "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+            dir.join("nosuchtool.toml"),
+            "name=\"nosuchtool\"\n[binary]\nnames=[\"nosuchtool-xyzzy\"]\n[launch]\nargv=[\"{prompt}\"]\n",
         )
         .unwrap();
         let all = e.harnesses(true).unwrap();
-        let aider = all.iter().find(|h| h.name == "aider").unwrap();
-        assert_eq!(aider.origin, "user");
-        assert!(!aider.installed);
-        assert!(aider.reason.as_deref().unwrap().contains("`aider` not found on PATH"));
+        let user = all.iter().find(|h| h.name == "nosuchtool").unwrap();
+        assert_eq!(user.origin, "user");
+        assert!(!user.installed);
+        assert!(user.reason.as_deref().unwrap().contains("`nosuchtool-xyzzy` not found on PATH"));
     }
 
     /// th-0f6126: an unknown kind is refused before anything is created.

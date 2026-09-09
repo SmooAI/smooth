@@ -179,6 +179,10 @@ final class DaemonManager: ObservableObject {
         env.merge(Self.utf8Locale(env: env)) { $1 }
         // Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay.
         env["SMOOTH_TAILSCALE_SERVE"] = "0"
+        // …as its OWN relay device (th-a1bb12): Big Smooth reads
+        // ~/.smooth/relay-device-id; without these the child dialed in as the
+        // same device and phones flapped between the two daemons.
+        env.merge(RelayIdentity.environment(deviceId: RelayIdentity.load(home: home), hostname: ProcessInfo.processInfo.hostName)) { $1 }
         // A GUI app's PATH is tiny; agents the daemon launches need the usual dirs.
         // The bundle's own Contents/MacOS goes first so the `th` shipped with the
         // app (release builds) wins over a stale ~/.cargo/bin one.
