@@ -204,6 +204,17 @@ fn socket_of(s: &Session) -> String {
     s.tmux_socket.clone().unwrap_or_else(tmux::socket_name)
 }
 
+/// Whether this daemon owns (supervises) `s` — th-4f7866. A row is owned by
+/// the daemon that created it, identified by the tmux socket name that daemon
+/// was configured with; rows from before the `owner` column are owned by the
+/// daemon whose socket matches the row's. Two daemons sharing one flow.db
+/// (the default `th up` daemon + the SmoothFlow app's child, or an orphaned
+/// instance) otherwise each declare the other's live panes "process vanished"
+/// and race to relaunch them.
+fn owned_here(s: &Session) -> bool {
+    s.owner.clone().unwrap_or_else(|| socket_of(s)) == tmux::socket_name()
+}
+
 /// `(socket, tmux session)` of a launched session.
 fn pane(s: &Session) -> Result<(String, String)> {
     let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
@@ -635,6 +646,7 @@ impl Engine {
                 argv: argv.clone(),
                 tmux_session: None,
                 tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
+                owner: Some(tmux::socket_name()),
                 fan_out_id: req.fan_out_id.clone(),
             })
         })?;
@@ -1074,14 +1086,15 @@ impl Engine {
 
     // ── supervision ────────────────────────────────────────────────────────
 
-    /// One supervision pass over every live session. Cheap when nothing
-    /// changed; safe to call every couple of seconds.
+    /// One supervision pass over every live session **this daemon owns**
+    /// (th-4f7866 — see [`owned_here`]). Cheap when nothing changed; safe to
+    /// call every couple of seconds.
     ///
     /// # Errors
     /// On a store failure (per-session tmux/ps errors are logged, not raised).
     pub fn supervise_tick(&self) -> Result<()> {
         let now = Utc::now();
-        for s in self.with_store(FlowStore::list_live)? {
+        for s in self.with_store(FlowStore::list_live)?.into_iter().filter(owned_here) {
             if let Err(e) = self.supervise_one(&s, now) {
                 tracing::warn!(session = %s.id, error = %e, "flow supervision");
             }
@@ -1900,6 +1913,55 @@ mod tests {
         let s = e.get(&shell2.id).unwrap().unwrap();
         assert_eq!(s.state, SessionState::Dead);
         assert_eq!(s.attention.unwrap().reason, "crashed");
+    }
+
+    /// th-4f7866: two daemons sharing one flow.db — supervision only touches
+    /// rows this daemon owns. A foreign daemon's live pane is not on this
+    /// daemon's tmux server, so before the `owner` column a tick here marked
+    /// it `dead · process vanished` and raced to relaunch it.
+    #[test]
+    fn supervision_skips_rows_owned_by_another_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mine = tmux::socket_name();
+        let mk = |owner: Option<&str>, sock: Option<&str>| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    argv: vec!["x".into()],
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    tmux_session: Some("fs-not-a-real-pane".into()),
+                    tmux_socket: sock.map(str::to_string),
+                    owner: owner.map(str::to_string),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        // Another daemon's row — even one whose pane sits on a server of my name.
+        let theirs = mk(Some("other-daemon"), Some(&mine));
+        // A pre-column row on a foreign server: owned by that server's daemon.
+        let legacy_foreign = mk(None, Some("flow-4f7866-not-mine"));
+        // Mine, with the pane parked on the app's server (`--tmux-socket`).
+        let mine_parked = mk(Some(&mine), Some("flow-4f7866-not-mine"));
+        // A pre-column row on my server.
+        let legacy_mine = mk(None, Some(&mine));
+
+        assert!(!owned_here(&theirs) && !owned_here(&legacy_foreign));
+        assert!(owned_here(&mine_parked) && owned_here(&legacy_mine));
+
+        e.supervise_tick().unwrap();
+
+        for s in [&theirs, &legacy_foreign] {
+            assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Starting, "{}: not ours — untouched", s.id);
+        }
+        // Owned rows are still supervised: no such pane exists, so they die.
+        for s in [&mine_parked, &legacy_mine] {
+            let s = e.get(&s.id).unwrap().unwrap();
+            assert_eq!(s.state, SessionState::Dead, "{}: ours — supervised", s.id);
+            assert!(s.attention.unwrap().detail.unwrap().contains("process vanished"));
+        }
     }
 
     /// A throwaway git repo with one commit, as the project (main checkout).

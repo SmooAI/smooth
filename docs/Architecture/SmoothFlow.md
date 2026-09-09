@@ -191,6 +191,18 @@ Sessions are created on the tmux server named by, in order: the
 then the default `smooth-flow`. Every row records its socket, so a daemon
 restarted with a different setting still finds its old panes.
 
+**Ownership (th-4f7866).** Each row also records its `owner`: the socket
+name the _creating_ daemon was configured with — that daemon's identity
+across restarts, distinct from where the pane lives. A daemon's supervision
+tick only touches rows it owns (rows from before the column: the daemon
+whose socket matches the row's). Two daemons sharing one `flow.db` — `th
+up`'s on the default socket and the SmoothFlow app's child on `smoothflow`,
+or an orphaned instance — otherwise each looked for the other's panes on
+_its_ server, marked them `dead · process vanished`, and raced to relaunch
+them. Attach, send, kill and snapshot are not ownership-gated: they use the
+row's socket, so `th flow` drives any session through any daemon. The app
+additionally keeps its own db (`SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`).
+
 **Why it matters:** on macOS, TCC attributes a pane's grants (Full Disk
 Access, Calendar, Notifications) to the process that started the tmux
 _server_. The SmoothFlow app starts `tmux -L smoothflow` itself (as a direct
