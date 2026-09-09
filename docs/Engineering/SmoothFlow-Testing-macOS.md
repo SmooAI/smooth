@@ -43,7 +43,8 @@ xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug
 
 `RealEngineUITests` looks for the server at
 `~/.cargo/target-e2e/debug/examples/flow_e2e_server` (override with
-`SMOOTHFLOW_E2E_SERVER`) and skips — with the reason — when it, `tmux` or
+`SMOOTHFLOW_E2E_SERVER`; from xcodebuild pass it as
+`TEST_RUNNER_SMOOTHFLOW_E2E_SERVER=…` — the runner does not inherit the shell's env) and skips — with the reason — when it, `tmux` or
 `node` is missing. Each test gets its own temp HOME, flow.db and tmux socket
 (`flow-ui-<pid>`), torn down with the test; nothing touches `~/.smooth`.
 

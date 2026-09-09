@@ -152,7 +152,15 @@ class FlowUITestCase: XCTestCase {
 
     func waitForState(_ sessionId: String, timeout: TimeInterval = 20, _ predicate: @escaping (String) -> Bool) {
         let ok = waitUntil(timeout: timeout) { predicate(self.label("sidebar.state.\(sessionId)")) }
-        XCTAssertTrue(ok, "sidebar state for \(sessionId) is '\(label("sidebar.state.\(sessionId)"))'")
+        XCTAssertTrue(ok, "sidebar state for \(sessionId) is '\(label("sidebar.state.\(sessionId)"))'; tree: \(dump())")
+    }
+
+    /// Identifiers + text of every static text and cell, for a failure message.
+    func dump() -> String {
+        let texts = app.staticTexts.allElementsBoundByIndex.prefix(40).map { "\($0.identifier)=\(($0.value as? String) ?? $0.label)" }
+        let cells = app.descendants(matching: .cell).allElementsBoundByIndex.prefix(10).map { "cell:\($0.identifier)=\($0.label)" }
+        let rows = app.descendants(matching: .outlineRow).allElementsBoundByIndex.prefix(10).map { "row:\($0.identifier)=\($0.label)" }
+        return (texts + cells + rows).joined(separator: " | ")
     }
 
     // MARK: HTTP (the test's own view of the backend)
