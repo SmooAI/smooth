@@ -54,15 +54,15 @@ struct InboxView: View {
     @ViewBuilder
     private func attentionCard(_ s: Session) -> some View {
         let a = s.attention
-        card(accent: Theme.amber) {
+        card(accent: Theme.amber, id: "inbox.card.\(s.id)") {
             switch a?.reason {
             case .permission:
                 title("Permission request", s)
                 Text(a?.detail ?? "").font(.body.monospaced())
                 HStack {
-                    Button("Allow") { app.approve(s, .allow) }.keyboardShortcut("a", modifiers: [])
-                    Button("Deny") { app.approve(s, .deny) }.keyboardShortcut("d", modifiers: [])
-                    Button("Allow for session") { app.approve(s, .allowSession) }
+                    Button("Allow") { app.approve(s, .allow) }.keyboardShortcut("a", modifiers: []).accessibilityIdentifier("inbox.allow.\(s.id)")
+                    Button("Deny") { app.approve(s, .deny) }.keyboardShortcut("d", modifiers: []).accessibilityIdentifier("inbox.deny.\(s.id)")
+                    Button("Allow for session") { app.approve(s, .allowSession) }.accessibilityIdentifier("inbox.allowSession.\(s.id)")
                     Button("Open session") { app.focus(s.id); app.toggleInbox() }
                 }
             case .question:
@@ -97,7 +97,7 @@ struct InboxView: View {
 
     private func finishedCard(_ s: Session) -> some View {
         let h = app.handoffs[s.id]
-        return card(accent: Theme.ink) {
+        return card(accent: Theme.ink, id: "inbox.finished.\(s.id)") {
             title(s.label, s)
             if let pr = h?.pr, let n = pr.number { Text("PR #\(n)" + (pr.ci.map { " · CI \($0)" } ?? "")).font(.caption) }
             if let dirty = h?.handoff?.dirty, !dirty.isEmpty { Text("\(dirty.count) dirty files").font(.caption) }
@@ -129,8 +129,10 @@ struct InboxView: View {
         }
     }
 
-    private func card<C: View>(accent: NSColor, @ViewBuilder _ c: () -> C) -> some View {
+    private func card<C: View>(accent: NSColor, id: String? = nil, @ViewBuilder _ c: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 8) { c() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(id ?? "inbox.card")
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))

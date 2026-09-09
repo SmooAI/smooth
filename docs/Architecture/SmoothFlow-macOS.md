@@ -340,6 +340,15 @@ The publish role (`OtaPublishRole`, smooai `infra/ci/github-oidc.ts`) grants
 `.github/workflows/smoothflow-mac.yml` stays the ad-hoc compile + XCTest gate on
 PRs touching `apps/smoothflow/**`.
 
+## Testing
+
+Three layers, all on PR via `smoothflow-mac.yml`: `SmoothFlowTests` (pure XCTests:
+frame codec, store reducer, notifier, daemon address), `MockServerUITests`
+(XCUITest against `mock/server.mjs`) and `RealEngineUITests` (XCUITest against
+`flow_e2e_server` + `fake-claude` — the real router/supervisor, a scripted agent).
+Launch contract, identifiers and how to run:
+[SmoothFlow-Testing-macOS.md](../Engineering/SmoothFlow-Testing-macOS.md).
+
 ## Gaps (pearls filed from the main checkout)
 
 - th-c7041a — engine launches agents under the app-owned `tmux -L smoothflow`

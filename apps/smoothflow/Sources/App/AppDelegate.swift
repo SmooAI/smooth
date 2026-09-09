@@ -6,7 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let app = AppController()
     /// Sparkle OTA. Feed + key live in Info.plist (SUFeedURL / SUPublicEDKey);
     /// checks hourly on its own, the menu item is the manual path.
-    let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    /// Not started under `SMOOTHFLOW_UI_TEST=1`: Sparkle's first-run "check automatically?" prompt would steal focus from a UI test.
+    let updater = SPUStandardUpdaterController(startingUpdater: ProcessInfo.processInfo.environment["SMOOTHFLOW_UI_TEST"] != "1", updaterDelegate: nil, userDriverDelegate: nil)
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
