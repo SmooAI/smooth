@@ -378,11 +378,15 @@ Launch contract, identifiers and how to run:
 
 ## Gaps (pearls filed from the main checkout)
 
-- th-c7041a — engine launches agents under the app-owned `tmux -L smoothflow`
-  server. The engine already honors `SMOOTH_FLOW_TMUX_SOCKET`, which the app
-  sets; the pearl tracks making that the contract (`--tmux-socket`).
+- th-c7041a — closed: the engine launches agents under the app-owned
+  `tmux -L smoothflow` server; `smooth-daemon operator --tmux-socket` is the
+  contract and the app sets `SMOOTH_FLOW_TMUX_SOCKET`.
 - th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
   by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
-- th-e126cc — "Close pearl + GC worktree" from the inbox is not in the v0
-  protocol; the PR tab only shows what the handoff endpoint reports, "Merge"
-  opens the PR.
+- th-e126cc — engine side closed: `flow.close {id, close_pearl,
+remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
+  `th flow close`) closes the pearl, removes the merged worktree + branch and
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The inbox
+  card does not send it yet; wiring the Swift side is th-883ce9. Until then
+  the PR tab only shows what the handoff endpoint reports, "Merge" opens the
+  PR.
