@@ -30,11 +30,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(sock) = arg(&args, "--tmux-socket") {
         std::env::set_var("SMOOTH_FLOW_TMUX_SOCKET", sock);
     }
+    // `home` (harness manifests) and `daemon_url` follow the defaults: $HOME —
+    // the caller points it at a throwaway dir — and none.
     let engine = smooth_flow::Engine::open(smooth_flow::EngineConfig {
         db_path: db,
-        default_project: workspace.clone(),
         version: "e2e".into(),
         machine_label: "flow-e2e".into(),
+        ..smooth_flow::EngineConfig::new(workspace.clone())
     })?;
     drop(smooth_daemon::flow_route::spawn_supervisor(engine.clone()));
     let router = smooth_daemon::flow_route::flow_router(engine, token);
