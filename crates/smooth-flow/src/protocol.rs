@@ -91,6 +91,35 @@ pub enum ClientFrame {
     /// WS only). Reply is `ServerFrame::Handoff`.
     #[serde(rename = "flow.handoff")]
     Handoff { id: String },
+    /// Additive (th-e126cc): finish a session for good — close its pearl,
+    /// remove its worktree (and branch) once the branch is merged, drop the
+    /// row. Reply is `flow.session.removed` (or `flow.error`, with nothing
+    /// touched). `force` removes a dirty or unmerged worktree.
+    #[serde(rename = "flow.close")]
+    Close {
+        id: String,
+        #[serde(default)]
+        close_pearl: bool,
+        #[serde(default)]
+        remove_worktree: bool,
+        #[serde(default)]
+        force: bool,
+    },
+}
+
+/// What `flow.close` did (the HTTP reply of `POST /api/flow/sessions/{id}/close`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseOutcome {
+    pub id: String,
+    /// The pearl `th pearls close` closed.
+    #[serde(default)]
+    pub pearl_closed: Option<String>,
+    /// The worktree path removed.
+    #[serde(default)]
+    pub worktree_removed: Option<String>,
+    /// The branch deleted with it.
+    #[serde(default)]
+    pub branch_deleted: Option<String>,
 }
 
 /// Who an event line belongs to (the phone's Chat tab).
@@ -564,6 +593,32 @@ mod tests {
         assert_eq!(hello, ClientFrame::Hello {});
         let h = parse_client_frame(r#"{"channel":"flow","type":"flow.handoff","id":"fs-1"}"#).unwrap().unwrap();
         assert_eq!(h, ClientFrame::Handoff { id: "fs-1".into() });
+        // th-e126cc: every flag defaults off, so a bare close only drops the row.
+        let c = parse_client_frame(r#"{"channel":"flow","type":"flow.close","id":"fs-1"}"#).unwrap().unwrap();
+        assert_eq!(
+            c,
+            ClientFrame::Close {
+                id: "fs-1".into(),
+                close_pearl: false,
+                remove_worktree: false,
+                force: false
+            }
+        );
+        let c = parse_client_frame(r#"{"channel":"flow","type":"flow.close","id":"fs-1","close_pearl":true,"remove_worktree":true,"force":true}"#)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            c,
+            ClientFrame::Close {
+                close_pearl: true,
+                remove_worktree: true,
+                force: true,
+                ..
+            }
+        ));
+        let out: CloseOutcome = serde_json::from_str(r#"{"id":"fs-1","pearl_closed":"th-1"}"#).unwrap();
+        assert_eq!(out.pearl_closed.as_deref(), Some("th-1"));
+        assert!(out.worktree_removed.is_none() && out.branch_deleted.is_none());
 
         let ev = ServerFrame::Event {
             id: "fs-1".into(),

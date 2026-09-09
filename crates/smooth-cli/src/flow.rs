@@ -95,6 +95,23 @@ pub enum FlowCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Close a finished session out: close its pearl and remove its worktree
+    /// (+ branch) once merged, then drop it. Refuses a dirty or unmerged
+    /// worktree unless --force. A live session is killed first.
+    Close {
+        id: String,
+        /// Leave the pearl open.
+        #[arg(long)]
+        keep_pearl: bool,
+        /// Leave the worktree and branch in place.
+        #[arg(long)]
+        keep_worktree: bool,
+        /// Remove the worktree even if dirty or unmerged.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Plain-text snapshot of the visible pane.
     Snapshot {
         id: String,
@@ -436,6 +453,39 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             emit(json, &v, |v| {
                 let state = v.pointer("/session/state").and_then(Value::as_str).unwrap_or("?");
                 println!("{} {id} → {}", paint("●", |g| g.green().to_string()), state_cell(state).0);
+            })
+        }
+        FlowCommands::Close {
+            id,
+            keep_pearl,
+            keep_worktree,
+            force,
+            json,
+        } => {
+            let v = call(
+                reqwest::Method::POST,
+                &format!("/api/flow/sessions/{id}/close"),
+                Some(json!({ "close_pearl": !keep_pearl, "remove_worktree": !keep_worktree, "force": force })),
+            )
+            .await?;
+            emit(json, &v, |v| {
+                let did = |k: &str| v.get(k).and_then(Value::as_str);
+                let mut parts = vec![];
+                if let Some(p) = did("pearl_closed") {
+                    parts.push(format!("closed {p}"));
+                }
+                if let Some(w) = did("worktree_removed") {
+                    parts.push(format!("removed {w}"));
+                }
+                if let Some(b) = did("branch_deleted") {
+                    parts.push(format!("deleted branch {b}"));
+                }
+                let tail = if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", parts.join(", "))
+                };
+                println!("{} {id} closed{tail}", paint("●", |g| g.green().to_string()));
             })
         }
         FlowCommands::Snapshot { id, json } => {
