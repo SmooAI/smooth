@@ -70,14 +70,69 @@ final class DaemonManager: ObservableObject {
         }
     }
 
+    /// Stop the child — bounded. Quit used to block here in `waitUntilExit()`
+    /// for as long as the daemon took to die, which for a daemon that ignored
+    /// TERM was forever: the Quit Apple event was handled, `applicationWillTerminate`
+    /// ran, and the app just never exited (th-6198bf). Now: TERM the supervisor,
+    /// give the tree [`stopGrace`] to go quietly, then SIGKILL the supervisor
+    /// and the daemon it recorded in [`pidFile`].
     func stop() {
         stopping = true
-        if let p = process, p.isRunning {
-            p.terminate()
-            p.waitUntilExit()
+        if let p = process {
+            _ = Self.stopChild(p, daemonPid: Self.readPid(pidFile), grace: Self.stopGrace)
         }
+        try? FileManager.default.removeItem(at: pidFile)
         process = nil
         status = "stopped"
+    }
+
+    /// How long quit waits for the supervisor + daemon to exit on TERM before
+    /// escalating. The supervisor's own TERM→KILL grace is shorter, so in the
+    /// normal case it has already finished the job by the time this expires.
+    static let stopGrace: TimeInterval = 5
+
+    /// Where the supervisor records the daemon's pid (`$SMOOTHFLOW_DAEMON_PIDFILE`),
+    /// so the app can SIGKILL the daemon itself if the supervisor is gone or stuck.
+    var pidFile: URL { home.appendingPathComponent(".smooth/smoothflow-daemon.pid") }
+
+    /// TERM `supervisor`, wait up to `grace` for it to exit, then SIGKILL it and
+    /// `daemonPid`. Returns whether the tree went down on TERM alone. Blocks the
+    /// calling thread (quit is the caller; the app is leaving anyway) — polled,
+    /// never `waitUntilExit()`, so the bound holds whatever the child does.
+    @discardableResult
+    nonisolated static func stopChild(_ supervisor: Process, daemonPid: pid_t?, grace: TimeInterval) -> Bool {
+        guard supervisor.isRunning else { return true }
+        supervisor.terminate()
+        let quiet = waitForExit(supervisor, timeout: grace)
+        if !quiet {
+            // `Process` gives the child its own process group, so the group is
+            // the supervisor + the daemon + whatever they forked. Kill it all,
+            // plus the recorded daemon pid in case it re-grouped itself.
+            let pid = supervisor.processIdentifier
+            killpg(getpgid(pid) > 0 ? getpgid(pid) : pid, SIGKILL)
+            kill(pid, SIGKILL)
+            if let d = daemonPid { kill(d, SIGKILL) }
+            _ = waitForExit(supervisor, timeout: 2)
+        }
+        if let d = daemonPid, kill(d, 0) == 0 { kill(d, SIGKILL) }
+        return quiet
+    }
+
+    /// Poll `isRunning` until it flips or `timeout` passes. NSTask reaps on its
+    /// own queue, so the flag updates while this thread sleeps.
+    nonisolated static func waitForExit(_ p: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning {
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return true
+    }
+
+    /// The pid the supervisor wrote, if any and if it still names a live process.
+    nonisolated static func readPid(_ file: URL) -> pid_t? {
+        guard let text = try? String(contentsOf: file, encoding: .utf8), let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return nil }
+        return kill(pid, 0) == 0 ? pid : nil
     }
 
     // MARK: child mode
@@ -95,6 +150,9 @@ final class DaemonManager: ObservableObject {
         p.arguments = ["-c", Self.childSupervisor, binary, "operator", "--addr", ep.description]
         var env = ProcessInfo.processInfo.environment
         env["SMOOTHFLOW_PARENT"] = Bundle.main.bundleIdentifier ?? "ai.smoo.smoothflow"
+        // The supervisor records the daemon's pid here so a bounded quit can
+        // SIGKILL the daemon directly if TERM did not do it (th-6198bf).
+        env["SMOOTHFLOW_DAEMON_PIDFILE"] = pidFile.path
         // The daemon refuses to start next to a running Big Smooth (they would
         // share operator-storage.db). SmoothFlow's daemon is a separate product
         // on its own port; opt out of the guard. ponytail: flow.db is separate,
@@ -214,13 +272,20 @@ final class DaemonManager: ObservableObject {
 
     // MARK: helpers
 
-    /// `sh -c` body: run `$0 "$@"` in the background, exit with it when our
-    /// parent (the app) is gone, forward TERM/INT. `$PPID` is the app's pid.
+    /// `sh -c` body: run `$0 "$@"` in the background, record its pid in
+    /// `$SMOOTHFLOW_DAEMON_PIDFILE`, exit with it when our parent (the app) is
+    /// gone, and on TERM/INT take it down — TERM first, then SIGKILL after
+    /// [`supervisorGraceSeconds`] if it is still there. `$PPID` is the app's pid.
+    /// The escalation is what keeps quit bounded: `wait "$d"` on a daemon that
+    /// ignores TERM never returns (th-6198bf).
+    static let supervisorGraceSeconds = 3
     static let childSupervisor = #"""
     "$0" "$@" & d=$!
-    trap 'kill "$d" 2>/dev/null' TERM INT
+    [ -n "$SMOOTHFLOW_DAEMON_PIDFILE" ] && printf '%s\n' "$d" > "$SMOOTHFLOW_DAEMON_PIDFILE" 2>/dev/null
+    down() { kill "$d" 2>/dev/null; n=0; while kill -0 "$d" 2>/dev/null && [ "$n" -lt \#(supervisorGraceSeconds) ]; do sleep 1; n=$((n+1)); done; kill -9 "$d" 2>/dev/null; }
+    trap 'down; wait "$d"; exit 0' TERM INT
     while kill -0 "$PPID" 2>/dev/null && kill -0 "$d" 2>/dev/null; do sleep 1; done
-    kill "$d" 2>/dev/null; wait "$d"
+    down; wait "$d"
     """#
 
     static func freePort() -> Int {

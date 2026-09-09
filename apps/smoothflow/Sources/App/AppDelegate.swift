@@ -18,6 +18,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { app.activated() }
+
+    /// Every quit path — ⌘Q, the menu items, the status item, AppleScript
+    /// `quit`, `NSRunningApplication.terminate()` (all of which arrive here
+    /// through `NSApplication.terminate(_:)`) — takes the fleet down first,
+    /// then terminates. Always `.terminateNow`: the shutdown is bounded on its
+    /// own (th-6198bf), so there is never a `.terminateLater` to forget to
+    /// answer, and never a `.terminateCancel` — quit means quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        app.shutdown()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) { app.shutdown() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
