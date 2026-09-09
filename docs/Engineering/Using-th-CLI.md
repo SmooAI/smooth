@@ -1132,7 +1132,7 @@ Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooa
 
 ```bash
 th up                                              # boot Smooth platform (host daemon)
-th down                                            # stop
+th down                                            # stop — the daemon and its whole process tree, verified (th-eed3de)
 th status                                          # health
 th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
 th operators list / kill / show

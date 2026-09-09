@@ -17,6 +17,7 @@ mod claude;
 mod config;
 mod daemon_health;
 mod daemon_launcher;
+mod daemon_stop;
 mod destructive;
 mod ext;
 mod fda;
@@ -2451,13 +2452,17 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
 }
 
 async fn cmd_down() -> Result<()> {
-    // Kill the daemonized Big Smooth child recorded in the pid file.
+    // Stop the Big Smooth process recorded in the pid file — and everything
+    // under it. The pid used to be a wrapper whose smooth-daemon child
+    // survived a plain `kill` (th-eed3de); the launcher now execs the daemon,
+    // and `daemon_stop` takes the whole tree down regardless and verifies it.
     let pid_path = pid_file_path();
     let mut pid_killed: Option<u32> = None;
+    let mut survivors = Vec::new();
     if pid_path.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+                survivors = tokio::task::spawn_blocking(move || daemon_stop::stop_tree(pid, daemon_stop::GRACE)).await?;
                 pid_killed = Some(pid);
             }
         }
@@ -2465,6 +2470,10 @@ async fn cmd_down() -> Result<()> {
     }
 
     match pid_killed {
+        Some(_) if !survivors.is_empty() => {
+            let list = survivors.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            anyhow::bail!("could not stop Big Smooth — still running: pid {list}\n  → kill -9 {list}");
+        }
         Some(pid) => {
             let tag = format!("(pid {pid})");
             println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
