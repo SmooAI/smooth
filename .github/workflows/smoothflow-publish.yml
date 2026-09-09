@@ -23,7 +23,7 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: 'Git ref to build (blank = current branch)'
+                description: 'Git ref to build: branch, tag, or commit SHA (short OK; blank = current branch)'
                 required: false
                 type: string
 
@@ -42,9 +42,27 @@ jobs:
         env:
             OTA_PUBLISH_ROLE_ARN: ${{ secrets.OTA_PUBLISH_ROLE_ARN }}
         steps:
+            # Resolve the requested ref to a full SHA first. actions/checkout
+            # fetches `+refs/heads/<x>*:…` / `+refs/tags/<x>*:…` for a bare value,
+            # so an abbreviated commit id (`8a7e1321`) matches nothing and the run
+            # dies 20 minutes late with "git failed with exit code 1". Branches,
+            # tags, and full/short SHAs all resolve here; unknown refs fail fast.
+            - name: Resolve ref
+              id: ref
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  want='${{ inputs.tag || github.ref }}'
+                  sha="$(gh api "repos/${{ github.repository }}/commits/${want}" --jq .sha 2>/dev/null || true)"
+                  if [ -z "$sha" ]; then
+                      echo "::error::ref '$want' does not resolve to a commit in ${{ github.repository }}"
+                      exit 1
+                  fi
+                  echo "sha=$sha" >> "$GITHUB_OUTPUT"
+                  echo "Building $want → $sha"
             - uses: actions/checkout@v4
               with:
-                  ref: ${{ inputs.tag || github.ref }}
+                  ref: ${{ steps.ref.outputs.sha }}
 
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
