@@ -37,6 +37,7 @@ pub mod flow_route;
 pub mod hooks;
 pub mod judge_settings;
 pub mod judge_settings_route;
+pub mod logfile;
 pub mod mode_route;
 pub mod mode_session_route;
 pub mod model_catalog_route;
