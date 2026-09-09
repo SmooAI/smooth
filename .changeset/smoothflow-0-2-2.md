@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+SmoothFlow 0.2.2 — the first release that ships the real fix for `_`-instead-of-glyphs prompts. A Finder-launched app has no `LANG`, the child daemon inherited that, and tmux then treated the attach client as non-UTF-8 and replaced every non-ASCII cell with `_`; the daemon now attaches with `tmux -u` and gives the child a UTF-8 locale. Ghostty themes never applied either, because `GHOSTTY_RESOURCES_DIR` was unset before `ghostty_init` — Catppuccin Mocha now renders. Also in this cut: a bundled Nerd Font and a Settings ▸ Terminal pane (th-bcd819), SmoothFlow's own relay identity (`kind=flow`, th-a1bb12), agentic `add_harness` manifest drafting (th-473294), harness manifests so any coding-agent CLI can launch (th-0f6126), end-to-end encrypted relay frames with QR pairing (th-d98fde), `flow.close` with a confirm sheet that closes the pearl and GCs the merged worktree (th-883ce9, th-e126cc), bounded daemon shutdown on quit (th-6198bf), and per-daemon supervision ownership of flow.db rows (th-4f7866). th-4efb09.
