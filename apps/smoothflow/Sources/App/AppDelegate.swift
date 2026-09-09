@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any surface or view asks for a font (th-bcd819).
+        TerminalFont.registerBundled()
         NSApp.mainMenu = buildMenu()
         // Hosting the unit tests: no status item, no window, no daemon, no tmux
         // (th-dccc80). Everything below `start()` is what a test would observe.

@@ -170,6 +170,13 @@ final class DaemonManager: ObservableObject {
         // that is the whole TCC story (docs/Architecture/SmoothFlow-macOS.md).
         env["SMOOTH_FLOW_TMUX_SOCKET"] = Self.tmuxSocket
         env["SMOOTH_LOCAL_TOKEN"] = token
+        // A Finder-launched app has no LANG. Without a UTF-8 locale every tmux
+        // client the daemon runs (its attach = the bytes we render) is treated
+        // as a non-UTF-8 terminal and tmux draws `_` for each non-ASCII cell —
+        // the blank Nerd Font prompt icons of th-bcd819. Agents' shells need
+        // it too (Claude Code's own output). Mirrors what Ghostty does for its
+        // shells.
+        env.merge(Self.utf8Locale(env: env)) { $1 }
         // Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay.
         env["SMOOTH_TAILSCALE_SERVE"] = "0"
         // …as its OWN relay device (th-a1bb12): Big Smooth reads
@@ -268,7 +275,8 @@ final class DaemonManager: ObservableObject {
     private static func tmux(_ bin: String, _ args: [String]) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["-L", tmuxSocket] + args
+        // `-u`: force UTF-8 on the client side regardless of locale (th-bcd819).
+        p.arguments = ["-u", "-L", tmuxSocket] + args
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run(); p.waitUntilExit(); return p.terminationStatus == 0 } catch { return false }
@@ -291,6 +299,25 @@ final class DaemonManager: ObservableObject {
     while kill -0 "$PPID" 2>/dev/null && kill -0 "$d" 2>/dev/null; do sleep 1; done
     down; wait "$d"
     """#
+
+    /// The locale variables to add so the child (and everything under its
+    /// tmux server) speaks UTF-8: nothing when `LC_ALL` / `LC_CTYPE` / `LANG`
+    /// already names a UTF-8 locale, else `LANG` + `LC_CTYPE` set to the
+    /// user's locale (`en_US.UTF-8`) when the system knows it, `en_US.UTF-8`
+    /// otherwise. Pure over its inputs (th-bcd819).
+    nonisolated static func utf8Locale(env: [String: String], identifier: String = Locale.current.identifier,
+                           known: (String) -> Bool = { FileManager.default.fileExists(atPath: "/usr/share/locale/\($0)") }) -> [String: String] {
+        let isUTF8: (String?) -> Bool = { v in
+            guard let v = v?.lowercased() else { return false }
+            return v.contains("utf-8") || v.contains("utf8")
+        }
+        if isUTF8(env["LC_ALL"]) || isUTF8(env["LC_CTYPE"]) || isUTF8(env["LANG"]) { return [:] }
+        // "en_US@rg=gbzzzz" style identifiers are not locale names; keep ll_CC.
+        let base = identifier.split(separator: "@").first.map(String.init) ?? identifier
+        let candidate = base.replacingOccurrences(of: "-", with: "_") + ".UTF-8"
+        let name = (base.contains("_") && known(candidate)) ? candidate : "en_US.UTF-8"
+        return ["LANG": name, "LC_CTYPE": name]
+    }
 
     static func freePort() -> Int {
         let sock = socket(AF_INET, SOCK_STREAM, 0)

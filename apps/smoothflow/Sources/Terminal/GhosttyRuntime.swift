@@ -15,6 +15,10 @@ final class GhosttyRuntime {
 
     /// Set by the surface view registry so action callbacks can find their view.
     private init() {
+        // Themes (`theme = …` in the user's config) resolve under the
+        // resources dir libghostty is told about — Ghostty.app sets it for
+        // itself; without it a theme silently never applies (th-bcd819).
+        TerminalFont.exportResourcesDir()
         // ghostty_init reads argv for CLI actions; we have none.
         var argv: [UnsafeMutablePointer<CChar>?] = [strdup("smoothflow"), nil]
         defer { free(argv[0]) }
@@ -22,13 +26,7 @@ final class GhosttyRuntime {
             _ = ghostty_init(UInt(buf.count - 1), buf.baseAddress)
         }
 
-        guard let cfg = ghostty_config_new() else { return }
-        // The user's own ~/.config/ghostty config applies (fonts, theme), then
-        // our overrides: no shell integration (no PTY of ours to integrate with).
-        ghostty_config_load_default_files(cfg)
-        let overrides = "shell-integration = none\nconfirm-close-surface = false\nwindow-padding-x = 6\nwindow-padding-y = 4\n"
-        overrides.withCString { ov in "smoothflow".withCString { src in ghostty_config_load_string(cfg, ov, UInt(overrides.utf8.count), src) } }
-        ghostty_config_finalize(cfg)
+        guard let cfg = Self.buildConfig() else { return }
         config = cfg
 
         var rt = ghostty_runtime_config_s()
@@ -74,6 +72,30 @@ final class GhosttyRuntime {
         }
         rt.close_surface_cb = { _, _ in }
         app = ghostty_app_new(&rt, cfg)
+    }
+
+    /// The user's own ~/.config/ghostty config applies (theme, and their font
+    /// if they set one), then our overrides: no shell integration (no PTY of
+    /// ours to integrate with), padding, and the terminal font (th-bcd819 —
+    /// see `TerminalFont` for the precedence).
+    private static func buildConfig() -> ghostty_config_t? {
+        guard let cfg = ghostty_config_new() else { return nil }
+        ghostty_config_load_default_files(cfg)
+        let overrides = baseOverrides + TerminalFont.overrides(settings: TerminalSettings.load(), userKeys: TerminalFont.readUserConfigKeys())
+        overrides.withCString { ov in "smoothflow".withCString { src in ghostty_config_load_string(cfg, ov, UInt(overrides.utf8.count), src) } }
+        ghostty_config_finalize(cfg)
+        return cfg
+    }
+
+    static let baseOverrides = "shell-integration = none\nconfirm-close-surface = false\nwindow-padding-x = 6\nwindow-padding-y = 4\n"
+
+    /// Settings ▸ Terminal changed: rebuild the config and push it to every
+    /// open surface (ghostty re-shapes with the new font in place).
+    func reloadConfig() {
+        guard let app, let cfg = Self.buildConfig() else { return }
+        ghostty_app_update_config(app, cfg)
+        if let old = config { ghostty_config_free(old) }
+        config = cfg
     }
 
     func tick() {
