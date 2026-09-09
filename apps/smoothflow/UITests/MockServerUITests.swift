@@ -15,7 +15,7 @@ final class MockServerUITests: FlowUITestCase {
         waitForState("fs-3041bbbb") { $0.hasPrefix("limit") }
         waitForState("fs-3033cccc") { $0 == "done" }
         waitForState("fs-shell001") { $0 == "idle" }
-        XCTAssertTrue(app.staticTexts["sidebar.header"].label.contains("sessions"))
+        XCTAssertTrue(label("sidebar.header").contains("sessions"), label("sidebar.header"))
     }
 
     func testSelectingSessionShowsSurfaceAndHeader() {
