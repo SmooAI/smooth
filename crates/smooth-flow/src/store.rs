@@ -317,6 +317,29 @@ fn parse_ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |d| d.with_timezone(&Utc))
 }
 
+/// A paired phone (th-d98fde).
+///
+/// The relay device allowed to drive this daemon's flow channel, plus the
+/// per-pairing key both sides derived when the QR was scanned. `key_hex` is
+/// the secret — it never leaves the daemon (`serde(skip_serializing)`), so a
+/// `Pairing` can be handed to a route as-is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pairing {
+    /// The phone's relay device id (`phone-…`) — the envelope `from`.
+    pub device: String,
+    /// Human label the phone sent in its hello ("Brent's iPhone").
+    pub label: String,
+    /// `ios` | `android` | anything the phone reports.
+    pub platform: String,
+    /// The phone's X25519 public key, base64url — identity/display only.
+    pub public_key: String,
+    /// The derived 32-byte pairing key, lowercase hex.
+    #[serde(skip_serializing, default)]
+    pub key_hex: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
 /// The store. One connection; callers serialize through a `Mutex`.
 pub struct FlowStore {
     conn: Connection,
@@ -389,6 +412,15 @@ impl FlowStore {
              CREATE TABLE IF NOT EXISTS config (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS pairings (
+                 device       TEXT PRIMARY KEY,
+                 label        TEXT NOT NULL DEFAULT '',
+                 platform     TEXT NOT NULL DEFAULT '',
+                 public_key   TEXT NOT NULL,
+                 key_hex      TEXT NOT NULL,
+                 created_at   TEXT NOT NULL,
+                 last_seen_at TEXT
              );",
         )
         .context("apply flow schema")?;
@@ -668,6 +700,96 @@ impl FlowStore {
                 params![key, value],
             )
             .context("set config")?;
+        Ok(())
+    }
+
+    // ── pairings (th-d98fde) ────────────────────────────────────────────────
+
+    fn row_to_pairing(row: &Row<'_>) -> rusqlite::Result<Pairing> {
+        let created: String = row.get("created_at")?;
+        let seen: Option<String> = row.get("last_seen_at")?;
+        Ok(Pairing {
+            device: row.get("device")?,
+            label: row.get("label")?,
+            platform: row.get("platform")?,
+            public_key: row.get("public_key")?,
+            key_hex: row.get("key_hex")?,
+            created_at: parse_ts(&created),
+            last_seen_at: seen.as_deref().map(parse_ts),
+        })
+    }
+
+    /// Insert or replace a phone pairing (re-pairing the same device rotates
+    /// its key in place).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn upsert_pairing(&self, p: &Pairing) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO pairings (device, label, platform, public_key, key_hex, created_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(device) DO UPDATE SET label = excluded.label, platform = excluded.platform,
+                     public_key = excluded.public_key, key_hex = excluded.key_hex,
+                     created_at = excluded.created_at, last_seen_at = excluded.last_seen_at",
+                params![
+                    p.device,
+                    p.label,
+                    p.platform,
+                    p.public_key,
+                    p.key_hex,
+                    p.created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    p.last_seen_at.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+                ],
+            )
+            .context("upsert pairing")?;
+        Ok(())
+    }
+
+    /// One pairing by relay device id.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn pairing(&self, device: &str) -> Result<Option<Pairing>> {
+        self.conn
+            .query_row("SELECT * FROM pairings WHERE device = ?1", params![device], Self::row_to_pairing)
+            .optional()
+            .context("get pairing")
+    }
+
+    /// Every pairing, oldest first.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn list_pairings(&self) -> Result<Vec<Pairing>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM pairings ORDER BY created_at ASC, device ASC")?;
+        let rows = stmt.query_map([], Self::row_to_pairing).context("list pairings")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("collect pairings")
+    }
+
+    /// Revoke a pairing. `true` when a row was removed.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn remove_pairing(&self, device: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM pairings WHERE device = ?1", params![device])
+            .context("remove pairing")?
+            > 0)
+    }
+
+    /// Record that the phone was heard from.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn touch_pairing(&self, device: &str, at: DateTime<Utc>) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE pairings SET last_seen_at = ?2 WHERE device = ?1",
+                params![device, at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)],
+            )
+            .context("touch pairing")?;
         Ok(())
     }
 
@@ -1099,5 +1221,63 @@ mod tests {
         let db = tmp.path().join("flow.db");
         let id = FlowStore::open(&db).unwrap().create(new_shell()).unwrap().id;
         assert!(FlowStore::open(&db).unwrap().get(&id).unwrap().is_some());
+    }
+
+    // ── pairings (th-d98fde) ────────────────────────────────────────────────
+
+    fn pairing(device: &str) -> Pairing {
+        Pairing {
+            device: device.into(),
+            label: "Brent's iPhone".into(),
+            platform: "ios".into(),
+            public_key: "pk".into(),
+            key_hex: "00".repeat(32),
+            created_at: Utc::now(),
+            last_seen_at: None,
+        }
+    }
+
+    #[test]
+    fn pairings_round_trip_list_touch_and_revoke() {
+        let st = store();
+        assert!(st.list_pairings().unwrap().is_empty());
+        st.upsert_pairing(&pairing("phone-a")).unwrap();
+        st.upsert_pairing(&pairing("phone-b")).unwrap();
+        let got = st.pairing("phone-a").unwrap().unwrap();
+        assert_eq!(got.label, "Brent's iPhone");
+        assert_eq!(got.key_hex, "00".repeat(32));
+        assert_eq!(got.last_seen_at, None);
+        assert_eq!(st.list_pairings().unwrap().len(), 2);
+
+        let at = Utc::now();
+        st.touch_pairing("phone-a", at).unwrap();
+        let seen = st.pairing("phone-a").unwrap().unwrap().last_seen_at.unwrap();
+        assert!((seen - at).num_milliseconds().abs() < 2);
+
+        assert!(st.remove_pairing("phone-a").unwrap());
+        assert!(!st.remove_pairing("phone-a").unwrap(), "second revoke is a no-op");
+        assert!(st.pairing("phone-a").unwrap().is_none());
+        assert_eq!(st.list_pairings().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn re_pairing_rotates_the_key_in_place() {
+        let st = store();
+        st.upsert_pairing(&pairing("phone-a")).unwrap();
+        let mut again = pairing("phone-a");
+        again.key_hex = "ff".repeat(32);
+        again.label = "New phone, same id".into();
+        st.upsert_pairing(&again).unwrap();
+        let got = st.pairing("phone-a").unwrap().unwrap();
+        assert_eq!(got.key_hex, "ff".repeat(32));
+        assert_eq!(got.label, "New phone, same id");
+        assert_eq!(st.list_pairings().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pairing_key_never_serializes() {
+        let v = serde_json::to_value(pairing("phone-a")).unwrap();
+        assert!(v.get("key_hex").is_none(), "{v}");
+        assert_eq!(v["device"], "phone-a");
     }
 }

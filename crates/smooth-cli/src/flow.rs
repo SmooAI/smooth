@@ -130,6 +130,38 @@ pub enum FlowCommands {
     },
     /// The pearl-rail handoff block for a session.
     Handoff { id: String },
+    /// Pair a phone for end-to-end encrypted relay frames: shows a one-time
+    /// link (and `--qr` a scannable QR) and waits for the scan. Subcommands
+    /// list and revoke pairings.
+    Pair {
+        #[command(subcommand)]
+        cmd: Option<PairCommands>,
+        /// Render the pairing QR in the terminal.
+        #[arg(long)]
+        qr: bool,
+        /// Give up waiting for the scan after this many seconds (0 = don't wait).
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PairCommands {
+    /// Paired phones (device, label, platform, created, last seen).
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a phone's pairing; its next encrypted frame is refused.
+    Revoke {
+        /// The phone's relay device id (`phone-…`, from `list`).
+        device: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -498,7 +530,144 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             Ok(())
         }
         FlowCommands::Fanout { cmd } => cmd_fanout(cmd).await,
+        FlowCommands::Pair { cmd: None, qr, timeout, json } => cmd_pair(qr, timeout, json).await,
+        FlowCommands::Pair {
+            cmd: Some(PairCommands::List { json }),
+            ..
+        } => {
+            let v = call(reqwest::Method::GET, "/api/flow/pairings", None).await?;
+            emit(json, &v, print_pairings)
+        }
+        FlowCommands::Pair {
+            cmd: Some(PairCommands::Revoke { device, json }),
+            ..
+        } => {
+            let v = call(reqwest::Method::DELETE, &format!("/api/flow/pairings/{device}"), None).await?;
+            emit(json, &v, |v| {
+                if v.get("revoked").and_then(Value::as_bool) == Some(true) {
+                    println!(
+                        "{} revoked {device} — its next encrypted frame is refused",
+                        paint("✓", |g| g.green().bold().to_string())
+                    );
+                } else {
+                    println!("{device} was not paired");
+                }
+            })
+        }
     }
+}
+
+// ── pairing (th-d98fde) ───────────────────────────────────────────────────────
+
+/// The QR as unicode half-blocks (two rows per line), light-on-dark so it
+/// scans on a dark terminal. Pure: rendering only.
+pub fn render_qr(url: &str) -> Result<String> {
+    use qrcode::render::unicode;
+    let code = qrcode::QrCode::new(url.as_bytes()).context("build QR")?;
+    Ok(code
+        .render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Light)
+        .light_color(unicode::Dense1x2::Dark)
+        .quiet_zone(true)
+        .build())
+}
+
+fn print_pairings(v: &Value) {
+    let rows = list_of(v, "pairings");
+    let device = v.get("device").and_then(Value::as_str).unwrap_or("?");
+    let label = v.get("label").and_then(Value::as_str).unwrap_or("");
+    println!("{} {label} ({device})", paint("this daemon", |g| g.bold().to_string()));
+    if v.get("relay_enabled").and_then(Value::as_bool) == Some(false) {
+        println!(
+            "{}",
+            paint("relay is disabled (SMOOTH_RELAY=0) — phones cannot reach this daemon", |g| g
+                .yellow()
+                .to_string())
+        );
+    }
+    if rows.is_empty() {
+        println!("no paired phones — `th flow pair --qr`");
+        return;
+    }
+    println!("{:<22} {:<24} {:<8} {:<20} {}", "DEVICE", "LABEL", "PLATFORM", "PAIRED", "LAST SEEN");
+    for r in rows {
+        let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        println!(
+            "{:<22} {:<24} {:<8} {:<20} {}",
+            short(&s("device"), 22),
+            short(&s("label"), 24),
+            s("platform"),
+            short(&s("created_at"), 20),
+            if s("last_seen_at").is_empty() {
+                "never".to_string()
+            } else {
+                short(&s("last_seen_at"), 20)
+            }
+        );
+    }
+}
+
+async fn cmd_pair(qr: bool, timeout_secs: u64, json: bool) -> Result<()> {
+    let v = call(reqwest::Method::POST, "/api/flow/pair", None).await?;
+    let id = v
+        .get("pairing_id")
+        .and_then(Value::as_str)
+        .context("daemon returned no pairing_id")?
+        .to_string();
+    let url = v.get("url").and_then(Value::as_str).context("daemon returned no url")?.to_string();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        let label = v.get("label").and_then(Value::as_str).unwrap_or("");
+        let device = v.get("device").and_then(Value::as_str).unwrap_or("");
+        println!("{} {label} ({device})", paint("pair a phone with", |g| g.bold().to_string()));
+        if v.get("relay_enabled").and_then(Value::as_bool) == Some(false) {
+            println!(
+                "{}",
+                paint(
+                    "relay is disabled on this daemon (SMOOTH_RELAY=0) — the phone will not be able to connect",
+                    |g| g.yellow().to_string()
+                )
+            );
+        }
+        if qr {
+            println!("{}", render_qr(&url)?);
+            println!("Scan with the SmoothFlow app (Connect ▸ Pair a Mac), or with the Camera app.");
+        } else {
+            println!("Open this link on the phone (or pass --qr to scan it):");
+        }
+        println!("{url}");
+        if let Some(exp) = v.get("expires_at").and_then(Value::as_str) {
+            println!("{}", paint(&format!("expires {exp}"), |g| g.dimmed().to_string()));
+        }
+    }
+    if timeout_secs == 0 {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let s = call(reqwest::Method::GET, &format!("/api/flow/pair/{id}"), None).await?;
+        match s.get("state").and_then(Value::as_str) {
+            Some("paired") => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&s)?);
+                } else {
+                    println!(
+                        "{} paired {} ({}, {})",
+                        paint("✓", |g| g.green().bold().to_string()),
+                        s.get("label").and_then(Value::as_str).unwrap_or("phone"),
+                        s.get("platform").and_then(Value::as_str).unwrap_or("?"),
+                        s.get("device").and_then(Value::as_str).unwrap_or("?")
+                    );
+                }
+                return Ok(());
+            }
+            Some("expired" | "unknown") => bail!("the pairing link expired before it was scanned — run `th flow pair` again"),
+            _ => {}
+        }
+    }
+    bail!("no phone scanned the link within {timeout_secs}s — run `th flow pair` again")
 }
 
 struct NewArgs {
@@ -757,6 +926,16 @@ mod tests {
         assert_eq!(pad("abcdef", 6, 5), "abcdef");
         assert_eq!(short("abcdef", 4), "abc…");
         assert_eq!(short("ab", 4), "ab");
+    }
+
+    #[test]
+    fn render_qr_is_square_unicode_blocks() {
+        let out = render_qr("smoothflow://pair?v=1&p=1a2b3c4d&d=daemon-0123456789ab&k=x&c=y&l=smoo-hub").unwrap();
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert!(lines.len() > 10, "{out}");
+        let widths: std::collections::HashSet<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(widths.len(), 1, "every row has the same width: {widths:?}");
+        assert!(out.chars().any(|c| c == '█' || c == '▀' || c == '▄'), "half-block glyphs: {out}");
     }
 
     #[test]

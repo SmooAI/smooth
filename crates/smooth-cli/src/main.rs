@@ -7811,6 +7811,9 @@ mod cli_dispatch_tests {
             "th model",
             "th auth profile",
             "th smoo auth profile",
+            // th-d98fde: phone pairings live in THIS machine's ~/.smooth/flow.db;
+            // revoke talks to the local daemon only (nothing on smoo.ai changes).
+            "th flow pair",
         ];
 
         fn is_delete_verb(name: &str) -> bool {

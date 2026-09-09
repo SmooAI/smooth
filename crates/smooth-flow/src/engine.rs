@@ -26,7 +26,7 @@ use crate::protocol::{
     FlowEvent, HookEvent, HookOutcome, ServerFrame,
 };
 use crate::pty::{OnOutput, PtyAttach};
-use crate::store::{Attention, FanOut, FlowStore, NewSession, Session, SessionKind, SessionState};
+use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
 use crate::{limit, proc, tmux};
 
 /// Supervision rule 2: relaunch attempts before `dead`.
@@ -390,6 +390,48 @@ impl Engine {
             .with_store(|st| st.get_config(HARNESS_PREFS_KEY))?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default())
+    }
+
+    // ── pairings (th-d98fde) ────────────────────────────────────────────────
+
+    /// Every paired phone.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn pairings(&self) -> Result<Vec<Pairing>> {
+        self.with_store(FlowStore::list_pairings)
+    }
+
+    /// One pairing by relay device id.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn pairing(&self, device: &str) -> Result<Option<Pairing>> {
+        self.with_store(|st| st.pairing(device))
+    }
+
+    /// Persist a new (or rotated) pairing.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn upsert_pairing(&self, p: &Pairing) -> Result<()> {
+        self.with_store(|st| st.upsert_pairing(p))
+    }
+
+    /// Revoke a pairing; `true` when it existed.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn remove_pairing(&self, device: &str) -> Result<bool> {
+        self.with_store(|st| st.remove_pairing(device))
+    }
+
+    /// Record that the phone was heard from.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn touch_pairing(&self, device: &str, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        self.with_store(|st| st.touch_pairing(device, at))
     }
 
     /// The harness rows — `all = false` is the `flow.hello` list (hidden
