@@ -74,6 +74,17 @@ const seed = [
         ended_at: now(),
         unread: true,
     }),
+    // th-883ce9: done, but its branch was never merged — flow.close refuses it
+    // (nothing touched) until the shell resends with force.
+    mk('fs-3034dddd', {
+        pearl_id: 'SMOODEV-3034',
+        title: 'unmerged branch',
+        project: `${HOME}/dev/smooai/smooai`,
+        state: 'done',
+        exit_code: 0,
+        ended_at: now(),
+        unread: false,
+    }),
     mk('fs-19cca5c0', { pearl_id: 'th-19cca5', title: 'fan-out C', state: 'working', fan_out_id: 'fo-1' }),
     mk('fs-shell001', {
         kind: 'shell',
@@ -87,6 +98,27 @@ const seed = [
     }),
 ];
 for (const s of seed) sessions.set(s.id, s);
+// Sessions whose worktree the engine would refuse to remove (dirty / unmerged).
+const unmerged = new Set(['fs-3034dddd']);
+
+// flow.close (th-e126cc): why the engine would refuse, or null to go ahead.
+function closeRefusal(s, m) {
+    if (!m.remove_worktree || m.force || !unmerged.has(s.id)) return null;
+    return `worktree ${s.worktree} has 2 uncommitted files and branch ${s.branch} is not merged into main — force to remove it anyway`;
+}
+// What the engine did: kill a live row, close the pearl, drop the worktree, drop the row.
+function closeSession(s, m) {
+    const out = { id: s.id, pearl_closed: null, worktree_removed: null, branch_deleted: null };
+    if (m.close_pearl && s.pearl_id) out.pearl_closed = s.pearl_id;
+    if (m.remove_worktree && s.worktree !== s.project && s.worktree !== HOME) {
+        out.worktree_removed = s.worktree;
+        out.branch_deleted = s.branch;
+    }
+    sessions.delete(s.id);
+    unmerged.delete(s.id);
+    broadcast({ type: 'flow.session.removed', id: s.id });
+    return out;
+}
 const fanOuts = new Map([
     ['fo-1', { id: 'fo-1', prompt: 'pearls sync API shape', base_commit: '30ddeeb0', pearl_id: 'th-19cca5', created_at: now(), winner_session_id: null }],
 ]);
@@ -279,6 +311,15 @@ function handle(c, m) {
         case 'flow.mark_read':
             if (s) sessionChanged(s, { unread: false });
             return;
+        case 'flow.close': {
+            // The engine echoes the client's `seq` as `ref` on its error reply.
+            const ref = m.seq ?? null;
+            if (!s) return send(c, { type: 'flow.error', ref, code: 'not_found', message: `no session ${m.id}` });
+            const why = closeRefusal(s, m);
+            if (why) return send(c, { type: 'flow.error', ref, code: 'refused', message: why });
+            closeSession(s, m);
+            return;
+        }
         case 'flow.new': {
             const id = newId();
             const n = mk(id, {
@@ -349,6 +390,22 @@ setInterval(() => {
         });
 }, 45000);
 
+// ---------- phone pairing state (th-d98fde) ----------
+const pendingPairs = new Map();
+const pairings = new Map([
+    [
+        'phone-mock0000000',
+        {
+            device: 'phone-mock0000000',
+            label: 'Brent\u2019s Pixel',
+            platform: 'android',
+            public_key: 'ROBtiZm7GEsCMK0Ke9PbGlaMk21hD-HPJmTq-a8asZg',
+            created_at: '2026-09-01T12:00:00.000Z',
+            last_seen_at: '2026-09-01T18:00:00.000Z',
+        },
+    ],
+]);
+
 // ---------- http ----------
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -363,6 +420,63 @@ const server = http.createServer((req, res) => {
         return s ? json(200, handoff(s)) : json(404, { code: 'not_found', message: m[1] });
     }
     if (req.method === 'POST' && url.pathname === '/api/flow/hooks') return json(200, {});
+    // th-e126cc HTTP twin of flow.close: {id, pearl_closed, worktree_removed, branch_deleted}.
+    if (req.method === 'POST' && (m = url.pathname.match(/^\/api\/flow\/sessions\/([^/]+)\/close$/))) {
+        const id = m[1];
+        let raw = '';
+        req.on('data', (chunk) => (raw += chunk));
+        req.on('end', () => {
+            let body = {};
+            try {
+                body = raw ? JSON.parse(raw) : {};
+            } catch {
+                return json(400, { error: 'invalid JSON body' });
+            }
+            const s = sessions.get(id);
+            if (!s) return json(404, { error: `no such session ${id}` });
+            const why = closeRefusal(s, body);
+            if (why) return json(500, { error: why });
+            json(200, closeSession(s, body));
+        });
+        return;
+    }
+    // ---- phone pairing (th-d98fde): a scan "happens" on the 3rd poll ----
+    if (req.method === 'POST' && url.pathname === '/api/flow/pair') {
+        const id = Math.random().toString(16).slice(2, 10);
+        pendingPairs.set(id, { polls: 0 });
+        const code = 'EDJUdpi63P4BI0VniavN7w';
+        return json(200, {
+            pairing_id: id,
+            url: `smoothflow://pair?v=1&p=${id}&d=daemon-mock00000000&k=hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr06NxOql-OKqo&c=${code}&l=mock`,
+            code,
+            device: 'daemon-mock00000000',
+            label: 'mock',
+            daemon_public_key: 'hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr06NxOql-OKqo',
+            expires_at: new Date(Date.now() + 300_000).toISOString(),
+            relay_enabled: true,
+        });
+    }
+    if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/flow\/pair\/([^/]+)$/))) {
+        const p = pendingPairs.get(m[1]);
+        if (!p) return json(200, { state: 'unknown', pairing_id: m[1] });
+        p.polls += 1;
+        if (p.polls < 3) return json(200, { state: 'pending', pairing_id: m[1], expires_at: new Date(Date.now() + 300_000).toISOString() });
+        pendingPairs.delete(m[1]);
+        const phone = {
+            device: 'phone-mock0000001',
+            label: 'Mock iPhone',
+            platform: 'ios',
+            public_key: 'd8IOd4V6q4WY1RGMlAbmaOfzsY_QyeRpttXIdD4RPtA',
+            created_at: new Date().toISOString(),
+            last_seen_at: new Date().toISOString(),
+        };
+        pairings.set(phone.device, phone);
+        return json(200, { state: 'paired', pairing_id: m[1], device: phone.device, label: phone.label, platform: phone.platform });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/flow/pairings')
+        return json(200, { device: 'daemon-mock00000000', label: 'mock', relay_enabled: true, pairings: [...pairings.values()] });
+    if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/flow\/pairings\/([^/]+)$/)))
+        return json(200, { device: m[1], revoked: pairings.delete(m[1]) });
     json(404, { code: 'not_found', message: url.pathname });
 });
 

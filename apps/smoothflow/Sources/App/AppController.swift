@@ -2,6 +2,20 @@ import AppKit
 import Combine
 import UserNotifications
 
+/// One `flow.close` the shell sent (th-883ce9).
+struct CloseRequest: Equatable {
+    var sessionId: String
+    var closePearl: Bool
+    var removeWorktree: Bool
+    var force: Bool
+}
+
+/// The engine said no (dirty / unmerged worktree): what was asked, and why not.
+struct CloseRefusal: Equatable {
+    var request: CloseRequest
+    var message: String
+}
+
 /// The coordinator: wires store ↔ client ↔ surfaces ↔ windows ↔ notifications.
 /// Holds no session facts of its own — those live in `FlowStore`, fed by frames.
 @MainActor
@@ -16,9 +30,21 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// `store.harnesses` (visible only) instead.
     @Published private(set) var allHarnesses: [HarnessInfo] = []
     @Published var thOutput: String?
+    /// Settings ▸ Phones (th-d98fde): the paired phones, the QR on screen, and
+    /// what the last scan produced.
+    @Published private(set) var pairedPhones: PairingsList?
+    @Published private(set) var pendingPairing: PairingBegin?
+    @Published private(set) var pairingMessage: String?
+    private var pairingPoll: Task<Void, Never>?
+    /// th-883ce9: `flow.close` in flight, keyed by the `seq` the frame carried,
+    /// and the engine's refusal per session (the card shows it with "Force close").
+    private var pendingCloses: [Int: CloseRequest] = [:]
+    @Published private(set) var closeRefusals: [String: CloseRefusal] = [:]
+    private var nextSeq = 1
     var notifySettings = NotifySettings.load()
 
     private(set) var surfaces: [String: TerminalSurfaceView] = [:]
+    /// nil until `start()` (an inert test host never creates it).
     private(set) var mainWindow: MainWindowController!
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
@@ -28,7 +54,27 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     // MARK: lifecycle
 
+    /// Whether this process should bring the fleet up at all (th-dccc80).
+    ///
+    /// The unit-test bundle is hosted INSIDE the app (`TEST_HOST`), so every
+    /// `xcodebuild test` ran the real `applicationDidFinishLaunching`: in spawn
+    /// mode that meant `tmux -L smoothflow kill-server` and a `smooth-daemon`
+    /// child against the developer's real HOME — stray daemons, and before
+    /// #546 a rewritten `~/.smooth/daemon.addr`. Under XCTest the app stays
+    /// inert unless a test opts in with `SMOOTHFLOW_TEST_START=1`. The XCUITest
+    /// lane is unaffected: the app under test is a separate process with none
+    /// of the XCTest variables.
+    nonisolated static func shouldStart(env: [String: String]) -> Bool {
+        if env["SMOOTHFLOW_TEST_START"] == "1" { return true }
+        return ["XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier"].allSatisfy { env[$0] == nil }
+    }
+
+    /// True once `start()` ran; `shutdown()` is a no-op before that, so an
+    /// inert test host never touches tmux or a daemon on the way out.
+    private(set) var started = false
+
     func start() {
+        started = true
         mainWindow = MainWindowController(app: self)
         mainWindow.showWindow(nil)
         mainWindow.window?.makeKeyAndOrderFront(nil)
@@ -44,7 +90,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             self.mainWindow.center.refreshHeaders()
         }.store(in: &subscriptions)
         // @Published fires on willSet; hop once so the headers read the new value.
-        store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.mainWindow.center.refreshHeaders() }.store(in: &subscriptions)
+        store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
+            self?.mainWindow.center.refreshHeaders()
+            self?.pruneCloses(live)
+        }.store(in: &subscriptions)
         daemon.onRestart = { [weak self] ep in self?.client.connect(to: ep) }
 
         connect()
@@ -74,7 +123,15 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         connect()
     }
 
+    /// Take the fleet down with the app: disconnect, stop the child daemon
+    /// (bounded — see `DaemonManager.stop`), kill the app-owned tmux server.
+    /// Idempotent: `applicationShouldTerminate` runs it, and
+    /// `applicationWillTerminate` runs it again for the paths that skip the
+    /// former (a SIGTERM to the app, a forced logout).
+    private(set) var didShutdown = false
     func shutdown() {
+        guard started, !didShutdown else { return }
+        didShutdown = true
         client.disconnect()
         daemon.stop()
         if UserDefaults.standard.object(forKey: "tmuxOwnedByApp") as? Bool ?? true { daemon.stopTmuxServer() }
@@ -107,11 +164,24 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 if let v = surfaces[id] { client.send(.attach(id: id, cols: v.gridSize.cols, rows: v.gridSize.rows)) }
             case let .handoff(id, h):
                 handoffs[id] = h
-            case let .error(msg):
-                thOutput = msg
+            case let .error(ref, msg):
+                if let ref, let req = pendingCloses.removeValue(forKey: ref) {
+                    closeRefusals[req.sessionId] = CloseRefusal(request: req, message: msg)
+                } else {
+                    thOutput = msg
+                }
             }
         }
         NSApp.dockTile.badgeLabel = store.counts.needsYou > 0 ? String(store.counts.needsYou) : nil
+    }
+
+    /// A close that succeeded ends in `flow.session.removed` (no effect of its
+    /// own): forget the request, and any stale refusal, once the row is gone.
+    private func pruneCloses(_ live: [String: Session]) {
+        let pending = pendingCloses.filter { live[$0.value.sessionId] != nil }
+        if pending.count != pendingCloses.count { pendingCloses = pending }
+        let refusals = closeRefusals.filter { live[$0.key] != nil }
+        if refusals.count != closeRefusals.count { closeRefusals = refusals }
     }
 
     // MARK: surfaces
@@ -187,6 +257,26 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     }
 
     func kill(_ s: Session, resume: Bool) { client.send(.kill(id: s.id, resume: resume)) }
+
+    /// th-883ce9: `flow.close` for a finished session. Tagged with a `seq` so
+    /// the engine's refusal (`flow.error.ref`) lands on THIS card as a
+    /// "Force close" offer instead of in the rail's generic output.
+    func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false) {
+        let seq = nextSeq
+        nextSeq += 1
+        let req = CloseRequest(sessionId: s.id, closePearl: closePearl, removeWorktree: removeWorktree, force: force)
+        pendingCloses[seq] = req
+        closeRefusals[s.id] = nil
+        client.send(.close(id: s.id, closePearl: closePearl, removeWorktree: removeWorktree, force: force), seq: seq)
+    }
+
+    /// Resend the refused close with `force` — the user read the reason.
+    func forceClose(_ s: Session) {
+        guard let r = closeRefusals[s.id] else { return }
+        close(s, closePearl: r.request.closePearl, removeWorktree: r.request.removeWorktree, force: true)
+    }
+
+    func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
     func newSession(_ n: NewSession) { client.send(.new(n)) }
     func fanoutNew(prompt: String, pearlId: String?, candidates: [FanOutCandidate]) {
         client.send(.fanoutNew(prompt: prompt, pearlId: pearlId, candidates: candidates))
@@ -201,6 +291,54 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// the engine's `flow.harnesses` updates every picker.
     func setHarnessPrefs(order: [String]? = nil, hidden: [String]? = nil) async {
         do { allHarnesses = try await client.putHarnessPrefs(order: order, hidden: hidden) } catch { thOutput = "harness prefs: \(error.localizedDescription)" }
+    }
+
+    // ── phone pairing (th-d98fde) ────────────────────────────────────────────
+
+    func loadPairings() async {
+        do { pairedPhones = try await client.pairings() } catch { pairingMessage = "pairings: \(error.localizedDescription)" }
+    }
+
+    /// Mint a QR and poll until a phone scans it (or it expires). One at a time.
+    func beginPairing() async {
+        pairingPoll?.cancel()
+        pairingMessage = nil
+        do {
+            let begin = try await client.beginPairing()
+            pendingPairing = begin
+            pairingPoll = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let self, let pending = self.pendingPairing, pending.pairingId == begin.pairingId else { return }
+                    guard let poll = try? await self.client.pairingStatus(begin.pairingId) else { continue }
+                    if poll.isPaired {
+                        self.pairingMessage = "Paired \(poll.label ?? "phone") (\(poll.platform ?? "?"))"
+                        self.pendingPairing = nil
+                        await self.loadPairings()
+                        return
+                    }
+                    if poll.isGone {
+                        self.pairingMessage = "The link expired before it was scanned — show a new one."
+                        self.pendingPairing = nil
+                        return
+                    }
+                }
+            }
+        } catch {
+            pairingMessage = "pair: \(error.localizedDescription)"
+        }
+    }
+
+    func cancelPairing() {
+        pairingPoll?.cancel()
+        pendingPairing = nil
+    }
+
+    func revokePairing(_ device: String) async {
+        do {
+            _ = try await client.revokePairing(device)
+            await loadPairings()
+        } catch { pairingMessage = "revoke: \(error.localizedDescription)" }
     }
 
     func loadHandoff(for id: String) async {

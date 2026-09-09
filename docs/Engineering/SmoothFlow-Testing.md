@@ -83,8 +83,16 @@ the two slow ones to a nightly `schedule:` — they are the only tests over
 
 Port 0 is real: the daemon resolves the ephemeral port BEFORE the router
 renders `{daemon_url}` (a bug this suite caught — hooks went to
-`http://127.0.0.1:0`). `daemon.addr` under the test HOME is what `th flow`
-and `th harness` read; `operator-token` is the `X-Smooth-Token`.
+`http://127.0.0.1:0`). A second instance deliberately does NOT advertise
+itself (#546 — SmoothFlow's own daemon must never repoint `th`), so the rig
+reads the bound port off the daemon's `operator listening … addr=` log line
+and writes `daemon.addr` under the test HOME itself; that is what `th flow`
+and `th harness` read. `operator-token` is the `X-Smooth-Token`.
+
+The opt-in real-harness test copies your `~/.smooth/providers.json` into the
+rig's HOME (th code refuses to boot without providers) and skips th code when
+there is none; claude / opencode / codex sit on onboarding in a fresh HOME, so
+only "painted + pid live + the launch shape" is asserted for them.
 
 Waits: `wait_state` / `wait_until` / `wait_screen` poll every 250 ms with a
 30 s cap (`WAIT`) and fail with the row, the pane, fake-agent's log and the

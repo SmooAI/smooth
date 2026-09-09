@@ -72,17 +72,18 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
 }
 
 /// Open the engine on `workspace`, start its supervisor, return its router —
-/// the one-liner `serve_local_flavor` merges.
+/// the one-liner `serve_local_flavor` merges — plus the engine handle (the
+/// pairing authority shares its store, th-d98fde).
 ///
 /// # Errors
 /// When the flow store cannot be opened.
-pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<Router> {
+pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<(Router, Engine)> {
     let engine = Engine::open(smooth_flow::EngineConfig {
         daemon_url,
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
     drop(spawn_supervisor(engine.clone()));
-    Ok(flow_router(engine, Some(token)))
+    Ok((flow_router(engine.clone(), Some(token)), engine))
 }
 
 /// Spawn the supervision tick for `engine` (rules 2–5 run here).

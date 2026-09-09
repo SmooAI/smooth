@@ -231,12 +231,23 @@ async fn real_harnesses_launch_through_their_manifests() {
         return;
     }
     let d = Daemon::boot().await;
+    // th code refuses to boot without LLM providers (`th model login`); the
+    // real ones on this machine, copied into the rig's HOME, let it come up
+    // and report its first turn natively. Absent, th code is skipped.
+    let providers = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json")).filter(|p| p.is_file());
+    if let Some(p) = &providers {
+        std::fs::copy(p, d.home.join(".smooth/providers.json")).unwrap();
+    }
     let (_, v) = d.get("/api/flow/harnesses").await;
     let mut matrix = Vec::new();
     for name in ["claude", "opencode", "codex", "th-code"] {
         let h = by_name(&v["harnesses"], name);
         if h["installed"] != true {
             eprintln!("[skip] {name}: {}", h["reason"]);
+            continue;
+        }
+        if name == "th-code" && providers.is_none() {
+            eprintln!("[skip] th-code: no ~/.smooth/providers.json to boot it with");
             continue;
         }
         let s = d.new_session(name, Some("say ok and stop")).await;

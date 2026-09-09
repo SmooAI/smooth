@@ -26,7 +26,7 @@ use crate::protocol::{
     FlowEvent, HookEvent, HookOutcome, ServerFrame,
 };
 use crate::pty::{OnOutput, PtyAttach};
-use crate::store::{Attention, FanOut, FlowStore, NewSession, Session, SessionKind, SessionState};
+use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
 use crate::{limit, proc, tmux};
 
 /// Supervision rule 2: relaunch attempts before `dead`.
@@ -204,6 +204,17 @@ fn socket_of(s: &Session) -> String {
     s.tmux_socket.clone().unwrap_or_else(tmux::socket_name)
 }
 
+/// Whether this daemon owns (supervises) `s` — th-4f7866. A row is owned by
+/// the daemon that created it, identified by the tmux socket name that daemon
+/// was configured with; rows from before the `owner` column are owned by the
+/// daemon whose socket matches the row's. Two daemons sharing one flow.db
+/// (the default `th up` daemon + the SmoothFlow app's child, or an orphaned
+/// instance) otherwise each declare the other's live panes "process vanished"
+/// and race to relaunch them.
+fn owned_here(s: &Session) -> bool {
+    s.owner.clone().unwrap_or_else(|| socket_of(s)) == tmux::socket_name()
+}
+
 /// `(socket, tmux session)` of a launched session.
 fn pane(s: &Session) -> Result<(String, String)> {
     let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
@@ -379,6 +390,48 @@ impl Engine {
             .with_store(|st| st.get_config(HARNESS_PREFS_KEY))?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default())
+    }
+
+    // ── pairings (th-d98fde) ────────────────────────────────────────────────
+
+    /// Every paired phone.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn pairings(&self) -> Result<Vec<Pairing>> {
+        self.with_store(FlowStore::list_pairings)
+    }
+
+    /// One pairing by relay device id.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn pairing(&self, device: &str) -> Result<Option<Pairing>> {
+        self.with_store(|st| st.pairing(device))
+    }
+
+    /// Persist a new (or rotated) pairing.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn upsert_pairing(&self, p: &Pairing) -> Result<()> {
+        self.with_store(|st| st.upsert_pairing(p))
+    }
+
+    /// Revoke a pairing; `true` when it existed.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn remove_pairing(&self, device: &str) -> Result<bool> {
+        self.with_store(|st| st.remove_pairing(device))
+    }
+
+    /// Record that the phone was heard from.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn touch_pairing(&self, device: &str, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        self.with_store(|st| st.touch_pairing(device, at))
     }
 
     /// The harness rows — `all = false` is the `flow.hello` list (hidden
@@ -635,6 +688,7 @@ impl Engine {
                 argv: argv.clone(),
                 tmux_session: None,
                 tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
+                owner: Some(tmux::socket_name()),
                 fan_out_id: req.fan_out_id.clone(),
             })
         })?;
@@ -755,6 +809,18 @@ impl Engine {
         tmux::send_text(&k, &t, text)?;
         self.event(id, EventKind::User, text);
         Ok(())
+    }
+
+    /// A named tmux key (`Enter`, `Escape`, `1`) into the pane — answering a
+    /// dialog, not steering: no bracketed paste, no `User` event row. Harness
+    /// validation uses it to accept a first-run prompt's default (th-473294).
+    ///
+    /// # Errors
+    /// When the session is unknown or tmux refuses.
+    pub fn send_key(&self, id: &str, key: &str) -> Result<()> {
+        let s = self.require(id)?;
+        let (k, t) = pane(&s)?;
+        tmux::send_key(&k, &t, key)
     }
 
     /// `flow.snapshot`: plain-text visible pane.
@@ -1079,14 +1145,15 @@ impl Engine {
 
     // ── supervision ────────────────────────────────────────────────────────
 
-    /// One supervision pass over every live session. Cheap when nothing
-    /// changed; safe to call every couple of seconds.
+    /// One supervision pass over every live session **this daemon owns**
+    /// (th-4f7866 — see [`owned_here`]). Cheap when nothing changed; safe to
+    /// call every couple of seconds.
     ///
     /// # Errors
     /// On a store failure (per-session tmux/ps errors are logged, not raised).
     pub fn supervise_tick(&self) -> Result<()> {
         let now = Utc::now();
-        for s in self.with_store(FlowStore::list_live)? {
+        for s in self.with_store(FlowStore::list_live)?.into_iter().filter(owned_here) {
             if let Err(e) = self.supervise_one(&s, now) {
                 tracing::warn!(session = %s.id, error = %e, "flow supervision");
             }
@@ -1933,6 +2000,55 @@ mod tests {
         assert_eq!(s.attention.unwrap().reason, "crashed");
     }
 
+    /// th-4f7866: two daemons sharing one flow.db — supervision only touches
+    /// rows this daemon owns. A foreign daemon's live pane is not on this
+    /// daemon's tmux server, so before the `owner` column a tick here marked
+    /// it `dead · process vanished` and raced to relaunch it.
+    #[test]
+    fn supervision_skips_rows_owned_by_another_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mine = tmux::socket_name();
+        let mk = |owner: Option<&str>, sock: Option<&str>| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    argv: vec!["x".into()],
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    tmux_session: Some("fs-not-a-real-pane".into()),
+                    tmux_socket: sock.map(str::to_string),
+                    owner: owner.map(str::to_string),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        // Another daemon's row — even one whose pane sits on a server of my name.
+        let theirs = mk(Some("other-daemon"), Some(&mine));
+        // A pre-column row on a foreign server: owned by that server's daemon.
+        let legacy_foreign = mk(None, Some("flow-4f7866-not-mine"));
+        // Mine, with the pane parked on the app's server (`--tmux-socket`).
+        let mine_parked = mk(Some(&mine), Some("flow-4f7866-not-mine"));
+        // A pre-column row on my server.
+        let legacy_mine = mk(None, Some(&mine));
+
+        assert!(!owned_here(&theirs) && !owned_here(&legacy_foreign));
+        assert!(owned_here(&mine_parked) && owned_here(&legacy_mine));
+
+        e.supervise_tick().unwrap();
+
+        for s in [&theirs, &legacy_foreign] {
+            assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Starting, "{}: not ours — untouched", s.id);
+        }
+        // Owned rows are still supervised: no such pane exists, so they die.
+        for s in [&mine_parked, &legacy_mine] {
+            let s = e.get(&s.id).unwrap().unwrap();
+            assert_eq!(s.state, SessionState::Dead, "{}: ours — supervised", s.id);
+            assert!(s.attention.unwrap().detail.unwrap().contains("process vanished"));
+        }
+    }
+
     /// A throwaway git repo with one commit, as the project (main checkout).
     fn git_project(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
@@ -2417,6 +2533,16 @@ mod tests {
 
     /// th-0f6126: prefs persist in flow.db, order/hide the list, reach
     /// `flow.hello` and broadcast `flow.harnesses`.
+    /// th-473294: a key press addresses a pane, so an unknown session is an
+    /// error, not a silent no-op.
+    #[test]
+    fn send_key_needs_a_known_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let err = e.send_key("fs-nope", "Enter").unwrap_err().to_string();
+        assert!(err.contains("no such session"), "{err}");
+    }
+
     #[test]
     fn harness_prefs_persist_order_and_hide() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2453,15 +2579,15 @@ mod tests {
         // A binary name nothing installs, so the assertion holds on a
         // machine that happens to have the real tool (th-8e3087 hit `aider`).
         std::fs::write(
-            dir.join("aider.toml"),
-            "name=\"aider\"\n[binary]\nnames=[\"aider-not-installed-here\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+            dir.join("nosuchtool.toml"),
+            "name=\"nosuchtool\"\n[binary]\nnames=[\"nosuchtool-xyzzy\"]\n[launch]\nargv=[\"{prompt}\"]\n",
         )
         .unwrap();
         let all = e.harnesses(true).unwrap();
-        let aider = all.iter().find(|h| h.name == "aider").unwrap();
-        assert_eq!(aider.origin, "user");
-        assert!(!aider.installed);
-        assert!(aider.reason.as_deref().unwrap().contains("`aider-not-installed-here` not found on PATH"));
+        let user = all.iter().find(|h| h.name == "nosuchtool").unwrap();
+        assert_eq!(user.origin, "user");
+        assert!(!user.installed);
+        assert!(user.reason.as_deref().unwrap().contains("`nosuchtool-xyzzy` not found on PATH"));
     }
 
     /// th-0f6126: an unknown kind is refused before anything is created.

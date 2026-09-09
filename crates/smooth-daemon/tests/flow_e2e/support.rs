@@ -188,6 +188,11 @@ impl Daemon {
         }
         let mut child = cmd.spawn().expect("spawn smooth-daemon");
 
+        // A second instance (SMOOTH_ALLOW_SECOND_DAEMON) deliberately does NOT
+        // advertise itself in ~/.smooth/daemon.addr (#546: SmoothFlow's
+        // daemon must never repoint `th` at itself). The bound port is on the
+        // daemon's own "listening" log line; the rig then writes daemon.addr
+        // in ITS home so `th flow` / `th harness` find this daemon.
         let addr_file = home.join(".smooth").join("daemon.addr");
         let token_file = home.join(".smooth").join("operator-token");
         let start = Instant::now();
@@ -198,17 +203,17 @@ impl Daemon {
                     std::fs::read_to_string(&log_path).unwrap_or_default()
                 );
             }
-            let addr = std::fs::read_to_string(&addr_file).unwrap_or_default().trim().to_string();
-            if !addr.is_empty() && !addr.ends_with(":0") {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if let Some(addr) = listening_addr(&log) {
                 break addr;
             }
             assert!(
                 start.elapsed() < BOOT_TIMEOUT,
-                "smooth-daemon did not advertise an address within {BOOT_TIMEOUT:?}:\n{}",
-                std::fs::read_to_string(&log_path).unwrap_or_default()
+                "smooth-daemon did not report a listening address within {BOOT_TIMEOUT:?}:\n{log}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
+        std::fs::write(&addr_file, format!("{addr}\n")).expect("write the rig's daemon.addr");
         let token = std::fs::read_to_string(&token_file).expect("operator-token").trim().to_string();
         assert!(!token.is_empty(), "empty operator-token");
         let http = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().expect("reqwest");
@@ -629,6 +634,33 @@ pub fn brief(v: &Value) -> String {
             s.chars().take(160).collect()
         }
     }
+}
+
+/// The `host:port` from the daemon's `… operator listening … addr=<addr> …`
+/// log line, once it is there.
+pub fn listening_addr(log: &str) -> Option<String> {
+    // tracing colours the log even into a file; strip `ESC[...m` first.
+    let line = strip_ansi(log.lines().find(|l| l.contains("operator listening"))?);
+    let rest = line.split("addr=").nth(1)?;
+    let addr: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+    (addr.contains(':') && !addr.ends_with(":0")).then_some(addr)
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub fn tail(s: &str, n: usize) -> String {

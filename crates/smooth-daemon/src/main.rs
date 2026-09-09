@@ -11,7 +11,8 @@
 //!   retired (EPIC th-c89c2a: one operator runtime, no second loop).
 //! - `smooth-daemon audit [--lines]` — tail the egress proxy's audit log.
 //!
-//! Logging honours `RUST_LOG` (default `info`, daemon at `debug`).
+//! Logging honours `RUST_LOG` (default `info`, daemon at `debug`) and goes to
+//! stderr, or to a size-rotated file when `SMOOTH_LOG_FILE` is set (`logfile`).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -301,9 +302,31 @@ fn cmd_permissions(cmd: &PermissionsCmd) -> Result<()> {
     }
 }
 
+/// Install the tracing subscriber. `RUST_LOG` picks the filter; `SMOOTH_LOG_FILE`
+/// redirects the output to a size-rotated file (no ANSI) instead of stderr —
+/// the desktop app and launchd units set it so a daemon with no terminal still
+/// leaves a diagnosable trail (pearl th-4b189c). A file that can't be opened
+/// falls back to stderr with a one-line complaint rather than killing the daemon.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,smooth_daemon=debug"));
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_target(false);
+    let Some(path) = smooth_daemon::logfile::resolve_log_file(std::env::var("SMOOTH_LOG_FILE").ok().as_deref()) else {
+        builder.init();
+        return;
+    };
+    match smooth_daemon::logfile::prepare(&path) {
+        Ok(file) => {
+            // One breadcrumb on stderr so whoever captured it (the desktop's
+            // daemon.log) knows where the rest went.
+            eprintln!("smooth-daemon: logging to {}", path.display());
+            builder.with_ansi(false).with_writer(std::sync::Arc::new(file)).init();
+            tracing::info!(version = env!("SMOOTH_DAEMON_VERSION"), pid = std::process::id(), "smooth-daemon starting");
+        }
+        Err(e) => {
+            eprintln!("smooth-daemon: cannot open SMOOTH_LOG_FILE {} ({e}); logging to stderr", path.display());
+            builder.init();
+        }
+    }
 }
 
 // ---- status -----------------------------------------------------------------
