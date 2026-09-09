@@ -1154,13 +1154,17 @@ mod tests {
         let pkg = tmp.path().join("pkgroot");
         w(&pkg.join("harness/aider/harness.toml"), &toml("aider", "Pkg Aider"));
         w(&pkg.join("harness/amp/harness.toml"), &toml("amp", "Amp"));
-        w(
-            &home.join(".smooth/pkg/index.toml"),
-            &format!(
-                "[packages.p]\nversion = \"1\"\nsource = \"x\"\ninstalled_at = \"t\"\nroot = \"{}\"\nharnesses = []\n",
-                pkg.display()
-            ),
-        );
+        // Serialize the path with toml (a Windows path's backslashes would be
+        // invalid escapes in a hand-written basic string).
+        let index = toml::toml! {
+            [packages.p]
+            version = "1"
+            source = "x"
+            installed_at = "t"
+            root = (pkg.to_string_lossy().into_owned())
+            harnesses = []
+        };
+        w(&home.join(".smooth/pkg/index.toml"), &toml::to_string(&index).unwrap());
         let r = Registry::load(&home, Some(&project));
         assert_eq!(r.get("aider").unwrap().display_name, "Pkg Aider");
         assert!(matches!(r.get("aider").unwrap().origin, Origin::Package(_)));
