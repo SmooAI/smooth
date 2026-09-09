@@ -102,6 +102,15 @@ fn daemon_url_from(env: Option<String>, addr_file: Option<&std::path::Path>) -> 
     "http://localhost:4400".to_string()
 }
 
+/// A canonical `error` frame that names the in-flight turn (the client's
+/// read loop keeps `request_id` only for that one — th-472012) ends the
+/// turn: no `TaskComplete` will follow. th-9d4b09: `th run` against a daemon
+/// with no LLM key printed `LLM_UNAVAILABLE` and then waited forever for a
+/// completion. Unattributed errors are chatter and keep the turn alive.
+fn turn_error(names_this_turn: bool, message: &str) -> Option<anyhow::Error> {
+    names_this_turn.then(|| anyhow::anyhow!("Task failed: {message}"))
+}
+
 /// Whether an `/api/tasks` reply is the SSE stream the fallback expects.
 /// The daemon's SPA fallback answers *any* unknown path with `200 text/html`
 /// (index.html) — reading that as an empty event stream is exactly how `th
@@ -175,6 +184,11 @@ pub async fn run_headless_capture(
             }
             ServerEvent::TaskError { message, .. } => {
                 anyhow::bail!("task failed: {message}");
+            }
+            ServerEvent::Error { message, request_id } => {
+                if let Some(fatal) = turn_error(request_id.is_some(), &message) {
+                    return Err(fatal);
+                }
             }
             _ => {}
         }
@@ -251,8 +265,11 @@ async fn run_headless_client(
                 eprintln!("[error] {message}");
                 anyhow::bail!("Task failed: {message}");
             }
-            ServerEvent::Error { message, .. } => {
+            ServerEvent::Error { message, request_id } => {
                 eprintln!("[error] {message}");
+                if let Some(fatal) = turn_error(request_id.is_some(), &message) {
+                    return Err(fatal);
+                }
             }
             _ => {}
         }
@@ -541,6 +558,15 @@ mod tests {
         std::fs::write(&addr, "").unwrap();
         assert_eq!(daemon_url_from(None, Some(&addr)), "http://localhost:4400", "empty file is unset");
         assert_eq!(daemon_url_from(None, None), "http://localhost:4400");
+    }
+
+    /// th-9d4b09: a turn-scoped `error` frame ends the turn (no completion
+    /// follows); an unattributed one is chatter.
+    #[test]
+    fn a_turn_scoped_error_is_fatal_and_chatter_is_not() {
+        let fatal = turn_error(true, "LLM_UNAVAILABLE: no gateway key").unwrap();
+        assert!(fatal.to_string().contains("LLM_UNAVAILABLE"));
+        assert!(turn_error(false, "late error for an abandoned turn").is_none());
     }
 
     /// th-9d4b09: the SPA fallback's `200 text/html` must not pass for a stream.
