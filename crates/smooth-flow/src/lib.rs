@@ -9,6 +9,8 @@
 
 pub mod engine;
 pub mod harness;
+pub mod harness_draft;
+pub mod harness_validate;
 pub mod limit;
 pub mod proc;
 pub mod protocol;

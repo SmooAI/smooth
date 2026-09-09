@@ -65,7 +65,7 @@ struct InboxView: View {
             switch a?.reason {
             case .permission:
                 title("Permission request", s)
-                Text(a?.detail ?? "").font(.body.monospaced())
+                Text(a?.detail ?? "").font(Theme.mono(.body))
                 HStack {
                     Button("Allow") { app.approve(s, .allow) }.keyboardShortcut("a", modifiers: []).accessibilityIdentifier("inbox.allow.\(s.id)")
                     Button("Deny") { app.approve(s, .deny) }.keyboardShortcut("d", modifiers: []).accessibilityIdentifier("inbox.deny.\(s.id)")
@@ -83,7 +83,7 @@ struct InboxView: View {
                 HStack { Button("Open session") { app.focus(s.id); app.toggleInbox() } }
             case .held:
                 title("FYI · idle session held by another process", s)
-                Text(a?.detail ?? "owned by pid \(a?.pid.map(String.init) ?? "?")").font(.caption.monospaced())
+                Text(a?.detail ?? "owned by pid \(a?.pid.map(String.init) ?? "?")").font(Theme.mono(.caption))
                 HStack {
                     Button("Kill and resume here") { app.kill(s, resume: true) }
                     Button("Leave it") { app.markRead(s.id) }
@@ -195,14 +195,14 @@ struct CloseSessionSheet: View {
             Text("Close \(session.label)").font(.headline)
             Text("This finishes the session for good. It leaves the fleet; its scrollback stays until you quit.").font(.caption).foregroundStyle(Color(Theme.muted))
             if let p = session.pearlId {
-                Toggle(isOn: $closePearl) { Text("Close pearl \(p)").font(.body.monospaced()) }.accessibilityIdentifier("inbox.close.pearl")
+                Toggle(isOn: $closePearl) { Text("Close pearl \(p)").font(Theme.mono(.body)) }.accessibilityIdentifier("inbox.close.pearl")
             } else {
                 Text("No pearl on this session.").font(.caption).foregroundStyle(Color(Theme.faint))
             }
             if Self.hasOwnWorktree(session) {
                 Toggle(isOn: $removeWorktree) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Remove worktree \(session.worktree)").font(.body.monospaced())
+                        Text("Remove worktree \(session.worktree)").font(Theme.mono(.body))
                         if let b = session.branch { Text("and delete branch \(b)").font(.caption).foregroundStyle(Color(Theme.muted)) }
                     }
                 }.accessibilityIdentifier("inbox.close.worktree")
