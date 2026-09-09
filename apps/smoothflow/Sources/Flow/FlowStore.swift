@@ -19,7 +19,9 @@ enum StoreEffect: Equatable {
     case relaunched(id: String)
     /// The engine pushed a handoff packet (`flow.handoff`).
     case handoff(id: String, Handoff)
-    case error(String)
+    /// `flow.error`. `ref` is the client `seq` the engine echoed (nil when the
+    /// error was not a reply to anything we tagged).
+    case error(ref: Int?, message: String)
 }
 
 enum ConnectionState: Equatable {
@@ -153,9 +155,9 @@ final class FlowStore: ObservableObject {
             harnesses = HarnessOrdering.visible(list)
             return []
 
-        case let .error(_, code, message):
+        case let .error(ref, code, message):
             lastError = "\(code): \(message)"
-            return [.error(lastError!)]
+            return [.error(ref: ref, message: lastError!)]
 
         case .unknown:
             return []

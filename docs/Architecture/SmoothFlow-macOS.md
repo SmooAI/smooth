@@ -88,7 +88,29 @@ daemon it did not start:
 - The child is spawned through a one-line `sh` supervisor that exits with the
   app: macOS has no parent-death signal, and an app crash used to leave the
   daemon (and its supervision loop) running — seven such orphans were found
-  after one day of shell development.
+  after one day of shell development. The supervisor records the daemon's pid
+  in `~/.smooth/smoothflow-daemon.pid` (`$SMOOTHFLOW_DAEMON_PIDFILE`).
+
+### Quit (th-6198bf)
+
+Every quit sender — ⌘Q, the app and status-item menus, AppleScript `quit`,
+`NSRunningApplication.terminate()` (what the release lane uses to install over
+a running copy) — arrives as `NSApplication.terminate(_:)`, and
+`applicationShouldTerminate` takes the fleet down **before** answering
+`.terminateNow`: disconnect, stop the child daemon, kill the app-owned tmux
+server. It never answers `.terminateLater` (nothing to forget to reply to) or
+`.terminateCancel` (quit means quit); `applicationWillTerminate` runs the same
+idempotent shutdown for the paths that skip the delegate question.
+
+The stop is **bounded**. It used to be `terminate()` + `waitUntilExit()` on the
+main thread, which blocks for exactly as long as the child tree takes to die —
+and a daemon that ignores SIGTERM never does, so the Quit Apple event was
+handled, `applicationWillTerminate` ran, and the app simply never exited (the
+0.2.0 symptom: "quit did nothing, had to kill the pid"). Now the supervisor
+itself escalates — TERM the daemon, wait up to 3 s, SIGKILL it — and the app
+waits at most 5 s for the supervisor before SIGKILLing the supervisor and the
+pid it recorded. Reproduced and pinned with a `trap '' TERM` daemon: quit
+completes in ~4 s instead of never; a TERM-honoring daemon is gone in ~1 s.
 
 ### What the child daemon is started with
 
@@ -257,6 +279,21 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
 
+### Closing a finished session (th-883ce9)
+
+The finished card's **Close…** is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
+sheet names each action with its target — _close pearl `<id>`_ (on when the
+row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
+when the row lives in its own worktree; the main checkout is never offered) —
+and states the rule up front: a dirty or unmerged worktree is refused with
+nothing touched. The frame carries a client `seq`; the engine echoes it as
+`flow.error.ref`, so a refusal lands on **that card** in the engine's words
+with **Force close** (resends with `force`) and **Keep it**. Success is just
+`flow.session.removed`: the card and the sidebar row go. The mock
+(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
+covers both paths without a real worktree.
+
 ## Keyboard
 
 | Keys      | Action                                     |
@@ -335,6 +372,45 @@ shipping a new public key, which installed apps will refuse — so an installed
 3. Verify: `curl -s https://downloads.smoo.ai/smoothflow/appcast.xml | grep shortVersionString`.
    Installed apps offer it on the next hourly check.
 
+What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
+
+- **The appcast carries only the version just published.** `generate_appcast`
+  runs over the run's own `dist/`, which holds one DMG, so each publish
+  replaces the feed rather than appending to it. Sparkle only needs the newest
+  item; older `SmoothFlow-<v>-arm64.dmg` objects stay in the bucket (the sync
+  never deletes) but drop out of the feed.
+- **The notarization ticket is stapled to the DMG, not the app inside it.**
+  `xcrun stapler validate` on the DMG passes; on `/Applications/SmoothFlow.app`
+  it reports no ticket, while `spctl -a -t install` still says
+  `Notarized Developer ID` (the online check). Both are correct — Sparkle
+  installs from the DMG, and Gatekeeper accepts the app either way.
+- **The bundled daemon rewrites `~/.smooth/daemon.addr` on every launch** with
+  its own random loopback port, clobbering the address Big Smooth advertised.
+  The app never reads that file, but `th`-driven tooling on the same machine
+  does; PR #546 stops the child from writing it. Until it lands, restore the
+  file after running SmoothFlow.
+- **Two daemons, two supervisors.** On a Mac running both apps there are two
+  `smooth-daemon` children: Big Smooth's (the advertised one, typically `:8899`
+  or `:8787`) and SmoothFlow's (a second instance, random port, not advertised).
+  Each app supervises only the child it spawned. Big Smooth's side is
+  described in [`desktop/README.md`](../../desktop/README.md) ("Daemon
+  supervision", th-4b189c): exit → `~/Library/Logs/Big Smooth/daemon.log` +
+  respawn with backoff, `/api/mode` probed every 30s, tray line + About box.
+  The daemon's own tracing lands in `~/Library/Logs/Big Smooth/smooth-daemon.log`
+  via `SMOOTH_LOG_FILE`; SmoothFlow's child can be given the same env var to
+  get its own file. When "the daemon" looks dead, check which one — the port
+  and the log folder tell them apart (see the two-daemons note in the Big Smooth
+  desktop doc).
+- **The OTA loop end to end:** Check for Updates… → "SmoothFlow 0.2.1 is now
+  available—you have 0.2.0" → Install Update → the 48 MB DMG downloads and
+  the EdDSA signature verifies → "Ready to Install / Install and Relaunch" →
+  the app relaunches as 0.2.1 in a few seconds, `spctl` still accepts it, and
+  `otool -L` on the bundled daemon still shows only system libraries. The
+  whole thing took about a minute on marvin.
+- `tell application "SmoothFlow" to quit` from AppleScript was ignored by a
+  running 0.2.0; `kill <pid>` (or ⌘Q) is what actually stops it before an
+  install-over.
+
 The publish role (`OtaPublishRole`, smooai `infra/ci/github-oidc.ts`) grants
 `smoothflow/*` next to `bigsmooth/*`; the CDN serves the whole bucket.
 `.github/workflows/smoothflow-mac.yml` stays the ad-hoc compile + XCTest gate on
@@ -351,11 +427,19 @@ Launch contract, identifiers and how to run:
 
 ## Gaps (pearls filed from the main checkout)
 
-- th-c7041a — engine launches agents under the app-owned `tmux -L smoothflow`
-  server. The engine already honors `SMOOTH_FLOW_TMUX_SOCKET`, which the app
-  sets; the pearl tracks making that the contract (`--tmux-socket`).
+- th-c7041a — closed: the engine launches agents under the app-owned
+  `tmux -L smoothflow` server; `smooth-daemon operator --tmux-socket` is the
+  contract and the app sets `SMOOTH_FLOW_TMUX_SOCKET`.
 - th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
   by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
-- th-e126cc — "Close pearl + GC worktree" from the inbox is not in the v0
-  protocol; the PR tab only shows what the handoff endpoint reports, "Merge"
-  opens the PR.
+- th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
+remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
+  `th flow close`) closes the pearl, removes the merged worktree + branch and
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
+  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  still opens the PR: merging is a review act, not something the shell does
+  blind.
+- th-6198bf — closed: AppleScript / `NSRunningApplication.terminate()` quit
+  hung in `waitUntilExit()` on a child that did not exit on TERM. Quit is now
+  bounded (supervisor TERM→KILL escalation + app-side backstop, see
+  [Quit](#quit-th-6198bf)) and pinned by `QuitUITests`.
