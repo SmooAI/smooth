@@ -1,5 +1,19 @@
 # @smooai/smooth
 
+## 0.46.0
+
+### Minor Changes
+
+- 58737d7: SmoothFlow relay end-to-end encryption (th-d98fde): a phone pairs with a daemon by scanning a QR (Settings ▸ Phones in the macOS app, or `th flow pair --qr`) carrying the daemon's relay device id, a fresh X25519 public key and a one-time code; both sides derive a pairing key (HKDF-SHA256), the phone proves it with a sealed hello, and from then on every `channel:"flow"` frame between them is ChaCha20-Poly1305 with per-connection session keys and per-direction counter nonces — the Smoo Relay brokers ciphertext only, with no relay change. Pairings persist in `flow.db` (`th flow pair list|revoke`, `/api/flow/pair*`); plaintext from a paired phone is rejected with a visible `flow.error`; Big Smooth chat frames are untouched. The cross-platform vectors live in `crates/smooth-daemon/tests/fixtures/flow-e2e-v1.json`.
+
+### Patch Changes
+
+- f1263b6: SmoothFlow: `flow.close {id, close_pearl, remove_worktree, force}` (+ `POST /api/flow/sessions/{id}/close`, `th flow close`) finishes a session for good — closes its pearl through `th pearls close`, removes the worktree and branch once the branch is merged (ancestry or a merged PR; squash merges count), drops the row and broadcasts `flow.session.removed`. A dirty or unmerged worktree is refused with nothing touched unless `force`; the main checkout is never removed (th-e126cc).
+- cae9a48: smooth-flow: sessions record the daemon that created them (`owner`), and a daemon's supervision tick only touches its own rows. Two daemons sharing one `flow.db` (the default `th up` daemon and the SmoothFlow app's child, or an orphaned instance) no longer mark each other's live panes `dead · process vanished` and race to relaunch them (th-4f7866).
+- 3203939: smooth-daemon: a second instance (`SMOOTH_ALLOW_SECOND_DAEMON=1`, e.g. the SmoothFlow app's child daemon) no longer overwrites `~/.smooth/daemon.addr`. Only the primary daemon advertises, so launching SmoothFlow no longer repoints `th`, the hooks and Big Smooth's clients at the wrong daemon (th-3e6b1b).
+- 80c4e3e: `th down` no longer orphans the daemon. The `th up --foreground` wrapper now execs `smooth-daemon` (the recorded pid _is_ the daemon), and `th down` signals the pid file's whole process tree, waits, and fails loudly if anything survives — instead of printing "stopped" while the child kept the port bound and `daemon.lock` held (th-eed3de).
+- a92e101: `th run` dispatches again, and fails loudly when it cannot. It used to POST a legacy `/api/tasks` route on a hard-wired `:4400` that no daemon has served since the microVM stack went; the SPA fallback answered `200 text/html`, and `th run` exited 0 having dispatched nothing (th-9d4b09). It now reads the pearl from the local store and runs one headless turn over the daemon's canonical WebSocket, discovered via `$SMOOTH_URL` → `~/.smooth/daemon.addr` → `:4400`. The headless SSE fallback also refuses a non-event-stream reply and an empty stream instead of reporting success. A turn-scoped `error` frame (e.g. `LLM_UNAVAILABLE`) now ends the headless turn instead of hanging until timeout, and the client only auto-starts `th up` when aimed at its own `localhost:4400` — a stale `SMOOTH_URL` / `daemon.addr` no longer spawns a stray daemon on :4400.
+
 ## 0.45.2
 
 ### Patch Changes

@@ -1149,9 +1149,9 @@ Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooa
 
 ```bash
 th up                                              # boot Smooth platform (host daemon)
-th down                                            # stop
+th down                                            # stop — the daemon and its whole process tree, verified (th-eed3de)
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
+th run <pearl-id | "task text">                    # one headless turn on Big Smooth (title+description of the pearl, or the text); a daemon that is down or refuses = non-zero exit
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
@@ -1231,11 +1231,26 @@ th flow send <id> "also add a regression test"           # steer: bracketed-past
 th flow inbox                                            # sessions that need you or finished unread
 th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
 th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
+th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
+th flow pair --timeout 0                                 # just print the smoothflow://pair?… link (open it on the phone)
+th flow pair list                                        # paired phones: device, label, platform, paired, last seen
+th flow pair revoke <phone-device>                       # its next encrypted frame is refused
 ```
+
+**Phones are end-to-end encrypted (th-d98fde).** A paired phone's flow frames
+are sealed with a key only the phone and this daemon hold; the Smoo Relay
+brokers ciphertext. The QR carries the daemon's relay device id, a fresh
+X25519 public key and a one-time code that never crosses the relay; the
+SmoothFlow app (Connect ▸ Pair a Mac) or the Camera app scans it. Once a phone
+is paired, plaintext frames from it are rejected with a visible `flow.error`
+(`e2e_required`); re-pairing rotates the key. `SMOOTH_FLOW_E2E_REQUIRED=1`
+makes the daemon refuse plaintext from unpaired phones too. Protocol:
+`docs/Architecture/SmoothFlow.md` → _End-to-end encryption_.
 
 States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `limited` (usage limit — the engine resumes at the parsed reset time) ·

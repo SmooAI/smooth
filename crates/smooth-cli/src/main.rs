@@ -17,6 +17,7 @@ mod claude;
 mod config;
 mod daemon_health;
 mod daemon_launcher;
+mod daemon_stop;
 mod destructive;
 mod ext;
 mod fda;
@@ -2451,13 +2452,17 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
 }
 
 async fn cmd_down() -> Result<()> {
-    // Kill the daemonized Big Smooth child recorded in the pid file.
+    // Stop the Big Smooth process recorded in the pid file — and everything
+    // under it. The pid used to be a wrapper whose smooth-daemon child
+    // survived a plain `kill` (th-eed3de); the launcher now execs the daemon,
+    // and `daemon_stop` takes the whole tree down regardless and verifies it.
     let pid_path = pid_file_path();
     let mut pid_killed: Option<u32> = None;
+    let mut survivors = Vec::new();
     if pid_path.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+                survivors = tokio::task::spawn_blocking(move || daemon_stop::stop_tree(pid, daemon_stop::GRACE)).await?;
                 pid_killed = Some(pid);
             }
         }
@@ -2465,6 +2470,10 @@ async fn cmd_down() -> Result<()> {
     }
 
     match pid_killed {
+        Some(_) if !survivors.is_empty() => {
+            let list = survivors.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            anyhow::bail!("could not stop Big Smooth — still running: pid {list}\n  → kill -9 {list}");
+        }
         Some(pid) => {
             let tag = format!("(pid {pid})");
             println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
@@ -3106,46 +3115,44 @@ async fn cmd_operatives(cmd: Option<OperativesCommands>) -> Result<()> {
     }
 }
 
+/// What `th run` dispatches: `(pearl id, message)`. A `th-…` argument is that
+/// pearl's title + description; no argument is the first ready pearl; anything
+/// else is the ad-hoc task text.
+fn resolve_run_task(arg: Option<&str>, store: &smooth_pearls::PearlStore) -> Result<(Option<String>, String)> {
+    fn body(p: &smooth_pearls::Pearl) -> String {
+        if p.description.trim().is_empty() {
+            p.title.clone()
+        } else {
+            format!("{}\n\n{}", p.title, p.description)
+        }
+    }
+    match arg.map(str::trim) {
+        Some(id) if id.starts_with("th-") => {
+            let p = store.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl {id} not found"))?;
+            Ok((Some(p.id.clone()), body(&p)))
+        }
+        Some(adhoc) if !adhoc.is_empty() => Ok((None, adhoc.to_string())),
+        _ => {
+            let ready = store.ready()?;
+            let p = ready
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no ready pearls — pass a pearl id or a task description"))?;
+            Ok((Some(p.id.clone()), body(p)))
+        }
+    }
+}
+
 async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<&str>) -> Result<()> {
     // Validate the agent name up front so a typo fails at the CLI
     // instead of falling through to the runner's "unknown agent,
     // falling back to code" warning.
     let agent_name = resolve_primary_agent(agent)?;
-    // Resolve the task message.
-    // - If pearl_id_arg looks like a pearl id (starts with "th-"), fetch
-    //   the pearl's title+description and use that as the task message.
-    // - Otherwise treat the whole arg as an ad-hoc task message.
-    // - If missing, grab the first ready pearl.
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()?;
-
-    let (pearl_id, message) = match pearl_id_arg {
-        Some(arg) if arg.starts_with("th-") => {
-            let url = format!("http://localhost:4400/api/pearls/{arg}");
-            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
-            let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
-            if data.is_null() {
-                anyhow::bail!("pearl {arg} not found");
-            }
-            let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
-            (Some(arg.to_string()), body)
-        }
-        Some(adhoc) => (None, adhoc.to_string()),
-        None => {
-            // Take the first ready pearl.
-            let resp: serde_json::Value = client.get("http://localhost:4400/api/pearls/ready").send().await?.json().await?;
-            let first = resp.get("data").and_then(|v| v.as_array()).and_then(|a| a.first()).cloned();
-            let first = first.ok_or_else(|| anyhow::anyhow!("no ready pearls — pass a pearl id or a task description"))?;
-            let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = first.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
-            (Some(id), body)
-        }
-    };
-
     let cwd = std::env::current_dir()?;
+    // Pearls are local SQLite (th-d3e842) — read them directly. The old
+    // `GET localhost:4400/api/pearls/…` round trip targeted a route no daemon
+    // has served since the microVM stack went.
+    let store = smooth_pearls::PearlStore::open(&cwd)?;
+    let (pearl_id, message) = resolve_run_task(pearl_id_arg, &store)?;
 
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
@@ -3156,75 +3163,14 @@ async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<
     println!("  {} {}", "agent".dimmed(), agent_name.dimmed());
     println!();
 
-    let body = serde_json::json!({
-        "message": message,
-        "model": model,
-        "working_dir": cwd.to_string_lossy(),
-        "agent": agent_name,
-    });
-
-    // Stream SSE from /api/tasks.
-    use futures_util::StreamExt;
-
-    let stream_client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30 * 60)).build()?;
-    let resp = stream_client.post("http://localhost:4400/api/tasks").json(&body).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("dispatch failed: HTTP {}", resp.status());
-    }
-
-    let mut byte_stream = resp.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk_res) = byte_stream.next().await {
-        let chunk = chunk_res?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // SSE frames separated by "\n\n". Each starts with "data: ".
-        while let Some(idx) = buffer.find("\n\n") {
-            let frame = buffer[..idx].to_string();
-            buffer.drain(..=idx + 1);
-
-            for line in frame.lines() {
-                let Some(payload) = line.strip_prefix("data: ") else {
-                    continue;
-                };
-                let Ok(evt) = serde_json::from_str::<serde_json::Value>(payload) else {
-                    continue;
-                };
-                let kind = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                match kind {
-                    "TokenDelta" => {
-                        if let Some(content) = evt.get("content").and_then(|v| v.as_str()) {
-                            print!("{content}");
-                            let _ = std::io::Write::flush(&mut anstream::stdout());
-                        }
-                    }
-                    "ToolCallStart" => {
-                        let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
-                        println!("\n  {} {}", "⚙".cyan(), tool.dimmed());
-                    }
-                    "ToolCallComplete" => {
-                        let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let is_error = evt.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                        if is_error {
-                            let result = evt.get("result").and_then(|v| v.as_str()).unwrap_or("");
-                            println!("  {} {} {}", "✗".red().bold(), tool.dimmed(), result.red());
-                        }
-                    }
-                    "Complete" | "TaskComplete" => {
-                        println!("\n  {} agent completed", "✓".green().bold());
-                    }
-                    "Error" | "TaskError" => {
-                        let msg = evt.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                        println!("\n  {} {msg}", "✗".red().bold());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok(())
+    // th-9d4b09: this used to POST `/api/tasks` on a hard-wired :4400 and read
+    // SSE frames back. No daemon serves that route any more; the SPA fallback
+    // answered `200 text/html`, the reader found no `data:` lines, and `th run`
+    // exited 0 having dispatched nothing. Run the turn the way `th code
+    // --headless` does — over the daemon's canonical WebSocket, discovered via
+    // `$SMOOTH_URL` / `~/.smooth/daemon.addr` — so a daemon that is down, on
+    // another port, or refusing the turn is a non-zero exit with the reason.
+    smooth_code::headless::run_headless(cwd, message, model.map(str::to_string), None, false, Some(agent_name)).await
 }
 
 /// `reqwest` only returns `Err` when the request never completed. A 404 or a
@@ -7865,6 +7811,9 @@ mod cli_dispatch_tests {
             "th model",
             "th auth profile",
             "th smoo auth profile",
+            // th-d98fde: phone pairings live in THIS machine's ~/.smooth/flow.db;
+            // revoke talks to the local daemon only (nothing on smoo.ai changes).
+            "th flow pair",
         ];
 
         fn is_delete_verb(name: &str) -> bool {
@@ -8017,5 +7966,72 @@ mod cli_dispatch_tests {
                 sub.get_name()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod run_task_tests {
+    use super::resolve_run_task;
+    use smooth_pearls::{NewPearl, PearlStore, PearlType, Priority};
+
+    fn store(tmp: &std::path::Path) -> PearlStore {
+        PearlStore::open_with_db(&tmp.join("pearls.db"), &tmp.join("proj")).unwrap()
+    }
+
+    fn pearl(store: &PearlStore, title: &str, description: &str) -> String {
+        store
+            .create(&NewPearl {
+                title: title.into(),
+                description: description.into(),
+                pearl_type: PearlType::Task,
+                priority: Priority::Medium,
+                assigned_to: None,
+                parent_id: None,
+                labels: vec![],
+            })
+            .unwrap()
+            .id
+    }
+
+    /// th-9d4b09: the task text comes from the local pearl store, not a daemon
+    /// route that no longer exists.
+    #[test]
+    fn a_pearl_id_becomes_title_and_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = store(tmp.path());
+        let id = pearl(&st, "Fix the thing", "It is broken.");
+        let (pid, msg) = resolve_run_task(Some(&id), &st).unwrap();
+        assert_eq!(pid.as_deref(), Some(id.as_str()));
+        assert_eq!(msg, "Fix the thing\n\nIt is broken.");
+        let bare = pearl(&st, "Title only", "  ");
+        assert_eq!(resolve_run_task(Some(&bare), &st).unwrap().1, "Title only");
+    }
+
+    #[test]
+    fn an_unknown_pearl_id_is_an_error_not_a_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = store(tmp.path());
+        let err = resolve_run_task(Some("th-000000"), &st).unwrap_err().to_string();
+        assert!(err.contains("th-000000 not found"), "{err}");
+    }
+
+    #[test]
+    fn free_text_is_an_ad_hoc_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = store(tmp.path());
+        assert_eq!(resolve_run_task(Some("  refactor x to y "), &st).unwrap(), (None, "refactor x to y".into()));
+    }
+
+    #[test]
+    fn no_argument_picks_the_first_ready_pearl_or_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let st = store(tmp.path());
+        let err = resolve_run_task(None, &st).unwrap_err().to_string();
+        assert!(err.contains("no ready pearls"), "{err}");
+        assert!(resolve_run_task(Some("   "), &st).unwrap_err().to_string().contains("no ready pearls"));
+        let id = pearl(&st, "Ready one", "");
+        let (pid, msg) = resolve_run_task(None, &st).unwrap();
+        assert_eq!(pid.as_deref(), Some(id.as_str()));
+        assert_eq!(msg, "Ready one");
     }
 }

@@ -50,4 +50,23 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.daemon"].waitForExistence(timeout: 10), "Daemon pane")
         XCTAssertTrue(settings.staticTexts["Restart daemon"].exists || settings.buttons["Restart daemon"].exists)
     }
+
+    /// Settings ▸ Phones (th-d98fde): the seeded pairing lists, "Pair a phone…"
+    /// puts a QR on screen, and the mock's scan (3rd poll) lands as a paired row.
+    func testPhonesPanePairsAgainstTheMock() {
+        app.typeKey(",", modifierFlags: .command)
+        let settings = app.windows["SmoothFlow Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        let phonesTab = settings.radioButtons["Phones"].exists ? settings.radioButtons["Phones"] : settings.buttons["Phones"]
+        XCTAssertTrue(phonesTab.waitForExistence(timeout: 5), "Phones tab")
+        phonesTab.click()
+        XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")
+        XCTAssertTrue(settings.staticTexts["Brent’s Pixel"].waitForExistence(timeout: 10), "seeded pairing is listed")
+        settings.buttons["settings.phones.pair"].click()
+        XCTAssertTrue(settings.descendants(matching: .any)["settings.phones.qr"].waitForExistence(timeout: 10), "QR on screen")
+        XCTAssertTrue(settings.staticTexts["Mock iPhone"].waitForExistence(timeout: 15), "the mock's scan lands as a paired row")
+        XCTAssertFalse(settings.descendants(matching: .any)["settings.phones.qr"].exists, "QR leaves once paired")
+        settings.buttons["settings.phones.revoke.phone-mock0000001"].click()
+        XCTAssertTrue(waitUntil { !settings.staticTexts["Mock iPhone"].exists }, "revoked row disappears")
+    }
 }

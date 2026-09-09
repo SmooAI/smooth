@@ -36,6 +36,12 @@ enum Theme {
         }
     }
 
+    /// A wall-clock time for an RFC3339 stamp ("3:42 PM"), or the raw string.
+    static func clock(_ iso: String) -> String {
+        guard let d = ISO8601DateFormatter.flexible.date(from: iso) else { return iso }
+        return AttentionNotifier.timeFormatter.string(from: d)
+    }
+
     static func relative(_ iso: String) -> String {
         guard let d = ISO8601DateFormatter.flexible.date(from: iso) else { return "" }
         let secs = Int(-d.timeIntervalSinceNow)

@@ -16,6 +16,12 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// `store.harnesses` (visible only) instead.
     @Published private(set) var allHarnesses: [HarnessInfo] = []
     @Published var thOutput: String?
+    /// Settings ▸ Phones (th-d98fde): the paired phones, the QR on screen, and
+    /// what the last scan produced.
+    @Published private(set) var pairedPhones: PairingsList?
+    @Published private(set) var pendingPairing: PairingBegin?
+    @Published private(set) var pairingMessage: String?
+    private var pairingPoll: Task<Void, Never>?
     var notifySettings = NotifySettings.load()
 
     private(set) var surfaces: [String: TerminalSurfaceView] = [:]
@@ -201,6 +207,54 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// the engine's `flow.harnesses` updates every picker.
     func setHarnessPrefs(order: [String]? = nil, hidden: [String]? = nil) async {
         do { allHarnesses = try await client.putHarnessPrefs(order: order, hidden: hidden) } catch { thOutput = "harness prefs: \(error.localizedDescription)" }
+    }
+
+    // ── phone pairing (th-d98fde) ────────────────────────────────────────────
+
+    func loadPairings() async {
+        do { pairedPhones = try await client.pairings() } catch { pairingMessage = "pairings: \(error.localizedDescription)" }
+    }
+
+    /// Mint a QR and poll until a phone scans it (or it expires). One at a time.
+    func beginPairing() async {
+        pairingPoll?.cancel()
+        pairingMessage = nil
+        do {
+            let begin = try await client.beginPairing()
+            pendingPairing = begin
+            pairingPoll = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let self, let pending = self.pendingPairing, pending.pairingId == begin.pairingId else { return }
+                    guard let poll = try? await self.client.pairingStatus(begin.pairingId) else { continue }
+                    if poll.isPaired {
+                        self.pairingMessage = "Paired \(poll.label ?? "phone") (\(poll.platform ?? "?"))"
+                        self.pendingPairing = nil
+                        await self.loadPairings()
+                        return
+                    }
+                    if poll.isGone {
+                        self.pairingMessage = "The link expired before it was scanned — show a new one."
+                        self.pendingPairing = nil
+                        return
+                    }
+                }
+            }
+        } catch {
+            pairingMessage = "pair: \(error.localizedDescription)"
+        }
+    }
+
+    func cancelPairing() {
+        pairingPoll?.cancel()
+        pendingPairing = nil
+    }
+
+    func revokePairing(_ device: String) async {
+        do {
+            _ = try await client.revokePairing(device)
+            await loadPairings()
+        } catch { pairingMessage = "revoke: \(error.localizedDescription)" }
     }
 
     func loadHandoff(for id: String) async {

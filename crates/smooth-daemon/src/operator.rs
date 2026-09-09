@@ -1142,6 +1142,22 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         session_modes.clone(),
         Some(turn_notifier.clone() as Arc<dyn smooth_tools::NotifySink>),
     );
+    // The SmoothFlow engine (th-7f0af3): opens ~/.smooth/flow.db, starts the
+    // supervisor, serves the flow WS + HTTP siblings + the Claude Code hooks
+    // endpoint. Token-gated (except hooks): a flow session is a shell on this
+    // host. The engine handle also backs the phone-pairing authority (th-d98fde),
+    // which shares the daemon's relay identity so the QR names THIS daemon.
+    let (flow_router, flow_engine) =
+        crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
+    let relay_url = crate::relay::resolve_relay_url();
+    let relay_identity = crate::relay::device_identity();
+    let pairing = Arc::new(crate::flow_e2e::PairingState::new(
+        flow_engine,
+        relay_identity.device.clone(),
+        relay_identity.label.clone(),
+        crate::flow_e2e::PairingState::required_from_env(),
+    ));
+
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
@@ -1204,7 +1220,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // ~/.smooth/flow.db, starts the supervisor, serves the flow WS +
                 // HTTP siblings + the Claude Code hooks endpoint. Token-gated
                 // (except hooks): a flow session is a shell on this host.
-                .merge(crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?)
+                .merge(flow_router)
+                // /api/flow/pair* — phone pairing for end-to-end encrypted relay
+                // frames (th-d98fde): the QR the macOS app / `th flow pair` show,
+                // the pairing list, revoke. Shares the flow engine's store.
+                .merge(crate::flow_pair_route::pair_router(pairing.clone(), Some(token.clone()), relay_url.is_some()))
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
@@ -1250,7 +1270,16 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // `:8788`); without this a double-clicked app defaults to `:8787` and loads
     // the wrong app. Best-effort: an unwritable `~/.smooth` just falls back to
     // the client's own default. (th-8af70d)
-    persist_daemon_addr(&server.addr().to_string());
+    // …but only the PRIMARY daemon advertises. A deliberate second instance
+    // (SMOOTH_ALLOW_SECOND_DAEMON=1: the SmoothFlow app's child daemon, a test
+    // daemon) must not repoint `th`, the hooks and Big Smooth's own clients at
+    // itself — that is exactly what happened every time SmoothFlow launched
+    // (pearl th-3e6b1b).
+    if advertise_daemon_addr(crate::single_instance::allow_second()) {
+        persist_daemon_addr(&server.addr().to_string());
+    } else {
+        tracing::info!(addr = %server.addr(), "second daemon instance — not advertising in ~/.smooth/daemon.addr");
+    }
 
     // Reachability: if Tailscale is present and the node is up, expose the daemon
     // over the user's *tailnet* via `tailscale serve` (never funnel — tailnet-
@@ -1267,9 +1296,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // Smoo Relay (th-2f626d): dial OUT to relay.smoo.ai and bridge phones to
     // this operator — remote control with NO tailnet membership. Best-effort
     // like tailscale above: signed-out or unreachable just waits and retries.
-    let _relay = crate::relay::resolve_relay_url().map(|relay_url| {
+    let _relay = relay_url.map(|relay_url| {
         tracing::info!(relay = %relay_url, "Smoo Relay armed — phones can reach Big Smooth without tailscale");
-        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone())
+        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone(), relay_identity, pairing)
     });
 
     // Proactivity: the always-on agent fires due schedules into its *own*
@@ -1322,6 +1351,13 @@ fn persist_daemon_addr(addr: &str) {
     }
 }
 
+/// Whether this instance may write `~/.smooth/daemon.addr`. Only the primary
+/// (single-instance-locked) daemon advertises; a second instance is by
+/// definition not the one `th` and the hooks should discover. (th-3e6b1b)
+const fn advertise_daemon_addr(second_instance: bool) -> bool {
+    !second_instance
+}
+
 /// Pure over its dir so it's testable without touching the real `$HOME`. Writes
 /// `<dir>/daemon.addr` (mode 600 on unix) and returns the path.
 fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<std::path::PathBuf> {
@@ -1334,6 +1370,15 @@ fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_primary_daemon_advertises_its_addr() {
+        assert!(advertise_daemon_addr(false), "the single-instance daemon must advertise");
+        assert!(
+            !advertise_daemon_addr(true),
+            "a SMOOTH_ALLOW_SECOND_DAEMON instance must not repoint clients (th-3e6b1b)"
+        );
+    }
 
     #[tokio::test]
     async fn provider_registers_remember_and_recall_tools() {
