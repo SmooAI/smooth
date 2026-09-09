@@ -1,13 +1,18 @@
 # SmoothFlow (apps/smoothflow) — the native macOS fleet console.
 #
-# pull_request: compile gate + XCTests, ad-hoc signed, nothing published.
-# The signed + notarized + published release is smoothflow-publish.yml.
+# pull_request: compile gate + XCTests + XCUITests, ad-hoc signed, nothing
+# published. The UI tests drive the built app against mock/server.mjs and
+# against the real flow engine (flow_e2e_server + fake-claude) — see
+# docs/Engineering/SmoothFlow-Testing-macOS.md. The signed + notarized +
+# published release is smoothflow-publish.yml.
 name: smoothflow-mac
 
 on:
     pull_request:
         paths:
             - 'apps/smoothflow/**'
+            - 'crates/smooth-daemon/examples/flow_e2e_server.rs'
+            - 'crates/smooth-daemon/tests/fixtures/fake-claude'
             - '.github/workflows/smoothflow-mac.yml'
 
 concurrency:
@@ -22,21 +27,70 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Tools
-              run: brew install xcodegen
+              run: brew install xcodegen tmux
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '22.x'
+
+            # The pinned prebuilt xcframework is ~200MB; key on the lock so a bump
+            # re-fetches and a matching stamp short-circuits ensure-ghosttykit.sh.
+            - name: Cache GhosttyKit
+              uses: actions/cache@v4
+              with:
+                  path: apps/smoothflow/Vendor/GhosttyKit.xcframework
+                  key: ghosttykit-${{ hashFiles('apps/smoothflow/scripts/ghosttykit.lock') }}
 
             - name: GhosttyKit (pinned prebuilt)
               run: bash apps/smoothflow/scripts/ensure-ghosttykit.sh
+
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  key: flow-e2e-server
+
+            # The real engine the UI tests point the app at: the daemon's flow
+            # router + supervisor on a port, nothing else (no lock, no tailscale,
+            # no LLM creds).
+            - name: Build flow_e2e_server
+              run: time cargo build -p smooai-smooth-daemon --example flow_e2e_server
 
             - name: Generate project
               working-directory: apps/smoothflow
               run: xcodegen generate
 
-            - name: Build + test (ad-hoc)
+            - name: Build + unit tests (ad-hoc)
               working-directory: apps/smoothflow
               run: |
                   set -o pipefail
+                  time xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
+                      -only-testing:SmoothFlowTests test 2>&1 \
+                      | grep -E "error:|warning: .*Swift|Test Case.*(failed|passed)|Executed|BUILD|TEST" || true
                   xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
-                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- test 2>&1 \
-                      | grep -E "error:|warning: .*Swift|Test Case.*failed|Executed|BUILD|TEST" || true
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
+                      -only-testing:SmoothFlowTests test -quiet
+
+            - name: UI tests (mock server + real engine)
+              working-directory: apps/smoothflow
+              env:
+                  SMOOTHFLOW_E2E_SERVER: ${{ github.workspace }}/target/debug/examples/flow_e2e_server
+              run: |
+                  set -o pipefail
+                  time xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
+                      -resultBundlePath build/UITests.xcresult \
+                      -only-testing:SmoothFlowUITests test 2>&1 \
+                      | grep -E "error:|Test Case.*(failed|passed|skipped)|Executed|BUILD|TEST" || true
                   xcodebuild -project SmoothFlow.xcodeproj -scheme SmoothFlow -configuration Debug \
-                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- test -quiet
+                      -derivedDataPath build/DerivedData CODE_SIGN_IDENTITY=- \
+                      -only-testing:SmoothFlowUITests test -quiet
+
+            # Failure screenshots (XCTAttachment) live in the result bundle.
+            - name: Upload UI test results
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: smoothflow-uitests-xcresult
+                  path: apps/smoothflow/build/UITests.xcresult
+                  if-no-files-found: ignore

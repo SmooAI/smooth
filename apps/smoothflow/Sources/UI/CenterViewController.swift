@@ -34,6 +34,9 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         root.translatesAutoresizingMaskIntoConstraints = false
 
         tabs.selectedSegment = 0
+        tabs.setAccessibilityIdentifier("center.tabs")
+        pathLabel.setAccessibilityIdentifier("center.path")
+        steerField.setAccessibilityIdentifier("steer.field")
         tabs.target = self
         tabs.action = #selector(tabChanged)
         pathLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -188,6 +191,7 @@ final class SessionPane: NSView {
     init() {
         super.init(frame: .zero)
         header.font = .systemFont(ofSize: 11)
+        header.setAccessibilityIdentifier("pane.header")
         header.textColor = Theme.muted
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 4

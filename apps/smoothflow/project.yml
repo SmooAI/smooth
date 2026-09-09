@@ -101,17 +101,42 @@ targets:
                 TEST_HOST: '$(BUILT_PRODUCTS_DIR)/SmoothFlow.app/Contents/MacOS/SmoothFlow'
                 BUNDLE_LOADER: '$(TEST_HOST)'
 
+    # XCUITest lane (pearl th-a58a97): drives the built app against the mock
+    # server and against the real engine (flow_e2e_server + fake-claude).
+    # See docs/Engineering/SmoothFlow-Testing-macOS.md.
+    SmoothFlowUITests:
+        type: bundle.ui-testing
+        platform: macOS
+        sources:
+            - path: UITests
+        dependencies:
+            - target: SmoothFlow
+        settings:
+            base:
+                PRODUCT_BUNDLE_IDENTIFIER: ai.smoo.smoothflow.uitests
+                GENERATE_INFOPLIST_FILE: YES
+                CODE_SIGN_IDENTITY: '-'
+                CODE_SIGN_STYLE: Manual
+                TEST_TARGET_NAME: SmoothFlow
+                # Xcode sandboxes xctrunner by default (container HOME, no tmux
+                # sockets, no writable temp dirs). The tests spawn node / tmux /
+                # flow_e2e_server, so the runner must be a plain process.
+                ENABLE_APP_SANDBOX: NO
+                CODE_SIGN_ENTITLEMENTS: UITests/SmoothFlowUITests.entitlements
+
 schemes:
     SmoothFlow:
         build:
             targets:
                 SmoothFlow: all
                 SmoothFlowTests: [test]
+                SmoothFlowUITests: [test]
         run:
             config: Debug
         test:
             config: Debug
             targets:
                 - SmoothFlowTests
+                - SmoothFlowUITests
         archive:
             config: Release

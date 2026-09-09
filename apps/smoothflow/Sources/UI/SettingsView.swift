@@ -15,10 +15,10 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            PermissionsPane(permissions: permissions, daemon: daemon).tabItem { Text("Permissions") }
-            attention.tabItem { Text("Attention") }
-            HarnessesPane(app: app).tabItem { Text("Harnesses") }
-            daemonPane.tabItem { Text("Daemon") }
+            PermissionsPane(permissions: permissions, daemon: daemon).accessibilityIdentifier("settings.pane.permissions").tabItem { Text("Permissions") }
+            attention.accessibilityIdentifier("settings.pane.attention").tabItem { Text("Attention") }
+            HarnessesPane(app: app).accessibilityIdentifier("settings.pane.harnesses").tabItem { Text("Harnesses") }
+            daemonPane.accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
         .padding(16)
         .frame(width: 560, height: 440)
@@ -50,7 +50,7 @@ struct SettingsView: View {
             if !daemon.launchAgentAvailable {
                 Text("LaunchAgent mode needs the daemon bundled in SmoothFlow.app (release builds).").font(.caption).foregroundStyle(Color(Theme.muted))
             }
-            LabeledContent("Status", value: daemon.status)
+            LabeledContent("Status", value: daemon.status).accessibilityIdentifier("settings.daemon.status")
             LabeledContent("Binary", value: daemon.binary ?? "not found")
             LabeledContent("Endpoint", value: daemon.endpoint?.description ?? "—")
             TextField("Connect to an external daemon instead (host:port) — dev/mock only", text: $addr)

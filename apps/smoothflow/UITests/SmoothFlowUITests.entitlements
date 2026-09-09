@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the XCUITest runner. Xcode sandboxes xctrunner by default
+  (container HOME, no writable temp, no tmux sockets); the UI tests spawn node,
+  tmux and flow_e2e_server, so the runner must be a plain process.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>
