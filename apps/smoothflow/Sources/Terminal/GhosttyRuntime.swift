@@ -50,12 +50,14 @@ final class GhosttyRuntime {
             return GhosttyRuntime.handleActionOffMain(target: target, action: action)
         }
         rt.read_clipboard_cb = { userdata, _, state in
-            // Runs on the main thread (ghostty calls it from the app tick).
-            MainActor.assumeIsolated { GhosttyRuntime.completeClipboardRead(surfaceUserdata: userdata, state: state) }
+            // Usually the app tick (main), but the same renderer/IO threads that
+            // raise actions can reach here — `assumeIsolated` off-main is the
+            // SIGTRAP in the 2026-09-08 crash report. Hop instead of asserting.
+            GhosttyRuntime.onMain { GhosttyRuntime.completeClipboardRead(surfaceUserdata: userdata, state: state) }
             return true
         }
         rt.confirm_read_clipboard_cb = { userdata, _, state, _ in
-            MainActor.assumeIsolated { GhosttyRuntime.completeClipboardRead(surfaceUserdata: userdata, state: state) }
+            GhosttyRuntime.onMain { GhosttyRuntime.completeClipboardRead(surfaceUserdata: userdata, state: state) }
         }
         rt.write_clipboard_cb = { _, _, contents, count, _ in
             guard let contents, count > 0 else { return }
@@ -94,6 +96,15 @@ final class GhosttyRuntime {
 
     /// The subset of `handleAction` that is safe from a ghostty background
     /// thread: copy what the action carries, then dispatch to the main actor.
+    /// Run `body` on the main actor: inline when already there, else async.
+    nonisolated static func onMain(_ body: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(body)
+        } else {
+            DispatchQueue.main.async { body() }
+        }
+    }
+
     nonisolated private static func handleActionOffMain(target: ghostty_target_s, action: ghostty_action_s) -> Bool {
         guard target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
               let ud = ghostty_surface_userdata(surface) else { return false }

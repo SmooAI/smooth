@@ -114,8 +114,8 @@ the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
-`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, and (v0.1)
-`flow.hello`, `flow.handoff`.
+`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, (v0.1)
+`flow.hello`, `flow.handoff`, and (th-e126cc) `flow.close`.
 
 Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
@@ -165,6 +165,23 @@ with a fresh `flow.hello`. This is the phone's bridge nudge: over the relay
 nothing opens the flow WS until the phone sends a frame, so the bridge is
 opened by the **first** `channel:"flow"` envelope (whatever its type), the
 engine's on-connect hello goes back, and the nudge's reply follows.
+
+### `flow.close` — close the pearl, GC the worktree (th-e126cc)
+
+`flow.close {id, close_pearl, remove_worktree, force}` (all flags default
+off) finishes a session for good: a live one is killed first; then
+`th pearls close <pearl>` runs in the project when `close_pearl` and the row
+has a pearl; then, when `remove_worktree`, `git worktree remove` + the branch
+is deleted — but only once the branch is **merged** into the project
+(an ancestor of its HEAD, or a merged PR per `gh`, since the repos
+squash-merge) and the worktree is clean; the main checkout is never removed.
+Then the row is dropped and `flow.session.removed` is broadcast. A dirty or
+unmerged worktree is refused as `flow.error` with **nothing touched**;
+`force` removes it anyway. HTTP sibling: `POST
+/api/flow/sessions/{id}/close` with the same body, replying
+`{id, pearl_closed, worktree_removed, branch_deleted}` (nulls for what was
+not done). CLI: `th flow close <id> [--keep-pearl] [--keep-worktree]
+[--force]` — the CLI defaults both actions **on**.
 
 ### tmux socket (TCC) {#tmux-socket-tcc}
 

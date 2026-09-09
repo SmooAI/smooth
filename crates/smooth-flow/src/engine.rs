@@ -22,8 +22,8 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::harness::{FlowEventName, HarnessInfo, Manifest, Prefs, PromptAs, Registry, ResumeMode, ScrapeRules, SessionIdMode, StateSource, Vars};
 use crate::protocol::{
-    approval_keystroke, hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, DaemonInfo, Decision, EventKind, FlowEvent,
-    HookEvent, HookOutcome, ServerFrame,
+    approval_keystroke, hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, CloseOutcome, DaemonInfo, Decision, EventKind,
+    FlowEvent, HookEvent, HookOutcome, ServerFrame,
 };
 use crate::pty::{OnOutput, PtyAttach};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Session, SessionKind, SessionState};
@@ -873,6 +873,69 @@ impl Engine {
         Ok(())
     }
 
+    /// `flow.close` (th-e126cc): finish a session for good — close its pearl,
+    /// remove its worktree and branch once the branch is merged, drop the row,
+    /// broadcast `flow.session.removed`. A live session is killed first.
+    ///
+    /// Everything is validated before anything changes: a dirty worktree, or
+    /// a branch not merged into the project (by ancestry, or a merged PR per
+    /// `gh` — the repos squash-merge), is refused with nothing touched unless
+    /// `force`. The main checkout is never removed.
+    ///
+    /// # Errors
+    /// When the session is unknown, the worktree is dirty or unmerged (and
+    /// `!force`), or `th` / `git` refuse.
+    pub fn close(&self, id: &str, close_pearl: bool, remove_worktree: bool, force: bool) -> Result<CloseOutcome> {
+        let s = self.require(id)?;
+        let project = Path::new(&s.project);
+        let wt = Path::new(&s.worktree);
+        let removable = remove_worktree && wt != project && wt.is_dir();
+        let branch = if removable { worktree_branch(wt, s.branch.as_deref()) } else { None };
+        if removable && !force {
+            let dirty = git(wt, &["status", "--porcelain"]).unwrap_or_default();
+            if !dirty.trim().is_empty() {
+                bail!("worktree {} has uncommitted changes — commit or stash them, or close with force", wt.display());
+            }
+            if let Some(b) = &branch {
+                if !branch_merged(project, wt, b) {
+                    bail!("branch {b} is not merged into {} — merge the PR first, or close with force", project.display());
+                }
+            }
+        }
+        if !s.state.is_terminal() {
+            self.kill(id, false)?;
+        }
+        let mut out = CloseOutcome {
+            id: id.to_string(),
+            ..Default::default()
+        };
+        if close_pearl {
+            if let Some(p) = &s.pearl_id {
+                th(project, &["pearls", "close", p])?;
+                out.pearl_closed = Some(p.clone());
+            }
+        }
+        if removable {
+            let mut args = vec!["worktree", "remove"];
+            if force {
+                args.push("--force");
+            }
+            args.push(&s.worktree);
+            git(project, &args)?;
+            out.worktree_removed = Some(s.worktree.clone());
+            if let Some(b) = &branch {
+                // Merged was established above (ancestry or a merged PR — a
+                // squash merge is not an ancestor, so `-d` would refuse it).
+                if git(project, &["branch", "-D", b]).is_ok() {
+                    out.branch_deleted = Some(b.clone());
+                }
+            }
+        }
+        self.with_store(|st| st.remove(id))?;
+        self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
+        Ok(out)
+    }
+
     /// Relaunch a dead agent with the resume argv, honouring rule 4.
     fn relaunch(&self, s: &Session) -> Result<Session> {
         if let Some(agent) = &s.agent_session_id {
@@ -1384,6 +1447,40 @@ pub fn parse_pearl_id(text: &str) -> Option<String> {
     re.captures(text).and_then(|c| c.get(1)).map(|m| m.as_str().to_string())
 }
 
+/// The branch checked out in `wt` — the recorded one, else `HEAD`'s name;
+/// `None` when detached.
+fn worktree_branch(wt: &Path, recorded: Option<&str>) -> Option<String> {
+    recorded
+        .map(str::to_string)
+        .or_else(|| git(wt, &["rev-parse", "--abbrev-ref", "HEAD"]).ok())
+        .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
+/// Whether `branch` is merged into `project`'s HEAD: an ancestor of it, or
+/// (squash merges leave no ancestry) the branch's PR is merged per `gh`.
+fn branch_merged(project: &Path, wt: &Path, branch: &str) -> bool {
+    let ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", branch, "HEAD"])
+        .current_dir(project)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    ancestor || pr_merged(wt, branch)
+}
+
+/// Whether `gh` knows a merged PR for `branch` (false when gh is absent,
+/// unauthenticated, or there is none).
+fn pr_merged(cwd: &Path, branch: &str) -> bool {
+    Command::new("gh")
+        .args(["pr", "list", "--head", branch, "--state", "merged", "--limit", "1", "--json", "number"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+        .and_then(|v| v.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
 /// `{number, url, ci}` for the open PR on `branch`, via `gh` (None when gh
 /// is absent, unauthenticated, or there is no PR).
 fn pr_for_branch(cwd: &Path, branch: &str) -> Option<Value> {
@@ -1867,6 +1964,155 @@ mod tests {
         }
     }
 
+    /// A throwaway git repo with one commit, as the project (main checkout).
+    fn git_project(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+        ] {
+            git(dir, &args).unwrap();
+        }
+    }
+
+    fn done_row(e: &Engine, project: &Path, wt: &Path, branch: Option<&str>, pearl: Option<&str>) -> Session {
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    project: project.to_string_lossy().into(),
+                    worktree: wt.to_string_lossy().into(),
+                    branch: branch.map(str::to_string),
+                    pearl_id: pearl.map(str::to_string),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        e.set_state(&s.id, SessionState::Done, None).unwrap().unwrap()
+    }
+
+    /// th-e126cc: `flow.close` refuses a dirty or unmerged worktree with
+    /// nothing touched, removes worktree + branch once merged, and drops the
+    /// row with a `flow.session.removed` broadcast.
+    #[test]
+    fn close_refuses_dirty_or_unmerged_then_removes_the_merged_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        git_project(&project);
+        let e = engine(tmp.path());
+        let mut rx = e.subscribe();
+        let wt = Engine::create_worktree(&project, "th-e126cc", "x", "HEAD").unwrap();
+        assert!(wt.is_dir() && wt != project);
+        let s = done_row(&e, &project, &wt, Some("th-e126cc-x"), None);
+
+        // Dirty: refused, nothing touched.
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let err = e.close(&s.id, false, true, false).unwrap_err().to_string();
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(wt.is_dir() && e.get(&s.id).unwrap().is_some());
+        std::fs::remove_file(wt.join("scratch.txt")).unwrap();
+
+        // Unmerged: refused, nothing touched.
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "work"]).unwrap();
+        let err = e.close(&s.id, false, true, false).unwrap_err().to_string();
+        assert!(err.contains("not merged"), "{err}");
+        assert!(wt.is_dir() && e.get(&s.id).unwrap().is_some());
+
+        // Merged into the project: worktree + branch go, row goes, frame goes out.
+        git(&project, &["merge", "-q", "--ff-only", "th-e126cc-x"]).unwrap();
+        let out = e.close(&s.id, false, true, false).unwrap();
+        assert_eq!(out.worktree_removed.as_deref(), Some(wt.to_string_lossy().as_ref()));
+        assert_eq!(out.branch_deleted.as_deref(), Some("th-e126cc-x"));
+        assert!(out.pearl_closed.is_none(), "no pearl asked for");
+        assert!(!wt.exists(), "worktree removed");
+        assert_eq!(git(&project, &["branch", "--list", "th-e126cc-x"]).unwrap(), "", "branch deleted");
+        assert!(e.get(&s.id).unwrap().is_none(), "row removed");
+        let mut removed = false;
+        while let Ok(f) = rx.try_recv() {
+            if matches!(&f, ServerFrame::SessionRemoved { id } if *id == s.id) {
+                removed = true;
+            }
+        }
+        assert!(removed, "flow.session.removed broadcast");
+    }
+
+    /// th-e126cc: `force` removes a dirty, unmerged worktree; the main checkout
+    /// is never removed; a live row is killed first.
+    #[test]
+    fn close_force_removes_unmerged_and_never_touches_the_main_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        git_project(&project);
+        let e = engine(tmp.path());
+        let wt = Engine::create_worktree(&project, "th-e126cc", "y", "HEAD").unwrap();
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "unmerged"]).unwrap();
+        std::fs::write(wt.join("dirty.txt"), "x").unwrap();
+        let s = done_row(&e, &project, &wt, None, None); // branch resolved from HEAD
+        let out = e.close(&s.id, false, true, true).unwrap();
+        assert!(out.worktree_removed.is_some() && out.branch_deleted.as_deref() == Some("th-e126cc-y"));
+        assert!(!wt.exists());
+
+        // The main checkout itself: `remove_worktree` is a no-op, the row still goes.
+        let s = done_row(&e, &project, &project, Some("main"), None);
+        let out = e.close(&s.id, false, true, true).unwrap();
+        assert!(out.worktree_removed.is_none() && out.branch_deleted.is_none());
+        assert!(project.is_dir() && e.get(&s.id).unwrap().is_none());
+
+        // A live (never launched) row is killed, then removed.
+        let live = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    project: project.to_string_lossy().into(),
+                    worktree: project.to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        assert!(!live.state.is_terminal());
+        e.close(&live.id, false, false, false).unwrap();
+        assert!(e.get(&live.id).unwrap().is_none());
+        assert!(e.close("fs-nope", false, false, false).is_err());
+    }
+
+    /// th-e126cc: `close_pearl` runs `th pearls close <id>` in the project,
+    /// and a failing `th` aborts before the row is dropped.
+    #[test]
+    #[cfg(unix)]
+    fn close_closes_the_pearl_through_th() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        git_project(&project);
+        let log = tmp.path().join("th.log");
+        let fake = tmp.path().join("th");
+        std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::env::set_var("SMOOTH_TH_BIN", &fake);
+        let e = engine(tmp.path());
+        let s = done_row(&e, &project, &project, None, Some("th-abc123"));
+        let out = e.close(&s.id, true, false, false).unwrap();
+        assert_eq!(out.pearl_closed.as_deref(), Some("th-abc123"));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "pearls close th-abc123");
+        assert!(e.get(&s.id).unwrap().is_none());
+
+        // No pearl on the row: nothing to close, still removed.
+        let s = done_row(&e, &project, &project, None, None);
+        assert!(e.close(&s.id, true, false, false).unwrap().pearl_closed.is_none());
+
+        // th fails: the row stays.
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let s = done_row(&e, &project, &project, None, Some("th-abc123"));
+        assert!(e.close(&s.id, true, false, false).is_err());
+        assert!(e.get(&s.id).unwrap().is_some(), "nothing dropped when th refuses");
+        std::env::remove_var("SMOOTH_TH_BIN");
+    }
+
     #[test]
     #[cfg(unix)]
     fn relaunch_refuses_when_another_live_row_owns_the_harness_session() {
@@ -1932,8 +2178,13 @@ mod tests {
         assert_eq!(dirty_path("??"), None);
     }
 
+    /// Tests that point `SMOOTH_TH_BIN` somewhere serialize on this — the env
+    /// is process-wide and cargo runs tests in parallel.
+    static TH_BIN_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn handoff_degrades_without_th_or_gh() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
         let e = engine(tmp.path());
