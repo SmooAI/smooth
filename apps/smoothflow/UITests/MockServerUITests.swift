@@ -39,12 +39,51 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { !card.exists })
     }
 
+    /// th-883ce9: Close on a finished card → confirm sheet → `flow.close`; the
+    /// mock answers with `flow.session.removed`, so the card AND the sidebar row go.
+    func testInboxCloseFinishedSessionRemovesIt() {
+        waitForState("fs-3033cccc") { $0 == "done" }
+        app.typeKey("i", modifierFlags: .command)
+        let inbox = app.windows["Inbox"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10))
+        let card = inbox.descendants(matching: .any)["inbox.finished.fs-3033cccc"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "finished card; tree: \(dump())")
+        app.buttons["inbox.close.fs-3033cccc"].click()
+        XCTAssertTrue(app.buttons["inbox.close.confirm"].waitForExistence(timeout: 10), "confirm sheet")
+        XCTAssertTrue(app.checkBoxes["inbox.close.pearl"].exists, "pearl toggle for a row with a pearl")
+        XCTAssertTrue(app.checkBoxes["inbox.close.worktree"].exists, "worktree toggle for a row in its own worktree")
+        app.buttons["inbox.close.confirm"].click()
+        XCTAssertTrue(waitUntil { !card.exists }, "card gone after flow.session.removed")
+        XCTAssertTrue(waitUntil { !self.app.staticTexts["sidebar.state.fs-3033cccc"].exists }, "sidebar row gone")
+    }
+
+    /// th-883ce9: the mock refuses the unmerged fixture (`flow.error` with our
+    /// seq as `ref`); the card shows the reason and Force close resends with force.
+    func testInboxCloseRefusalThenForce() {
+        waitForState("fs-3034dddd") { $0 == "done" }
+        app.typeKey("i", modifierFlags: .command)
+        let inbox = app.windows["Inbox"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10))
+        let card = inbox.descendants(matching: .any)["inbox.finished.fs-3034dddd"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10), "finished card; tree: \(dump())")
+        app.buttons["inbox.close.fs-3034dddd"].click()
+        XCTAssertTrue(app.buttons["inbox.close.confirm"].waitForExistence(timeout: 10))
+        app.buttons["inbox.close.confirm"].click()
+        let refusal = app.staticTexts["inbox.close.refusal.fs-3034dddd"]
+        XCTAssertTrue(refusal.waitForExistence(timeout: 10), "refusal lands on the card, not the rail; tree: \(dump())")
+        XCTAssertTrue(label("inbox.close.refusal.fs-3034dddd").contains("not merged"), label("inbox.close.refusal.fs-3034dddd"))
+        XCTAssertTrue(card.exists, "nothing touched: the row is still there")
+        app.buttons["inbox.close.force.fs-3034dddd"].click()
+        XCTAssertTrue(waitUntil { !card.exists }, "forced close removes the row")
+        XCTAssertTrue(waitUntil { !self.app.staticTexts["sidebar.state.fs-3034dddd"].exists })
+    }
+
     func testSettingsPanesRender() {
         app.typeKey(",", modifierFlags: .command)
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.permissions"].waitForExistence(timeout: 10), "Permissions pane is the first tab")
-        let daemonTab = settings.radioButtons["Daemon"].exists ? settings.radioButtons["Daemon"] : settings.buttons["Daemon"]
+        let daemonTab = settingsTab("Daemon", in: settings)
         XCTAssertTrue(daemonTab.waitForExistence(timeout: 5), "Daemon tab")
         daemonTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.daemon"].waitForExistence(timeout: 10), "Daemon pane")
@@ -57,7 +96,7 @@ final class MockServerUITests: FlowUITestCase {
         app.typeKey(",", modifierFlags: .command)
         let settings = app.windows["SmoothFlow Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
-        let phonesTab = settings.radioButtons["Phones"].exists ? settings.radioButtons["Phones"] : settings.buttons["Phones"]
+        let phonesTab = settingsTab("Phones", in: settings)
         XCTAssertTrue(phonesTab.waitForExistence(timeout: 5), "Phones tab")
         phonesTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")

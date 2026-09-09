@@ -88,7 +88,29 @@ daemon it did not start:
 - The child is spawned through a one-line `sh` supervisor that exits with the
   app: macOS has no parent-death signal, and an app crash used to leave the
   daemon (and its supervision loop) running — seven such orphans were found
-  after one day of shell development.
+  after one day of shell development. The supervisor records the daemon's pid
+  in `~/.smooth/smoothflow-daemon.pid` (`$SMOOTHFLOW_DAEMON_PIDFILE`).
+
+### Quit (th-6198bf)
+
+Every quit sender — ⌘Q, the app and status-item menus, AppleScript `quit`,
+`NSRunningApplication.terminate()` (what the release lane uses to install over
+a running copy) — arrives as `NSApplication.terminate(_:)`, and
+`applicationShouldTerminate` takes the fleet down **before** answering
+`.terminateNow`: disconnect, stop the child daemon, kill the app-owned tmux
+server. It never answers `.terminateLater` (nothing to forget to reply to) or
+`.terminateCancel` (quit means quit); `applicationWillTerminate` runs the same
+idempotent shutdown for the paths that skip the delegate question.
+
+The stop is **bounded**. It used to be `terminate()` + `waitUntilExit()` on the
+main thread, which blocks for exactly as long as the child tree takes to die —
+and a daemon that ignores SIGTERM never does, so the Quit Apple event was
+handled, `applicationWillTerminate` ran, and the app simply never exited (the
+0.2.0 symptom: "quit did nothing, had to kill the pid"). Now the supervisor
+itself escalates — TERM the daemon, wait up to 3 s, SIGKILL it — and the app
+waits at most 5 s for the supervisor before SIGKILLing the supervisor and the
+pid it recorded. Reproduced and pinned with a `trap '' TERM` daemon: quit
+completes in ~4 s instead of never; a TERM-honoring daemon is gone in ~1 s.
 
 ### What the child daemon is started with
 
@@ -288,6 +310,21 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
 
+### Closing a finished session (th-883ce9)
+
+The finished card's **Close…** is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
+sheet names each action with its target — _close pearl `<id>`_ (on when the
+row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
+when the row lives in its own worktree; the main checkout is never offered) —
+and states the rule up front: a dirty or unmerged worktree is refused with
+nothing touched. The frame carries a client `seq`; the engine echoes it as
+`flow.error.ref`, so a refusal lands on **that card** in the engine's words
+with **Force close** (resends with `force`) and **Keep it**. Success is just
+`flow.session.removed`: the card and the sidebar row go. The mock
+(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
+covers both paths without a real worktree.
+
 ## Keyboard
 
 | Keys      | Action                                     |
@@ -426,10 +463,14 @@ Launch contract, identifiers and how to run:
   contract and the app sets `SMOOTH_FLOW_TMUX_SOCKET`.
 - th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
   by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
-- th-e126cc — engine side closed: `flow.close {id, close_pearl,
+- th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
 remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
   `th flow close`) closes the pearl, removes the merged worktree + branch and
-  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The inbox
-  card does not send it yet; wiring the Swift side is th-883ce9. Until then
-  the PR tab only shows what the handoff endpoint reports, "Merge" opens the
-  PR.
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
+  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  still opens the PR: merging is a review act, not something the shell does
+  blind.
+- th-6198bf — closed: AppleScript / `NSRunningApplication.terminate()` quit
+  hung in `waitUntilExit()` on a child that did not exit on TERM. Quit is now
+  bounded (supervisor TERM→KILL escalation + app-side backstop, see
+  [Quit](#quit-th-6198bf)) and pinned by `QuitUITests`.
