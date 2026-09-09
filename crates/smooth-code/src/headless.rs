@@ -6,6 +6,8 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+
+use anyhow::Context as _;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -58,15 +60,54 @@ pub async fn run_headless(
         anyhow::bail!("message must not be empty");
     }
 
-    let mut client = BigSmoothClient::new("http://localhost:4400");
+    let url = daemon_url();
+    let mut client = BigSmoothClient::new(&url);
 
     match client.connect().await {
         Ok(()) => run_headless_client(client, working_dir, message, model, budget, json_output, agent).await,
         Err(e) => {
-            tracing::debug!(error = %e, "BigSmoothClient connection failed, falling back to SSE");
-            run_headless_sse(working_dir, message, model, budget, json_output, agent).await
+            tracing::debug!(error = %e, url, "BigSmoothClient connection failed, falling back to SSE");
+            run_headless_sse(&url, working_dir, message, model, budget, json_output, agent)
+                .await
+                .with_context(|| format!("Big Smooth at {url}: WebSocket connect failed ({e})"))
         }
     }
+}
+
+/// Where Big Smooth is: `$SMOOTH_URL`, else the daemon advertised in
+/// `~/.smooth/daemon.addr`, else `http://localhost:4400`.
+///
+/// th-9d4b09: the headless path (and `th run` on top of it) hard-wired the
+/// last one, so a daemon on any other port — the Big Smooth app's, or `th up
+/// --port` — was never even tried.
+#[must_use]
+pub fn daemon_url() -> String {
+    daemon_url_from(
+        std::env::var("SMOOTH_URL").ok(),
+        dirs_next::home_dir().map(|h| h.join(".smooth").join("daemon.addr")).as_deref(),
+    )
+}
+
+fn daemon_url_from(env: Option<String>, addr_file: Option<&std::path::Path>) -> String {
+    if let Some(u) = env.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()) {
+        return u;
+    }
+    if let Some(addr) = addr_file
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return if addr.contains("://") { addr } else { format!("http://{addr}") };
+    }
+    "http://localhost:4400".to_string()
+}
+
+/// Whether an `/api/tasks` reply is the SSE stream the fallback expects.
+/// The daemon's SPA fallback answers *any* unknown path with `200 text/html`
+/// (index.html) — reading that as an empty event stream is exactly how `th
+/// run` "succeeded" without dispatching anything (th-9d4b09).
+fn is_event_stream(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|ct| ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 /// Run smooth-code headless against a specific Big Smooth URL, returning
@@ -309,8 +350,10 @@ fn strip_ansi_codes(s: &str) -> String {
     String::from_utf8(out).expect("strip_ansi_codes preserves UTF-8 because it only skips ASCII control sequences")
 }
 
-/// Fallback: run headless via SSE (legacy `/api/tasks` endpoint).
+/// Fallback: run headless via SSE (legacy `/api/tasks` endpoint). Loud when
+/// the server has no such endpoint, and when the stream ends without a result.
 async fn run_headless_sse(
+    url: &str,
     working_dir: PathBuf,
     message: String,
     model: Option<String>,
@@ -329,16 +372,27 @@ async fn run_headless_sse(
     });
 
     let resp = client
-        .post("http://localhost:4400/api/tasks")
+        .post(format!("{url}/api/tasks"))
         .json(&task_req)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to Big Smooth: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to connect to Big Smooth at {url}: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("Big Smooth returned {status}: {body}");
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if !is_event_stream(content_type.as_deref()) {
+        anyhow::bail!(
+            "Big Smooth at {url} has no /api/tasks (got {}) — nothing was dispatched",
+            content_type.as_deref().unwrap_or("no content-type")
+        );
     }
 
     let mut content_buf = String::new();
@@ -364,6 +418,9 @@ async fn run_headless_sse(
 
     if !line_buf.is_empty() {
         process_sse_line(&line_buf, json_output, &mut content_buf, &mut tool_calls, &mut cost);
+    }
+    if content_buf.is_empty() && tool_calls.is_empty() {
+        anyhow::bail!("Big Smooth at {url} closed the stream without a result — nothing was dispatched");
     }
 
     if !json_output {
@@ -462,6 +519,39 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// th-9d4b09: discovery order — `$SMOOTH_URL`, then `daemon.addr`, then :4400.
+    #[test]
+    fn daemon_url_prefers_env_then_advertised_addr_then_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = dir.path().join("daemon.addr");
+        assert_eq!(daemon_url_from(None, Some(&addr)), "http://localhost:4400", "no env, no file");
+        std::fs::write(&addr, "127.0.0.1:8899\n").unwrap();
+        assert_eq!(
+            daemon_url_from(None, Some(&addr)),
+            "http://127.0.0.1:8899",
+            "the advertised daemon wins over the default"
+        );
+        assert_eq!(
+            daemon_url_from(Some("http://10.0.0.2:4400/".into()), Some(&addr)),
+            "http://10.0.0.2:4400",
+            "env wins"
+        );
+        assert_eq!(daemon_url_from(Some("  ".into()), Some(&addr)), "http://127.0.0.1:8899", "blank env is unset");
+        std::fs::write(&addr, "").unwrap();
+        assert_eq!(daemon_url_from(None, Some(&addr)), "http://localhost:4400", "empty file is unset");
+        assert_eq!(daemon_url_from(None, None), "http://localhost:4400");
+    }
+
+    /// th-9d4b09: the SPA fallback's `200 text/html` must not pass for a stream.
+    #[test]
+    fn only_a_real_event_stream_counts() {
+        assert!(is_event_stream(Some("text/event-stream")));
+        assert!(is_event_stream(Some("Text/Event-Stream; charset=utf-8")));
+        assert!(!is_event_stream(Some("text/html; charset=utf-8")));
+        assert!(!is_event_stream(Some("application/json")));
+        assert!(!is_event_stream(None));
+    }
 
     #[tokio::test]
     async fn headless_empty_message_returns_error() {
