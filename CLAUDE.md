@@ -382,7 +382,7 @@ text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 ### Global (`~/.smooth/`)
 
 - `pearls.db` — Every project's pearls (SQLite; see above)
-- `registry.json` — Multi-project registry (auto-updated on pearl store open; entries whose path is gone are pruned)
+- `registry.json` — Multi-project registry. A plain store open registers the project only when its root is a git repo other than `/` or `$HOME` (hooks open the store from any cwd, so scratch dirs are not projects — th-92e046); `th pearls init` registers any directory explicitly. Entries whose path is gone, or that are not git repos unless explicit, are pruned on open
 - `smooth.db` — Legacy SQLite. No migration command ships any more (`th pearls migrate-from-sqlite` was removed); the file is unread and safe to delete.
 - `mail.db` — Agent mail + the agent roster (SQLite; `$SMOOTH_MAIL_DB` overrides). Machine-level on purpose — see [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)
 - `agent-sessions/<session_id>` — Handle each harness session registered under (written by the smooth-agent SessionStart hook, rewritten by `th agent claim`/`rename`)
