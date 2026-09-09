@@ -507,6 +507,38 @@ fn outbound_frames(flow: &mut Option<FlowGuard>, text: &str) -> Vec<String> {
     }
 }
 
+/// Why an inbound pump stopped: the loopback sink is gone (rebuild the bridge)
+/// or the relay out-channel is gone (the supervisor is rebuilding everything).
+enum PumpEnd {
+    Loopback,
+    Relay,
+}
+
+/// Apply one phone frame's actions: plaintext to the engine's WS, replies back
+/// to the phone through the relay out-channel.
+async fn apply_actions<S>(actions: Vec<Action>, device: &str, sink: &mut S, out: &mpsc::UnboundedSender<String>) -> Result<(), PumpEnd>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    for action in actions {
+        match action {
+            Action::ToEngine(text) => {
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    return Err(PumpEnd::Loopback);
+                }
+            }
+            Action::ToPhone(text) => {
+                if let Some(envelope) = wrap_out(device, &text) {
+                    if out.send(envelope).is_err() {
+                        return Err(PumpEnd::Relay);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The bridge body. `flow = Some(guard)` is the flow-channel flavour: the
 /// guard enforces end-to-end encryption per phone, and `flow.output` is
 /// coalesced to ~30 fps and ≤16 KiB per frame before it reaches a phone.
@@ -530,31 +562,32 @@ fn spawn_bridge_with(
         let mut coalescer = OutputCoalescer::default();
         let mut tick = tokio::time::interval(PHONE_OUTPUT_TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let actions_for = |flow: &mut Option<FlowGuard>, f: String| match flow.as_mut() {
+            Some(guard) => guard.inbound(&f),
+            None => vec![Action::ToEngine(f)],
+        };
+        // The frame that opened this bridge (a phone's `flow.pair` / `flow.e2e.open`
+        // / nudge) is already queued: process it BEFORE reading the engine, so its
+        // on-connect `flow.hello` is judged against the phone's real pairing state
+        // rather than racing it (th-d98fde).
+        while let Ok(f) = rx.try_recv() {
+            match apply_actions(actions_for(&mut flow, f), &device, &mut sink, &out).await {
+                Ok(()) => {}
+                Err(PumpEnd::Loopback) => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    return;
+                }
+                Err(PumpEnd::Relay) => return,
+            }
+        }
         'pump: loop {
             tokio::select! {
                 frame = rx.recv() => match frame {
-                    Some(f) => {
-                        let actions = match flow.as_mut() {
-                            Some(guard) => guard.inbound(&f),
-                            None => vec![Action::ToEngine(f)],
-                        };
-                        for action in actions {
-                            match action {
-                                Action::ToEngine(text) => {
-                                    if sink.send(Message::Text(text.into())).await.is_err() {
-                                        break 'pump;
-                                    }
-                                }
-                                Action::ToPhone(text) => {
-                                    if let Some(envelope) = wrap_out(&device, &text) {
-                                        if out.send(envelope).is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Some(f) => match apply_actions(actions_for(&mut flow, f), &device, &mut sink, &out).await {
+                        Ok(()) => {}
+                        Err(PumpEnd::Loopback) => break 'pump,
+                        Err(PumpEnd::Relay) => return,
+                    },
                     None => break, // bridge dropped by the supervisor
                 },
                 _ = tick.tick(), if throttle_output && !coalescer.is_empty() => {
