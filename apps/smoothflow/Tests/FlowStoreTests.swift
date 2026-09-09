@@ -139,9 +139,25 @@ final class FlowStoreTests: XCTestCase {
 
     func testErrorFrameSurfacesMessage() {
         let store = FlowStore()
-        XCTAssertEqual(store.apply(.error(ref: nil, code: "held", message: "pid 5 owns it")), [.error("held: pid 5 owns it")])
+        XCTAssertEqual(store.apply(.error(ref: nil, code: "held", message: "pid 5 owns it")), [.error(ref: nil, message: "held: pid 5 owns it")])
         XCTAssertEqual(store.lastError, "held: pid 5 owns it")
         XCTAssertEqual(store.apply(.unknown(type: "flow.x")), [])
+    }
+
+    /// th-883ce9: the engine's `ref` (our `seq`) survives into the effect so a
+    /// refused `flow.close` can find its card; a successful close is just
+    /// `flow.session.removed`, which drops the row with no effect.
+    func testErrorRefIsKeptAndRemovalDropsRow() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: ""), sessions: [s("a", .done), s("b")]))
+        XCTAssertEqual(store.apply(.error(ref: 3, code: "refused", message: "not merged")), [.error(ref: 3, message: "refused: not merged")])
+        XCTAssertEqual(store.finished.map(\.id), ["a"])
+        XCTAssertEqual(store.apply(.sessionRemoved(id: "a")), [])
+        XCTAssertEqual(store.finished, [])
+        XCTAssertEqual(store.order, ["b"])
+        XCTAssertTrue(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p-wt")))
+        XCTAssertFalse(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p")), "the main checkout is never offered for removal")
+        XCTAssertFalse(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "", worktree: "")))
     }
 }
 
