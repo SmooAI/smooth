@@ -6,9 +6,13 @@
 # scraping:
 #
 #   POST http://<daemon.addr>/api/flow/hooks
-#        {harness:"claude-code", event, session_id, cwd, payload}
+#        {harness, event, session_id, cwd, payload}
 #
-# Usage (from hooks.json): flow-hook.sh <Event>
+# Usage (from hooks.json): flow-hook.sh <Event> [harness]
+#   harness defaults to claude-code; Codex ≥ 0.153 reads the same hooks.json
+#   schema from ~/.codex/hooks.json, so `th pkg` renders the package's
+#   harness/codex/hooks.json overlay there with `flow-hook.sh <Event> codex`
+#   (pearl th-4ad334). FLOW_HOOK_HARNESS overrides the default.
 #
 # Contract — this hook must NEVER block the harness:
 #   * daemon.addr missing/empty, daemon down, curl/jq missing → exit 0, silent.
@@ -24,6 +28,7 @@
 set -u
 
 event="${1:-}"
+harness="${2:-${FLOW_HOOK_HARNESS:-claude-code}}"
 [ -n "$event" ] || exit 0
 command -v curl >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
@@ -44,8 +49,8 @@ if ! printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1; then
     input="$(jq -cn --arg raw "$input" '{raw: $raw}')"
 fi
 
-body="$(printf '%s' "$input" | jq -c --arg event "$event" --arg cwd "$PWD" \
-    '{harness: "claude-code", event: $event, session_id: (.session_id // ""), cwd: (.cwd // $cwd), payload: .}' 2>/dev/null)" || exit 0
+body="$(printf '%s' "$input" | jq -c --arg harness "$harness" --arg event "$event" --arg cwd "$PWD" \
+    '{harness: $harness, event: $event, session_id: (.session_id // ""), cwd: (.cwd // $cwd), payload: .}' 2>/dev/null)" || exit 0
 
 if [ "$event" = "PermissionRequest" ]; then
     reply="$(curl -fsS -m "${FLOW_HOOK_PERMISSION_TIMEOUT:-120}" -X POST -H 'Content-Type: application/json' \
