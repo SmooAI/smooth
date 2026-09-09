@@ -57,7 +57,8 @@ struct FleetSidebar: View {
             if s.unread { UnreadBadge() }
         }
         .padding(.vertical, 2)
-        .accessibilityIdentifier("sidebar.session.\(s.id)")
+        // No identifier on the row itself: SwiftUI would stamp it onto both Texts,
+        // hiding sidebar.title.* / sidebar.state.* from XCUITest.
     }
 
     private var footer: some View {

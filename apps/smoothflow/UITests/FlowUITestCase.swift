@@ -72,10 +72,13 @@ class FlowUITestCase: XCTestCase {
     func startEngine() throws {
         guard Self.which("tmux") != nil else { throw XCTSkip("tmux not installed") }
         let env = ProcessInfo.processInfo.environment
-        let server = env["SMOOTHFLOW_E2E_SERVER"]
-            ?? "\(env["HOME"] ?? NSHomeDirectory())/.cargo/target-e2e/debug/examples/flow_e2e_server"
-        guard FileManager.default.isExecutableFile(atPath: server) else {
-            throw XCTSkip("flow_e2e_server not built (\(server)); cargo build -p smooai-smooth-daemon --example flow_e2e_server")
+        // xctrunner does not inherit the shell's env (TEST_RUNNER_ forwarding did not
+        // reach it either), so look where CI and the dev loop actually build it.
+        let candidates = [env["SMOOTHFLOW_E2E_SERVER"],
+                          Self.repoRoot.appendingPathComponent("target/debug/examples/flow_e2e_server").path,
+                          "\(env["HOME"] ?? NSHomeDirectory())/.cargo/target-e2e/debug/examples/flow_e2e_server"].compactMap { $0 }
+        guard let server = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("flow_e2e_server not built (looked in \(candidates)); cargo build -p smooai-smooth-daemon --example flow_e2e_server")
         }
         let fm = FileManager.default
         let bin = tmp.appendingPathComponent("bin"), ws = tmp.appendingPathComponent("ws")
