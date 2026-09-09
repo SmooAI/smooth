@@ -1148,6 +1148,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "creates /bin/sh fake CLIs and asserts unix path spelling; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     fn which_bin_prefers_home_dirs_then_path_and_skips_cmux_shims() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1165,6 +1169,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn probe_help_reads_the_fake_cli() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = fake_cli(tmp.path(), "faketool");
@@ -1177,6 +1185,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn probe_help_fails_loudly_for_a_silent_binary() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("mute");
@@ -1200,6 +1212,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn loop_retries_a_bad_draft_then_installs_a_complete_one() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1239,6 +1255,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn loop_feeds_the_verdict_back_and_installs_partial_when_usable() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1261,6 +1281,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn never_usable_is_drafted_not_installed_unless_asked() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1289,6 +1313,10 @@ mod tests {
 
     /// cursor-agent: a sign-in wall is named as the next step, not "edit the TOML".
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn a_sign_in_wall_names_signing_in_as_the_next_step() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1307,6 +1335,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn existing_manifest_needs_force() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1333,6 +1365,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn wrong_name_in_draft_is_a_parse_error_not_a_rename() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1365,6 +1401,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn drafter_outage_falls_back_to_the_skeleton_once() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1383,6 +1423,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "executes a /bin/sh fake CLI; the agentic-add flow is unix-only (it needs tmux + a real shell)"
+    )]
     async fn validator_setup_error_ends_the_loop_with_a_draft() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
