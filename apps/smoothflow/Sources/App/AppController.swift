@@ -44,6 +44,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     var notifySettings = NotifySettings.load()
 
     private(set) var surfaces: [String: TerminalSurfaceView] = [:]
+    /// nil until `start()` (an inert test host never creates it).
     private(set) var mainWindow: MainWindowController!
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
@@ -53,7 +54,27 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     // MARK: lifecycle
 
+    /// Whether this process should bring the fleet up at all (th-dccc80).
+    ///
+    /// The unit-test bundle is hosted INSIDE the app (`TEST_HOST`), so every
+    /// `xcodebuild test` ran the real `applicationDidFinishLaunching`: in spawn
+    /// mode that meant `tmux -L smoothflow kill-server` and a `smooth-daemon`
+    /// child against the developer's real HOME — stray daemons, and before
+    /// #546 a rewritten `~/.smooth/daemon.addr`. Under XCTest the app stays
+    /// inert unless a test opts in with `SMOOTHFLOW_TEST_START=1`. The XCUITest
+    /// lane is unaffected: the app under test is a separate process with none
+    /// of the XCTest variables.
+    nonisolated static func shouldStart(env: [String: String]) -> Bool {
+        if env["SMOOTHFLOW_TEST_START"] == "1" { return true }
+        return ["XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier"].allSatisfy { env[$0] == nil }
+    }
+
+    /// True once `start()` ran; `shutdown()` is a no-op before that, so an
+    /// inert test host never touches tmux or a daemon on the way out.
+    private(set) var started = false
+
     func start() {
+        started = true
         mainWindow = MainWindowController(app: self)
         mainWindow.showWindow(nil)
         mainWindow.window?.makeKeyAndOrderFront(nil)
@@ -109,7 +130,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// former (a SIGTERM to the app, a forced logout).
     private(set) var didShutdown = false
     func shutdown() {
-        guard !didShutdown else { return }
+        guard started, !didShutdown else { return }
         didShutdown = true
         client.disconnect()
         daemon.stop()
