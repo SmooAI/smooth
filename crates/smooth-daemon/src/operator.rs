@@ -158,6 +158,46 @@ struct SandboxedToolProvider {
     /// self-notify fan-out. `None` for the ephemeral/test providers that don't
     /// wire push; the always-on daemon passes the shared [`crate::notify::TurnNotifier`].
     notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
+    /// App Store reviewer demo (`SMOOTH_DEMO`, th-a455be). When true, `tools_for`
+    /// clamps the per-turn set to [`DEMO_SAFE_TOOLS`] — deny-by-default, applied
+    /// LAST and UNCONDITIONALLY. This is the ONLY thing that constrains a relay
+    /// reviewer: the relay bridge authenticates as the owner (Role::Admin, no
+    /// `role:` group), so family RBAC doesn't gate it, and Plan mode is
+    /// per-conversation and toggleable from the phone — neither can be trusted
+    /// when the demo creds ship in the App Store review notes.
+    demo: bool,
+}
+
+/// The tools the App Store reviewer demo (`SMOOTH_DEMO`) exposes — chat plus a
+/// strictly read-only, host-safe subset. Deny-by-default: anything not listed
+/// (`write_file`, `edit_file`, `bash`, `th`, `create_skill`, `send_file`,
+/// `remember`, calendar/reminders/imessage/contacts, plugins, MCP,
+/// `send_sidekick`, `notify`) never reaches the model, regardless of auto-mode or
+/// principal. Read/list/grep stay confined to `SMOOTH_WORKSPACE`; `web_search`/
+/// `crawl` stay behind the egress allowlist — so a reviewer sees a working agent
+/// that cannot touch the host. NB: no `contacts` (macOS personal data) even
+/// though Plan mode allows it — a reviewer must not read the host's address book.
+const DEMO_SAFE_TOOLS: &[&str] = &[
+    "read_file",
+    "list_files",
+    "grep",
+    "web_search",
+    "knowledge_search",
+    "crawl",
+    "recall",
+    "get_current_datetime",
+    "get_weather",
+    "create_artifact",
+    "cd",
+    "present_plan",
+    "todo_write",
+];
+
+/// True when `SMOOTH_DEMO` is set to a truthy value (App Store reviewer demo).
+/// Same truthy grammar as `fast_mode` — unset / `0` / `false` / `no` / `off` /
+/// blank all read as off.
+fn demo_mode() -> bool {
+    matches!(std::env::var("SMOOTH_DEMO"), Ok(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
 }
 
 /// The tools a **Plan-mode** turn may keep — a strict read-only allowlist
@@ -407,6 +447,20 @@ impl ToolProvider for SandboxedToolProvider {
                 "plan mode: filtered to read-only tools"
             );
         }
+        // App Store reviewer demo (th-a455be): clamp to the host-safe allowlist,
+        // LAST and UNCONDITIONAL. A relay reviewer authenticates as the owner in
+        // Bypass and can toggle Plan off from the phone, so this is the only
+        // filter that actually holds — deny-by-default, nothing outside
+        // DEMO_SAFE_TOOLS reaches the model no matter the mode or principal.
+        if self.demo {
+            let before = tools.len();
+            tools.retain(|t| DEMO_SAFE_TOOLS.contains(&t.schema().name.as_str()));
+            tracing::info!(
+                kept = tools.len(),
+                dropped = before - tools.len(),
+                "SMOOTH_DEMO: clamped to host-safe reviewer tool set"
+            );
+        }
         tools
     }
 }
@@ -469,6 +523,7 @@ pub fn local_tool_provider_full(
         family,
         modes,
         notify_sink,
+        demo: demo_mode(),
     })
 }
 
@@ -1828,6 +1883,57 @@ mod tests {
         for m in ["write_file", "edit_file", "bash"] {
             assert!(auto_names.iter().any(|n| n == m), "Auto mode keeps {m}: {auto_names:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn demo_mode_clamps_to_the_safe_set_even_for_an_owner_in_auto() {
+        use smooth_operator_svc::access_control::AccessContext;
+        // Build the provider directly with demo=true (no SMOOTH_DEMO env, so no
+        // cross-test race) and an OWNER principal in the default (Auto) mode —
+        // exactly what a relay reviewer is. The clamp must still hold.
+        let provider = SandboxedToolProvider {
+            cwd: SessionCwd::new(std::env::temp_dir()),
+            proxy: None,
+            memory: Arc::new(smooth_operator::InMemoryMemory::new()),
+            mcp: None,
+            family: None,
+            modes: crate::session_mode::SessionModes::new(),
+            notify_sink: None,
+            demo: true,
+        };
+        let sink = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let mut ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("demo-conv");
+        ctx.directive_sink = Some(sink);
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+
+        // Every dangerous tool is gone — a reviewer cannot mutate the host, run a
+        // shell, text anyone, read contacts, or delegate.
+        for banned in [
+            "write_file",
+            "edit_file",
+            "bash",
+            "send_file",
+            "create_skill",
+            "remember",
+            "th",
+            "send_sidekick",
+            "calendar",
+            "reminders",
+            "imessage",
+            "contacts",
+            "notify",
+        ] {
+            assert!(!names.iter().any(|n| n == banned), "demo mode must DROP {banned}: {names:?}");
+        }
+        // Chat + safe reads remain so the reviewer sees a working agent.
+        for keep in ["read_file", "web_search", "get_current_datetime"] {
+            assert!(names.iter().any(|n| n == keep), "demo mode keeps {keep}: {names:?}");
+        }
+        // Nothing outside the allowlist survived — deny-by-default.
+        assert!(
+            names.iter().all(|n| DEMO_SAFE_TOOLS.contains(&n.as_str())),
+            "demo mode leaves only allowlisted tools: {names:?}"
+        );
     }
 
     #[test]
