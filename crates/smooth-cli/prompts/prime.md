@@ -12,6 +12,7 @@
 [ ] 2. git add <files>         (stage specific code changes)
 [ ] 3. git commit -m "..."     (commit code)
 [ ] 4. git push                (push to remote)
+[ ] 5. th pearls close <id>    (or `th pearls checkpoint <id> --next "…"` if handing off unfinished work)
 ```
 
 **NEVER skip this.** Work isn't done until pushed.
@@ -23,12 +24,17 @@
 - **Prohibited**: do NOT use the TodoWrite tool or ad-hoc markdown
   files for multi-turn task tracking.
 - **Workflow**: create pearl BEFORE writing code, mark in_progress
-  when starting, close when work is pushed.
+  when starting, checkpoint at milestones, close when work is pushed.
 - **Memory**: durable project context lives in CLAUDE.md / AGENTS.md —
   read those before guessing conventions. For cross-session insights
   about you-the-user, auto-memory is loaded automatically.
 - Persistence you don't need beats lost context.
-- Every write lands in `~/.smooth/pearls.db` immediately; nothing to commit or push.
+- Every write lands in `~/.smooth/pearls.db` immediately; there is
+  nothing to commit, push, or pull. `th pearls push` / `pull` only print
+  a notice.
+- Worktrees share the store: the project is the main checkout
+  (`git rev-parse --git-common-dir`), so `th pearls` from any worktree
+  sees and edits the same pearls — no need to hop to `main` first.
 
 ## Essential Commands
 
@@ -51,16 +57,33 @@
 - **WARNING**: avoid interactive editor flows (`th pearls edit`) — they
   block the agent on $EDITOR.
 
+### Checkpoints & handoff (compaction-proof)
+
+- `th pearls checkpoint <id> --note "what happened" --next "what to do first"` —
+  at every milestone (tests green, PR open, blocked). Records the worktree,
+  branch, HEAD, dirty files and session automatically; notes append, the
+  handoff state is latest-wins.
+- `th pearls show <id> --handoff [--json]` — resume one pearl: where the
+  work is, what happened, what's next.
+- `th pearls prime --in-progress [--cwd .]` — handoff packets for every
+  in-progress pearl (only this worktree's with `--cwd`).
+
 ### Dependencies & blocking
 
 - `th pearls dep add <issue> <depends-on>` — issue depends on depends-on
 - `th pearls blocked` — show blocked issues
 - `th pearls show <id>` — see what's blocking / blocked by
 
-### Sync
+### Search & stats
 
 - `th pearls search <query>` — full-text
 - `th pearls stats` — project counts
+
+### Team sync
+
+- `th pearls sync [--project <KEY>] [--dry-run]` — reconcile this repo's
+  pearls with Smoo Projects work items (pearl th-19cca5). Bind the repo
+  once with `--project`; it is explicit and offline-first, never automatic.
 
 ## Common Workflows
 
@@ -68,16 +91,22 @@
 
 ```bash
 th pearls ready
-th pearls show <id>
+th pearls show <id>                 # add --handoff to resume someone's checkpoint
 th pearls update <id> --status=in_progress
 ```
 
 **Completing work:**
 
 ```bash
-th pearls close <id1> <id2> ...
 git add . && git commit -m "Pearl th-XXXX: ..."
 git push
+th pearls close <id1> <id2> ...
+```
+
+**Handing off unfinished work:**
+
+```bash
+th pearls checkpoint <id> --note "tests green, PR #123 open" --next "address review, then merge"
 ```
 
 **Spawning dependent pearls:**
