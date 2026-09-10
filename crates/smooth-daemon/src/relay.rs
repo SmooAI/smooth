@@ -31,12 +31,35 @@
 //! coalesced to ~30 fps and split into ≤16 KiB frames; phones never see raw
 //! scrollback.
 //!
+//! **End-to-end encryption (th-d98fde).** A paired phone's flow frames are
+//! sealed on the phone and opened here — the relay brokers ciphertext only.
+//! [`FlowGuard`] is the per-phone policy inside a flow bridge: it finishes
+//! pairings, opens per-connection sessions, decrypts inbound data frames,
+//! encrypts outbound ones, and rejects plaintext from a paired (or revoked)
+//! phone with a visible `flow.error`. See `flow_e2e.rs` for the protocol.
+//!
+//! **Two daemons, one machine (th-a1bb12).** The SmoothFlow app runs its own
+//! child daemon next to Big Smooth. Both used to read the same
+//! `~/.smooth/relay-device-id`, connect as one device, and the relay's presence
+//! flapped between two sockets — phones landed on whichever connected last. Now
+//! the app pins a second id (`SMOOTH_RELAY_DEVICE_ID`, minted into
+//! `~/.smooth/smoothflow-relay-device-id`) and announces `kind=flow`
+//! (`SMOOTH_RELAY_KIND`), so the relay's device list carries Big Smooth and
+//! SmoothFlow as two peers and SmoothFlow phones can prefer the flow one. As a
+//! belt-and-braces guard every daemon also holds an advisory lock on its
+//! device id (`~/.smooth/relay-locks/<device>.lock`): a second process on the
+//! same machine that resolves the SAME id logs an error and stays off the
+//! relay until the first lets go, instead of racing it.
+//!
 //! Config: `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the default
 //! relay endpoint; `SMOOTH_RELAY_DEVICE_ID` / `SMOOTH_RELAY_LABEL` pin the
-//! identity (the env-knob precedent of `config.rs`).
+//! identity and `SMOOTH_RELAY_KIND` (`daemon` | `flow`) the presence kind (the
+//! env-knob precedent of `config.rs`).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs::{File, TryLockError};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -46,12 +69,19 @@ use smooai_client_shared::auth::storage::CredentialsStore;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::flow_e2e::{self, E2eSession, Inbound, PairingState, PENDING_OUT_MAX};
+
 /// The production relay endpoint (SMOODEV-2828).
 const DEFAULT_RELAY_URL: &str = "wss://relay.smoo.ai/ws";
 /// Where the per-machine device id is persisted, under `~/.smooth/`.
 const DEVICE_ID_FILE: &str = "relay-device-id";
+/// Where per-device-id advisory locks live, under `~/.smooth/` (th-a1bb12).
+const LOCK_DIR: &str = "relay-locks";
 /// Label fallback when the host has no usable hostname.
 const DEFAULT_LABEL: &str = "big-smooth";
+/// Suffix a flow-only daemon (the SmoothFlow app's child) adds to its
+/// hostname label so a phone's device list tells the two daemons apart.
+const FLOW_LABEL_SUFFIX: &str = " · SmoothFlow";
 /// Labels are display-only; cap them so a junk `$SMOOTH_RELAY_LABEL` can't
 /// bloat every connect URL.
 const LABEL_MAX_CHARS: usize = 120;
@@ -62,6 +92,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 /// How long a signed-out daemon waits before checking for credentials again.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(60);
+/// How often a daemon whose device id another local process holds re-checks
+/// the lock (the other daemon may have quit).
+const IDENTITY_RECHECK: Duration = Duration::from_secs(30);
 /// Refresh the Smoo session when the access token is inside this window of
 /// expiry (or already past). ~60s beats a connect round-trip without
 /// refreshing on every reconnect (th-c6a542).
@@ -116,6 +149,129 @@ fn resolve_device_id_from(override_env: Option<&str>, base_dir: Option<&Path>) -
     id
 }
 
+/// Which side of the relay's device list this daemon sits on — the `?kind=`
+/// of the connect URL (`rust/relay-ws` `presence::sanitize_kind`, SMOODEV-2834
+/// / SMOODEV-3142). Anything the relay does not know degrades to `phone` there,
+/// so this is a closed enum, never free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayKind {
+    /// Big Smooth — the personal agent daemon (chat + flow engine).
+    #[default]
+    Daemon,
+    /// A flow-only daemon: the SmoothFlow app's child (th-a1bb12).
+    Flow,
+}
+
+impl RelayKind {
+    /// The wire value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::Flow => "flow",
+        }
+    }
+
+    /// What this daemon calls itself in logs.
+    const fn product(self) -> &'static str {
+        match self {
+            Self::Daemon => "Big Smooth",
+            Self::Flow => "SmoothFlow",
+        }
+    }
+}
+
+/// `SMOOTH_RELAY_KIND` → [`RelayKind`]. Unset / empty / `daemon` ⇒ `Daemon`;
+/// `flow` ⇒ `Flow` (case-insensitive, trimmed). Junk is logged and treated as
+/// `Daemon` — the relay would have coerced it to `phone`, which would hide the
+/// daemon from every picker.
+fn resolve_kind_from(override_env: Option<&str>) -> RelayKind {
+    match override_env.map(str::trim).filter(|v| !v.is_empty()) {
+        None => RelayKind::Daemon,
+        Some(v) if v.eq_ignore_ascii_case("daemon") => RelayKind::Daemon,
+        Some(v) if v.eq_ignore_ascii_case("flow") => RelayKind::Flow,
+        Some(v) => {
+            tracing::warn!(value = %v, "relay: SMOOTH_RELAY_KIND must be `daemon` or `flow` — using `daemon`");
+            RelayKind::Daemon
+        }
+    }
+}
+
+/// This daemon's relay identity — resolved ONCE at boot so the pairing QR and
+/// the relay connection agree on the device id across reconnects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayIdentity {
+    pub device: String,
+    pub label: String,
+    pub kind: RelayKind,
+}
+
+/// Resolve [`RelayIdentity`] from the environment + `~/.smooth`.
+pub fn device_identity() -> RelayIdentity {
+    let kind = resolve_kind_from(std::env::var("SMOOTH_RELAY_KIND").ok().as_deref());
+    let device = resolve_device_id_from(
+        std::env::var("SMOOTH_RELAY_DEVICE_ID").ok().as_deref(),
+        dirs_next::home_dir().map(|h| h.join(".smooth")).as_deref(),
+    );
+    let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref(), kind);
+    RelayIdentity { device, label, kind }
+}
+
+/// Holds this process's claim on a relay device id for its lifetime; dropping
+/// it (or dying) releases the claim. Advisory, same mechanism as
+/// `single_instance::InstanceLock`.
+#[derive(Debug)]
+pub struct IdentityLock {
+    _file: File,
+}
+
+/// The outcome of trying to claim a device id on this machine.
+#[derive(Debug)]
+pub enum IdentityClaim {
+    /// Ours now — keep the lock alive for as long as the identity is in use.
+    Held(IdentityLock),
+    /// Another live process on this machine holds the same device id.
+    Busy,
+    /// No lock dir / unwritable — nothing to enforce; the caller proceeds.
+    Unavailable(String),
+}
+
+/// The file name a device id locks under: the relay grammar is
+/// `[A-Za-z0-9._-]`, but `SMOOTH_RELAY_DEVICE_ID` is free text, so anything
+/// else becomes `_`.
+fn lock_file_name(device: &str) -> String {
+    let safe: String = device
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    format!("{safe}.lock")
+}
+
+/// Try to claim `device` under `<dir>/relay-locks/`. Pure over its dir for tests.
+fn claim_identity(dir: Option<&Path>, device: &str) -> IdentityClaim {
+    let Some(dir) = dir else {
+        return IdentityClaim::Unavailable("no home dir".into());
+    };
+    let locks = dir.join(LOCK_DIR);
+    if let Err(e) = std::fs::create_dir_all(&locks) {
+        return IdentityClaim::Unavailable(format!("creating {}: {e}", locks.display()));
+    }
+    let path = locks.join(lock_file_name(device));
+    let file = match File::options().create(true).truncate(false).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => return IdentityClaim::Unavailable(format!("opening {}: {e}", path.display())),
+    };
+    match file.try_lock() {
+        Ok(()) => IdentityClaim::Held(IdentityLock { _file: file }),
+        Err(TryLockError::WouldBlock) => IdentityClaim::Busy,
+        Err(TryLockError::Error(e)) => IdentityClaim::Unavailable(format!("locking {}: {e}", path.display())),
+    }
+}
+
+/// Where [`claim_identity`] locks for the real daemon: `~/.smooth`.
+fn identity_lock_dir() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".smooth"))
+}
+
 fn mint_device_id() -> String {
     let hex = uuid::Uuid::new_v4().simple().to_string();
     format!("daemon-{}", &hex[..12])
@@ -123,21 +279,27 @@ fn mint_device_id() -> String {
 
 /// The human label for this daemon on the relay's device list.
 ///
-/// Pure over (`SMOOTH_RELAY_LABEL`, the raw hostname) — the env override wins,
-/// a hostname is shortened to its first DNS label, and both are stripped of
+/// Pure over (`SMOOTH_RELAY_LABEL`, the raw hostname, the kind) — the env
+/// override wins verbatim; otherwise a hostname shortened to its first DNS
+/// label, with ` · SmoothFlow` appended for a flow-only daemon so a phone's
+/// device list reads `smoo-hub` / `smoo-hub · SmoothFlow`. Both are stripped of
 /// control characters and capped so the value stays URL- and UI-safe.
-fn resolve_label_from(override_env: Option<&str>, hostname: Option<&str>) -> String {
+fn resolve_label_from(override_env: Option<&str>, hostname: Option<&str>, kind: RelayKind) -> String {
     let from_env = override_env.map(str::trim).filter(|s| !s.is_empty()).map(sanitize_label);
     let from_host = hostname
         .map(str::trim)
         // `hostname` may hand back an FQDN; the short form is what a human reads.
         .and_then(|h| h.split('.').next())
-        .map(sanitize_label);
-    from_env
-        .into_iter()
-        .chain(from_host)
-        .find(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_LABEL.to_string())
+        .map(sanitize_label)
+        .filter(|s| !s.is_empty())
+        .map(|host| match kind {
+            RelayKind::Daemon => host,
+            RelayKind::Flow => sanitize_label(&format!("{host}{FLOW_LABEL_SUFFIX}")),
+        });
+    from_env.into_iter().chain(from_host).find(|s| !s.is_empty()).unwrap_or_else(|| match kind {
+        RelayKind::Daemon => DEFAULT_LABEL.to_string(),
+        RelayKind::Flow => format!("{DEFAULT_LABEL}{FLOW_LABEL_SUFFIX}"),
+    })
 }
 
 fn sanitize_label(raw: &str) -> String {
@@ -156,14 +318,16 @@ fn host_name() -> Option<String> {
     String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Assemble the relay connect URL. `kind=daemon` tells the relay which side of
-/// the presence list this connection belongs on (SMOODEV-2834).
-fn connect_url(relay_url: &str, token: &str, device: &str, label: &str) -> String {
+/// Assemble the relay connect URL. `kind=` tells the relay which side of the
+/// presence list this connection belongs on (SMOODEV-2834; `flow` since
+/// SMOODEV-3142).
+fn connect_url(relay_url: &str, token: &str, device: &str, label: &str, kind: RelayKind) -> String {
     format!(
-        "{relay_url}?token={}&device={}&label={}&kind=daemon",
+        "{relay_url}?token={}&device={}&label={}&kind={}",
         urlencode(token),
         urlencode(device),
-        urlencode(label)
+        urlencode(label),
+        kind.as_str()
     )
 }
 
@@ -302,6 +466,153 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
+/// What a flow bridge does with one frame from the phone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Forward this plaintext flow frame to the engine's flow WS.
+    ToEngine(String),
+    /// Send this wire frame back to the phone (enveloped by the bridge).
+    ToPhone(String),
+}
+
+/// The per-phone end-to-end policy inside a flow bridge (th-d98fde). Pure over
+/// its inputs — no sockets — so every branch is unit-testable.
+pub struct FlowGuard {
+    device: String,
+    pairing: Arc<PairingState>,
+    session: Option<E2eSession>,
+    /// Engine frames that arrived for a paired phone before its session opened
+    /// (the engine's on-connect `flow.hello` races the phone's `flow.e2e.open`).
+    pending_out: Vec<String>,
+}
+
+impl FlowGuard {
+    pub fn new(device: impl Into<String>, pairing: Arc<PairingState>) -> Self {
+        Self {
+            device: device.into(),
+            pairing,
+            session: None,
+            pending_out: Vec::new(),
+        }
+    }
+
+    /// Whether an encrypted session is open right now.
+    pub const fn session_open(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// One frame from the phone → actions.
+    pub fn inbound(&mut self, frame_text: &str) -> Vec<Action> {
+        let paired = self.pairing.is_paired(&self.device);
+        match flow_e2e::classify(frame_text) {
+            Inbound::Plain(text) => {
+                if paired {
+                    tracing::warn!(device = %self.device, "relay e2e: paired phone sent plaintext — rejected");
+                    vec![Action::ToPhone(flow_e2e::error_frame(
+                        "e2e_required",
+                        "this phone is paired with this Mac; send encrypted frames",
+                    ))]
+                } else if self.pairing.plaintext_required_to_fail() {
+                    vec![Action::ToPhone(flow_e2e::error_frame(
+                        "e2e_required",
+                        "this Mac only accepts encrypted flow frames; pair it first",
+                    ))]
+                } else {
+                    vec![Action::ToEngine(text)]
+                }
+            }
+            Inbound::Pair {
+                pairing_id,
+                phone_public_key,
+                n,
+                ct,
+            } => match self.pairing.complete(&self.device, &pairing_id, &phone_public_key, n, &ct) {
+                Ok(reply) => {
+                    // A fresh pairing invalidates any session under the old key.
+                    self.session = None;
+                    self.pending_out.clear();
+                    vec![Action::ToPhone(reply)]
+                }
+                Err(e) => {
+                    tracing::warn!(device = %self.device, error = %e, "relay e2e: pairing failed");
+                    vec![Action::ToPhone(flow_e2e::error_frame(
+                        "pair_failed",
+                        "pairing failed — show a fresh QR and scan again",
+                    ))]
+                }
+            },
+            Inbound::Open { salt } => match self.pairing.open_session(&self.device, &salt) {
+                Ok((session, reply)) => {
+                    self.session = Some(session);
+                    let mut actions = vec![Action::ToPhone(reply)];
+                    for text in std::mem::take(&mut self.pending_out) {
+                        actions.extend(self.outbound(&text).into_iter().map(Action::ToPhone));
+                    }
+                    actions
+                }
+                Err(e) => {
+                    tracing::debug!(device = %self.device, error = %e, "relay e2e: session open refused");
+                    vec![Action::ToPhone(flow_e2e::error_frame(
+                        "e2e_not_paired",
+                        "this phone is not paired with this Mac",
+                    ))]
+                }
+            },
+            Inbound::Data { n, ct } => {
+                if !paired {
+                    self.session = None;
+                    return vec![Action::ToPhone(flow_e2e::error_frame("e2e_revoked", "this phone's pairing was revoked"))];
+                }
+                let Some(session) = self.session.as_mut() else {
+                    return vec![Action::ToPhone(flow_e2e::error_frame("e2e_not_open", "send flow.e2e.open first"))];
+                };
+                match session.open_frame(n, &ct) {
+                    Ok(plaintext) => {
+                        self.pairing.touch(&self.device);
+                        vec![Action::ToEngine(plaintext)]
+                    }
+                    Err(e) => {
+                        tracing::warn!(device = %self.device, error = %e, "relay e2e: frame rejected");
+                        vec![Action::ToPhone(flow_e2e::error_frame(
+                            "e2e_bad_frame",
+                            "frame did not authenticate or was replayed",
+                        ))]
+                    }
+                }
+            }
+            Inbound::Malformed(why) => vec![Action::ToPhone(flow_e2e::error_frame("e2e_bad_frame", why))],
+        }
+    }
+
+    /// One frame from the engine → wire frames for the phone (0..n).
+    pub fn outbound(&mut self, text: &str) -> Vec<String> {
+        let paired = self.pairing.is_paired(&self.device);
+        if let Some(session) = self.session.as_mut() {
+            if !paired {
+                self.session = None;
+                return Vec::new();
+            }
+            return match session.seal_frame(text) {
+                Ok(wire) => vec![wire],
+                Err(e) => {
+                    tracing::warn!(device = %self.device, error = %e, "relay e2e: seal failed; frame dropped");
+                    Vec::new()
+                }
+            };
+        }
+        if paired {
+            if self.pending_out.len() < PENDING_OUT_MAX {
+                self.pending_out.push(text.to_string());
+            }
+            return Vec::new();
+        }
+        if self.pairing.plaintext_required_to_fail() {
+            return Vec::new();
+        }
+        vec![text.to_string()]
+    }
+}
+
 /// A live loopback bridge for one phone device: frames from the phone go into
 /// `to_operator`; a spawned task owns the loopback WS and pushes the operator's
 /// replies back to the relay through the shared out-channel.
@@ -321,19 +632,61 @@ impl Drop for Bridge {
 /// envelope). Ends when either side closes; the caller reaps the entry lazily
 /// (a dead `to_operator` receiver surfaces as a failed `send`).
 fn spawn_bridge(device: String, local_ws_url: String, rx: mpsc::UnboundedReceiver<String>, out: mpsc::UnboundedSender<String>) -> tokio::task::JoinHandle<()> {
-    spawn_bridge_with(device, local_ws_url, rx, out, false)
+    spawn_bridge_with(device, local_ws_url, rx, out, None)
 }
 
-/// The bridge body. `throttle_output` = the flow-channel flavour: coalesce
-/// `flow.output` to ~30 fps and ≤16 KiB per frame before it reaches a phone.
+/// Engine → phone through the guard (or untouched for the operator flavour).
+fn outbound_frames(flow: &mut Option<FlowGuard>, text: &str) -> Vec<String> {
+    match flow.as_mut() {
+        Some(guard) => guard.outbound(text),
+        None => vec![text.to_string()],
+    }
+}
+
+/// Why an inbound pump stopped: the loopback sink is gone (rebuild the bridge)
+/// or the relay out-channel is gone (the supervisor is rebuilding everything).
+enum PumpEnd {
+    Loopback,
+    Relay,
+}
+
+/// Apply one phone frame's actions: plaintext to the engine's WS, replies back
+/// to the phone through the relay out-channel.
+async fn apply_actions<S>(actions: Vec<Action>, device: &str, sink: &mut S, out: &mpsc::UnboundedSender<String>) -> Result<(), PumpEnd>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    for action in actions {
+        match action {
+            Action::ToEngine(text) => {
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    return Err(PumpEnd::Loopback);
+                }
+            }
+            Action::ToPhone(text) => {
+                if let Some(envelope) = wrap_out(device, &text) {
+                    if out.send(envelope).is_err() {
+                        return Err(PumpEnd::Relay);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The bridge body. `flow = Some(guard)` is the flow-channel flavour: the
+/// guard enforces end-to-end encryption per phone, and `flow.output` is
+/// coalesced to ~30 fps and ≤16 KiB per frame before it reaches a phone.
 fn spawn_bridge_with(
     device: String,
     local_ws_url: String,
     mut rx: mpsc::UnboundedReceiver<String>,
     out: mpsc::UnboundedSender<String>,
-    throttle_output: bool,
+    mut flow: Option<FlowGuard>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let throttle_output = flow.is_some();
         let (stream, _) = match tokio_tungstenite::connect_async(&local_ws_url).await {
             Ok(s) => s,
             Err(e) => {
@@ -345,21 +698,41 @@ fn spawn_bridge_with(
         let mut coalescer = OutputCoalescer::default();
         let mut tick = tokio::time::interval(PHONE_OUTPUT_TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
+        let actions_for = |flow: &mut Option<FlowGuard>, f: String| match flow.as_mut() {
+            Some(guard) => guard.inbound(&f),
+            None => vec![Action::ToEngine(f)],
+        };
+        // The frame that opened this bridge (a phone's `flow.pair` / `flow.e2e.open`
+        // / nudge) is already queued: process it BEFORE reading the engine, so its
+        // on-connect `flow.hello` is judged against the phone's real pairing state
+        // rather than racing it (th-d98fde).
+        while let Ok(f) = rx.try_recv() {
+            match apply_actions(actions_for(&mut flow, f), &device, &mut sink, &out).await {
+                Ok(()) => {}
+                Err(PumpEnd::Loopback) => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    return;
+                }
+                Err(PumpEnd::Relay) => return,
+            }
+        }
+        'pump: loop {
             tokio::select! {
                 frame = rx.recv() => match frame {
-                    Some(f) => {
-                        if sink.send(Message::Text(f.into())).await.is_err() {
-                            break;
-                        }
-                    }
+                    Some(f) => match apply_actions(actions_for(&mut flow, f), &device, &mut sink, &out).await {
+                        Ok(()) => {}
+                        Err(PumpEnd::Loopback) => break 'pump,
+                        Err(PumpEnd::Relay) => return,
+                    },
                     None => break, // bridge dropped by the supervisor
                 },
                 _ = tick.tick(), if throttle_output && !coalescer.is_empty() => {
                     for text in coalescer.drain() {
-                        if let Some(envelope) = wrap_out(&device, &text) {
-                            if out.send(envelope).is_err() {
-                                return;
+                        for wire in outbound_frames(&mut flow, &text) {
+                            if let Some(envelope) = wrap_out(&device, &wire) {
+                                if out.send(envelope).is_err() {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -369,9 +742,11 @@ fn spawn_bridge_with(
                         if throttle_output && coalescer.absorb(&text) {
                             continue;
                         }
-                        if let Some(envelope) = wrap_out(&device, &text) {
-                            if out.send(envelope).is_err() {
-                                break; // relay connection gone; supervisor rebuilds
+                        for wire in outbound_frames(&mut flow, &text) {
+                            if let Some(envelope) = wrap_out(&device, &wire) {
+                                if out.send(envelope).is_err() {
+                                    break 'pump; // relay connection gone; supervisor rebuilds
+                                }
                             }
                         }
                     }
@@ -445,25 +820,55 @@ async fn fresh_access_token(http: &reqwest::Client, force: bool) -> Option<Strin
 /// operator via per-device loopback bridges, backs off exponentially on drops,
 /// and waits patiently while signed out. Never fails the daemon — every error
 /// is a log line and a retry.
-pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> tokio::task::JoinHandle<()> {
+///
+/// `identity` is resolved once by the caller ([`device_identity`]) — the id
+/// must be identical across reconnects (or the relay sees a new device every
+/// backoff cycle) and identical to what the pairing QR advertises. `pairing`
+/// is the shared end-to-end pairing authority for the flow bridges.
+pub fn spawn_relay(
+    relay_url: String,
+    local_port: u16,
+    local_token: String,
+    identity: RelayIdentity,
+    pairing: Arc<PairingState>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let http = reqwest::Client::default();
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
         let flow_ws_url = flow_ws_url(local_port, &local_token);
-        // Resolved once: the id must be identical across reconnects or the
-        // relay sees a new device every backoff cycle.
-        let device = resolve_device_id_from(
-            std::env::var("SMOOTH_RELAY_DEVICE_ID").ok().as_deref(),
-            dirs_next::home_dir().map(|h| h.join(".smooth")).as_deref(),
-        );
-        let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref());
-        tracing::info!(%device, %label, "relay: this daemon's identity");
+        let RelayIdentity { device, label, kind } = identity;
+        tracing::info!(%device, %label, kind = kind.as_str(), "relay: this daemon's identity");
+        let lock_dir = identity_lock_dir();
+        // Held for the life of the task once claimed; `None` while another
+        // local process owns the id (or when there is nothing to lock).
+        let mut claim: Option<IdentityLock> = None;
+        let mut lock_unavailable = false;
         let mut backoff = BACKOFF_MIN;
         // Set after an auth rejection (4401 close / 401 handshake): the next
         // read forces a token refresh before reconnecting. Normal backoff still
         // applies, so a persistently-dead refresh token can't hammer the relay.
         let mut force_refresh = false;
         loop {
+            if claim.is_none() && !lock_unavailable {
+                match claim_identity(lock_dir.as_deref(), &device) {
+                    IdentityClaim::Held(lock) => claim = Some(lock),
+                    IdentityClaim::Busy => {
+                        tracing::error!(
+                            %device,
+                            "relay: another daemon on this machine is ALREADY online as this device id — not connecting with it \
+                             (phones would flap between the two). If that is Big Smooth and this is SmoothFlow's child, give this one \
+                             its own SMOOTH_RELAY_DEVICE_ID (the app does: ~/.smooth/smoothflow-relay-device-id, th-a1bb12); \
+                             otherwise stop the other daemon. Re-checking in {IDENTITY_RECHECK:?}"
+                        );
+                        tokio::time::sleep(IDENTITY_RECHECK).await;
+                        continue;
+                    }
+                    IdentityClaim::Unavailable(why) => {
+                        tracing::warn!(%device, %why, "relay: cannot lock this device id locally — connecting without the duplicate-identity guard");
+                        lock_unavailable = true;
+                    }
+                }
+            }
             let Some(token) = fresh_access_token(&http, force_refresh).await else {
                 force_refresh = false;
                 tracing::debug!("relay: no Smoo session (signed out) — retrying in {SIGNED_OUT_RECHECK:?}");
@@ -471,12 +876,12 @@ pub fn spawn_relay(relay_url: String, local_port: u16, local_token: String) -> t
                 continue;
             };
             force_refresh = false;
-            let url = connect_url(&relay_url, &token, &device, &label);
+            let url = connect_url(&relay_url, &token, &device, &label, kind);
             let connected_at = std::time::Instant::now();
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
-                    tracing::info!(relay = %relay_url, "relay: connected — Big Smooth is reachable without tailscale");
-                    match run_connection(stream, &local_ws_url, &flow_ws_url).await {
+                    tracing::info!(relay = %relay_url, kind = kind.as_str(), "relay: connected — {} is reachable without tailscale", kind.product());
+                    match run_connection(stream, &local_ws_url, &flow_ws_url, &pairing).await {
                         ConnEnd::AuthRejected => {
                             tracing::warn!("relay: token rejected (4401) — refreshing the Smoo session and reconnecting");
                             force_refresh = true;
@@ -523,6 +928,7 @@ async fn run_connection(
     stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     local_ws_url: &str,
     flow_ws_url: &str,
+    pairing: &Arc<PairingState>,
 ) -> ConnEnd {
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
@@ -595,7 +1001,8 @@ async fn run_connection(
                             .is_some_and(|b| b.to_operator.send(frame.clone()).is_ok() && !b.task.is_finished());
                         if !delivered {
                             let (tx, rx) = mpsc::unbounded_channel();
-                            let task = spawn_bridge_with(from, flow_ws_url.to_string(), rx, out_tx.clone(), true);
+                            let guard = FlowGuard::new(from.clone(), pairing.clone());
+                            let task = spawn_bridge_with(from, flow_ws_url.to_string(), rx, out_tx.clone(), Some(guard));
                             let _ = tx.send(frame);
                             bridges.insert(key, Bridge { to_operator: tx, task });
                         }
@@ -715,31 +1122,45 @@ mod tests {
 
     #[test]
     fn label_prefers_the_env_override() {
-        assert_eq!(resolve_label_from(Some(" Brent's Laptop "), Some("smoo-hub")), "Brent's Laptop");
+        assert_eq!(
+            resolve_label_from(Some(" Brent's Laptop "), Some("smoo-hub"), RelayKind::Daemon),
+            "Brent's Laptop"
+        );
+        // Verbatim for a flow daemon too — the app composes its own label.
+        assert_eq!(
+            resolve_label_from(Some("smoo-hub · SmoothFlow"), Some("smoo-hub"), RelayKind::Flow),
+            "smoo-hub · SmoothFlow"
+        );
     }
 
     #[test]
     fn label_uses_the_short_hostname() {
-        assert_eq!(resolve_label_from(None, Some("smoo-hub.local")), "smoo-hub");
-        assert_eq!(resolve_label_from(None, Some("  mac-studio\n")), "mac-studio");
+        assert_eq!(resolve_label_from(None, Some("smoo-hub.local"), RelayKind::Daemon), "smoo-hub");
+        assert_eq!(resolve_label_from(None, Some("  mac-studio\n"), RelayKind::Daemon), "mac-studio");
+    }
+
+    #[test]
+    fn flow_daemon_label_says_so() {
+        assert_eq!(resolve_label_from(None, Some("smoo-hub.local"), RelayKind::Flow), "smoo-hub · SmoothFlow");
+        assert_eq!(resolve_label_from(None, None, RelayKind::Flow), "big-smooth · SmoothFlow");
     }
 
     #[test]
     fn label_falls_back_when_there_is_no_hostname() {
-        assert_eq!(resolve_label_from(None, None), DEFAULT_LABEL);
-        assert_eq!(resolve_label_from(None, Some("")), DEFAULT_LABEL);
-        assert_eq!(resolve_label_from(Some("  "), Some("   ")), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(None, None, RelayKind::Daemon), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(None, Some(""), RelayKind::Daemon), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(Some("  "), Some("   "), RelayKind::Daemon), DEFAULT_LABEL);
         // A label that sanitizes down to nothing is not a label.
-        assert_eq!(resolve_label_from(Some("\u{7}\u{0}"), None), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(Some("\u{7}\u{0}"), None, RelayKind::Daemon), DEFAULT_LABEL);
     }
 
     #[test]
     fn label_strips_control_chars_and_caps_length() {
-        assert_eq!(resolve_label_from(Some("big\u{0}sm\noth"), None), "bigsmoth");
-        let long = resolve_label_from(Some(&"x".repeat(500)), None);
+        assert_eq!(resolve_label_from(Some("big\u{0}sm\noth"), None, RelayKind::Daemon), "bigsmoth");
+        let long = resolve_label_from(Some(&"x".repeat(500)), None, RelayKind::Daemon);
         assert_eq!(long.chars().count(), LABEL_MAX_CHARS);
         // Multi-byte labels are cut on char boundaries, not bytes.
-        let emoji = resolve_label_from(Some(&"é".repeat(500)), None);
+        let emoji = resolve_label_from(Some(&"é".repeat(500)), None, RelayKind::Daemon);
         assert_eq!(emoji.chars().count(), LABEL_MAX_CHARS);
     }
 
@@ -747,11 +1168,76 @@ mod tests {
 
     #[test]
     fn connect_url_carries_device_label_and_kind() {
-        let u = connect_url("wss://relay.smoo.ai/ws", "tok en", "daemon-abc123", "Brent's Laptop");
+        let u = connect_url("wss://relay.smoo.ai/ws", "tok en", "daemon-abc123", "Brent's Laptop", RelayKind::Daemon);
         assert_eq!(
             u,
             "wss://relay.smoo.ai/ws?token=tok%20en&device=daemon-abc123&label=Brent%27s%20Laptop&kind=daemon"
         );
+        let u = connect_url("wss://relay.smoo.ai/ws", "t", "daemon-flow01", "smoo-hub · SmoothFlow", RelayKind::Flow);
+        assert_eq!(
+            u,
+            "wss://relay.smoo.ai/ws?token=t&device=daemon-flow01&label=smoo-hub%20%C2%B7%20SmoothFlow&kind=flow"
+        );
+    }
+
+    // ── kind (th-a1bb12) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn kind_defaults_to_daemon_and_accepts_flow() {
+        assert_eq!(resolve_kind_from(None), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some("")), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some("daemon")), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some(" flow ")), RelayKind::Flow);
+        assert_eq!(resolve_kind_from(Some("FLOW")), RelayKind::Flow);
+    }
+
+    #[test]
+    fn junk_kind_stays_a_daemon_rather_than_becoming_a_phone() {
+        // The relay coerces unknown kinds to `phone`, which would hide the
+        // daemon from every picker — never send what we did not recognise.
+        for junk in ["phone", "root", "flow\u{0}", "daemon; drop"] {
+            assert_eq!(resolve_kind_from(Some(junk)), RelayKind::Daemon, "junk kind: {junk:?}");
+        }
+    }
+
+    // ── identity lock (th-a1bb12) ─────────────────────────────────────────────
+
+    #[test]
+    fn identity_is_claimed_once_and_busy_for_a_second_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = claim_identity(Some(dir.path()), "daemon-abc123");
+        assert!(matches!(first, IdentityClaim::Held(_)), "{first:?}");
+        assert!(dir.path().join(LOCK_DIR).join("daemon-abc123.lock").is_file());
+        // A second open of the same path is a distinct file description, so
+        // the OS reports the conflict even within one process.
+        assert!(matches!(claim_identity(Some(dir.path()), "daemon-abc123"), IdentityClaim::Busy));
+        // A different id on the same machine is a different lock.
+        assert!(matches!(claim_identity(Some(dir.path()), "daemon-flow01"), IdentityClaim::Held(_)));
+        drop(first);
+        // Released on drop. Polled, not asserted once: a sibling test that is
+        // mid-spawn shares our open file descriptions until its child execs
+        // (O_CLOEXEC), and flock follows the description — seen once under a
+        // load average of 23.
+        let reclaimed = (0..50).any(|_| {
+            let held = matches!(claim_identity(Some(dir.path()), "daemon-abc123"), IdentityClaim::Held(_));
+            if !held {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            held
+        });
+        assert!(reclaimed, "released on drop");
+    }
+
+    #[test]
+    fn identity_lock_tolerates_junk_ids_and_a_missing_home() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(claim_identity(Some(dir.path()), "../../etc/passwd"), IdentityClaim::Held(_)));
+        assert_eq!(lock_file_name("../../etc/passwd"), ".._.._etc_passwd.lock");
+        assert!(
+            dir.path().join(LOCK_DIR).join(".._.._etc_passwd.lock").is_file(),
+            "the lock stays inside relay-locks/"
+        );
+        assert!(matches!(claim_identity(None, "daemon-abc123"), IdentityClaim::Unavailable(_)));
     }
 
     // ── inbound classification ────────────────────────────────────────────────
@@ -1014,7 +1500,8 @@ mod tests {
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let _task = spawn_bridge_with(from, flow_ws_url(addr.port(), "tok"), rx, out_tx, true);
+        let guard = FlowGuard::new(from.clone(), Arc::new(crate::flow_e2e::tests::state()));
+        let _task = spawn_bridge_with(from, flow_ws_url(addr.port(), "tok"), rx, out_tx, Some(guard));
         tx.send(frame).unwrap();
 
         let mut hellos = 0;
@@ -1029,6 +1516,236 @@ mod tests {
             assert_eq!(v["frame"]["type"], "flow.hello", "{v}");
             assert_eq!(v["frame"]["daemon"]["version"], "t");
             hellos += 1;
+        }
+    }
+
+    // ── end-to-end guard (th-d98fde) ────────────────────────────────────────
+
+    use crate::flow_e2e::tests::{phone_pair_frame, state as pairing_state, CODE, DAEMON_SALT, DAEMON_SECRET, PAIRING_ID, PHONE_DEVICE, PHONE_SALT};
+    use crate::flow_e2e::{b64, derive_session_key, open, seal, unb64, DIR_DAEMON_TO_PHONE, DIR_PHONE_TO_DAEMON};
+
+    fn error_code(action: &Action) -> String {
+        let Action::ToPhone(text) = action else {
+            panic!("expected a reply, got {action:?}")
+        };
+        let v: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(v["type"], "flow.error", "{v}");
+        v["code"].as_str().unwrap().to_string()
+    }
+
+    /// Pair the fixture phone through the guard and open a session; returns
+    /// (guard, phone-side session key).
+    fn paired_guard() -> (FlowGuard, Arc<PairingState>, [u8; 32]) {
+        let st = Arc::new(pairing_state());
+        let qr = st.begin_with(DAEMON_SECRET, CODE, PAIRING_ID.into());
+        let mut guard = FlowGuard::new(PHONE_DEVICE, st.clone());
+        let (frame, pairing_key) = phone_pair_frame(&qr, r#"{"type":"flow.pair.hello","label":"x","platform":"ios"}"#);
+        let actions = guard.inbound(&frame);
+        assert_eq!(actions.len(), 1);
+        let Action::ToPhone(reply) = &actions[0] else { panic!("{actions:?}") };
+        let v: Value = serde_json::from_str(reply).unwrap();
+        assert_eq!(v["type"], "flow.pair");
+        let pt = open(&pairing_key, DIR_DAEMON_TO_PHONE, 1, &unb64(v["ct"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(String::from_utf8(pt).unwrap().contains("flow.pair.ok"));
+        (guard, st, pairing_key)
+    }
+
+    #[test]
+    fn unpaired_phone_passes_plaintext_both_ways() {
+        let st = Arc::new(pairing_state());
+        let mut guard = FlowGuard::new("phone-unpaired", st);
+        assert_eq!(
+            guard.inbound(r#"{"channel":"flow","type":"flow.hello"}"#),
+            vec![Action::ToEngine(r#"{"channel":"flow","type":"flow.hello"}"#.into())]
+        );
+        assert_eq!(
+            guard.outbound(r#"{"channel":"flow","type":"flow.hello"}"#),
+            vec![r#"{"channel":"flow","type":"flow.hello"}"#.to_string()]
+        );
+        // An open from an unpaired phone is refused, visibly.
+        assert_eq!(
+            error_code(&guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string())[0]),
+            "e2e_not_paired"
+        );
+    }
+
+    #[test]
+    fn required_mode_refuses_plaintext_from_unpaired_phones() {
+        let st = Arc::new(PairingState::new(crate::flow_e2e::tests::engine(), "daemon-x".into(), "x".into(), true));
+        let mut guard = FlowGuard::new("phone-unpaired", st);
+        assert_eq!(error_code(&guard.inbound(r#"{"channel":"flow","type":"flow.hello"}"#)[0]), "e2e_required");
+        assert!(
+            guard.outbound(r#"{"channel":"flow","type":"flow.hello"}"#).is_empty(),
+            "nothing leaves in the clear"
+        );
+    }
+
+    #[test]
+    fn paired_phone_pairs_opens_and_exchanges_sealed_frames() {
+        let (mut guard, _st, pairing_key) = paired_guard();
+        // Engine output before the session opens is buffered, not sent in the clear.
+        assert!(guard.outbound(r#"{"channel":"flow","type":"flow.hello","sessions":[]}"#).is_empty());
+        // Plaintext from a paired phone is refused.
+        assert_eq!(error_code(&guard.inbound(r#"{"channel":"flow","type":"flow.hello"}"#)[0]), "e2e_required");
+        // Data before open is refused.
+        assert_eq!(error_code(&guard.inbound(r#"{"channel":"flow","v":1,"n":1,"ct":"AAAA"}"#)[0]), "e2e_not_open");
+        // Open → reply + the buffered hello, both sealed.
+        let actions = guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string());
+        assert_eq!(actions.len(), 2, "{actions:?}");
+        let Action::ToPhone(open_reply) = &actions[0] else { panic!() };
+        let v: Value = serde_json::from_str(open_reply).unwrap();
+        assert_eq!(v["type"], "flow.e2e.open");
+        let daemon_salt: [u8; 16] = unb64(v["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let session_key = derive_session_key(&pairing_key, &PHONE_SALT, &daemon_salt);
+        let Action::ToPhone(sealed_hello) = &actions[1] else { panic!() };
+        let v: Value = serde_json::from_str(sealed_hello).unwrap();
+        assert_eq!(v["n"], 1);
+        let pt = open(&session_key, DIR_DAEMON_TO_PHONE, 1, &unb64(v["ct"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(pt, br#"{"channel":"flow","type":"flow.hello","sessions":[]}"#);
+        assert!(guard.session_open());
+        // Phone → engine, decrypted.
+        let ct = seal(&session_key, DIR_PHONE_TO_DAEMON, 1, br#"{"channel":"flow","type":"flow.attach","id":"fs-1"}"#).unwrap();
+        assert_eq!(
+            guard.inbound(&json!({"channel":"flow","v":1,"n":1,"ct":b64(&ct)}).to_string()),
+            vec![Action::ToEngine(r#"{"channel":"flow","type":"flow.attach","id":"fs-1"}"#.into())]
+        );
+        // Replay is refused.
+        assert_eq!(
+            error_code(&guard.inbound(&json!({"channel":"flow","v":1,"n":1,"ct":b64(&ct)}).to_string())[0]),
+            "e2e_bad_frame"
+        );
+        // Engine → phone, sealed with n=2 now.
+        let wire = guard.outbound(r#"{"channel":"flow","type":"flow.output","id":"fs-1","seq":1,"data_b64":"aGk="}"#);
+        let v: Value = serde_json::from_str(&wire[0]).unwrap();
+        assert_eq!(v["n"], 2);
+        assert!(v.get("data_b64").is_none(), "nothing readable in the clear: {v}");
+    }
+
+    #[test]
+    fn revoke_mid_session_refuses_the_next_frame_and_drops_output() {
+        let (mut guard, st, pairing_key) = paired_guard();
+        let actions = guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string());
+        let Action::ToPhone(open_reply) = &actions[0] else { panic!() };
+        let v: Value = serde_json::from_str(open_reply).unwrap();
+        let daemon_salt: [u8; 16] = unb64(v["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let session_key = derive_session_key(&pairing_key, &PHONE_SALT, &daemon_salt);
+        assert!(st.revoke(PHONE_DEVICE).unwrap());
+        let ct = seal(&session_key, DIR_PHONE_TO_DAEMON, 1, b"{}").unwrap();
+        assert_eq!(
+            error_code(&guard.inbound(&json!({"channel":"flow","v":1,"n":1,"ct":b64(&ct)}).to_string())[0]),
+            "e2e_revoked"
+        );
+        assert!(!guard.session_open());
+        // Now unpaired: engine output goes out in the clear again (pre-pairing behaviour),
+        // and the phone can pair afresh.
+        assert_eq!(guard.outbound("{}"), vec!["{}".to_string()]);
+    }
+
+    #[test]
+    fn re_pairing_rotates_the_key_and_drops_the_old_session() {
+        let (mut guard, st, _old_key) = paired_guard();
+        drop(guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string()));
+        assert!(guard.session_open());
+        let qr = st.begin_with(DAEMON_SECRET, [9u8; 16], "deadbeef".into());
+        let (frame, new_key) = phone_pair_frame(&qr, r#"{"type":"flow.pair.hello","label":"same phone","platform":"ios"}"#);
+        let actions = guard.inbound(&frame);
+        assert!(matches!(actions[0], Action::ToPhone(_)));
+        assert!(!guard.session_open(), "old session is gone after a re-pair");
+        assert_eq!(st.key_for(PHONE_DEVICE).unwrap(), new_key);
+        assert_eq!(st.list().len(), 1);
+        assert_eq!(st.list()[0].label, "same phone");
+        // Old-key frames no longer open.
+        let (mut fresh, _) = st.open_session_with(PHONE_DEVICE, &b64(&PHONE_SALT), DAEMON_SALT).unwrap();
+        let old_session_key = derive_session_key(&_old_key, &PHONE_SALT, &DAEMON_SALT);
+        let ct = seal(&old_session_key, DIR_PHONE_TO_DAEMON, 1, b"{}").unwrap();
+        assert!(fresh.open_frame(1, &b64(&ct)).is_err());
+    }
+
+    #[test]
+    fn pending_output_is_capped() {
+        let (mut guard, _st, _k) = paired_guard();
+        for i in 0..(PENDING_OUT_MAX + 10) {
+            assert!(guard
+                .outbound(&format!(r#"{{"channel":"flow","type":"flow.event","id":"fs-1","kind":"x","text":"{i}"}}"#))
+                .is_empty());
+        }
+        let actions = guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string());
+        assert_eq!(actions.len(), 1 + PENDING_OUT_MAX, "open reply + the capped buffer");
+    }
+
+    #[test]
+    fn malformed_e2e_frames_get_a_visible_error() {
+        let (mut guard, _st, _k) = paired_guard();
+        assert_eq!(error_code(&guard.inbound(r#"{"channel":"flow","v":2,"n":1,"ct":"x"}"#)[0]), "e2e_bad_frame");
+        assert_eq!(error_code(&guard.inbound(r#"{"channel":"flow","v":1,"type":"flow.pair"}"#)[0]), "e2e_bad_frame");
+        assert_eq!(
+            error_code(&guard.inbound(r#"{"channel":"flow","v":1,"type":"flow.pair","pair":"nope","pk":"x","n":1,"ct":"y"}"#)[0]),
+            "pair_failed"
+        );
+        assert_eq!(error_code(&guard.inbound("garbage")[0]), "e2e_bad_frame");
+    }
+
+    /// The live bridge with a PAIRED phone: the engine's on-connect hello must
+    /// come back sealed, never in the clear.
+    #[tokio::test]
+    async fn paired_phone_gets_the_engine_hello_sealed_over_the_real_flow_ws() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = smooth_flow::Engine::open(smooth_flow::EngineConfig {
+            db_path: tmp.path().join("flow.db"),
+            default_project: tmp.path().to_path_buf(),
+            version: "t".into(),
+            machine_label: "m".into(),
+            home: tmp.path().join("home"),
+            daemon_url: None,
+        })
+        .unwrap();
+        let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let st = Arc::new(PairingState::new(engine, "daemon-t".into(), "t".into(), false));
+        let qr = st.begin_with(DAEMON_SECRET, CODE, PAIRING_ID.into());
+        let (pair_frame, pairing_key) = phone_pair_frame(&qr, r#"{"type":"flow.pair.hello","label":"x","platform":"ios"}"#);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let guard = FlowGuard::new(PHONE_DEVICE, st.clone());
+        let _task = spawn_bridge_with(PHONE_DEVICE.to_string(), flow_ws_url(addr.port(), "tok"), rx, out_tx, Some(guard));
+        tx.send(pair_frame).unwrap();
+        tx.send(json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string())
+            .unwrap();
+
+        let mut session_key = None;
+        let mut saw_sealed_hello = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !saw_sealed_hello {
+            let envelope = tokio::time::timeout_at(deadline, out_rx.recv()).await.expect("frames within 5s").unwrap();
+            let v: Value = serde_json::from_str(&envelope).unwrap();
+            assert_eq!(v["to"], PHONE_DEVICE);
+            let frame = &v["frame"];
+            assert!(
+                frame.get("sessions").is_none() && frame.get("daemon").is_none(),
+                "hello leaked in the clear: {v}"
+            );
+            match frame["type"].as_str() {
+                Some("flow.pair") => {}
+                Some("flow.e2e.open") => {
+                    let ds: [u8; 16] = unb64(frame["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+                    session_key = Some(derive_session_key(&pairing_key, &PHONE_SALT, &ds));
+                }
+                Some(other) => panic!("unexpected clear frame {other}: {v}"),
+                None => {
+                    let key = session_key.expect("open reply precedes data");
+                    let n = frame["n"].as_u64().unwrap();
+                    let pt = open(&key, DIR_DAEMON_TO_PHONE, n, &unb64(frame["ct"].as_str().unwrap()).unwrap()).unwrap();
+                    let inner: Value = serde_json::from_slice(&pt).unwrap();
+                    if inner["type"] == "flow.hello" {
+                        assert_eq!(inner["daemon"]["version"], "t");
+                        saw_sealed_hello = true;
+                    }
+                }
+            }
         }
     }
 }

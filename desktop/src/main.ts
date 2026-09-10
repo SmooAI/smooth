@@ -13,14 +13,20 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, s
 import { type DesktopConfig, loadConfig, saveConfig } from './config.js';
 import {
     baseUrl,
+    daemonLogDirectory,
+    daemonVersion,
     desktopLog,
     isHealthy,
     isRemote,
+    onSupervisorChange,
     remoteUrl,
+    resolveAddr,
     resolveThBin,
+    retryDaemon,
     runDaemonCommand,
     startDaemon,
     stopDaemon,
+    supervisorState,
     tccHelperApp,
     tccOpenArgs,
 } from './daemon.js';
@@ -29,6 +35,7 @@ import { linkThOnPath } from './installth.js';
 import { firstRunLoginItem, trayModeLabel } from './loginitem.js';
 import { isNewChatChord } from './newchat.js';
 import { buildNotification, type NotifyPayload } from './notify.js';
+import { aboutDaemonDetail, type SupervisorState, trayDaemonClickable, trayDaemonLabel } from './supervisor.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
@@ -36,6 +43,9 @@ let tray: Tray | undefined;
 let quitting = false;
 let spawnedDaemon = false;
 let lastDaemons: RemoteDaemon[] = [];
+/** The daemon phase the tray last painted — so a respawn that comes back
+ * healthy can reload the window exactly once (th-4b189c). */
+let lastPaintedPhase: SupervisorState['phase'] | undefined;
 
 if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -58,6 +68,7 @@ async function main(): Promise<void> {
     applyLoginItemDefault(cfg); // th-ccf2cf: open-at-login on first run
     createTray();
     installThCli();
+    watchDaemon();
 
     // th-5c2ec6: ALWAYS start this Mac's own daemon. A stale saved remoteUrl used
     // to early-return here and leave the machine with no local daemon (phone
@@ -82,14 +93,53 @@ async function main(): Promise<void> {
             else app.quit();
             return;
         }
-    } else if (!result.ok) {
-        // Local mode: the window has nothing to load without the local daemon.
+    } else if (!result.ok && !result.spawned) {
+        // Local mode with no binary at all: nothing to supervise, nothing to load.
         dialog.showErrorBox('Big Smooth could not start', result.error ?? 'The daemon failed to start.');
         app.quit();
+        return;
+    } else if (!result.ok) {
+        // We spawned it and it hasn't come up (yet). The supervisor keeps trying
+        // with backoff and the tray says so; the window opens on first health
+        // (watchDaemon) instead of loading a dead URL. Don't quit (th-4b189c).
+        startAutoUpdates();
         return;
     }
     showWindow();
     startAutoUpdates();
+}
+
+/**
+ * React to the daemon supervisor (th-4b189c): repaint the tray's daemon line
+ * on every change, open the window the first time a slow/failed start finally
+ * answers, and reload it after a respawn so the SPA reconnects to the new
+ * process instead of sitting on a dead WebSocket.
+ */
+function watchDaemon(): void {
+    onSupervisorChange((state) => {
+        const cameBack = state.phase === 'running' && lastPaintedPhase !== undefined && lastPaintedPhase !== 'running' && lastPaintedPhase !== 'starting';
+        const firstUp = state.phase === 'running' && lastPaintedPhase === 'starting';
+        lastPaintedPhase = state.phase;
+        applyTrayMenu(lastDaemons);
+        if (isRemote()) return; // the window shows a remote daemon; the local one is background-only
+        if (!win && (firstUp || cameBack)) showWindow();
+        else if (win && cameBack) win.webContents.reload();
+    });
+}
+
+/** Tray → About Big Smooth…: app + daemon versions, pid/port/uptime/restarts,
+ * last exit, and where the logs are (with a button to open that folder). */
+async function showAbout(): Promise<void> {
+    const detail = aboutDaemonDetail({
+        state: supervisorState(),
+        now: Date.now(),
+        port: resolveAddr(),
+        logDir: daemonLogDirectory(),
+        appVersion: app.getVersion(),
+        daemonVersion: daemonVersion(),
+    });
+    const { response } = await dialog.showMessageBox({ type: 'info', message: 'Big Smooth', detail, buttons: ['OK', 'Open Logs'], defaultId: 0, cancelId: 0 });
+    if (response === 1) void shell.openPath(daemonLogDirectory());
 }
 
 /**
@@ -212,6 +262,9 @@ function createTray(): void {
     tray.on('click', showWindow);
     applyTrayMenu([]); // first paint with no discovered peers yet…
     void refreshDiscovery(); // …then discover tailnet daemons and repaint.
+    // Menu labels are static once built; repaint on the health cadence so the
+    // daemon line's uptime / countdown stays roughly right (cheap: no discovery).
+    setInterval(() => applyTrayMenu(lastDaemons), 30_000).unref();
 }
 
 /** (Re)build the tray menu, including the Connect submenu from `daemons`. */
@@ -219,6 +272,7 @@ function applyTrayMenu(daemons: RemoteDaemon[]): void {
     lastDaemons = daemons; // so toggles (e.g. Open at Login) can repaint without re-discovering
     const active = remoteUrl(); // '' = local
     const openAtLogin = safeOpenAtLogin();
+    const daemon = supervisorState();
     const connect: Electron.MenuItemConstructorOptions[] = [{ label: 'This Mac (local)', type: 'radio', checked: active === '', click: () => connectTo(null) }];
     if (daemons.length > 0) {
         connect.push({ type: 'separator' });
@@ -238,10 +292,16 @@ function applyTrayMenu(daemons: RemoteDaemon[]): void {
             // Current mode, unmissable at a glance — remote mode used to be visible
             // only in the (nested) Connect submenu and the title bar (th-5c2ec6).
             { label: trayModeLabel(active === '' ? null : hostOf(active)), enabled: false },
+            // The daemon's own line (th-4b189c): quiet while he's here, a plain
+            // "crashed — restarting…" while the supervisor works, and only the
+            // give-up state asks for a click. Clicking a restarting line skips
+            // the backoff wait.
+            { label: trayDaemonLabel(daemon, Date.now()), enabled: trayDaemonClickable(daemon), click: retryDaemon },
             { type: 'separator' },
             { label: 'Open Big Smooth', click: showWindow },
             { label: 'Open at Login', type: 'checkbox', checked: openAtLogin, click: toggleOpenAtLogin },
             { label: 'Check for Updates…', click: () => void checkForUpdatesInteractive() },
+            { label: 'About Big Smooth…', click: () => void showAbout() },
             { type: 'separator' },
             { label: 'Connect', submenu: connect },
             {

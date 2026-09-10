@@ -60,6 +60,7 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/sessions/{id}/resize", post(resize))
         .route("/api/flow/sessions/{id}/approve", post(approve))
         .route("/api/flow/sessions/{id}/kill", post(kill))
+        .route("/api/flow/sessions/{id}/close", post(close))
         .route("/api/flow/sessions/{id}/send", post(send_text))
         .route("/api/flow/sessions/{id}/snapshot", get(snapshot))
         .route("/api/flow/sessions/{id}/handoff", get(handoff))
@@ -71,17 +72,18 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
 }
 
 /// Open the engine on `workspace`, start its supervisor, return its router —
-/// the one-liner `serve_local_flavor` merges.
+/// the one-liner `serve_local_flavor` merges — plus the engine handle (the
+/// pairing authority shares its store, th-d98fde).
 ///
 /// # Errors
 /// When the flow store cannot be opened.
-pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<Router> {
+pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<(Router, Engine)> {
     let engine = Engine::open(smooth_flow::EngineConfig {
         daemon_url,
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
     drop(spawn_supervisor(engine.clone()));
-    Ok(flow_router(engine, Some(token)))
+    Ok((flow_router(engine.clone(), Some(token)), engine))
 }
 
 /// Spawn the supervision tick for `engine` (rules 2–5 run here).
@@ -293,6 +295,31 @@ async fn kill(
     let e = st.engine.clone();
     let s = blocking(move || e.kill(&id, resume)).await?;
     Ok(Json(json!({ "session": s })))
+}
+
+#[derive(Deserialize, Default)]
+struct CloseBody {
+    #[serde(default)]
+    close_pearl: bool,
+    #[serde(default)]
+    remove_worktree: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+/// th-e126cc: close the pearl / remove the worktree / drop the row.
+async fn close(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    body: Option<Json<CloseBody>>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let e = st.engine.clone();
+    let out = blocking(move || e.close(&id, b.close_pearl, b.remove_worktree, b.force)).await?;
+    Ok(Json(serde_json::to_value(out).unwrap_or(Value::Null)))
 }
 
 #[derive(Deserialize)]
@@ -563,6 +590,17 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
         }
         ClientFrame::MarkRead { id } => {
             run(engine, move |e| e.mark_read(&id)).await?;
+            Ok(vec![])
+        }
+        // th-e126cc: the engine broadcasts `flow.session.removed` itself.
+        ClientFrame::Close {
+            id,
+            close_pearl,
+            remove_worktree,
+            force,
+        } => {
+            attached.remove(&id);
+            run(engine, move |e| e.close(&id, close_pearl, remove_worktree, force)).await?;
             Ok(vec![])
         }
         // th-d33afa: the phone's bridge nudge — say hello again.

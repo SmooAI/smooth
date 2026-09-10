@@ -11,18 +11,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any surface or view asks for a font (th-bcd819).
+        TerminalFont.registerBundled()
         NSApp.mainMenu = buildMenu()
+        // Hosting the unit tests: no status item, no window, no daemon, no tmux
+        // (th-dccc80). Everything below `start()` is what a test would observe.
+        guard AppController.shouldStart(env: ProcessInfo.processInfo.environment) else { return }
         installStatusItem()
         app.start()
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { app.activated() }
+
+    /// Every quit path — ⌘Q, the menu items, the status item, AppleScript
+    /// `quit`, `NSRunningApplication.terminate()` (all of which arrive here
+    /// through `NSApplication.terminate(_:)`) — takes the fleet down first,
+    /// then terminates. Always `.terminateNow`: the shutdown is bounded on its
+    /// own (th-6198bf), so there is never a `.terminateLater` to forget to
+    /// answer, and never a `.terminateCancel` — quit means quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        app.shutdown()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) { app.shutdown() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        app.mainWindow.window?.makeKeyAndOrderFront(nil)
+        app.mainWindow?.window?.makeKeyAndOrderFront(nil)
         return true
     }
 

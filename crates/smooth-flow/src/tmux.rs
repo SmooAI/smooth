@@ -44,8 +44,16 @@ pub fn socket_name() -> String {
         .unwrap_or_else(|| FLOW_SOCKET.to_string())
 }
 
+/// Every tmux client the engine runs is `-u`: a client whose environment
+/// carries no UTF-8 locale (the SmoothFlow child daemon is launched by a
+/// Finder-started app, which has no `LANG`) is otherwise treated as a
+/// non-UTF-8 terminal and tmux draws `_` for every non-ASCII cell — the
+/// blank Nerd Font prompt icons of th-bcd819. Forcing UTF-8 on the client
+/// side needs no locale at all.
+const UTF8_FLAG: &str = "-u";
+
 fn tmux(socket: &str, args: &[&str]) -> Result<std::process::Output> {
-    let mut full: Vec<&str> = vec!["-L", socket];
+    let mut full: Vec<&str> = vec![UTF8_FLAG, "-L", socket];
     full.extend_from_slice(args);
     Command::new("tmux").args(&full).output().context("running tmux")
 }
@@ -273,7 +281,15 @@ pub fn kill_server(socket: &str) {
 /// stable.
 #[must_use]
 pub fn attach_argv(socket: &str, session: &str) -> Vec<String> {
-    vec!["tmux".into(), "-L".into(), socket.into(), "attach-session".into(), "-t".into(), session.into()]
+    vec![
+        "tmux".into(),
+        UTF8_FLAG.into(),
+        "-L".into(),
+        socket.into(),
+        "attach-session".into(),
+        "-t".into(),
+        session.into(),
+    ]
 }
 
 fn driver(socket: &str, session: &str) -> TmuxDriver {
@@ -324,10 +340,13 @@ mod tests {
     fn attach_argv_targets_the_flow_socket() {
         let a = attach_argv("smoothflow", "fs-1");
         assert_eq!(a[0], "tmux");
-        assert_eq!(a[1], "-L");
-        assert_eq!(a[2], "smoothflow");
-        assert_eq!(a[3], "attach-session");
-        assert_eq!(a[5], "fs-1");
+        // th-bcd819: forced UTF-8, or a LANG-less client (the app's child
+        // daemon) gets `_` for every Nerd Font glyph.
+        assert_eq!(a[1], "-u");
+        assert_eq!(a[2], "-L");
+        assert_eq!(a[3], "smoothflow");
+        assert_eq!(a[4], "attach-session");
+        assert_eq!(a[6], "fs-1");
     }
 
     #[test]

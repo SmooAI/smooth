@@ -131,10 +131,12 @@ th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 # docs/Engineering/Harness-Manifests.md) — list/show/add, and sort/hide
 # what every picker offers (th-0f6126) …
 th harness list [--all] [--json] / show <name> / add <path|owner/repo> / hide|unhide <name> / order <name…>
-# … and this machine's toolbox setup for Claude Code / Codex / OpenCode: MCP
-# server, smooth-agent plugin, shared skills, statusline. enable is
-# idempotent and doubles as the update command.
-th harness enable claude-code|codex|opencode|all / status / disable
+# … and this machine's toolbox setup for Claude Code / Codex / OpenCode /
+# Cursor: MCP server, smooth-agent plugin, shared skills, statusline; for
+# Codex also the SmoothFlow hooks in ~/.codex/hooks.json + ~/.smooth in the
+# sandbox's writable_roots (th-4ad334). enable is idempotent and doubles as
+# the update command.
+th harness enable claude-code|codex|opencode|cursor|all / status / disable
 
 # SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux
 th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
@@ -143,9 +145,12 @@ th flow fanout new / pick
 # Install an agent package (skills, rules, MCP, hooks) into every harness from
 # ONE Claude-plugin-layout source: path, owner/repo[/subdir][#ref], or a
 # marketplace.json. Native output per harness + provenance in
-# ~/.smooth/pkg/index.toml so rm/status are exact. `th harness enable` is
-# sugar for installing smooth-agent. Spec: docs/Engineering/Harness-Packages.md
-th pkg install <source> [--harness all|claude-code,codex,opencode] / list / status [name] / rm <name> / init [dir]
+# ~/.smooth/pkg/index.toml so rm/status are exact. hooks.json overlays are
+# KEY-MERGED (never replace, never translated), rules render as Cursor .mdc
+# and as a managed <!-- th-pkg:<name> --> section in Codex/OpenCode AGENTS.md
+# (M1, th-6ad314). `th harness enable` is sugar for installing smooth-agent.
+# Spec: docs/Engineering/Harness-Packages.md
+th pkg install <source> [--harness all|claude-code,codex,opencode,cursor] / list / status [name] / rm <name> / init [dir]
 
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove

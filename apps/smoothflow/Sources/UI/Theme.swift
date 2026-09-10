@@ -11,6 +11,19 @@ enum Theme {
     static let amberWash = NSColor(srgbRed: 0xff / 255, green: 0xf4 / 255, blue: 0xdd / 255, alpha: 1)
     static let blue = NSColor(srgbRed: 0x2a / 255, green: 0x5f / 255, blue: 0xd0 / 255, alpha: 1)
 
+    /// The app's monospace text: the bundled terminal family when it
+    /// registered, so chrome and panes match (th-bcd819); else the system
+    /// monospace design.
+    static func mono(_ style: Font.TextStyle) -> Font {
+        guard TerminalFont.registeredFamily != nil else { return .system(style, design: .monospaced) }
+        return .custom(TerminalFont.bundledPostScriptRegular, size: NSFont.preferredFont(forTextStyle: style.nsTextStyle).pointSize, relativeTo: style)
+    }
+
+    /// AppKit twin of `mono` for NSTextField / NSTextView.
+    static func monoNSFont(size: CGFloat) -> NSFont {
+        (TerminalFont.registeredFamily != nil ? NSFont(name: TerminalFont.bundledPostScriptRegular, size: size) : nil) ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     /// Sidebar dot: teal working, amber needs you / limited, ink done, grey idle.
     static func dot(for s: Session) -> Color {
         switch s.state {
@@ -36,6 +49,12 @@ enum Theme {
         }
     }
 
+    /// A wall-clock time for an RFC3339 stamp ("3:42 PM"), or the raw string.
+    static func clock(_ iso: String) -> String {
+        guard let d = ISO8601DateFormatter.flexible.date(from: iso) else { return iso }
+        return AttentionNotifier.timeFormatter.string(from: d)
+    }
+
     static func relative(_ iso: String) -> String {
         guard let d = ISO8601DateFormatter.flexible.date(from: iso) else { return "" }
         let secs = Int(-d.timeIntervalSinceNow)
@@ -55,5 +74,24 @@ struct StateDot: View {
 struct UnreadBadge: View {
     var body: some View {
         Circle().fill(Color(Theme.amber)).frame(width: 7, height: 7)
+    }
+}
+
+extension Font.TextStyle {
+    /// The AppKit text style with the same default point size.
+    var nsTextStyle: NSFont.TextStyle {
+        switch self {
+        case .largeTitle: .largeTitle
+        case .title: .title1
+        case .title2: .title2
+        case .title3: .title3
+        case .headline: .headline
+        case .subheadline: .subheadline
+        case .callout: .callout
+        case .footnote: .footnote
+        case .caption: .caption1
+        case .caption2: .caption2
+        default: .body
+        }
     }
 }

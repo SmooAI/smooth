@@ -1,4 +1,4 @@
-//! `th pkg` — one package, N harness renderings (EPIC th-55b2c7, M0).
+//! `th pkg` — one package, N harness renderings (EPIC th-55b2c7, M0 + M1).
 //!
 //! A package is a Claude Code plugin checkout used as the SHARED CORE
 //! (`.claude-plugin/plugin.json`, `skills/`, `commands/`, `agents/`, `hooks/`,
@@ -7,18 +7,21 @@
 //! fetches the source into `~/.smooth/pkg/cache/`, composes core + overlay per
 //! target harness and renders each harness's NATIVE shape:
 //!
-//! | Harness | Rendering (M0) |
+//! | Harness | Rendering |
 //! |---|---|
-//! | claude-code | handed to Claude's own plugin system: composed plugin under the local `th-pkg` marketplace + `enabledPlugins`/`extraKnownMarketplaces` in `~/.claude/settings.json`; `rules/` → `~/.claude/rules/<pkg>/` |
-//! | codex | `skills/` → `~/.codex/skills/`, `.mcp.json` → `[mcp_servers.*]`, `harness/codex/config.toml` key-merged into `~/.codex/config.toml` |
-//! | opencode | `skills/` → `~/.opencode/skills/`, `.mcp.json` → `mcp.*`, `harness/opencode/plugin.js` → `~/.config/opencode/plugins/<pkg>.js` |
+//! | claude-code | handed to Claude's own plugin system: composed plugin (core `hooks/hooks.json` KEY-MERGED with `harness/claude-code/hooks/hooks.json`) under the local `th-pkg` marketplace + `enabledPlugins`/`extraKnownMarketplaces` in `~/.claude/settings.json`; `rules/` → `~/.claude/rules/<pkg>/` |
+//! | codex | `skills/` → `~/.codex/skills/`, `.mcp.json` → `[mcp_servers.*]`, `harness/codex/config.toml` key-merged into `~/.codex/config.toml`, `harness/codex/hooks.json` key-merged into `~/.codex/hooks.json` (Codex ≥ 0.153 reads Claude-style hooks), `rules/` → a managed section in `~/.codex/AGENTS.md` |
+//! | opencode | `skills/` → `~/.opencode/skills/`, `.mcp.json` → `mcp.*`, `harness/opencode/plugin.js` → `~/.config/opencode/plugins/<pkg>.js`, `rules/` → a managed section in `~/.config/opencode/AGENTS.md` |
+//! | cursor | `rules/*.md` → `~/.cursor/rules/<pkg>/*.mdc` (Cursor frontmatter; `harness/cursor/rules/<stem>.mdc` replaces a rendering), `.mcp.json` → `mcpServers.*` in `~/.cursor/mcp.json` |
 //! | (all) | `skills/` → `~/.smooth/skills/` so `th` itself discovers them |
 //!
-//! Every written path (+ sha256) and every owned dotted key in a merged config
-//! file is recorded in `~/.smooth/pkg/index.toml`, so `rm` removes exactly
-//! what was installed and `status` reports drift. Hooks are never translated
-//! between harnesses — they are per-harness customization points, and
-//! `status` says which ones a package provides.
+//! Every written path (+ sha256), every owned dotted key in a merged config
+//! file, every hook entry merged into a `hooks.json`, and every managed
+//! `AGENTS.md` section is recorded in `~/.smooth/pkg/index.toml`, so `rm`
+//! removes exactly what was installed and `status` reports drift. Hooks are
+//! never translated between harnesses — they are per-harness customization
+//! points (a `hooks.json` overlay is an explicit shim), and `status` says
+//! which ones a package provides.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +45,7 @@ pub enum Cmd {
     /// marketplace.json (path or URL) whose plugins are all installed.
     Install {
         source: String,
-        /// claude-code | codex | opencode | all (comma-separated)
+        /// claude-code | codex | opencode | cursor | all (comma-separated)
         #[arg(long, default_value = "all")]
         harness: String,
         /// Install for this user (the only scope in M0).
@@ -137,7 +140,7 @@ fn parse_harnesses(spec: &str) -> Result<Vec<Harness>> {
         }
     }
     if out.is_empty() {
-        bail!("no harness given (expected claude-code|codex|opencode|all)");
+        bail!("no harness given (expected claude-code|codex|opencode|cursor|all)");
     }
     Ok(out)
 }
@@ -185,6 +188,22 @@ impl Paths {
     }
     fn opencode_plugins(&self) -> PathBuf {
         self.home.join(".config").join("opencode").join("plugins")
+    }
+    /// Codex ≥ 0.153 reads Claude-style hooks from here.
+    fn codex_hooks(&self) -> PathBuf {
+        self.home.join(".codex").join("hooks.json")
+    }
+    /// Codex's personal global guidance file.
+    fn codex_agents_md(&self) -> PathBuf {
+        self.home.join(".codex").join("AGENTS.md")
+    }
+    /// OpenCode's global rules file.
+    fn opencode_agents_md(&self) -> PathBuf {
+        self.home.join(".config").join("opencode").join("AGENTS.md")
+    }
+    /// Cursor scans nested `.mdc` rules under here.
+    fn cursor_rules(&self) -> PathBuf {
+        self.home.join(".cursor").join("rules")
     }
 }
 
@@ -586,6 +605,12 @@ pub struct Installed {
     pub files: Vec<OwnedFile>,
     #[serde(default)]
     pub keys: Vec<OwnedKey>,
+    /// Hook entries key-merged into a harness `hooks.json` (M1).
+    #[serde(default)]
+    pub hooks: Vec<OwnedHook>,
+    /// Managed `AGENTS.md` sections (M1).
+    #[serde(default)]
+    pub sections: Vec<OwnedSection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -603,6 +628,33 @@ pub struct OwnedKey {
     pub file: PathBuf,
     /// Key path, one segment per element (segments may contain dots).
     pub key: Vec<String>,
+}
+
+/// One hook entry we appended to `hooks.<event>[matcher].hooks` in a
+/// Claude-style `hooks.json`. Identified by its command — an identical
+/// command that was already there is the user's, never ours.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnedHook {
+    pub harness: String,
+    pub file: PathBuf,
+    pub event: String,
+    /// `""` when the group has no matcher (Claude treats absent and empty alike).
+    #[serde(default)]
+    pub matcher: String,
+    pub command: String,
+}
+
+/// A `<!-- th-pkg:<name> -->` … `<!-- /th-pkg:<name> -->` block in an
+/// `AGENTS.md`. `created` = the file did not exist before we wrote it, so
+/// `rm` may delete it again once the block is gone and nothing else is left.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnedSection {
+    pub harness: String,
+    pub file: PathBuf,
+    pub name: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub created: bool,
 }
 
 impl Index {
@@ -648,8 +700,12 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
     // `--harness codex` on a package already rendered for opencode keeps
     // opencode (that is how `th harness enable` adds one harness at a time).
     let mut harnesses = harnesses.to_vec();
+    let mut prev_sections = Vec::new();
     if let Some(prev) = index.packages.remove(&m.name) {
-        for w in remove_rendered(paths, &prev)? {
+        // Managed AGENTS.md blocks are left for the re-render to replace IN
+        // PLACE (so a block in the middle of the file stays there); any block
+        // the new version no longer renders is removed below.
+        for w in remove_rendered(paths, &prev, true)? {
             println!("   {} {w}", "!".bright_yellow());
         }
         for h in prev.harnesses.iter().filter_map(|h| Harness::parse(h).ok()) {
@@ -657,6 +713,7 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
                 harnesses.push(h);
             }
         }
+        prev_sections = prev.sections;
     }
     let harnesses = &harnesses;
     let mut rec = Installed {
@@ -681,6 +738,17 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
             Harness::ClaudeCode => render_claude_code(paths, root, &m, fetched, &mut rec)?,
             Harness::Codex => render_codex(paths, root, &m, &mut rec)?,
             Harness::OpenCode => render_opencode(paths, root, &m, &mut rec)?,
+            Harness::Cursor => render_cursor(paths, root, &m, &mut rec)?,
+        }
+    }
+    for old in prev_sections {
+        match rec.sections.iter_mut().find(|s| s.file == old.file && s.name == old.name) {
+            // Still rendered: a file WE created stays ours to delete on rm.
+            Some(cur) => cur.created |= old.created,
+            None if old.file.exists() => {
+                remove_section(&old.file, &old.name, old.created)?;
+            }
+            None => {}
         }
     }
     index.packages.insert(m.name.clone(), rec);
@@ -834,6 +902,15 @@ fn render_claude_code(paths: &Paths, root: &Path, m: &Manifest, fetched: &Fetche
         let overlay = root.join("harness").join(h);
         if overlay.is_dir() {
             overlay_dir(&overlay, &composed, true)?;
+            // M1: hooks.json is KEY-MERGED, not replaced — the overlay adds to
+            // the core's events/matchers and drops nothing.
+            let (core_hooks, over_hooks) = (root.join("hooks").join("hooks.json"), overlay.join("hooks").join("hooks.json"));
+            if core_hooks.is_file() && over_hooks.is_file() {
+                let mut merged = load_json(&core_hooks)?;
+                let added = merge_hooks(&mut merged, &load_json(&over_hooks)?);
+                save_json(&composed.join("hooks").join("hooks.json"), &merged)?;
+                println!("   {h}: hooks.json = core + overlay ({} hooks added by the overlay)", added.len());
+            }
         }
         let mut doc = doc;
         json_set(
@@ -880,6 +957,12 @@ fn render_codex(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed) -
             key,
         }));
     }
+    // Codex ≥ 0.153 loads Claude-style hooks from ~/.codex/hooks.json. The
+    // overlay is an explicit per-harness shim (never the core hooks.json —
+    // hooks are not translated), key-merged so the user's own entries and
+    // any identical command already there stay theirs.
+    render_hooks_overlay(root, h, &paths.codex_hooks(), rec)?;
+    render_agents_section(root, m, h, &paths.codex_agents_md(), rec)?;
     Ok(())
 }
 
@@ -898,13 +981,98 @@ fn render_opencode(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed
             None => note(rec, format!("{h}: {} exists and is not ours — left alone", dst.display())),
         }
     }
+    render_agents_section(root, m, h, &paths.opencode_agents_md(), rec)?;
+    Ok(())
+}
+
+/// Cursor has no plugin system: `rules/*.md` become `.mdc` rules with Cursor
+/// frontmatter under `~/.cursor/rules/<pkg>/`; a `harness/cursor/rules/<stem>.mdc`
+/// overlay replaces the rendering for that stem (and extra `.mdc` files there
+/// are copied as they are). MCP goes to `~/.cursor/mcp.json`.
+fn render_cursor(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed) -> Result<()> {
+    let h = "cursor";
+    render_mcp(paths, Harness::Cursor, m, rec)?;
+    let dir = paths.cursor_rules().join(&m.name);
+    let overlay = root.join("harness").join(h).join("rules");
+    let mut n = 0;
+    for rule in load_rules(root)? {
+        let dst = dir.join(format!("{}.mdc", rule.stem));
+        let over = overlay.join(format!("{}.mdc", rule.stem));
+        if over.is_file() {
+            rec.files.push(place_copy(&over, &dst, h)?);
+        } else {
+            rec.files.push(write_owned(&dst, &rule.to_mdc(&m.name), h)?);
+        }
+        n += 1;
+    }
+    if let Ok(entries) = std::fs::read_dir(&overlay) {
+        for e in entries.flatten() {
+            let dst = dir.join(e.file_name());
+            if e.path().extension().is_some_and(|x| x == "mdc") && !rec.files.iter().any(|f| f.path == dst) {
+                rec.files.push(place_copy(&e.path(), &dst, h)?);
+                n += 1;
+            }
+        }
+    }
+    if n > 0 {
+        println!("   {h}: {n} rules → {}", dir.display());
+    }
+    Ok(())
+}
+
+/// Key-merge `harness/<h>/hooks.json` into a harness's Claude-style hooks
+/// file, substituting `${CLAUDE_PLUGIN_ROOT}` with the cached package root.
+/// Only the entries that were actually added become ours.
+fn render_hooks_overlay(root: &Path, h: &str, target: &Path, rec: &mut Installed) -> Result<()> {
+    let overlay = root.join("harness").join(h).join("hooks.json");
+    if !overlay.is_file() {
+        return Ok(());
+    }
+    let mut add = load_json(&overlay)?;
+    subst_plugin_root(&mut add, root);
+    let mut doc = load_json(target)?;
+    let added = merge_hooks(&mut doc, &add);
+    save_json(target, &doc)?;
+    println!("   {h}: {} hooks merged into {}", added.len(), target.display());
+    rec.hooks.extend(added.into_iter().map(|(event, matcher, command)| OwnedHook {
+        harness: h.into(),
+        file: target.to_path_buf(),
+        event,
+        matcher,
+        command,
+    }));
+    Ok(())
+}
+
+/// Render `rules/*.md` as one marker-delimited block in a harness's global
+/// `AGENTS.md`. Idempotent: an existing block for this package is replaced
+/// in place; text outside the markers is never touched.
+fn render_agents_section(root: &Path, m: &Manifest, h: &str, file: &Path, rec: &mut Installed) -> Result<()> {
+    let rules = load_rules(root)?;
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let block = render_section(&m.name, &rules);
+    let created = upsert_section(file, &m.name, &block)?;
+    println!("   {h}: {} rules → managed section in {}", rules.len(), file.display());
+    rec.sections.push(OwnedSection {
+        harness: h.into(),
+        file: file.to_path_buf(),
+        name: m.name.clone(),
+        sha256: sha256_str(&block),
+        created,
+    });
     Ok(())
 }
 
 fn render_mcp(paths: &Paths, harness: Harness, m: &Manifest, rec: &mut Installed) -> Result<()> {
     for s in &m.mcp_servers {
         mcp_install::install_server_into(harness, &paths.home, s, false)?;
-        let table = if harness == Harness::Codex { "mcp_servers" } else { "mcp" };
+        let table = match harness {
+            Harness::Codex => "mcp_servers",
+            Harness::OpenCode => "mcp",
+            Harness::ClaudeCode | Harness::Cursor => "mcpServers",
+        };
         rec.keys.push(OwnedKey {
             harness: harness.to_string(),
             file: harness.config_path(&paths.home),
@@ -968,14 +1136,17 @@ pub fn rm(paths: &Paths, name: &str) -> Result<Vec<String>> {
         .packages
         .remove(name)
         .with_context(|| format!("'{name}' is not installed (th pkg list)"))?;
-    let warnings = remove_rendered(paths, &rec)?;
+    let warnings = remove_rendered(paths, &rec, false)?;
     index.save(paths)?;
     write_claude_marketplace(paths, &index)?;
     let _ = std::fs::remove_dir_all(&rec.root);
     Ok(warnings)
 }
 
-fn remove_rendered(paths: &Paths, rec: &Installed) -> Result<Vec<String>> {
+/// Take back everything `rec` says we wrote. `keep_sections` leaves managed
+/// AGENTS.md blocks for a reinstall to replace in place; otherwise they are
+/// removed, except a block the user edited, which stays with a warning.
+fn remove_rendered(paths: &Paths, rec: &Installed, keep_sections: bool) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     for f in &rec.files {
         match f.kind.as_str() {
@@ -1017,7 +1188,74 @@ fn remove_rendered(paths: &Paths, rec: &Installed) -> Result<Vec<String>> {
             }
         }
     }
+    for hk in &rec.hooks {
+        if !hk.file.exists() {
+            continue;
+        }
+        let mut doc = load_json(&hk.file)?;
+        if remove_hook(&mut doc, &hk.event, &hk.matcher, &hk.command) {
+            save_json(&hk.file, &doc)?;
+        }
+    }
+    for sec in &rec.sections {
+        if keep_sections || !sec.file.exists() {
+            continue;
+        }
+        match section_state(sec) {
+            Err(why) if why.starts_with("modified") => {
+                warnings.push(format!(
+                    "{}: managed section for {} was edited after install — left in place",
+                    sec.file.display(),
+                    sec.name
+                ));
+                continue;
+            }
+            _ => {}
+        }
+        remove_section(&sec.file, &sec.name, sec.created)?;
+    }
     let _ = paths;
+    Ok(warnings)
+}
+
+/// Remove one harness's rendering of a package (what `th harness disable <h>`
+/// needs) and forget that harness in the index. When no harness is left the
+/// whole package goes, cache included.
+///
+/// # Errors
+/// Returns an error when a config can't be edited. An unknown package is not
+/// an error — there is nothing to remove.
+pub fn rm_harness(paths: &Paths, name: &str, harness: Harness) -> Result<Vec<String>> {
+    let mut index = Index::load(paths)?;
+    let Some(mut rec) = index.packages.remove(name) else {
+        return Ok(Vec::new());
+    };
+    let h = harness.as_str();
+    let part = Installed {
+        files: rec.files.iter().filter(|f| f.harness == h).cloned().collect(),
+        keys: rec.keys.iter().filter(|k| k.harness == h).cloned().collect(),
+        hooks: rec.hooks.iter().filter(|k| k.harness == h).cloned().collect(),
+        sections: rec.sections.iter().filter(|s| s.harness == h).cloned().collect(),
+        ..Installed::default()
+    };
+    let mut warnings = remove_rendered(paths, &part, false)?;
+    rec.files.retain(|f| f.harness != h);
+    rec.keys.retain(|k| k.harness != h);
+    rec.hooks.retain(|k| k.harness != h);
+    rec.sections.retain(|s| s.harness != h);
+    rec.notes.retain(|n| !n.starts_with(&format!("{h}:")));
+    rec.harnesses.retain(|x| x != h);
+    if harness == Harness::ClaudeCode {
+        rec.claude_plugin = None;
+    }
+    if rec.harnesses.is_empty() {
+        warnings.extend(remove_rendered(paths, &rec, false)?);
+        let _ = std::fs::remove_dir_all(&rec.root);
+    } else {
+        index.packages.insert(name.to_string(), rec);
+    }
+    index.save(paths)?;
+    write_claude_marketplace(paths, &index)?;
     Ok(warnings)
 }
 
@@ -1046,6 +1284,30 @@ pub fn status_lines(rec: &Installed) -> Vec<String> {
             out.push(format!("{} {}:{} — key missing", "✗".bright_red(), k.file.display(), k.key.join(".")));
         }
     }
+    for hk in &rec.hooks {
+        if hook_present(hk).unwrap_or(false) {
+            ok += 1;
+        } else {
+            bad += 1;
+            out.push(format!(
+                "{} {}:{}[{}] — hook `{}` missing",
+                "✗".bright_red(),
+                hk.file.display(),
+                hk.event,
+                hk.matcher,
+                hk.command
+            ));
+        }
+    }
+    for sec in &rec.sections {
+        match section_state(sec) {
+            Ok(()) => ok += 1,
+            Err(why) => {
+                bad += 1;
+                out.push(format!("{} {} — managed section {} {why}", "✗".bright_red(), sec.file.display(), sec.name));
+            }
+        }
+    }
     out.push(format!(
         "{ok} artifacts ok, {bad} drifted/missing{}",
         if bad > 0 { " — reinstall to repair" } else { "" }
@@ -1060,15 +1322,16 @@ pub fn status_lines(rec: &Installed) -> Vec<String> {
     out
 }
 
-/// Which per-harness overlays this package provides vs. what M0 renders.
+/// Which per-harness customization points this package provides.
 fn customization_points(root: &Path) -> Vec<String> {
     let has = |rel: &str| root.join(rel).exists();
     let point = |label: &str, present: bool| format!("{label}={}", if present { "present" } else { "absent" });
     vec![
         point("claude-code/hooks", has("hooks/hooks.json") || has("harness/claude-code/hooks/hooks.json")),
         point("codex/config.toml", has("harness/codex/config.toml")),
+        point("codex/hooks.json", has("harness/codex/hooks.json")),
         point("opencode/plugin.js", has("harness/opencode/plugin.js")),
-        point("cursor (M1)", has("harness/cursor")),
+        point("cursor/rules", has("harness/cursor/rules")),
         point("rules", has("rules")),
     ]
 }
@@ -1099,6 +1362,32 @@ fn file_state(f: &OwnedFile) -> std::result::Result<(), String> {
             Ok(())
         }
         _ => f.path.is_dir().then_some(()).ok_or_else(|| "missing".into()),
+    }
+}
+
+fn hook_present(hk: &OwnedHook) -> Result<bool> {
+    let doc = load_json(&hk.file)?;
+    Ok(doc
+        .get("hooks")
+        .and_then(|h| h.get(&hk.event))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|groups| {
+            groups.iter().any(|g| {
+                hook_matcher(g) == hk.matcher
+                    && g.get("hooks")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|hs| hs.iter().any(|h| hook_id(h) == hk.command))
+            })
+        }))
+}
+
+fn section_state(sec: &OwnedSection) -> std::result::Result<(), String> {
+    let text = std::fs::read_to_string(&sec.file).map_err(|_| "missing (file gone)".to_string())?;
+    let (a, b) = find_section(&text, &sec.name).ok_or_else(|| "missing".to_string())?;
+    if sha256_str(&text[a..b]) == sec.sha256 {
+        Ok(())
+    } else {
+        Err("modified (hash mismatch)".into())
     }
 }
 
@@ -1143,7 +1432,7 @@ pub fn init(dir: &Path) -> Result<()> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
         .filter(|n| valid_segment(n))
         .unwrap_or_else(|| "my-package".into());
-    let files: [(&str, String); 6] = [
+    let files: [(&str, String); 7] = [
         (
             ".claude-plugin/plugin.json",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1163,6 +1452,7 @@ pub fn init(dir: &Path) -> Result<()> {
             "harness/codex/config.toml",
             "# Keys merged into ~/.codex/config.toml (th pkg records ownership per key).\n".into(),
         ),
+        ("harness/codex/hooks.json", "{\n    \"hooks\": {}\n}\n".into()),
         (
             "harness/opencode/plugin.js",
             "// OpenCode lifecycle plugin — linked to ~/.config/opencode/plugins/<name>.js\nexport const Plugin = async () => ({});\n".into(),
@@ -1343,6 +1633,329 @@ fn toml_remove_in(item: &mut toml_edit::Item, keys: &[&str]) -> bool {
     removed
 }
 
+// ---------------------------------------------------------------- hooks ----
+
+/// Key-merge a Claude-style `hooks.json` document (`{"hooks": {Event:
+/// [{matcher?, hooks: [{type, command, …}]}]}}`) into `base`: events union,
+/// matcher groups matched by (normalised) matcher, hooks appended unless an
+/// identical command is already there. Returns `(event, matcher, command)`
+/// for every hook actually added — the ones the caller now owns.
+fn merge_hooks(base: &mut serde_json::Value, add: &serde_json::Value) -> Vec<(String, String, String)> {
+    let mut added = Vec::new();
+    let Some(events) = add.get("hooks").and_then(serde_json::Value::as_object) else {
+        return added;
+    };
+    let base_events = as_object(as_object(base).entry("hooks").or_insert_with(|| serde_json::json!({})));
+    for (event, groups) in events {
+        let Some(groups) = groups.as_array() else { continue };
+        let target = base_events.entry(event.clone()).or_insert_with(|| serde_json::json!([]));
+        if !target.is_array() {
+            *target = serde_json::json!([]);
+        }
+        let Some(target) = target.as_array_mut() else { continue };
+        for group in groups {
+            let matcher = hook_matcher(group);
+            let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            let slot = match target.iter().position(|g| hook_matcher(g) == matcher) {
+                Some(i) => i,
+                None => {
+                    let mut g = group.clone();
+                    g["hooks"] = serde_json::json!([]);
+                    target.push(g);
+                    target.len() - 1
+                }
+            };
+            let dst = as_object(&mut target[slot]).entry("hooks".to_string()).or_insert_with(|| serde_json::json!([]));
+            if !dst.is_array() {
+                *dst = serde_json::json!([]);
+            }
+            let Some(dst) = dst.as_array_mut() else { continue };
+            for h in hooks {
+                let id = hook_id(h);
+                if dst.iter().any(|e| hook_id(e) == id) {
+                    continue;
+                }
+                dst.push(h.clone());
+                added.push((event.clone(), matcher.clone(), id));
+            }
+        }
+    }
+    added
+}
+
+/// A group's matcher; absent and `""` are the same thing to Claude/Codex.
+fn hook_matcher(group: &serde_json::Value) -> String {
+    group.get("matcher").and_then(serde_json::Value::as_str).unwrap_or("").to_string()
+}
+
+/// What makes two hooks "the same": the command for command hooks, the whole
+/// value otherwise.
+fn hook_id(hook: &serde_json::Value) -> String {
+    hook.get("command")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| hook.to_string(), str::to_string)
+}
+
+/// Remove one hook (by command) from `hooks.<event>` groups with `matcher`;
+/// prunes groups and events left empty but keeps `"hooks": {}` so the file
+/// stays a valid hooks document. Returns whether anything was removed.
+fn remove_hook(doc: &mut serde_json::Value, event: &str, matcher: &str, command: &str) -> bool {
+    let Some(events) = doc.get_mut("hooks").and_then(serde_json::Value::as_object_mut) else {
+        return false;
+    };
+    let Some(groups) = events.get_mut(event).and_then(serde_json::Value::as_array_mut) else {
+        return false;
+    };
+    let mut removed = false;
+    for g in groups.iter_mut() {
+        if hook_matcher(g) != matcher {
+            continue;
+        }
+        if let Some(hs) = g.get_mut("hooks").and_then(serde_json::Value::as_array_mut) {
+            let before = hs.len();
+            hs.retain(|h| hook_id(h) != command);
+            removed |= hs.len() != before;
+        }
+    }
+    if removed {
+        groups.retain(|g| g.get("hooks").and_then(serde_json::Value::as_array).is_some_and(|h| !h.is_empty()));
+        if groups.is_empty() {
+            events.remove(event);
+        }
+    }
+    removed
+}
+
+/// Replace `${CLAUDE_PLUGIN_ROOT}` in every string of a document with the
+/// cached package root (Claude substitutes it itself; nobody else does).
+fn subst_plugin_root(v: &mut serde_json::Value, root: &Path) {
+    match v {
+        serde_json::Value::String(s) if s.contains("${CLAUDE_PLUGIN_ROOT}") => {
+            *s = s.replace("${CLAUDE_PLUGIN_ROOT}", &root.display().to_string());
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| subst_plugin_root(x, root)),
+        serde_json::Value::Object(m) => m.values_mut().for_each(|x| subst_plugin_root(x, root)),
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------- rules ----
+
+/// One `rules/<stem>.md`: optional `paths:` / `description:` frontmatter + body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rule {
+    stem: String,
+    description: Option<String>,
+    paths: Vec<String>,
+    body: String,
+}
+
+impl Rule {
+    fn parse(stem: &str, text: &str) -> Self {
+        let (fm, body) = split_frontmatter(text);
+        Self {
+            stem: stem.to_string(),
+            description: fm.and_then(|f| fm_scalar(f, "description")),
+            paths: fm.map(|f| fm_list(f, "paths")).unwrap_or_default(),
+            body: body.trim_matches('\n').to_string(),
+        }
+    }
+
+    fn title(&self) -> &str {
+        self.description.as_deref().unwrap_or(&self.stem)
+    }
+
+    /// Cursor `.mdc`: `description`, `globs` (comma-joined), `alwaysApply`
+    /// when the rule has no paths.
+    fn to_mdc(&self, pkg: &str) -> String {
+        let mut out = String::from("---\n");
+        out += &format!("description: {}\n", self.description.clone().unwrap_or_else(|| format!("{pkg}: {}", self.stem)));
+        if !self.paths.is_empty() {
+            out += &format!("globs: {}\n", self.paths.join(","));
+        }
+        out += &format!("alwaysApply: {}\n---\n\n{}\n", self.paths.is_empty(), self.body);
+        out
+    }
+}
+
+/// `rules/*.md` of a package root, sorted by stem.
+fn load_rules(root: &Path) -> Result<Vec<Rule>> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("rules")) else {
+        return Ok(out);
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() || p.extension().is_none_or(|x| x != "md") {
+            continue;
+        }
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        out.push(Rule::parse(
+            &stem,
+            &std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?,
+        ));
+    }
+    out.sort_by(|a, b| a.stem.cmp(&b.stem));
+    Ok(out)
+}
+
+/// `(frontmatter, body)` for a `---`-fenced document; `(None, text)` otherwise.
+fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
+    let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) else {
+        return (None, text);
+    };
+    for end in ["\n---\n", "\n---\r\n"] {
+        if let Some(i) = rest.find(end) {
+            return (Some(&rest[..i]), &rest[i + end.len()..]);
+        }
+    }
+    if let Some(fm) = rest.strip_suffix("\n---").or_else(|| rest.strip_suffix("\n---\n")) {
+        return (Some(fm), "");
+    }
+    (None, text)
+}
+
+/// A scalar `key: value` line of the (tiny, YAML-ish) frontmatter.
+fn fm_scalar(fm: &str, key: &str) -> Option<String> {
+    fm.lines().find_map(|l| {
+        let v = l.strip_prefix(key)?.trim_start().strip_prefix(':')?.trim();
+        (!v.is_empty() && !v.starts_with('[')).then(|| unquote(v).to_string())
+    })
+}
+
+/// A list value: inline `key: [a, "b"]` or a block of `- item` lines.
+fn fm_list(fm: &str, key: &str) -> Vec<String> {
+    let mut lines = fm.lines().peekable();
+    while let Some(l) = lines.next() {
+        let Some(v) = l.strip_prefix(key).and_then(|r| r.trim_start().strip_prefix(':')) else {
+            continue;
+        };
+        let v = v.trim();
+        if let Some(inner) = v.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            return inner.split(',').map(|s| unquote(s.trim()).to_string()).filter(|s| !s.is_empty()).collect();
+        }
+        if v.is_empty() {
+            let mut items = Vec::new();
+            while let Some(item) = lines.peek().and_then(|n| n.trim_start().strip_prefix("- ")) {
+                items.push(unquote(item.trim()).to_string());
+                lines.next();
+            }
+            return items;
+        }
+        return vec![unquote(v).to_string()];
+    }
+    Vec::new()
+}
+
+fn unquote(s: &str) -> &str {
+    s.strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(s)
+}
+
+// ------------------------------------------------------- managed section ----
+
+fn section_markers(name: &str) -> (String, String) {
+    (format!("<!-- th-pkg:{name} -->"), format!("<!-- /th-pkg:{name} -->"))
+}
+
+/// The block `th pkg` owns in an `AGENTS.md`: markers, a one-line notice, one
+/// `###` per rule with its path scope.
+fn render_section(name: &str, rules: &[Rule]) -> String {
+    let (open, close) = section_markers(name);
+    let mut s = format!(
+        "{open}\n<!-- managed by `th pkg install {name}` — edits inside these markers are overwritten on reinstall; `th pkg rm {name}` removes the block -->\n"
+    );
+    for r in rules {
+        s += &format!("\n### {}\n", r.title());
+        if !r.paths.is_empty() {
+            s += &format!("\n_Applies to: {}_\n", r.paths.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", "));
+        }
+        s += &format!("\n{}\n", r.body);
+    }
+    s += &format!("\n{close}\n");
+    s
+}
+
+/// Byte range of the managed block (through its trailing newline), if present.
+fn find_section(text: &str, name: &str) -> Option<(usize, usize)> {
+    let (open, close) = section_markers(name);
+    let a = text.match_indices(&open).map(|(i, _)| i).find(|&i| i == 0 || text[..i].ends_with('\n'))?;
+    let c = text[a..].find(&close)? + a;
+    let mut b = c + close.len();
+    if text[b..].starts_with('\n') {
+        b += 1;
+    }
+    Some((a, b))
+}
+
+/// Write the block into `file`, replacing an existing one in place or
+/// appending after a blank line. Returns whether the file was created.
+fn upsert_section(file: &Path, name: &str, block: &str) -> Result<bool> {
+    let existing = file.is_file().then(|| std::fs::read_to_string(file)).transpose()?;
+    let out = match &existing {
+        Some(text) => match find_section(text, name) {
+            Some((a, b)) => format!("{}{block}{}", &text[..a], &text[b..]),
+            None => {
+                let mut t = text.clone();
+                if !t.is_empty() && !t.ends_with('\n') {
+                    t.push('\n');
+                }
+                if !t.is_empty() {
+                    t.push('\n');
+                }
+                t + block
+            }
+        },
+        None => block.to_string(),
+    };
+    if let Some(p) = file.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(file, out).with_context(|| format!("write {}", file.display()))?;
+    Ok(existing.is_none())
+}
+
+/// Take the block out again. A file we created that is left empty is deleted.
+fn remove_section(file: &Path, name: &str, created: bool) -> Result<bool> {
+    let text = std::fs::read_to_string(file)?;
+    let Some((a, b)) = find_section(&text, name) else {
+        return Ok(false);
+    };
+    let (before, mut after) = (&text[..a], &text[b..]);
+    // The blank line that separated the block from what came before it goes too.
+    if before.ends_with("\n\n") && after.starts_with('\n') {
+        after = &after[1..];
+    }
+    let mut out = format!("{before}{after}");
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    if created && out.trim().is_empty() {
+        std::fs::remove_file(file)?;
+    } else {
+        std::fs::write(file, out)?;
+    }
+    Ok(true)
+}
+
+/// Write `content` at `dst` and record it as ours.
+fn write_owned(dst: &Path, content: &str, harness: &str) -> Result<OwnedFile> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dst, content).with_context(|| format!("write {}", dst.display()))?;
+    Ok(OwnedFile {
+        harness: harness.to_string(),
+        path: dst.to_path_buf(),
+        kind: "file".into(),
+        sha256: sha256_str(content),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1367,11 +1980,29 @@ mod tests {
         w("skills/beta/SKILL.md", "---\nname: beta\ndescription: b\n---\n");
         w("commands/hello.md", "hi");
         w("rules/style.md", "---\npaths: [\"**/*.rs\"]\n---\nbe terse\n");
-        w("hooks/hooks.json", r#"{"hooks":{}}"#);
-        w("harness/claude-code/hooks/hooks.json", r#"{"hooks":{"PreToolUse":[]}}"#);
+        w("rules/always.md", "---\ndescription: Always on\n---\n\nsay hi\n");
+        w(
+            "hooks/hooks.json",
+            r#"{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/a.sh"}]}]}}"#,
+        );
+        w(
+            "harness/claude-code/hooks/hooks.json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/b.sh"}]}],"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/a.sh"},{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/c.sh"}]}]}}"#,
+        );
         w("harness/codex/config.toml", "[features]\nfix = true\n[plugins.\"fix@th\"]\nenabled = true\n");
+        w(
+            "harness/codex/hooks.json",
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow.sh SessionStart codex"},{"type":"command","command":"th prime"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow.sh PreToolUse codex"}]}]}}"#,
+        );
         w("harness/opencode/plugin.js", "export const Fix = 1;");
-        w("harness/cursor/README.md", "later");
+        w(
+            "harness/cursor/rules/always.mdc",
+            "---\ndescription: overridden\nalwaysApply: true\n---\n\nhi from the overlay\n",
+        );
+        w(
+            "harness/cursor/rules/extra.mdc",
+            "---\ndescription: extra\nalwaysApply: false\n---\n\nonly cursor gets this\n",
+        );
     }
 
     fn home() -> (TempDir, Paths) {
@@ -1531,8 +2162,43 @@ mod tests {
         assert!(composed.join("skills/alpha/SKILL.md").is_file());
         assert!(composed.join("commands/hello.md").is_file());
         assert!(!composed.join("harness").exists(), "overlays never ship inside the composed plugin");
-        // The claude-code overlay REPLACES core hooks.json.
-        assert!(std::fs::read_to_string(composed.join("hooks/hooks.json")).unwrap().contains("PreToolUse"));
+        // M1: the claude-code overlay is KEY-MERGED into core hooks.json.
+        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(composed.join("hooks/hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+        let ss = hooks["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(ss.len(), 1, "same matcher → one group: {ss:?}");
+        let cmds: Vec<&str> = ss[0]["hooks"].as_array().unwrap().iter().map(|h| h["command"].as_str().unwrap()).collect();
+        assert_eq!(
+            cmds,
+            ["${CLAUDE_PLUGIN_ROOT}/hooks/a.sh", "${CLAUDE_PLUGIN_ROOT}/hooks/c.sh"],
+            "a.sh deduped, c.sh appended"
+        );
+
+        // Codex hooks overlay → ~/.codex/hooks.json with the cache root substituted; cursor rules; AGENTS.md sections.
+        let ch: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.codex_hooks()).unwrap()).unwrap();
+        assert_eq!(
+            ch["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            format!("{}/hooks/flow.sh PreToolUse codex", rec.root.display())
+        );
+        assert_eq!(rec.hooks.len(), 3, "{:?}", rec.hooks);
+        let mdc = std::fs::read_to_string(paths.cursor_rules().join("fix/style.mdc")).unwrap();
+        assert!(
+            mdc.contains("globs: **/*.rs") && mdc.contains("alwaysApply: false") && mdc.contains("be terse"),
+            "{mdc}"
+        );
+        assert!(std::fs::read_to_string(paths.cursor_rules().join("fix/always.mdc"))
+            .unwrap()
+            .contains("hi from the overlay"));
+        assert!(paths.cursor_rules().join("fix/extra.mdc").is_file());
+        for f in [paths.codex_agents_md(), paths.opencode_agents_md()] {
+            let text = std::fs::read_to_string(&f).unwrap();
+            assert!(
+                text.starts_with("<!-- th-pkg:fix -->") && text.contains("### Always on") && text.contains("`**/*.rs`"),
+                "{text}"
+            );
+        }
+        assert_eq!(rec.sections.len(), 2);
+        assert!(rec.sections.iter().all(|s| s.created));
         let mk: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(paths.claude_marketplace().join(".claude-plugin/marketplace.json")).unwrap()).unwrap();
         assert_eq!(mk["plugins"][0]["source"], "./plugins/fix");
@@ -1544,7 +2210,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("opencode/plugin.js=present") && l.contains("cursor (M1)=present")),
+                .any(|l| l.contains("opencode/plugin.js=present") && l.contains("cursor/rules=present") && l.contains("codex/hooks.json=present")),
             "{lines:?}"
         );
 
@@ -1553,6 +2219,18 @@ mod tests {
         let again = Index::load(&paths).unwrap();
         assert_eq!(again.packages["fix"].files.len(), rec.files.len());
         assert_eq!(again.packages["fix"].keys.len(), rec.keys.len());
+        assert_eq!(again.packages["fix"].hooks.len(), rec.hooks.len());
+        assert_eq!(again.packages["fix"].sections.len(), rec.sections.len());
+        let ch: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.codex_hooks()).unwrap()).unwrap();
+        assert_eq!(
+            ch["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap().len(),
+            2,
+            "no duplicate hooks on reinstall"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.codex_agents_md()).unwrap().matches("<!-- th-pkg:fix -->").count(),
+            1
+        );
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.claude_settings()).unwrap()).unwrap();
         assert_eq!(settings["enabledPlugins"].as_object().unwrap().len(), 2);
 
@@ -1576,7 +2254,243 @@ mod tests {
         assert!(settings.get("extraKnownMarketplaces").is_none(), "empty marketplace registration pruned");
         assert!(!paths.claude_marketplace().exists());
         assert!(!paths.cache().join("fix@local").exists());
+        assert!(!paths.cursor_rules().join("fix").exists());
+        assert!(
+            !paths.codex_agents_md().exists() && !paths.opencode_agents_md().exists(),
+            "files we created go away"
+        );
+        let ch: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.codex_hooks()).unwrap()).unwrap();
+        assert_eq!(ch, serde_json::json!({"hooks": {}}), "{ch}");
         assert!(rm(&paths, "fix").is_err(), "second rm reports unknown package");
+    }
+
+    #[test]
+    fn merge_hooks_covers_every_case_and_reports_only_what_it_added() {
+        let cmd = |c: &str| serde_json::json!({"type":"command","command":c});
+        let mut base = serde_json::json!({"hooks":{
+            "SessionStart":[{"matcher":"","hooks":[cmd("th prime")]}],
+            "PreToolUse":[{"matcher":"Bash","hooks":[cmd("rtk hook claude")]}],
+            "Stop":"not an array"
+        }});
+        let add = serde_json::json!({"hooks":{
+            // absent matcher == "" → same group; th prime is deduped, flow appended
+            "SessionStart":[{"hooks":[cmd("th prime"), cmd("flow SessionStart")]}],
+            // existing event, new matcher group → appended as a group
+            "PreToolUse":[{"matcher":"Edit","hooks":[cmd("guard")]}, {"matcher":"Bash","hooks":[cmd("rtk hook claude"), cmd("flow PreToolUse")]}],
+            // new event
+            "PostToolUse":[{"hooks":[cmd("flow PostToolUse")]}],
+            // a non-array event in base is replaced (it was never a valid group list)
+            "Stop":[{"hooks":[cmd("flow Stop")]}],
+            // non-command hooks compare by value
+            "Notification":[{"hooks":[{"type":"prompt","prompt":"p"}]}],
+            // garbage groups are skipped
+            "SessionEnd":[{"matcher":"x"}, "junk"]
+        }});
+        let added = merge_hooks(&mut base, &add);
+        let mut got: Vec<String> = added.iter().map(|(e, m, c)| format!("{e}|{m}|{c}")).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                "Notification||{\"type\":\"prompt\",\"prompt\":\"p\"}",
+                "PostToolUse||flow PostToolUse",
+                "PreToolUse|Bash|flow PreToolUse",
+                "PreToolUse|Edit|guard",
+                "SessionStart||flow SessionStart",
+                "Stop||flow Stop",
+            ]
+        );
+        let ss = base["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss[0]["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(base["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            base["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap().len(),
+            2,
+            "appended to the Bash group"
+        );
+        assert_eq!(base["hooks"]["PreToolUse"][1]["matcher"], "Edit");
+        assert!(base["hooks"].get("SessionEnd").is_some_and(|v| v.as_array().unwrap().is_empty()));
+        // Merging the same overlay again adds nothing.
+        assert!(merge_hooks(&mut base, &add).is_empty());
+        // A base without `hooks` at all, and an add without `hooks`.
+        let mut empty = serde_json::json!({});
+        assert_eq!(merge_hooks(&mut empty, &add).len(), 8, "everything, th prime and rtk included");
+        assert!(merge_hooks(&mut empty, &serde_json::json!({"nope":1})).is_empty());
+
+        // remove_hook: prunes the group and the event, keeps `hooks: {}`, never touches neighbours.
+        assert!(remove_hook(&mut base, "SessionStart", "", "flow SessionStart"));
+        assert_eq!(base["hooks"]["SessionStart"][0]["hooks"][0]["command"], "th prime");
+        assert!(remove_hook(&mut base, "PostToolUse", "", "flow PostToolUse"));
+        assert!(base["hooks"].get("PostToolUse").is_none(), "{base}");
+        assert!(!remove_hook(&mut base, "PostToolUse", "", "flow PostToolUse"));
+        assert!(!remove_hook(&mut base, "SessionStart", "Bash", "th prime"), "wrong matcher removes nothing");
+        assert!(remove_hook(&mut base, "PreToolUse", "Edit", "guard"));
+        assert_eq!(base["hooks"]["PreToolUse"].as_array().unwrap().len(), 1, "empty Edit group pruned");
+        let mut only = serde_json::json!({"hooks":{"Stop":[{"hooks":[cmd("x")]}]}});
+        assert!(remove_hook(&mut only, "Stop", "", "x"));
+        assert_eq!(only, serde_json::json!({"hooks":{}}));
+        assert!(!remove_hook(&mut serde_json::json!({}), "Stop", "", "x"));
+    }
+
+    #[test]
+    fn codex_hooks_overlay_keeps_the_users_entries_and_rm_takes_back_only_ours() {
+        let (tmp, paths) = home();
+        let src = pkg_dir(&tmp);
+        // Brent's real file: th prime on SessionStart + PreCompact.
+        let user = serde_json::json!({"hooks":{
+            "PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"th prime"}]}],
+            "SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"th prime"}]}]
+        }});
+        save_json(&paths.codex_hooks(), &user).unwrap();
+        install(&paths, &Source::Path(src.clone()), &[Harness::Codex]).unwrap();
+        let rec = Index::load(&paths).unwrap().packages["fix"].clone();
+        let doc = load_json(&paths.codex_hooks()).unwrap();
+        let ss: Vec<String> = doc["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["command"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ss[0], "th prime");
+        assert!(
+            ss[1].ends_with("/hooks/flow.sh SessionStart codex") && ss[1].starts_with(rec.root.to_str().unwrap()),
+            "{ss:?}"
+        );
+        assert_eq!(ss.len(), 2, "the overlay's `th prime` is deduped against the user's");
+        assert_eq!(doc["hooks"]["PreCompact"][0]["hooks"][0]["command"], "th prime");
+        // Ownership: the two flow hooks, never the user's th prime.
+        assert_eq!(rec.hooks.len(), 2, "{:?}", rec.hooks);
+        assert!(rec
+            .hooks
+            .iter()
+            .all(|h| h.command.contains("flow.sh") && h.matcher.is_empty() && h.harness == "codex"));
+
+        // Drift: the user deletes one of ours.
+        let mut edited = doc.clone();
+        remove_hook(
+            &mut edited,
+            "PreToolUse",
+            "",
+            &rec.hooks.iter().find(|h| h.event == "PreToolUse").unwrap().command,
+        );
+        save_json(&paths.codex_hooks(), &edited).unwrap();
+        let lines = status_lines(&rec).join("\n");
+        assert!(lines.contains("PreToolUse[] — hook") && lines.contains("1 drifted"), "{lines}");
+
+        rm(&paths, "fix").unwrap();
+        assert_eq!(load_json(&paths.codex_hooks()).unwrap(), user, "back to exactly the user's file");
+    }
+
+    #[test]
+    fn agents_md_section_is_idempotent_and_never_touches_text_outside_the_markers() {
+        let (tmp, paths) = home();
+        let src = pkg_dir(&tmp);
+        let before = "# My global rules\n\nBe kind.\n";
+        std::fs::write(paths.codex_agents_md(), before).unwrap();
+        install(&paths, &Source::Path(src.clone()), &[Harness::Codex]).unwrap();
+        let text = std::fs::read_to_string(paths.codex_agents_md()).unwrap();
+        assert!(text.starts_with(before), "{text}");
+        assert!(
+            text[before.len()..].starts_with("\n<!-- th-pkg:fix -->\n"),
+            "one blank line then the block: {text}"
+        );
+        assert!(text.trim_end().ends_with("<!-- /th-pkg:fix -->"));
+
+        // The user writes below the block; the package changes a rule; reinstall.
+        std::fs::write(paths.codex_agents_md(), format!("{text}\nUser text after.\n")).unwrap();
+        std::fs::write(src.join("rules/style.md"), "---\npaths: [\"**/*.rs\", \"**/*.toml\"]\n---\nbe VERY terse\n").unwrap();
+        install(&paths, &Source::Path(src.clone()), &[Harness::Codex]).unwrap();
+        let text = std::fs::read_to_string(paths.codex_agents_md()).unwrap();
+        assert!(text.starts_with(before));
+        assert!(text.ends_with("<!-- /th-pkg:fix -->\n\nUser text after.\n"), "{text}");
+        assert_eq!(text.matches("<!-- th-pkg:fix -->").count(), 1);
+        assert!(
+            text.contains("be VERY terse") && text.contains("`**/*.toml`") && !text.contains("be terse\n"),
+            "{text}"
+        );
+        let rec = Index::load(&paths).unwrap().packages["fix"].clone();
+        assert!(!rec.sections[0].created);
+        assert!(status_lines(&rec).iter().any(|l| l.contains("0 drifted")));
+
+        // A second package's block sits alongside untouched.
+        let other = tmp.path().join("src/other");
+        fixture(&other);
+        std::fs::write(other.join(".claude-plugin/plugin.json"), r#"{"name":"other"}"#).unwrap();
+        install(&paths, &Source::Path(other), &[Harness::Codex]).unwrap();
+        let text = std::fs::read_to_string(paths.codex_agents_md()).unwrap();
+        assert!(text.contains("<!-- th-pkg:other -->") && text.contains("<!-- th-pkg:fix -->"));
+        rm(&paths, "other").unwrap();
+        let text = std::fs::read_to_string(paths.codex_agents_md()).unwrap();
+        assert!(!text.contains("th-pkg:other") && text.contains("<!-- th-pkg:fix -->"), "{text}");
+        assert!(text.ends_with("User text after.\n"), "{text}");
+
+        // A block the user edited is reported and left alone by rm.
+        std::fs::write(paths.codex_agents_md(), text.replace("be VERY terse", "my own words")).unwrap();
+        let lines = status_lines(&rec).join("\n");
+        assert!(lines.contains("managed section fix modified"), "{lines}");
+        let warnings = rm(&paths, "fix").unwrap();
+        assert!(warnings.iter().any(|w| w.contains("managed section")), "{warnings:?}");
+        let text = std::fs::read_to_string(paths.codex_agents_md()).unwrap();
+        assert!(text.contains("my own words") && text.starts_with(before));
+
+        // Marker inside a line is not a block start.
+        assert!(find_section("text <!-- th-pkg:x --> more\n<!-- /th-pkg:x -->\n", "x").is_none());
+        let t = "a\n<!-- th-pkg:x -->\nbody\n<!-- /th-pkg:x -->\nb\n";
+        let (a, b) = find_section(t, "x").unwrap();
+        assert_eq!(&t[a..b], "<!-- th-pkg:x -->\nbody\n<!-- /th-pkg:x -->\n");
+    }
+
+    #[test]
+    fn rules_frontmatter_parses_inline_and_block_lists_and_renders_mdc() {
+        let r = Rule::parse(
+            "style",
+            "---\ndescription: \"Rust style\"\npaths:\n  - \"**/*.rs\"\n  - src/**\n---\n\nbody\n\n",
+        );
+        assert_eq!(r.description.as_deref(), Some("Rust style"));
+        assert_eq!(r.paths, ["**/*.rs", "src/**"]);
+        assert_eq!(r.body, "body");
+        assert_eq!(
+            r.to_mdc("p"),
+            "---\ndescription: Rust style\nglobs: **/*.rs,src/**\nalwaysApply: false\n---\n\nbody\n"
+        );
+        let r = Rule::parse("plain", "no frontmatter\n");
+        assert_eq!((r.description.as_deref(), r.paths.len(), r.body.as_str()), (None, 0, "no frontmatter"));
+        assert!(r.to_mdc("p").contains("description: p: plain\nalwaysApply: true\n"));
+        let r = Rule::parse("one", "---\npaths: 'a/**'\n---\nx");
+        assert_eq!(r.paths, ["a/**"]);
+        assert_eq!(Rule::parse("bare", "---\ndescription: d\n---").body, "");
+        assert_eq!(split_frontmatter("---\nunterminated"), (None, "---\nunterminated"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rm_harness_removes_one_rendering_and_the_package_once_none_are_left() {
+        let (tmp, paths) = home();
+        let src = pkg_dir(&tmp);
+        install(&paths, &Source::Path(src), &[Harness::Codex, Harness::OpenCode]).unwrap();
+        let warnings = rm_harness(&paths, "fix", Harness::Codex).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let rec = Index::load(&paths).unwrap().packages["fix"].clone();
+        assert_eq!(rec.harnesses, vec!["opencode".to_string()]);
+        assert!(rec.files.iter().all(|f| f.harness != "codex") && rec.keys.iter().all(|k| k.harness != "codex"));
+        assert!(rec.hooks.is_empty() && rec.sections.iter().all(|s| s.harness == "opencode"));
+        assert!(std::fs::symlink_metadata(paths.codex_skills().join("alpha")).is_err());
+        assert!(!paths.codex_agents_md().exists());
+        assert!(!std::fs::read_to_string(Harness::Codex.config_path(tmp.path())).unwrap().contains("fixmcp"));
+        assert!(std::fs::read_link(paths.opencode_skills().join("alpha")).is_ok(), "opencode untouched");
+        assert!(
+            std::fs::read_link(paths.smooth_skills().join("alpha")).is_ok(),
+            "smooth's own links stay while a harness remains"
+        );
+        assert!(rm_harness(&paths, "fix", Harness::Codex).unwrap().is_empty(), "idempotent");
+        rm_harness(&paths, "fix", Harness::OpenCode).unwrap();
+        assert!(Index::load(&paths).unwrap().packages.is_empty());
+        assert!(std::fs::symlink_metadata(paths.smooth_skills().join("alpha")).is_err());
+        assert!(
+            rm_harness(&paths, "fix", Harness::OpenCode).unwrap().is_empty(),
+            "unknown package is not an error"
+        );
     }
 
     #[test]
@@ -1719,6 +2633,20 @@ mod tests {
                     file: tmp.path().join("c.toml"),
                     key: vec!["plugins".into(), "x@y".into(), "enabled".into()],
                 }],
+                hooks: vec![OwnedHook {
+                    harness: "codex".into(),
+                    file: tmp.path().join("hooks.json"),
+                    event: "SessionStart".into(),
+                    matcher: String::new(),
+                    command: "flow.sh SessionStart codex".into(),
+                }],
+                sections: vec![OwnedSection {
+                    harness: "codex".into(),
+                    file: tmp.path().join("AGENTS.md"),
+                    name: "p".into(),
+                    sha256: "cd".into(),
+                    created: true,
+                }],
             },
         );
         index.save(&paths).unwrap();
@@ -1783,6 +2711,7 @@ mod tests {
             "rules/conventions.md",
             "harness/claude-code/hooks/hooks.json",
             "harness/codex/config.toml",
+            "harness/codex/hooks.json",
             "harness/opencode/plugin.js",
         ] {
             assert!(d.join(rel).is_file(), "{rel}");
@@ -1794,7 +2723,8 @@ mod tests {
     fn parse_harnesses_accepts_lists_and_all() {
         assert_eq!(parse_harnesses("all").unwrap(), Harness::ALL.to_vec());
         assert_eq!(parse_harnesses("codex, claude-code,codex").unwrap(), vec![Harness::Codex, Harness::ClaudeCode]);
-        assert!(parse_harnesses("cursor").is_err());
+        assert_eq!(parse_harnesses("cursor").unwrap(), vec![Harness::Cursor]);
+        assert!(parse_harnesses("copilot").is_err());
         assert!(parse_harnesses(",").is_err());
     }
 }

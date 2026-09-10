@@ -70,14 +70,69 @@ final class DaemonManager: ObservableObject {
         }
     }
 
+    /// Stop the child — bounded. Quit used to block here in `waitUntilExit()`
+    /// for as long as the daemon took to die, which for a daemon that ignored
+    /// TERM was forever: the Quit Apple event was handled, `applicationWillTerminate`
+    /// ran, and the app just never exited (th-6198bf). Now: TERM the supervisor,
+    /// give the tree [`stopGrace`] to go quietly, then SIGKILL the supervisor
+    /// and the daemon it recorded in [`pidFile`].
     func stop() {
         stopping = true
-        if let p = process, p.isRunning {
-            p.terminate()
-            p.waitUntilExit()
+        if let p = process {
+            _ = Self.stopChild(p, daemonPid: Self.readPid(pidFile), grace: Self.stopGrace)
         }
+        try? FileManager.default.removeItem(at: pidFile)
         process = nil
         status = "stopped"
+    }
+
+    /// How long quit waits for the supervisor + daemon to exit on TERM before
+    /// escalating. The supervisor's own TERM→KILL grace is shorter, so in the
+    /// normal case it has already finished the job by the time this expires.
+    static let stopGrace: TimeInterval = 5
+
+    /// Where the supervisor records the daemon's pid (`$SMOOTHFLOW_DAEMON_PIDFILE`),
+    /// so the app can SIGKILL the daemon itself if the supervisor is gone or stuck.
+    var pidFile: URL { home.appendingPathComponent(".smooth/smoothflow-daemon.pid") }
+
+    /// TERM `supervisor`, wait up to `grace` for it to exit, then SIGKILL it and
+    /// `daemonPid`. Returns whether the tree went down on TERM alone. Blocks the
+    /// calling thread (quit is the caller; the app is leaving anyway) — polled,
+    /// never `waitUntilExit()`, so the bound holds whatever the child does.
+    @discardableResult
+    nonisolated static func stopChild(_ supervisor: Process, daemonPid: pid_t?, grace: TimeInterval) -> Bool {
+        guard supervisor.isRunning else { return true }
+        supervisor.terminate()
+        let quiet = waitForExit(supervisor, timeout: grace)
+        if !quiet {
+            // `Process` gives the child its own process group, so the group is
+            // the supervisor + the daemon + whatever they forked. Kill it all,
+            // plus the recorded daemon pid in case it re-grouped itself.
+            let pid = supervisor.processIdentifier
+            killpg(getpgid(pid) > 0 ? getpgid(pid) : pid, SIGKILL)
+            kill(pid, SIGKILL)
+            if let d = daemonPid { kill(d, SIGKILL) }
+            _ = waitForExit(supervisor, timeout: 2)
+        }
+        if let d = daemonPid, kill(d, 0) == 0 { kill(d, SIGKILL) }
+        return quiet
+    }
+
+    /// Poll `isRunning` until it flips or `timeout` passes. NSTask reaps on its
+    /// own queue, so the flag updates while this thread sleeps.
+    nonisolated static func waitForExit(_ p: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning {
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return true
+    }
+
+    /// The pid the supervisor wrote, if any and if it still names a live process.
+    nonisolated static func readPid(_ file: URL) -> pid_t? {
+        guard let text = try? String(contentsOf: file, encoding: .utf8), let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return nil }
+        return kill(pid, 0) == 0 ? pid : nil
     }
 
     // MARK: child mode
@@ -95,6 +150,9 @@ final class DaemonManager: ObservableObject {
         p.arguments = ["-c", Self.childSupervisor, binary, "operator", "--addr", ep.description]
         var env = ProcessInfo.processInfo.environment
         env["SMOOTHFLOW_PARENT"] = Bundle.main.bundleIdentifier ?? "ai.smoo.smoothflow"
+        // The supervisor records the daemon's pid here so a bounded quit can
+        // SIGKILL the daemon directly if TERM did not do it (th-6198bf).
+        env["SMOOTHFLOW_DAEMON_PIDFILE"] = pidFile.path
         // The daemon refuses to start next to a running Big Smooth (they would
         // share operator-storage.db). SmoothFlow's daemon is a separate product
         // on its own port; opt out of the guard. ponytail: flow.db is separate,
@@ -112,8 +170,19 @@ final class DaemonManager: ObservableObject {
         // that is the whole TCC story (docs/Architecture/SmoothFlow-macOS.md).
         env["SMOOTH_FLOW_TMUX_SOCKET"] = Self.tmuxSocket
         env["SMOOTH_LOCAL_TOKEN"] = token
+        // A Finder-launched app has no LANG. Without a UTF-8 locale every tmux
+        // client the daemon runs (its attach = the bytes we render) is treated
+        // as a non-UTF-8 terminal and tmux draws `_` for each non-ASCII cell —
+        // the blank Nerd Font prompt icons of th-bcd819. Agents' shells need
+        // it too (Claude Code's own output). Mirrors what Ghostty does for its
+        // shells.
+        env.merge(Self.utf8Locale(env: env)) { $1 }
         // Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay.
         env["SMOOTH_TAILSCALE_SERVE"] = "0"
+        // …as its OWN relay device (th-a1bb12): Big Smooth reads
+        // ~/.smooth/relay-device-id; without these the child dialed in as the
+        // same device and phones flapped between the two daemons.
+        env.merge(RelayIdentity.environment(deviceId: RelayIdentity.load(home: home), hostname: ProcessInfo.processInfo.hostName)) { $1 }
         // A GUI app's PATH is tiny; agents the daemon launches need the usual dirs.
         // The bundle's own Contents/MacOS goes first so the `th` shipped with the
         // app (release builds) wins over a stale ~/.cargo/bin one.
@@ -206,7 +275,8 @@ final class DaemonManager: ObservableObject {
     private static func tmux(_ bin: String, _ args: [String]) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["-L", tmuxSocket] + args
+        // `-u`: force UTF-8 on the client side regardless of locale (th-bcd819).
+        p.arguments = ["-u", "-L", tmuxSocket] + args
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         do { try p.run(); p.waitUntilExit(); return p.terminationStatus == 0 } catch { return false }
@@ -214,14 +284,40 @@ final class DaemonManager: ObservableObject {
 
     // MARK: helpers
 
-    /// `sh -c` body: run `$0 "$@"` in the background, exit with it when our
-    /// parent (the app) is gone, forward TERM/INT. `$PPID` is the app's pid.
+    /// `sh -c` body: run `$0 "$@"` in the background, record its pid in
+    /// `$SMOOTHFLOW_DAEMON_PIDFILE`, exit with it when our parent (the app) is
+    /// gone, and on TERM/INT take it down — TERM first, then SIGKILL after
+    /// [`supervisorGraceSeconds`] if it is still there. `$PPID` is the app's pid.
+    /// The escalation is what keeps quit bounded: `wait "$d"` on a daemon that
+    /// ignores TERM never returns (th-6198bf).
+    static let supervisorGraceSeconds = 3
     static let childSupervisor = #"""
     "$0" "$@" & d=$!
-    trap 'kill "$d" 2>/dev/null' TERM INT
+    [ -n "$SMOOTHFLOW_DAEMON_PIDFILE" ] && printf '%s\n' "$d" > "$SMOOTHFLOW_DAEMON_PIDFILE" 2>/dev/null
+    down() { kill "$d" 2>/dev/null; n=0; while kill -0 "$d" 2>/dev/null && [ "$n" -lt \#(supervisorGraceSeconds) ]; do sleep 1; n=$((n+1)); done; kill -9 "$d" 2>/dev/null; }
+    trap 'down; wait "$d"; exit 0' TERM INT
     while kill -0 "$PPID" 2>/dev/null && kill -0 "$d" 2>/dev/null; do sleep 1; done
-    kill "$d" 2>/dev/null; wait "$d"
+    down; wait "$d"
     """#
+
+    /// The locale variables to add so the child (and everything under its
+    /// tmux server) speaks UTF-8: nothing when `LC_ALL` / `LC_CTYPE` / `LANG`
+    /// already names a UTF-8 locale, else `LANG` + `LC_CTYPE` set to the
+    /// user's locale (`en_US.UTF-8`) when the system knows it, `en_US.UTF-8`
+    /// otherwise. Pure over its inputs (th-bcd819).
+    nonisolated static func utf8Locale(env: [String: String], identifier: String = Locale.current.identifier,
+                           known: (String) -> Bool = { FileManager.default.fileExists(atPath: "/usr/share/locale/\($0)") }) -> [String: String] {
+        let isUTF8: (String?) -> Bool = { v in
+            guard let v = v?.lowercased() else { return false }
+            return v.contains("utf-8") || v.contains("utf8")
+        }
+        if isUTF8(env["LC_ALL"]) || isUTF8(env["LC_CTYPE"]) || isUTF8(env["LANG"]) { return [:] }
+        // "en_US@rg=gbzzzz" style identifiers are not locale names; keep ll_CC.
+        let base = identifier.split(separator: "@").first.map(String.init) ?? identifier
+        let candidate = base.replacingOccurrences(of: "-", with: "_") + ".UTF-8"
+        let name = (base.contains("_") && known(candidate)) ? candidate : "en_US.UTF-8"
+        return ["LANG": name, "LC_CTYPE": name]
+    }
 
     static func freePort() -> Int {
         let sock = socket(AF_INET, SOCK_STREAM, 0)

@@ -14,15 +14,16 @@ dumb view.
 
 ## Where the pieces live
 
-| Piece                                                    | Path                                                        |
-| -------------------------------------------------------- | ----------------------------------------------------------- |
-| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                       |
-| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                    |
-| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                         |
-| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                          |
-| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)               |
-| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)        |
-| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc) |
+| Piece                                                    | Path                                                         |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                        |
+| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                     |
+| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                          |
+| End-to-end encryption + phone pairing (th-d98fde)        | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs` |
+| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                           |
+| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)                |
+| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)         |
+| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)  |
 
 ## Process model
 
@@ -79,6 +80,8 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   loopback bridge; no `channel` ⇒ operator WS, unchanged. Outbound
   `flow.output` to a phone is coalesced to ~30 fps and split into ≤16 KiB
   frames (`relay::OutputCoalescer`); phones never receive raw scrollback.
+  A **paired** phone's frames are end-to-end encrypted — see
+  [End-to-end encryption](#end-to-end-encryption).
 - Every frame is one JSON object `{"channel":"flow","type":"<name>", …}`.
   Unknown types are ignored, never fatal. Errors are objects, never strings.
 
@@ -114,8 +117,8 @@ the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
-`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, and (v0.1)
-`flow.hello`, `flow.handoff`.
+`flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, (v0.1)
+`flow.hello`, `flow.handoff`, and (th-e126cc) `flow.close`.
 
 Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
@@ -166,6 +169,23 @@ nothing opens the flow WS until the phone sends a frame, so the bridge is
 opened by the **first** `channel:"flow"` envelope (whatever its type), the
 engine's on-connect hello goes back, and the nudge's reply follows.
 
+### `flow.close` — close the pearl, GC the worktree (th-e126cc)
+
+`flow.close {id, close_pearl, remove_worktree, force}` (all flags default
+off) finishes a session for good: a live one is killed first; then
+`th pearls close <pearl>` runs in the project when `close_pearl` and the row
+has a pearl; then, when `remove_worktree`, `git worktree remove` + the branch
+is deleted — but only once the branch is **merged** into the project
+(an ancestor of its HEAD, or a merged PR per `gh`, since the repos
+squash-merge) and the worktree is clean; the main checkout is never removed.
+Then the row is dropped and `flow.session.removed` is broadcast. A dirty or
+unmerged worktree is refused as `flow.error` with **nothing touched**;
+`force` removes it anyway. HTTP sibling: `POST
+/api/flow/sessions/{id}/close` with the same body, replying
+`{id, pearl_closed, worktree_removed, branch_deleted}` (nulls for what was
+not done). CLI: `th flow close <id> [--keep-pearl] [--keep-worktree]
+[--force]` — the CLI defaults both actions **on**.
+
 ### tmux socket (TCC) {#tmux-socket-tcc}
 
 Sessions are created on the tmux server named by, in order: the
@@ -173,6 +193,18 @@ Sessions are created on the tmux server named by, in order: the
 `smooth-daemon operator --tmux-socket <name>` / `$SMOOTH_FLOW_TMUX_SOCKET`,
 then the default `smooth-flow`. Every row records its socket, so a daemon
 restarted with a different setting still finds its old panes.
+
+**Ownership (th-4f7866).** Each row also records its `owner`: the socket
+name the _creating_ daemon was configured with — that daemon's identity
+across restarts, distinct from where the pane lives. A daemon's supervision
+tick only touches rows it owns (rows from before the column: the daemon
+whose socket matches the row's). Two daemons sharing one `flow.db` — `th
+up`'s on the default socket and the SmoothFlow app's child on `smoothflow`,
+or an orphaned instance — otherwise each looked for the other's panes on
+_its_ server, marked them `dead · process vanished`, and raced to relaunch
+them. Attach, send, kill and snapshot are not ownership-gated: they use the
+row's socket, so `th flow` drives any session through any daemon. The app
+additionally keeps its own db (`SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`).
 
 **Why it matters:** on macOS, TCC attributes a pane's grants (Full Disk
 Access, Calendar, Notifications) to the process that started the tmux
@@ -183,6 +215,80 @@ the daemon it spawns. A session created on any other socket — the default
 FDA/Calendar access, and the failures are silent (empty listings, "not
 authorized" from EventKit), not prompts. `th flow new` from a terminal
 therefore lands on the app's server only with `--tmux-socket smoothflow`.
+
+## End-to-end encryption {#end-to-end-encryption}
+
+> Pearl th-d98fde. The relay (`rust/relay-ws` in smooai) forwards `{to, frame}`
+> opaquely and never inspects `frame`, so nothing in the relay changed. The
+> reference implementation is `crates/smooth-daemon/src/flow_e2e.rs`; the
+> Swift (`SmoothRelay/FlowCrypto.swift`) and Kotlin (`relay/…/FlowCrypto.kt`)
+> ports in smooai `apps/bigsmooth/relay` assert the same fixture,
+> `crates/smooth-daemon/tests/fixtures/flow-e2e-v1.json`.
+
+Terminal bytes must not be readable by the relay. A phone therefore **pairs**
+with a daemon once, out of band, and from then on every `channel:"flow"` frame
+between them is sealed; only the envelope stays routable. Big Smooth chat
+frames (no `channel`) are untouched.
+
+**Primitives.** X25519 (with the contributory check), HKDF-SHA256,
+ChaCha20-Poly1305 with a 12-byte nonce `[direction, 0, 0, 0, u64 counter BE]`
+(direction `0` = phone→daemon, `1` = daemon→phone; counters start at 1) and the
+constant AAD `smoothflow-e2e/v1`. Keys and the code are base64url (unpadded);
+`ct` and salts are standard base64. RustCrypto on the daemon, CryptoKit on
+iOS, Tink's pure-Java subtle primitives on Android (X25519 / ChaCha20-Poly1305
+in `javax.crypto` need API 33 / 28, and the app ships at minSdk 26).
+
+**Pairing** (once per phone; `POST /api/flow/pair` mints it, Settings ▸
+Phones and `th flow pair --qr` show it, `GET /api/flow/pair/{id}` polls it):
+
+1. The daemon makes a fresh X25519 keypair, a 128-bit one-time code and an
+   8-hex pairing id, and shows
+   `smoothflow://pair?v=1&p=<id>&d=<daemon device>&k=<daemon pub>&c=<code>&l=<label>`
+   as a QR. The link is valid for 5 minutes. The code never crosses the relay.
+2. The phone scans it (in-app camera, the Camera app via the URL scheme, or
+   pasted), makes its own X25519 keypair and derives
+   `pairing_key = HKDF(salt = code, ikm = X25519(phone_sk, daemon_pk), info = "smoothflow-pair/v1" || id)`.
+3. The phone sends, through the relay,
+   `{channel:"flow", v:1, type:"flow.pair", pair:<id>, pk:<phone pub>, n:1, ct}`
+   where `ct` seals `{"type":"flow.pair.hello","label":"Brent's iPhone","platform":"ios"}`
+   under the pairing key (direction 0, n = 1). Being able to seal under a key
+   that needs the code is what authenticates the phone: the relay sees both
+   public keys but cannot substitute its own.
+4. The daemon derives the same key, opens the hello, writes the pairing to
+   `flow.db` (`pairings(device PK, label, platform, public_key, key_hex,
+created_at, last_seen_at)`, keyed by the phone's relay device id) and
+   answers `{channel:"flow", v:1, type:"flow.pair", n:1, ct}` sealing
+   `{"type":"flow.pair.ok", device, label, protocol:1}` (direction 1, n = 1). The
+   phone stores the pairing key in the Keychain / its Tink-encrypted store.
+   A failed scan answers a plaintext `flow.error {code:"pair_failed"}` and
+   leaves the QR valid.
+
+**Sessions** (every connection). The pairing key never seals data. On connect
+the phone sends `{channel:"flow", v:1, type:"flow.e2e.open", salt:<16 B>}`;
+the daemon answers the same shape with its own 16-byte salt and both derive
+`session_key = HKDF(salt = phone_salt || daemon_salt, ikm = pairing_key, info = "smoothflow-session/v1")`.
+Data frames are then `{channel:"flow", v:1, n, ct}` — the plaintext is the
+ordinary flow frame JSON, `flow.output` included (after the phone caps). The
+daemon's salt is what stops a recorded session from being replayed after a
+restart; each receiver also requires a strictly increasing `n` and never
+advances on a failed authentication. Engine frames that arrive before the
+session is open (the on-connect `flow.hello` races the phone's open) are
+buffered, up to 64, and flushed sealed once it is.
+
+**Rejections are visible.** Plaintext from a paired phone is answered with
+`flow.error {code:"e2e_required"}` and not forwarded; a data frame from a
+revoked phone gets `e2e_revoked`, one before `open` gets `e2e_not_open`, one
+that fails authentication or replays gets `e2e_bad_frame`, and an `open` from
+an unpaired phone gets `e2e_not_paired`. Unpaired phones keep working in
+plaintext (the pre-pairing apps) unless the daemon runs with
+`SMOOTH_FLOW_E2E_REQUIRED=1`. Re-pairing a device rotates its key in place;
+`DELETE /api/flow/pairings/{device}` (`th flow pair revoke`) drops it and every
+live bridge for it notices on its next frame. `GET /api/flow/pairings` never
+serves `key_hex`.
+
+The daemon's relay identity (`daemon-<12 hex>` from `~/.smooth/relay-device-id`
+plus the hostname label) is resolved once at boot and shared by the relay
+connection and the QR, so the link always names the daemon that will answer.
 
 ## Session kinds — harness manifests (th-0f6126)
 
@@ -323,6 +429,10 @@ frame round-trips, the hook table, the reset-time parser, the guard, the PTY
 bridge and — when `tmux` is on `PATH` — a live shell session end to end
 (launch, stream, send, snapshot, kill, death detection). `smooth-daemon`'s
 `flow_route` tests drive the WS + the hook long-poll over a real socket;
-`relay` tests pin the channel routing and the phone caps. All live tests name a
+`relay` tests pin the channel routing, the phone caps and the end-to-end
+guard (`FlowGuard`: pair → open → data, plaintext from a paired phone refused,
+revoke mid-session); `flow_e2e` tests pin the primitives (an RFC 7748 vector,
+nonce layout, tamper + replay rejection) and regenerate/verify the shared
+fixture (`SMOOTH_E2E_WRITE_FIXTURE=1` rewrites it). All live tests name a
 private tmux socket per call (`tmux_socket` on the request) so they never
 touch a running daemon's sessions.
