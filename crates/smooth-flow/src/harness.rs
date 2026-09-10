@@ -591,10 +591,24 @@ impl ScrapeRules {
     /// `smooth_tmux::detect::detect_state`: a live working hint in the tail
     /// wins, then a usage limit anywhere, then an approval, then an error,
     /// then an idle hint in the tail.
+    ///
+    /// One refinement over "an approval anywhere" (th-473294): an approval
+    /// the harness has already moved past — an idle marker on a LATER line —
+    /// is not pending. Scrolling CLIs (aider) keep the answered question on
+    /// screen, `… (Y)es/(N)o [Yes]: y`, and print their `>` prompt under it;
+    /// a modal dialog (gemini's folder trust, Claude Code's approval) has no
+    /// idle marker below it, so it still wins.
     #[must_use]
     pub fn detect(&self, pane: &str) -> Scrape {
         let tail = live_tail(pane);
         let any = |res: &[Regex], hay: &str| res.iter().any(|r| r.is_match(hay));
+        let last_line_matching = |res: &[Regex]| {
+            pane.lines()
+                .enumerate()
+                .filter(|(_, l)| !l.trim().is_empty() && any(res, l))
+                .map(|(i, _)| i)
+                .last()
+        };
         if any(&self.working, &tail) {
             return Scrape {
                 state: PaneState::Working,
@@ -608,7 +622,12 @@ impl ScrapeRules {
                 reset_text,
             };
         }
-        let state = if any(&self.needs_you, pane) {
+        let pending_approval = match (last_line_matching(&self.needs_you), last_line_matching(&self.idle)) {
+            (Some(approval), Some(idle)) => approval > idle,
+            (Some(_), None) => true,
+            (None, _) => any(&self.needs_you, pane),
+        };
+        let state = if pending_approval {
             PaneState::AwaitingApproval
         } else if any(&self.error, pane) {
             PaneState::Errored
@@ -1103,6 +1122,31 @@ mod tests {
         let th = rules("th-code");
         assert_eq!(th.detect("> \n? for shortcuts").state, PaneState::Unknown);
         assert_eq!(th.detect("usage limit reached").state, PaneState::UsageLimit);
+    }
+
+    /// th-473294: an answered prompt that stays on screen above the CLI's own
+    /// `>` prompt is not pending; a dialog with nothing idle below it is.
+    #[test]
+    fn an_approval_above_an_idle_marker_is_not_pending() {
+        let spec = ScrapeSpec {
+            idle: vec!["(?m)^>".into()],
+            needs_you: vec![r"\(y\)es/\(n\)o".into(), "do you trust".into()],
+            ..Default::default()
+        };
+        let rules = ScrapeRules::compile(&spec).unwrap();
+        let aider_answered = "Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]: y\nAdded .aider* to .gitignore\nAider v0.86.2\nMain model: x\n> ";
+        assert_eq!(rules.detect(aider_answered).state, PaneState::Idle);
+        let aider_pending = "Aider v0.86.2\n> \nAdd .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:";
+        assert_eq!(rules.detect(aider_pending).state, PaneState::AwaitingApproval);
+        // gemini: the composer `>` is painted ABOVE the trust dialog.
+        let gemini_dialog = "> Reply with READY\n╭───╮\n│ Do you trust the files in this folder?\n│ ● 1. Trust folder\n╰───╯";
+        assert_eq!(rules.detect(gemini_dialog).state, PaneState::AwaitingApproval);
+        // Claude Code's approval dialog: numbered options, nothing idle below.
+        let claude = ScrapeRules::compile(&claude().state.scrape).unwrap();
+        assert_eq!(
+            claude.detect("> \nEdit file foo.rs?\n  Do you want to proceed?\n  ❯ 1. Yes\n  2. No").state,
+            PaneState::AwaitingApproval
+        );
     }
 
     #[test]

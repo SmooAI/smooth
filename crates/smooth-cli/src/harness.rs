@@ -25,8 +25,9 @@
 //! | Harness | MCP (`th mcp serve`) | Package rendering (`th pkg`) | Extras |
 //! |---|---|---|---|
 //! | claude-code | `~/.claude.json` | via the smooth-agent marketplace plugin | plugin install/update via the `claude` CLI; statusline check |
-//! | codex | `~/.codex/config.toml` | skills → `~/.codex/skills/` | plugin state detection + instructions |
-//! | opencode | `~/.config/opencode/opencode.json` | skills → `~/.opencode/skills/`, lifecycle plugin → `~/.config/opencode/plugins/` | — |
+//! | codex | `~/.codex/config.toml` | skills → `~/.codex/skills/`, SmoothFlow hooks key-merged into `~/.codex/hooks.json` (th-4ad334), rules → `~/.codex/AGENTS.md` | plugin state detection; `~/.smooth` added to the workspace-write sandbox's `writable_roots` |
+//! | opencode | `~/.config/opencode/opencode.json` | skills → `~/.opencode/skills/`, lifecycle plugin → `~/.config/opencode/plugins/`, rules → `~/.config/opencode/AGENTS.md` | — |
+//! | cursor | `~/.cursor/mcp.json` | rules → `~/.cursor/rules/smooth-agent/*.mdc` | — |
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,11 +74,37 @@ pub enum Cmd {
     /// Validate a manifest and copy it into ~/.smooth/harnesses/<name>.toml.
     /// SOURCE is a .toml file, a directory holding harness.toml (or
     /// harness/<name>/harness.toml), or owner/repo[/subdir][#ref] on GitHub.
+    ///
+    /// With --agentic, SOURCE is a harness NAME and Big Smooth writes the
+    /// manifest itself: it probes the CLI's --help (and --docs), drafts a
+    /// manifest, validates it by launching a real session on a private
+    /// engine (launch → working → idle, steer, kill+resume), iterates, installs
+    /// it, and reports what it could not prove. Needs a running daemon with an
+    /// LLM provider — you are offered the Smoo AI Gateway or your own key.
     Add {
         source: String,
         /// Overwrite an existing ~/.smooth/harnesses/<name>.toml.
         #[arg(long)]
         force: bool,
+        /// Let Big Smooth draft + validate the manifest (SOURCE = harness name).
+        #[arg(long)]
+        agentic: bool,
+        /// The executable's name or path when it differs from the name
+        /// (e.g. `gemini-cli` → `gemini`). --agentic only.
+        #[arg(long, requires = "agentic")]
+        binary: Option<String>,
+        /// A docs page (CLI reference / hooks) to give the drafter. --agentic only.
+        #[arg(long, requires = "agentic", value_name = "URL")]
+        docs: Option<String>,
+        /// Draft → validate rounds before giving up (1–6). --agentic only.
+        #[arg(long, requires = "agentic", default_value_t = 3)]
+        iterations: u8,
+        /// Install the best draft even when no run reached idle. --agentic only.
+        #[arg(long, requires = "agentic")]
+        install_unverified: bool,
+        /// Model to pass through `{model}` while validating. --agentic only.
+        #[arg(long, requires = "agentic")]
+        model: Option<String>,
     },
     /// Set up (or update) a harness: register the `th mcp serve` MCP server,
     /// install/update the smooth-agent plugin where the harness has a plugin
@@ -86,7 +113,7 @@ pub enum Cmd {
     /// Idempotent — re-run after upgrading `th` or the plugin. This is the
     /// install AND the update command.
     Enable {
-        /// claude-code | codex | opencode | all
+        /// claude-code | codex | opencode | cursor | all
         provider: String,
     },
     /// Show, per harness: installed?, MCP entry state, plugin/skills state,
@@ -96,7 +123,7 @@ pub enum Cmd {
     /// symlinks that resolve into smooth-owned sources. Never touches
     /// user-owned config; plugin uninstall stays with the harness's own CLI.
     Disable {
-        /// claude-code | codex | opencode | all
+        /// claude-code | codex | opencode | cursor | all
         provider: String,
     },
 }
@@ -116,7 +143,31 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             print_harnesses(&infos_of(&v), true);
             Ok(())
         }
-        Cmd::Add { source, force } => add(&home, &source, force),
+        Cmd::Add {
+            source,
+            force,
+            agentic,
+            binary,
+            docs,
+            iterations,
+            install_unverified,
+            model,
+        } => {
+            if agentic {
+                add_agentic(crate::harness_agentic::AgenticArgs {
+                    name: source,
+                    binary,
+                    docs,
+                    iterations: iterations.clamp(1, 6),
+                    force,
+                    install_unverified,
+                    model,
+                })
+                .await
+            } else {
+                add(&home, &source, force)
+            }
+        }
         Cmd::Enable { provider } => {
             for h in providers(&provider)? {
                 enable(h, &home);
@@ -370,6 +421,57 @@ fn add(home: &Path, source: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// `th harness add --agentic <name>`: the provider gate, then one turn of
+/// Big Smooth calling its `add_harness` tool; the manifest lands in
+/// ~/.smooth/harnesses via the daemon (pearl th-473294).
+async fn add_agentic(args: crate::harness_agentic::AgenticArgs) -> Result<()> {
+    if !manifests::Manifest::parse(&format!(
+        "name = \"{}\"\n[binary]\nnames = [\"x\"]\n[launch]\nargv = [\"{{prompt}}\"]\n",
+        args.name
+    ))
+    .is_ok()
+    {
+        bail!(
+            "`{}` is not a valid harness name (lowercase letters, digits, dashes)\n  → th harness add --agentic gemini",
+            args.name
+        );
+    }
+    if !crate::harness_agentic::ensure_provider().await? {
+        return Ok(());
+    }
+    let reply = crate::harness_agentic::run_turn(&args).await?;
+    // The report is authoritative: if the daemon installed it, it is on disk now.
+    let home = mcp_install::harness_home()?;
+    let dest = user_manifests_dir(&home).join(format!("{}.toml", args.name));
+    if dest.is_file() {
+        let m = manifests::load_file(&dest)?;
+        let binary = m.resolve_binary_in(&home, &std::env::var_os("PATH").unwrap_or_default());
+        println!(
+            "{} {} → {}  ({})",
+            paint("●", |g| g.bold().to_string()),
+            m.name,
+            dest.display(),
+            binary.map_or_else(|| format!("`{}` not on PATH", m.binary.names.join("`/`")), |b| b.display().to_string())
+        );
+        println!(
+            "{}",
+            paint(
+                &format!("  th flow new --kind {} --prompt \"say hi\"   ·   th harness show {}", m.name, m.name),
+                |t| t.dimmed().to_string()
+            )
+        );
+    } else if !reply.to_ascii_lowercase().contains("needs_provider") {
+        println!(
+            "{}",
+            paint(
+                "  not installed — the report above has the draft; th harness add <file> installs an edited one",
+                |t| t.dimmed().to_string()
+            )
+        );
+    }
+    Ok(())
+}
+
 fn providers(spec: &str) -> Result<Vec<Harness>> {
     if spec.trim().eq_ignore_ascii_case("all") {
         Ok(Harness::ALL.to_vec())
@@ -400,8 +502,9 @@ fn enable(h: Harness, home: &Path) {
         Harness::Codex => {
             pkg_step(h, home);
             codex_plugin_step(home);
+            codex_sandbox_step(home);
         }
-        Harness::OpenCode => pkg_step(h, home),
+        Harness::OpenCode | Harness::Cursor => pkg_step(h, home),
     }
 }
 
@@ -412,9 +515,24 @@ fn pkg_step(h: Harness, home: &Path) {
         println!("   package: no smooth-agent checkout found — enable claude-code first (the plugin checkout is the canonical source)");
         return;
     };
-    match pkg::install(&pkg::Paths::new(home.to_path_buf()), &pkg::Source::Path(root), &[h]) {
-        Ok(_) => println!("   package: smooth-agent rendered for {h} (th pkg status smooth-agent)"),
+    match pkg::install(&pkg::Paths::new(home.to_path_buf()), &pkg::Source::Path(root.clone()), &[h]) {
+        Ok(_) => println!("   package: smooth-agent rendered for {h} from {} (th pkg status smooth-agent)", root.display()),
         Err(e) => println!("   package: {} {e:#}", "FAILED".bright_red()),
+    }
+}
+
+/// Codex's `workspace-write` sandbox only lets a session write under its
+/// cwd, so every `th pearls` / `th agent` write inside Codex fails with
+/// "unable to open database file" (sqlite error 14) until `~/.smooth` is a
+/// `writable_roots` entry. Added once, with a comment saying why.
+fn codex_sandbox_step(home: &Path) {
+    match ensure_codex_smooth_writable(home) {
+        Ok(true) => println!(
+            "   sandbox: added {} to [sandbox_workspace_write].writable_roots (pearls + agent mail writes)",
+            home.join(".smooth").display()
+        ),
+        Ok(false) => println!("   sandbox: ~/.smooth already in [sandbox_workspace_write].writable_roots"),
+        Err(e) => println!("   sandbox: {} {e:#}", "FAILED".bright_red()),
     }
 }
 
@@ -504,11 +622,33 @@ fn status(h: Harness, home: &Path) {
             }
             statusline_step(home);
         }
-        Harness::Codex => match codex_plugin_enabled(home) {
-            Ok(true) => println!("   plugin: smooth-agent@smooth enabled"),
-            Ok(false) => println!("   plugin: not installed"),
-            Err(e) => println!("   plugin: could not read codex config — {e:#}"),
-        },
+        Harness::Codex => {
+            match codex_plugin_enabled(home) {
+                Ok(true) => println!("   plugin: smooth-agent@smooth enabled"),
+                Ok(false) => println!("   plugin: not installed"),
+                Err(e) => println!("   plugin: could not read codex config — {e:#}"),
+            }
+            match codex_flow_hooks(home) {
+                0 => println!("   hooks: SmoothFlow flow hook not in ~/.codex/hooks.json — `th harness enable codex` (state falls back to pane scraping)"),
+                n => println!("   hooks: SmoothFlow flow hook wired ({n} events in ~/.codex/hooks.json)"),
+            }
+            match codex_smooth_writable(home) {
+                Ok(true) => println!("   sandbox: ~/.smooth writable (pearls + agent mail work under workspace-write)"),
+                Ok(false) => println!(
+                    "   sandbox: ~/.smooth NOT in [sandbox_workspace_write].writable_roots — th pearls/agent writes fail in Codex; `th harness enable codex`"
+                ),
+                Err(e) => println!("   sandbox: could not read codex config — {e:#}"),
+            }
+        }
+        Harness::Cursor => {
+            let dir = home.join(".cursor").join("rules").join("smooth-agent");
+            let n = std::fs::read_dir(&dir).map_or(0, |d| d.flatten().count());
+            if n == 0 {
+                println!("   rules: none rendered — `th harness enable cursor`");
+            } else {
+                println!("   rules: {n} rendered in {}", dir.display());
+            }
+        }
         Harness::OpenCode => {
             let n = smooth_skill_links(home).len();
             if n == 0 {
@@ -543,6 +683,17 @@ fn disable(h: Harness, home: &Path) -> Result<()> {
     }
     if h == Harness::ClaudeCode {
         println!("   plugin: left installed — remove with `claude plugin uninstall smooth-agent@smooth` if you mean it");
+    } else {
+        // Everything `th pkg` recorded for this harness: skills, hooks it
+        // merged into hooks.json, config keys, rules, AGENTS.md sections.
+        let warnings = pkg::rm_harness(&pkg::Paths::new(home.to_path_buf()), "smooth-agent", h)?;
+        for w in warnings {
+            println!("   {} {w}", "!".bright_yellow());
+        }
+        println!("   package: smooth-agent's {h} rendering removed (th pkg index)");
+    }
+    if h == Harness::Codex {
+        println!("   sandbox: ~/.smooth left in writable_roots (harmless without th; remove by hand if you mean it)");
     }
     println!("   (th pkg rm smooth-agent removes the package from every harness at once)");
     Ok(())
@@ -550,9 +701,18 @@ fn disable(h: Harness, home: &Path) -> Result<()> {
 
 // ---------------------------------------------------------------- skills ----
 
-/// Where the canonical smooth-agent package lives on this machine: the newest
-/// installed Claude plugin cache, else the marketplace checkout.
+/// Where the canonical smooth-agent package lives on this machine: the path
+/// a previous `th pkg install <path>` of smooth-agent used (a repo checkout —
+/// the freshest source, and what `enable` should re-render from), else the
+/// newest installed Claude plugin cache, else the marketplace checkout.
 fn package_root(home: &Path) -> Option<PathBuf> {
+    if let Some(p) = pkg::Index::load(&pkg::Paths::new(home.to_path_buf()))
+        .ok()
+        .and_then(|i| i.packages.get("smooth-agent").and_then(|r| r.source.strip_prefix("path:").map(PathBuf::from)))
+        .filter(|p| p.join("skills").is_dir())
+    {
+        return Some(p);
+    }
     if let Some(version) = claude_plugin_cache(home) {
         let p = home.join(".claude/plugins/cache/smooth/smooth-agent").join(version);
         if p.join("skills").is_dir() {
@@ -633,6 +793,77 @@ fn codex_plugin_enabled(home: &Path) -> Result<bool> {
         .unwrap_or(false))
 }
 
+/// How many `flow-hook.sh` entries `~/.codex/hooks.json` carries (0 = not wired).
+fn codex_flow_hooks(home: &Path) -> usize {
+    fn count(v: &Value) -> usize {
+        match v {
+            Value::String(s) => usize::from(s.contains("flow-hook.sh")),
+            Value::Array(a) => a.iter().map(count).sum(),
+            Value::Object(m) => m.values().map(count).sum(),
+            _ => 0,
+        }
+    }
+    std::fs::read_to_string(home.join(".codex").join("hooks.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .map_or(0, |v| count(&v))
+}
+
+/// The spellings of `~/.smooth` a user might already have in `writable_roots`.
+fn smooth_root_spellings(home: &Path) -> [String; 2] {
+    [home.join(".smooth").display().to_string(), "~/.smooth".to_string()]
+}
+
+/// Is `~/.smooth` (either spelling) in `[sandbox_workspace_write].writable_roots`?
+fn codex_smooth_writable(home: &Path) -> Result<bool> {
+    let path = Harness::Codex.config_path(home);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)?.parse().with_context(|| format!("parse {}", path.display()))?;
+    let spellings = smooth_root_spellings(home);
+    Ok(doc
+        .get("sandbox_workspace_write")
+        .and_then(|t| t.get("writable_roots"))
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|a| a.iter().filter_map(toml_edit::Value::as_str).any(|s| spellings.iter().any(|x| x == s))))
+}
+
+/// Add `~/.smooth` (absolute — Codex does not document tilde expansion there)
+/// to `writable_roots`, creating the table with an explanatory comment.
+/// Returns whether anything was written. Edits in place: the user's other
+/// roots, comments and layout survive.
+fn ensure_codex_smooth_writable(home: &Path) -> Result<bool> {
+    if codex_smooth_writable(home)? {
+        return Ok(false);
+    }
+    let path = Harness::Codex.config_path(home);
+    let raw = if path.exists() { std::fs::read_to_string(&path)? } else { String::new() };
+    let mut doc: toml_edit::DocumentMut = raw.parse().with_context(|| format!("parse {} — fix or move it, then re-run", path.display()))?;
+    let fresh = doc.get("sandbox_workspace_write").is_none();
+    let item = doc["sandbox_workspace_write"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    if fresh {
+        if let Some(t) = item.as_table_mut() {
+            t.decor_mut().set_prefix(
+                "\n# th (pearls, agent mail) keeps its state under ~/.smooth; without this the\n# workspace-write sandbox fails every `th agent`/`th pearls` write with\n# \"unable to open database file\" (sqlite error 14). Added by `th harness enable codex`.\n",
+            );
+        }
+    }
+    let Some(table) = item.as_table_like_mut() else {
+        bail!("[sandbox_workspace_write] in {} is not a table", path.display());
+    };
+    let roots = table.entry("writable_roots").or_insert(toml_edit::value(toml_edit::Array::new()));
+    let Some(arr) = roots.as_array_mut() else {
+        bail!("[sandbox_workspace_write].writable_roots in {} is not an array", path.display());
+    };
+    arr.push(home.join(".smooth").display().to_string());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string()).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
 fn claude_statusline_wired(home: &Path) -> bool {
     let settings = home.join(".claude").join("settings.json");
     std::fs::read_to_string(settings)
@@ -677,7 +908,124 @@ mod tests {
         let oc = root.join("harness/opencode");
         std::fs::create_dir_all(&oc).unwrap();
         std::fs::write(oc.join("plugin.js"), "export const SmoothAgent = 1;").unwrap();
+        let cx = root.join("harness/codex");
+        std::fs::create_dir_all(&cx).unwrap();
+        std::fs::write(
+            cx.join("hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart codex"}]}],"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Stop codex"}]}]}}"#,
+        )
+        .unwrap();
         tmp
+    }
+
+    /// th-4ad334: `enable codex` merges the flow hook into the user's
+    /// hooks.json and adds ~/.smooth to the sandbox once; `disable` takes
+    /// back only what we added.
+    #[test]
+    #[cfg(unix)]
+    fn enable_codex_wires_flow_hooks_and_sandbox_and_disable_removes_only_ours() {
+        let tmp = home();
+        let hooks = tmp.path().join(".codex/hooks.json");
+        let user_hooks = serde_json::json!({"hooks":{
+            "PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"th prime"}]}],
+            "SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"th prime"}]}]
+        }});
+        std::fs::write(&hooks, serde_json::to_string_pretty(&user_hooks).unwrap()).unwrap();
+        let cfg = Harness::Codex.config_path(tmp.path());
+        std::fs::write(
+            &cfg,
+            "# mine\nmodel = \"gpt-5.5\"\n\n[sandbox_workspace_write]\nwritable_roots = [\"/tmp/other\"]\n",
+        )
+        .unwrap();
+
+        enable(Harness::Codex, tmp.path());
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        let ss: Vec<&str> = doc["hooks"]["SessionStart"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(ss[0], "th prime", "the user's hook stays first");
+        assert!(
+            ss[1].ends_with("/hooks/flow-hook.sh SessionStart codex") && ss[1].contains("/.smooth/pkg/cache/"),
+            "{ss:?}"
+        );
+        assert_eq!(ss.len(), 2);
+        assert_eq!(doc["hooks"]["PreCompact"][0]["hooks"][0]["command"], "th prime");
+        assert_eq!(codex_flow_hooks(tmp.path()), 2);
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(raw.contains("# mine") && raw.contains("\"/tmp/other\""), "{raw}");
+        assert!(codex_smooth_writable(tmp.path()).unwrap(), "{raw}");
+        assert!(raw.contains(&format!("\"{}\"", tmp.path().join(".smooth").display())), "{raw}");
+        assert!(!raw.contains("sqlite error 14"), "no comment when the table already existed: {raw}");
+
+        // Idempotent: nothing doubles.
+        enable(Harness::Codex, tmp.path());
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        assert_eq!(doc["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap().len(), 2);
+        let abs = format!("\"{}\"", tmp.path().join(".smooth").display());
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap().matches(&abs).count(), 1);
+        status(Harness::Codex, tmp.path());
+
+        disable(Harness::Codex, tmp.path()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        assert_eq!(doc, user_hooks, "exactly the user's hooks again");
+        assert_eq!(codex_flow_hooks(tmp.path()), 0);
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!raw.contains("mcp_servers.smooth") && raw.contains("# mine"), "{raw}");
+        assert!(codex_smooth_writable(tmp.path()).unwrap(), "the sandbox root is left in place");
+        assert!(
+            std::fs::symlink_metadata(tmp.path().join(".codex/skills/pearls-flow")).is_err(),
+            "skills links removed"
+        );
+    }
+
+    #[test]
+    fn codex_sandbox_root_is_added_once_with_a_comment_and_both_spellings_count() {
+        let tmp = home();
+        let cfg = Harness::Codex.config_path(tmp.path());
+        assert!(!codex_smooth_writable(tmp.path()).unwrap(), "no file yet");
+        std::fs::write(&cfg, "model = \"m\"\n").unwrap();
+        assert!(ensure_codex_smooth_writable(tmp.path()).unwrap());
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(raw.starts_with("model = \"m\"\n"), "{raw}");
+        assert!(raw.contains("sqlite error 14") && raw.contains("[sandbox_workspace_write]"), "{raw}");
+        let doc: toml_edit::DocumentMut = raw.parse().unwrap();
+        assert_eq!(doc["sandbox_workspace_write"]["writable_roots"].as_array().unwrap().len(), 1);
+        assert!(!ensure_codex_smooth_writable(tmp.path()).unwrap(), "second call is a no-op");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
+
+        // The tilde spelling counts as present too.
+        std::fs::write(&cfg, "[sandbox_workspace_write]\nwritable_roots = [\"~/.smooth\"]\n").unwrap();
+        assert!(codex_smooth_writable(tmp.path()).unwrap());
+        assert!(!ensure_codex_smooth_writable(tmp.path()).unwrap());
+        // A table without the key gets the key; a non-array key is refused.
+        std::fs::write(&cfg, "[sandbox_workspace_write]\nnetwork_access = true\n").unwrap();
+        assert!(ensure_codex_smooth_writable(tmp.path()).unwrap());
+        let raw = std::fs::read_to_string(&cfg).unwrap();
+        assert!(raw.contains("network_access = true") && raw.contains("writable_roots"), "{raw}");
+        std::fs::write(&cfg, "[sandbox_workspace_write]\nwritable_roots = \"nope\"\n").unwrap();
+        assert!(ensure_codex_smooth_writable(tmp.path()).is_err());
+        std::fs::write(&cfg, "[[[").unwrap();
+        assert!(codex_smooth_writable(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn package_root_prefers_the_index_source_path_when_it_still_exists() {
+        let tmp = home();
+        let paths = pkg::Paths::new(tmp.path().to_path_buf());
+        let src = tmp.path().join("checkout");
+        std::fs::create_dir_all(src.join("skills/x")).unwrap();
+        std::fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+        std::fs::write(src.join(".claude-plugin/plugin.json"), r#"{"name":"smooth-agent"}"#).unwrap();
+        pkg::install(&paths, &pkg::Source::Path(src.clone()), &[Harness::OpenCode]).unwrap();
+        assert_eq!(package_root(tmp.path()).unwrap(), src.canonicalize().unwrap());
+        std::fs::remove_dir_all(&src).unwrap();
+        assert!(
+            package_root(tmp.path()).unwrap().ends_with("marketplaces/smooth/claude-plugins/smooth-agent"),
+            "falls back"
+        );
     }
 
     #[test]
@@ -825,6 +1173,7 @@ mod tests {
     fn providers_expands_all_and_rejects_junk() {
         assert_eq!(providers("all").unwrap(), Harness::ALL.to_vec());
         assert_eq!(providers("claude").unwrap(), vec![Harness::ClaudeCode]);
-        assert!(providers("cursor").is_err());
+        assert_eq!(providers("cursor").unwrap(), vec![Harness::Cursor]);
+        assert!(providers("copilot").is_err());
     }
 }

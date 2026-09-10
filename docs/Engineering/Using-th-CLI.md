@@ -70,6 +70,10 @@ th harness unhide codex
 th harness order th-code claude    # these first, in this order; the rest follow
 th harness add ./aider.toml        # validate + copy into ~/.smooth/harnesses/aider.toml
 th harness add owner/repo[/subdir][#ref]   # same, from a GitHub repo's harness.toml / harness/<name>/harness.toml
+th harness add --agentic gemini [--binary gemini] [--docs <url>] [--iterations 3] [--force] [--install-unverified] [--model m]
+                                   # Big Smooth probes --help, drafts the manifest, VALIDATES it on a private engine
+                                   # (launch → idle, steer, kill+resume), iterates, installs, reports what it could not prove.
+                                   # Needs a provider: you're offered the Smoo AI Gateway or your own key (th-473294)
 ```
 
 `list`/`show` read the files directly (with the daemon's order/hide prefs
@@ -83,23 +87,32 @@ updates) each coding harness with the smooth toolbox:
 ```bash
 th harness enable claude-code   # smooth-agent plugin install/update (claude CLI),
                                 # MCP server, statusline check
-th harness enable codex         # MCP server + plugin state detection
+th harness enable codex         # MCP server + plugin state detection + SmoothFlow flow hooks
+                                # key-merged into ~/.codex/hooks.json (Codex ≥ 0.153, th-4ad334)
+                                # + ~/.smooth in [sandbox_workspace_write].writable_roots so
+                                # th pearls / th agent can write under the workspace-write sandbox
 th harness enable opencode      # MCP server + shared-skill symlinks (~/.opencode/skills)
                                 # + the lifecycle plugin (~/.config/opencode/plugins/smooth-agent.js):
                                 # every OpenCode session registers on the th-mail bus with
                                 # working/idle/offline presence (pearl th-cc50cd)
+th harness enable cursor        # MCP server (~/.cursor/mcp.json) + rules → ~/.cursor/rules/smooth-agent/*.mdc
 th harness enable all
-th harness status               # per-harness: MCP ok/stale/missing, plugin, skills, statusline
-th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry, smooth-owned links)
+th harness status               # per-harness: MCP ok/stale/missing, plugin, skills, statusline,
+                                # codex hooks + sandbox root, cursor rules
+th harness disable <provider>   # removes ONLY what smooth wrote (MCP entry + the th pkg rendering
+                                # for that harness: skills, hooks, config keys, AGENTS.md section)
 ```
 
 `enable` is the install AND the update command — re-run it after upgrading
 `th` or the plugin. All writes are preserving (user config keys, comments and
-key order survive); `disable` never touches user-owned entries. Since
-th-55b2c7 the Codex/OpenCode half is sugar for `th pkg install <smooth-agent
-checkout> --harness <x>` (§1c) — skills, the OpenCode lifecycle plugin and
-their provenance come from `th pkg`; `th harness` keeps the MCP entry and the
-per-harness extras. Inbox delivery INTO a running OpenCode session
+key order survive; a `th prime` you already had in `~/.codex/hooks.json` is
+never ours to remove); `disable` never touches user-owned entries. Since
+th-55b2c7 the Codex/OpenCode/Cursor half is sugar for `th pkg install
+<smooth-agent checkout> --harness <x>` (§1c) — skills, hooks overlays, rules,
+the OpenCode lifecycle plugin and their provenance come from `th pkg`;
+`th harness` keeps the MCP entry and the per-harness extras. The checkout is
+the path of a previous `th pkg install <path>` of smooth-agent when it still
+exists (a repo checkout), else the Claude plugin cache. Inbox delivery INTO a running OpenCode session
 (prompt-boundary context injection via the SDK client) is the remaining piece
 of pearl th-cc50cd; the write kill switch for `th mcp serve` is
 `SMOOTH_MCP_ALLOW_WRITE=0` (th-1d5ca8).
@@ -116,6 +129,7 @@ every written path (+ sha256) and every owned config key in
 
 ```bash
 th pkg install ./claude-plugins/smooth-agent --harness all   # path, copied to ~/.smooth/pkg/cache
+th pkg install ./claude-plugins/smooth-agent --harness codex,cursor   # a comma list
 th pkg install SmooAI/smooth/claude-plugins/smooth-agent#v1  # owner/repo[/subdir][#ref] (git clone --depth 1)
 th pkg install ./repo-with-marketplace                       # .claude-plugin/marketplace.json → every plugin
 th pkg install https://x.dev/marketplace.json                # remote marketplace
@@ -125,17 +139,24 @@ th pkg rm <name>                                             # removes exactly w
 th pkg init [dir]                                            # scaffold core + harness/ overlays
 ```
 
-What each harness gets in M0: **claude-code** → handed to Claude's own plugin
+What each harness gets: **claude-code** → handed to Claude's own plugin
 system (`enabledPlugins` + `extraKnownMarketplaces` in `~/.claude/settings.json`;
 the repo's marketplace when it has one, else a composed copy under the local
-`th-pkg` directory marketplace) plus `rules/` → `~/.claude/rules/<pkg>/`;
-**codex** → skills symlinked into `~/.codex/skills`, MCP into
-`[mcp_servers.*]`, `harness/codex/config.toml` key-merged; **opencode** →
-skills into `~/.opencode/skills`, MCP into `mcp.*`, `harness/opencode/plugin.js`
-linked into `~/.config/opencode/plugins/`; **every** install also links skills
-into `~/.smooth/skills` for `th` itself. Hooks are never translated between
-harnesses. `--harness` takes a comma list or `all`; a harness that isn't
-installed is skipped with a note.
+`th-pkg` directory marketplace, with core + overlay `hooks.json` key-merged)
+plus `rules/` → `~/.claude/rules/<pkg>/`; **codex** → skills symlinked into
+`~/.codex/skills`, MCP into `[mcp_servers.*]`, `harness/codex/config.toml`
+key-merged, `harness/codex/hooks.json` key-merged into `~/.codex/hooks.json`,
+`rules/` → a `<!-- th-pkg:<pkg> -->` managed section in `~/.codex/AGENTS.md`;
+**opencode** → skills into `~/.opencode/skills`, MCP into `mcp.*`,
+`harness/opencode/plugin.js` linked into `~/.config/opencode/plugins/`, `rules/`
+→ a managed section in `~/.config/opencode/AGENTS.md`; **cursor** → `rules/`
+→ `~/.cursor/rules/<pkg>/*.mdc` (Cursor frontmatter) + MCP into
+`~/.cursor/mcp.json`; **every** install also links skills into
+`~/.smooth/skills` for `th` itself. Hooks are never translated between
+harnesses (a `hooks.json` overlay is an explicit per-harness shim). `--harness`
+takes a comma list or `all`; a harness that isn't installed is skipped with a
+note. M1 details (merge rules, `.mdc` rendering, the managed section
+contract): [`Harness-Packages.md`](Harness-Packages.md#m1--overlays-that-merge-instead-of-replace).
 
 ---
 
@@ -1132,9 +1153,9 @@ Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooa
 
 ```bash
 th up                                              # boot Smooth platform (host daemon)
-th down                                            # stop
+th down                                            # stop — the daemon and its whole process tree, verified (th-eed3de)
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
+th run <pearl-id | "task text">                    # one headless turn on Big Smooth (title+description of the pearl, or the text); a daemon that is down or refuses = non-zero exit
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
@@ -1214,11 +1235,26 @@ th flow send <id> "also add a regression test"           # steer: bracketed-past
 th flow inbox                                            # sessions that need you or finished unread
 th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]
 th flow kill <id> [--resume]                             # kill the tree; --resume relaunches `claude --resume`
+th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
+th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
+th flow pair --timeout 0                                 # just print the smoothflow://pair?… link (open it on the phone)
+th flow pair list                                        # paired phones: device, label, platform, paired, last seen
+th flow pair revoke <phone-device>                       # its next encrypted frame is refused
 ```
+
+**Phones are end-to-end encrypted (th-d98fde).** A paired phone's flow frames
+are sealed with a key only the phone and this daemon hold; the Smoo Relay
+brokers ciphertext. The QR carries the daemon's relay device id, a fresh
+X25519 public key and a one-time code that never crosses the relay; the
+SmoothFlow app (Connect ▸ Pair a Mac) or the Camera app scans it. Once a phone
+is paired, plaintext frames from it are rejected with a visible `flow.error`
+(`e2e_required`); re-pairing rotates the key. `SMOOTH_FLOW_E2E_REQUIRED=1`
+makes the daemon refuse plaintext from unpaired phones too. Protocol:
+`docs/Architecture/SmoothFlow.md` → _End-to-end encryption_.
 
 States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `limited` (usage limit — the engine resumes at the parsed reset time) ·

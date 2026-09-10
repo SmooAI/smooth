@@ -34,10 +34,12 @@ final class FlowClient {
         store.connection = .disconnected(reason: nil)
     }
 
-    func send(_ frame: ClientFrame) {
+    /// `seq` rides on the frame so the engine's reply (`flow.error.ref`) can be
+    /// matched to it; most frames need none.
+    func send(_ frame: ClientFrame, seq: Int? = nil) {
         guard let task, store.connection.isConnected else { return }
         // Text, not binary: the engine's WS loop only reads `Message::Text`.
-        task.send(.string(frame.encodeText())) { [weak self] error in
+        task.send(.string(frame.encodeText(seq: seq))) { [weak self] error in
             if let error { Task { @MainActor in self?.dropped("send failed: \(error.localizedDescription)") } }
         }
     }
@@ -67,6 +69,40 @@ final class FlowClient {
     }
 
     private struct HarnessList: Decodable { var harnesses: [HarnessInfo] }
+
+    // ── phone pairing (th-d98fde) ────────────────────────────────────────────
+
+    /// `POST /api/flow/pair` — mint a QR.
+    func beginPairing() async throws -> PairingBegin {
+        try await jsonCall(method: "POST", path: "api/flow/pair")
+    }
+
+    /// `GET /api/flow/pair/{id}` — poll until scanned.
+    func pairingStatus(_ id: String) async throws -> PairingPoll {
+        try await jsonCall(method: "GET", path: "api/flow/pair/\(id)")
+    }
+
+    /// `GET /api/flow/pairings`
+    func pairings() async throws -> PairingsList {
+        try await jsonCall(method: "GET", path: "api/flow/pairings")
+    }
+
+    /// `DELETE /api/flow/pairings/{device}` → whether a pairing was removed.
+    func revokePairing(_ device: String) async throws -> Bool {
+        struct Reply: Decodable { var revoked: Bool }
+        let r: Reply = try await jsonCall(method: "DELETE", path: "api/flow/pairings/\(device)")
+        return r.revoked
+    }
+
+    private func jsonCall<T: Decodable>(method: String, path: String) async throws -> T {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var req = URLRequest(url: address.httpBase.appendingPathComponent(path))
+        req.httpMethod = method
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse) }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
 
     private func harnessCall(method: String, path: String, body: Data?) async throws -> [HarnessInfo] {
         guard let address else { throw URLError(.cannotConnectToHost) }

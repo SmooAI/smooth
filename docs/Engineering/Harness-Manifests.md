@@ -115,6 +115,12 @@ otherwise the whole pane is); then `needs_you`; then `error`; then `idle` in
 the tail; else unknown. For `hooks`/`native` sources the engine scrapes only
 limits and approvals; working/idle come from the harness.
 
+One refinement over "an approval anywhere" (th-473294): a `needs_you` hit
+with an `idle` hit on a **later line** is not pending. Scrolling CLIs (aider)
+keep the answered question on screen — `… (Y)es/(N)o [Yes]: y` — and print
+their `>` prompt under it; a modal dialog (gemini's folder trust, Claude
+Code's approval box) has nothing idle below it, so it still wins.
+
 ### State sources
 
 - **hooks** — the harness posts to `POST /api/flow/hooks` (`{harness, event,
@@ -185,5 +191,116 @@ note; `hide`/`unhide`/`order` need the daemon.
    it didn't resolve). `th flow new --kind mytool --prompt "say ok"`.
 4. To ship it: put it at `harness/<name>/harness.toml` in a `th pkg` package.
 
-The agentic version of this (draft from `--help`, validate against the
-fake-agent rig, install) is phase 2 of th-faa590.
+## Agentic add — `th harness add --agentic <name>` (pearl th-473294)
+
+Big Smooth can write the manifest itself. The daemon tool `add_harness(name,
+binary_hint?, docs_url?, max_iterations?, force?, install_unverified?,
+model?)` is the agentic loop; every piece it composes is deterministic and
+unit-tested in `smooth-flow`:
+
+1. **Probe** — resolve the binary (`~/.local/bin`, `~/.cargo/bin`, … before
+   `PATH`, skipping cmux shims), run `--help` (`-h` / `help` fallbacks) and
+   `--version`; fetch `docs_url` as markdown through `th crawl scrape` (the
+   `crawl` tool's egress rules apply).
+2. **Facts** — `harness_draft::parse_help` reads clap / commander / yargs /
+   argparse layouts into flags, subcommands and positionals, then
+   `argv_candidates` ranks launch shapes: an interactive positional prompt
+   (80), an "…and stay interactive" flag (70), a plain `--prompt`/`--message`
+   flag that is not a batch mode (60), else **paste** (40). Print/headless/
+   "then exit" flags are never the prompt slot. `--session-id` ⇒
+   `preassigned`; `--resume <id>` / `resume <id>` ⇒ `resume_session`; a
+   `hooks` subcommand ⇒ "documents hooks". The best candidate becomes the
+   skeleton TOML.
+3. **Draft** — the daemon's model (`operator::agent_llm_config`, the coding
+   route) gets the schema, the built-in `claude.toml` as the reference, the
+   help text, the docs, the ranked candidates and the skeleton, and answers
+   with one ```toml block. Parse errors are fed straight back.
+4. **Validate** — `harness_validate::validate` runs the draft on a **private
+   engine** (`EngineDriver::private`: its own `flow.db`, its own
+   `tmux -L smooth-flow-validate-<pid>-…` server, a scratch `$HOME` holding
+   only the draft, a scratch git repo as the worktree — the user's flow.db,
+   tmux server and `~/.smooth/harnesses/` are never touched). The state
+   machine proves, in order: launch · working observed · first turn idle ·
+   steer acknowledged · steered turn idle · kill+resume came back · the
+   relaunch argv carried the session id. Each step ends **proven**,
+   **unproven** (could not be shown either way — e.g. no session id was
+   learned because state is scraped) or **failed** (shown not to work, with
+   the pane tail). Budgets: 60 s to boot, 120 s per turn.
+5. **Iterate** — on failure the verdict, the last 12 pane lines and an idle
+   pattern derived from that pane (`scrape_from_panes`) go back to the
+   drafter, up to `max_iterations` (default 3, max 6). The attempt with the
+   most proofs wins.
+6. **Install** — a _usable_ draft (launch + idle proven) is written to
+   `~/.smooth/harnesses/<name>.toml` (`force` to replace) with a provenance
+   header; `install_unverified` writes the best draft regardless. The report
+   lists the manifest, every proven step, every unproven/failed step with
+   why, and next steps (`th flow new --kind <name>`, wire hooks, …).
+
+`th harness add --agentic <name> [--binary <exe>] [--docs <url>]
+[--iterations N] [--force] [--install-unverified] [--model <m>]` drives this
+over the daemon's canonical WebSocket (one `send_message` turn asking the
+agent to call `add_harness` with exactly those arguments): tool progress on
+stderr, the agent's report on stdout, then the installed manifest line.
+
+**Provider gate.** Drafting needs a model. `GET /api/llm/provider` reports
+`{configured, source, model, gateway_host, restart_required, options}` (never
+a key). With nothing configured the tool answers a structured
+`needs_provider` report and the CLI prompts:
+
+- **Smoo AI Gateway (recommended)** — `smoo auth login` if needed, mint the
+  org's `llm.smoo.ai` key (`/llm-gateway/create-key`; on 409 offer a rotate
+  or paste the existing key), save it as the `smooai-gateway` provider in
+  `~/.smooth/providers.json` (other providers survive; coding default
+  `deepseek-v4-flash`).
+- **Bring your own key** — `th model login`.
+
+The daemon reads its gateway **once at boot**, so after a provider is saved
+the gate answers `configured` + `restart_required` and the CLI says so:
+`th down && th up`, then rerun. Non-TTY runs get the two commands instead of
+a prompt.
+
+**First-run prompts.** The private engine runs the CLI in a scratch folder,
+so the validator meets exactly what a user meets on a fresh machine: gemini's
+_"Do you trust the files in this folder?"_ then its auth-method dialog,
+aider's _"Add .aider\* to .gitignore? (Y)es/(N)o"_. Before the first idle (and
+after a resume — never during a steer, where a prompt is the harness's real
+answer) it answers those the way a person would: `harness_validate::
+FIRST_RUN_PROMPTS` names each dialog and the key that accepts its default
+(`Enter`; the exceptions, _"open the documentation url?"_ and _"see what's
+new in this version?"_, get `n` so no browser pops mid-validation). A visible
+prompt is checked _before_ the scraped state is believed (gemini paints its
+`>` composer a beat before the trust dialog covers it), a scraped `idle` must
+hold for three polls, the prompt **nearest the cursor** is the pending one
+(scrolling CLIs keep the answered questions visible above the live one, with
+the typed answer echoed onto them), each is answered once while it stays on
+screen, at most `MAX_ANSWERS` (4) per run. Every answer is recorded in the verdict (`answered`), shown in
+the report (`◐ answered a first-run prompt by pressing its default: …`) and
+handed to the drafter with the rule that `needs_you` must match each one — a
+real SmoothFlow session must surface them to the user, never skip them with a
+flag.
+
+Two things are never pressed: a **sign-in** (_"Press any key to sign in…"_,
+_"Sign in with Google"_ highlighted — `Enter` there starts a browser login on
+the user's desk; gemini's auth dialog is answered only when it says an API
+key was detected, because that is then the default), and any `needs_you` the
+table does not name (an approval, an unknown dialog) — that is the harness
+asking, and it stays the blocking reason with the pane tail.
+
+What it cannot prove is reported, not assumed: a CLI that needs a sign-in, or
+a dialog the default key does not clear, stops at `first turn reached idle —
+FAILED: …` with the pane tail (and what was already pressed), and is not
+installed unless `--install-unverified`. Sign the CLI in and rerun.
+
+Smoke-tested on this machine (2026-09-09) against a private daemon
+(`deepseek-v4-flash` via llm.smoo.ai), one `th harness add --agentic <cli>` each:
+
+| CLI                                       | version    | result                  | reached                                                                                                                                                                        | blocker                                                                                                               |
+| ----------------------------------------- | ---------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `gemini` (`@google/gemini-cli`, npm)      | 0.59.0     | **installed** (partial) | launch, working, first idle, **steered turn idle, kill+resume, resume reused the session id**; steer-acknowledged unproven (its turn is too fast to catch `working` mid-steer) | folder-trust dialog — answered by the validator                                                                       |
+| `aider` (`aider-chat`, `uv tool`, py3.12) | 0.86.2     | drafted, not installed  | launch; three first-run prompts answered (`.gitignore` → Enter, docs → n, "what's new" → n)                                                                                    | `prompt_as="paste"` pastes on a timer and lands inside a first-run question, so the turn never runs — pearl th-d2a1e4 |
+| `cursor-agent`                            | 2025.10.01 | drafted, not installed  | launch                                                                                                                                                                         | browser sign-in wall ("Press any key to sign in…") — never pressed by design; sign in once, then rerun                |
+
+`gemini`'s installed manifest launches with `--session-id {session_id} --model
+{model} {prompt}` (prompt as argv, preassigned session id), resumes with
+`--resume {session_id}`, scrapes state (its `hooks` subcommand is undocumented
+for our transport), steers by bracketed paste, kills with TERM.

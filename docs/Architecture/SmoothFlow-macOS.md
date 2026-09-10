@@ -88,20 +88,73 @@ daemon it did not start:
 - The child is spawned through a one-line `sh` supervisor that exits with the
   app: macOS has no parent-death signal, and an app crash used to leave the
   daemon (and its supervision loop) running — seven such orphans were found
-  after one day of shell development.
+  after one day of shell development. The supervisor records the daemon's pid
+  in `~/.smooth/smoothflow-daemon.pid` (`$SMOOTHFLOW_DAEMON_PIDFILE`).
+
+### Quit (th-6198bf)
+
+Every quit sender — ⌘Q, the app and status-item menus, AppleScript `quit`,
+`NSRunningApplication.terminate()` (what the release lane uses to install over
+a running copy) — arrives as `NSApplication.terminate(_:)`, and
+`applicationShouldTerminate` takes the fleet down **before** answering
+`.terminateNow`: disconnect, stop the child daemon, kill the app-owned tmux
+server. It never answers `.terminateLater` (nothing to forget to reply to) or
+`.terminateCancel` (quit means quit); `applicationWillTerminate` runs the same
+idempotent shutdown for the paths that skip the delegate question.
+
+The stop is **bounded**. It used to be `terminate()` + `waitUntilExit()` on the
+main thread, which blocks for exactly as long as the child tree takes to die —
+and a daemon that ignores SIGTERM never does, so the Quit Apple event was
+handled, `applicationWillTerminate` ran, and the app simply never exited (the
+0.2.0 symptom: "quit did nothing, had to kill the pid"). Now the supervisor
+itself escalates — TERM the daemon, wait up to 3 s, SIGKILL it — and the app
+waits at most 5 s for the supervisor before SIGKILLing the supervisor and the
+pid it recorded. Reproduced and pinned with a `trap '' TERM` daemon: quit
+completes in ~4 s instead of never; a TERM-honoring daemon is gone in ~1 s.
 
 ### What the child daemon is started with
 
-| env                          | value                              | why                                                                                 |
-| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
-| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                       | agents run under the **app-owned** tmux server (the TCC story below)                |
-| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new  | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
-| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db` | never share Big Smooth's operator store                                             |
-| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`     | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
-| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                | Big Smooth may be running; we are a separate product on our own port                |
-| `SMOOTH_TAILSCALE_SERVE`     | `0`                                | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+| env                          | value                                  | why                                                                                 |
+| ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                           | agents run under the **app-owned** tmux server (the TCC story below)                |
+| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new      | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
+| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db`     | never share Big Smooth's operator store                                             |
+| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`         | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
+| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                    | Big Smooth may be running; we are a separate product on our own port                |
+| `SMOOTH_TAILSCALE_SERVE`     | `0`                                    | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+| `SMOOTH_RELAY_DEVICE_ID`     | `~/.smooth/smoothflow-relay-device-id` | its OWN relay identity — Big Smooth's is `~/.smooth/relay-device-id` (th-a1bb12)    |
+| `SMOOTH_RELAY_LABEL`         | `<host> · SmoothFlow`                  | what a phone's device list calls this daemon                                        |
+| `SMOOTH_RELAY_KIND`          | `flow`                                 | relay presence kind: SmoothFlow phones prefer it, Big Smooth phones skip it         |
 
 The token rides as `?token=` on the WebSocket and `X-Smooth-Token` on HTTP.
+
+### Two daemons, one machine
+
+Big Smooth (`th up` / the Big Smooth app) and the SmoothFlow child are two
+`smooth-daemon` processes on one Mac. They must not share anything that names
+a machine-wide singleton. Every isolation knob, and what went wrong before it:
+
+| Resource        | Big Smooth                                 | SmoothFlow child                                                                                               | Without it                                                                                                            |
+| --------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| HTTP/WS port    | `:8899` app / `:4400` `th up`              | a free port per launch (`--addr 127.0.0.1:0`-style pick in `DaemonManager`)                                    | bind failure                                                                                                          |
+| single-instance | `~/.smooth/daemon.lock`                    | `SMOOTH_ALLOW_SECOND_DAEMON=1`                                                                                 | the child refuses to start                                                                                            |
+| operator store  | `~/.smooth/operator-storage.db`            | `SMOOTH_OPERATOR_DB=~/.smooth/smoothflow-operator.db`                                                          | shared conversations + SQLite lock fights (th-2c8c1f)                                                                 |
+| flow store      | `~/.smooth/flow.db`                        | `SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`                                                                  | Big Smooth supervised our rows on its socket → "process vanished" (th-4f7866)                                         |
+| tmux server     | `tmux -L smooth-flow`                      | `SMOOTH_FLOW_TMUX_SOCKET=smoothflow` (the app-owned server, TCC)                                               | panes attributed to the wrong process                                                                                 |
+| tailnet         | `tailscale serve` → `:443`                 | `SMOOTH_TAILSCALE_SERVE=0`                                                                                     | the child re-pointed the tailnet port at itself                                                                       |
+| `daemon.addr`   | written                                    | not written (a `SMOOTH_ALLOW_SECOND_DAEMON` instance never advertises, #546)                                   | `th flow` and clients discovered the child instead of Big Smooth (th-3e6b1b)                                          |
+| relay identity  | `~/.smooth/relay-device-id`, `kind=daemon` | `SMOOTH_RELAY_DEVICE_ID` from `~/.smooth/smoothflow-relay-device-id`, `kind=flow`, label `<host> · SmoothFlow` | both dialed `relay.smoo.ai` as ONE device; presence flapped and phones landed on whichever connected last (th-a1bb12) |
+
+The relay id is minted once by the app (`RelayIdentity.load`, mode 600, same
+`daemon-<12 hex>` shape the daemon mints for itself) and passed down on every
+launch, so the pairing QR and the phone's remembered daemon stay stable across
+app restarts. The daemon side also holds an advisory lock per device id
+(`~/.smooth/relay-locks/<device>.lock`): a second local daemon that resolves
+the same id — say `th up` next to the Big Smooth app — logs an error and stays
+off the relay until the first exits, rather than racing it. Phones: the relay
+(`rust/relay-ws`, SMOODEV-3142) accepts `kind=flow`; SmoothFlow mobile lists
+`flow` and `daemon` peers and auto-picks a lone `flow` one, Big Smooth mobile
+keeps listing `daemon` peers only.
 
 ### TCC matrix (measured 2026-09-07, macOS 26.4, Developer-ID-signed ad-hoc-equivalent build)
 
@@ -244,6 +297,56 @@ build, so a rebuilt Debug app is asked again); after Allow the pane reads
 FDA the other way round. Attribution follows the app through the real
 engine's daemon → tmux → pane chain, exactly as the matrix predicted.
 
+## Terminal font (th-bcd819)
+
+The panes use **JetBrainsMono Nerd Font** (OFL, four faces in
+`Resources/Fonts`, ~10 MB), registered for the process at launch with
+`CTFontManagerRegisterFontsForURL(.process)` — nothing is installed for the
+user. libghostty already compiled in JetBrains Mono + a Symbols Nerd Font
+fallback, which is why starship glyphs rendered before; now the font is named,
+picked, and the same face carries the app's own monospace text (`Theme.mono`:
+pearl rail, activity, paths, sheets), so chrome and panes match.
+
+Precedence, highest first (`TerminalFont.overrides`):
+
+1. **Settings ▸ Terminal** — family (bundled first, then every installed
+   fixed-pitch family), size, ligatures. Saved to UserDefaults and applied live
+   to every open surface through `ghostty_app_update_config`.
+2. **The user's Ghostty config** — a `font-family` / `font-size` in
+   `~/.config/ghostty/config` (or the Application Support config) is left alone.
+   `config-file` includes are not followed.
+3. **The bundled default** at 13 pt.
+
+Ghostty treats `font-family` as a list (a repeat adds a fallback), so the
+overrides clear each key (`font-family =`) before setting it. Ligatures off
+becomes `font-feature = -calt/-liga/-dlig`.
+
+### The 0.2.1 blank-prompt bug was tmux, not fonts
+
+Brent's starship prompt rendered `_` for `❯` and blanks for the branch / cloud
+icons in the shipped 0.2.1 while Ghostty.app drew them. The release binary's
+embedded Symbols Nerd Font was fine (an isolated 0.2.1 copy fed the same
+glyphs through the mock rendered every one). The cause: a Finder-launched app
+has **no `LANG`**, the child daemon inherits that, and **tmux treats a client
+without a UTF-8 locale as a non-UTF-8 terminal and draws `_` for every
+non-ASCII cell** — the daemon's `tmux attach` is exactly such a client, and its
+bytes are what the pane shows. (A dev build launched from a terminal inherited
+`LANG`, which is why it never showed.) Two fixes: the engine passes `-u` to
+every tmux client (`smooth-flow/src/tmux.rs`), and the app gives the child
+`LANG` / `LC_CTYPE` (`DaemonManager.utf8Locale`, the user's locale when
+`/usr/share/locale` knows it, else `en_US.UTF-8`) so agents' shells speak UTF-8
+too. `GlyphUITests` runs the engine with no locale and asserts the streamed
+`flow.output` carries `❯ \u{e0a0} ☁` intact.
+
+The **theme** not applying was separate and older: `theme = …` resolves under
+libghostty's resources dir, which Ghostty.app sets for itself and SmoothFlow
+never did. The bundle now carries `Contents/Resources/ghostty/themes` (Ghostty
+1.3.1's set, MIT) and `GhosttyRuntime` exports `GHOSTTY_RESOURCES_DIR` before
+`ghostty_init` (an explicit env value is respected; an installed Ghostty.app's
+dir is the fallback).
+
+![terminal font](assets/smoothflow/terminal-font.png)
+
 ## Attention → notifications
 
 `AttentionNotifier.notification(for:settings:)` is a pure map from a session
@@ -256,6 +359,21 @@ session, and permission notifications carry Allow / Deny actions that send
 session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
+
+### Closing a finished session (th-883ce9)
+
+The finished card's **Close…** is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
+sheet names each action with its target — _close pearl `<id>`_ (on when the
+row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
+when the row lives in its own worktree; the main checkout is never offered) —
+and states the rule up front: a dirty or unmerged worktree is refused with
+nothing touched. The frame carries a client `seq`; the engine echoes it as
+`flow.error.ref`, so a refusal lands on **that card** in the engine's words
+with **Force close** (resends with `force`) and **Keep it**. Success is just
+`flow.session.removed`: the card and the sidebar row go. The mock
+(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
+covers both paths without a real worktree.
 
 ## Keyboard
 
@@ -352,6 +470,18 @@ What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
   The app never reads that file, but `th`-driven tooling on the same machine
   does; PR #546 stops the child from writing it. Until it lands, restore the
   file after running SmoothFlow.
+- **Two daemons, two supervisors.** On a Mac running both apps there are two
+  `smooth-daemon` children: Big Smooth's (the advertised one, typically `:8899`
+  or `:8787`) and SmoothFlow's (a second instance, random port, not advertised).
+  Each app supervises only the child it spawned. Big Smooth's side is
+  described in [`desktop/README.md`](../../desktop/README.md) ("Daemon
+  supervision", th-4b189c): exit → `~/Library/Logs/Big Smooth/daemon.log` +
+  respawn with backoff, `/api/mode` probed every 30s, tray line + About box.
+  The daemon's own tracing lands in `~/Library/Logs/Big Smooth/smooth-daemon.log`
+  via `SMOOTH_LOG_FILE`; SmoothFlow's child can be given the same env var to
+  get its own file. When "the daemon" looks dead, check which one — the port
+  and the log folder tell them apart (see the two-daemons note in the Big Smooth
+  desktop doc).
 - **The OTA loop end to end:** Check for Updates… → "SmoothFlow 0.2.1 is now
   available—you have 0.2.0" → Install Update → the 48 MB DMG downloads and
   the EdDSA signature verifies → "Ready to Install / Install and Relaunch" →
@@ -378,11 +508,19 @@ Launch contract, identifiers and how to run:
 
 ## Gaps (pearls filed from the main checkout)
 
-- th-c7041a — engine launches agents under the app-owned `tmux -L smoothflow`
-  server. The engine already honors `SMOOTH_FLOW_TMUX_SOCKET`, which the app
-  sets; the pearl tracks making that the contract (`--tmux-socket`).
+- th-c7041a — closed: the engine launches agents under the app-owned
+  `tmux -L smoothflow` server; `smooth-daemon operator --tmux-socket` is the
+  contract and the app sets `SMOOTH_FLOW_TMUX_SOCKET`.
 - th-2c8c1f — the child shared `operator-storage.db` with Big Smooth. Closed
   by `SMOOTH_OPERATOR_DB` (and `SMOOTH_FLOW_DB`) above.
-- th-e126cc — "Close pearl + GC worktree" from the inbox is not in the v0
-  protocol; the PR tab only shows what the handoff endpoint reports, "Merge"
-  opens the PR.
+- th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
+remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
+  `th flow close`) closes the pearl, removes the merged worktree + branch and
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
+  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  still opens the PR: merging is a review act, not something the shell does
+  blind.
+- th-6198bf — closed: AppleScript / `NSRunningApplication.terminate()` quit
+  hung in `waitUntilExit()` on a child that did not exit on TERM. Quit is now
+  bounded (supervisor TERM→KILL escalation + app-side backstop, see
+  [Quit](#quit-th-6198bf)) and pinned by `QuitUITests`.

@@ -49,9 +49,49 @@ repo root does both in the right order.
   login-item instance — it attaches and never touches it. Otherwise it spawns the
   bundled `smooth-daemon run` and terminates that child on Quit. Resolution order:
   bundled resources → `$SMOOTH_DAEMON_BIN` → `~/.smooth/bin` → `PATH` → the cargo
-  target dir. The spawned daemon's stdout/stderr and the app's own spawn
-  diagnostics go to `~/.smooth/desktop.log` — a Finder/`open` launch has no
-  terminal, so that file is where a startup failure actually shows up (th-5c2ec6).
+  target dir. The app's own spawn/update diagnostics go to `~/.smooth/desktop.log`
+  — a Finder/`open` launch has no terminal, so that file is where a startup
+  failure actually shows up (th-5c2ec6). The daemon's output goes to the log
+  folder below.
+- **Daemon supervision (th-4b189c).** A child the app spawned is watched for as
+  long as the app runs. The app once ran for hours with its daemon dead — nothing
+  on the port, no log of the exit anywhere — because the `exit` handler only
+  cleared a variable. Now:
+    - **Exit → logged + respawned with backoff.** The exit code/signal, the
+      uptime, and the last 40 stderr lines land in `daemon.log`; the child is
+      respawned after 1s, 2s, 4s … capped at 60s. Eight consecutive failures
+      (about three minutes) and it gives up and asks the user. A child that stays
+      healthy for a minute resets the streak, so an isolated crash next week
+      starts at 1s again, not at the cap.
+    - **Hung ≡ dead.** Every 30s the app probes `GET /api/mode` (a real router
+      round-trip, not a TCP accept). Two consecutive misses (5s timeout each)
+      → SIGTERM, SIGKILL after 4s, then the same respawn path. An _attached_
+      daemon (one the app didn't start) is probed too so the tray can say it's
+      gone, but is never killed or respawned — it isn't ours.
+    - **Tray + About.** The second tray line is the daemon's: `Daemon: running ·
+up 2h · 1 restart`, `Daemon crashed — restarting in 4s (attempt 2/8)`
+      (click to skip the wait), or `Daemon stopped — click to retry`. **About
+      Big Smooth…** shows app + daemon versions, pid, address, uptime, restarts
+      this session, the last exit, and an **Open Logs** button. When a respawned
+      daemon comes back the window reloads so the SPA reconnects instead of
+      sitting on a dead WebSocket; a start that never came up opens the window
+      on first health instead of quitting the app.
+    - **Quit/OTA.** `stopDaemon()` tells the supervisor first, so the deliberate
+      exit is neither logged as a crash nor respawned into the bundle the
+      updater is about to swap (th-79416c still holds).
+    - The decisions are pure (`src/supervisor.ts`, tests in
+      `supervisor.test.ts`); `src/daemon.ts` is the plumbing.
+- **Logs.** `~/Library/Logs/Big Smooth/` (macOS; `~/.smooth/logs/` elsewhere;
+  `SMOOTH_DESKTOP_LOG_DIR` overrides), size-rotated (`.1`…`.3`):
+    - `daemon.log` — the child's stdout/stderr plus `[supervisor]` lines
+      (spawns, exits with code/signal/uptime, the stderr tail, hung-kills,
+      give-ups). Written by the app (`src/daemonlog.ts`).
+    - `smooth-daemon.log` — the daemon's own tracing. The app passes
+      `SMOOTH_LOG_FILE=<that path>` when it spawns, so the daemon writes there
+      (no ANSI, rotated at 10 MB on startup) instead of to stderr; only panics
+      and the one-line `logging to …` breadcrumb reach stderr → `daemon.log`.
+      Any launcher can set `SMOOTH_LOG_FILE` (launchd, `nohup`); unset keeps the
+      stderr default. `RUST_LOG` still picks the filter.
 - **Local vs remote is a view target, not a daemon switch (th-5c2ec6).** Connecting
   to a remote daemon (tray → Connect → a tailnet peer) only changes what the
   **window** loads; this Mac still runs its own local daemon in the background, so
@@ -66,8 +106,8 @@ repo root does both in the right order.
 - **Window.** A `BrowserWindow` on the daemon's `/`. The daemon serves smooth-web
   with its local auth token already injected into `index.html`, so there is no
   renderer, preload, or IPC code here. Closing hides to the tray; Quit exits.
-- **Tray.** The `th` mark, with the current-mode header, Open / Open at Login /
-  Set Up / Connect / Quit.
+- **Tray.** The `th` mark, with the current-mode header, the daemon status line,
+  Open / Open at Login / Check for Updates / About / Set Up / Connect / Quit.
 - **`th` on PATH.** The DMG bundles the `th` CLI next to the daemon. On launch the
   app symlinks it into a PATH dir (`/usr/local/bin/th`, falling back to
   `~/.local/bin/th`) so `th` works from a terminal. Because the link points **into

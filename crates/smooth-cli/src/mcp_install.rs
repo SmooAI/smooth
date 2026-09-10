@@ -12,6 +12,7 @@
 //! | claude-code | `~/.claude.json` | `mcpServers.smooth = {type:"stdio", command, args}` |
 //! | codex | `~/.codex/config.toml` | `[mcp_servers.smooth]` |
 //! | opencode | `~/.config/opencode/opencode.json` | `mcp.smooth = {type:"local", command:[…]}` |
+//! | cursor | `~/.cursor/mcp.json` | same shape as claude-code (`mcpServers.smooth`) |
 //!
 //! Every writer is **idempotent and preserving**: an existing `smooth` entry
 //! with the right command is left alone, an entry pointing somewhere else is
@@ -66,11 +67,14 @@ pub enum Harness {
     ClaudeCode,
     Codex,
     OpenCode,
+    /// Cursor (th-55b2c7 M1): no plugin system, so `th pkg` renders rules
+    /// (`~/.cursor/rules/<pkg>/*.mdc`) and MCP (`~/.cursor/mcp.json`).
+    Cursor,
 }
 
 impl Harness {
     /// Every harness, in install order.
-    pub const ALL: [Self; 3] = [Self::ClaudeCode, Self::Codex, Self::OpenCode];
+    pub const ALL: [Self; 4] = [Self::ClaudeCode, Self::Codex, Self::OpenCode, Self::Cursor];
 
     /// The CLI spelling.
     #[must_use]
@@ -79,6 +83,7 @@ impl Harness {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -91,7 +96,8 @@ impl Harness {
             "claude-code" | "claude" | "claudecode" => Ok(Self::ClaudeCode),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::OpenCode),
-            other => bail!("unknown harness '{other}' (expected claude-code|codex|opencode|all)"),
+            "cursor" => Ok(Self::Cursor),
+            other => bail!("unknown harness '{other}' (expected claude-code|codex|opencode|cursor|all)"),
         }
     }
 
@@ -102,6 +108,7 @@ impl Harness {
             Self::ClaudeCode => home.join(".claude.json"),
             Self::Codex => home.join(".codex").join("config.toml"),
             Self::OpenCode => home.join(".config").join("opencode").join("opencode.json"),
+            Self::Cursor => home.join(".cursor").join("mcp.json"),
         }
     }
 
@@ -118,6 +125,7 @@ impl Harness {
             Self::ClaudeCode => home.join(".claude"),
             Self::Codex => home.join(".codex"),
             Self::OpenCode => home.join(".config").join("opencode"),
+            Self::Cursor => home.join(".cursor"),
         }
     }
 }
@@ -170,7 +178,7 @@ pub fn install_server_into(harness: Harness, home: &Path, server: &McpServer, dr
     }
     let path = harness.config_path(home);
     let (outcome, rendered) = match harness {
-        Harness::ClaudeCode => render_claude_code(&path, server)?,
+        Harness::ClaudeCode | Harness::Cursor => render_claude_code(&path, server)?,
         Harness::Codex => render_codex(&path, server)?,
         Harness::OpenCode => render_opencode(&path, server)?,
     };
@@ -197,7 +205,8 @@ fn load_json(path: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&raw).with_context(|| format!("parse {} as JSON — fix or move it, then re-run", path.display()))
 }
 
-/// `~/.claude.json` → top-level `mcpServers.smooth`.
+/// `~/.claude.json` (and Cursor's `~/.cursor/mcp.json`, same shape) →
+/// top-level `mcpServers.smooth`.
 fn render_claude_code(path: &Path, server: &McpServer) -> Result<(Outcome, String)> {
     let mut doc = load_json(path)?;
     let mut entry = serde_json::json!({
@@ -361,12 +370,12 @@ pub fn remove_server(harness: Harness, home: &Path, name: &str) -> Result<bool> 
             }
             Ok(removed)
         }
-        Harness::ClaudeCode | Harness::OpenCode => {
+        Harness::ClaudeCode | Harness::OpenCode | Harness::Cursor => {
             if raw.trim().is_empty() {
                 return Ok(false);
             }
             let mut doc: serde_json::Value = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
-            let key = if harness == Harness::ClaudeCode { "mcpServers" } else { "mcp" };
+            let key = if harness == Harness::OpenCode { "mcp" } else { "mcpServers" };
             let removed = doc
                 .get_mut(key)
                 .and_then(serde_json::Value::as_object_mut)
@@ -420,7 +429,8 @@ mod tests {
         assert_eq!(Harness::parse("claude-code").unwrap(), Harness::ClaudeCode);
         assert_eq!(Harness::parse(" CODEX ").unwrap(), Harness::Codex);
         assert_eq!(Harness::parse("opencode").unwrap(), Harness::OpenCode);
-        assert!(Harness::parse("cursor").is_err());
+        assert_eq!(Harness::parse("cursor").unwrap(), Harness::Cursor);
+        assert!(Harness::parse("copilot").is_err());
         assert!(Harness::parse("all").is_err(), "`all` is the caller's job, not a Harness");
     }
 
@@ -533,6 +543,20 @@ mod tests {
         .unwrap();
         assert_eq!(install_into(Harness::Codex, tmp.path(), false).unwrap(), Outcome::Updated);
         assert!(read(Harness::Codex, tmp.path()).contains("command = \"th\""));
+    }
+
+    #[test]
+    fn cursor_uses_the_claude_shape_in_its_own_file() {
+        let tmp = home();
+        std::fs::write(Harness::Cursor.config_path(tmp.path()), r#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        assert_eq!(install_into(Harness::Cursor, tmp.path(), false).unwrap(), Outcome::Added);
+        let doc = json_at(Harness::Cursor, tmp.path());
+        assert_eq!(doc["mcpServers"]["smooth"]["command"], "th");
+        assert_eq!(doc["mcpServers"]["other"]["command"], "x");
+        assert!(!Harness::ClaudeCode.config_path(tmp.path()).exists(), "cursor never writes ~/.claude.json");
+        assert_eq!(install_into(Harness::Cursor, tmp.path(), false).unwrap(), Outcome::AlreadyPresent);
+        assert!(remove_server(Harness::Cursor, tmp.path(), SERVER_NAME).unwrap());
+        assert!(json_at(Harness::Cursor, tmp.path())["mcpServers"].get("smooth").is_none());
     }
 
     #[test]

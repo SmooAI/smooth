@@ -143,13 +143,31 @@ async fn resolve() -> Result<PathBuf> {
     download().await
 }
 
-/// `th daemon <args…>` — resolve + spawn the standalone daemon binary, inheriting
-/// stdio and propagating its exit code.
+/// `th daemon <args…>` — resolve the standalone daemon binary and hand the
+/// process over to it, inheriting stdio and propagating its exit code.
 pub async fn run(args: Vec<String>) -> Result<()> {
     let bin = resolve().await?;
-    let status = Command::new(&bin).args(&args).status().with_context(|| format!("spawning {}", bin.display()))?;
+    hand_over(&bin, &args)
+}
+
+/// On unix this **execs** the daemon: it takes over our pid, so the pid that
+/// `th up` recorded in `~/.smooth/smooth.pid` *is* the daemon and `th down`'s
+/// SIGTERM reaches it. Spawning a child instead left an orphan on every `th
+/// down` (th-eed3de): the wrapper died, the child kept `:4400` bound and held
+/// `daemon.lock`, so no new daemon could start until someone found it by hand.
+/// Only returns on failure.
+#[cfg(unix)]
+fn hand_over(bin: &std::path::Path, args: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let err = Command::new(bin).args(args).exec();
+    Err(err).with_context(|| format!("exec {}", bin.display()))
+}
+
+/// Windows has no exec: spawn, wait, mirror the child's exit code.
+#[cfg(not(unix))]
+fn hand_over(bin: &std::path::Path, args: &[String]) -> Result<()> {
+    let status = Command::new(bin).args(args).status().with_context(|| format!("spawning {}", bin.display()))?;
     if !status.success() {
-        // Mirror the child's exit so scripts see the real code.
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())

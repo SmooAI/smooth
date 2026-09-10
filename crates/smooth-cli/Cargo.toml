@@ -70,6 +70,8 @@ futures-util.workspace = true
 # and url-encode query params for the list endpoint.
 walkdir = "2"
 urlencoding = "2"
+# th-473294: `th harness add --agentic` opens a canonical-protocol session on the daemon (needs an agentId uuid).
+uuid.workspace = true
 # SMOODEV-2090: `th testing runs report` converts a JUnit XML report (e.g.
 # cargo-nextest output) into CTRF before submitting, so CI never needs a
 # separate junit-to-ctrf step. quick-xml is the de-facto Rust XML parser.
@@ -97,6 +99,9 @@ base64 = "0.22"
 # Used by `th config build` (non-test) to drop the embedded JS schema
 # generator to a temp .mjs before invoking node/tsx.
 tempfile = "3"
+# th-d98fde: `th flow pair --qr` renders the phone-pairing QR in the terminal
+# (unicode half-blocks). Pure Rust, no image features.
+qrcode = { version = "0.14", default-features = false }
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 schemars = "1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

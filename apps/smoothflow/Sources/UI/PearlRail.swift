@@ -45,7 +45,7 @@ struct PearlRail: View {
                 section("CHECKPOINTS") {
                     ForEach(cps) { c in
                         HStack(alignment: .top, spacing: 6) {
-                            Text(String(c.at.suffix(8).prefix(5))).font(.caption.monospaced()).foregroundStyle(Color(Theme.faint))
+                            Text(String(c.at.suffix(8).prefix(5))).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.faint))
                             Text(c.note + (c.auto == true ? " (auto)" : "")).font(.caption)
                         }
                     }
@@ -53,13 +53,13 @@ struct PearlRail: View {
             }
 
             if let blocks = h?.blocks, !blocks.isEmpty {
-                section("BLOCKS") { Text(blocks.joined(separator: " · ")).font(.caption.monospaced()) }
+                section("BLOCKS") { Text(blocks.joined(separator: " · ")).font(Theme.mono(.caption)) }
             }
 
             if let pr = h?.pr, let n = pr.number {
                 section("PR") {
                     HStack {
-                        Text("#\(n)").font(.caption.monospaced())
+                        Text("#\(n)").font(Theme.mono(.caption))
                         if let ci = pr.ci { chip("CI \(ci)") }
                         if let u = pr.url, let url = URL(string: u) { Link("open", destination: url).font(.caption) }
                     }
@@ -73,7 +73,7 @@ struct PearlRail: View {
             }.controlSize(.small)
 
             if let msg = app.thOutput, !msg.isEmpty {
-                Text(msg).font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).textSelection(.enabled)
+                Text(msg).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)).textSelection(.enabled)
             }
         }
         .padding(14)
@@ -89,7 +89,7 @@ struct PearlRail: View {
     private func mono(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Text(k).font(.caption).foregroundStyle(Color(Theme.faint)).frame(width: 60, alignment: .trailing)
-            Text(v).font(.caption.monospaced()).textSelection(.enabled)
+            Text(v).font(Theme.mono(.caption)).textSelection(.enabled)
         }
     }
 

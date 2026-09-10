@@ -39,7 +39,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         steerField.setAccessibilityIdentifier("steer.field")
         tabs.target = self
         tabs.action = #selector(tabChanged)
-        pathLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        pathLabel.font = Theme.monoNSFont(size: 11)
         pathLabel.textColor = Theme.muted
         pathLabel.lineBreakMode = .byTruncatingMiddle
         let top = NSStackView(views: [tabs, pathLabel])
@@ -243,7 +243,7 @@ final class DiffView: NSScrollView {
         documentView = text
         hasVerticalScroller = true
         text.isEditable = false
-        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        text.font = Theme.monoNSFont(size: 12)
         text.autoresizingMask = [.width]
         text.isVerticallyResizable = true
         text.textContainer?.widthTracksTextView = true
@@ -276,7 +276,7 @@ struct PRView: View {
                     Text("PR #\(n)").font(.title2.bold())
                     if let ci = pr.ci { Text("CI: \(ci)").font(.body) }
                     if let u = pr.url, let url = URL(string: u) {
-                        Link(u, destination: url).font(.body.monospaced())
+                        Link(u, destination: url).font(Theme.mono(.body))
                         Button("Merge (opens PR)") { app.merge(s) }
                     }
                 } else {
@@ -326,8 +326,8 @@ struct ActivityView: View {
 
     private func row(_ e: FlowEvent) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(Self.clock(e.at)).font(.caption.monospaced()).foregroundStyle(Color(Theme.faint)).frame(width: 58, alignment: .trailing)
-            Text(e.kind).font(.caption.monospaced()).foregroundStyle(e.needsYou ? Color(Theme.amber) : Color(Theme.muted)).frame(width: 96, alignment: .leading)
+            Text(Self.clock(e.at)).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.faint)).frame(width: 58, alignment: .trailing)
+            Text(e.kind).font(Theme.mono(.caption)).foregroundStyle(e.needsYou ? Color(Theme.amber) : Color(Theme.muted)).frame(width: 96, alignment: .leading)
             Text(e.text).font(.caption).textSelection(.enabled).lineLimit(4)
         }
     }

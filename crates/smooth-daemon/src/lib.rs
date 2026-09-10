@@ -27,14 +27,19 @@
 //! `serve_persistent` agent loop + its server/wire/runner/coordinator/scheduler/
 //! permission/sqlite modules were deleted once the operator path reached parity.
 
+pub mod add_harness;
 pub mod auth_login;
 pub mod cloud_memory;
 pub mod config;
 pub mod cwd_route;
+pub mod flow_e2e;
+pub mod flow_pair_route;
 pub mod flow_route;
 pub mod hooks;
 pub mod judge_settings;
 pub mod judge_settings_route;
+pub mod llm_provider;
+pub mod logfile;
 pub mod mode_route;
 pub mod mode_session_route;
 pub mod model_catalog_route;

@@ -52,7 +52,9 @@ pub async fn acquire_default() -> Result<InstanceLock> {
     Ok(lock)
 }
 
-fn allow_second() -> bool {
+/// The one predicate for "this is a deliberate second instance": empty and
+/// `0` count as unset, so the lock and the daemon.addr advertisement agree.
+pub(crate) fn allow_second() -> bool {
     std::env::var("SMOOTH_ALLOW_SECOND_DAEMON").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
