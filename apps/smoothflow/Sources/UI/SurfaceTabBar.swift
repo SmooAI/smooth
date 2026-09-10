@@ -25,6 +25,9 @@ final class SurfaceTabBar: NSView {
             row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
             heightAnchor.constraint(equalToConstant: 26),
         ])
+        // A plain NSView is not an accessibility element by default, so without
+        // this the strip has an identifier nothing can look up.
+        setAccessibilityElement(true)
         setAccessibilityIdentifier("center.tabbar")
         setAccessibilityRole(.tabGroup)
     }
