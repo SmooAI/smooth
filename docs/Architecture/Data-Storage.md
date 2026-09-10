@@ -11,17 +11,17 @@ One SQLite database (WAL) holding pearls, dependencies, labels, comments, histor
 
 ## Global: `~/.smooth/`
 
-| Path                         | What                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------- |
-| `pearls.db`                  | All pearls, every project (SQLite; see [[Pearls]])                              |
-| `registry.json`              | Index of every project root this `th` knows about (dead paths pruned on open)   |
-| `providers.json`             | LLM provider credentials                                                        |
-| `audit/`                     | Rotating tool-usage logs per actor (Big Smooth, operatives, …)                  |
-| `mcp.toml`                   | Global MCP server configs                                                       |
-| `plugins/<name>/plugin.toml` | CLI-wrapper plugin manifests                                                    |
-| `smooth.pid`                 | Big Smooth daemon pid (`th up` writes it, `th down` reads it)                   |
-| `smooth.log`                 | Big Smooth daemon stdout+stderr                                                 |
-| `smooth.db`                  | Legacy SQLite — unread, and no migration command ships any more; safe to delete |
+| Path                         | What                                                                              |
+| ---------------------------- | --------------------------------------------------------------------------------- |
+| `pearls.db`                  | All pearls, every project (SQLite; see [[Pearls]])                                |
+| `registry.json`              | Index of project roots (git repos, or `th pearls init`-ed); dead + non-git pruned |
+| `providers.json`             | LLM provider credentials                                                          |
+| `audit/`                     | Rotating tool-usage logs per actor (Big Smooth, operatives, …)                    |
+| `mcp.toml`                   | Global MCP server configs                                                         |
+| `plugins/<name>/plugin.toml` | CLI-wrapper plugin manifests                                                      |
+| `smooth.pid`                 | Big Smooth daemon pid (`th up` writes it, `th down` reads it)                     |
+| `smooth.log`                 | Big Smooth daemon stdout+stderr                                                   |
+| `smooth.db`                  | Legacy SQLite — unread, and no migration command ships any more; safe to delete   |
 
 ## Project: `<repo>/.smooth/`
 

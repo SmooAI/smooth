@@ -12,6 +12,7 @@ fn main() {
     let project_root = args.next().expect("usage: <registry_file> <project_root>");
     let registry_file = std::path::PathBuf::from(registry_file);
     let project_root = std::path::PathBuf::from(project_root);
-    std::fs::create_dir_all(&project_root).expect("create project root");
+    // A `.git` entry is what makes the root auto-registrable (th-92e046).
+    std::fs::create_dir_all(project_root.join(".git")).expect("create project root");
     smooth_pearls::registry::auto_register_at(&project_root, &registry_file).expect("auto_register_at");
 }
