@@ -1001,6 +1001,8 @@ th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
 th msg unread-count [--agent <h>]          # just the number, for a statusline/prompt
 th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
+th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
+th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
 th inbox                                   # alias for `th msg inbox` (default identity)
 th agent backend status [--json]           # which mailbox am I on, and (cloud) my trial state
 th agent backend set sqlite|cloud          # local (default, free) or cross-machine (paid)
