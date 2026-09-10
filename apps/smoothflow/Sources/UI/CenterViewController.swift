@@ -22,7 +22,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     private var prHost: NSHostingView<PRView>?
     private var activityHost: NSHostingView<ActivityView>?
     private let steerField = NSTextField()
-    private let steerHint = NSTextField(labelWithString: "⌘↵ send · ⌘⇧↵ send to all working")
+    private let steerHint = NSTextField(labelWithString: "")
     private let content = NSView()
 
     init(app: AppController) {
@@ -58,6 +58,11 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         steerField.placeholderString = "Steer the focused session…"
         steerField.delegate = self
         steerField.font = .systemFont(ofSize: 13)
+        // The hint names whatever the keymap currently says, or it becomes the
+        // one place in the app still advertising the old ⌘⇧↩.
+        let focusedChord = app.keymap.chord(for: .steerFocused)?.display ?? "↵"
+        let allChord = app.keymap.chord(for: .steerAll)?.display
+        steerHint.stringValue = "\(focusedChord) send" + (allChord.map { " · \($0) send to all working" } ?? "")
         steerHint.font = .systemFont(ofSize: 10)
         steerHint.textColor = Theme.faint
         let steer = NSStackView(views: [steerField, steerHint])
