@@ -138,6 +138,8 @@ struct Inner {
     ptys: Mutex<HashMap<String, Arc<PtyAttach>>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     rt: Mutex<Runtime>,
+    /// Per-session serialisation between `kill` and the supervision tick.
+    session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     info: DaemonInfo,
     default_project: PathBuf,
     home: PathBuf,
@@ -359,6 +361,7 @@ impl Engine {
                 ptys: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 rt: Mutex::new(Runtime::default()),
+                session_locks: Mutex::new(HashMap::new()),
                 info: DaemonInfo {
                     version: cfg.version,
                     machine_label: cfg.machine_label,
@@ -882,6 +885,8 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or the relaunch fails.
     pub fn kill(&self, id: &str, resume: bool) -> Result<Session> {
+        let lock = self.session_lock(id);
+        let _held = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let s = self.require(id)?;
         let sock = socket_of(&s);
         let tmux_name = s.tmux_session.clone();
@@ -901,6 +906,17 @@ impl Engine {
             return self.relaunch(&self.require(id)?);
         }
         self.set_state(id, SessionState::Done, None)?.ok_or_else(|| anyhow!("no such session: {id}"))
+    }
+
+    /// The mutex serialising `kill` and supervision for one session.
+    fn session_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.inner
+            .session_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.to_string())
+            .or_default()
+            .clone()
     }
 
     fn drop_pty(&self, id: &str) {
@@ -923,6 +939,7 @@ impl Engine {
             tmux::kill_session(&socket_of(&s), t);
         }
         self.with_store(|st| st.remove(id))?;
+        self.inner.session_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
         Ok(())
     }
@@ -1007,6 +1024,9 @@ impl Engine {
                     .find_map(|o| o.pid.filter(|p| proc::is_alive(*p, o.pid_start)))
             });
             if let Some(pid) = holder {
+                // A backoff scheduled by an earlier death would fire into this
+                // same refusal on the next tick; drop it with the hold.
+                self.rt().relaunch_at.remove(&s.id);
                 let att = Attention::new("held").with_detail(format!("session {agent} is owned by live pid {pid}"));
                 return self
                     .set_state(&s.id, SessionState::NeedsYou, Some(att))?
@@ -1046,6 +1066,23 @@ impl Engine {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
             return Ok(HookReply::Immediate(json!({})));
         };
+        // Serialise this row against `kill` and supervision, then re-read it:
+        // `s` was resolved before the lock, and a `kill --resume` landing in
+        // that window wrote rule 4's `held` under us.
+        let lock = self.session_lock(&s.id);
+        let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(s) = self.with_store(|st| st.get(&s.id))? else {
+            return Ok(HookReply::Immediate(json!({})));
+        };
+        // Rule 4 parked this row (`held`): another live process owns this
+        // harness session id, so a hook carrying it is not evidence about
+        // THIS row. Letting one through un-held the row (a dying agent's
+        // last `Stop` read as "idle"), and the next supervision pass then
+        // took its dead tmux session for a crash (th-8e3087).
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+            tracing::debug!(session = %s.id, event = %ev.event, "flow hook for a held session — ignored");
+            return Ok(HookReply::Immediate(json!({})));
+        }
         // th-0f6126: the manifest says how this harness's events read
         // (`state.hooks.event_map`), and whether they count as `hooks` or
         // `native` state; an empty map is the Claude Code table.
@@ -1162,6 +1199,13 @@ impl Engine {
     }
 
     fn supervise_one(&self, s: &Session, now: DateTime<Utc>) -> Result<()> {
+        // A `kill` is mid-flight on this row — it owns the outcome. Without
+        // this, `kill --resume` tore the tmux session down between this pass's
+        // liveness check and its write, so the tick read the kill as an
+        // unexpected death and overwrote rule 4's `held` with a crash backoff
+        // (th-8e3087, ~1-in-3 under load).
+        let lock = self.session_lock(&s.id);
+        let Ok(_held) = lock.try_lock() else { return Ok(()) };
         // A relaunch is scheduled (rule 2 backoff) — fire it when due.
         let due = self.rt().relaunch_at.get(&s.id).copied();
         if let Some(at) = due {
@@ -1177,6 +1221,13 @@ impl Engine {
         // gone). Without this the tick re-scheduled a resume every backoff,
         // the guard refused it again, and the row flapped starting ↔ held
         // forever (th-8e3087).
+        //
+        // Re-read the row: `s` is a snapshot taken at the top of the tick, so
+        // a hold written by a concurrent `kill --resume` (the common case —
+        // holding is what kills the tmux session this pass is reacting to) is
+        // not in it, and the stale copy sent the row to `on_death` instead.
+        let fresh = self.with_store(|st| st.get(&s.id))?;
+        let Some(s) = fresh.as_ref() else { return Ok(()) };
         if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
             return Ok(());
         }
@@ -2235,7 +2286,7 @@ mod tests {
         let still = e.get(&victim.id).unwrap().unwrap();
         assert_eq!(still.state, SessionState::NeedsYou, "{still:?}");
         assert_eq!(still.attention.as_ref().map(|a| a.reason.as_str()), Some("held"));
-        assert!(e.rt().relaunch_at.get(&victim.id).is_none(), "no resume scheduled for a held row");
+        assert!(!e.rt().relaunch_at.contains_key(&victim.id), "no resume scheduled for a held row");
     }
 
     #[test]
