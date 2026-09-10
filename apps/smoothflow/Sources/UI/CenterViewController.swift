@@ -11,9 +11,13 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     private let tabs = NSSegmentedControl(labels: ["terminal", "diff", "PR", "activity"], trackingMode: .selectOne, target: nil, action: nil)
     private let pathLabel = NSTextField(labelWithString: "")
-    private let split = NSSplitView()
-    private var panes: [SessionPane] = []
-    private var activePane = 0
+    /// Surface tabs (⌘T) over a pane tree (⌘D and friends). Never empty.
+    private let tabBar = SurfaceTabBar()
+    private let treeView = PaneTreeView()
+    private let surfaceArea = NSStackView()
+    private var surfaceTabs: [SurfaceTab] = []
+    private var activeTabIndex = 0
+    private var nextTabId = 1
     private let diffView = DiffView()
     private var prHost: NSHostingView<PRView>?
     private var activityHost: NSHostingView<ActivityView>?
@@ -47,11 +51,9 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         top.spacing = 12
         top.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
 
-        split.isVertical = true
-        split.dividerStyle = .thin
         content.translatesAutoresizingMaskIntoConstraints = false
-        addPane()
-        show(split)
+        buildSurfaceArea()
+        show(surfaceArea)
 
         steerField.placeholderString = "Steer the focused session…"
         steerField.delegate = self
@@ -95,7 +97,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         didSet {
             tabs.selectedSegment = tab.rawValue
             switch tab {
-            case .terminal: show(split)
+            case .terminal: show(surfaceArea)
             case .diff:
                 show(diffView)
                 diffView.load(worktree: app.store.focused?.worktree)
@@ -113,46 +115,194 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     @objc private func tabChanged() { tab = CenterTab(rawValue: tabs.selectedSegment) ?? .terminal }
 
-    // MARK: panes
+    // MARK: tabs + panes
 
-    func addPane() {
-        let pane = SessionPane()
-        pane.onActivate = { [weak self, weak pane] in
-            guard let self, let pane, let i = self.panes.firstIndex(where: { $0 === pane }) else { return }
-            self.activePane = i
-            if let id = pane.sessionId { self.app.store.focusedId = id }
+    private func buildSurfaceArea() {
+        surfaceArea.orientation = .vertical
+        surfaceArea.spacing = 0
+        surfaceArea.alignment = .leading
+        surfaceArea.addArrangedSubview(tabBar)
+        surfaceArea.addArrangedSubview(treeView)
+        treeView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tabBar.widthAnchor.constraint(equalTo: surfaceArea.widthAnchor),
+            treeView.widthAnchor.constraint(equalTo: surfaceArea.widthAnchor),
+        ])
+        tabBar.onSelect = { [weak self] i in self?.selectTab(i) }
+        tabBar.onClose = { [weak self] i in self?.closeTab(at: i) }
+        tabBar.onNew = { [weak self] in self?.newTab() }
+        treeView.onPaneActivated = { [weak self] id in self?.paneActivated(id) }
+        treeView.onFractionChanged = { [weak self] f, a, b in
+            guard let self, var t = self.activeTab else { return }
+            t.root = t.root.settingFraction(f, between: a, and: b)
+            self.replaceActiveTab(t, relayout: false)
         }
-        panes.append(pane)
-        split.addArrangedSubview(pane)
-        split.adjustSubviews()
+        surfaceTabs = [SurfaceTab(id: nextTabId, pane: PaneID.next())]
+        nextTabId += 1
+        renderTabs()
     }
 
-    func splitActive() {
-        addPane()
-        activePane = panes.count - 1
-        if let id = app.store.focusedId { showSession(id) }
+    private var activeTab: SurfaceTab? {
+        surfaceTabs.indices.contains(activeTabIndex) ? surfaceTabs[activeTabIndex] : nil
+    }
+
+    private func replaceActiveTab(_ t: SurfaceTab, relayout: Bool = true, redividing: Bool = false) {
+        guard surfaceTabs.indices.contains(activeTabIndex) else { return }
+        surfaceTabs[activeTabIndex] = t
+        if relayout { renderTabs(redividing: redividing) }
+    }
+
+    /// Lay the active tab's tree out, re-host every pane's surface, refresh the
+    /// strip. The one place the model reaches the screen.
+    private func renderTabs(redividing: Bool = false) {
+        guard let t = activeTab else { return }
+        treeView.apply(root: t.root, focused: t.focused, zoomed: t.zoomed, redividing: redividing)
+        for id in t.panes {
+            let pane = treeView.pane(id)
+            if let sid = t.sessions[id], app.store.sessions[sid] != nil {
+                pane.host(app.surface(for: sid), id: sid)
+            } else {
+                pane.showEmpty()
+            }
+        }
+        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.pearlId ?? self.app.store.sessions[$0]?.title } }, active: activeTabIndex)
+        refreshHeaders()
+        if let sid = t.sessions[t.focused], app.store.focusedId != sid { app.store.focusedId = sid }
+    }
+
+    /// A pane took focus (click, or the surface became first responder): it is
+    /// now the focused pane, and its session is the focused session.
+    private func paneActivated(_ id: PaneID) {
+        guard var t = activeTab, t.focused != id || t.zoomed != nil else { return }
+        t.focused = id
+        replaceActiveTab(t, relayout: false)
+        treeView.apply(root: t.root, focused: t.focused, zoomed: t.zoomed)
+        if let sid = t.sessions[id] { app.store.focusedId = sid }
+    }
+
+    // MARK: tab actions
+
+    func newTab() {
+        var t = SurfaceTab(id: nextTabId, pane: PaneID.next())
+        nextTabId += 1
+        if let sid = app.store.focusedId { t.sessions[t.focused] = sid }
+        surfaceTabs.append(t)
+        activeTabIndex = surfaceTabs.count - 1
+        renderTabs()
+    }
+
+    /// A shell session (`kind=shell`) in the focused session's worktree, in a
+    /// new tab — the "give me a prompt next to the agent" move. The tab shows
+    /// it as soon as the engine announces the session.
+    func newShellHere() {
+        guard let s = app.store.focused else { return }
+        newTab()
+        pendingShellTab = activeTab?.id
+        app.newSession(NewSession(kind: "shell", worktree: s.worktree, project: s.projectName, title: "shell · \(s.projectName)"))
+    }
+
+    private var pendingShellTab: Int?
+
+    /// A brand-new session claims the tab that asked for it (`newShellHere`),
+    /// else nothing — a session appearing must never steal a pane you are in.
+    func adopt(newSessionId id: String) {
+        guard let tabId = pendingShellTab, let i = surfaceTabs.firstIndex(where: { $0.id == tabId }) else { return }
+        pendingShellTab = nil
+        surfaceTabs[i].sessions[surfaceTabs[i].focused] = id
+        renderTabs()
+    }
+
+    func closeTab(at index: Int? = nil) {
+        let i = index ?? activeTabIndex
+        guard surfaceTabs.indices.contains(i), surfaceTabs.count > 1 else { return }
+        surfaceTabs.remove(at: i)
+        activeTabIndex = min(activeTabIndex >= i ? max(activeTabIndex - 1, 0) : activeTabIndex, surfaceTabs.count - 1)
+        renderTabs()
+    }
+
+    func selectTab(_ i: Int) {
+        guard surfaceTabs.indices.contains(i), i != activeTabIndex else { return }
+        activeTabIndex = i
+        renderTabs()
+    }
+
+    func cycleTab(by delta: Int) {
+        guard surfaceTabs.count > 1 else { return }
+        let n = surfaceTabs.count
+        selectTab(((activeTabIndex + delta) % n + n) % n)
+    }
+
+    // MARK: split actions
+
+    func split(_ direction: SplitDirection) {
+        guard var t = activeTab else { return }
+        _ = t.split(direction)
+        replaceActiveTab(t)
+        focusActiveSurface()
     }
 
     func closeActivePane() {
-        guard panes.count > 1 else { return }
-        let pane = panes.remove(at: activePane)
-        pane.removeFromSuperview()
-        activePane = min(activePane, panes.count - 1)
-        split.adjustSubviews()
+        guard var t = activeTab else { return }
+        if t.closeFocused() {
+            replaceActiveTab(t)
+        } else {
+            closeTab()
+        }
     }
 
-    /// The focused session goes into the active pane.
-    func showSession(_ id: String) {
-        guard let s = app.store.sessions[id] else { return }
-        let surface = app.surface(for: id)
-        panes[activePane].host(surface, id: id)
-        pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
-        if tab == .diff { diffView.load(worktree: s.worktree) }
+    func focusPane(_ direction: SplitDirection) {
+        guard var t = activeTab else { return }
+        let before = t.focused
+        t.focus(direction, in: treeView.bounds)
+        guard t.focused != before else { return }
+        replaceActiveTab(t, relayout: false)
+        treeView.apply(root: t.root, focused: t.focused, zoomed: t.zoomed)
+        if let sid = t.sessions[t.focused] { app.store.focusedId = sid }
+        focusActiveSurface()
+    }
+
+    func toggleZoom() {
+        guard var t = activeTab else { return }
+        t.toggleZoom()
+        replaceActiveTab(t)
+        focusActiveSurface()
+    }
+
+    func equalizePanes() {
+        guard var t = activeTab else { return }
+        t.equalize()
+        replaceActiveTab(t, redividing: true)
+    }
+
+    private func focusActiveSurface() {
+        guard let t = activeTab, let sid = t.sessions[t.focused], let surface = app.surfaceIfLoaded(sid) else { return }
         view.window?.makeFirstResponder(surface)
     }
 
+    /// The focused session goes into the focused pane of the active tab.
+    func showSession(_ id: String) {
+        guard let s = app.store.sessions[id], var t = activeTab else { return }
+        // Already on screen in this tab? Move the focus there instead of
+        // stacking the same session into a second pane.
+        if let existing = t.panes.first(where: { t.sessions[$0] == id }) {
+            guard t.focused != existing else { return }
+            t.focused = existing
+        } else {
+            guard t.sessions[t.focused] != id else { return }
+            t.sessions[t.focused] = id
+        }
+        replaceActiveTab(t)
+        pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
+        if tab == .diff { diffView.load(worktree: s.worktree) }
+        focusActiveSurface()
+    }
+
     func refreshHeaders() {
-        for p in panes { if let id = p.sessionId, let s = app.store.sessions[id] { p.setHeader(s, kindLabel: app.store.displayName(forKind: s.kind)) } }
+        guard let t = activeTab else { return }
+        for id in t.panes {
+            guard let sid = t.sessions[id], let s = app.store.sessions[sid] else { continue }
+            treeView.pane(id).setHeader(s, kindLabel: app.store.displayName(forKind: s.kind))
+        }
         // argv changes under a session (`claude --resume …` after a kill/resume).
         if let s = app.store.focused { pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))" }
     }
@@ -190,6 +340,9 @@ final class SessionPane: NSView {
 
     init() {
         super.init(frame: .zero)
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.clear.cgColor
         header.font = .systemFont(ofSize: 11)
         header.setAccessibilityIdentifier("pane.header")
         header.textColor = Theme.muted
@@ -211,6 +364,9 @@ final class SessionPane: NSView {
     required init?(coder: NSCoder) { nil }
 
     func host(_ view: TerminalSurfaceView, id: String) {
+        // Re-hosting what is already here would chain another `onFocus`
+        // wrapper onto the surface every time the tab is laid out.
+        guard sessionId != id || hosted !== view else { return }
         sessionId = id
         hosted?.removeFromSuperview()
         hosted = view
@@ -230,6 +386,23 @@ final class SessionPane: NSView {
     func setHeader(_ s: Session, kindLabel: String) {
         header.stringValue = "\(s.pearlId ?? s.title) · \(kindLabel) · \(Theme.stateLabel(s))"
         dot.layer?.backgroundColor = NSColor(Theme.dot(for: s)).cgColor
+    }
+
+    /// A pane with nothing in it yet — a fresh split before you pick a session.
+    func showEmpty() {
+        guard sessionId != nil || hosted == nil else { return }
+        sessionId = nil
+        hosted?.removeFromSuperview()
+        hosted = nil
+        header.stringValue = "empty · pick a session in the sidebar"
+        dot.layer?.backgroundColor = Theme.faint.cgColor
+    }
+
+    /// Which pane the keyboard is in. A one-pixel teal edge, and only when the
+    /// tab is actually split — a lone pane needs no telling.
+    func setFocused(_ focused: Bool) {
+        layer?.borderColor = (focused ? Theme.teal.withAlphaComponent(0.7) : .clear).cgColor
+        setAccessibilityIdentifier(focused ? "pane.focused" : "pane")
     }
 }
 

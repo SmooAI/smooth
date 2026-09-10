@@ -3,7 +3,8 @@ import SwiftUI
 
 /// ⌘, — Permissions (live TCC status + asks), Attention (per-reason toggles),
 /// Harnesses (order + hide, th-0f6126), Terminal (the bundled Nerd Font, size,
-/// ligatures — th-bcd819), Phones (QR pairing for end-to-end encrypted relay
+/// ligatures — th-bcd819), Keyboard (every shortcut, recorded here or edited in
+/// ~/.smooth/smoothflow/keybindings.toml — th-27baa4), Phones (QR pairing for end-to-end encrypted relay
 /// frames, th-d98fde), Daemon (child vs LaunchAgent, address override).
 struct SettingsView: View {
     @ObservedObject var app: AppController
@@ -24,12 +25,13 @@ struct SettingsView: View {
             attention.accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.attention").tabItem { Text("Attention") }
             HarnessesPane(app: app).accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.harnesses").tabItem { Text("Harnesses") }
             TerminalPane().accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.terminal").tabItem { Text("Terminal") }
+            KeyboardPane(keymap: app.keymap).tabItem { Text("Keyboard") }
             PhonesPane(app: app).accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.phones").tabItem { Text("Phones") }
             daemonPane.accessibilityElement(children: .contain).accessibilityIdentifier("settings.pane.daemon").tabItem { Text("Daemon") }
         }
         .classicTabs()
         .padding(16)
-        .frame(width: 560, height: 440)
+        .frame(width: 620, height: 460)
         .onAppear { mode = daemon.mode; permissions.refresh() }
     }
 
@@ -332,7 +334,7 @@ struct OnboardingView: View {
 @MainActor
 final class SettingsWindowController: NSWindowController {
     init(app: AppController) {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 480), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "SmoothFlow Settings"
         w.contentView = NSHostingView(rootView: SettingsView(app: app, permissions: app.permissions, daemon: app.daemon))
         w.center()
