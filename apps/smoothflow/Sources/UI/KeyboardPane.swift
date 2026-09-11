@@ -29,7 +29,10 @@ struct KeyboardPane: View {
                 .accessibilityIdentifier("settings.keyboard.problems")
             }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // Not a LazyVStack: it materializes only the visible rows, so a
+                // row below the fold has no accessibility element — VoiceOver
+                // and the UI test both lose it. Forty rows cost nothing.
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(FlowAction.Category.allCases) { category in
                         let rows = actions(in: category)
                         if !rows.isEmpty {

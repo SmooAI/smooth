@@ -21,6 +21,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
 
     // Tabs
     case newTab
+    case closePane
     case closeTab
     case previousTab
     case nextTab
@@ -36,7 +37,6 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case focusPaneDown
     case zoomPane
     case equalizePanes
-    case closeSplit
 
     // View
     case inbox
@@ -64,11 +64,11 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
              .focusSession1, .focusSession2, .focusSession3, .focusSession4, .focusSession5,
              .focusSession6, .focusSession7, .focusSession8, .focusSession9:
             .session
-        case .newTab, .closeTab, .previousTab, .nextTab:
+        case .newTab, .closePane, .closeTab, .previousTab, .nextTab:
             .tabs
         case .splitRight, .splitDown, .splitLeft, .splitUp,
              .focusPaneLeft, .focusPaneRight, .focusPaneUp, .focusPaneDown,
-             .zoomPane, .equalizePanes, .closeSplit:
+             .zoomPane, .equalizePanes:
             .splits
         case .inbox, .viewTerminal, .viewDiff, .viewPR, .viewActivity, .toggleSidebar, .togglePearlRail, .settings:
             .view
@@ -89,6 +89,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .killResume: return "Kill & Resume"
         case .kill: return "Kill"
         case .newTab: return "New Tab"
+        case .closePane: return "Close Pane"
         case .closeTab: return "Close Tab"
         case .previousTab: return "Previous Tab"
         case .nextTab: return "Next Tab"
@@ -102,7 +103,6 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .focusPaneDown: return "Focus Pane Down"
         case .zoomPane: return "Zoom Pane"
         case .equalizePanes: return "Equalize Panes"
-        case .closeSplit: return "Close Split"
         case .inbox: return "Inbox"
         case .viewTerminal: return "Terminal"
         case .viewDiff: return "Diff"
@@ -135,6 +135,10 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     ///   ⌘⌥ is already the fleet-action family here (⌘⌥Y allow, ⌘⌥N deny,
     ///   ⌘⌥R kill & resume, ⌘⌥K kill), and steering every working session is
     ///   exactly a fleet action.
+    /// - **⌘W is Close Pane, not Close Tab.** ⌘W acts on the surface in
+    ///   Ghostty, iTerm2 and Terminal.app, and the container collapses when it
+    ///   empties: last pane closes the tab, last tab closes the window. ⌘⇧W
+    ///   keeps its place as "close the whole tab, splits and all".
     /// - **⌘D is Split Right and ⌘⇧D is Split Down**, matching cmux/Ghostty,
     ///   rather than one untyped "Split Surface". The other two directions are
     ///   ⌘⇧← and ⌘⇧↑; ⌘⇧→ / ⌘⇧↓ are left free for anyone who wants the
@@ -152,7 +156,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .kill: return KeyChord("k", command: true, option: true)
 
         case .newTab: return KeyChord("t", command: true)
-        case .closeTab: return KeyChord("w", command: true)
+        case .closePane: return KeyChord("w", command: true)
+        case .closeTab: return KeyChord("w", command: true, shift: true)
         case .previousTab: return KeyChord("[", command: true, shift: true)
         case .nextTab: return KeyChord("]", command: true, shift: true)
 
@@ -166,7 +171,6 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .focusPaneDown: return KeyChord("down", command: true, option: true)
         case .zoomPane: return KeyChord("enter", command: true, shift: true)
         case .equalizePanes: return KeyChord("=", command: true, option: true)
-        case .closeSplit: return KeyChord("w", command: true, shift: true)
 
         case .inbox: return KeyChord("i", command: true)
         case .viewTerminal: return KeyChord("1", command: true, option: true)
@@ -189,6 +193,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .newShell: return "A shell session in the focused session's worktree, in a new tab."
         case .newTab: return "Another surface layout over the same fleet — tabs hold panes, not sessions."
+        case .closePane: return "Closes the focused pane; the tab, then the window, collapse when they empty. Asks first when a live session is on screen."
+        case .closeTab: return "Closes the whole tab, splits and all."
         case .steerAll: return "Sends the steer bar's text to every working session."
         case .zoomPane: return "The focused pane fills the tab; again restores the layout."
         case .equalizePanes: return "Resets every divider in the focused tab to an even split."

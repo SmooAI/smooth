@@ -21,20 +21,46 @@ final class LayoutUITests: FlowUITestCase {
         app.windows["SmoothFlow"].descendants(matching: .any).matching(NSPredicate(format: "identifier == %@", "pane.header")).count
     }
 
-    func testCommandDSplitsRightAndCommandShiftWCloses() {
+    func testCommandDSplitsRightAndDown() {
         selectWorkingSession()
         XCTAssertEqual(paneCount, 1)
         app.typeKey("d", modifierFlags: .command)
         XCTAssertTrue(waitUntil { self.paneCount == 2 }, "⌘D splits; tree: \(dump())")
         app.typeKey("d", modifierFlags: [.command, .shift])
         XCTAssertTrue(waitUntil { self.paneCount == 3 }, "⌘⇧D splits down")
+    }
+
+    /// ⌘W on a pane holding a working agent must ask before it does anything,
+    /// and Cancel must leave the pane exactly where it was.
+    func testCommandWAsksBeforeClosingAPaneWithALiveAgent() {
+        selectWorkingSession()
+        app.typeKey("d", modifierFlags: .command)
+        XCTAssertTrue(waitUntil { self.paneCount == 2 })
+        app.typeKey("w", modifierFlags: .command)
+        let cancel = app.windows["SmoothFlow"].descendants(matching: .any)["pane.close.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10), "the confirmation sheet; tree: \(dump())")
+        XCTAssertTrue(app.descendants(matching: .any)["pane.close.kill"].exists, "End Session is offered")
+        XCTAssertTrue(app.descendants(matching: .any)["pane.close.suppress"].exists, "Don't ask again")
+        cancel.click()
+        XCTAssertTrue(waitUntil { self.paneCount == 2 }, "Cancel leaves the pane alone")
+
+        app.typeKey("w", modifierFlags: .command)
+        let close = app.windows["SmoothFlow"].descendants(matching: .any)["pane.close.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 10))
+        close.click()
+        XCTAssertTrue(waitUntil { self.paneCount == 1 }, "Close Pane closes it")
+    }
+
+    /// ⌘⇧W keeps its place: the whole tab, splits and all.
+    func testCommandShiftWClosesTheWholeTab() {
+        selectWorkingSession()
+        app.typeKey("t", modifierFlags: .command)
+        let tabBar = app.windows["SmoothFlow"].descendants(matching: .any)["center.tabbar"]
+        XCTAssertTrue(tabBar.waitForExistence(timeout: 10))
+        app.typeKey("d", modifierFlags: .command)
+        XCTAssertTrue(waitUntil { self.paneCount == 2 }, "a split in the second tab")
         app.typeKey("w", modifierFlags: [.command, .shift])
-        XCTAssertTrue(waitUntil { self.paneCount == 2 }, "⌘⇧W closes the focused split")
-        app.typeKey("w", modifierFlags: [.command, .shift])
-        XCTAssertTrue(waitUntil { self.paneCount == 1 })
-        // The last pane is not closeable by ⌘⇧W — there would be nothing left.
-        app.typeKey("w", modifierFlags: [.command, .shift])
-        XCTAssertTrue(waitUntil { self.paneCount == 1 })
+        XCTAssertTrue(waitUntil { !tabBar.exists }, "⌘⇧W takes the tab and both its panes")
     }
 
     /// ⌘⇧↩ is Zoom Pane now (it used to be Steer All Working — see
@@ -49,15 +75,17 @@ final class LayoutUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { self.paneCount == 2 }, "unzoom restores the layout")
     }
 
-    func testCommandTOpensATabAndCommandWClosesIt() {
-        selectWorkingSession()
+    /// ⌘T then ⌘W: the new tab's pane is empty, so ⌘W needs no confirmation
+    /// and the tab collapses with it — the "container goes when it empties"
+    /// half of the terminal semantics.
+    func testCommandTOpensATabAndCommandWCollapsesItWhenEmpty() {
         let tabBar = app.windows["SmoothFlow"].descendants(matching: .any)["center.tabbar"]
         XCTAssertFalse(tabBar.exists, "one tab shows no tab bar")
         app.typeKey("t", modifierFlags: .command)
         XCTAssertTrue(tabBar.waitForExistence(timeout: 10), "⌘T opens a second tab; tree: \(dump())")
         XCTAssertTrue(app.windows["SmoothFlow"].descendants(matching: .any)["center.tab.1"].exists)
         app.typeKey("w", modifierFlags: .command)
-        XCTAssertTrue(waitUntil { !tabBar.exists }, "⌘W closes it and the bar goes away")
+        XCTAssertTrue(waitUntil { !tabBar.exists }, "⌘W on the empty pane closes the tab, no dialog")
     }
 
     /// A split lives in its tab: switching away and back must not lose it.
@@ -80,6 +108,10 @@ final class LayoutUITests: FlowUITestCase {
         settingsTab("Keyboard", in: settings).click()
         let pane = settings.descendants(matching: .any)["settings.pane.keyboard"]
         XCTAssertTrue(pane.waitForExistence(timeout: 10), "Keyboard pane; tree: \(dump())")
+        let filter = settings.textFields["settings.keyboard.filter"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 10), "filter field")
+        filter.click()
+        filter.typeText("Split Right")
         let chord = settings.descendants(matching: .any)["settings.keyboard.chord.splitRight"]
         XCTAssertTrue(chord.waitForExistence(timeout: 10), "a row for Split Right")
         XCTAssertEqual(chord.value as? String ?? chord.label, "⌘D")
@@ -93,8 +125,8 @@ final class LayoutUITests: FlowUITestCase {
         let layout = app.menuBars.menuBarItems["Layout"]
         XCTAssertTrue(layout.waitForExistence(timeout: 10), "Layout menu")
         layout.click()
-        for title in ["New Tab", "Close Tab", "Split Right", "Split Down", "Split Left", "Split Up",
-                      "Focus Pane Left", "Focus Pane Right", "Zoom Pane", "Equalize Panes", "Close Split"] {
+        for title in ["New Tab", "Close Pane", "Close Tab", "Split Right", "Split Down", "Split Left", "Split Up",
+                      "Focus Pane Left", "Focus Pane Right", "Zoom Pane", "Equalize Panes"] {
             XCTAssertTrue(layout.menuItems[title].exists, "\(title) in the Layout menu")
         }
         layout.typeKey(XCUIKeyboardKey.escape, modifierFlags: [])

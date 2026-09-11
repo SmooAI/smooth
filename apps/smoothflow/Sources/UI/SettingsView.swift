@@ -138,6 +138,9 @@ struct HarnessesPane: View {
 /// config → the bundled JetBrainsMono Nerd Font.
 struct TerminalPane: View {
     @State private var settings = TerminalSettings.load()
+    /// Mirrors `PaneCloseSettings` so the toggle redraws — the value itself
+    /// lives in UserDefaults, because the alert writes it too.
+    @State private var confirmClosePane = PaneCloseSettings.confirm()
     @State private var families = TerminalFont.availableFamilies()
     private let userKeys = TerminalFont.readUserConfigKeys()
 
@@ -158,6 +161,10 @@ struct TerminalPane: View {
                 Button("Default size") { settings.size = nil; apply() }.disabled(settings.size == nil)
             }
             Toggle("Ligatures", isOn: ligatures).accessibilityIdentifier("settings.terminal.ligatures")
+            Toggle("Confirm before ⌘W closes a pane holding a live session", isOn: confirmClose)
+                .accessibilityIdentifier("settings.terminal.confirmClosePane")
+            Text("Off, ⌘W closes the pane immediately and never ends a session — the session keeps running and stays in the sidebar. This is the switch behind the alert's “Don’t ask again”.")
+                .font(.caption).foregroundStyle(Color(Theme.muted))
             if userKeys.contains("font-family"), settings.family == nil {
                 Text("Your Ghostty config sets font-family, so the panes follow it. Pick a font above to override just SmoothFlow.")
                     .font(.caption).foregroundStyle(Color(Theme.muted))
@@ -183,6 +190,10 @@ struct TerminalPane: View {
 
     private var ligatures: Binding<Bool> {
         Binding(get: { settings.ligatures }, set: { settings.ligatures = $0; apply() })
+    }
+
+    private var confirmClose: Binding<Bool> {
+        Binding(get: { PaneCloseSettings.confirm() }, set: { PaneCloseSettings.setConfirm($0); confirmClosePane = $0 })
     }
 
     private func apply() {

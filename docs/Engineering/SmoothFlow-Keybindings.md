@@ -31,6 +31,11 @@ tab 1                      tab 2
   browser tab, and it is the right model here: the sessions outlive the window
   (they are tmux sessions the engine owns), so a tab that owned one would be
   lying.
+- **⌘W closes the pane, and the container collapses when it empties** — last
+  pane closes the tab, last tab closes the window. That is what Ghostty, iTerm2
+  and Terminal.app do. ⌘⇧W still closes the whole tab, splits and all. See
+  [Closing a pane](#closing-a-pane) for the confirmation, which is the
+  interesting half.
 - **A split shows what it was split from.** ⌘D on a pane running `claude` gives
   you two panes on that same session, which is what "split this" means in every
   terminal. Point one of them somewhere else from the sidebar.
@@ -50,6 +55,51 @@ tab 1                      tab 2
 Only fractions travel back from the view: a dragged divider writes
 `settingFraction` into the model without a rebuild, or the drag would fight the
 relayout. The hierarchy is rebuilt only when the tree's _skeleton_ changes.
+
+## Closing a pane
+
+Because a pane is a view over a session the engine owns, ⌘W has **two honest
+answers** when a live session is on screen, and the alert offers both rather
+than guessing:
+
+| Button                                            |                                                                                  |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Close Pane** / **Close Tab** / **Close Window** | the view goes; the session keeps running and stays in the sidebar                |
+| **End Session** (destructive)                     | kills the process too                                                            |
+| **Cancel**                                        | **the default button** — a stray Return over this sheet must never kill an agent |
+
+`PaneClose.decide` is a pure function of the pane's session and returns the
+prompt, or `nil` for "just close it". It asks only when there is something to
+lose:
+
+| Pane holds                            | ⌘W                                                |
+| ------------------------------------- | ------------------------------------------------- |
+| nothing                               | closes, no dialog                                 |
+| a `done` / `dead` session             | closes, no dialog — the pane is scrollback        |
+| a **shell at a prompt** (`idle`)      | closes, no dialog                                 |
+| a **shell with a foreground process** | asks, naming it                                   |
+| any **harness** session, live         | asks, naming the harness, the pearl and the state |
+| anything, with the setting off        | closes, and never kills                           |
+
+The idle-shell line is Ghostty's own `confirm-close-surface` nuance: an alert
+people learn to dismiss unread is worse than no alert. The agent line is the
+reason the dialog exists at all — the copy names the harness ("Claude Code is
+still working on th-27baa4"), says the pane can be closed without killing it,
+and says plainly that ending the session _"kills the process, and an agent
+killed mid-turn loses the work in flight."_
+
+> **Why not libghostty's own confirmation?** `GhosttyRuntime.baseOverrides` sets
+> `confirm-close-surface = false` and keeps it that way. libghostty does not
+> know these surfaces are views over engine-owned sessions, so its generic
+> "close this surface?" would be both wrong and unskippable — no idle-shell
+> nuance, no harness name, no close-without-killing option. The flag stays off
+> and SmoothFlow asks its own question.
+
+"Don't ask again" is on the sheet because it maps to a real setting —
+Settings ▸ Terminal ▸ _Confirm before ⌘W closes a pane holding a live session_
+(`PaneCloseSettings`, `terminal.confirmClosePane`). With it off, ⌘W closes the
+view immediately and never ends a session, which is the safe direction for a
+switch people flip while annoyed.
 
 ## The keymap
 
@@ -122,8 +172,15 @@ Surface" that could only ever add another column. ⌘⇧← and ⌘⇧↑ are th
 directions; ⌘⇧→ and ⌘⇧↓ are deliberately left free for anyone who wants the
 symmetric four-arrow set instead of ⌘D/⌘⇧D — that is two rows in the pane.
 
+**⌘W is Close Pane, ⌘⇧W is Close Tab.** ⌘W acts on the surface in every
+terminal, so it does here; ⌘⇧W keeps its place as the bigger hammer. There is no
+`closeSplit` action any more — ⌘W is it.
+
 ## Tests
 
+- `Tests/PaneCloseTests.swift` — the ⌘W decision: what is asked and what is
+  not, the wording for each session state and each scope, the name fallbacks,
+  and the setting's default.
 - `Tests/KeymapTests.swift` — chord parsing (aliases, `+` as both separator and
   key, garbage), wire round-trip, menu key equivalents, the default map's
   freedom from conflicts, file parsing with bad lines, override/unbind
@@ -133,7 +190,8 @@ symmetric four-arrow set instead of ⌘D/⌘⇧D — that is two rows in the pan
   the upper pane", which the arrow keys depend on), directional focus with no
   wrap-around, and the `SurfaceTab` operations.
 - `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘D/⌘⇧D
-  split, ⌘⇧W closes, ⌘⇧↩ zooms, ⌘T/⌘W and ⌘⇧[ / ⌘⇧] move between tabs, splits
+  split, ⌘W asks before closing a live agent's pane (Cancel leaves it alone),
+  ⌘⇧W takes the whole tab, ⌘⇧↩ zooms, ⌘T/⌘W and ⌘⇧[ / ⌘⇧] move between tabs, splits
   stay in their tab, and the Keyboard pane renders.
 
 ## Deliberately not in this pass

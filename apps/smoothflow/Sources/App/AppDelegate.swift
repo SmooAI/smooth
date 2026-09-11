@@ -115,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let layout = NSMenu()
         layout.addItem(item(.newTab))
         layout.addItem(item(.newShell))
+        layout.addItem(item(.closePane))
         layout.addItem(item(.closeTab))
         layout.addItem(.separator())
         layout.addItem(item(.previousTab))
@@ -132,7 +133,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layout.addItem(.separator())
         layout.addItem(item(.zoomPane))
         layout.addItem(item(.equalizePanes))
-        layout.addItem(item(.closeSplit))
         bar.addItem(submenu(layout, "Layout"))
 
         let window = NSMenu()
@@ -250,6 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .togglePearlRail: app.mainWindow?.toggleRail()
         case .newTab: center?.newTab()
         case .newShell: center?.newShellHere()
+        case .closePane: center?.closeFocusedPane()
         case .closeTab: center?.closeTab()
         case .previousTab: center?.cycleTab(by: -1)
         case .nextTab: center?.cycleTab(by: 1)
@@ -263,7 +264,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .focusPaneDown: center?.focusPane(.down)
         case .zoomPane: center?.toggleZoom()
         case .equalizePanes: center?.equalizePanes()
-        case .closeSplit: center?.closeActivePane()
         default: app.focus(index: FlowAction.focusSessionIndex(action) ?? tag)
         }
     }

@@ -385,22 +385,23 @@ not a contract. Settings ▸ Keyboard (⌘,) and
 the file format and the two default changes th-27baa4 made are documented in
 [SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
 
-| Keys            | Action                                     |
-| --------------- | ------------------------------------------ |
-| ⌘N / ⌘⇧N        | new session / fan out                      |
-| ⌘I              | inbox                                      |
-| ⌘↩ / ⌘⌥↩        | steer focused / steer all working          |
-| ⌘1…9            | focus session N                            |
-| ⌘⌥Y / ⌘⌥N       | allow / deny the focused session's request |
-| ⌘⌥R / ⌘⌥K       | kill & resume / kill                       |
-| ⌘⌥1/2/3/4       | terminal / diff / PR / activity tab        |
-| ⌘T / ⌘⇧T / ⌘W   | new tab / new shell here / close tab       |
-| ⌘⇧[ / ⌘⇧]       | previous / next tab                        |
-| ⌘D / ⌘⇧D        | split right / split down                   |
-| ⌘⇧← / ⌘⇧↑       | split left / split up                      |
-| ⌘⌥←↑→↓          | move focus between panes                   |
-| ⌘⇧↩ / ⌘⌥= / ⌘⇧W | zoom pane / equalize / close split         |
-| ⌘⌃S / ⌘⌃P       | toggle sidebar / pearl rail                |
+| Keys      | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| ⌘N / ⌘⇧N  | new session / fan out                                          |
+| ⌘I        | inbox                                                          |
+| ⌘↩ / ⌘⌥↩  | steer focused / steer all working                              |
+| ⌘1…9      | focus session N                                                |
+| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request                     |
+| ⌘⌥R / ⌘⌥K | kill & resume / kill                                           |
+| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab                            |
+| ⌘T / ⌘⇧T  | new tab / new shell here                                       |
+| ⌘W / ⌘⇧W  | close pane (tab, then window, collapse when empty) / close tab |
+| ⌘⇧[ / ⌘⇧] | previous / next tab                                            |
+| ⌘D / ⌘⇧D  | split right / split down                                       |
+| ⌘⇧← / ⌘⇧↑ | split left / split up                                          |
+| ⌘⌥←↑→↓    | move focus between panes                                       |
+| ⌘⇧↩ / ⌘⌥= | zoom pane / equalize panes                                     |
+| ⌘⌃S / ⌘⌃P | toggle sidebar / pearl rail                                    |
 
 ![fan-out](assets/smoothflow/fanout.png)
 

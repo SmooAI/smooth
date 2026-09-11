@@ -246,6 +246,75 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         focusActiveSurface()
     }
 
+    /// ⌘W. Terminal semantics: the focused pane goes, and the container
+    /// collapses when it empties — last pane closes the tab, last tab closes
+    /// the window. A pane holding a live session asks first, and the alert is
+    /// where the two honest answers live: close the view (the session keeps
+    /// running in the fleet) or end the session (it does not). See
+    /// `PaneClose.decide`.
+    func closeFocusedPane() {
+        guard let t = activeTab else { return }
+        let scope: PaneCloseScope = t.panes.count > 1 ? .pane : (surfaceTabs.count > 1 ? .tab : .window)
+        let session = t.sessions[t.focused].flatMap { app.store.sessions[$0] }
+        let decision = PaneClose.decide(session: session,
+                                        harnessLabel: session.map { app.store.displayName(forKind: $0.kind) } ?? "",
+                                        scope: scope,
+                                        confirmEnabled: PaneCloseSettings.confirm())
+        guard let prompt = decision.prompt, let session, let window = view.window else {
+            return performClose(scope: scope, kill: nil)
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.message
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don’t ask again"
+        alert.suppressionButton?.setAccessibilityIdentifier("pane.close.suppress")
+        alert.addButton(withTitle: prompt.closeTitle)
+        if let kill = prompt.killTitle { alert.addButton(withTitle: kill) }
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].setAccessibilityIdentifier("pane.close.close")
+        alert.buttons[0].keyEquivalent = ""
+        if prompt.killTitle != nil {
+            alert.buttons[1].setAccessibilityIdentifier("pane.close.kill")
+            alert.buttons[1].hasDestructiveAction = true
+            alert.buttons[1].keyEquivalent = ""
+        }
+        // Cancel is the DEFAULT: a stray Return over this sheet must never kill
+        // an agent. That is why the buttons are re-keyed rather than ordered
+        // Cancel-first, which would put it on the wrong side of the sheet.
+        let cancel = alert.buttons[alert.buttons.count - 1]
+        cancel.setAccessibilityIdentifier("pane.close.cancel")
+        cancel.keyEquivalent = "\r"
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if alert.suppressionButton?.state == .on { PaneCloseSettings.setConfirm(false) }
+            switch response {
+            case .alertFirstButtonReturn: self.performClose(scope: scope, kill: nil)
+            case .alertSecondButtonReturn where prompt.killTitle != nil: self.performClose(scope: scope, kill: session)
+            default: break
+            }
+        }
+    }
+
+    /// Remove the focused pane, taking the tab and then the window with it when
+    /// they empty. `kill` ends that pane's session on the way out.
+    private func performClose(scope: PaneCloseScope, kill: Session?) {
+        if let kill { app.kill(kill, resume: false) }
+        switch scope {
+        case .pane:
+            guard var t = activeTab else { return }
+            _ = t.closeFocused()
+            replaceActiveTab(t)
+        case .tab:
+            closeTab()
+        case .window:
+            view.window?.performClose(nil)
+        }
+    }
+
+    /// Remove the focused pane with no questions — the tab-bar × and the
+    /// internal callers. ⌘W goes through `closeFocusedPane`.
     func closeActivePane() {
         guard var t = activeTab else { return }
         if t.closeFocused() {
