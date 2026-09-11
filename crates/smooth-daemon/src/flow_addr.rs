@@ -144,11 +144,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_takes_a_stale_file_and_leaves_a_live_one() {
+    async fn claim_takes_a_file_whose_owner_is_dead() {
         let dir = tempfile::tempdir().unwrap();
-        // Nothing listens on this port, so the holder is stale.
+        // Nothing listens on this port, so the `/health` probe fails and the
+        // holder is stale.
         write(dir.path(), "127.0.0.1:1").unwrap();
         assert!(claim(dir.path(), "127.0.0.1:4400").await);
         assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
+    }
+
+    #[tokio::test]
+    async fn claim_takes_a_file_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(claim(dir.path(), "127.0.0.1:4400").await);
+        assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
+    }
+
+    /// A listener that answers `/health` with 200 until it is dropped — a
+    /// live flow daemon, as far as the probe can tell.
+    async fn live_health_listener() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn claim_leaves_a_file_whose_owner_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, server) = live_health_listener().await;
+        write(dir.path(), &holder).unwrap();
+        assert!(!claim(dir.path(), "127.0.0.1:4400").await, "a live flow daemon keeps the hooks");
+        assert_eq!(claimed(dir.path()).as_deref(), Some(holder.as_str()), "the file is untouched");
+        // …and the loser must not delete the winner's claim on ITS shutdown.
+        assert!(!release(dir.path(), "127.0.0.1:4400"));
+        assert_eq!(claimed(dir.path()).as_deref(), Some(holder.as_str()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn claim_rewrites_our_own_address_even_while_it_answers() {
+        // A restart on the same port: the dying listener may still answer the
+        // probe, and we must still take the file back.
+        let dir = tempfile::tempdir().unwrap();
+        let (ours, server) = live_health_listener().await;
+        write(dir.path(), &ours).unwrap();
+        assert!(claim(dir.path(), &ours).await);
+        assert_eq!(claimed(dir.path()).as_deref(), Some(ours.as_str()));
+        server.abort();
     }
 }

@@ -1358,6 +1358,16 @@ impl Engine {
         let agent_id = ev.session_id.clone();
         // Check-and-create under the store lock: two hooks from the same
         // session can land concurrently (the script is fire-and-forget).
+        //
+        // KNOWN SEAM (th-c103c1): this lock is per PROCESS, and two daemons
+        // can share one flow.db (Big Smooth + the SmoothFlow app's child).
+        // If a brand-new harness session's first two hooks reach BOTH daemons
+        // within the same millisecond, each can miss the other's insert and
+        // adopt it into its own row — two rows for one terminal. The window
+        // is the width of one SQLite insert, both rows are harmless (adopted
+        // rows are inert: no pane, no supervision), and closing it properly
+        // means a cross-process claim. Documented rather than fixed; if you
+        // are here because you saw a duplicate, that is this.
         let created = self.with_store(|st| {
             if let Some(existing) = st.get_by_agent_session(&agent_id)? {
                 return Ok::<_, anyhow::Error>(Some((existing, false)));
@@ -1473,6 +1483,11 @@ impl Engine {
         // variable sub-second precision, so a strict watermark can mis-order
         // two writes in the same millisecond. A re-emit is an idempotent
         // upsert, a missed one is a stale client.
+        //
+        // KNOWN SEAM (th-c103c1): this is a POLL, so a client attached to the
+        // daemon that did NOT write the row sees the change up to one
+        // supervision tick late (SUPERVISE_EVERY, 2 s) — a state dot that
+        // lags on one of two running daemons is this, not a lost frame.
         let since = since - chrono::Duration::seconds(REBROADCAST_SLACK_SECS);
         for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s)) {
             self.emit_session(s);
