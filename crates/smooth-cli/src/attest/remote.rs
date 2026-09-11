@@ -168,17 +168,73 @@ pub fn execute(sys: &Sys, cfg: &Remote, check: &str, origin: &str, sha: &str) ->
     let out = child.stdout.take().map(|s| stream(s, prefix.clone(), false));
     let err = child.stderr.take().map(|s| stream(s, prefix, true));
 
+    // th-7db71c: bound the whole run. `ConnectTimeout` covers reaching the host,
+    // but once connected the check can wedge — measured repeatedly: cargo finished,
+    // yet rust.sh hung in a docker probe (th-c9057c) and `child.wait()` never
+    // returned, hanging th with it. A watchdog kills the ssh after a deadline;
+    // killing the local client drops the connection so sshd SIGHUPs the remote
+    // check too. Off the happy path, so a fast check clears `done` and the
+    // watchdog exits without touching anything.
+    let deadline = deadline_secs();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = {
+        let (done, timed_out, pid) = (done.clone(), timed_out.clone(), child.id());
+        std::thread::spawn(move || {
+            let mut waited = 0u64;
+            while waited < deadline {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                waited += 1; // 500ms steps → `deadline` is in half-seconds below
+            }
+            timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Portable kill by pid (no libc): TERM, then a hard KILL shortly after.
+            // stderr silenced — the second kill usually races a process the first
+            // already reaped ("No such process"), which is success, not an error.
+            let kill = |args: &[&str]| {
+                let _ = Command::new("kill").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            };
+            let pid = pid.to_string();
+            kill(&[&pid]);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            kill(&["-9", &pid]);
+        })
+    };
+
     let status = child.wait().map_err(|e| format!("ssh to {} failed: {e}", cfg.host))?;
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = watchdog.join();
     for h in [out, err].into_iter().flatten() {
         drop(h.join());
     }
 
+    if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(format!(
+            "{} did not finish {check} within {}s — killed (the host is stuck)",
+            cfg.host,
+            deadline / 2
+        ));
+    }
     match status.code() {
         // ssh reserves 255 for its OWN failures — unreachable host, auth refused,
         // connection dropped. None of those say anything about the commit.
         Some(255) | None => Err(format!("ssh to {} failed (unreachable, auth, or dropped connection)", cfg.host)),
         Some(code) => Ok(code),
     }
+}
+
+/// The watchdog's budget, in half-second ticks (so the loop above counts in 500ms
+/// steps). Default 45 minutes — comfortably longer than a warm rust build, so it
+/// only ever fires on a genuinely stuck host. `SMOOTH_ATTEST_REMOTE_DEADLINE_SECS`
+/// overrides it (tests set it low).
+fn deadline_secs() -> u64 {
+    std::env::var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2700)
+        .saturating_mul(2)
 }
 
 fn stream(from: impl Read + Send + 'static, prefix: String, to_stderr: bool) -> std::thread::JoinHandle<()> {
@@ -376,5 +432,33 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         let tmp = tempfile::tempdir().unwrap();
         let sys = sys_with_ssh(tmp.path().join("no-such-ssh"));
         assert!(execute(&sys, &cfg(), "rust", "origin", "abc").is_err());
+    }
+
+    /// th-7db71c: once connected, a wedged check must not hang forever. The df
+    /// probe answers, then the check invocation sleeps — the watchdog kills it at
+    /// the deadline and execute returns Err (which the caller turns into a local
+    /// run), rather than blocking on `child.wait()` indefinitely.
+    #[test]
+    fn a_stuck_remote_is_killed_at_the_deadline_not_left_to_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        // df answers so the disk guard passes; the check invocation then hangs.
+        let ssh = test_script(
+            tmp.path(),
+            "ssh",
+            // `exec sleep` so the stub's pid IS the sleep — a TERM to it dies at
+            // once, like the real ssh client (a bash parent would defer the signal
+            // until its `sleep` child returned, which is not how ssh behaves).
+            "case \"$*\" in\n  *\"df -Pk\"*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/d 100 1 999999999 1%% /\\n'; exit 0 ;;\nesac\nexec sleep 30\n",
+        );
+        // 1s → the watchdog fires almost immediately instead of after the 30s sleep.
+        std::env::set_var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS", "1");
+        let sys = sys_with_ssh(ssh);
+        let began = std::time::Instant::now();
+        let result = execute(&sys, &cfg(), "rust", "origin", "abc");
+        let secs = began.elapsed().as_secs();
+        std::env::remove_var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS");
+        let err = result.expect_err("a stuck remote must return Err, not hang");
+        assert!(err.contains("did not finish"), "the error names the deadline kill: {err}");
+        assert!(secs < 15, "killed near the ~1s deadline, not after the 30s sleep — took {secs}s");
     }
 }
