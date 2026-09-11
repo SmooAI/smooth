@@ -46,6 +46,12 @@ use gh::Gh;
 /// Exit code for a usage error — an unknown check, or no check named at all.
 const EXIT_USAGE: i32 = 2;
 
+/// Exit code when the working tree is dirty before the run, or a check dirtied
+/// a tracked file during it (codegen drift). Distinct from a check FAILURE:
+/// nothing was credited because what was tested would not match the credited
+/// commit, not because the code is wrong.
+const EXIT_DIRTY: i32 = 3;
+
 #[derive(Args, Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "these are CLI flags, not state")]
 pub struct AttestArgs {
@@ -76,6 +82,15 @@ pub struct AttestArgs {
     /// Run everything locally, ignoring any remote routing in the config.
     #[arg(long)]
     pub local: bool,
+
+    /// Attest even though the working tree has uncommitted changes. Off by
+    /// default, and deliberately: attest credits the HEAD commit, but the checks
+    /// run against your working tree. A dirty tree means those differ, so a green
+    /// here is a green a PR would not reproduce — and a check that regenerates a
+    /// tracked file (codegen drift) would slip through as a pass. Pass this only
+    /// when you know the dirt cannot change any check's outcome.
+    #[arg(long)]
+    pub allow_dirty: bool,
 
     /// Machine-readable summary on stdout.
     #[arg(long)]
@@ -176,6 +191,26 @@ fn run(args: &AttestArgs, sys: &Sys, root: &Path) -> Result<i32> {
         return Ok(1);
     }
 
+    // Attest credits the COMMIT, but the checks run against the working TREE. If
+    // they differ, a pass here is a pass a PR (which sees only the commit) would
+    // not reproduce — and a silent one, which is how a dirty tree once produced a
+    // run that "passed everything and credited nothing" with no stated reason.
+    // Refuse up front and name the files, unless the caller opts in.
+    // Tracked changes only (`-uno`): a modified committed file is the integrity
+    // risk — uncommitted work, or regenerated output that drifted from source.
+    // Untracked scratch files are the caller's business and don't change what a
+    // committed check runs against.
+    let dirty_before = git(root, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !dirty_before.is_empty() && !args.allow_dirty {
+        eprintln!("✗ working tree has uncommitted changes — attest credits the commit {sha}, not your working tree.");
+        eprintln!("  The checks would run against files a PR never sees, so any credit could be a green that CI would not reproduce.");
+        for line in dirty_before.lines().take(20) {
+            eprintln!("    {line}");
+        }
+        eprintln!("  → commit or stash, then re-run — or pass --allow-dirty to credit HEAD as-is.");
+        return Ok(EXIT_DIRTY);
+    }
+
     let (local_checks, remote_plan) = route(args, root, &requested)?;
 
     env::apply_path(sys);
@@ -184,6 +219,23 @@ fn run(args: &AttestArgs, sys: &Sys, root: &Path) -> Result<i32> {
 
     for r in &results {
         report(r);
+    }
+
+    // A check that dirtied a tracked file regenerated committed output — the
+    // classic codegen drift (a Zod source edited without re-running generation).
+    // HEAD still holds the stale output, so `sha` would fail that very check in
+    // CI: crediting it green would be a lie. Only reachable when the tree started
+    // clean (a dirty start already returned above unless --allow-dirty).
+    if !args.allow_dirty {
+        let dirty_after = git(root, &["status", "--porcelain", "--untracked-files=no"])?;
+        if !dirty_after.is_empty() {
+            eprintln!("\n✗ a check modified tracked files — generated output is not committed, so {sha} would fail in CI. Nothing credited.");
+            for line in dirty_after.lines().take(20) {
+                eprintln!("    {line}");
+            }
+            eprintln!("  → regenerate and commit the drift the check exposed, then re-attest.");
+            return Ok(EXIT_DIRTY);
+        }
     }
 
     if !pre_pushed && !args.no_push {
@@ -851,6 +903,44 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let f = fixture();
         assert_eq!(f.attest(&["--no-push", "passing"]), 0);
         assert_eq!(f.posted_for("passing"), 1);
+    }
+
+    // ── dirty working tree (the "passed everything, credited nothing" hole) ──
+
+    #[test]
+    fn a_dirty_tree_is_refused_and_never_runs_a_check() {
+        let f = fixture();
+        // A marker the check would create if it ever ran.
+        let ran = f.root.join("ran");
+        check(&f.root, "passing", &format!("touch '{}'", ran.display()));
+        // Dirty a tracked file — the working tree no longer matches HEAD.
+        fs::write(f.root.join("f"), "dirty\n").unwrap();
+
+        let code = f.attest(&["passing"]);
+        assert_eq!(code, EXIT_DIRTY, "a dirty tree stops the run before it starts");
+        assert_eq!(f.posted_for("passing"), 0, "nothing is credited when the tree isn't the commit");
+        assert!(!ran.exists(), "the check must not even run — attest credits the commit, not the tree");
+    }
+
+    #[test]
+    fn allow_dirty_credits_despite_a_dirty_tree() {
+        let f = fixture();
+        fs::write(f.root.join("f"), "dirty\n").unwrap();
+        let code = f.attest(&["--allow-dirty", "passing"]);
+        assert_eq!(code, 0, "the escape hatch proceeds");
+        assert_eq!(f.posted_state("passing").as_deref(), Some("state=success"));
+    }
+
+    #[test]
+    fn a_check_that_dirties_a_tracked_file_is_not_credited() {
+        let f = fixture();
+        // Exits 0 but regenerates a committed file — the codegen-drift shape
+        // (a Zod source edited without re-running generation). HEAD holds the
+        // stale output, so a green here would be a lie.
+        check(&f.root, "drifting", r#"echo changed > "$(git rev-parse --show-toplevel)/f""#);
+        let code = f.attest(&["drifting"]);
+        assert_eq!(code, EXIT_DIRTY, "a check that leaves the tree dirty exposes stale committed output");
+        assert_eq!(f.posted_for("drifting"), 0, "the check passed but its output isn't committed — not credited");
     }
 
     #[test]
