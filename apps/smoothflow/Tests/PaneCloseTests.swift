@@ -41,6 +41,17 @@ final class PaneCloseTests: XCTestCase {
         XCTAssertTrue(PaneClose.hasRunningProcess(session("shell", .working, pearl: nil)))
     }
 
+    /// ⌘T starts the new tab on the focused session, so ⌘T-then-⌘W would hit a
+    /// dialog about a session that is still sitting in the tab you came from.
+    /// Closing one of several views of a session destroys nothing.
+    func testSessionStillVisibleElsewhereClosesSilently() {
+        let live = session("claude", .working)
+        XCTAssertNotNil(PaneClose.decide(session: live, harnessLabel: "Claude Code", scope: .pane).prompt,
+                        "the only view of it still asks")
+        XCTAssertNil(PaneClose.decide(session: live, harnessLabel: "Claude Code", scope: .pane, shownElsewhere: true).prompt,
+                     "a duplicate view does not")
+    }
+
     func testSuppressedConfirmationNeverAsks() {
         let d = PaneClose.decide(session: session("claude", .working), harnessLabel: "Claude Code", scope: .pane, confirmEnabled: false)
         XCTAssertNil(d.prompt, "with the setting off, ⌘W closes the view and never kills anything")

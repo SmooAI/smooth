@@ -54,11 +54,15 @@ enum PaneClose {
     /// - a **shell sitting at a prompt** — Ghostty's `confirm-close-surface`
     ///   draws exactly this line, and asking about an idle shell is the kind of
     ///   dialog people learn to dismiss without reading,
+    /// - a session **still on screen in another pane or tab** — closing one of
+    ///   two views of the same session loses nothing, and asking would make
+    ///   ⌘T-then-⌘W (which starts on the focused session) feel booby-trapped,
     /// - or the user having turned the confirmation off, in which case ⌘W
     ///   closes the view and never kills anything.
-    static func decide(session: Session?, harnessLabel: String, scope: PaneCloseScope, confirmEnabled: Bool = true) -> PaneCloseDecision {
+    static func decide(session: Session?, harnessLabel: String, scope: PaneCloseScope,
+                       shownElsewhere: Bool = false, confirmEnabled: Bool = true) -> PaneCloseDecision {
         let closeTitle = "Close \(scope.noun)"
-        guard confirmEnabled, let session, session.isLive, hasRunningProcess(session) else {
+        guard confirmEnabled, !shownElsewhere, let session, session.isLive, hasRunningProcess(session) else {
             return PaneCloseDecision(scope: scope, prompt: nil)
         }
         let name = session.pearlId ?? (session.title.isEmpty ? session.id : session.title)

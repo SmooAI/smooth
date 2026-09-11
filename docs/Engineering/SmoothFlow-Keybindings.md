@@ -81,6 +81,12 @@ lose:
 | any **harness** session, live         | asks, naming the harness, the pearl and the state |
 | anything, with the setting off        | closes, and never kills                           |
 
+The duplicate-view line matters more than it looks: ⌘T starts the new tab on
+the focused session and a split starts on the session it was split from, so
+without it the most ordinary ⌘T-then-⌘W and ⌘D-then-⌘W would both raise a scary
+dialog about a session that is still sitting right there in the tab you came
+from. Closing one of several views of a session destroys nothing.
+
 The idle-shell line is Ghostty's own `confirm-close-surface` nuance: an alert
 people learn to dismiss unread is worse than no alert. The agent line is the
 reason the dialog exists at all — the copy names the harness ("Claude Code is

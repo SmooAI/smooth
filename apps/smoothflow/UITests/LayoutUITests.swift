@@ -36,6 +36,12 @@ final class LayoutUITests: FlowUITestCase {
         selectWorkingSession()
         app.typeKey("d", modifierFlags: .command)
         XCTAssertTrue(waitUntil { self.paneCount == 2 })
+        // A split starts on the same session, which is a duplicate view and so
+        // closes silently by design. Point the new pane at a different session
+        // so this is the last view of a live agent — the case that must ask.
+        waitForState("fs-3041bbbb") { $0.hasPrefix("limit") }
+        app.staticTexts["sidebar.title.fs-3041bbbb"].click()
+        XCTAssertTrue(waitUntil { self.label("pane.header").contains("3041bb") }, self.label("pane.header"))
         app.typeKey("w", modifierFlags: .command)
         let cancel = app.windows["SmoothFlow"].descendants(matching: .any)["pane.close.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 10), "the confirmation sheet; tree: \(dump())")
@@ -75,17 +81,19 @@ final class LayoutUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { self.paneCount == 2 }, "unzoom restores the layout")
     }
 
-    /// ⌘T then ⌘W: the new tab's pane is empty, so ⌘W needs no confirmation
-    /// and the tab collapses with it — the "container goes when it empties"
-    /// half of the terminal semantics.
-    func testCommandTOpensATabAndCommandWCollapsesItWhenEmpty() {
+    /// ⌘T starts the new tab on the focused session, so its pane is a SECOND
+    /// view of a session the first tab still shows — and ⌘W must not interrogate
+    /// you about closing a duplicate. The tab collapses with the pane.
+    func testCommandTOpensATabAndCommandWCollapsesItWithNoDialog() {
+        selectWorkingSession()
         let tabBar = app.windows["SmoothFlow"].descendants(matching: .any)["center.tabbar"]
         XCTAssertFalse(tabBar.exists, "one tab shows no tab bar")
         app.typeKey("t", modifierFlags: .command)
         XCTAssertTrue(tabBar.waitForExistence(timeout: 10), "⌘T opens a second tab; tree: \(dump())")
         XCTAssertTrue(app.windows["SmoothFlow"].descendants(matching: .any)["center.tab.1"].exists)
         app.typeKey("w", modifierFlags: .command)
-        XCTAssertTrue(waitUntil { !tabBar.exists }, "⌘W on the empty pane closes the tab, no dialog")
+        XCTAssertTrue(waitUntil { !tabBar.exists }, "⌘W closes the duplicate view and its tab, no dialog")
+        XCTAssertFalse(app.descendants(matching: .any)["pane.close.cancel"].exists, "no sheet for a duplicate view")
     }
 
     /// A split lives in its tab: switching away and back must not lose it.

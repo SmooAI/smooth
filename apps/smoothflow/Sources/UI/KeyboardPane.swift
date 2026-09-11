@@ -151,6 +151,10 @@ final class ChordRecorderView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        // A plain NSView is not an accessibility element, and setting a role
+        // does not make it one — without this the recorder has an identifier
+        // that neither VoiceOver nor XCUITest can find.
+        setAccessibilityElement(true)
         wantsLayer = true
         layer?.cornerRadius = 5
         layer?.borderWidth = 1

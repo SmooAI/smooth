@@ -255,10 +255,12 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     func closeFocusedPane() {
         guard let t = activeTab else { return }
         let scope: PaneCloseScope = t.panes.count > 1 ? .pane : (surfaceTabs.count > 1 ? .tab : .window)
-        let session = t.sessions[t.focused].flatMap { app.store.sessions[$0] }
+        let sid = t.sessions[t.focused]
+        let session = sid.flatMap { app.store.sessions[$0] }
         let decision = PaneClose.decide(session: session,
                                         harnessLabel: session.map { app.store.displayName(forKind: $0.kind) } ?? "",
                                         scope: scope,
+                                        shownElsewhere: sid.map { isShownElsewhere($0, than: t.focused) } ?? false,
                                         confirmEnabled: PaneCloseSettings.confirm())
         guard let prompt = decision.prompt, let session, let window = view.window else {
             return performClose(scope: scope, kill: nil)
@@ -295,6 +297,18 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             default: break
             }
         }
+    }
+
+    /// Is this session on screen somewhere other than `pane` — another pane in
+    /// this tab, or any pane of another tab? Then closing `pane` is closing one
+    /// of several views of it, which destroys nothing.
+    private func isShownElsewhere(_ sessionId: String, than pane: PaneID) -> Bool {
+        for (i, t) in surfaceTabs.enumerated() {
+            for p in t.panes where t.sessions[p] == sessionId {
+                if i != activeTabIndex || p != pane { return true }
+            }
+        }
+        return false
     }
 
     /// Remove the focused pane, taking the tab and then the window with it when
