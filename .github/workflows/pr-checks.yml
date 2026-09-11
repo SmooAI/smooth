@@ -94,6 +94,10 @@ jobs:
               shell: bash
               run: echo "run=${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}" >>"$GITHUB_OUTPUT"
 
+            # tmux: the SmoothFlow engine e2e suite (crates/smooth-daemon/tests/
+            # flow_e2e, th-8e3087) boots a real daemon per test and runs
+            # fake-agent under a private tmux server. Without it the suite
+            # skips — and SMOOTH_E2E_STRICT below turns that skip into a failure.
             - name: Install system dependencies
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               # ubuntu-latest ships a google-chrome apt source that intermittently
@@ -103,7 +107,7 @@ jobs:
               # a mirror we don't use (pearl th-79cef7).
               run: |
                   sudo rm -f /etc/apt/sources.list.d/google-chrome*
-                  sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
+                  sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler tmux
 
             # No apt on Windows — protoc is the only native build-time tool the
             # workspace needs there (tonic-build in smooth-scribe et al.).
@@ -165,6 +169,11 @@ jobs:
               run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
                   NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
+                  # The flow e2e suite must RUN on Linux, not skip: a missing
+                  # tmux/bash/curl/`th` fails the job instead of passing it
+                  # having proved nothing. Windows compiles the suite empty
+                  # (`#![cfg(unix)]`) — no tmux there.
+                  SMOOTH_E2E_STRICT: ${{ runner.os == 'Linux' && '1' || '0' }}
                   # Windows test threads get ~1MB of stack; parsing/dropping the
                   # full clap derive tree in a debug build overflows it as the
                   # `th` Command graph grows (th-6c4ddf, then th-9483e8). libtest

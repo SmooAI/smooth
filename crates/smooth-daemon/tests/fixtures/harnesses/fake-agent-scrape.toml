@@ -1,0 +1,39 @@
+# fake-agent-scrape — SCRAPE state: the agent posts nothing; working / idle /
+# approval / usage-limit all come from what it paints on the pane. Resume is
+# `relaunch_command` (the original argv again), the other resume mode.
+name = "fake-agent-scrape"
+display_name = "Fake Agent (scrape)"
+
+[binary]
+names = ["fake-agent"]
+prefer_paths = [".local/bin/fake-agent"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[launch.env]
+FAKE_AGENT_MODE = "scrape"
+FAKE_AGENT_WORK_SECS = "5"
+
+[resume]
+argv = []
+mode = "relaunch_command"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+working = ["esc to interrupt"]
+idle = ["(?m)^> ?$"]
+needs_you = ["do you want to proceed"]
+usage_limit = ["usage limit", "limit will reset"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 1000

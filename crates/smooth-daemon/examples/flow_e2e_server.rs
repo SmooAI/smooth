@@ -22,6 +22,12 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `RUST_LOG` (default `warn`) — the supervisor's trace lines are how a
+    // silent state machine gets debugged.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")))
+        .with_writer(std::io::stderr)
+        .init();
     let args: Vec<String> = std::env::args().collect();
     let addr = arg(&args, "--addr").unwrap_or_else(|| "127.0.0.1:0".into());
     let workspace = PathBuf::from(arg(&args, "--workspace").unwrap_or_else(|| ".".into()));
