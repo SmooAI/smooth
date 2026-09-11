@@ -53,6 +53,18 @@ impl UserClient {
         })
     }
 
+    /// Build against an explicit base URL + bearer — what tests point at a
+    /// mock server (no credentials file involved).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_bearer(base: impl Into<String>, bearer: impl Into<String>) -> Self {
+        Self {
+            base: base.into(),
+            bearer: bearer.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
     /// Identity (email) behind the loaded session, best-effort — used
     /// for the "importing as <user>" banner.
     pub fn user_label() -> Option<String> {

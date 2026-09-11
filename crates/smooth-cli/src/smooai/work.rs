@@ -1044,7 +1044,7 @@ fn looks_like_uuid(s: &str) -> bool {
 
 /// Resolve a project argument — a uuid passes through; anything else matches
 /// the org's projects by KEY (case-insensitive) or exact name.
-async fn resolve_project_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
+pub(crate) async fn resolve_project_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
     if looks_like_uuid(s) {
         return Ok(s.to_string());
     }

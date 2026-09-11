@@ -381,8 +381,10 @@ text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
 > **Dolt is gone** (PR #522 retired it, pearl th-c6ba83 deleted the shim).
 > A straggler machine with a legacy `.smooth/dolt` store must run
 > `th pearls migrate-from-dolt` with **th ≤ 0.42.x** BEFORE upgrading; newer
-> builds cannot read it. `th pearls push` / `pull` print a notice and exit 0 —
-> cross-machine sync against Smoo Projects is pearl th-19cca5.
+> builds cannot read it. `th pearls push` / `pull` print a notice
+> and exit 0 — cross-machine sync is `th pearls sync` against Smoo Projects
+> work items (`sync_map` table, `externalRef = th-xxxxxx@<checkout-dir>`,
+> last-writer-wins, never deletes; pearl th-19cca5).
 
 ### Global (`~/.smooth/`)
 
@@ -437,7 +439,9 @@ th pearls show <id> --handoff [--json]   # Handoff packet: what / where / what h
 th pearls prime --in-progress [--cwd .]  # Handoff packets for in-progress pearls (this worktree's with --cwd)
 th pearls blocked                     # Show blocked pearls
 th pearls projects                    # List all registered pearl projects
-th pearls push / pull                 # Exit-0 notice — sync is pearl th-19cca5
+th pearls sync --project <KEY>        # Bind to a Smoo project, then two-way sync (th-19cca5)
+th pearls sync [--pull-only|--push-only] [--dry-run] [--json]
+th pearls push / pull                 # Exit-0 notice pointing at `th pearls sync`
 ```
 
 ---
