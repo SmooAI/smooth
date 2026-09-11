@@ -1223,6 +1223,9 @@ the only state holder; `th flow` connects and never launches the daemon.
 
 ```bash
 th flow ls [--json]                                      # every session: state glyph, attention, worktree
+th flow new                                              # zero friction: a claude in THIS directory, pearl/branch/title inferred
+th flow infer [--cwd <dir>]                              # what a session here would work on (worktree/project/branch/pearl/jira)
+th flow adopt [on|off]                                   # adopt plain `claude`/`codex` sessions started outside SmoothFlow
 th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --session-id, launched under tmux
 th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
 th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
@@ -1263,8 +1266,23 @@ States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `done` · `dead`. Attention reasons in brackets: `permission`, `question`,
 `usage_limit`, `crashed`, `held` (another live pid owns that harness session).
 
+**Nothing is demanded (th-c103c1).** `th flow new` with no arguments starts a
+session in the current directory; the engine infers the worktree, the project
+(the main checkout, even inside a linked worktree), the branch, the pearl id
+(off the branch or the worktree name) and a title. `th flow infer` shows
+exactly what it would use; any explicit flag wins.
+
+`th flow adopt on` lets a `claude` or `codex` you started in an ordinary
+terminal join the fleet on its first hook, with its pearl and branch attached.
+It is off by default, and an adopted session is not engine-owned: no attach,
+no kill, no resume — the engine only tracks it. Rules:
+[`SmoothFlow.md`](../Architecture/SmoothFlow.md#zero-friction--inference-and-adoption-th-c103c1).
+
 Discovery is `~/.smooth/daemon.addr`; auth is the daemon's local token
-(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Errors are two lines:
+(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Harness HOOKS use a
+wider chain — `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` →
+`~/.smooth/daemon.addr` — because the SmoothFlow app's child daemon
+deliberately does not advertise itself in `daemon.addr`. Errors are two lines:
 what failed, then what to do.
 
 ### Worktree helpers

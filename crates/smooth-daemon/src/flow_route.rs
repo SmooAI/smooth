@@ -68,6 +68,9 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         // th-0f6126: the harness manifests + the user's sort/hide prefs.
         .route("/api/flow/harnesses", get(list_harnesses))
         .route("/api/flow/harnesses/prefs", put(put_harness_prefs))
+        // th-c103c1: the zero-friction New Session dialog + its opt-in.
+        .route("/api/flow/infer", get(infer_context))
+        .route("/api/flow/settings", get(get_settings).put(put_settings))
         .with_state(state)
 }
 
@@ -394,6 +397,52 @@ async fn put_harness_prefs(
     let e = st.engine.clone();
     let harnesses = blocking(move || e.set_harness_prefs(body.order, body.hidden)).await?;
     Ok(Json(json!({ "harnesses": harnesses })))
+}
+
+/// `GET /api/flow/infer?cwd=…` (th-c103c1) — the session context of `cwd`.
+///
+/// Worktree, project, branch, pearl, Jira key, title. No `cwd` means the
+/// daemon's own workspace. Nothing is created.
+async fn infer_context(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let cwd = q.get("cwd").map(std::path::PathBuf::from);
+    let e = st.engine.clone();
+    let inferred = blocking(move || Ok(e.infer_context(cwd.as_deref()))).await?;
+    Ok(Json(serde_json::to_value(inferred).unwrap_or_else(|_| json!({}))))
+}
+
+/// `GET /api/flow/settings` — the engine settings a client can see.
+async fn get_settings(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let adopt = blocking(move || Ok(e.adopt_enabled())).await?;
+    Ok(Json(json!({ "adopt_plain_sessions": adopt })))
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    #[serde(default)]
+    adopt_plain_sessions: Option<bool>,
+}
+
+/// `PUT /api/flow/settings {adopt_plain_sessions?}` — flip the adoption
+/// opt-in; returns the settings as they now stand.
+async fn put_settings(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<SettingsBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let adopt = blocking(move || {
+        if let Some(on) = body.adopt_plain_sessions {
+            e.set_adopt(on)?;
+        }
+        Ok(e.adopt_enabled())
+    })
+    .await?;
+    Ok(Json(json!({ "adopt_plain_sessions": adopt })))
 }
 
 async fn hooks(State(st): State<FlowState>, Json(ev): Json<HookEvent>) -> Json<Value> {
