@@ -162,13 +162,36 @@ mod tests {
 
     /// A listener that answers `/health` with 200 until it is dropped — a
     /// live flow daemon, as far as the probe can tell.
+    ///
+    /// It DRAINS the request before replying. Writing the response and
+    /// closing while the request still sits unread makes Windows close the
+    /// socket abortively (RST), which reqwest reports as a transport error —
+    /// so the probe called a live holder dead and the takeover test passed on
+    /// macOS/Linux while failing on windows-latest.
     async fn live_health_listener() -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let handle = tokio::spawn(async move {
             while let Ok((mut sock, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // Read until the end of the request head (bounded — a probe
+                // sends a few hundred bytes and no body).
+                let mut req = Vec::new();
+                let mut buf = [0u8; 512];
+                while req.len() < 8192 {
+                    match sock.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
                 let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                let _ = sock.flush().await;
                 let _ = sock.shutdown().await;
             }
         });
