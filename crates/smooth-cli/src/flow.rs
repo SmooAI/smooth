@@ -738,11 +738,7 @@ async fn cmd_adopt(state: Option<String>, json: bool) -> Result<()> {
     let v = match state.as_deref().map(str::trim) {
         None => call(reqwest::Method::GET, "/api/flow/settings", None).await?,
         Some(s) => {
-            let on = match s.to_ascii_lowercase().as_str() {
-                "on" | "true" | "1" | "yes" => true,
-                "off" | "false" | "0" | "no" => false,
-                other => bail!("expected `on` or `off`, got `{other}`"),
-            };
+            let on = parse_on_off(s)?;
             call(reqwest::Method::PUT, "/api/flow/settings", Some(json!({ "adopt_plain_sessions": on }))).await?
         }
     };
@@ -764,6 +760,15 @@ async fn cmd_adopt(state: Option<String>, json: bool) -> Result<()> {
         }
     })?;
     Ok(())
+}
+
+/// `on` / `off` (and the usual synonyms) for `th flow adopt`.
+fn parse_on_off(s: &str) -> Result<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        other => bail!("expected `on` or `off`, got `{other}`\n  → th flow adopt on"),
+    }
 }
 
 /// Percent-encode a query value (paths carry spaces and `&`).
@@ -992,6 +997,28 @@ async fn attach_session(id: &str) -> Result<()> {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adopt_takes_on_off_and_their_synonyms() {
+        for yes in ["on", "ON", " true ", "1", "yes"] {
+            assert!(parse_on_off(yes).unwrap(), "{yes}");
+        }
+        for no in ["off", "FALSE", "0", "no"] {
+            assert!(!parse_on_off(no).unwrap(), "{no}");
+        }
+        let err = parse_on_off("maybe").unwrap_err().to_string();
+        assert!(err.contains("expected `on` or `off`"), "{err}");
+        assert!(err.contains("th flow adopt on"), "errors say what to do: {err}");
+        assert!(parse_on_off("").is_err());
+    }
+
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(urlencoding("/dev/smooth-th-c103c1"), "/dev/smooth-th-c103c1");
+        assert_eq!(urlencoding("/a dir/with&and=signs"), "/a%20dir/with%26and%3Dsigns");
+        assert_eq!(urlencoding("~/.smooth"), "~/.smooth");
+        assert_eq!(urlencoding("/é"), "/%C3%A9", "non-ASCII is encoded byte by byte");
+    }
 
     #[test]
     fn candidate_spec_parsing() {

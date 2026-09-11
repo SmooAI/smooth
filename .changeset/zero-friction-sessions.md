@@ -1,5 +1,5 @@
 ---
-'smooth': minor
+'@smooai/smooth': minor
 ---
 
 SmoothFlow zero-friction sessions (th-c103c1): the New Session dialog no longer demands a pearl id. A new `smooth_flow::infer` derives worktree, project (the main checkout, even inside a linked worktree), branch, pearl id, Jira key and title from a directory, served at `GET /api/flow/infer` and `th flow infer`; `flow.new` runs the same inference, so any client gets the context without sending it, and `th flow new` with no arguments starts a session in the current directory.
