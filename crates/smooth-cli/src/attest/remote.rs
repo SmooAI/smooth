@@ -104,12 +104,23 @@ pub fn remote_script(cfg: &Remote, check: &str, origin: &str, sha: &str) -> Stri
         acc
     });
     let r = attest_ref(sha);
+    // th-5123e5: `checkout --force` resets TRACKED files but leaves untracked ones
+    // in place. A file abandoned by an earlier branch (the incident was a stray
+    // `api-prime/tests/*.rs`) then survives into the tree under test, cargo compiles
+    // it, and the remote posts a FALSE `ci-attest/rust: failure` naming a plausible
+    // cause — worse than a plain outage. `git clean -ffd` after the checkout makes
+    // the worktree match the SHA exactly: untracked files and directories gone
+    // (and nested repos, via the second `-f`). No `-x` — the cargo cache lives in an
+    // external CARGO_TARGET_DIR, so ignored files inside the worktree are cheap to
+    // keep and are not what poisons the build. A clean failure is the BOX being
+    // wrong, not the commit, so it exits as a precondition like the lines above.
     format!(
         "set -u\n\
          {path}\n\
          cd {worktree} || exit {EXIT_PRECONDITION}\n\
          git fetch --force --quiet {origin} '+{r}:{r}' || exit {EXIT_PRECONDITION}\n\
          git checkout --detach --force {sha} >/dev/null 2>&1 || exit {EXIT_PRECONDITION}\n\
+         git clean -ffd --quiet || exit {EXIT_PRECONDITION}\n\
          {target}{extra}exec bash {script}\n",
         path = remote_path_prelude(),
         worktree = shell_quote(&cfg.worktree),
@@ -270,6 +281,14 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         assert!(s.contains("refs/attest/abc123"));
         assert!(s.contains("git checkout --detach --force abc123"));
         assert!(
+            s.contains("git clean -ffd"),
+            "th-5123e5: the tree must be cleaned of untracked leftovers after checkout, or a stale box posts a false red"
+        );
+        assert!(
+            s.find("git checkout").unwrap() < s.find("git clean").unwrap(),
+            "clean runs AFTER the checkout — it removes what the checkout left behind"
+        );
+        assert!(
             s.contains("bash 'scripts/ci/rust.sh'"),
             "the check path is quoted like every other interpolation"
         );
@@ -280,9 +299,9 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
     #[test]
     fn every_host_side_failure_in_the_script_is_a_precondition() {
         let s = remote_script(&cfg(), "rust", "origin", "abc123");
-        // cd, fetch and checkout — three ways the BOX can be wrong, none of them
-        // a statement about the code.
-        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 3);
+        // cd, fetch, checkout and clean — four ways the BOX can be wrong, none of
+        // them a statement about the code (th-5123e5 added the clean).
+        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 4);
     }
 
     #[test]
