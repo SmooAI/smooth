@@ -103,6 +103,27 @@ up 2h · 1 restart`, `Daemon crashed — restarting in 4s (attempt 2/8)`
   daemon comes back after a reboot without a hand-made plist. It's applied exactly
   once (tracked by `loginItemConfigured` in the userData `config.json`); after
   that the tray's **Open at Login** checkbox (or System Settings) owns it.
+- **Updates (OTA, th-75eb2e).** electron-updater polls the feed at launch + every
+  30 min (`src/updater.ts`; the pure decisions are in `src/updateDecision.ts` with
+  tests). `autoDownload` is **off** — when an update is _available_ the app shows a
+  native, Sparkle-style choice dialog (Electron's own `dialog.showMessageBox`,
+  since Electron can't use Sparkle the way the native SmoothFlow companion does):
+  title "A new version of Big Smooth is available!", the "X is now available—you
+  have Y" body, a **Skip This Version / Remind Me Later / Install Update** button
+  row, and an "Automatically download and install updates in the future" checkbox.
+    - **Install Update** → `downloadUpdate()`; when the download completes the
+      existing guarded restart step ("Restart now / Later" → stop daemon →
+      `quitAndInstall`, th-79416c) takes over.
+    - **Skip This Version** persists the version to `skippedUpdateVersions` in the
+      userData `config.json` — it's never offered again in the background.
+    - **Remind Me Later** just defers; the next launch / 30-min poll re-offers.
+    - The **checkbox** persists `autoUpdate` in `config.json`; once set, a future
+      available update downloads silently (still landing on the guarded restart
+      prompt) instead of showing the choice dialog. Tray → **Check for Updates…**
+      always shows the dialog, even for a skipped version, and reports the
+      up-to-date case. All of it flows through the same attempt-cap / give-up /
+      once-per-session guards as before (th-d4feb8), so a bundle that won't install
+      still falls back to a manual download instead of nagging forever.
 - **Window.** A `BrowserWindow` on the daemon's `/`. The daemon serves smooth-web
   with its local auth token already injected into `index.html`, so there is no
   renderer, preload, or IPC code here. Closing hides to the tray; Quit exits.

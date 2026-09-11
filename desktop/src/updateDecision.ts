@@ -63,6 +63,74 @@ export function decideUpdateAction(opts: {
     return 'prompt-install';
 }
 
+/** What to do when electron-updater reports an update is AVAILABLE (before it's
+ * downloaded). This drives the Sparkle-style choice dialog. Kept separate from
+ * `decideUpdateAction` (which drives the post-download restart step) so both
+ * layers stay pure and independently testable. */
+export type UpdateAvailableAction =
+    /** Show the native "A new version is available" dialog (Skip / Later / Install). */
+    | 'prompt'
+    /** The user previously opted into automatic updates — download silently, no dialog. */
+    | 'auto-download'
+    /** Do nothing — already installing, already offered this session, the version was
+     * skipped, it isn't newer, or it has already burned through its install attempts. */
+    | 'ignore';
+
+/** Decide what to do when electron-updater reports an available (not-yet-downloaded)
+ * update. Pure — no electron, no I/O. The caller supplies the persisted preferences
+ * (skip list, auto-update flag) and session/attempt state. */
+export function decideAvailableAction(opts: {
+    availableVersion: string;
+    installedVersion: string;
+    /** Versions the user explicitly chose "Skip This Version" for (persisted). */
+    skippedVersions: readonly string[];
+    /** Persisted "Automatically download and install updates in the future" checkbox. */
+    autoUpdate: boolean;
+    /** Have we already shown the available-dialog for this exact version this session? */
+    promptedThisSession: boolean;
+    /** Are we already mid-install (or mid-download after a choice)? */
+    installing: boolean;
+    /** Persisted cross-restart install-attempt record, or null. */
+    persisted: UpdateState | null;
+    /** Force the prompt regardless of skip/auto/session guards (an explicit
+     * "Check for Updates…" — but still respect `installing`). */
+    interactive?: boolean;
+    maxAttempts?: number;
+}): UpdateAvailableAction {
+    const { availableVersion, installedVersion, skippedVersions, autoUpdate, promptedThisSession, installing, persisted, interactive } = opts;
+    const maxAttempts = opts.maxAttempts ?? MAX_INSTALL_ATTEMPTS;
+
+    // A download/install already in flight — never stack a second choice.
+    if (installing) return 'ignore';
+
+    // An explicit user-initiated check always shows the dialog (they asked), as
+    // long as it's genuinely a newer version, ignoring the skip list / auto flag /
+    // session guard that only suppress the *background* nag.
+    if (interactive) {
+        if (availableVersion === installedVersion) return 'ignore';
+        return 'prompt';
+    }
+
+    if (promptedThisSession) return 'ignore';
+    if (availableVersion === installedVersion) return 'ignore';
+    if (skippedVersions.includes(availableVersion)) return 'ignore';
+
+    // This exact version has already failed to install too many times — don't keep
+    // (auto-)downloading a bundle that won't stick. The download path's own give-up
+    // offers a manual download instead.
+    if (persisted && persisted.version === availableVersion && persisted.attempts >= maxAttempts) {
+        return 'ignore';
+    }
+
+    return autoUpdate ? 'auto-download' : 'prompt';
+}
+
+/** Append a version to the "skipped" list, de-duplicated. Pure helper so the
+ * persistence call in updater.ts stays a one-liner. */
+export function addSkippedVersion(skipped: readonly string[], version: string): string[] {
+    return skipped.includes(version) ? [...skipped] : [...skipped, version];
+}
+
 /** The persisted record after we start an install attempt for `version`:
  * increments the counter when it's the same version, resets to 1 for a new one. */
 export function recordAttempt(persisted: UpdateState | null, version: string): UpdateState {

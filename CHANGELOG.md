@@ -1,5 +1,71 @@
 # @smooai/smooth
 
+## 0.48.5
+
+### Patch Changes
+
+- 030541c: th attest: refuse a dirty working tree instead of crediting a commit that wasn't tested
+
+  `th attest` credits the HEAD commit, but the checks run against the working tree. It
+  never checked the two match — so a dirty tree (uncommitted work, or codegen drift
+  where a tracked generated file was regenerated but not committed) produced a green a
+  PR would not reproduce, or the confusing "passed everything, credited nothing" with no
+  stated reason.
+
+  Now it checks tracked-file cleanliness (`git status --porcelain -uno`) both before and
+  after the run: a dirty tree up front is refused with the offending files named
+  (`--allow-dirty` opts out); a check that leaves a tracked file modified (the codegen-
+  drift shape) refuses to credit, since HEAD still holds the stale output and would fail
+  that check in CI. New exit code 3 marks "nothing credited because the tree wasn't the
+  commit," distinct from a real check failure. Untracked scratch files are ignored.
+
+## 0.48.4
+
+### Patch Changes
+
+- ba2d625: th attest: clean the remote worktree after checkout so a stale box can't post a false red
+
+  `th attest` delegates `rust` to a build box (smoo-hub) by fetching the commit and
+  running `git checkout --detach --force <sha>`. That resets tracked files but leaves
+  untracked ones in place, so a file abandoned by an earlier branch (the incident was
+  a stray `api-prime/tests/*.rs`) survived into the tree under test — cargo compiled it
+  and the box posted a FALSE `ci-attest/rust: failure` naming a plausible cause, which
+  reads to a reviewer as a genuine Rust failure (th-5123e5).
+
+  The remote script now runs `git clean -ffd` after the checkout, so the worktree
+  matches the SHA exactly. No `-x`: the cargo cache lives in an external
+  CARGO_TARGET_DIR, so ignored files inside the worktree are cheap to keep and are not
+  what poisons the build. A clean failure exits as a precondition (97) like the cd /
+  fetch / checkout lines — a wrong box, never a verdict on the commit.
+
+## 0.48.3
+
+### Patch Changes
+
+- 11ee74e: th msg watch: add `--from` / `--type` filters and a non-consuming `--peek` mode
+
+  Watching the agent-mail bus for a specific correspondent used to mean hand-rolling
+  a `sqlite3` poll over `~/.smooth/mail.db` — the existing `th msg watch` could only
+  watch your whole inbox and, in continuous mode, acked (consumed) every message it
+  saw. Two additions close that gap so every harness can use the one tested command:
+
+  - `--from <agent>` and `--type <kind>` narrow the stream to one sender or one
+    message type (both normal and peek mode).
+  - `--peek` tracks position by message `seq` instead of read-state and never acks,
+    so a machine consumer (a harness responder, the th-mail skill) reacts to each new
+    message without marking it read — the owner still decides when it has actually
+    been handled. `--since <seq>` pins a durable watermark across restarts.
+
+  Backed by new `MailStore::inbox_since` / `max_seq` (and the `Mail` backend wrappers;
+  cloud emulates via a filtered inbox fetch). Part of the resilient-messaging epic
+  (th-826c4a).
+
+## 0.48.2
+
+### Patch Changes
+
+- 8856243: `th pearls projects` no longer fills up with hook litter. Opening the pearl store used to register whatever directory it was opened from, and `th prime` (the Codex SessionStart hook) opens it from any cwd — so `~/.smooth/registry.json` collected Codex scratch dirs, `$TMPDIR`, `$HOME`, even `/`. A plain open now registers the project only when its root is a git repository other than `/` or `$HOME`; `th pearls init` registers any directory explicitly and that entry survives. Every open also prunes implicit entries that are not git repos (alongside the existing dead-path prune), so an existing registry heals on the next `th pearls` call. (th-92e046)
+
 ## 0.48.1
 
 ### Patch Changes

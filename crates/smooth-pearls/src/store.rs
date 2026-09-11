@@ -149,20 +149,31 @@ impl PearlStore {
     /// Open the store for the project containing `project_root` (any path
     /// inside the repo works — see [`resolve_project_root`]). Creates the
     /// database and schema on first use and registers the project in
-    /// `~/.smooth/registry.json`.
+    /// `~/.smooth/registry.json` — but only when the resolved root is a
+    /// git repository that is neither `/` nor `$HOME`
+    /// ([`crate::registry::is_auto_registrable`]); hooks open the store
+    /// from any cwd, and scratch dirs are not projects (th-92e046).
     pub fn open(project_root: &Path) -> Result<Self> {
+        Self::open_registering(project_root, false)
+    }
+
+    /// `th pearls init` — the database is created on demand, so "init" is
+    /// "open + register explicitly": any directory is accepted, and the
+    /// entry survives the non-git prune that a plain open applies.
+    pub fn init(project_root: &Path) -> Result<Self> {
+        Self::open_registering(project_root, true)
+    }
+
+    fn open_registering(project_root: &Path, explicit: bool) -> Result<Self> {
         let root = resolve_project_root(project_root);
         let store = Self::open_with_db(&default_db_path(), &root)?;
         // Best-effort registry update; never fails the open.
-        let _ = crate::registry::auto_register(&store.project_root);
+        let _ = if explicit {
+            crate::registry::register_explicit(&store.project_root)
+        } else {
+            crate::registry::auto_register(&store.project_root)
+        };
         Ok(store)
-    }
-
-    /// Alias of [`Self::open`] — the database is created on demand, so
-    /// "init" is just "open + register". Kept for callers and docs that
-    /// spell it `th pearls init`.
-    pub fn init(project_root: &Path) -> Result<Self> {
-        Self::open(project_root)
     }
 
     /// Open the store at an explicit database file for `project_root`
