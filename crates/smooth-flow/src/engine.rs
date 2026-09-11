@@ -372,6 +372,11 @@ pub const ADOPT_ENV: &str = "SMOOTH_FLOW_ADOPT";
 /// gone: its terminal was closed without a `SessionEnd`, and nothing here can
 /// see its process.
 pub const ADOPTED_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
+/// How far back of its own watermark the cross-daemon re-broadcast looks.
+pub const REBROADCAST_SLACK_SECS: i64 = 2;
+/// Cap on the per-session adoption-refusal cache, so a long-lived daemon that
+/// sees thousands of strangers does not grow a map forever.
+const ADOPT_REFUSED_CAP: usize = 1024;
 
 /// Why adoption declined a hook.
 ///
@@ -1390,7 +1395,11 @@ impl Engine {
     /// Cache a refusal and return `None`.
     fn refuse_adoption(&self, session_id: &str, why: AdoptRefusal) -> Option<Session> {
         tracing::debug!(session = %session_id, why = why.as_str(), "flow: not adopting");
-        self.rt().adopt_refused.insert(session_id.to_string(), why);
+        let mut rt = self.rt();
+        if rt.adopt_refused.len() >= ADOPT_REFUSED_CAP {
+            rt.adopt_refused.clear();
+        }
+        rt.adopt_refused.insert(session_id.to_string(), why);
         None
     }
 
@@ -1454,17 +1463,18 @@ impl Engine {
     /// engine already emitted is harmless.
     fn rebroadcast_external_changes(&self, now: DateTime<Utc>) -> Result<()> {
         let since = self.rt().seen_changes_at;
+        self.rt().seen_changes_at = Some(now);
         let Some(since) = since else {
             // First tick: take the watermark, emit nothing (clients just got
             // the whole list in `flow.hello`).
-            self.rt().seen_changes_at = Some(now);
             return Ok(());
         };
-        let changed = self.with_store(|st| st.changed_since(since))?;
-        if let Some(latest) = changed.iter().map(|s| s.updated_at).max() {
-            self.rt().seen_changes_at = Some(latest);
-        }
-        for s in changed.iter().filter(|s| !owned_here(s)) {
+        // The window is deliberately slack: `updated_at` is RFC3339 text with
+        // variable sub-second precision, so a strict watermark can mis-order
+        // two writes in the same millisecond. A re-emit is an idempotent
+        // upsert, a missed one is a stale client.
+        let since = since - chrono::Duration::seconds(REBROADCAST_SLACK_SECS);
+        for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s)) {
             self.emit_session(s);
         }
         Ok(())
@@ -2812,6 +2822,19 @@ mod tests {
         let after = e.get(&stale.id).unwrap().unwrap();
         assert_eq!(after.state, SessionState::Dead);
         assert_eq!(after.attention.unwrap().reason, "crashed");
+    }
+
+    #[test]
+    fn the_refusal_cache_is_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        for i in 0..=ADOPT_REFUSED_CAP {
+            e.refuse_adoption(&format!("s{i}"), AdoptRefusal::NotGit);
+        }
+        assert!(
+            e.rt().adopt_refused.len() <= ADOPT_REFUSED_CAP,
+            "a long-lived daemon must not grow this forever"
+        );
     }
 
     #[test]
