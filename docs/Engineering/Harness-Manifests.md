@@ -150,6 +150,25 @@ session_id, cwd, payload}`). `install` says how that gets wired
 - Needs the daemon's local token: the pane inherits `HOME`, so
   `~/.smooth/operator-token` is found the way any `th code` finds it.
 
+## Adoption — a harness started outside SmoothFlow (th-c103c1)
+
+Because the `th pkg` hook overlay posts `{harness, event, session_id, cwd}`
+from every harness, a `claude` or `codex` started in a plain terminal can be
+**adopted** into the fleet: the engine infers its worktree, project, branch,
+pearl and Jira key from the `cwd` the hook already carries, and creates a row.
+
+Two things a manifest author should know:
+
+- The `harness` field a hook sends must resolve to a manifest name. The
+  `-code` spelling is stripped (`claude-code` → `claude`); anything else must
+  match the manifest name exactly, or the session is not adopted.
+- An adopted row is NOT engine-owned: no pane to attach, no resume, no kill,
+  and supervision skips it. Its `[resume]` and `[launch]` blocks are never
+  used; only `[state]` matters.
+
+Off by default — `th flow adopt on`. Full rules and guards:
+[`SmoothFlow.md`](../Architecture/SmoothFlow.md#zero-friction--inference-and-adoption-th-c103c1).
+
 ## Sort / hide preferences
 
 `{order: [names], hidden: [names]}` in flow.db (`config` table, key

@@ -91,7 +91,7 @@ fn advertised_addr(dir: &Path) -> Option<String> {
 
 /// True when a daemon answers `/health` at `addr` quickly. Conservative on
 /// error: unreachable/slow means "no live daemon", and we proceed to start.
-async fn probe_health(addr: &str) -> bool {
+pub(crate) async fn probe_health(addr: &str) -> bool {
     let url = format!("http://{addr}/health");
     let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_millis(750)).build() else {
         return false;

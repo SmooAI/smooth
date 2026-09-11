@@ -71,6 +71,24 @@ pub enum FlowCommands {
         #[arg(last = true)]
         argv: Vec<String>,
     },
+    /// What a session started here would work on: worktree, project, branch,
+    /// pearl, Jira key, title — all inferred, nothing created (th-c103c1).
+    Infer {
+        /// Directory to infer from (default: this one).
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Adopt harness sessions started OUTSIDE SmoothFlow (a plain `claude` or
+    /// `codex` in a terminal) into the fleet, using the hooks they already
+    /// post. `on` | `off`; no argument prints the current setting.
+    Adopt {
+        /// on | off
+        state: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Stream a session to this terminal (raw mode) until Ctrl-\.
     Attach { id: String },
     /// Steer: paste TEXT + Enter into the agent's prompt.
@@ -464,6 +482,8 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             })
             .await
         }
+        FlowCommands::Infer { cwd, json } => cmd_infer(cwd, json).await,
+        FlowCommands::Adopt { state, json } => cmd_adopt(state, json).await,
         FlowCommands::Attach { id } => attach_session(&id).await,
         FlowCommands::Send { id, text } => {
             let text = text.join(" ");
@@ -684,6 +704,78 @@ struct NewArgs {
     argv: Vec<String>,
 }
 
+/// `th flow infer` — the read-only context the New Session dialog shows.
+async fn cmd_infer(cwd: Option<String>, json: bool) -> Result<()> {
+    let cwd = match cwd {
+        Some(c) => c,
+        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+    };
+    let v = call(reqwest::Method::GET, &format!("/api/flow/infer?cwd={}", urlencoding(&cwd)), None).await?;
+    emit(json, &v, |v| {
+        let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("—").to_string();
+        println!("{} {}", paint("●", |g| g.green().to_string()), field("title"));
+        for (label, value) in [
+            ("worktree", field("worktree")),
+            ("project ", field("project")),
+            ("branch  ", field("branch")),
+            ("pearl   ", field("pearl_id")),
+            ("jira    ", field("jira_key")),
+        ] {
+            println!("  {}  {value}", paint(label, |l| l.dimmed().to_string()));
+        }
+        if v.get("is_git").and_then(Value::as_bool) != Some(true) {
+            println!(
+                "  {}",
+                paint("not a git worktree — a session here is untracked work", |l| l.dimmed().to_string())
+            );
+        }
+    })?;
+    Ok(())
+}
+
+/// `th flow adopt [on|off]` — the adoption opt-in.
+async fn cmd_adopt(state: Option<String>, json: bool) -> Result<()> {
+    let v = match state.as_deref().map(str::trim) {
+        None => call(reqwest::Method::GET, "/api/flow/settings", None).await?,
+        Some(s) => {
+            let on = match s.to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" | "yes" => true,
+                "off" | "false" | "0" | "no" => false,
+                other => bail!("expected `on` or `off`, got `{other}`"),
+            };
+            call(reqwest::Method::PUT, "/api/flow/settings", Some(json!({ "adopt_plain_sessions": on }))).await?
+        }
+    };
+    emit(json, &v, |v| {
+        let on = v.get("adopt_plain_sessions").and_then(Value::as_bool).unwrap_or(false);
+        println!(
+            "{} adoption of plain harness sessions is {}",
+            paint("●", |g| g.green().to_string()),
+            if on { "ON" } else { "OFF" }
+        );
+        if on {
+            println!(
+                "  {}",
+                paint(
+                    "a `claude`/`codex` started in a terminal joins the fleet on its first hook — no pane to attach, no resume",
+                    |l| l.dimmed().to_string()
+                )
+            );
+        }
+    })?;
+    Ok(())
+}
+
+/// Percent-encode a query value (paths carry spaces and `&`).
+fn urlencoding(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => (b as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
 async fn cmd_new(a: NewArgs) -> Result<()> {
     let NewArgs {
         kind,
@@ -698,6 +790,13 @@ async fn cmd_new(a: NewArgs) -> Result<()> {
         json,
         argv,
     } = a;
+    // th-c103c1: `th flow new` with no arguments starts a session HERE. The
+    // engine infers the pearl, branch and title from the worktree; only
+    // `--pearl` (which asks it to CREATE a worktree) opts out.
+    let worktree = match (&worktree, &pearl) {
+        (None, None) => std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+        _ => worktree,
+    };
     let body = json!({
         "kind": kind,
         "worktree": worktree,

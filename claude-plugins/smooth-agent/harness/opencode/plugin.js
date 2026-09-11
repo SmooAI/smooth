@@ -49,9 +49,15 @@ const readFile = async (p) => {
     }
 };
 
-/// `http://<daemon.addr>/api/flow/hooks`, or '' when no daemon is advertised.
-export const flowHooksUrl = async (addrFile = process.env.SMOOTH_DAEMON_ADDR_FILE || `${process.env.HOME || ''}/.smooth/daemon.addr`) => {
-    const addr = await readFile(addrFile);
+/// `http://<flow.addr or daemon.addr>/api/flow/hooks`, or '' when no daemon
+/// is reachable. Same chain as flow-hook.sh (th-c103c1): $SMOOTH_FLOW_ADDR →
+/// ~/.smooth/flow.addr (claimed by whichever daemon hosts the live flow
+/// engine) → ~/.smooth/daemon.addr.
+export const flowHooksUrl = async (
+    addrFile = process.env.SMOOTH_DAEMON_ADDR_FILE || `${process.env.HOME || ''}/.smooth/daemon.addr`,
+    flowAddrFile = process.env.SMOOTH_FLOW_ADDR_FILE || `${process.env.HOME || ''}/.smooth/flow.addr`,
+) => {
+    const addr = process.env.SMOOTH_FLOW_ADDR || (await readFile(flowAddrFile)) || (await readFile(addrFile));
     if (!addr) return '';
     return `${/^https?:\/\//.test(addr) ? addr : `http://${addr}`}/api/flow/hooks`;
 };
