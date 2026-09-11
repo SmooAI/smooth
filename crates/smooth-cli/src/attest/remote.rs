@@ -82,7 +82,10 @@ fn parse_df_available_kb(out: &str) -> Option<u64> {
 /// itself did not answer, which is treated the same as a failing guard.
 pub fn free_gib(sys: &Sys, host: &str) -> Option<u64> {
     let out = Command::new(&sys.ssh)
-        .args(["-o", "BatchMode=yes", host, "df -Pk /"])
+        // ConnectTimeout so an UNREACHABLE box fails in seconds — without it, ssh
+        // waits out the full TCP handshake timeout, and the caller falls back to a
+        // local run (or CI) only after a long, silent stall.
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "df -Pk /"])
         .stdin(Stdio::null())
         .output()
         .ok()?;
@@ -148,7 +151,7 @@ pub fn execute(sys: &Sys, cfg: &Remote, check: &str, origin: &str, sha: &str) ->
     }
 
     let mut child = Command::new(&sys.ssh)
-        .args(["-o", "BatchMode=yes", &cfg.host, "bash", "-s"])
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &cfg.host, "bash", "-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
