@@ -1894,6 +1894,65 @@ mod tests {
         assert!(root == d || root.join(".git").exists());
     }
 
+    /// th-8e3087: a `SessionStart` that arrives while a kill+resume is still
+    /// deciding the row's state must still promote it.
+    ///
+    /// The original bug was pure ordering: `hook` read the row BEFORE
+    /// `relaunch` wrote `Starting`, saw the pre-kill `idle`, and
+    /// [`HookOutcome::Started`]'s `state == Starting` test declined — the
+    /// resumed row then sat at `starting` until the test timed out. The kill's
+    /// slow half is simulated by holding the session lock (no `KILL_GRACE`
+    /// sleep) so this pins the ordering, not the timing.
+    #[test]
+    fn session_start_during_a_kill_resume_still_promotes_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Claude),
+                    agent_session_id: Some("uuid-resume".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        // The row as a finished turn leaves it: idle, not starting.
+        e.set_state(&s.id, SessionState::Idle, None).unwrap();
+
+        // Stand in for `kill`'s locked tail, which ends by writing `Starting`.
+        let lock = e.session_lock(&s.id);
+        let held = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let hooking = {
+            let e = e.clone();
+            std::thread::spawn(move || {
+                e.hook(HookEvent {
+                    harness: "claude-code".into(),
+                    event: "SessionStart".into(),
+                    session_id: "uuid-resume".into(),
+                    cwd: None,
+                    payload: json!({ "source": "resume" }),
+                })
+                .unwrap();
+            })
+        };
+        // Give the hook thread every chance to read the row early — which is
+        // exactly what it used to do.
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Idle);
+        e.set_state(&s.id, SessionState::Starting, None).unwrap();
+        drop(held);
+
+        hooking.join().unwrap();
+        assert_eq!(
+            e.get(&s.id).unwrap().unwrap().state,
+            SessionState::Idle,
+            "SessionStart must promote the row relaunch just marked `starting`"
+        );
+    }
+
     #[test]
     fn hook_for_unknown_session_is_a_quiet_ok() {
         let tmp = tempfile::tempdir().unwrap();
