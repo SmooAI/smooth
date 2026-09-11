@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Before any surface or view asks for a font (th-bcd819).
         TerminalFont.registerBundled()
+        app.keymap.onChange = { [weak self] in self?.rebuildMenu() }
         NSApp.mainMenu = buildMenu()
         // Hosting the unit tests: no status item, no window, no daemon, no tmux
         // (th-dccc80). Everything below `start()` is what a test would observe.
@@ -45,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: menu bar
 
+    /// Every shortcut in the bar comes from the keymap, so rebinding one in
+    /// Settings ▸ Keyboard (or in the TOML file) moves the menu with it. The
+    /// bar is rebuilt, not patched, whenever the map changes — cheap, and
+    /// there is exactly one code path that can be wrong.
     private func buildMenu() -> NSMenu {
         let bar = NSMenu()
 
@@ -52,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About SmoothFlow", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(checkForUpdatesItem())
         appMenu.addItem(.separator())
-        appMenu.addItem(item("Settings…", #selector(showSettings), ","))
+        appMenu.addItem(item(.settings))
         let perms = NSMenu()
         for kind in PermissionKind.allCases {
             let it = NSMenuItem(title: kind.title + "…", action: #selector(grantPermission(_:)), keyEquivalent: "")
@@ -67,20 +72,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bar.addItem(submenu(appMenu, "SmoothFlow"))
 
         let session = NSMenu()
-        session.addItem(item("New Session…", #selector(newSession), "n"))
-        session.addItem(item("Fan Out…", #selector(fanOut), "n", [.command, .shift]))
+        session.addItem(item(.newSession))
+        session.addItem(item(.fanOut))
         session.addItem(.separator())
-        session.addItem(item("Steer All Working", #selector(steerAll), "\r", [.command, .shift]))
-        session.addItem(item("Steer Focused…", #selector(steerFocused), "\r", [.command]))
+        session.addItem(item(.steerAll))
+        session.addItem(item(.steerFocused))
         session.addItem(.separator())
-        session.addItem(item("Approve (Allow)", #selector(allow), "y", [.command, .option]))
-        session.addItem(item("Deny", #selector(deny), "n", [.command, .option]))
-        session.addItem(item("Kill & Resume", #selector(killResume), "r", [.command, .option]))
-        session.addItem(item("Kill", #selector(kill), "k", [.command, .option]))
+        session.addItem(item(.allow))
+        session.addItem(item(.deny))
+        session.addItem(item(.killResume))
+        session.addItem(item(.kill))
         session.addItem(.separator())
-        for i in 1...9 {
-            let it = item("Focus Session \(i)", #selector(focusIndex(_:)), String(i))
-            it.tag = i - 1
+        for a in FlowAction.allCases where FlowAction.focusSessionIndex(a) != nil {
+            let it = item(a)
+            it.tag = FlowAction.focusSessionIndex(a) ?? 0
             session.addItem(it)
         }
         bar.addItem(submenu(session, "Session"))
@@ -93,19 +98,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bar.addItem(submenu(edit, "Edit"))
 
         let view = NSMenu()
-        view.addItem(item("Inbox", #selector(inbox), "i"))
+        view.addItem(item(.inbox))
         view.addItem(.separator())
-        view.addItem(item("Terminal", #selector(tabTerminal), "1", [.command, .option]))
-        view.addItem(item("Diff", #selector(tabDiff), "2", [.command, .option]))
-        view.addItem(item("PR", #selector(tabPR), "3", [.command, .option]))
-        view.addItem(item("Activity", #selector(tabActivity), "4", [.command, .option]))
+        view.addItem(item(.viewTerminal))
+        view.addItem(item(.viewDiff))
+        view.addItem(item(.viewPR))
+        view.addItem(item(.viewActivity))
         view.addItem(.separator())
-        view.addItem(item("Split Surface", #selector(split), "d"))
-        view.addItem(item("Close Split", #selector(closeSplit), "w", [.command, .shift]))
-        view.addItem(.separator())
-        view.addItem(item("Toggle Sidebar", #selector(toggleSidebar), "s", [.command, .control]))
-        view.addItem(item("Toggle Pearl Rail", #selector(toggleRail), "p", [.command, .control]))
+        view.addItem(item(.toggleSidebar))
+        view.addItem(item(.togglePearlRail))
         bar.addItem(submenu(view, "View"))
+
+        // Tabs and splits are a menu of their own: they are the surface model,
+        // not a view toggle, and burying them under View is how the old
+        // single "Split Surface" item stayed unnoticed.
+        let layout = NSMenu()
+        layout.addItem(item(.newTab))
+        layout.addItem(item(.newShell))
+        layout.addItem(item(.closePane))
+        layout.addItem(item(.closeTab))
+        layout.addItem(.separator())
+        layout.addItem(item(.previousTab))
+        layout.addItem(item(.nextTab))
+        layout.addItem(.separator())
+        layout.addItem(item(.splitRight))
+        layout.addItem(item(.splitDown))
+        layout.addItem(item(.splitLeft))
+        layout.addItem(item(.splitUp))
+        layout.addItem(.separator())
+        layout.addItem(item(.focusPaneLeft))
+        layout.addItem(item(.focusPaneRight))
+        layout.addItem(item(.focusPaneUp))
+        layout.addItem(item(.focusPaneDown))
+        layout.addItem(.separator())
+        layout.addItem(item(.zoomPane))
+        layout.addItem(item(.equalizePanes))
+        bar.addItem(submenu(layout, "Layout"))
 
         let window = NSMenu()
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
@@ -114,6 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = window
         return bar
     }
+
+    /// Rebuild the bar against the current keymap.
+    func rebuildMenu() { NSApp.mainMenu = buildMenu() }
 
     private func checkForUpdatesItem() -> NSMenuItem {
         let it = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
@@ -138,10 +169,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         si.button?.toolTip = "SmoothFlow"
         let menu = NSMenu()
         menu.addItem(item("Open SmoothFlow", #selector(openMainWindow), ""))
-        menu.addItem(item("Inbox", #selector(inbox), ""))
+        menu.addItem(unbound(.inbox))
         menu.addItem(.separator())
         menu.addItem(checkForUpdatesItem())
-        menu.addItem(item("Settings…", #selector(showSettings), ""))
+        menu.addItem(unbound(.settings))
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit SmoothFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         si.menu = menu
@@ -151,6 +182,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         app.mainWindow.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// A menu item for a `FlowAction`, wearing whatever chord the keymap
+    /// currently gives it (none is legal — the item still works by mouse).
+    private func item(_ action: FlowAction) -> NSMenuItem {
+        let it = NSMenuItem(title: action.title, action: #selector(runAction(_:)), keyEquivalent: "")
+        it.representedObject = action.rawValue
+        if let chord = app.keymap.chord(for: action) {
+            it.keyEquivalent = chord.menuKeyEquivalent
+            it.keyEquivalentModifierMask = chord.menuModifiers
+        }
+        it.target = self
+        return it
+    }
+
+    /// The same action with no key equivalent — the status-item menu, which
+    /// must not claim a second copy of a shortcut the main bar already owns.
+    private func unbound(_ action: FlowAction) -> NSMenuItem {
+        let it = NSMenuItem(title: action.title, action: #selector(runAction(_:)), keyEquivalent: "")
+        it.representedObject = action.rawValue
+        it.target = self
+        return it
     }
 
     private func item(_ title: String, _ action: Selector, _ key: String, _ mods: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
@@ -169,26 +222,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: actions
 
-    @objc private func showSettings() { app.showSettings() }
+    /// One selector for every keymap-driven item; the action rides on
+    /// `representedObject`, so a rebind never has to touch a selector.
+    @objc private func runAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let action = FlowAction(rawValue: raw) else { return }
+        run(action, tag: sender.tag)
+    }
+
+    func run(_ action: FlowAction, tag: Int = 0) {
+        let center = app.mainWindow?.center
+        switch action {
+        case .settings: app.showSettings()
+        case .newSession: app.showNewSession()
+        case .fanOut: app.showFanOut()
+        case .steerAll: center?.steerAll()
+        case .steerFocused: center?.focusSteer()
+        case .allow: if let s = app.store.focused { app.approve(s, .allow) }
+        case .deny: if let s = app.store.focused { app.approve(s, .deny) }
+        case .killResume: if let s = app.store.focused { app.kill(s, resume: true) }
+        case .kill: if let s = app.store.focused { app.kill(s, resume: false) }
+        case .inbox: app.toggleInbox()
+        case .viewTerminal: app.showTab(.terminal)
+        case .viewDiff: app.showTab(.diff)
+        case .viewPR: app.showTab(.pr)
+        case .viewActivity: app.showTab(.activity)
+        case .toggleSidebar: app.mainWindow?.toggleSidebar()
+        case .togglePearlRail: app.mainWindow?.toggleRail()
+        case .newTab: center?.newTab()
+        case .newShell: center?.newShellHere()
+        case .closePane: center?.closeFocusedPane()
+        case .closeTab: center?.closeTab()
+        case .previousTab: center?.cycleTab(by: -1)
+        case .nextTab: center?.cycleTab(by: 1)
+        case .splitRight: center?.split(.right)
+        case .splitLeft: center?.split(.left)
+        case .splitUp: center?.split(.up)
+        case .splitDown: center?.split(.down)
+        case .focusPaneLeft: center?.focusPane(.left)
+        case .focusPaneRight: center?.focusPane(.right)
+        case .focusPaneUp: center?.focusPane(.up)
+        case .focusPaneDown: center?.focusPane(.down)
+        case .zoomPane: center?.toggleZoom()
+        case .equalizePanes: center?.equalizePanes()
+        default: app.focus(index: FlowAction.focusSessionIndex(action) ?? tag)
+        }
+    }
+
     @objc private func grantPermission(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let kind = PermissionKind(rawValue: raw) { app.permissions.request(kind) }
     }
-    @objc private func newSession() { app.showNewSession() }
-    @objc private func fanOut() { app.showFanOut() }
-    @objc private func inbox() { app.toggleInbox() }
-    @objc private func steerAll() { app.mainWindow.center.steerAll() }
-    @objc private func steerFocused() { app.mainWindow.center.focusSteer() }
-    @objc private func allow() { if let s = app.store.focused { app.approve(s, .allow) } }
-    @objc private func deny() { if let s = app.store.focused { app.approve(s, .deny) } }
-    @objc private func killResume() { if let s = app.store.focused { app.kill(s, resume: true) } }
-    @objc private func kill() { if let s = app.store.focused { app.kill(s, resume: false) } }
-    @objc private func focusIndex(_ sender: NSMenuItem) { app.focus(index: sender.tag) }
-    @objc private func tabTerminal() { app.showTab(.terminal) }
-    @objc private func tabDiff() { app.showTab(.diff) }
-    @objc private func tabPR() { app.showTab(.pr) }
-    @objc private func tabActivity() { app.showTab(.activity) }
-    @objc private func split() { app.mainWindow.center.splitActive() }
-    @objc private func closeSplit() { app.mainWindow.center.closeActivePane() }
-    @objc private func toggleSidebar() { app.mainWindow.toggleSidebar() }
-    @objc private func toggleRail() { app.mainWindow.toggleRail() }
 }

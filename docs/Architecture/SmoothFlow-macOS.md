@@ -59,8 +59,10 @@ One `TerminalSurfaceView` per session, created on first focus and kept for the
 session's life, so scrollback lives in the surface. Keys go through
 `interpretKeyEvents` (IME/dead keys work) then `ghostty_surface_key`; mouse,
 scroll (precise + momentum bits), resize (`flow.resize` on grid change), focus
-and content scale are forwarded. `⌘D` splits the surface area (NSSplitView,
-no third-party splitter — bonsplit's submodule is not vendored here).
+and content scale are forwarded. The surface area is a stack of **tabs**, each
+holding a **binary split tree** of panes (nested `NSSplitView`s — no
+third-party splitter, bonsplit's submodule is not vendored here); see
+[SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
 
 ## Daemon lifecycle and TCC — the part cmux gets wrong
 
@@ -377,16 +379,29 @@ covers both paths without a real worktree.
 
 ## Keyboard
 
-| Keys      | Action                                     |
-| --------- | ------------------------------------------ |
-| ⌘N / ⌘⇧N  | new session / fan out                      |
-| ⌘I        | inbox                                      |
-| ⌘↩ / ⌘⇧↩  | steer focused / steer all working          |
-| ⌘1…9      | focus session N                            |
-| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request |
-| ⌘⌥R / ⌘⌥K | kill & resume / kill                       |
-| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab        |
-| ⌘D / ⌘⇧W  | split / close split                        |
+Every shortcut is user-configurable — the table below is the shipped default,
+not a contract. Settings ▸ Keyboard (⌘,) and
+`~/.smooth/smoothflow/keybindings.toml` are the same store; the whole model,
+the file format and the two default changes th-27baa4 made are documented in
+[SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
+
+| Keys      | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| ⌘N / ⌘⇧N  | new session / fan out                                          |
+| ⌘I        | inbox                                                          |
+| ⌘↩ / ⌘⌥↩  | steer focused / steer all working                              |
+| ⌘1…9      | focus session N                                                |
+| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request                     |
+| ⌘⌥R / ⌘⌥K | kill & resume / kill                                           |
+| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab                            |
+| ⌘T / ⌘⇧T  | new tab / new shell here                                       |
+| ⌘W / ⌘⇧W  | close pane (tab, then window, collapse when empty) / close tab |
+| ⌘⇧[ / ⌘⇧] | previous / next tab                                            |
+| ⌘D / ⌘⇧D  | split right / split down                                       |
+| ⌘⇧← / ⌘⇧↑ | split left / split up                                          |
+| ⌘⌥←↑→↓    | move focus between panes                                       |
+| ⌘⇧↩ / ⌘⌥= | zoom pane / equalize panes                                     |
+| ⌘⌃S / ⌘⌃P | toggle sidebar / pearl rail                                    |
 
 ![fan-out](assets/smoothflow/fanout.png)
 
