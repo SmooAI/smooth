@@ -224,6 +224,25 @@ pub enum MsgCommands {
         /// Print messages as a JSON array (implies machine consumption).
         #[arg(long)]
         json: bool,
+        /// Only surface messages from this sender (e.g. another agent you're
+        /// coordinating with). Applies in both normal and `--peek` mode.
+        #[arg(long)]
+        from: Option<String>,
+        /// Only surface messages of this type: note|request|result|handoff|cancel.
+        #[arg(long = "type")]
+        kind: Option<String>,
+        /// Watch WITHOUT consuming: track position by message seq instead of
+        /// read-state, and never ack. A machine consumer (a harness responder,
+        /// the th-mail skill) reacts to each new message without marking it
+        /// read, so the owner still decides when it has actually been handled.
+        /// Starts from the newest message unless `--since` pins an earlier seq.
+        #[arg(long)]
+        peek: bool,
+        /// `--peek` only: start from messages with seq strictly greater than
+        /// this, instead of only mail that arrives from now on. Use a prior
+        /// message's seq as a durable watermark across restarts.
+        #[arg(long)]
+        since: Option<i64>,
         /// Deprecated no-op.
         #[arg(long, hide = true)]
         no_pull: bool,
@@ -794,6 +813,10 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             interval,
             once,
             json,
+            from,
+            kind,
+            peek,
+            since,
             no_pull,
             pull,
         } => {
@@ -801,26 +824,66 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 deprecated(if pull { "--pull" } else { "--no-pull" });
             }
             let who = agent.unwrap_or_else(resolve_handle);
+            let from = from.map(|f| f.trim().to_string());
+            let kind: Option<MessageKind> = match kind {
+                Some(k) => Some(k.parse()?),
+                None => None,
+            };
+            let filter = |m: &MailMessage| from.as_deref().is_none_or(|f| m.from_agent == f) && kind.is_none_or(|k| m.kind == k);
             if !once && !json {
-                println!("👀 watching inbox for {} (every {interval}s). Ctrl-C to stop.", who.green().bold());
+                let scope = from.as_deref().map(|f| format!(" from {f}")).unwrap_or_default();
+                let how = if peek { "peeking" } else { "watching" };
+                println!("👀 {how} inbox for {}{scope} (every {interval}s). Ctrl-C to stop.", who.green().bold());
             }
             let interval = std::time::Duration::from_secs(interval.max(1));
+
+            // Peek mode: track position by seq and never ack, so a machine
+            // consumer reacts without consuming. Start at the newest message
+            // (only new mail) unless `--since` pins an earlier watermark.
+            if peek {
+                let mut watermark = match since {
+                    Some(s0) => s0,
+                    None => s.max_seq(&who).await?,
+                };
+                loop {
+                    let _ = s.touch(&who).await;
+                    match s.inbox_since(&who, watermark, from.as_deref(), kind, 200).await {
+                        Ok(msgs) if !msgs.is_empty() => {
+                            print_messages(&msgs, json)?;
+                            // Advance the watermark past everything just seen, so
+                            // no message is emitted twice — without touching read
+                            // state.
+                            watermark = msgs.iter().map(|m| m.seq).max().unwrap_or(watermark);
+                            if once {
+                                return Ok(());
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) if once => return Err(e.context("inbox poll failed — mail state is unknown, not empty")),
+                        Err(e) => eprintln!("{} inbox poll failed: {e}", "!".yellow()),
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            }
+
             loop {
                 let _ = s.touch(&who).await;
                 match s.inbox(&who, true, 200).await {
-                    Ok(msgs) if !msgs.is_empty() => {
-                        print_messages(&msgs, json)?;
-                        if once {
-                            // Leave the mail UNREAD: the caller decides when it
-                            // has actually been handled (`th msg ack`), so a
-                            // dropped watcher cycle never loses a message.
-                            return Ok(());
-                        }
-                        for m in &msgs {
-                            s.ack(&who, &m.id).await?; // consume so it doesn't repeat
+                    Ok(msgs) => {
+                        let msgs: Vec<MailMessage> = msgs.into_iter().filter(|m| filter(m)).collect();
+                        if !msgs.is_empty() {
+                            print_messages(&msgs, json)?;
+                            if once {
+                                // Leave the mail UNREAD: the caller decides when it
+                                // has actually been handled (`th msg ack`), so a
+                                // dropped watcher cycle never loses a message.
+                                return Ok(());
+                            }
+                            for m in &msgs {
+                                s.ack(&who, &m.id).await?; // consume so it doesn't repeat
+                            }
                         }
                     }
-                    Ok(_) => {}
                     // A failed poll is NOT an empty inbox. `--once` is consumed
                     // by watch-once.sh, whose caller reads "exited without
                     // messages" as "no mail" — so it must fail loudly instead
@@ -1215,6 +1278,46 @@ mod cli_tests {
                 cmd: MsgCommands::Ack { all: true, .. }
             }
         ));
+    }
+
+    #[test]
+    fn watch_parses_peek_from_type_and_since() {
+        let TestCommands::Msg {
+            cmd: MsgCommands::Watch {
+                from, kind, peek, since, json, ..
+            },
+        } = parse(&[
+            "th",
+            "msg",
+            "watch",
+            "--peek",
+            "--from",
+            "smoothflow-research",
+            "--type",
+            "result",
+            "--since",
+            "82",
+            "--json",
+        ])
+        .cmd
+        else {
+            panic!("expected watch")
+        };
+        assert!(peek);
+        assert_eq!(from.as_deref(), Some("smoothflow-research"));
+        assert_eq!(kind.unwrap().parse::<MessageKind>().unwrap(), MessageKind::Result);
+        assert_eq!(since, Some(82));
+        assert!(json);
+
+        // Defaults: a bare watch is the original consuming, unfiltered watcher.
+        let TestCommands::Msg {
+            cmd: MsgCommands::Watch { peek, from, kind, since, .. },
+        } = parse(&["th", "msg", "watch"]).cmd
+        else {
+            panic!("expected watch")
+        };
+        assert!(!peek);
+        assert!(from.is_none() && kind.is_none() && since.is_none());
     }
 
     #[test]

@@ -961,7 +961,7 @@ If you hit one of these workarounds and there's no `smoo admin` for it yet, **fi
 
 See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls create / list / ready / show / update / close`. Always prefer this over `TodoWrite` or ad-hoc markdown.
 
-**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file.
+**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file. A plain open (any `th pearls` verb, or the `th prime` SessionStart hook) only registers the project when its root is a git repo other than `/` or `$HOME`, so scratch dirs never show up in `th pearls projects` — `th pearls init` is the explicit opt-in for anything else (th-92e046).
 
 **Legacy `.smooth/dolt` stores.** The Dolt shim and `th pearls migrate-from-dolt` were deleted in pearl th-c6ba83. A machine that still has one must migrate with th ≤ 0.42.x before upgrading — see the History section of [Pearls](../Architecture/Pearls.md).
 
@@ -1001,6 +1001,8 @@ th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
 th msg unread-count [--agent <h>]          # just the number, for a statusline/prompt
 th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
+th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
+th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
 th inbox                                   # alias for `th msg inbox` (default identity)
 th agent backend status [--json]           # which mailbox am I on, and (cloud) my trial state
 th agent backend set sqlite|cloud          # local (default, free) or cross-machine (paid)
