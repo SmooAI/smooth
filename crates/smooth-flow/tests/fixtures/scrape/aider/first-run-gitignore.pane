@@ -1,0 +1,49 @@
+# harness: aider
+# expect: needs_you
+# rule: aider-question
+# title: marvin
+# alternate_on: false
+# cursor_y: 4
+# source: live aider 0.86.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: fresh $HOME: the first-run .gitignore question owns the last line
+---
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Update git name with: git config user.name "Your Name"
+Update git email with: git config user.email "you@example.com"
+You can skip this check with --no-gitignore
+Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,50 @@
+# harness: goose
+# expect: needs_you
+# rule: goose-prompt
+# title: 🪿 goose
+# alternate_on: false
+# cursor_y: 30
+# quiet_ms: 2000
+# source: live goose 1.50.0, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: GOOSE_MODE=approve: "Goose would like to call the above tool, do you allow?"
+---
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_2 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> use a tool please
+  ✓ extensions ready
+
+
+  ────────────────────────────────────────
+  ▸ analyze
+    command: echo mock-tool-call
+
+
+  Tool approval request
+    {
+      "tool_name": "analyze",
+      "arguments": {
+        "command": "echo mock-tool-call"
+      }
+    }
+
+◆  Goose would like to call the above tool, do you allow?
+│  ● Allow (Allow the tool call once)
+│  ○ Always Allow
+│  ○ Deny
+│  ○ Cancel
+└
+
+
+
+
+
+
+
+
+
+

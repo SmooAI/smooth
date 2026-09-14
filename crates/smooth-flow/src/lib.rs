@@ -16,6 +16,7 @@ pub mod limit;
 pub mod proc;
 pub mod protocol;
 pub mod pty;
+pub mod scrape;
 pub mod store;
 pub mod tmux;
 

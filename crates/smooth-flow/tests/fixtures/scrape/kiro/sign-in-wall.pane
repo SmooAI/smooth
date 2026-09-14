@@ -1,0 +1,48 @@
+# harness: kiro
+# expect: none  (sign-in wall — must not read as idle or working under any built-in)
+# title: marvin
+# alternate_on: false
+# cursor_y: 3
+# source: live kiro-cli 2.21.4, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: fresh $HOME, `kiro-cli chat --tui`: "You are not logged in. Login now?". Never pressed. No built-in manifest (fixture-only).
+---
+  You are not logged in. Login now?
+❯ Yes
+  No
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

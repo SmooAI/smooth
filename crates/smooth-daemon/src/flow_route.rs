@@ -712,8 +712,15 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let v = body_json(resp).await;
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["claude", "opencode", "codex", "th-code"]);
+        let builtin: Vec<&str> = smooth_flow::harness::BUILTIN.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, builtin);
         assert_eq!(v["harnesses"][3]["state_source"], "native");
+        // `th-code` first, then the rest in registry order, minus `hidden`.
+        let reordered = |hidden: &[&str]| {
+            std::iter::once("th-code")
+                .chain(builtin.iter().copied().filter(|n| *n != "th-code" && !hidden.contains(n)))
+                .collect::<Vec<_>>()
+        };
         // Gated like the rest.
         let resp = app
             .clone()
@@ -733,7 +740,8 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let v = body_json(resp).await;
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(names, reordered(&[]));
+        assert_eq!(v["harnesses"][3]["name"], "codex");
         assert_eq!(v["harnesses"][3]["hidden"], true);
         // An unknown name is a 4xx with the reason, not a 500.
         let req = Request::builder()
@@ -749,7 +757,7 @@ mod tests {
         let hello = engine.hello().unwrap().to_wire();
         let v: Value = serde_json::from_str(&hello).unwrap();
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["th-code", "claude", "opencode"]);
+        assert_eq!(names, reordered(&["codex"]));
     }
 
     /// The next text frame as JSON (5 s cap).

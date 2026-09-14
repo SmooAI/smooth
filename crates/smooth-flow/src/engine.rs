@@ -43,9 +43,14 @@ const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
-/// harness's composer. ponytail: a fixed delay; scrape-for-idle first if a
-/// harness turns out to boot slower than this.
+/// harness's composer when its manifest cannot scrape an idle composer.
 const PASTE_DELAY: Duration = Duration::from_secs(4);
+/// `prompt_as = "paste"` for a manifest that CAN scrape idle (th-d2a1e4): the
+/// earliest paste, which then waits for the pane to read idle…
+const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
+/// …at most this long (a pane that never reads idle or needs-you gets the
+/// paste anyway, as before). A pending needs-you is never pasted into.
+const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
 
@@ -126,8 +131,11 @@ struct Runtime {
     claims: HashMap<String, (u32, Instant)>,
     /// Session id → when it was last resumed from a usage limit.
     limit_resumed_at: HashMap<String, Instant>,
-    /// Session id → (prompt, when to paste it) for `prompt_as = "paste"`.
-    paste_at: HashMap<String, (String, Instant)>,
+    /// Session id → pending `prompt_as = "paste"` prompt.
+    paste_at: HashMap<String, PendingPaste>,
+    /// Session id → (hash of the last captured pane text, when it last
+    /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
+    pane_seen: HashMap<String, (u64, Instant)>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
     /// Harness session ids adoption already refused (th-c103c1) — a stranger
@@ -137,6 +145,53 @@ struct Runtime {
     /// Watermark for re-broadcasting rows another daemon changed in the
     /// shared `flow.db` (th-c103c1).
     seen_changes_at: Option<DateTime<Utc>>,
+}
+
+/// A prompt waiting to be pasted into a harness's composer.
+struct PendingPaste {
+    prompt: String,
+    /// Not before.
+    at: Instant,
+    /// `Some(deadline)`: wait for a scraped idle until then (th-d2a1e4).
+    /// `None`: paste at `at`, whatever the pane shows.
+    wait_idle_until: Option<Instant>,
+}
+
+impl PendingPaste {
+    /// Is it time, given what the pane reads right now?
+    fn due(&self, now: Instant, pane: PaneState) -> bool {
+        if now < self.at {
+            return false;
+        }
+        match self.wait_idle_until {
+            None => true,
+            // A first-run question or approval owns the input: pasting now
+            // would answer it with the prompt.
+            Some(_) if pane == PaneState::AwaitingApproval => false,
+            Some(_) if pane == PaneState::Idle => true,
+            Some(deadline) => now >= deadline,
+        }
+    }
+}
+
+/// How long the pane text has held still, updating `seen` with this capture.
+/// `None` on the first look (no baseline to measure from).
+fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &str, now: Instant) -> Option<Duration> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    let hash = h.finish();
+    match seen.get_mut(id) {
+        Some((prev, changed)) if *prev == hash => Some(now.saturating_duration_since(*changed)),
+        Some(entry) => {
+            *entry = (hash, now);
+            Some(Duration::ZERO)
+        }
+        None => {
+            seen.insert(id.to_string(), (hash, now));
+            None
+        }
+    }
 }
 
 struct Inner {
@@ -300,7 +355,8 @@ pub fn manifest_for<'r>(registry: &'r Registry, kind: &SessionKind) -> Result<&'
 /// The argv that resumes a dead agent session — the manifest's `[resume]`.
 ///
 /// `resume_session` with a known harness session id renders `resume.argv`
-/// behind the row's `argv[0]`; otherwise (no id yet, or `relaunch_command`,
+/// behind the row's `argv[0]`; `continue_latest` always does (no id — the
+/// CLI's own "most recent conversation here"); otherwise (no id yet, or `relaunch_command`,
 /// or no manifest) the original argv is relaunched: a fresh session, not a
 /// continuation.
 #[must_use]
@@ -313,6 +369,16 @@ pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
             let bin = session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary());
             let vars = Vars {
                 session_id: Some(id),
+                cwd: Some(&session.worktree),
+                ..Default::default()
+            };
+            let mut v = vec![bin];
+            v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
+            v
+        }
+        (ResumeMode::ContinueLatest, _) => {
+            let bin = session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary());
+            let vars = Vars {
                 cwd: Some(&session.worktree),
                 ..Default::default()
             };
@@ -863,7 +929,26 @@ impl Engine {
             return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
         }
         if let (true, Some(p)) = (paste, prompt) {
-            self.rt().paste_at.insert(session.id.clone(), (p.to_string(), Instant::now() + PASTE_DELAY));
+            // Wait for the composer only when this manifest can tell us it is up.
+            let can_see_idle = manifest.is_some_and(|m| {
+                let sc = &m.state.scrape;
+                !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
+            });
+            let now = Instant::now();
+            let pending = if can_see_idle {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_MIN_DELAY,
+                    wait_idle_until: Some(now + PASTE_IDLE_WAIT),
+                }
+            } else {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_DELAY,
+                    wait_idle_until: None,
+                }
+            };
+            self.rt().paste_at.insert(session.id.clone(), pending);
         }
         Ok(session)
     }
@@ -1533,12 +1618,6 @@ impl Engine {
         if !s.kind.is_agent() {
             return Ok(());
         }
-        // `prompt_as = "paste"`: the composer should be up by now.
-        let paste = self.rt().paste_at.get(&s.id).filter(|(_, at)| Instant::now() >= *at).map(|(p, _)| p.clone());
-        if let Some(p) = paste {
-            self.rt().paste_at.remove(&s.id);
-            self.send(&s.id, &p)?;
-        }
         // Usage-limit resume due?
         if s.state == SessionState::Limited {
             let due = s.attention.as_ref().and_then(|a| a.resume_at).is_some_and(|at| now >= at);
@@ -1557,7 +1636,27 @@ impl Engine {
         let Some(rules) = self.rules_for(&self.registry(), &s.kind) else {
             return Ok(());
         };
-        let scrape = rules.detect(&pane);
+        // Title / alt-screen / cursor are best-effort: a rule that needs one
+        // simply does not fire without it.
+        let meta = tmux::pane_meta(&sock, t).ok();
+        let quiet_for = observe_quiet(&mut self.rt().pane_seen, &s.id, &pane, Instant::now());
+        let scrape = rules.detect_observation(&crate::scrape::PaneObservation {
+            text: &pane,
+            title: meta.as_ref().map(|m| m.title.as_str()),
+            alternate_on: meta.as_ref().map(|m| m.alternate_on),
+            cursor_y: meta.as_ref().and_then(|m| m.cursor_y),
+            quiet_for,
+        });
+        // `prompt_as = "paste"`: paste once the composer is up.
+        let paste = {
+            let rt = self.rt();
+            rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
+        };
+        if let Some(p) = paste {
+            self.rt().paste_at.remove(&s.id);
+            self.send(&s.id, &p)?;
+            return Ok(());
+        }
         match scrape.state {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
@@ -3151,23 +3250,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let names = |v: &[HarnessInfo]| v.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&e.harnesses(true).unwrap()), ["claude", "opencode", "codex", "th-code"]);
+        let builtin: Vec<String> = crate::harness::BUILTIN.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert_eq!(names(&e.harnesses(true).unwrap()), builtin);
+        // `th-code` first, then the rest in registry order, minus `hidden`.
+        let reordered = |hidden: &[&str]| {
+            std::iter::once("th-code".to_string())
+                .chain(builtin.iter().filter(|n| *n != "th-code" && !hidden.contains(&n.as_str())).cloned())
+                .collect::<Vec<_>>()
+        };
         let mut rx = e.subscribe();
         let all = e.set_harness_prefs(Some(vec!["th-code".into()]), Some(vec!["codex".into()])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
-        assert!(all[3].hidden);
+        assert_eq!(names(&all), reordered(&[]));
+        assert!(all.iter().find(|h| h.name == "codex").unwrap().hidden);
         match rx.try_recv().unwrap() {
-            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         // Visible list + hello omit the hidden one; a partial PUT keeps the other half.
-        assert_eq!(names(&e.harnesses(false).unwrap()), ["th-code", "claude", "opencode"]);
+        assert_eq!(names(&e.harnesses(false).unwrap()), reordered(&["codex"]));
         match e.hello().unwrap() {
-            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         let all = e.set_harness_prefs(None, Some(vec![])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(names(&all), reordered(&[]));
         assert!(all.iter().all(|h| !h.hidden));
         // Persisted: a fresh engine on the same db sees the order.
         let e2 = engine(tmp.path());

@@ -1,0 +1,50 @@
+# harness: cline
+# expect: needs_you
+# rule: cline-approval
+# title: > use a tool again
+# alternate_on: true
+# cursor_y: 20
+# quiet_ms: 1000
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: the approval box renders while `⠴ Thinking... (esc to cancel)` is still above it — needs_you must win
+---
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the
+   terminal stays busy for a while.
+
+ ❯ use a tool please
+
+ x read_files({"command":"mkdir -p mockdir && touch mockdir/x.txt","des...)
+      Error: ✖ Invalid input
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the    █
+   terminal stays busy for a while.                                                                                    █
+                                                                                                                       █
+ ❯ use a tool again                                                                                                    █
+                                                                                                                       █
+ ⠴ Thinking... (esc to cancel)                                                                                         █
+                                                                                                                       █
+
+ Cline needs permission
+
+ Approve tool call?
+ run_commands
+
+
+   {
+   "command": "mkdir -p mockdir && touch mockdir/x.txt",
+   "description": "print a marker",
+   "requires_approval": true
+
+  [y] Approve   [n] Deny
+
+
+ mock-model (10) $0.00                                                                               ○ Plan ● Act (Tab)
+ cline (main)
+ Auto-approve all disabled (Shift+Tab)

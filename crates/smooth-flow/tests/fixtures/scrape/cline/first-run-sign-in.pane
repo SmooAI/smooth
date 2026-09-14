@@ -1,0 +1,49 @@
+# harness: cline
+# expect: needs_you
+# rule: cline-dialog
+# title: Cline
+# alternate_on: true
+# cursor_y: 36
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: fresh $HOME: "Connect a model provider to get started" — a sign-in wall, never pressed
+---
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                                 @@@@@    @@@@.   @@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                    @@@@@@@@@@@@@@@@.
+
+                                                    Welcome to Cline
+
+                                        Connect a model provider to get started.
+
+                          ╭──────────────────────────────────────────────────────────────────╮
+                          │ ☺ Sign in with Cline                                           → │
+                          │   Latest models with regular free promos                         │
+                          ╰──────────────────────────────────────────────────────────────────╯
+                          ╭──────────────────────────────────────────────────────────────────╮
+                          │ ✦ Sign in with ClinePass                                         │
+                          │   Low cost subscription for everyone                             │
+                          ╰──────────────────────────────────────────────────────────────────╯
+                          ╭──────────────────────────────────────────────────────────────────╮
+                          │ ✦ Sign in with ChatGPT                                           │
+                          │   Use your ChatGPT Plus subscription                             │
+                          ╰──────────────────────────────────────────────────────────────────╯
+                          ╭──────────────────────────────────────────────────────────────────╮
+                          │ ⚷ Bring your own provider                                        │
+                          │   API key or local server (e.g. Ollama)                          │
+                          ╰──────────────────────────────────────────────────────────────────╯
+                                     ↑/↓ navigate, Enter to select, Ctrl+C to exit
+
+
+

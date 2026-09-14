@@ -26,6 +26,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("opencode", include_str!("../harnesses/opencode.toml")),
     ("codex", include_str!("../harnesses/codex.toml")),
     ("th-code", include_str!("../harnesses/th-code.toml")),
+    // Scrape-only / scraped harnesses (th-e77603) — `[[state.scrape.rules]]`.
+    ("aider", include_str!("../harnesses/aider.toml")),
+    ("goose", include_str!("../harnesses/goose.toml")),
+    ("crush", include_str!("../harnesses/crush.toml")),
+    ("cline", include_str!("../harnesses/cline.toml")),
 ];
 
 /// Any `PATH` entry under a directory with this name is a cmux CLI shim —
@@ -155,6 +160,12 @@ pub enum ResumeMode {
     /// Always relaunch the original argv (a fresh session, not a continuation).
     #[default]
     RelaunchCommand,
+    /// `binary + resume.argv` with no session id — the CLI's own "continue the
+    /// most recent conversation in this directory" (`crush --continue`,
+    /// `goose session --resume`). For harnesses whose session id the engine
+    /// cannot learn (scrape-only); each SmoothFlow session has its own
+    /// worktree, so "latest here" is this session's (th-e77603).
+    ContinueLatest,
 }
 
 /// `[resume]`.
@@ -219,7 +230,9 @@ pub struct HooksSpec {
     pub event_map: BTreeMap<String, FlowEventName>,
 }
 
-/// `[state.scrape]` — case-insensitive regexes over the visible pane.
+/// `[state.scrape]` — case-insensitive regexes over the visible pane, plus
+/// ordered `[[state.scrape.rules]]` (th-e77603, `crate::scrape`) evaluated
+/// before the flat lists.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScrapeSpec {
@@ -235,6 +248,13 @@ pub struct ScrapeSpec {
     pub usage_limit: Vec<String>,
     #[serde(default)]
     pub error: Vec<String>,
+    /// Live window for `where = "tail"` rules and the flat `working` / `idle`
+    /// lists. Default 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_lines: Option<usize>,
+    /// Ordered rules; the first that fires decides, before the flat lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::scrape::RuleSpec>,
 }
 
 /// `[state]`.
@@ -406,8 +426,21 @@ impl Manifest {
                 bail!("resume.argv: mode = \"resume_session\" needs a `{{session_id}}` placeholder");
             }
         }
-        if self.state.source == StateSource::Scrape && self.state.scrape.working.is_empty() && self.state.scrape.idle.is_empty() {
-            bail!("state.scrape: source = \"scrape\" needs working and/or idle patterns");
+        if self.resume.mode == ResumeMode::ContinueLatest {
+            if self.resume.argv.is_empty() {
+                bail!("resume.argv: mode = \"continue_latest\" needs an argv");
+            }
+            if self.resume.argv.iter().any(|a| a.contains("{session_id}") || a.contains("{prompt}")) {
+                bail!("resume.argv: mode = \"continue_latest\" takes no `{{session_id}}` or `{{prompt}}` (use resume_session for an id)");
+            }
+        }
+        let scrape = &self.state.scrape;
+        let rule_decides_turns = scrape
+            .rules
+            .iter()
+            .any(|r| matches!(r.state, crate::scrape::Verdict::Working | crate::scrape::Verdict::Idle));
+        if self.state.source == StateSource::Scrape && scrape.working.is_empty() && scrape.idle.is_empty() && !rule_decides_turns {
+            bail!("state.scrape: source = \"scrape\" needs working and/or idle patterns (or a working/idle rule)");
         }
         ScrapeRules::compile(&self.state.scrape)?;
         if self.steer.submit_key.trim().is_empty() {
@@ -551,6 +584,8 @@ pub fn render_env(template: &BTreeMap<String, String>, vars: &Vars<'_>) -> Vec<(
 /// Compiled `[state.scrape]` patterns.
 #[derive(Debug, Clone)]
 pub struct ScrapeRules {
+    rules: Vec<crate::scrape::Rule>,
+    tail_lines: usize,
     working: Vec<Regex>,
     idle: Vec<Regex>,
     needs_you: Vec<Regex>,
@@ -564,6 +599,9 @@ pub struct Scrape {
     pub state: PaneState,
     /// The `reset` capture of the matching usage-limit pattern, if any.
     pub reset_text: Option<String>,
+    /// The `[[state.scrape.rules]]` entry that decided (its `name`, or
+    /// `rules[i]`); `None` when the flat lists did.
+    pub rule: Option<String>,
 }
 
 fn compile_all(field: &str, pats: &[String]) -> Result<Vec<Regex>> {
@@ -578,7 +616,19 @@ impl ScrapeRules {
     /// # Errors
     /// Naming the field and pattern that failed to compile.
     pub fn compile(spec: &ScrapeSpec) -> Result<Self> {
+        let tail_lines = spec.tail_lines.unwrap_or(LIVE_TAIL_LINES);
+        if tail_lines == 0 || tail_lines > crate::scrape::MAX_TAIL_LINES {
+            bail!("state.scrape.tail_lines: must be 1..={}, got {tail_lines}", crate::scrape::MAX_TAIL_LINES);
+        }
+        let rules = spec
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| crate::scrape::Rule::compile(i, r, tail_lines))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            rules,
+            tail_lines,
             working: compile_all("working", &spec.working)?,
             idle: compile_all("idle", &spec.idle)?,
             needs_you: compile_all("needs_you", &spec.needs_you)?,
@@ -600,7 +650,30 @@ impl ScrapeRules {
     /// idle marker below it, so it still wins.
     #[must_use]
     pub fn detect(&self, pane: &str) -> Scrape {
-        let tail = live_tail(pane);
+        self.detect_observation(&crate::scrape::PaneObservation::text(pane))
+    }
+
+    /// [`Self::detect`] with the terminal state and timing the engine
+    /// observed: `[[state.scrape.rules]]` first (in order), then the flat
+    /// lists on the text alone.
+    #[must_use]
+    pub fn detect_observation(&self, obs: &crate::scrape::PaneObservation<'_>) -> Scrape {
+        let text = crate::scrape::strip_ansi(obs.text);
+        let title = obs.title.map(crate::scrape::strip_ansi);
+        let obs = &crate::scrape::PaneObservation {
+            text: &text,
+            title: title.as_deref(),
+            ..*obs
+        };
+        if let Some(hit) = crate::scrape::first_hit(&self.rules, obs) {
+            return Scrape {
+                state: hit.state.pane_state(),
+                reset_text: hit.reset_text,
+                rule: Some(hit.rule),
+            };
+        }
+        let pane = obs.text;
+        let tail = live_tail(pane, self.tail_lines);
         let any = |res: &[Regex], hay: &str| res.iter().any(|r| r.is_match(hay));
         let last_line_matching = |res: &[Regex]| {
             pane.lines()
@@ -613,6 +686,7 @@ impl ScrapeRules {
             return Scrape {
                 state: PaneState::Working,
                 reset_text: None,
+                rule: None,
             };
         }
         if let Some(r) = self.usage_limit.iter().find(|r| r.is_match(pane)) {
@@ -620,6 +694,7 @@ impl ScrapeRules {
             return Scrape {
                 state: PaneState::UsageLimit,
                 reset_text,
+                rule: None,
             };
         }
         let pending_approval = match (last_line_matching(&self.needs_you), last_line_matching(&self.idle)) {
@@ -636,14 +711,18 @@ impl ScrapeRules {
         } else {
             PaneState::Unknown
         };
-        Scrape { state, reset_text: None }
+        Scrape {
+            state,
+            reset_text: None,
+            rule: None,
+        }
     }
 }
 
-/// The last [`LIVE_TAIL_LINES`] non-blank lines of `pane`, joined.
-fn live_tail(pane: &str) -> String {
+/// The last `n` non-blank lines of `pane`, joined.
+fn live_tail(pane: &str, n: usize) -> String {
     let lines: Vec<&str> = pane.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
 }
 
@@ -877,7 +956,7 @@ mod tests {
         let r = Registry::builtin();
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         let names: Vec<&str> = r.all().iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(names, ["claude", "opencode", "codex", "th-code", "aider", "goose", "crush", "cline"]);
         assert_eq!(r.get("claude").unwrap().display_name, "Claude Code");
         assert_eq!(r.get("th-code").unwrap().state.source, StateSource::Native);
         assert_eq!(r.get("th-code").unwrap().map_event("turn_end"), Some(FlowEventName::Idle));
