@@ -876,14 +876,12 @@ pub fn run(home: &Path, only: Option<&str>, json: bool, verbose: bool) -> Result
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn script(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn machine(root: &Path, shell_path: &[&Path], app_path: Option<&[&Path]>) -> Machine {
@@ -900,6 +898,7 @@ mod tests {
         Registry::builtin().get(name).cloned().unwrap()
     }
 
+    #[cfg(unix)]
     fn by_id<'a>(d: &'a Diagnosis, id: &str) -> &'a Check {
         d.checks.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("no {id} check in {d:#?}"))
     }
@@ -1099,6 +1098,7 @@ mod tests {
         assert_eq!(diagnose_all(&reg, &m, None).unwrap().len(), reg.all().len());
     }
 
+    #[cfg(unix)]
     #[test]
     fn opencode_plugin_must_be_linked_and_use_the_generic_event_hook() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1108,10 +1108,7 @@ mod tests {
         std::fs::write(&src, "export default { 'session.idle': () => fetch('/api/flow/hooks') }").unwrap();
         let link = m.home.join(".config/opencode/plugins/smooth-agent.js");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&src, &link).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&src, &link).unwrap();
         assert!(opencode_hooks(&m).detail.contains("never fires"));
         std::fs::write(&src, "export default { event: ({event}) => fetch('/api/flow/hooks') }").unwrap();
         assert_eq!(opencode_hooks(&m).level, Level::Ok);

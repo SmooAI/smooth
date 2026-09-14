@@ -400,7 +400,7 @@ CI: the `Harness conformance` job in `pr-checks.yml` (Linux, tmux installed,
    without a prompt.
 
 A failing run names the harness and the step with the pane tail, e.g.
-`` ○ FAILED permission attention `permission` carries no request_id to approve ``
+``○ FAILED permission attention `permission` carries no request_id to approve``
 — which is the engine bug this suite found on its first run (a permission ask
 under a harness's own event name could not be approved; fixed in th-3cabf6).
 
