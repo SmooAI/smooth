@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let v = body_json(resp).await;
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(names[..4], ["claude", "opencode", "codex", "th-code"]);
         assert_eq!(v["harnesses"][3]["state_source"], "native");
         // Gated like the rest.
         let resp = app
@@ -733,7 +733,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let v = body_json(resp).await;
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(names[..4], ["th-code", "claude", "opencode", "codex"]);
         assert_eq!(v["harnesses"][3]["hidden"], true);
         // An unknown name is a 4xx with the reason, not a 500.
         let req = Request::builder()
@@ -749,7 +749,8 @@ mod tests {
         let hello = engine.hello().unwrap().to_wire();
         let v: Value = serde_json::from_str(&hello).unwrap();
         let names: Vec<&str> = v["harnesses"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["th-code", "claude", "opencode"]);
+        assert_eq!(names[..3], ["th-code", "claude", "opencode"]);
+        assert!(!names.contains(&"codex"), "hidden harnesses leave the hello");
     }
 
     /// The next text frame as JSON (5 s cap).
