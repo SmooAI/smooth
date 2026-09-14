@@ -1428,12 +1428,6 @@ impl Engine {
                 // A Notification while a hook request is pending is the same
                 // prompt seen twice — keep the request_id.
                 if s.state != SessionState::NeedsYou {
-                    // An ask this harness reports but can't have answered over
-                    // its hook (th-b00115): give it an id so `flow.approve`
-                    // answers it the way a scraped one is — with the keystroke.
-                    if !claude_protocol && att.request_id.is_none() {
-                        att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
-                    }
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
             }
@@ -2034,7 +2028,16 @@ pub fn map_manifest_event(m: &Manifest, event: &str, payload: &Value) -> HookOut
                 .and_then(Value::as_str)
                 .filter(|m| !m.trim().is_empty())
                 .map_or_else(|| permission_detail(payload), str::to_string);
-            HookOutcome::NeedsYou(Attention::new(reason).with_detail(detail))
+            let mut att = Attention::new(reason).with_detail(detail);
+            // th-3cabf6 / th-b00115: a permission ask under the harness's own
+            // event name has no long-poll to answer, but `flow.approve` (and
+            // every client) needs a request id to address it — the unknown id
+            // falls through to the approval keystroke, as a scraped prompt's
+            // does. A question is answered, not approved: no id.
+            if att.reason == "permission" {
+                att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
+            }
+            HookOutcome::NeedsYou(att)
         }
         Some(FlowEventName::Ended) => HookOutcome::Ended,
         Some(FlowEventName::Ignore) | None => HookOutcome::None,
@@ -3804,6 +3807,15 @@ quiet_ms = 300
             panic!()
         };
         assert_eq!(a.detail.as_deref(), Some("Allow rm?"));
+        assert!(
+            a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")),
+            "a ToolPermission ask is approvable: {a:?}"
+        );
+        let m = r.get("copilot").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "Notification", &json!({"notification_type": "elicitation_dialog"})) else {
+            panic!()
+        };
+        assert!(a.request_id.is_none(), "a question is answered, not approved");
     }
 
     #[test]
