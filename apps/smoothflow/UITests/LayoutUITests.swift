@@ -17,8 +17,16 @@ final class LayoutUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { self.label("pane.header").contains("th-1b8e05") }, label("pane.header"))
     }
 
-    private var paneCount: Int {
-        app.windows["SmoothFlow"].descendants(matching: .any).matching(NSPredicate(format: "identifier == %@", "pane.header")).count
+    private var paneHeaderQuery: XCUIElementQuery {
+        app.windows["SmoothFlow"].descendants(matching: .any).matching(NSPredicate(format: "identifier == %@", "pane.header"))
+    }
+
+    private var paneCount: Int { paneHeaderQuery.count }
+
+    /// Every pane's header text. With a split on screen `pane.header` matches
+    /// more than one element, so `label("pane.header")` would throw.
+    private var paneHeaders: [String] {
+        paneHeaderQuery.allElementsBoundByIndex.map { ($0.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? $0.label }
     }
 
     func testCommandDSplitsRightAndDown() {
@@ -41,7 +49,7 @@ final class LayoutUITests: FlowUITestCase {
         // so this is the last view of a live agent — the case that must ask.
         waitForState("fs-3041bbbb") { $0.hasPrefix("limit") }
         app.staticTexts["sidebar.title.fs-3041bbbb"].click()
-        XCTAssertTrue(waitUntil { self.label("pane.header").contains("3041bb") }, self.label("pane.header"))
+        XCTAssertTrue(waitUntil { self.paneHeaders.contains { $0.contains("3041bb") } }, "\(self.paneHeaders)")
         app.typeKey("w", modifierFlags: .command)
         let cancel = app.windows["SmoothFlow"].descendants(matching: .any)["pane.close.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 10), "the confirmation sheet; tree: \(dump())")
