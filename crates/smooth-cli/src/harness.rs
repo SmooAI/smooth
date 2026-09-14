@@ -1159,12 +1159,12 @@ mod tests {
         let tmp = home();
         let reg = Registry::load(tmp.path(), None);
         let rows = reg.infos(&Prefs::default(), true, tmp.path(), &std::ffi::OsString::new());
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), smooth_flow::harness::BUILTIN.len());
         let v = serde_json::to_value(&rows).unwrap();
         assert_eq!(v[0]["name"], "claude");
         assert_eq!(v[0]["installed"], false);
         assert_eq!(v[0]["order_index"], 0);
-        assert_eq!(infos_of(&json!({ "harnesses": v })).len(), 4);
+        assert_eq!(infos_of(&json!({ "harnesses": v })).len(), rows.len());
         print_harnesses(&rows, true);
         print_harnesses(&[], false);
     }

@@ -1,0 +1,169 @@
+# Screens for the built-in `crush` manifest (th-e77603), cut from the live
+# captures in tests/fixtures/scrape/crush/ (real crush panes, scratch path scrubbed):
+# boot = the top of idle-ready.pane, working = working-footer.pane, idle = idle-ready.pane,
+# needs_you = permission-modal-over-busy-footer.pane.
+[screens]
+boot = '''
+
+  ╱╱╱╱╱╱  Charm™                     v0.94.2 ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ ▄▀▀▀▀ █▀▀▀▄ █         █ ▄▀▀▀▀ █   █ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ █     █▀▀▀▄ █         █ ▀▀▀▀█ █▀▀▀█ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱  ▀▀▀▀ ▀   ▀  ▀▀▀▀▀▀▀▀▀  ▀▀▀▀  ▀   ▀ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+  /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-
+  /scrubbed-scratch-path/scrubbed-scrat
+
+  ◇ Mock Model via mock
+
+  LSPs                           MCPs                           Skills
+
+  None                           None                           ● crush-config
+                                                                ● crush-hooks
+                                                                ● jq
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   > Ready for instructions
+ :::
+ :::
+
+ / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+'''
+working = '''
+
+ │ hello crush                                                                          ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   !16cB1d9#df8*6! 1s                                                                    Charm™               v0.94.2
+                                                                                        ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+                                                                                        █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+                                                                                         ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+                                                                                        New Session
+
+                                                                                        /scrubbed-scratch-path/sc
+                                                                                        /scrubbed-scratch-path/scrub
+                                                                                        /scrubbed-scratch-path/scr
+                                                                                        9158-
+                                                                                        /scrubbed-scratch-path/scrubb
+                                                                                        /scrubbe
+
+                                                                                        ◇ Mock Model via mock
+                                                                                          0% (0) $0.00
+
+                                                                                        Modified Files ──────────────
+
+                                                                                        None
+
+                                                                                        LSPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        MCPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        Skills ──────────────────────
+   > Working!
+ :::                                                                                    ● crush-config
+ :::                                                                                    ● crush-hooks
+                                                                                        ● jq
+ esc cancel • tab focus chat • / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+'''
+idle = '''
+
+  ╱╱╱╱╱╱  Charm™                     v0.94.2 ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ ▄▀▀▀▀ █▀▀▀▄ █         █ ▄▀▀▀▀ █   █ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ █     █▀▀▀▄ █         █ ▀▀▀▀█ █▀▀▀█ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱  ▀▀▀▀ ▀   ▀  ▀▀▀▀▀▀▀▀▀  ▀▀▀▀  ▀   ▀ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+  /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-
+  /scrubbed-scratch-path/scrubbed-scrat
+
+  ◇ Mock Model via mock
+
+  LSPs                           MCPs                           Skills
+
+  None                           None                           ● crush-config
+                                                                ● crush-hooks
+                                                                ● jq
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   > Ready for instructions
+ :::
+ :::
+
+ / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+'''
+needs_you = '''
+
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      Charm™               v0.94.2
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+                                                                                        Sure. Here is a deliberately
+   ◇ Mock Model via mock in 20s ─────────────────────────────────────────────────────   slow answer so the terminal
+
+ │ use a tool again     ╭──────────────────────────────────────────────────────────────────────╮/scrubbed-scratch
+                        │  Permission Required ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱  │/scrubbed-scratch-pa
+   ✓ Bash echo mock-tool│                                                                      │/scrubbed-scratch-
+                        │ Tool bash                                                            │
+      mock-tool-call    │ Path /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed           │/scrubbed-scratch-pat
+                        │     /scrubbed-scratch-path/scrubbed                                  │
+   Sure. Here is a delib│     /scrubbed-scratch-path/scrubbed-scrat                            │
+   Sure. Here is a delib│ Desc print a marker                                                  │odel via mock
+   Sure. Here is a delib│                                                                      │) $0.00
+   Sure. Here is a delib│                                                                      │
+   Sure. Here is a delib│   mkdir -p mockdir && touch mockdir/x.txt                            │ Files ──────────────
+   Sure. Here is a delib│                                                                      │
+                        │                                                                      │
+   ◇ Mock Model via mock│                             Allow      Allow for Session      Deny   │
+                        │                                                                      │─────────────────────
+ │ use a tool third     │ ←/→ choose • enter confirm • esc exit                                │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+   ● Bash mkdir -p mockdir && touch mockdir/x.txt
+                                                                                        MCPs ────────────────────────
+   Requesting permission...
+                                                                                        None
+
+   > Processing...                                                                      Skills ──────────────────────
+ :::
+ :::                                                                                    ● crush-config
+                                                                                        ● crush-hooks
+ esc cancel • tab focus chat • / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+'''

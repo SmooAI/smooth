@@ -1,0 +1,30 @@
+# harness: aider
+# expect: idle
+# rule: aider-composer
+# title: marvin
+# alternate_on: false
+# cursor_y: 16
+# quiet_ms: 5000
+# source: live aider 0.86.2, tmux 3.5a 60x20, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: pane resized 120x40 → 60x20; the old full-width rules wrapped onto two lines
+---
+
+Tokens: 997 sent, 12 received.
+
+hello.py
+Create new file? (Y)es/(N)o [Yes]: y
+
+Applied edit to hello.py
+Commit 008413f hello.py
+ ```python
+ print('hello')
+ ```
+You can use /undo to undo and discard each aider commit.
+────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────
+hello.py
+hello.py
+>
+
+
+

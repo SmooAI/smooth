@@ -1,0 +1,48 @@
+# harness: auggie
+# expect: none  (sign-in wall — must not read as idle or working under any built-in)
+# title: auggie
+# alternate_on: false
+# cursor_y: 16
+# source: live auggie 0.36.0, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: fresh $HOME: "Login to continue / Press return to open your browser". Never pressed. No built-in manifest (fixture-only).
+---
+
+
+  ▇▇▇▇▇╗ ▇▇╗   ▇▇╗ ▇▇▇▇▇▇╗  ▇▇▇▇▇▇╗ ▇▇╗▇▇▇▇▇▇▇╗
+ ▇▇╔══▇▇╗▇▇║   ▇▇║▇▇╔════╝ ▇▇╔════╝ ▇▇║▇▇╔════╝
+ ▇▇▇▇▇▇▇║▇▇║   ▇▇║▇▇║  ▇▇▇╗▇▇║  ▇▇▇╗▇▇║▇▇▇▇▇╗
+ ▇▇╔══▇▇║▇▇║   ▇▇║▇▇║   ▇▇║▇▇║   ▇▇║▇▇║▇▇╔══╝
+ ▇▇║  ▇▇║╚▇▇▇▇▇▇╔╝╚▇▇▇▇▇▇╔╝╚▇▇▇▇▇▇╔╝▇▇║▇▇▇▇▇▇▇╗
+ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝╚══════╝
+
+
+   New to Augment? You can create an account from the login page.
+
+
+ → Login to continue
+
+   Press return to open your browser
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

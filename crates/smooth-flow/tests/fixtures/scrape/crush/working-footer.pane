@@ -1,0 +1,50 @@
+# harness: crush
+# expect: working
+# rule: crush-footer-busy
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 34
+# quiet_ms: 0
+# source: live crush 0.94.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: `> Working!` placeholder and `esc cancel` in the footer
+---
+
+ │ hello crush                                                                          ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   !16cB1d9#df8*6! 1s                                                                    Charm™               v0.94.2
+                                                                                        ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+                                                                                        █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+                                                                                         ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+                                                                                        New Session
+
+                                                                                        /scrubbed-scratch-path/sc
+                                                                                        /scrubbed-scratch-path/scrub
+                                                                                        /scrubbed-scratch-path/scr
+                                                                                        9158-
+                                                                                        /scrubbed-scratch-path/scrubb
+                                                                                        /scrubbe
+
+                                                                                        ◇ Mock Model via mock
+                                                                                          0% (0) $0.00
+
+                                                                                        Modified Files ──────────────
+
+                                                                                        None
+
+                                                                                        LSPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        MCPs ────────────────────────
+
+                                                                                        None
+
+                                                                                        Skills ──────────────────────
+   > Working!
+ :::                                                                                    ● crush-config
+ :::                                                                                    ● crush-hooks
+                                                                                        ● jq
+ esc cancel • tab focus chat • / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+

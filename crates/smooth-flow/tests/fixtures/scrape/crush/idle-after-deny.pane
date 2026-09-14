@@ -1,0 +1,50 @@
+# harness: crush
+# expect: idle
+# rule: crush-ready
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 34
+# quiet_ms: 5000
+# source: live crush 0.94.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: denied tool call, `> Ready...`
+---
+
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      Charm™               v0.94.2
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   ◇ Mock Model via mock in 20s ─────────────────────────────────────────────────────
+                                                                                        Sure. Here is a deliberately
+ │ use a tool again                                                                     slow answer so the terminal
+
+   ✓ Bash echo mock-tool-call                                                           /scrubbed-scratch-path/sc
+                                                                                        /scrubbed-scratch-path/scrub
+      mock-tool-call                                                                    /scrubbed-scratch-path/scr
+                                                                                        9158-
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     /scrubbed-scratch-path/scrubb
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     /scrubbe
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ◇ Mock Model via mock
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.       0% (20) $0.00
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+                                                                                        Modified Files ──────────────
+   ◇ Mock Model via mock in 38s ─────────────────────────────────────────────────────
+                                                                                        None
+ │ use a tool third
+                                                                                        LSPs ────────────────────────
+   × Bash mkdir -p mockdir && touch mockdir/x.txt
+                                                                                        None
+    WARN  User denied permission
+                                                                                        MCPs ────────────────────────
+   ◇ Mock Model via mock in 25s ─────────────────────────────────────────────────────
+                                                                                        None
+
+   > Ready...                                                                           Skills ──────────────────────
+ :::
+ :::                                                                                    ● crush-config
+                                                                                        ● crush-hooks
+ tab focus chat • / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+
