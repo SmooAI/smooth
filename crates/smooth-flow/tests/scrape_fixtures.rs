@@ -71,7 +71,8 @@ fn parse_state(s: &str) -> Option<PaneState> {
 }
 
 fn load(path: &Path) -> Fixture {
-    let raw = std::fs::read_to_string(path).unwrap();
+    // A Windows checkout may have turned every `\n` into `\r\n`.
+    let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
     let (header, text) = raw.split_once("\n---\n").unwrap_or_else(|| panic!("{}: no `---` separator", path.display()));
     let mut h: BTreeMap<&str, &str> = BTreeMap::new();
     for line in header.lines() {
