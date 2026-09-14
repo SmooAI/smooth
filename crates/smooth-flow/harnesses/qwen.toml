@@ -1,0 +1,60 @@
+# Qwen Code (th-b00115). A Gemini CLI fork whose hooks went the OTHER way:
+# Claude Code's event names and decision protocol (UserPromptSubmit / PreToolUse
+# / Stop / PermissionRequest with hookSpecificOutput.decision.behavior /
+# Notification{notification_type}) in ~/.qwen/settings.json, session_id + cwd
+# on stdin. So event_map stays EMPTY — the Claude table, including holding a
+# PermissionRequest open for `flow.approve`.
+# The overlay does NOT subscribe to Notification: Qwen sends
+# `idle_prompt` ("Qwen Code is waiting for your input") the moment a turn ends,
+# where Claude Code waits 60 s, so the Claude table would turn every finished
+# turn into needs_you — seen live 2026-09-14. Its asks already arrive as
+# PermissionRequest.
+# References: qwen-code docs users/features/hooks (events, PermissionRequest
+# output, notification_type permission_prompt|idle_prompt|auth_success);
+# qwen 0.23.4 --help (positional query is ONE-SHOT, -i keeps it interactive;
+# --session-id, -r/--resume <id>). orca launches it with no prompt and pastes
+# (src/shared/tui-agent-config.ts, 'qwen-code': stdin-after-start) and installs
+# no hooks for it; cmux has no qwen integration at all.
+name = "qwen"
+display_name = "Qwen Code"
+
+[binary]
+names = ["qwen"]
+prefer_paths = [".local/bin/qwen"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "-i", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness qwen  # harness/qwen/hooks.json key-merged into ~/.qwen/settings.json"
+# event_map omitted ⇒ the Claude Code table (Qwen's hooks use Claude's names).
+
+[state.scrape]
+working = ["esc to cancel"]
+idle = ["type your message"]
+# Captured 2026-09-14 (qwen 0.23.4, fresh HOME): the provider picker "Connect a Provider".
+needs_you = ["connect a provider", "do you trust the files in this folder", "allow execution", "apply this change", "waiting for user confirmation"]
+usage_limit = ["quota exceeded", "rate limit", "usage limit reached"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.qwen/skills"
+mcp_config = "~/.qwen/settings.json"

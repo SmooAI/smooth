@@ -1,0 +1,65 @@
+# Pi (th-b00115). No command hooks: Pi loads TypeScript extensions from
+# ~/.pi/agent/extensions/*.ts (jiti) with pi.on('session_start' | 'agent_start' |
+# 'tool_execution_start' | 'agent_end' | 'session_shutdown'). The smooth-agent
+# extension posts those names with ctx.sessionManager.getSessionId() and
+# SMOOTH_FLOW_ID. Pi has no permission prompts by design ("No permission
+# popups"), so nothing maps to needs_you.
+# The session id is PRE-ASSIGNED: pi 0.85.1 `--session-id <id>` "Use exact
+# project session ID, creating it if missing" — the same argv launches and
+# resumes (src/main.ts: findLocalSessionByExactId → open, else create).
+# References: pi packages/coding-agent/docs/extensions.md (events),
+# README (--session-id, "No permission popups"); orca
+# src/main/pi/agent-status-extension-source.ts, src/shared/agent-hook-listener/
+# providers/pi-family-events.ts:19-47 (session_start on open is not work;
+# agent_end → done); cmux CLI/CMUXCLI+AgentHookCatalog.swift:55-61
+# (~/.pi/agent/extensions/cmux-session.ts, PI_CODING_AGENT_DIR), cmux
+# .../AgentResumeArgv.swift:433 (`pi --session <id>`).
+name = "pi"
+display_name = "Pi"
+
+[binary]
+names = ["pi"]
+prefer_paths = [".local/bin/pi"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = ["--session-id", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness pi  # harness/pi/extension.ts → ~/.pi/agent/extensions/<pkg>.ts"
+
+[state.hooks.event_map]
+session_start = "ignore"
+agent_start = "working"
+tool_execution_start = "working"
+agent_end = "idle"
+session_shutdown = "ended"
+
+[state.scrape]
+working = ["working\\.\\.\\."]
+idle = ["escape interrupt · ctrl\\+c"]
+# Captured 2026-09-14 (pi 0.85.1, fresh HOME): "Warning: No models available. Use /login …".
+needs_you = ["no models available"]
+usage_limit = ["usage limit", "rate limit", "quota exceeded", "insufficient credits"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.pi/agent/skills"
+mcp_config = "~/.pi/agent/settings.json"
