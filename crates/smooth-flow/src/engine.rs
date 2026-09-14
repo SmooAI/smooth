@@ -149,6 +149,10 @@ struct Inner {
     default_project: PathBuf,
     home: PathBuf,
     daemon_url: Option<String>,
+    /// `(HOME, PATH)` harness binaries resolve against instead of this
+    /// process's (th-3cabf6: the conformance rig points it at a scratch HOME
+    /// holding a fake agent, so a real CLI on the machine is never launched).
+    resolve_env: Mutex<Option<(PathBuf, std::ffi::OsString)>>,
 }
 
 /// The SmoothFlow engine handle.
@@ -524,8 +528,29 @@ impl Engine {
                 default_project: cfg.default_project,
                 home: cfg.home,
                 daemon_url: cfg.daemon_url,
+                resolve_env: Mutex::new(None),
             }),
         })
+    }
+
+    /// Resolve harness binaries against `home` + `path` instead of this
+    /// process's `HOME`/`PATH` (th-3cabf6). A test seam: the conformance rig
+    /// installs a fake agent under a scratch HOME and must never fall through
+    /// to a real CLI on the machine.
+    pub fn set_resolve_env(&self, home: PathBuf, path: std::ffi::OsString) {
+        *self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((home, path));
+    }
+
+    /// `m`'s executable: [`Manifest::resolve_binary`], or against the
+    /// [`Self::set_resolve_env`] override (bare first name when nothing resolves).
+    fn resolve_bin(&self, m: &Manifest) -> String {
+        let env = self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        match env {
+            Some((home, path)) => m
+                .resolve_binary_in(&home, &path)
+                .map_or_else(|| m.binary.names[0].clone(), |p| p.to_string_lossy().into_owned()),
+            None => m.resolve_binary(),
+        }
     }
 
     // ── harnesses (th-0f6126) ─────────────────────────────────────────────
@@ -818,15 +843,17 @@ impl Engine {
             model: req.model.as_deref(),
             daemon_url: self.inner.daemon_url.as_deref(),
         };
-        let mut argv = match req.argv.clone().filter(|a| !a.is_empty()) {
+        let explicit = req.argv.clone().filter(|a| !a.is_empty());
+        let defaulted = explicit.is_none();
+        let mut argv = match explicit {
             Some(a) => a,
             None => default_argv(&registry, &req.kind, &vars)?,
         };
         // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
         // resolution as the default argv.
         if let Some(m) = manifest {
-            if argv.first().is_some_and(|a| m.is_bare_name(a)) {
-                argv[0] = m.resolve_binary();
+            if defaulted || argv.first().is_some_and(|a| m.is_bare_name(a)) {
+                argv[0] = self.resolve_bin(m);
             }
         }
         // th-c103c1: nothing here is demanded of the caller — the pearl, the
@@ -1787,7 +1814,15 @@ fn mapped_outcome(m: &Manifest, ev: &HookEvent) -> HookOutcome {
                 .get("message")
                 .and_then(Value::as_str)
                 .map_or_else(|| permission_detail(&ev.payload), str::to_string);
-            HookOutcome::NeedsYou(Attention::new(reason).with_detail(detail))
+            let mut att = Attention::new(reason).with_detail(detail);
+            // th-3cabf6: a permission ask under the harness's own event name
+            // has no long-poll to answer, but `flow.approve` (and every
+            // client) needs a request id to address it — the unknown id
+            // falls through to the approval keystroke, as a scraped prompt's does.
+            if att.reason == "permission" {
+                att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
+            }
+            HookOutcome::NeedsYou(att)
         }
         Some(FlowEventName::Ended) => HookOutcome::Ended,
         Some(FlowEventName::Ignore) | None => HookOutcome::None,
@@ -3119,6 +3154,7 @@ mod tests {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "permission");
                 assert_eq!(a.detail.as_deref(), Some("rm -rf"));
+                assert!(a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")), "approvable: {a:?}");
             }
             other => panic!("{other:?}"),
         }
@@ -3126,6 +3162,7 @@ mod tests {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "question");
                 assert_eq!(a.detail.as_deref(), Some("Bash: ls"));
+                assert!(a.request_id.is_none(), "a question is answered, not approved");
             }
             other => panic!("{other:?}"),
         }

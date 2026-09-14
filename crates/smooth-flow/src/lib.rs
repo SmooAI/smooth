@@ -9,6 +9,7 @@
 
 pub mod engine;
 pub mod harness;
+pub mod harness_conformance;
 pub mod harness_draft;
 pub mod harness_validate;
 pub mod infer;
