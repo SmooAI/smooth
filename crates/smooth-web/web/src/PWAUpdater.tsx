@@ -2,9 +2,43 @@
 // worker waits instead of silently swapping; we poll for updates while the app
 // is open and, when one lands, force a refresh through a modal the user can't
 // dismiss — so a long-lived Big Smooth tab never drifts onto stale code.
+//
+// EXCEPT in the Electron desktop app (th-003dc7): there the SPA is served by the
+// bundled daemon and the app updates via its OWN OTA (electron-updater). A
+// service worker adds nothing there — it only produces a SECOND "refresh" prompt
+// on top of the app's "restart" (the double update Brent saw) and a stale SPA
+// cache after an OTA. Push on desktop is native (`window.bigSmooth.notify`), not
+// the SW, so nothing depends on it. So desktop runs NO SW updater and tears down
+// any SW/caches a prior build left behind; browser + installed-PWA users keep the
+// full flow below.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
+
+/** True inside the Electron desktop shell — its preload exposes `window.bigSmooth`
+ * (the native bridge). The web/mobile PWA has no such global. */
+function isDesktopApp(): boolean {
+    return typeof window !== 'undefined' && !!(window as unknown as { bigSmooth?: unknown }).bigSmooth;
+}
+
+/** Unregister every service worker and clear its caches. Used on desktop to shed
+ * an SW a prior build registered (and that vite-plugin-pwa's auto-register puts
+ * back each load) — so the Electron webview always loads fresh from the local
+ * daemon and never shows the PWA refresh prompt. Best-effort; never throws. */
+async function tearDownServiceWorkers(): Promise<void> {
+    try {
+        if ('serviceWorker' in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
+        }
+        if ('caches' in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+        }
+    } catch {
+        // best-effort — a residual SW is harmless, just don't crash the shell
+    }
+}
 
 /** How often an open tab checks for a newer deploy. */
 const UPDATE_POLL_MS = 60_000;
@@ -31,6 +65,22 @@ async function forceRefresh(updateServiceWorker: (reload?: boolean) => Promise<v
 }
 
 export function PWAUpdater() {
+    // A hook-free switch so each branch's hooks stay unconditional (React rules):
+    // desktop never touches the SW updater; the browser/PWA path is unchanged.
+    if (isDesktopApp()) return <DesktopServiceWorkerTeardown />;
+    return <BrowserPWAUpdater />;
+}
+
+/** Desktop: shed any service worker + caches, show nothing. No `useRegisterSW`,
+ * so no refresh prompt — the app's OTA is the single update path. */
+function DesktopServiceWorkerTeardown() {
+    useEffect(() => {
+        void tearDownServiceWorkers();
+    }, []);
+    return null;
+}
+
+function BrowserPWAUpdater() {
     const [refreshing, setRefreshing] = useState(false);
     const {
         needRefresh: [needRefresh],

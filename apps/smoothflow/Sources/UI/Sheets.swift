@@ -26,18 +26,23 @@ struct HarnessPicker: View {
     }
 }
 
-/// ⌘N — `flow.new`.
+/// ⌘N — `flow.new`. Zero friction (th-c103c1): pick a kind, hit Start.
+/// The pearl, Jira key, worktree and title are INFERRED from where the work
+/// already is — shown, not demanded — and every one of them is overridable
+/// behind the disclosure. Start is never blocked on a missing pearl.
 struct NewSessionSheet: View {
     @ObservedObject var app: AppController
     @State private var kind = ""
+    @State private var prompt = ""
+    @State private var showOverrides = false
     @State private var worktree = ""
     @State private var pearlId = ""
-    @State private var prompt = ""
     @State private var title = ""
     var dismiss: () -> Void = {}
 
     private var selected: HarnessInfo? { app.store.harnesses.first { $0.name == kind } }
     private var launchable: Bool { kind == "shell" || selected?.installed == true }
+    private var context: InferredContext? { app.inferred }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -48,23 +53,62 @@ struct NewSessionSheet: View {
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }
-            TextField("Pearl id (th-xxxxxx) — the engine creates the worktree", text: $pearlId).font(Theme.mono(.body))
-            TextField("Worktree path (blank = derive from pearl / cwd)", text: $worktree).font(Theme.mono(.body))
-            TextField("Title (optional)", text: $title)
+            inferredContext
             TextField("Prompt (optional)", text: $prompt, axis: .vertical).lineLimit(3...6)
+            DisclosureGroup("Override context", isExpanded: $showOverrides) {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Pearl id (th-xxxxxx) — with no worktree, the engine creates one", text: $pearlId).font(Theme.mono(.body))
+                    TextField("Worktree path", text: $worktree).font(Theme.mono(.body))
+                    TextField("Title", text: $title)
+                }.padding(.top, 6)
+            }
+            .font(.caption)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Start") {
-                    app.newSession(NewSession(kind: kind, worktree: worktree.nilIfEmpty, project: nil, pearlId: pearlId.nilIfEmpty,
-                                              prompt: prompt.nilIfEmpty, argv: nil, title: title.nilIfEmpty))
-                    dismiss()
-                }.keyboardShortcut(.defaultAction).disabled(!launchable)
+                Button("Start") { start() }.keyboardShortcut(.defaultAction).disabled(!launchable)
             }
         }
         .padding(20)
         .frame(width: 520)
         .onAppear { if kind.isEmpty { kind = HarnessPicker.defaultKind(app.store) } }
+        .task { await app.loadInference(cwd: app.inferSeedCwd) }
+    }
+
+    /// What the session will inherit if you just press Start.
+    @ViewBuilder private var inferredContext: some View {
+        if let c = context {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(c.title).font(.body.weight(.medium)).lineLimit(1)
+                Text(c.summary).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)).lineLimit(2)
+                if !c.isGit {
+                    Text("not a git worktree — no pearl, no branch").font(.caption2).foregroundStyle(Color(Theme.faint))
+                } else if c.pearlId == nil {
+                    Text("no pearl here — starting anyway is fine").font(.caption2).foregroundStyle(Color(Theme.faint))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+        } else {
+            Text("reading the context…").font(.caption).foregroundStyle(Color(Theme.faint))
+        }
+    }
+
+    /// An override wins; otherwise the inferred value goes on the wire, so the
+    /// session records exactly the context the dialog showed.
+    private func start() {
+        let c = context
+        app.newSession(NewSession(
+            kind: kind,
+            worktree: worktree.nilIfEmpty ?? (pearlId.nilIfEmpty == nil ? c?.worktree.nilIfEmpty : nil),
+            project: c?.project.nilIfEmpty,
+            pearlId: pearlId.nilIfEmpty ?? c?.pearlId,
+            prompt: prompt.nilIfEmpty,
+            argv: nil,
+            title: title.nilIfEmpty
+        ))
+        dismiss()
     }
 }
 

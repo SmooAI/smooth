@@ -130,6 +130,13 @@ struct Runtime {
     paste_at: HashMap<String, (String, Instant)>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
+    /// Harness session ids adoption already refused (th-c103c1) — a stranger
+    /// posts a hook on every tool call, and re-running git + `th pearls` for
+    /// each one would be a shell-out storm.
+    adopt_refused: HashMap<String, AdoptRefusal>,
+    /// Watermark for re-broadcasting rows another daemon changed in the
+    /// shared `flow.db` (th-c103c1).
+    seen_changes_at: Option<DateTime<Utc>>,
 }
 
 struct Inner {
@@ -217,6 +224,12 @@ fn owned_here(s: &Session) -> bool {
 
 /// `(socket, tmux session)` of a launched session.
 fn pane(s: &Session) -> Result<(String, String)> {
+    if s.adopted {
+        bail!(
+            "session {} was adopted from a plain terminal (th-c103c1) — SmoothFlow never spawned its PTY, so there is no pane to attach; drive it where it is running",
+            s.id
+        );
+    }
     let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
     Ok((socket_of(s), t))
 }
@@ -317,12 +330,17 @@ pub fn resume_backoff(attempt: u32) -> Duration {
     RESUME_BACKOFF_BASE.saturating_mul(2u32.saturating_pow(attempt.min(10)))
 }
 
-/// Default title for a new session.
+/// Default title for a new session: the prompt, else what the worktree says
+/// it is working on (th-c103c1 — the pearl's title, else the branch), else
+/// the pearl id, else `kind · dir`.
 #[must_use]
-pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, worktree: &Path) -> String {
+pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, inferred: Option<&str>, worktree: &Path) -> String {
     if let Some(p) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
         let short: String = p.chars().take(60).collect();
         return short;
+    }
+    if let Some(t) = inferred.map(str::trim).filter(|t| !t.is_empty()) {
+        return t.to_string();
     }
     if let Some(p) = pearl_id {
         return p.to_string();
@@ -341,6 +359,146 @@ pub fn claim_holder(claims: &HashMap<String, (u32, Instant)>, agent_session_id: 
         return None;
     }
     alive(*pid).then_some(*pid)
+}
+
+// ── adoption (th-c103c1) ──────────────────────────────────────────────────
+
+/// The `config` key the adoption opt-in is stored under.
+pub const ADOPT_KEY: &str = "adopt_plain_sessions";
+/// `$SMOOTH_FLOW_ADOPT` overrides the stored opt-in (tests, and a one-off
+/// daemon run).
+pub const ADOPT_ENV: &str = "SMOOTH_FLOW_ADOPT";
+/// An adopted session that has gone this long without a hook is presumed
+/// gone: its terminal was closed without a `SessionEnd`, and nothing here can
+/// see its process.
+pub const ADOPTED_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
+/// How far back of its own watermark the cross-daemon re-broadcast looks.
+pub const REBROADCAST_SLACK_SECS: i64 = 2;
+/// Cap on the per-session adoption-refusal cache, so a long-lived daemon that
+/// sees thousands of strangers does not grow a map forever.
+const ADOPT_REFUSED_CAP: usize = 1024;
+
+/// Why adoption declined a hook.
+///
+/// Every refusal is a deliberate guard, and the reason is cached per harness
+/// session so the check runs once, not per event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptRefusal {
+    /// The opt-in is off (the default).
+    Disabled,
+    /// The hook carried no harness session id — nothing to key a row on.
+    NoSessionId,
+    /// The hook carried no cwd, or it is not a git repo. SmoothFlow tracks
+    /// work on branches; a shell in `/tmp` is not fleet work.
+    NotGit,
+    /// `harness` names no manifest this machine knows.
+    UnknownHarness,
+    /// The cwd's project has never had a session here. Adopting it would pull
+    /// unrelated repos into the fleet.
+    UnknownProject,
+    /// A permission request is the one event that must not be the first: the
+    /// engine would hold the harness open for a decision about a session
+    /// nobody is watching yet.
+    PermissionFirst,
+}
+
+impl AdoptRefusal {
+    /// A short reason for logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "adoption is off",
+            Self::NoSessionId => "no harness session id",
+            Self::NotGit => "cwd is not a git worktree",
+            Self::UnknownHarness => "unknown harness",
+            Self::UnknownProject => "project has no sessions here",
+            Self::PermissionFirst => "first event is a permission request",
+        }
+    }
+}
+
+/// The opt-in, pure: `$SMOOTH_FLOW_ADOPT` (`1`/`true`/`on` — or `0`/`false`/
+/// `off`) beats the stored value, which defaults to OFF.
+#[must_use]
+pub fn adopt_setting(env: Option<&str>, stored: Option<&str>) -> bool {
+    let truthy = |v: &str| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes");
+    match env.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => truthy(v),
+        None => stored.is_some_and(truthy),
+    }
+}
+
+/// The manifest kind a hook's `harness` field names: the manifest name
+/// itself, else the `-code` spelling the Claude Code hooks send
+/// (`claude-code` → `claude`).
+#[must_use]
+pub fn kind_for_harness(registry: &Registry, harness: &str) -> Option<SessionKind> {
+    let h = harness.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return None;
+    }
+    let name = if registry.get(&h).is_some() {
+        h
+    } else {
+        let stripped = h.strip_suffix("-code")?.to_string();
+        registry.get(&stripped).is_some().then_some(stripped)?
+    };
+    name.parse().ok()
+}
+
+/// Whether `project` is one the fleet already works in.
+///
+/// That means the daemon's own workspace, or a project some session row
+/// already lives in. Every argument must already be [`canon`]icalised —
+/// `/var/…` and `/private/var/…` are the same directory, and git always
+/// answers with the resolved one.
+#[must_use]
+pub fn project_is_known(project: &str, default_project: &str, known: &[String]) -> bool {
+    project == default_project || known.iter().any(|k| k == project)
+}
+
+/// A path with symlinks resolved, falling back to the input when it cannot be
+/// resolved (a project that has since been deleted still compares by name).
+#[must_use]
+pub fn canon(p: &str) -> String {
+    std::fs::canonicalize(p).map_or_else(|_| p.to_string(), |c| c.to_string_lossy().into_owned())
+}
+
+/// The adoption guards, pure over the facts. `Ok(kind)` means "create a row".
+///
+/// # Errors
+/// The refusal reason, which the caller caches per harness session.
+pub fn adoptable(
+    ev_event: &str,
+    session_id: &str,
+    enabled: bool,
+    inferred: Option<&crate::infer::Inferred>,
+    kind: Option<SessionKind>,
+    project_known: bool,
+) -> std::result::Result<SessionKind, AdoptRefusal> {
+    if !enabled {
+        return Err(AdoptRefusal::Disabled);
+    }
+    if session_id.trim().is_empty() {
+        return Err(AdoptRefusal::NoSessionId);
+    }
+    if ev_event == "PermissionRequest" {
+        return Err(AdoptRefusal::PermissionFirst);
+    }
+    let kind = kind.ok_or(AdoptRefusal::UnknownHarness)?;
+    if !inferred.is_some_and(|i| i.is_git) {
+        return Err(AdoptRefusal::NotGit);
+    }
+    if !project_known {
+        return Err(AdoptRefusal::UnknownProject);
+    }
+    Ok(kind)
+}
+
+/// Whether an adopted row has been silent long enough to call dead.
+#[must_use]
+pub fn adopted_is_stale(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(updated_at).num_seconds() >= ADOPTED_STALE_AFTER_SECS
 }
 
 impl Engine {
@@ -671,11 +829,16 @@ impl Engine {
                 argv[0] = m.resolve_binary();
             }
         }
-        let branch = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
+        // th-c103c1: nothing here is demanded of the caller — the pearl, the
+        // branch and the title are inferred from the worktree when they were
+        // not given. An explicit value always wins.
+        let inferred = crate::infer::gather(&worktree);
+        let branch = inferred.branch.clone().or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
+        let pearl_id = req.pearl_id.clone().or_else(|| inferred.pearl_id.clone());
         let title = req
             .title
             .clone()
-            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), &worktree));
+            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), pearl_id.as_deref(), Some(&inferred.title), &worktree));
         let session = self.with_store(|st| {
             st.create(NewSession {
                 kind: Some(req.kind.clone()),
@@ -683,13 +846,14 @@ impl Engine {
                 project: project.to_string_lossy().into_owned(),
                 worktree: worktree.to_string_lossy().into_owned(),
                 branch,
-                pearl_id: req.pearl_id.clone(),
+                pearl_id: pearl_id.clone(),
                 agent_session_id: agent_session_id.clone(),
                 argv: argv.clone(),
                 tmux_session: None,
                 tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
                 owner: Some(tmux::socket_name()),
                 fan_out_id: req.fan_out_id.clone(),
+                adopted: false,
             })
         })?;
         let env = self.launch_env(manifest, &session);
@@ -883,6 +1047,12 @@ impl Engine {
     /// When the session is unknown or the relaunch fails.
     pub fn kill(&self, id: &str, resume: bool) -> Result<Session> {
         let s = self.require(id)?;
+        if s.adopted {
+            bail!(
+                "session {id} was adopted from a plain terminal — SmoothFlow does not own its process and cannot {} it; stop it where it is running (`th flow close {id}` drops the row)",
+                if resume { "resume" } else { "kill" }
+            );
+        }
         let sock = socket_of(&s);
         let tmux_name = s.tmux_session.clone();
         if let Some(pid) = s.pid {
@@ -957,7 +1127,18 @@ impl Engine {
             }
         }
         if !s.state.is_terminal() {
-            self.kill(id, false)?;
+            if s.adopted {
+                // Nothing here can stop it, and removing a live session's
+                // worktree out from under it would be destructive.
+                if !force {
+                    bail!(
+                        "session {id} is adopted and still {} — stop it where it is running, or close with force",
+                        s.state
+                    );
+                }
+            } else {
+                self.kill(id, false)?;
+            }
         }
         let mut out = CloseOutcome {
             id: id.to_string(),
@@ -1042,6 +1223,11 @@ impl Engine {
                 found = self.bind_by_cwd(cwd, &ev.session_id)?;
             }
         }
+        // th-c103c1: still nobody? This may be a `claude`/`codex` someone
+        // started in a plain terminal — adopt it into the fleet.
+        if found.is_none() {
+            found = self.try_adopt(&ev)?;
+        }
         let Some(s) = found else {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
             return Ok(HookReply::Immediate(json!({})));
@@ -1100,9 +1286,131 @@ impl Engine {
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
             }
-            HookOutcome::Ended | HookOutcome::None => {}
+            HookOutcome::Ended => {
+                // Engine-spawned rows learn their exit from the PTY; an
+                // adopted one has no pane, so `SessionEnd` IS the end.
+                if s.adopted {
+                    self.set_state(&s.id, SessionState::Done, None)?;
+                }
+            }
+            HookOutcome::None => {}
         }
         Ok(HookReply::Immediate(json!({})))
+    }
+
+    /// Whether hooks from sessions this engine never launched are adopted
+    /// (th-c103c1). Off unless `$SMOOTH_FLOW_ADOPT` or the stored opt-in says
+    /// otherwise — adoption puts rows in the fleet that the user did not ask
+    /// for, so it is theirs to turn on.
+    #[must_use]
+    pub fn adopt_enabled(&self) -> bool {
+        let stored = self.with_store(|st| st.get_config(ADOPT_KEY)).ok().flatten();
+        adopt_setting(std::env::var(ADOPT_ENV).ok().as_deref(), stored.as_deref())
+    }
+
+    /// Turn adoption on or off (persisted in the flow store).
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn set_adopt(&self, on: bool) -> Result<()> {
+        self.with_store(|st| st.set_config(ADOPT_KEY, if on { "1" } else { "0" }))?;
+        self.rt().adopt_refused.clear();
+        Ok(())
+    }
+
+    /// What a session started in `cwd` would be working on — the New Session
+    /// dialog's read-only context (`GET /api/flow/infer`). `None` uses the
+    /// daemon's workspace.
+    #[must_use]
+    pub fn infer_context(&self, cwd: Option<&Path>) -> crate::infer::Inferred {
+        crate::infer::gather(cwd.unwrap_or(&self.inner.default_project))
+    }
+
+    /// Adopt the harness session `ev` belongs to, if every guard allows it.
+    /// A refusal is cached per harness session id so the git/`th` shell-outs
+    /// happen once, not on every hook event.
+    fn try_adopt(&self, ev: &HookEvent) -> Result<Option<Session>> {
+        // Bound before the `if let` so the runtime lock is not held across
+        // the body.
+        let cached = self.rt().adopt_refused.get(&ev.session_id).copied();
+        if let Some(why) = cached {
+            tracing::trace!(session = %ev.session_id, why = why.as_str(), "flow: adoption already refused");
+            return Ok(None);
+        }
+        let enabled = self.adopt_enabled();
+        let kind = kind_for_harness(&self.registry(), &ev.harness);
+        // Cheap guards first: inference shells out to git and `th`.
+        if let Err(why) = adoptable(&ev.event, &ev.session_id, enabled, None, kind.clone(), true) {
+            if why != AdoptRefusal::NotGit {
+                return Ok(self.refuse_adoption(&ev.session_id, why));
+            }
+        }
+        let Some(cwd) = ev.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+            return Ok(self.refuse_adoption(&ev.session_id, AdoptRefusal::NotGit));
+        };
+        let inferred = crate::infer::gather(Path::new(cwd));
+        let known: Vec<String> = self.with_store(FlowStore::projects)?.iter().map(|k| canon(k)).collect();
+        let project_known = project_is_known(&canon(&inferred.project), &canon(&self.inner.default_project.to_string_lossy()), &known);
+        let kind = match adoptable(&ev.event, &ev.session_id, enabled, Some(&inferred), kind, project_known) {
+            Ok(k) => k,
+            Err(why) => return Ok(self.refuse_adoption(&ev.session_id, why)),
+        };
+        let agent_id = ev.session_id.clone();
+        // Check-and-create under the store lock: two hooks from the same
+        // session can land concurrently (the script is fire-and-forget).
+        //
+        // KNOWN SEAM (th-c103c1): this lock is per PROCESS, and two daemons
+        // can share one flow.db (Big Smooth + the SmoothFlow app's child).
+        // If a brand-new harness session's first two hooks reach BOTH daemons
+        // within the same millisecond, each can miss the other's insert and
+        // adopt it into its own row — two rows for one terminal. The window
+        // is the width of one SQLite insert, both rows are harmless (adopted
+        // rows are inert: no pane, no supervision), and closing it properly
+        // means a cross-process claim. Documented rather than fixed; if you
+        // are here because you saw a duplicate, that is this.
+        let created = self.with_store(|st| {
+            if let Some(existing) = st.get_by_agent_session(&agent_id)? {
+                return Ok::<_, anyhow::Error>(Some((existing, false)));
+            }
+            let s = st.create(NewSession {
+                kind: Some(kind.clone()),
+                title: inferred.title.clone(),
+                project: inferred.project.clone(),
+                worktree: inferred.worktree.clone(),
+                branch: inferred.branch.clone(),
+                pearl_id: inferred.pearl_id.clone(),
+                agent_session_id: Some(agent_id.clone()),
+                argv: Vec::new(),
+                tmux_session: None,
+                tmux_socket: None,
+                owner: Some(tmux::socket_name()),
+                fan_out_id: None,
+                adopted: true,
+            })?;
+            Ok(Some((s, true)))
+        })?;
+        let Some((session, fresh)) = created else { return Ok(None) };
+        if fresh {
+            tracing::info!(
+                session = %session.id, harness_session = %agent_id, kind = %kind, worktree = %session.worktree,
+                pearl = session.pearl_id.as_deref().unwrap_or("-"),
+                "flow: adopted a harness session started outside SmoothFlow"
+            );
+            self.event(&session.id, EventKind::System, "adopted — started outside SmoothFlow (no pane to attach)");
+            self.emit_session(&session);
+        }
+        Ok(Some(session))
+    }
+
+    /// Cache a refusal and return `None`.
+    fn refuse_adoption(&self, session_id: &str, why: AdoptRefusal) -> Option<Session> {
+        tracing::debug!(session = %session_id, why = why.as_str(), "flow: not adopting");
+        let mut rt = self.rt();
+        if rt.adopt_refused.len() >= ADOPT_REFUSED_CAP {
+            rt.adopt_refused.clear();
+        }
+        rt.adopt_refused.insert(session_id.to_string(), why);
+        None
     }
 
     /// Bind harness session `agent_session_id` to the newest id-less agent
@@ -1153,6 +1461,37 @@ impl Engine {
                 tracing::warn!(session = %s.id, error = %e, "flow supervision");
             }
         }
+        self.rebroadcast_external_changes(now)?;
+        Ok(())
+    }
+
+    /// Re-broadcast rows another daemon changed in the shared `flow.db`
+    /// (th-c103c1). Big Smooth and the SmoothFlow app's child daemon share
+    /// one file but not one broadcast channel, so a hook that lands on the
+    /// other one is invisible to this one's clients until something re-reads
+    /// the store. A `Session` frame is an upsert, so re-emitting a row this
+    /// engine already emitted is harmless.
+    fn rebroadcast_external_changes(&self, now: DateTime<Utc>) -> Result<()> {
+        let since = self.rt().seen_changes_at;
+        self.rt().seen_changes_at = Some(now);
+        let Some(since) = since else {
+            // First tick: take the watermark, emit nothing (clients just got
+            // the whole list in `flow.hello`).
+            return Ok(());
+        };
+        // The window is deliberately slack: `updated_at` is RFC3339 text with
+        // variable sub-second precision, so a strict watermark can mis-order
+        // two writes in the same millisecond. A re-emit is an idempotent
+        // upsert, a missed one is a stale client.
+        //
+        // KNOWN SEAM (th-c103c1): this is a POLL, so a client attached to the
+        // daemon that did NOT write the row sees the change up to one
+        // supervision tick late (SUPERVISE_EVERY, 2 s) — a state dot that
+        // lags on one of two running daemons is this, not a lost frame.
+        let since = since - chrono::Duration::seconds(REBROADCAST_SLACK_SECS);
+        for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s)) {
+            self.emit_session(s);
+        }
         Ok(())
     }
 
@@ -1163,6 +1502,15 @@ impl Engine {
             if Instant::now() >= at {
                 self.rt().relaunch_at.remove(&s.id);
                 self.relaunch(s)?;
+            }
+            return Ok(());
+        }
+        // An adopted session has no pane and no pid here: the only liveness
+        // signal is its own hooks, so silence is the only thing to act on.
+        if s.adopted {
+            if adopted_is_stale(s.updated_at, now) {
+                let att = Attention::new("crashed").with_detail("adopted session went silent — its terminal is gone");
+                self.set_state(&s.id, SessionState::Dead, Some(att))?;
             }
             return Ok(());
         }
@@ -1617,10 +1965,20 @@ mod tests {
         assert_eq!(slugify("Fix the Auth bug!!", 24), "fix-the-auth-bug");
         assert_eq!(slugify("   ", 24), "");
         assert!(slugify(&"x".repeat(100), 10).len() <= 10);
-        assert_eq!(default_title(&SessionKind::Claude, Some("  do it  "), None, Path::new("/a/b")), "do it");
-        assert_eq!(default_title(&SessionKind::Claude, None, Some("th-1"), Path::new("/a/b")), "th-1");
-        assert_eq!(default_title(&SessionKind::Shell, None, None, Path::new("/a/b")), "shell · b");
-        assert_eq!(default_title(&"th-code".parse().unwrap(), None, None, Path::new("/a/b")), "th-code · b");
+        assert_eq!(
+            default_title(&SessionKind::Claude, Some("  do it  "), None, Some("inferred"), Path::new("/a/b")),
+            "do it"
+        );
+        assert_eq!(
+            default_title(&SessionKind::Claude, None, Some("th-1"), Some("Pearl title"), Path::new("/a/b")),
+            "Pearl title"
+        );
+        assert_eq!(default_title(&SessionKind::Claude, None, Some("th-1"), None, Path::new("/a/b")), "th-1");
+        assert_eq!(default_title(&SessionKind::Shell, None, None, None, Path::new("/a/b")), "shell · b");
+        assert_eq!(
+            default_title(&"th-code".parse().unwrap(), None, None, Some("  "), Path::new("/a/b")),
+            "th-code · b"
+        );
     }
 
     /// th-0f6126 regression: the three built-in manifests reproduce EXACTLY
@@ -2235,6 +2593,292 @@ mod tests {
     /// Tests that point `SMOOTH_TH_BIN` somewhere serialize on this — the env
     /// is process-wide and cargo runs tests in parallel.
     static TH_BIN_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── adoption (th-c103c1) ──────────────────────────────────────────────
+
+    #[test]
+    fn adopt_setting_env_beats_the_store_and_defaults_off() {
+        assert!(!adopt_setting(None, None), "adoption is opt-in");
+        assert!(adopt_setting(None, Some("1")));
+        assert!(adopt_setting(None, Some("true")));
+        assert!(!adopt_setting(None, Some("0")));
+        assert!(!adopt_setting(None, Some("")));
+        assert!(adopt_setting(Some("on"), Some("0")), "the env wins");
+        assert!(!adopt_setting(Some("off"), Some("1")), "…in both directions");
+        assert!(adopt_setting(Some("  "), Some("yes")), "a blank env is not a value");
+    }
+
+    #[test]
+    fn harness_names_map_onto_manifest_kinds() {
+        let r = reg();
+        assert_eq!(kind_for_harness(&r, "claude-code"), Some(SessionKind::Claude), "what the Claude hooks send");
+        assert_eq!(kind_for_harness(&r, "claude"), Some(SessionKind::Claude));
+        assert_eq!(kind_for_harness(&r, "CODEX"), Some(SessionKind::Codex));
+        assert_eq!(kind_for_harness(&r, "opencode"), Some(SessionKind::Opencode));
+        assert_eq!(kind_for_harness(&r, "th-code"), Some("th-code".parse().unwrap()));
+        assert_eq!(kind_for_harness(&r, "cursor"), None, "no manifest, no adoption");
+        assert_eq!(kind_for_harness(&r, "-code"), None);
+        assert_eq!(kind_for_harness(&r, ""), None);
+    }
+
+    #[test]
+    fn only_projects_the_fleet_already_works_in_are_known() {
+        let known = vec!["/dev/smooai".to_string()];
+        assert!(project_is_known("/dev/smooth", "/dev/smooth", &known), "the daemon's own workspace");
+        assert!(project_is_known("/dev/smooai", "/dev/smooth", &known), "a project with sessions");
+        assert!(!project_is_known("/dev/stranger", "/dev/smooth", &known));
+        // The symlink trap this guard fell into first: git answers with the
+        // resolved path, so both sides go through `canon`.
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = tmp.path().to_string_lossy().into_owned();
+        assert!(project_is_known(&canon(&raw), &canon(&raw), &[]));
+        assert_eq!(canon("/definitely/not/a/path"), "/definitely/not/a/path", "unresolvable falls back");
+    }
+
+    #[test]
+    fn adoption_guards_each_refuse_for_their_own_reason() {
+        let git = crate::infer::infer(
+            Path::new("/dev/smooth"),
+            &crate::infer::GitFacts {
+                toplevel: Some("/dev/smooth".into()),
+                common_dir: Some("/dev/smooth/.git".into()),
+                branch: Some("th-c103c1-zf".into()),
+            },
+            &crate::infer::PearlFacts::default(),
+        );
+        let no_git = crate::infer::infer(Path::new("/tmp/x"), &crate::infer::GitFacts::default(), &crate::infer::PearlFacts::default());
+        let claude = Some(SessionKind::Claude);
+        assert_eq!(adoptable("Stop", "u1", false, Some(&git), claude.clone(), true), Err(AdoptRefusal::Disabled));
+        assert_eq!(adoptable("Stop", "  ", true, Some(&git), claude.clone(), true), Err(AdoptRefusal::NoSessionId));
+        assert_eq!(
+            adoptable("PermissionRequest", "u1", true, Some(&git), claude.clone(), true),
+            Err(AdoptRefusal::PermissionFirst),
+            "adopting here would hold a plain terminal open for a decision nobody can see"
+        );
+        assert_eq!(adoptable("Stop", "u1", true, Some(&git), None, true), Err(AdoptRefusal::UnknownHarness));
+        assert_eq!(adoptable("Stop", "u1", true, Some(&no_git), claude.clone(), true), Err(AdoptRefusal::NotGit));
+        assert_eq!(adoptable("Stop", "u1", true, None, claude.clone(), true), Err(AdoptRefusal::NotGit));
+        assert_eq!(
+            adoptable("Stop", "u1", true, Some(&git), claude.clone(), false),
+            Err(AdoptRefusal::UnknownProject)
+        );
+        assert_eq!(adoptable("Stop", "u1", true, Some(&git), claude, true), Ok(SessionKind::Claude));
+    }
+
+    #[test]
+    fn an_adopted_session_goes_dead_only_after_a_long_silence() {
+        let now = Utc::now();
+        assert!(!adopted_is_stale(now, now));
+        assert!(!adopted_is_stale(now - chrono::Duration::hours(5), now));
+        assert!(adopted_is_stale(now - chrono::Duration::hours(7), now));
+    }
+
+    /// A git repo at `dir` on `branch`, with one commit.
+    fn git_repo(dir: &Path, branch: &str) {
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        run(&["checkout", "-q", "-b", branch]);
+    }
+
+    fn hook_from(session: &str, event: &str, cwd: &Path) -> HookEvent {
+        HookEvent {
+            harness: "claude-code".into(),
+            event: event.into(),
+            session_id: session.into(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            payload: json!({}),
+        }
+    }
+
+    /// An engine whose workspace is a real repo, with `th` pointed nowhere so
+    /// inference never touches the developer's pearl store.
+    fn adopting_engine(tmp: &Path, branch: &str, on: bool) -> Engine {
+        git_repo(tmp, branch);
+        let e = engine(tmp);
+        e.set_adopt(on).unwrap();
+        e
+    }
+
+    #[test]
+    fn a_plain_session_is_not_adopted_unless_the_user_opted_in() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-c103c1-zf", false);
+        let reply = e.hook(hook_from("plain-1", "UserPromptSubmit", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert!(matches!(reply, HookReply::Immediate(_)));
+        assert!(e.list().unwrap().is_empty(), "adoption is off by default");
+    }
+
+    #[test]
+    fn a_plain_session_is_adopted_with_its_pearl_branch_and_worktree() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-c103c1-zero-friction", true);
+        e.hook(hook_from("plain-2", "UserPromptSubmit", tmp.path())).unwrap();
+        // A second event must bind to the SAME row, not adopt again.
+        e.hook(hook_from("plain-2", "PostToolUse", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+
+        let rows = e.list().unwrap();
+        assert_eq!(rows.len(), 1, "one harness session is one row");
+        let s = &rows[0];
+        assert!(s.adopted);
+        assert_eq!(s.kind, SessionKind::Claude, "`claude-code` is the claude manifest");
+        assert_eq!(s.agent_session_id.as_deref(), Some("plain-2"));
+        assert_eq!(s.branch.as_deref(), Some("th-c103c1-zero-friction"));
+        assert_eq!(s.pearl_id.as_deref(), Some("th-c103c1"), "inferred off the branch");
+        assert_eq!(s.title, "th-c103c1-zero-friction");
+        assert!(s.argv.is_empty(), "we did not launch it");
+        assert_eq!(s.tmux_session, None);
+        assert_eq!(s.state, SessionState::Working);
+    }
+
+    #[test]
+    fn adoption_refuses_strangers_non_repos_and_permission_requests() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-aaa111-x", true);
+        // Another repo entirely.
+        let other = tempfile::tempdir().unwrap();
+        git_repo(other.path(), "th-bbb222-y");
+        e.hook(hook_from("stranger", "Stop", other.path())).unwrap();
+        // Not a repo at all.
+        let plain = tempfile::tempdir().unwrap();
+        e.hook(hook_from("nogit", "Stop", plain.path())).unwrap();
+        // A permission request is never the first thing adopted.
+        e.hook(hook_from("perm", "PermissionRequest", tmp.path())).unwrap();
+        // No cwd at all.
+        let mut bare = hook_from("nocwd", "Stop", tmp.path());
+        bare.cwd = None;
+        e.hook(bare).unwrap();
+        // An unknown harness.
+        let mut cursor = hook_from("cursor-1", "Stop", tmp.path());
+        cursor.harness = "cursor".into();
+        e.hook(cursor).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert!(e.list().unwrap().is_empty(), "every guard refused");
+    }
+
+    #[test]
+    fn a_refusal_is_cached_so_the_shell_outs_happen_once() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-ccc333-z", true);
+        let plain = tempfile::tempdir().unwrap();
+        e.hook(hook_from("nogit", "Stop", plain.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert_eq!(e.rt().adopt_refused.get("nogit").copied(), Some(AdoptRefusal::NotGit));
+        // …and turning adoption on clears the cache, so the user's decision
+        // takes effect without restarting the daemon.
+        e.set_adopt(true).unwrap();
+        assert!(e.rt().adopt_refused.is_empty());
+    }
+
+    #[test]
+    fn an_adopted_session_ends_on_its_own_hook_and_refuses_engine_lifecycle() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-ddd444-w", true);
+        e.hook(hook_from("plain-3", "UserPromptSubmit", tmp.path())).unwrap();
+        let id = e.list().unwrap()[0].id.clone();
+
+        let kill = e.kill(&id, false).unwrap_err().to_string();
+        assert!(kill.contains("adopted"), "we do not own that process: {kill}");
+        let attach = e.attach(&id, 80, 24).unwrap_err().to_string();
+        assert!(attach.contains("no pane to attach"), "{attach}");
+        let close = e.close(&id, false, false, false).unwrap_err().to_string();
+        assert!(close.contains("adopted"), "{close}");
+
+        // Its own SessionEnd is the only end-of-life signal there is.
+        e.hook(hook_from("plain-3", "SessionEnd", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert_eq!(e.get(&id).unwrap().unwrap().state, SessionState::Done);
+        // Terminal now, so closing it out is allowed.
+        e.close(&id, false, false, false).unwrap();
+        assert!(e.get(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn supervision_leaves_a_fresh_adopted_row_alone_and_buries_a_silent_one() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-eee555-v", true);
+        e.hook(hook_from("plain-4", "UserPromptSubmit", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        let s = e.list().unwrap()[0].clone();
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working, "no pane is not a death");
+
+        let stale = Session {
+            updated_at: Utc::now() - chrono::Duration::hours(9),
+            ..s
+        };
+        e.supervise_one(&stale, Utc::now()).unwrap();
+        let after = e.get(&stale.id).unwrap().unwrap();
+        assert_eq!(after.state, SessionState::Dead);
+        assert_eq!(after.attention.unwrap().reason, "crashed");
+    }
+
+    #[test]
+    fn the_refusal_cache_is_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        for i in 0..=ADOPT_REFUSED_CAP {
+            e.refuse_adoption(&format!("s{i}"), AdoptRefusal::NotGit);
+        }
+        assert!(
+            e.rt().adopt_refused.len() <= ADOPT_REFUSED_CAP,
+            "a long-lived daemon must not grow this forever"
+        );
+    }
+
+    #[test]
+    fn rows_another_daemon_changed_are_rebroadcast() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        // First tick only takes the watermark.
+        e.supervise_tick().unwrap();
+        let mut rx = e.subscribe();
+        // A row owned by SOMEBODY ELSE's daemon, written straight to the
+        // shared store — exactly what the other daemon's hook handler does.
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Claude),
+                    owner: Some("some-other-daemon".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        e.supervise_tick().unwrap();
+        let frame = rx.try_recv().expect("the other daemon's row is re-broadcast");
+        match frame {
+            ServerFrame::Session { session } => assert_eq!(session.id, s.id),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
 
     #[test]
     fn handoff_degrades_without_th_or_gh() {

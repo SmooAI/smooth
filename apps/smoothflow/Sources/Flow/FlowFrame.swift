@@ -449,6 +449,33 @@ enum ClientFrame: Equatable {
 
 enum ApproveDecision: String { case allow, deny, allowSession = "allow_session" }
 
+/// `GET /api/flow/infer` — what a session started in a directory would be
+/// working on (th-c103c1). Everything but `title` may be absent.
+struct InferredContext: Codable, Equatable {
+    var cwd: String = ""
+    var worktree: String = ""
+    var project: String = ""
+    var isGit: Bool = false
+    var branch: String?
+    var pearlId: String?
+    var pearlTitle: String?
+    /// `store` | `branch` | `worktree` — where the pearl id came from.
+    var pearlSource: String?
+    var jiraKey: String?
+    var title: String = ""
+
+    enum CodingKeys: String, CodingKey {
+        case cwd, worktree, project, branch, title
+        case isGit = "is_git", pearlId = "pearl_id", pearlTitle = "pearl_title", pearlSource = "pearl_source", jiraKey = "jira_key"
+    }
+
+    /// The one-line context the dialog shows under the title: pearl · Jira ·
+    /// branch · worktree, skipping whatever is not known.
+    var summary: String {
+        [pearlId, jiraKey, branch, worktree].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
 struct NewSession: Equatable {
     var kind: String = "claude"
     var worktree: String?

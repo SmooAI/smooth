@@ -26,7 +26,25 @@ const addrFile = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'flow-addr-')
 await fs.writeFile(addrFile, `127.0.0.1:${server.address().port}\n`);
 process.env.SMOOTH_DAEMON_ADDR_FILE = addrFile;
 assert.equal(await flowHooksUrl(addrFile), `http://127.0.0.1:${server.address().port}/api/flow/hooks`);
-assert.equal(await flowHooksUrl('/nonexistent/daemon.addr'), '', 'no daemon advertised ⇒ no URL, no throw');
+assert.equal(await flowHooksUrl('/nonexistent/daemon.addr', '/nonexistent/flow.addr'), '', 'no daemon advertised ⇒ no URL, no throw');
+
+// th-c103c1: flow.addr wins over daemon.addr (the SmoothFlow child daemon
+// deliberately does not write daemon.addr), and $SMOOTH_FLOW_ADDR wins over both.
+{
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'flowaddr-'));
+    const daemonAddr = path.join(dir, 'daemon.addr');
+    const flowAddr = path.join(dir, 'flow.addr');
+    await fs.writeFile(daemonAddr, '127.0.0.1:8788\n');
+    assert.equal(await flowHooksUrl(daemonAddr, flowAddr), 'http://127.0.0.1:8788/api/flow/hooks', 'daemon.addr is the fallback');
+    await fs.writeFile(flowAddr, '127.0.0.1:4400\n');
+    assert.equal(await flowHooksUrl(daemonAddr, flowAddr), 'http://127.0.0.1:4400/api/flow/hooks', 'flow.addr wins');
+    process.env.SMOOTH_FLOW_ADDR = '127.0.0.1:9999';
+    assert.equal(await flowHooksUrl(daemonAddr, flowAddr), 'http://127.0.0.1:9999/api/flow/hooks', 'the env wins over both');
+    delete process.env.SMOOTH_FLOW_ADDR;
+}
 
 const calls = [];
 let fail = false;

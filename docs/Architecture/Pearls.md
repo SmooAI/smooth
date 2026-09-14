@@ -25,7 +25,7 @@
   pearl_history       (project, id) UNIQUE, seq for ordering
   memories            (project, id) UNIQUE
   config              (project, k)
-~/.smooth/registry.json      # every project root th has seen; dead paths pruned on open
+~/.smooth/registry.json      # git-repo project roots th has opened (+ anything `th pearls init`-ed); dead + non-git paths pruned on open
 ```
 
 **`project`** is the canonical project root. `PearlStore::open(any_path)` runs

@@ -15,6 +15,19 @@
 //! (1) act at most once per version per session, (2) guard against a duplicate
 //! install, and (3) after an update repeatedly fails to stick, stop nagging and
 //! offer a manual download. See updateDecision.ts for the pure logic.
+//!
+//! Sparkle-style choice dialog (th-75eb2e): Electron can't use Sparkle — that's a
+//! native/AppKit updater, and it's what the native macOS companion SmoothFlow
+//! uses — but we reproduce its UX with Electron's own native
+//! `dialog.showMessageBox`. When an update is AVAILABLE we present the same three
+//! choices Sparkle offers (Skip This Version / Remind Me Later / Install Update)
+//! plus its "Automatically download and install updates in the future" checkbox.
+//! `autoDownload` is therefore OFF: nothing downloads until the user picks Install
+//! (or has previously opted into auto). Install → `downloadUpdate()`, then the
+//! existing `update-downloaded` restart step (with all its give-up/attempt-cap
+//! resilience) takes over. Skip persists the version to a skip list; Remind Me
+//! Later just defers to the next launch/interval; the checkbox persists the
+//! auto-download preference.
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -23,8 +36,9 @@ import { dirname, join } from 'node:path';
 import { app, dialog, shell } from 'electron';
 import electronUpdater from 'electron-updater';
 
+import { loadConfig, saveConfig } from './config.js';
 import { stopDaemon } from './daemon.js';
-import { decideUpdateAction, recordAttempt, shouldClearState, type UpdateState } from './updateDecision.js';
+import { addSkippedVersion, decideAvailableAction, decideUpdateAction, recordAttempt, shouldClearState, type UpdateState } from './updateDecision.js';
 
 const { autoUpdater } = electronUpdater;
 
@@ -41,15 +55,27 @@ const LOG_PATH = join(homedir(), '.smooth', 'desktop.log');
  * we've tried, so a failed install that relaunches the OLD app is remembered. */
 const STATE_PATH = join(homedir(), '.smooth', 'desktop-update-state.json');
 
-/** Versions we've already shown a dialog for THIS session — so a re-emitted
- * `update-downloaded` (electron-updater fires it on every check while a download
- * is pending) doesn't re-prompt. */
+/** Versions we've already shown the RESTART dialog for THIS session — so a
+ * re-emitted `update-downloaded` (electron-updater fires it on every check while a
+ * download is pending) doesn't re-prompt. */
 const promptedThisSession = new Set<string>();
 
-/** True from the moment the user opts to restart until the process exits, so a
- * duplicate `update-downloaded` can't start a second stopDaemon→quitAndInstall
+/** Versions we've already shown the AVAILABLE (Sparkle-style choice) dialog for
+ * THIS session — so the 30-min background poll doesn't re-nag after a "Remind Me
+ * Later". Separate from `promptedThisSession` because the available dialog and the
+ * restart dialog are two distinct prompts for the same version. */
+const availablePromptedThisSession = new Set<string>();
+
+/** True from the moment the user opts to restart (or a download starts) until the
+ * process exits, so a duplicate event can't start a second stopDaemon→quitAndInstall
  * (the 3s double-fire that raced Squirrel and rolled back — th-d4feb8). */
 let installing = false;
+
+/** Set for the duration of an explicit "Check for Updates…" so the shared
+ * `update-available` handler knows to always show the dialog (the user asked),
+ * bypassing the skip list / auto-download / once-per-session guards that only
+ * suppress the background nag. */
+let interactiveCheck = false;
 
 function logLine(level: string, ...args: unknown[]): void {
     const parts = args.map((a) => (a instanceof Error ? (a.stack ?? a.message) : typeof a === 'string' ? a : JSON.stringify(a)));
@@ -118,6 +144,88 @@ function offerManualDownload(version: string): void {
         });
 }
 
+/** The Sparkle-style "A new version is available" choice dialog, reproduced with
+ * Electron's native message box. Mirrors SmoothFlow's Sparkle dialog: title, the
+ * "X is now available—you have Y" body, the auto-update checkbox, and the three
+ * Skip / Later / Install buttons. Resolves after the user's choice is applied. */
+async function showAvailableDialog(version: string): Promise<void> {
+    const cfg = loadConfig();
+    // Buttons, indexed. macOS renders them right-to-left with the default last,
+    // matching Sparkle's Skip · Later · Install order.
+    const SKIP = 0;
+    const LATER = 1;
+    const INSTALL = 2;
+    const { response, checkboxChecked } = await dialog.showMessageBox({
+        type: 'info',
+        buttons: ['Skip This Version', 'Remind Me Later', 'Install Update'],
+        defaultId: INSTALL,
+        cancelId: LATER,
+        message: 'A new version of Big Smooth is available!',
+        detail: `Big Smooth ${version} is now available—you have ${app.getVersion()}. Would you like to download it now?`,
+        checkboxLabel: 'Automatically download and install updates in the future',
+        checkboxChecked: cfg.autoUpdate,
+    });
+
+    // The checkbox is remembered regardless of which button was pressed — Sparkle
+    // treats it as a standing preference for FUTURE versions, so a Skip here still
+    // arms auto-download for the next release.
+    if (checkboxChecked !== cfg.autoUpdate) {
+        saveConfig({ autoUpdate: checkboxChecked });
+        logLine('info', `auto-update preference → ${checkboxChecked}`);
+    }
+
+    if (response === SKIP) {
+        saveConfig({ skippedUpdateVersions: addSkippedVersion(cfg.skippedUpdateVersions, version) });
+        logLine('info', `user skipped ${version} — will not be offered again`);
+        return;
+    }
+    if (response === LATER) {
+        logLine('info', `user deferred ${version} — will re-offer next launch`);
+        return;
+    }
+    // Install Update → begin the download; `update-downloaded` handles the restart.
+    logLine('info', `user chose to install ${version} — downloading…`);
+    void autoUpdater.downloadUpdate();
+}
+
+/** Handle an `update-available` event: decide, then either show the Sparkle-style
+ * dialog, silently download (auto-update opted in), or ignore. Factored out so the
+ * decision + wiring reads top-to-bottom. */
+function onUpdateAvailable(info: UpdateInfoLike): void {
+    const cfg = loadConfig();
+    const persisted = readState();
+    const wasInteractive = interactiveCheck;
+    interactiveCheck = false; // consume the one-shot flag
+
+    const action = decideAvailableAction({
+        availableVersion: info.version,
+        installedVersion: app.getVersion(),
+        skippedVersions: cfg.skippedUpdateVersions,
+        autoUpdate: cfg.autoUpdate,
+        promptedThisSession: availablePromptedThisSession.has(info.version),
+        installing,
+        persisted,
+        interactive: wasInteractive,
+    });
+    logLine('info', `update available: ${info.version} (installed ${app.getVersion()}) → ${action}${wasInteractive ? ' [interactive]' : ''}`);
+
+    if (action === 'ignore') return;
+    availablePromptedThisSession.add(info.version);
+
+    if (action === 'auto-download') {
+        logLine('info', `auto-update on — downloading ${info.version} silently`);
+        void autoUpdater.downloadUpdate();
+        return;
+    }
+    void showAvailableDialog(info.version);
+}
+
+/** The shape of electron-updater's `UpdateInfo` we actually read — kept local so
+ * the pure decision layer stays free of the dependency's types. */
+interface UpdateInfoLike {
+    version: string;
+}
+
 /** Minimal numeric semver compare (major.minor.patch), enough to tell whether the
  * running version has reached the one we were installing. Non-numeric/extra parts
  * are ignored; returns <0, 0, or >0. */
@@ -135,7 +243,11 @@ function cmpSemver(a: string, b: string): number {
 export function startAutoUpdates(): void {
     if (!app.isPackaged) return;
     autoUpdater.logger = fileLogger;
-    autoUpdater.autoDownload = true;
+    // Off, on purpose: we present the Sparkle-style choice dialog on
+    // `update-available` and only start the download when the user picks Install
+    // (or has opted into auto-download). With autoDownload on, electron-updater
+    // would fetch the bundle before we could ask. (th-75eb2e)
+    autoUpdater.autoDownload = false;
     // The differential (delta) downloader assembles the new zip from the old one
     // + a blockmap, then verifies the result's sha512 against latest-mac.yml. Our
     // publish pipeline produces a blockmap that doesn't reassemble byte-exact
@@ -154,7 +266,7 @@ export function startAutoUpdates(): void {
     }
 
     autoUpdater.on('checking-for-update', () => logLine('info', 'checking for update…'));
-    autoUpdater.on('update-available', (info) => logLine('info', `update available: ${info.version}`));
+    autoUpdater.on('update-available', (info) => onUpdateAvailable(info));
     autoUpdater.on('update-not-available', (info) => logLine('info', `up to date (${info.version})`));
     autoUpdater.on('update-downloaded', (info) => {
         const persisted = readState();
@@ -211,8 +323,11 @@ export function startAutoUpdates(): void {
 
 /**
  * Manual "Check for Updates…" — unlike the silent background check, this reports
- * the already-up-to-date case so the menu item gives feedback. An available
- * update flows through the normal download → `update-downloaded` restart prompt.
+ * the already-up-to-date case so the menu item gives feedback, and it always shows
+ * the Sparkle-style choice dialog for an available update even if that version was
+ * skipped or already offered this session (the user explicitly asked). The
+ * `interactiveCheck` flag tells the shared `update-available` handler to force the
+ * prompt; the available update then flows Install → download → restart as usual.
  */
 export async function checkForUpdatesInteractive(): Promise<void> {
     if (!app.isPackaged) {
@@ -220,11 +335,14 @@ export async function checkForUpdatesInteractive(): Promise<void> {
         return;
     }
     try {
+        interactiveCheck = true;
         const result = await autoUpdater.checkForUpdates();
         if (!result || result.updateInfo.version === app.getVersion()) {
+            interactiveCheck = false; // no available update fired; nothing consumed the flag
             void dialog.showMessageBox({ type: 'info', message: `You’re up to date (${app.getVersion()}).` });
         }
     } catch (err) {
+        interactiveCheck = false;
         void dialog.showMessageBox({ type: 'warning', message: 'Could not check for updates.', detail: String(err) });
     }
 }
