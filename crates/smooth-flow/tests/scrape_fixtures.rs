@@ -76,7 +76,7 @@ fn load(path: &Path) -> Fixture {
     let mut h: BTreeMap<&str, &str> = BTreeMap::new();
     for line in header.lines() {
         let line = line.strip_prefix("# ").unwrap_or_else(|| panic!("{}: header line `{line}`", path.display()));
-        let (k, v) = line.split_once(": ").unwrap_or((line.trim_end_matches(':'), ""));
+        let (k, v) = line.split_once(": ").unwrap_or_else(|| (line.trim_end_matches(':'), ""));
         h.insert(k, v);
     }
     let expect_word = h["expect"].split_whitespace().next().unwrap();
@@ -187,7 +187,7 @@ fn verdicts_survive_resize_padding_and_longer_quiet() {
         assert_eq!(got.state, base.state, "{}: taller pane", fx.path.display());
 
         // Trailing spaces on every line (tmux pads cells with -N / -e captures).
-        let padded: String = fx.text.lines().map(|l| format!("{l}    \n")).collect();
+        let padded: String = fx.text.lines().flat_map(|l| [l, "    \n"]).collect();
         let got = rules.detect_observation(&PaneObservation { text: &padded, ..fx.obs() });
         assert_eq!(got.state, base.state, "{}: space-padded lines", fx.path.display());
 
@@ -195,7 +195,13 @@ fn verdicts_survive_resize_padding_and_longer_quiet() {
         let coloured: String = fx
             .text
             .lines()
-            .map(|l| if l.trim().is_empty() { format!("{l}\n") } else { format!("\u{1b}[38;5;15m{l}\u{1b}[0m\n") })
+            .flat_map(|l| {
+                if l.trim().is_empty() {
+                    ["", l, "\n"]
+                } else {
+                    ["\u{1b}[38;5;15m", l, "\u{1b}[0m\n"]
+                }
+            })
             .collect();
         let got = rules.detect_observation(&PaneObservation { text: &coloured, ..fx.obs() });
         assert_eq!(got.state, base.state, "{}: SGR-coloured", fx.path.display());
@@ -272,22 +278,6 @@ fn detect_rs_rules() -> ScrapeRules {
 /// thousands of generated ones.
 #[test]
 fn claude_detect_rs_is_expressible_as_rules() {
-    let rules = detect_rs_rules();
-    let mut panes: Vec<String> = [
-        "You've reached your usage limit. limit will reset at 4pm.",
-        "● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
-        "Edit file foo.rs?\n  Do you want to proceed?\n  ❯ 1. Yes\n  2. No",
-        "● Thinking…\n  (esc to interrupt · 1.2k tokens)",
-        "● API Error: something went wrong\n● Thinking…\n  (esc to interrupt · 200 tokens)",
-        "╭─────────╮\n│ >       │\n╰─────────╯\n  ? for shortcuts",
-        "just some neutral build output here",
-        "USAGE LIMIT REACHED",
-        "  ┃  Build · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀\n   ⬝⬝⬝⬝■■■■  esc interrupt        tab agents  ctrl+p commands",
-        "  Hooks need review\n› 1. Review hooks\n  2. Trust all and continue\n  Press enter to confirm or esc to go back",
-    ]
-    .iter()
-    .map(ToString::to_string)
-    .collect();
     const FRAGMENTS: &[&str] = &[
         "",
         "output line",
@@ -306,6 +296,22 @@ fn claude_detect_rs_is_expressible_as_rules() {
         "Quick safety check · Esc to cancel",
         "   ",
     ];
+    let rules = detect_rs_rules();
+    let mut panes: Vec<String> = [
+        "You've reached your usage limit. limit will reset at 4pm.",
+        "● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
+        "Edit file foo.rs?\n  Do you want to proceed?\n  ❯ 1. Yes\n  2. No",
+        "● Thinking…\n  (esc to interrupt · 1.2k tokens)",
+        "● API Error: something went wrong\n● Thinking…\n  (esc to interrupt · 200 tokens)",
+        "╭─────────╮\n│ >       │\n╰─────────╯\n  ? for shortcuts",
+        "just some neutral build output here",
+        "USAGE LIMIT REACHED",
+        "  ┃  Build · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀\n   ⬝⬝⬝⬝■■■■  esc interrupt        tab agents  ctrl+p commands",
+        "  Hooks need review\n› 1. Review hooks\n  2. Trust all and continue\n  Press enter to confirm or esc to go back",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
     let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
     let mut next = move || {
         seed ^= seed << 13;
@@ -315,7 +321,12 @@ fn claude_detect_rs_is_expressible_as_rules() {
     };
     for _ in 0..5_000 {
         let n = usize::try_from(next() % 30).unwrap();
-        panes.push((0..n).map(|_| FRAGMENTS[usize::try_from(next()).unwrap() % FRAGMENTS.len()]).collect::<Vec<_>>().join("\n"));
+        panes.push(
+            (0..n)
+                .map(|_| FRAGMENTS[usize::try_from(next()).unwrap() % FRAGMENTS.len()])
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     for p in &panes {
         assert_eq!(rules.detect(p).state, detect_state(p), "{p:?}");

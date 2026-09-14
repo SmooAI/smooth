@@ -247,12 +247,12 @@ impl Rule {
             }
         }
         if let Some(q) = self.quiet {
-            if !obs.quiet_for.is_some_and(|d| d >= q) {
+            if obs.quiet_for.is_none_or(|d| d < q) {
                 return None;
             }
         }
         if let Some(c) = self.changed_within {
-            if !obs.quiet_for.is_some_and(|d| d < c) {
+            if obs.quiet_for.is_none_or(|d| d >= c) {
                 return None;
             }
         }
@@ -318,18 +318,18 @@ fn window<'a>(obs: &PaneObservation<'a>, scope: Scope, lines: usize) -> Vec<&'a 
             non_blank[start..].to_vec()
         }
         Scope::LastLine => text.lines().rev().find(|l| !l.trim().is_empty()).into_iter().collect(),
-        Scope::CursorLine => match obs.cursor_y {
-            Some(y) => vec![text.lines().nth(y).unwrap_or("")],
-            None => window(obs, Scope::LastLine, lines),
-        },
+        Scope::CursorLine => obs
+            .cursor_y
+            .map_or_else(|| window(obs, Scope::LastLine, lines), |y| vec![text.lines().nth(y).unwrap_or("")]),
     }
 }
 
-/// `text` with terminal escape sequences removed: CSI (`ESC [ … final`), OSC
-/// (`ESC ] … BEL` / `ESC ] … ESC \\`), other two-byte `ESC x` sequences, and
-/// carriage returns. `capture-pane -p` is already plain; a `-e` capture or a
-/// raw PTY tail is not, and a colour code between `>` and the end of the
-/// line must not make an idle composer unreadable.
+/// `text` with terminal escape sequences and carriage returns removed.
+///
+/// Covers CSI (`ESC [ … final`), OSC (`ESC ] … BEL` / `ESC ] … ESC \\`) and
+/// other two-byte `ESC x` sequences. `capture-pane -p` is already plain; a
+/// `-e` capture or a raw PTY tail is not, and a colour code between `>` and
+/// the end of the line must not make an idle composer unreadable.
 #[must_use]
 pub fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains(['\u{1b}', '\r']) {
@@ -371,10 +371,12 @@ pub fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// A spinner frame: braille patterns (U+2801–U+28FF; U+2800 is a blank
-/// cell, not a frame), quarter / half circles ◐◑◒◓ and ◴◵◶◷. The same glyph
-/// families orca's `containsAgentSpinnerGlyph` and cmux's
-/// `TerminalTitleChurnFilter` treat as animation, never as identity.
+/// Does `s` hold a spinner frame?
+///
+/// Braille patterns (U+2801–U+28FF; U+2800 is a blank cell, not a frame),
+/// quarter / half circles ◐◑◒◓ and ◴◵◶◷ — the glyph families orca's
+/// `containsAgentSpinnerGlyph` and cmux's `TerminalTitleChurnFilter` treat as
+/// animation, never as identity.
 #[must_use]
 pub fn has_spinner(s: &str) -> bool {
     s.chars().any(|c| matches!(c as u32, 0x2801..=0x28FF | 0x25D0..=0x25D3 | 0x25F4..=0x25F7))
@@ -424,9 +426,14 @@ mod tests {
         let text = "header\n> explain the repo\nSure. Streaming…\n\n\n";
         let obs = PaneObservation::text(text);
         assert!(rule("state = \"idle\"\nmatch = [\"^>\"]\nwhere = \"tail\"").eval(&obs).is_some());
-        assert!(rule("state = \"idle\"\nmatch = [\"^>\"]\nwhere = \"last_line\"").eval(&obs).is_none(), "the prompt is not the last line");
+        assert!(
+            rule("state = \"idle\"\nmatch = [\"^>\"]\nwhere = \"last_line\"").eval(&obs).is_none(),
+            "the prompt is not the last line"
+        );
         let cursor_on_prompt = PaneObservation { cursor_y: Some(1), ..obs };
-        assert!(rule("state = \"idle\"\nmatch = [\"^>\"]\nwhere = \"cursor_line\"").eval(&cursor_on_prompt).is_some());
+        assert!(rule("state = \"idle\"\nmatch = [\"^>\"]\nwhere = \"cursor_line\"")
+            .eval(&cursor_on_prompt)
+            .is_some());
         // Unknown cursor ⇒ last non-blank line.
         assert!(rule("state = \"idle\"\nmatch = [\"streaming\"]\nwhere = \"cursor_line\"").eval(&obs).is_some());
         // A cursor past the text (blank rows) sees an empty line.
@@ -435,9 +442,15 @@ mod tests {
         // tail with lines = 1 is the last non-blank line.
         assert!(rule("state = \"idle\"\nmatch = [\"header\"]\nlines = 1").eval(&obs).is_none());
         assert!(rule("state = \"idle\"\nmatch = [\"header\"]\nwhere = \"pane\"").eval(&obs).is_some());
-        let titled = PaneObservation { title: Some("🪿 goose"), ..obs };
+        let titled = PaneObservation {
+            title: Some("🪿 goose"),
+            ..obs
+        };
         assert!(rule("state = \"idle\"\nmatch = [\"goose\"]\nwhere = \"title\"").eval(&titled).is_some());
-        assert!(rule("state = \"idle\"\nmatch = [\"goose\"]\nwhere = \"title\"").eval(&obs).is_none(), "no title ⇒ no match");
+        assert!(
+            rule("state = \"idle\"\nmatch = [\"goose\"]\nwhere = \"title\"").eval(&obs).is_none(),
+            "no title ⇒ no match"
+        );
     }
 
     #[test]
@@ -480,8 +493,18 @@ mod tests {
         let alt = rule("state = \"idle\"\nmatch = [\"ready\"]\nalternate_screen = true");
         let base = PaneObservation::text("> Ready");
         assert!(alt.eval(&base).is_none(), "unknown alt-screen is not `true`");
-        assert!(alt.eval(&PaneObservation { alternate_on: Some(true), ..base }).is_some());
-        assert!(alt.eval(&PaneObservation { alternate_on: Some(false), ..base }).is_none());
+        assert!(alt
+            .eval(&PaneObservation {
+                alternate_on: Some(true),
+                ..base
+            })
+            .is_some());
+        assert!(alt
+            .eval(&PaneObservation {
+                alternate_on: Some(false),
+                ..base
+            })
+            .is_none());
 
         let spin = rule("state = \"working\"\nspinner = true\nlines = 8");
         assert!(spin.eval(&PaneObservation::text(" ⠸ Thinking... (esc to cancel)\n❯ Ask anything...")).is_some());
@@ -587,7 +610,7 @@ mod tests {
             assert!(!l || t, "last_line hit ⇒ tail hit: {text:?}");
             assert!(!t || p, "tail hit ⇒ pane hit: {text:?}");
             // `unless` only ever removes hits.
-            assert!(!guarded.eval(&obs).is_some() || p);
+            assert!(guarded.eval(&obs).is_none() || p);
             // Time conditions only ever remove hits, and unknown time removes them all.
             assert!(quiet.eval(&obs).is_none());
             let long_quiet = PaneObservation {
@@ -598,7 +621,7 @@ mod tests {
             // Evaluation is a pure function of the observation.
             assert_eq!(idle_tail.eval(&obs), idle_tail.eval(&obs));
             // Blank lines never change the tail/last_line verdict.
-            let padded = format!("\n\n{}\n\n   \n", text);
+            let padded = format!("\n\n{text}\n\n   \n");
             let pobs = PaneObservation::text(&padded);
             assert_eq!(idle_last.eval(&pobs).is_some(), l, "{text:?}");
             assert_eq!(idle_tail.eval(&pobs).is_some(), t, "{text:?}");

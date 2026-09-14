@@ -1229,6 +1229,48 @@ mod tests {
     }
 
     #[test]
+    fn continue_latest_and_scrape_rules_validate() {
+        let base = "name=\"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n";
+        let err = |extra: &str| format!("{:#}", Manifest::parse(&format!("{base}{extra}")).unwrap_err());
+        assert!(err("[resume]\nmode=\"continue_latest\"").contains("continue_latest\" needs an argv"));
+        assert!(err("[resume]\nmode=\"continue_latest\"\nargv=[\"--resume\",\"{session_id}\"]").contains("takes no"));
+        assert!(err("[resume]\nmode=\"continue_latest\"\nargv=[\"{prompt}\"]").contains("takes no"));
+        let m = Manifest::parse(&format!("{base}[resume]\nmode=\"continue_latest\"\nargv=[\"--continue\"]")).unwrap();
+        assert_eq!(m.resume.mode, ResumeMode::ContinueLatest);
+        // source = scrape is satisfied by a working/idle RULE alone…
+        let ok = format!("{base}[state]\nsource=\"scrape\"\n[[state.scrape.rules]]\nstate=\"idle\"\nmatch=[\"^>\"]\nwhere=\"last_line\"");
+        assert!(Manifest::parse(&ok).is_ok());
+        // …but not by a needs_you rule.
+        assert!(err("[state]\nsource=\"scrape\"\n[[state.scrape.rules]]\nstate=\"needs_you\"\nmatch=[\"y/n\"]").contains("needs working and/or idle"));
+        // Rule errors surface through the manifest with their index.
+        assert!(err("[[state.scrape.rules]]\nstate=\"idle\"\nmatch=[\"(\"]").contains("state.scrape.rules[0].match: bad regex"));
+        assert!(err("[[state.scrape.rules]]\nstate=\"idle\"\nwhere=\"everywhere\"\nmatch=[\"x\"]").contains("where"));
+        assert!(err("[state.scrape]\ntail_lines=0").contains("tail_lines: must be"));
+        // A manifest without rules serialises exactly as before (no empty `rules`/`tail_lines` keys).
+        let round = toml::to_string(&claude()).unwrap();
+        assert!(
+            !round.contains("scrape.rules") && !round.contains("\nrules =") && !round.contains("tail_lines"),
+            "{round}"
+        );
+    }
+
+    #[test]
+    fn rules_run_before_the_flat_lists_and_tail_lines_applies_to_both() {
+        let spec: ScrapeSpec = toml::from_str(
+            "working = [\"esc cancel\"]\nidle = [\"ready\"]\ntail_lines = 2\n[[rules]]\nname = \"modal\"\nstate = \"needs_you\"\nmatch = [\"permission required\"]\nwhere = \"pane\"",
+        )
+        .unwrap();
+        let rules = ScrapeRules::compile(&spec).unwrap();
+        let modal = "Permission Required\n> Processing\nesc cancel";
+        let hit = rules.detect(modal);
+        assert_eq!((hit.state, hit.rule.as_deref()), (PaneState::AwaitingApproval, Some("modal")));
+        let busy = rules.detect("> Processing\nesc cancel");
+        assert_eq!((busy.state, busy.rule), (PaneState::Working, None), "flat list, no rule name");
+        // tail_lines = 2: a working hint three non-blank lines up is out of the live window.
+        assert_eq!(rules.detect("esc cancel\n> Ready\nfooter").state, PaneState::Idle);
+    }
+
+    #[test]
     fn usage_limit_reset_capture() {
         let spec = ScrapeSpec {
             usage_limit: vec![r"quota exhausted, back at (?P<reset>\d{1,2}(?::\d{2})?\s*[ap]m)".into()],
@@ -1254,28 +1296,28 @@ mod tests {
         let toml =
             |name: &str, display: &str| format!("name=\"{name}\"\ndisplay_name=\"{display}\"\n[binary]\nnames=[\"{name}\"]\n[launch]\nargv=[\"{{prompt}}\"]\n");
         // Nothing on disk ⇒ built-ins only.
-        assert_eq!(Registry::load(&home, Some(&project)).all().len(), 4);
+        assert_eq!(Registry::load(&home, Some(&project)).all().len(), BUILTIN.len());
         // User overrides a built-in and adds one; a broken file is reported, not fatal.
         w(&home.join(".smooth/harnesses/claude.toml"), &toml("claude", "User Claude"));
-        w(&home.join(".smooth/harnesses/aider.toml"), &toml("aider", "Aider"));
+        w(&home.join(".smooth/harnesses/mytool.toml"), &toml("mytool", "My Tool"));
         w(&home.join(".smooth/harnesses/broken.toml"), "name = \"broken\"\n");
         w(&home.join(".smooth/harnesses/notes.md"), "ignored");
         let r = Registry::load(&home, Some(&project));
         assert_eq!(r.get("claude").unwrap().display_name, "User Claude");
         assert!(matches!(r.get("claude").unwrap().origin, Origin::User(_)));
-        assert_eq!(r.get("aider").unwrap().display_name, "Aider");
+        assert_eq!(r.get("mytool").unwrap().display_name, "My Tool");
         assert_eq!(r.errors.len(), 1);
         assert!(r.errors[0].0.ends_with("broken.toml"));
-        assert_eq!(r.all().len(), 5, "override keeps its slot, new one appends");
+        assert_eq!(r.all().len(), BUILTIN.len() + 1, "override keeps its slot, new one appends");
         assert_eq!(r.all()[0].name, "claude");
         // Project beats user.
-        w(&project.join(".smooth/harnesses/aider.toml"), &toml("aider", "Project Aider"));
+        w(&project.join(".smooth/harnesses/mytool.toml"), &toml("mytool", "Project My Tool"));
         let r = Registry::load(&home, Some(&project));
-        assert_eq!(r.get("aider").unwrap().display_name, "Project Aider");
-        assert!(matches!(r.get("aider").unwrap().origin, Origin::Project(_)));
+        assert_eq!(r.get("mytool").unwrap().display_name, "Project My Tool");
+        assert!(matches!(r.get("mytool").unwrap().origin, Origin::Project(_)));
         // A th pkg package beats project.
         let pkg = tmp.path().join("pkgroot");
-        w(&pkg.join("harness/aider/harness.toml"), &toml("aider", "Pkg Aider"));
+        w(&pkg.join("harness/mytool/harness.toml"), &toml("mytool", "Pkg My Tool"));
         w(&pkg.join("harness/amp/harness.toml"), &toml("amp", "Amp"));
         // Serialize the path with toml (a Windows path's backslashes would be
         // invalid escapes in a hand-written basic string).
@@ -1289,10 +1331,10 @@ mod tests {
         };
         w(&home.join(".smooth/pkg/index.toml"), &toml::to_string(&index).unwrap());
         let r = Registry::load(&home, Some(&project));
-        assert_eq!(r.get("aider").unwrap().display_name, "Pkg Aider");
-        assert!(matches!(r.get("aider").unwrap().origin, Origin::Package(_)));
+        assert_eq!(r.get("mytool").unwrap().display_name, "Pkg My Tool");
+        assert!(matches!(r.get("mytool").unwrap().origin, Origin::Package(_)));
         assert_eq!(r.get("amp").unwrap().origin.label(), "package");
-        assert_eq!(r.all().len(), 6);
+        assert_eq!(r.all().len(), BUILTIN.len() + 2);
     }
 
     #[test]
@@ -1303,15 +1345,13 @@ mod tests {
             hidden: vec!["opencode".into()],
         };
         let names: Vec<&str> = r.ordered(&prefs).iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["th-code", "codex", "claude", "opencode"],
-            "listed first, unknown skipped, rest in registry order"
-        );
+        let rest: Vec<&str> = BUILTIN.iter().map(|(n, _)| *n).filter(|n| !["th-code", "codex"].contains(n)).collect();
+        assert_eq!(names[..2], ["th-code", "codex"], "listed first, unknown skipped");
+        assert_eq!(names[2..], rest[..], "rest in registry order");
         let tmp = tempfile::tempdir().unwrap();
         let empty = std::ffi::OsString::new();
         let all = r.infos(&prefs, true, tmp.path(), &empty);
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), BUILTIN.len());
         assert_eq!(all[3].name, "opencode");
         assert!(all[3].hidden);
         assert_eq!(all[3].order_index, 3);
@@ -1320,7 +1360,11 @@ mod tests {
         assert_eq!(all[0].state_source, "native");
         assert_eq!(all[0].origin, "builtin");
         let visible = r.infos(&prefs, false, tmp.path(), &empty);
-        assert_eq!(visible.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["th-code", "codex", "claude"]);
+        assert_eq!(
+            visible.iter().map(|i| i.name.as_str()).take(3).collect::<Vec<_>>(),
+            ["th-code", "codex", "claude"]
+        );
+        assert!(!visible.iter().any(|i| i.name == "opencode"));
         let v: serde_json::Value = serde_json::to_value(&visible[0]).unwrap();
         assert!(v.get("hidden").is_none(), "false hidden is omitted on the wire: {v}");
     }
