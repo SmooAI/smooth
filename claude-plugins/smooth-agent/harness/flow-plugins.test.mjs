@@ -52,9 +52,21 @@ const env = { SMOOTH_FLOW_ID: 'fs-7' };
 const thread = { thread: { id: 'T-abc' } };
 const ampTable = [
     ['session.start', thread, { session_id: 'T-abc', payload: { hook_event_name: 'session.start', thread_id: 'T-abc' } }],
-    ['agent.start', { ...thread, message: 'fix it', id: 'm1' }, { session_id: 'T-abc', payload: { hook_event_name: 'agent.start', thread_id: 'T-abc', message: 'fix it' } }],
-    ['tool.result', { ...thread, tool: 'Bash', status: 'done' }, { session_id: 'T-abc', payload: { hook_event_name: 'tool.result', thread_id: 'T-abc', tool_name: 'Bash', status: 'done' } }],
-    ['agent.end', { ...thread, message: 'fix it', status: 'cancelled' }, { session_id: 'T-abc', payload: { hook_event_name: 'agent.end', thread_id: 'T-abc', message: 'fix it', status: 'cancelled' } }],
+    [
+        'agent.start',
+        { ...thread, message: 'fix it', id: 'm1' },
+        { session_id: 'T-abc', payload: { hook_event_name: 'agent.start', thread_id: 'T-abc', message: 'fix it' } },
+    ],
+    [
+        'tool.result',
+        { ...thread, tool: 'Bash', status: 'done' },
+        { session_id: 'T-abc', payload: { hook_event_name: 'tool.result', thread_id: 'T-abc', tool_name: 'Bash', status: 'done' } },
+    ],
+    [
+        'agent.end',
+        { ...thread, message: 'fix it', status: 'cancelled' },
+        { session_id: 'T-abc', payload: { hook_event_name: 'agent.end', thread_id: 'T-abc', message: 'fix it', status: 'cancelled' } },
+    ],
     ['agent.start', undefined, { session_id: '', payload: { hook_event_name: 'agent.start', thread_id: '' } }],
 ];
 for (const [event, ev, want] of ampTable) {
@@ -75,14 +87,11 @@ assert.deepEqual(ampHandlers['agent.start'](thread), {}, 'agent.start result car
 assert.equal(ampHandlers['agent.end']({ ...thread, status: 'done' }), undefined);
 assert.equal(ampHandlers['tool.result']({ ...thread, tool: 'Read', status: 'done' }), undefined);
 await waitPosts(3);
-assert.deepEqual(
-    posted.map((p) => [p.url, p.body.harness, p.body.event, p.body.session_id, p.body.flow_id]).sort(),
-    [
-        ['/api/flow/hooks', 'amp', 'agent.end', 'T-abc', 'fs-amp'],
-        ['/api/flow/hooks', 'amp', 'agent.start', 'T-abc', 'fs-amp'],
-        ['/api/flow/hooks', 'amp', 'tool.result', 'T-abc', 'fs-amp'],
-    ],
-);
+assert.deepEqual(posted.map((p) => [p.url, p.body.harness, p.body.event, p.body.session_id, p.body.flow_id]).sort(), [
+    ['/api/flow/hooks', 'amp', 'agent.end', 'T-abc', 'fs-amp'],
+    ['/api/flow/hooks', 'amp', 'agent.start', 'T-abc', 'fs-amp'],
+    ['/api/flow/hooks', 'amp', 'tool.result', 'T-abc', 'fs-amp'],
+]);
 posted.length = 0;
 
 // ── Pi: envelope table ─────────────────────────────────────────────────────────
@@ -90,12 +99,26 @@ const ctx = { cwd: '/pi/wt', sessionManager: { getSessionId: () => 'pi-sid-1' } 
 assert.equal(pi.sessionIdOf(ctx), 'pi-sid-1');
 assert.equal(pi.sessionIdOf({}), '');
 assert.equal(pi.sessionIdOf(undefined), '');
-assert.equal(pi.sessionIdOf({ sessionManager: { getSessionId: () => { throw new Error('x'); } } }), '');
+assert.equal(
+    pi.sessionIdOf({
+        sessionManager: {
+            getSessionId: () => {
+                throw new Error('x');
+            },
+        },
+    }),
+    '',
+);
 assert.equal(pi.sessionIdOf({ sessionManager: { getSessionId: () => 42 } }), '');
 const piTable = [
     ['session_start', { reason: 'startup' }, ctx, { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'session_start', reason: 'startup' } }],
     ['agent_start', {}, ctx, { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'agent_start' } }],
-    ['tool_execution_start', { toolCallId: 't1', toolName: 'bash', args: {} }, ctx, { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'tool_execution_start', tool_name: 'bash' } }],
+    [
+        'tool_execution_start',
+        { toolCallId: 't1', toolName: 'bash', args: {} },
+        ctx,
+        { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'tool_execution_start', tool_name: 'bash' } },
+    ],
     ['agent_end', { messages: [] }, ctx, { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'agent_end' } }],
     ['session_shutdown', { reason: 'quit' }, ctx, { session_id: 'pi-sid-1', cwd: '/pi/wt', payload: { hook_event_name: 'session_shutdown', reason: 'quit' } }],
     ['agent_end', null, undefined, { session_id: '', cwd: '/fallback', payload: { hook_event_name: 'agent_end' } }],

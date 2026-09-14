@@ -2801,6 +2801,7 @@ mod tests {
             session_id: session.into(),
             cwd: Some(cwd.to_string_lossy().into_owned()),
             payload: json!({}),
+            flow_id: None,
         }
     }
 
