@@ -1319,6 +1319,18 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         tracing::info!(addr = %server.addr(), "second daemon instance — not advertising in ~/.smooth/daemon.addr");
     }
 
+    // …but harness hooks must still find A flow engine, and the instance that
+    // does not advertise is often the only one running (the SmoothFlow app's
+    // child). `~/.smooth/flow.addr` is claimed by the first LIVE flow daemon
+    // and released on shutdown; the hook chain is `$SMOOTH_FLOW_ADDR` →
+    // flow.addr → daemon.addr. (th-c103c1 — see `flow_addr`.)
+    let flow_addr = server.addr().to_string();
+    let flow_addr_dir = dirs_next::home_dir().map(|h| h.join(".smooth"));
+    let holds_flow_addr = match &flow_addr_dir {
+        Some(dir) => crate::flow_addr::claim(dir, &flow_addr).await,
+        None => false,
+    };
+
     // Reachability: if Tailscale is present and the node is up, expose the daemon
     // over the user's *tailnet* via `tailscale serve` (never funnel — tailnet-
     // private) so other devices reach it at https://<host>.<tailnet>.ts.net with
@@ -1359,6 +1371,13 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received");
+    if holds_flow_addr {
+        if let Some(dir) = &flow_addr_dir {
+            if crate::flow_addr::release(dir, &flow_addr) {
+                tracing::info!("released flow.addr — hooks fall back to the other daemon");
+            }
+        }
+    }
     server.shutdown().await.context("shutting down local operator")?;
     Ok(())
 }

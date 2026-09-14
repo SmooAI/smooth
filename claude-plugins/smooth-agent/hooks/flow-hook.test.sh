@@ -87,13 +87,33 @@ PAYLOAD='{"session_id":"sid-123","cwd":"/some/where","hook_event_name":"Stop","s
 echo "flow-hook.sh:"
 
 # --- unreachable / misconfigured → exit 0, silent -------------------------------
-out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop 2>&1); expect "no daemon.addr file → silent exit 0" 0 $? "$out"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop 2>&1); expect "no daemon.addr file → silent exit 0" 0 $? "$out"
 : >"$TMP/empty.addr"
-out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/empty.addr" bash "$HOOK" Stop 2>&1); expect "empty daemon.addr → silent exit 0" 0 $? "$out"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/empty.addr" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop 2>&1); expect "empty daemon.addr → silent exit 0" 0 $? "$out"
 echo "127.0.0.1:1" >"$TMP/dead.addr"
-out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" bash "$HOOK" Stop 2>&1); expect "daemon down (fire-and-forget) → silent exit 0" 0 $? "$out"
-out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" bash "$HOOK" PermissionRequest 2>&1); expect "daemon down (PermissionRequest) → silent exit 0" 0 $? "$out"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop 2>&1); expect "daemon down (fire-and-forget) → silent exit 0" 0 $? "$out"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" bash "$HOOK" PermissionRequest 2>&1); expect "daemon down (PermissionRequest) → silent exit 0" 0 $? "$out"
 out=$(echo "$PAYLOAD" | bash "$HOOK" 2>&1); expect "no event argument → silent exit 0" 0 $? "$out"
+
+# --- discovery chain: $SMOOTH_FLOW_ADDR → flow.addr → daemon.addr (th-c103c1) ---
+# flow.addr is how a hook reaches the SmoothFlow app's child daemon, which
+# deliberately does not write daemon.addr (PR #546).
+: >"$LOG"
+echo "127.0.0.1:1" >"$TMP/dead.addr"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" SMOOTH_FLOW_ADDR_FILE="$ADDR" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$rc" = 0 ]; then ok "flow.addr wins over daemon.addr"; else bad "flow.addr was not preferred — rc=$rc out='$out'"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/dead.addr" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" SMOOTH_FLOW_ADDR="$(cat "$ADDR")" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$rc" = 0 ]; then ok "\$SMOOTH_FLOW_ADDR wins over both files"; else bad "the env override did not win — rc=$rc out='$out'"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$ADDR" SMOOTH_FLOW_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$rc" = 0 ]; then ok "no flow.addr → daemon.addr still serves the hook"; else bad "the daemon.addr fallback broke — rc=$rc out='$out'"; fi
+: >"$LOG"
+: >"$TMP/empty-flow.addr"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$ADDR" SMOOTH_FLOW_ADDR_FILE="$TMP/empty-flow.addr" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$rc" = 0 ]; then ok "an empty flow.addr falls through to daemon.addr"; else bad "an empty flow.addr blocked the fallback — rc=$rc out='$out'"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" SMOOTH_FLOW_ADDR_FILE="$TMP/nope2" bash "$HOOK" Stop 2>&1); expect "neither file → silent exit 0" 0 $? "$out"
 
 # --- fire-and-forget envelope ---------------------------------------------------
 : >"$LOG"

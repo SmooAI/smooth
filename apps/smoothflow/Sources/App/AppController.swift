@@ -278,6 +278,20 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
     func newSession(_ n: NewSession) { client.send(.new(n)) }
+
+    /// th-c103c1: the context a new session would inherit. Seeded from the
+    /// focused session's worktree (you are almost always starting a second
+    /// agent on the work you are looking at), else the daemon's workspace.
+    @Published private(set) var inferred: InferredContext?
+
+    /// The directory the New Session dialog infers from.
+    var inferSeedCwd: String? { store.focused?.worktree }
+
+    /// Load the inferred context for `cwd` (nil ⇒ the daemon's workspace).
+    /// A failure simply leaves the dialog with no context to show.
+    func loadInference(cwd: String?) async {
+        inferred = try? await client.infer(cwd: cwd)
+    }
     func fanoutNew(prompt: String, pearlId: String?, candidates: [FanOutCandidate]) {
         client.send(.fanoutNew(prompt: prompt, pearlId: pearlId, candidates: candidates))
     }

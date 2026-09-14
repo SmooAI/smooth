@@ -55,6 +55,20 @@ final class FlowClient {
         return try JSONDecoder().decode(Handoff.self, from: data)
     }
 
+    /// `GET /api/flow/infer?cwd=…` — the New Session dialog's read-only
+    /// context. `nil` infers from the daemon's own workspace (th-c103c1).
+    func infer(cwd: String?) async throws -> InferredContext {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var comps = URLComponents(url: address.httpBase.appendingPathComponent("api/flow/infer"), resolvingAgainstBaseURL: false)
+        if let cwd, !cwd.isEmpty { comps?.queryItems = [URLQueryItem(name: "cwd", value: cwd)] }
+        guard let url = comps?.url else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse) }
+        return try JSONDecoder().decode(InferredContext.self, from: data)
+    }
+
     /// `GET /api/flow/harnesses` — every manifest, hidden ones flagged (Settings).
     func allHarnesses() async throws -> [HarnessInfo] {
         try await harnessCall(method: "GET", path: "api/flow/harnesses", body: nil)
