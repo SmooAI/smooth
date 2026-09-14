@@ -417,9 +417,11 @@ Deliberate choices:
   them without guessing by cwd.
 - **Only the Claude table holds `PermissionRequest` open.** A harness with its
   own `event_map` (Droid) doesn't speak Claude's decision reply, so its ask
-  is reported and the hook returns at once. Every such ask gets a
-  `request_id` of `hook-<uuid>`, which `flow.approve` answers with the approval
-  keystroke, the way a scraped ask is answered. Before this, `th flow approve`
+  is reported and the hook returns at once. A mapped **permission** ask gets a
+  `request_id` of `hook-<uuid>` (the same rule th-3cabf6 landed), which
+  `flow.approve` answers with the approval keystroke, the way a scraped ask is
+  answered; a question gets none. The label is derived from the event name or
+  `notification_type`, so Gemini and Droid need no `reason` in the payload. Before this, `th flow approve`
   refused it ("no pending permission request"): seen live with Gemini.
 - **`map_manifest_event` refines `needs_you`**: an event carrying
   `notification_type` is an ask only when that type is one
