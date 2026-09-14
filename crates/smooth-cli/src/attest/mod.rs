@@ -326,8 +326,9 @@ fn execute_all(
         }
         published_attest_ref = true;
         for check in checks {
-            let (sys, cfg, check, origin, sha) = (sys.clone(), cfg.clone(), check.clone(), origin.clone(), sha.to_string());
-            remote_handles.push(std::thread::spawn(move || run_remote(&sys, &cfg, &check, &origin, &sha)));
+            // `root` too: an unreachable box falls back to a local run of the check.
+            let (sys, cfg, check, origin, sha, root) = (sys.clone(), cfg.clone(), check.clone(), origin.clone(), sha.to_string(), root.to_path_buf());
+            remote_handles.push(std::thread::spawn(move || run_remote(&sys, &root, &cfg, &check, &origin, &sha)));
         }
     }
 
@@ -449,22 +450,33 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
     }
 }
 
-fn run_remote(sys: &Sys, cfg: &remote::Remote, check: &str, origin: &str, sha: &str) -> CheckResult {
+fn run_remote(sys: &Sys, root: &Path, cfg: &remote::Remote, check: &str, origin: &str, sha: &str) -> CheckResult {
     let began = Instant::now();
-    let outcome = remote::execute(sys, cfg, check, origin, sha);
-    let secs = began.elapsed().as_secs();
-    // The delegating machine's load says nothing about the box that ran the work,
-    // so overload distrust does not apply here.
-    let (outcome, note) = match outcome {
-        Ok(code) => classify(Some(code), false, String::new),
-        Err(reason) => (Outcome::Blocked, Some(reason)),
-    };
-    CheckResult {
-        name: check.to_string(),
-        outcome,
-        secs,
-        location: cfg.host.clone(),
-        note,
+    match remote::execute(sys, cfg, check, origin, sha) {
+        Ok(code) => {
+            // The delegating machine's load says nothing about the box that ran the
+            // work, so overload distrust does not apply here.
+            let (outcome, note) = classify(Some(code), false, String::new);
+            CheckResult {
+                name: check.to_string(),
+                outcome,
+                secs: began.elapsed().as_secs(),
+                location: cfg.host.clone(),
+                note,
+            }
+        }
+        // The box is unreachable or unusable — infrastructure, never a verdict on the
+        // commit. Blocking here hands the whole (often 38-minute) row back to CI —
+        // the slow path this build box exists to avoid. Run the check HERE instead,
+        // but LOUDLY on stderr: a local run has no warm cache and is far slower than
+        // the box, and the developer should know why their attest just got long.
+        // `ConnectTimeout` (remote.rs) makes an unreachable host surface in seconds,
+        // so this is a fast fall-through, not a long stall. Result reads as local.
+        Err(reason) => {
+            eprintln!("\n⚠ {}: {reason}", cfg.host);
+            eprintln!("  → running {check} locally instead — slower, no warm cache on this machine.");
+            run_local(sys, root, check)
+        }
     }
 }
 
@@ -903,6 +915,31 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let f = fixture();
         assert_eq!(f.attest(&["--no-push", "passing"]), 0);
         assert_eq!(f.posted_for("passing"), 1);
+    }
+
+    #[test]
+    fn an_unreachable_remote_falls_back_to_a_local_run() {
+        let f = fixture();
+        let stubdir = f.root.join("stubbin");
+        std::fs::create_dir_all(&stubdir).unwrap();
+        // An ssh that always fails: the box is unreachable, so even the df probe
+        // can't answer and `remote::execute` returns Err.
+        let ssh = test_script(&stubdir, "ssh", "exit 255");
+        let mut sys = f.sys.clone();
+        sys.ssh = ssh.into_os_string();
+        let cfg = remote::Remote {
+            host: "smoo-hub".into(),
+            checks: vec!["passing".into()],
+            worktree: "/nonexistent".into(),
+            target_dir: None,
+            env: std::collections::BTreeMap::new(),
+            min_free_gib: 5,
+        };
+        // `passing` is `exit 0`; a fall-back LOCAL run of it must pass and report
+        // that it ran locally — not block and leave the row to CI.
+        let r = run_remote(&sys, &f.root, &cfg, "passing", "origin", "abc");
+        assert_eq!(r.location, "locally", "an unreachable box falls back to a LOCAL run");
+        assert_eq!(r.outcome, Outcome::Pass, "the local run of a passing check passes");
     }
 
     // ── dirty working tree (the "passed everything, credited nothing" hole) ──
