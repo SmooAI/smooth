@@ -1,0 +1,35 @@
+# Reference HOOKS manifest with its OWN event names (th-3cabf6) — the shape
+# of gemini / qwen / droid style hooks: an event_map instead of the Claude
+# table, a needs_you event answered by the approval keystroke, a session id
+# LEARNED from the first hook, a resume subcommand, and no prefer_paths (the
+# binary resolves from PATH, past a cmux shim).
+name = "conformance-mapped"
+display_name = "Conformance (mapped hooks)"
+
+[binary]
+names = ["conformance-mapped"]
+
+[launch]
+argv = ["--model", "{model}", "--prompt-interactive", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+argv = ["resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "none — the conformance fake posts its own events"
+
+[state.hooks.event_map]
+BeforeAgent = "working"
+AfterAgent = "idle"
+ToolPermission = "needs_you"
+SessionEnd = "ended"
+Notification = "ignore"
+
+[state.scrape]
+usage_limit = ["quota exceeded"]

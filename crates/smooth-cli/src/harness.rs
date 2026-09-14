@@ -119,6 +119,24 @@ pub enum Cmd {
     /// Show, per harness: installed?, MCP entry state, plugin/skills state,
     /// and (Claude Code) whether a statusline is wired.
     Status,
+    /// Does each harness actually work on this machine? Read-only.
+    ///
+    /// Per harness manifest: the binary SmoothFlow runs (and whether `which`
+    /// hands you a cmux shim), its version, whether it resolves under the
+    /// SmoothFlow app's launchd environment, whether its hooks are installed
+    /// AND trusted (Codex's "Hooks need review"), whether the daemon its
+    /// reports go to is up, and sign-in state where it can be read without a
+    /// prompt. Verdict: works / degraded / not installed, with the one command
+    /// that fixes each degraded row. Never installs, trusts or logs in.
+    Doctor {
+        /// One harness (default: every manifest).
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Show every check, not just the ones that need attention.
+        #[arg(long, short)]
+        verbose: bool,
+    },
     /// Remove what smooth wrote for a harness: the MCP entry and any skill
     /// symlinks that resolve into smooth-owned sources. Never touches
     /// user-owned config; plugin uninstall stays with the harness's own CLI.
@@ -174,6 +192,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Doctor { name, json, verbose } => crate::harness_doctor::run(&home, name.as_deref(), json, verbose),
         Cmd::Status => {
             for h in Harness::ALL {
                 status(h, &home);
@@ -1167,6 +1186,27 @@ mod tests {
         assert_eq!(infos_of(&json!({ "harnesses": v })).len(), 4);
         print_harnesses(&rows, true);
         print_harnesses(&[], false);
+    }
+
+    #[test]
+    fn doctor_parses_an_optional_name_json_and_verbose() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let cli = Cli::try_parse_from(["th", "doctor", "codex", "--json", "-v"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Doctor { name: Some(ref n), json: true, verbose: true } if n == "codex"));
+        let cli = Cli::try_parse_from(["th", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Doctor {
+                name: None,
+                json: false,
+                verbose: false
+            }
+        ));
     }
 
     #[test]
