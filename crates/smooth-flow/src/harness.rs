@@ -160,9 +160,10 @@ pub enum ResumeMode {
     /// Always relaunch the original argv (a fresh session, not a continuation).
     #[default]
     RelaunchCommand,
-    /// `binary + resume.argv` with no session id — the CLI's own "continue the
-    /// most recent conversation in this directory" (`crush --continue`,
-    /// `goose session --resume`). For harnesses whose session id the engine
+    /// `resume.argv` with no session id — the CLI's own "continue the most
+    /// recent conversation in this directory" (`crush --continue`,
+    /// `aider --restore-chat-history`), appended to the original argv when
+    /// the prompt was pasted, to the binary alone when it was an argument. For harnesses whose session id the engine
     /// cannot learn (scrape-only); each SmoothFlow session has its own
     /// worktree, so "latest here" is this session's (th-e77603).
     ContinueLatest,

@@ -355,8 +355,9 @@ pub fn manifest_for<'r>(registry: &'r Registry, kind: &SessionKind) -> Result<&'
 /// The argv that resumes a dead agent session — the manifest's `[resume]`.
 ///
 /// `resume_session` with a known harness session id renders `resume.argv`
-/// behind the row's `argv[0]`; `continue_latest` always does (no id — the
-/// CLI's own "most recent conversation here"); otherwise (no id yet, or `relaunch_command`,
+/// behind the row's `argv[0]`; `continue_latest` always appends it (no id —
+/// the CLI's own "most recent conversation here") to the original argv when
+/// the prompt was pasted, to `argv[0]` when it was an argument; otherwise (no id yet, or `relaunch_command`,
 /// or no manifest) the original argv is relaunched: a fresh session, not a
 /// continuation.
 #[must_use]
@@ -377,12 +378,18 @@ pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
             v
         }
         (ResumeMode::ContinueLatest, _) => {
-            let bin = session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary());
             let vars = Vars {
                 cwd: Some(&session.worktree),
                 ..Default::default()
             };
-            let mut v = vec![bin];
+            // A pasted prompt never reached the argv, so the original command
+            // (model and all) plus the continue flag is the resume; an argv
+            // prompt must not be sent twice, so only the binary is kept.
+            let mut v = if m.launch.prompt_as == PromptAs::Paste && !session.argv.is_empty() {
+                session.argv.clone()
+            } else {
+                vec![session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary())]
+            };
             v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
             v
         }
@@ -1647,16 +1654,6 @@ impl Engine {
             cursor_y: meta.as_ref().and_then(|m| m.cursor_y),
             quiet_for,
         });
-        // `prompt_as = "paste"`: paste once the composer is up.
-        let paste = {
-            let rt = self.rt();
-            rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
-        };
-        if let Some(p) = paste {
-            self.rt().paste_at.remove(&s.id);
-            self.send(&s.id, &p)?;
-            return Ok(());
-        }
         match scrape.state {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
@@ -1690,6 +1687,16 @@ impl Engine {
                 self.set_state(&s.id, SessionState::Idle, None)?;
             }
             _ => {}
+        }
+        // `prompt_as = "paste"`: paste once the composer is up (after this
+        // tick's state change, so a cleared needs-you is recorded first).
+        let paste = {
+            let rt = self.rt();
+            rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
+        };
+        if let Some(p) = paste {
+            self.rt().paste_at.remove(&s.id);
+            self.send(&s.id, &p)?;
         }
         Ok(())
     }
@@ -3174,7 +3181,11 @@ mod tests {
         let mut aider = blank();
         aider.kind = "aider".parse().unwrap();
         aider.argv = vec!["/x/aider".into(), "--model".into(), "m".into()];
-        assert_eq!(resume_argv(&aider, &r), vec!["/x/aider", "--restore-chat-history"]);
+        assert_eq!(
+            resume_argv(&aider, &r),
+            vec!["/x/aider", "--model", "m", "--restore-chat-history"],
+            "a pasted-prompt harness keeps its launch flags"
+        );
         // goose pre-assigns its session name, so it resumes by id.
         let mut goose = blank();
         goose.kind = "goose".parse().unwrap();
