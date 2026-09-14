@@ -1,5 +1,145 @@
 # @smooai/smooth
 
+## 0.48.8
+
+### Patch Changes
+
+- 2a8f30a: th attest: never stall or hang on the build box — fail fast, bound the run, fall back to local
+
+  `th attest rust` routes to a remote build box. Three ways that stalled or hung `th`,
+  now closed:
+
+  - **Unreachable box:** the ssh calls had no `ConnectTimeout`, so they stalled on the
+    full TCP handshake. Both now use `ConnectTimeout=10`.
+  - **Wedged mid-run:** once connected, a check could wedge (measured: cargo finished but
+    `rust.sh` hung in a docker probe) and `child.wait()` never returned, hanging `th`
+    with it (th-7db71c). A watchdog now kills the ssh after a deadline
+    (`SMOOTH_ATTEST_REMOTE_DEADLINE_SECS`, default 45 min); killing the local client drops
+    the connection so the remote check is torn down too.
+  - **Either way:** a remote infrastructure failure (unreachable / no disk / dropped /
+    timed out) no longer blocks and defers the whole row to CI. It prints a visible
+    `⚠ <host>: <reason>` and runs the check **locally** — a real verdict on this machine.
+    Slower (no warm cache), which is why the warning is loud.
+
+## 0.48.7
+
+### Patch Changes
+
+- c01bd97: Desktop: don't run the PWA service worker in the Electron app — no more double update prompt, no stale SPA (th-003dc7).
+
+  The desktop app updates via its own OTA (electron-updater) and serves the SPA from the bundled daemon, so the service worker only produced a SECOND "A fresh Big Smooth is ready / Refresh now" prompt on top of the app's "Restart now", and a stale cached SPA after an OTA. Push on desktop is native (`window.bigSmooth.notify`), not the SW, so nothing there depends on it. `PWAUpdater` now detects the desktop shell (`window.bigSmooth`) and, instead of registering the SW updater, tears down any existing service worker + caches — the Electron webview always loads fresh from the local daemon. Browser and installed-PWA (mobile/web) users keep the full update-prompt flow unchanged.
+
+## 0.48.6
+
+### Patch Changes
+
+- f688096: th attest: serialize remote runs so two agents can't corrupt the shared build box
+
+  The remote attest host has ONE worktree and ONE cargo target, but agents attest
+  concurrently (measured live: two `th attest rust` against the same box). Without a
+  mutex their `git checkout` / `git clean` / cargo runs stomp each other — one run's
+  clean deletes the other's in-flight tree — producing phantom failures (th-983292).
+
+  `remote_script` now takes a `mkdir` lock (the portable mutex; macOS has no `flock`)
+  before the checkout and releases it via a trap on exit, so exactly one run touches
+  the worktree at a time. A crashed holder's lock (its trap never fired) is broken once
+  it's older than any real run; the wait is hard-capped so a wedged holder reads as a
+  busy box (exit 97) rather than hanging forever (th-7db71c, waiter side). The check now
+  runs as `bash` not `exec bash`, so the release trap actually fires. A `bash -n` test
+  guards the hand-rolled locking against a syntax slip.
+
+- 4f12260: Big Smooth desktop: native Sparkle-style update dialog
+
+  The Electron desktop app now presents a native update dialog modeled on the Sparkle
+  one the native macOS companion (SmoothFlow) shows. Electron can't use Sparkle, so the
+  UX is reproduced with Electron's own `dialog.showMessageBox`, driven by
+  electron-updater's `update-available` event: title "A new version of Big Smooth is
+  available!", the "X is now available—you have Y" body, a **Skip This Version / Remind
+  Me Later / Install Update** button row, and an "Automatically download and install
+  updates in the future" checkbox.
+
+  `autoDownload` is now off — nothing downloads until the user picks Install (or has
+  opted into auto-download via the checkbox). Install starts `downloadUpdate()` and the
+  existing guarded restart step (stop daemon → `quitAndInstall`) finishes the job; Skip
+  persists the version to a skip list so it's never offered again; Remind Me Later defers
+  to the next launch/poll; the checkbox persists an `autoUpdate` preference that silently
+  downloads future updates. The decision layer stays pure and unit-tested
+  (`decideAvailableAction`), and everything still flows through the existing attempt-cap /
+  give-up / once-per-session guards so an un-installable bundle falls back to a manual
+  download instead of nagging forever.
+
+## 0.48.5
+
+### Patch Changes
+
+- 030541c: th attest: refuse a dirty working tree instead of crediting a commit that wasn't tested
+
+  `th attest` credits the HEAD commit, but the checks run against the working tree. It
+  never checked the two match — so a dirty tree (uncommitted work, or codegen drift
+  where a tracked generated file was regenerated but not committed) produced a green a
+  PR would not reproduce, or the confusing "passed everything, credited nothing" with no
+  stated reason.
+
+  Now it checks tracked-file cleanliness (`git status --porcelain -uno`) both before and
+  after the run: a dirty tree up front is refused with the offending files named
+  (`--allow-dirty` opts out); a check that leaves a tracked file modified (the codegen-
+  drift shape) refuses to credit, since HEAD still holds the stale output and would fail
+  that check in CI. New exit code 3 marks "nothing credited because the tree wasn't the
+  commit," distinct from a real check failure. Untracked scratch files are ignored.
+
+## 0.48.4
+
+### Patch Changes
+
+- ba2d625: th attest: clean the remote worktree after checkout so a stale box can't post a false red
+
+  `th attest` delegates `rust` to a build box (smoo-hub) by fetching the commit and
+  running `git checkout --detach --force <sha>`. That resets tracked files but leaves
+  untracked ones in place, so a file abandoned by an earlier branch (the incident was
+  a stray `api-prime/tests/*.rs`) survived into the tree under test — cargo compiled it
+  and the box posted a FALSE `ci-attest/rust: failure` naming a plausible cause, which
+  reads to a reviewer as a genuine Rust failure (th-5123e5).
+
+  The remote script now runs `git clean -ffd` after the checkout, so the worktree
+  matches the SHA exactly. No `-x`: the cargo cache lives in an external
+  CARGO_TARGET_DIR, so ignored files inside the worktree are cheap to keep and are not
+  what poisons the build. A clean failure exits as a precondition (97) like the cd /
+  fetch / checkout lines — a wrong box, never a verdict on the commit.
+
+## 0.48.3
+
+### Patch Changes
+
+- 11ee74e: th msg watch: add `--from` / `--type` filters and a non-consuming `--peek` mode
+
+  Watching the agent-mail bus for a specific correspondent used to mean hand-rolling
+  a `sqlite3` poll over `~/.smooth/mail.db` — the existing `th msg watch` could only
+  watch your whole inbox and, in continuous mode, acked (consumed) every message it
+  saw. Two additions close that gap so every harness can use the one tested command:
+
+  - `--from <agent>` and `--type <kind>` narrow the stream to one sender or one
+    message type (both normal and peek mode).
+  - `--peek` tracks position by message `seq` instead of read-state and never acks,
+    so a machine consumer (a harness responder, the th-mail skill) reacts to each new
+    message without marking it read — the owner still decides when it has actually
+    been handled. `--since <seq>` pins a durable watermark across restarts.
+
+  Backed by new `MailStore::inbox_since` / `max_seq` (and the `Mail` backend wrappers;
+  cloud emulates via a filtered inbox fetch). Part of the resilient-messaging epic
+  (th-826c4a).
+
+## 0.48.2
+
+### Patch Changes
+
+- 8856243: `th pearls projects` no longer fills up with hook litter. Opening the pearl store used to register whatever directory it was opened from, and `th prime` (the Codex SessionStart hook) opens it from any cwd — so `~/.smooth/registry.json` collected Codex scratch dirs, `$TMPDIR`, `$HOME`, even `/`. A plain open now registers the project only when its root is a git repository other than `/` or `$HOME`; `th pearls init` registers any directory explicitly and that entry survives. Every open also prunes implicit entries that are not git repos (alongside the existing dead-path prune), so an existing registry heals on the next `th pearls` call. (th-92e046)
+
+## 0.48.1
+
+### Patch Changes
+
+- 21922ae: SmoothFlow 0.2.2 — the first release that ships the real fix for `_`-instead-of-glyphs prompts. A Finder-launched app has no `LANG`, the child daemon inherited that, and tmux then treated the attach client as non-UTF-8 and replaced every non-ASCII cell with `_`; the daemon now attaches with `tmux -u` and gives the child a UTF-8 locale. Ghostty themes never applied either, because `GHOSTTY_RESOURCES_DIR` was unset before `ghostty_init` — Catppuccin Mocha now renders. Also in this cut: a bundled Nerd Font and a Settings ▸ Terminal pane (th-bcd819), SmoothFlow's own relay identity (`kind=flow`, th-a1bb12), agentic `add_harness` manifest drafting (th-473294), harness manifests so any coding-agent CLI can launch (th-0f6126), end-to-end encrypted relay frames with QR pairing (th-d98fde), `flow.close` with a confirm sheet that closes the pearl and GCs the merged worktree (th-883ce9, th-e126cc), bounded daemon shutdown on quit (th-6198bf), and per-daemon supervision ownership of flow.db rows (th-4f7866). th-4efb09.
+
 ## 0.48.0
 
 ### Minor Changes

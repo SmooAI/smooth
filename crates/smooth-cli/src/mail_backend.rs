@@ -462,6 +462,39 @@ impl Mail {
         }
     }
 
+    /// New messages for `agent` (or broadcast) with `seq > after_seq`, oldest
+    /// first, optionally narrowed to one sender/kind. Non-consuming — see
+    /// [`MailStore::inbox_since`]. The cloud backend has no `since` endpoint, so
+    /// it fetches the recent inbox and filters client-side; still correct, just
+    /// less efficient than the local seq query.
+    ///
+    /// # Errors
+    /// Propagates store/API failures.
+    pub async fn inbox_since(&self, agent: &str, after_seq: i64, from: Option<&str>, kind: Option<MessageKind>, limit: usize) -> Result<Vec<MailMessage>> {
+        match self {
+            Self::Sqlite(s) => s.inbox_since(agent, after_seq, from, kind, limit),
+            Self::Cloud(_) => {
+                let mut msgs = self.inbox(agent, false, 200).await?;
+                msgs.retain(|m| m.seq > after_seq && from.is_none_or(|f| m.from_agent == f.trim()) && kind.is_none_or(|k| m.kind == k));
+                msgs.sort_by_key(|m| m.seq);
+                msgs.truncate(limit);
+                Ok(msgs)
+            }
+        }
+    }
+
+    /// The highest message `seq` the store has (0 when empty) — the baseline for
+    /// a `--peek` watcher. Cloud approximates from the recent inbox.
+    ///
+    /// # Errors
+    /// Propagates store/API failures.
+    pub async fn max_seq(&self, agent: &str) -> Result<i64> {
+        match self {
+            Self::Sqlite(s) => s.max_seq(),
+            Self::Cloud(_) => Ok(self.inbox(agent, false, 200).await?.iter().map(|m| m.seq).max().unwrap_or(0)),
+        }
+    }
+
     /// # Errors
     /// Propagates store/API failures.
     pub async fn get_message(&self, id: &str) -> Result<Option<MailMessage>> {

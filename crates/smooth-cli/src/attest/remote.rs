@@ -82,7 +82,10 @@ fn parse_df_available_kb(out: &str) -> Option<u64> {
 /// itself did not answer, which is treated the same as a failing guard.
 pub fn free_gib(sys: &Sys, host: &str) -> Option<u64> {
     let out = Command::new(&sys.ssh)
-        .args(["-o", "BatchMode=yes", host, "df -Pk /"])
+        // ConnectTimeout so an UNREACHABLE box fails in seconds — without it, ssh
+        // waits out the full TCP handshake timeout, and the caller falls back to a
+        // local run (or CI) only after a long, silent stall.
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "df -Pk /"])
         .stdin(Stdio::null())
         .output()
         .ok()?;
@@ -104,21 +107,61 @@ pub fn remote_script(cfg: &Remote, check: &str, origin: &str, sha: &str) -> Stri
         acc
     });
     let r = attest_ref(sha);
+    let lock = shell_quote(&format!("{}.attest-lock", cfg.worktree));
+    // th-983292: the host has ONE worktree and ONE target dir, but two agents
+    // attest at once (measured live — two `th attest rust` against the same box).
+    // Without a mutex their `git checkout`/`git clean`/cargo runs stomp each other:
+    // one run's clean deletes the other's in-flight tree. A `mkdir` lock is the
+    // portable mutex (macOS has no `flock`) — mkdir is atomic, so exactly one run
+    // holds it. A crashed holder can't run its trap, so a lock older than any real
+    // run (LOCK_STALE_MIN) is broken; a hard cap (LOCK_WAIT_SECS) means a waiter
+    // treats an endless holder as a busy box (97), never an infinite hang
+    // (th-7db71c, waiter side). The trap releases it on every ordinary exit — which
+    // is why the check runs as `bash`, not `exec bash`: exec would replace the
+    // shell and the trap would never fire.
+    //
+    // th-5123e5: inside the lock, `git clean -ffd` after `checkout --force` makes
+    // the worktree match the SHA exactly. `checkout --force` resets tracked files
+    // but leaves untracked leftovers (the incident: a stray `api-prime/tests/*.rs`
+    // from an abandoned branch) that cargo would compile into a FALSE red. No `-x`:
+    // the cargo cache is an external CARGO_TARGET_DIR, cheap to keep. Every failure
+    // here is the BOX being wrong, not the commit, so each exits as a precondition.
     format!(
         "set -u\n\
          {path}\n\
+         lock={lock}\n\
+         waited=0\n\
+         while ! mkdir \"$lock\" 2>/dev/null; do\n\
+         \x20 if [ -n \"$(find \"$lock\" -maxdepth 0 -mmin +{stale} 2>/dev/null)\" ]; then rmdir \"$lock\" 2>/dev/null; continue; fi\n\
+         \x20 waited=$((waited + 2))\n\
+         \x20 if [ \"$waited\" -ge {wait} ]; then echo \"attest: {worktree} locked by another run for >{wait}s — box busy, not a verdict\" >&2; exit {EXIT_PRECONDITION}; fi\n\
+         \x20 sleep 2\n\
+         done\n\
+         trap 'rmdir \"$lock\" 2>/dev/null' EXIT INT TERM\n\
          cd {worktree} || exit {EXIT_PRECONDITION}\n\
          git fetch --force --quiet {origin} '+{r}:{r}' || exit {EXIT_PRECONDITION}\n\
          git checkout --detach --force {sha} >/dev/null 2>&1 || exit {EXIT_PRECONDITION}\n\
-         {target}{extra}exec bash {script}\n",
+         git clean -ffd --quiet || exit {EXIT_PRECONDITION}\n\
+         {target}{extra}bash {script}\n",
         path = remote_path_prelude(),
         worktree = shell_quote(&cfg.worktree),
         origin = shell_quote(origin),
+        stale = LOCK_STALE_MIN,
+        wait = LOCK_WAIT_SECS,
         // Quoted like every other interpolation. A check name comes from a file
         // name in the repo, and a file name can hold shell metacharacters.
         script = shell_quote(&format!("scripts/ci/{check}.sh")),
     )
 }
+
+/// A run holding the worktree longer than this (minutes) is presumed dead — its
+/// trap never fired — so a waiter breaks the lock. Comfortably longer than a warm
+/// rust build, so it never breaks a lock a real run still holds.
+const LOCK_STALE_MIN: u64 = 40;
+
+/// The hard cap (seconds) a waiter will block for the lock before treating the
+/// host as busy. Bounds the wait so a wedged holder is never an infinite hang.
+const LOCK_WAIT_SECS: u64 = 3000;
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -137,7 +180,7 @@ pub fn execute(sys: &Sys, cfg: &Remote, check: &str, origin: &str, sha: &str) ->
     }
 
     let mut child = Command::new(&sys.ssh)
-        .args(["-o", "BatchMode=yes", &cfg.host, "bash", "-s"])
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &cfg.host, "bash", "-s"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -154,17 +197,73 @@ pub fn execute(sys: &Sys, cfg: &Remote, check: &str, origin: &str, sha: &str) ->
     let out = child.stdout.take().map(|s| stream(s, prefix.clone(), false));
     let err = child.stderr.take().map(|s| stream(s, prefix, true));
 
+    // th-7db71c: bound the whole run. `ConnectTimeout` covers reaching the host,
+    // but once connected the check can wedge — measured repeatedly: cargo finished,
+    // yet rust.sh hung in a docker probe (th-c9057c) and `child.wait()` never
+    // returned, hanging th with it. A watchdog kills the ssh after a deadline;
+    // killing the local client drops the connection so sshd SIGHUPs the remote
+    // check too. Off the happy path, so a fast check clears `done` and the
+    // watchdog exits without touching anything.
+    let deadline = deadline_secs();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = {
+        let (done, timed_out, pid) = (done.clone(), timed_out.clone(), child.id());
+        std::thread::spawn(move || {
+            let mut waited = 0u64;
+            while waited < deadline {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                waited += 1; // 500ms steps → `deadline` is in half-seconds below
+            }
+            timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Portable kill by pid (no libc): TERM, then a hard KILL shortly after.
+            // stderr silenced — the second kill usually races a process the first
+            // already reaped ("No such process"), which is success, not an error.
+            let kill = |args: &[&str]| {
+                let _ = Command::new("kill").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            };
+            let pid = pid.to_string();
+            kill(&[&pid]);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            kill(&["-9", &pid]);
+        })
+    };
+
     let status = child.wait().map_err(|e| format!("ssh to {} failed: {e}", cfg.host))?;
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = watchdog.join();
     for h in [out, err].into_iter().flatten() {
         drop(h.join());
     }
 
+    if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(format!(
+            "{} did not finish {check} within {}s — killed (the host is stuck)",
+            cfg.host,
+            deadline / 2
+        ));
+    }
     match status.code() {
         // ssh reserves 255 for its OWN failures — unreachable host, auth refused,
         // connection dropped. None of those say anything about the commit.
         Some(255) | None => Err(format!("ssh to {} failed (unreachable, auth, or dropped connection)", cfg.host)),
         Some(code) => Ok(code),
     }
+}
+
+/// The watchdog's budget, in half-second ticks (so the loop above counts in 500ms
+/// steps). Default 45 minutes — comfortably longer than a warm rust build, so it
+/// only ever fires on a genuinely stuck host. `SMOOTH_ATTEST_REMOTE_DEADLINE_SECS`
+/// overrides it (tests set it low).
+fn deadline_secs() -> u64 {
+    std::env::var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2700)
+        .saturating_mul(2)
 }
 
 fn stream(from: impl Read + Send + 'static, prefix: String, to_stderr: bool) -> std::thread::JoinHandle<()> {
@@ -270,9 +369,27 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         assert!(s.contains("refs/attest/abc123"));
         assert!(s.contains("git checkout --detach --force abc123"));
         assert!(
+            s.contains("git clean -ffd"),
+            "th-5123e5: the tree must be cleaned of untracked leftovers after checkout, or a stale box posts a false red"
+        );
+        assert!(
+            s.find("git checkout").unwrap() < s.find("git clean").unwrap(),
+            "clean runs AFTER the checkout — it removes what the checkout left behind"
+        );
+        assert!(
             s.contains("bash 'scripts/ci/rust.sh'"),
             "the check path is quoted like every other interpolation"
         );
+        // th-983292: a mkdir mutex serializes concurrent attests on the one shared
+        // worktree, and it MUST be taken before the checkout that would clobber a
+        // peer's tree. Not `exec`, or the release trap never fires.
+        assert!(s.contains("mkdir \"$lock\""), "concurrent runs serialize on a mkdir lock");
+        assert!(s.contains("trap 'rmdir \"$lock\"") && s.contains("EXIT"), "the lock is released on exit");
+        assert!(
+            s.find("mkdir \"$lock\"").unwrap() < s.find("git checkout").unwrap(),
+            "the lock is held before the checkout it protects"
+        );
+        assert!(!s.contains("exec bash"), "exec would skip the release trap");
         assert!(s.contains("export CARGO_TARGET_DIR='/Volumes/smoo-ext/ci-attest/target'"));
         assert!(s.contains("/opt/homebrew/bin"), "a non-login ssh shell has no Homebrew on PATH (th-92b35a)");
     }
@@ -280,9 +397,49 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
     #[test]
     fn every_host_side_failure_in_the_script_is_a_precondition() {
         let s = remote_script(&cfg(), "rust", "origin", "abc123");
-        // cd, fetch and checkout — three ways the BOX can be wrong, none of them
-        // a statement about the code.
-        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 3);
+        // Five ways the BOX can be wrong, none a statement about the code: the lock
+        // wait timing out (th-983292), then cd, fetch, checkout and clean.
+        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 5);
+    }
+
+    #[test]
+    fn the_lock_serializes_recovers_from_a_crash_and_never_hangs() {
+        let s = remote_script(&cfg(), "rust", "origin", "abc");
+        assert!(s.contains("mkdir \"$lock\""), "the mutex is an atomic mkdir (macOS has no flock)");
+        assert!(
+            s.contains(&format!("-mmin +{LOCK_STALE_MIN}")),
+            "a lock older than any real run is broken — a crashed holder never ran its trap"
+        );
+        assert!(
+            s.contains(&format!("-ge {LOCK_WAIT_SECS}")),
+            "the wait is bounded — a wedged holder is a busy box (97), never an infinite hang"
+        );
+        // The lock is a SIBLING of the worktree, never inside it — otherwise the
+        // in-lock `git clean -ffd` would delete the lock the run is holding.
+        assert!(s.contains(".attest-lock"));
+        assert!(!s.contains("smooai/.attest-lock"), "the lock lives beside the worktree, not within it");
+    }
+
+    /// The lock logic is hand-rolled shell; a stray token would break every remote
+    /// attest silently. `bash -n` parses without running, catching a syntax slip.
+    #[test]
+    fn the_generated_script_is_valid_shell() {
+        use std::io::Write as _;
+        let s = remote_script(&cfg(), "rust", "git@github.com:SmooAI/smooai.git", "abc123");
+        let mut child = Command::new("bash")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(s.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "generated remote script is not valid bash:\n{s}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -354,5 +511,33 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         let tmp = tempfile::tempdir().unwrap();
         let sys = sys_with_ssh(tmp.path().join("no-such-ssh"));
         assert!(execute(&sys, &cfg(), "rust", "origin", "abc").is_err());
+    }
+
+    /// th-7db71c: once connected, a wedged check must not hang forever. The df
+    /// probe answers, then the check invocation sleeps — the watchdog kills it at
+    /// the deadline and execute returns Err (which the caller turns into a local
+    /// run), rather than blocking on `child.wait()` indefinitely.
+    #[test]
+    fn a_stuck_remote_is_killed_at_the_deadline_not_left_to_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        // df answers so the disk guard passes; the check invocation then hangs.
+        let ssh = test_script(
+            tmp.path(),
+            "ssh",
+            // `exec sleep` so the stub's pid IS the sleep — a TERM to it dies at
+            // once, like the real ssh client (a bash parent would defer the signal
+            // until its `sleep` child returned, which is not how ssh behaves).
+            "case \"$*\" in\n  *\"df -Pk\"*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/d 100 1 999999999 1%% /\\n'; exit 0 ;;\nesac\nexec sleep 30\n",
+        );
+        // 1s → the watchdog fires almost immediately instead of after the 30s sleep.
+        std::env::set_var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS", "1");
+        let sys = sys_with_ssh(ssh);
+        let began = std::time::Instant::now();
+        let result = execute(&sys, &cfg(), "rust", "origin", "abc");
+        let secs = began.elapsed().as_secs();
+        std::env::remove_var("SMOOTH_ATTEST_REMOTE_DEADLINE_SECS");
+        let err = result.expect_err("a stuck remote must return Err, not hang");
+        assert!(err.contains("did not finish"), "the error names the deadline kill: {err}");
+        assert!(secs < 15, "killed near the ~1s deadline, not after the 30s sleep — took {secs}s");
     }
 }

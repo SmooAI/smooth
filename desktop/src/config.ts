@@ -13,9 +13,15 @@ export interface DesktopConfig {
     /** Set once we've applied the first-run "open at login" default, so we never
      * fight the user's later choice. */
     loginItemConfigured: boolean;
+    /** The Sparkle-style "Automatically download and install updates in the future"
+     * checkbox. When true, an available update downloads without showing the choice
+     * dialog. Toggled from that dialog's checkbox. */
+    autoUpdate: boolean;
+    /** Versions the user chose "Skip This Version" for — never offered again. */
+    skippedUpdateVersions: string[];
 }
 
-const DEFAULTS: DesktopConfig = { remoteUrl: null, loginItemConfigured: false };
+const DEFAULTS: DesktopConfig = { remoteUrl: null, loginItemConfigured: false, autoUpdate: false, skippedUpdateVersions: [] };
 
 function configPath(): string {
     return join(app.getPath('userData'), 'config.json');
