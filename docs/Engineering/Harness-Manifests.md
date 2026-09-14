@@ -8,16 +8,16 @@ skills/rules/MCP for it. The engine's launch table, binary resolver and pane
 scraper read manifests — nothing about `claude`, `codex` or `opencode` is
 hard-coded any more. Eight ship built in:
 
-| name       | display     | state    | prompt                   | session id                                           | resume               |
-| ---------- | ----------- | -------- | ------------------------ | ---------------------------------------------------- | -------------------- |
-| `claude`   | Claude Code | `hooks`  | positional               | pre-assigned (`--session-id <uuid>`)                 | `--resume <id>`      |
-| `opencode` | OpenCode    | `hooks`  | `--prompt`               | learned from the plugin's first hook (by cwd)        | `--session <id>`     |
-| `codex`    | Codex       | `hooks`  | positional               | learned from a hook (by cwd) once `hooks.json` posts | `resume <id>`        |
-| `th-code`  | th code     | `native` | pasted into the composer | pre-assigned (`SMOOTH_FLOW_SESSION` in the pane env) | relaunch (see below) |
-| `aider`    | Aider       | `scrape` | pasted once idle         | —                                                    | `--restore-chat-history` (`continue_latest`) |
-| `goose`    | goose       | `scrape` | `run --interactive --text` | pre-assigned (`--name <id>`)                       | `session --resume --name <id>` |
-| `crush`    | Crush       | `scrape` | pasted once idle         | —                                                    | `--continue` (`continue_latest`) |
-| `cline`    | Cline       | `scrape` | positional (`--tui`)     | —                                                    | relaunch |
+| name       | display     | state    | prompt                     | session id                                           | resume                                       |
+| ---------- | ----------- | -------- | -------------------------- | ---------------------------------------------------- | -------------------------------------------- |
+| `claude`   | Claude Code | `hooks`  | positional                 | pre-assigned (`--session-id <uuid>`)                 | `--resume <id>`                              |
+| `opencode` | OpenCode    | `hooks`  | `--prompt`                 | learned from the plugin's first hook (by cwd)        | `--session <id>`                             |
+| `codex`    | Codex       | `hooks`  | positional                 | learned from a hook (by cwd) once `hooks.json` posts | `resume <id>`                                |
+| `th-code`  | th code     | `native` | pasted into the composer   | pre-assigned (`SMOOTH_FLOW_SESSION` in the pane env) | relaunch (see below)                         |
+| `aider`    | Aider       | `scrape` | pasted once idle           | —                                                    | `--restore-chat-history` (`continue_latest`) |
+| `goose`    | goose       | `scrape` | `run --interactive --text` | pre-assigned (`--name <id>`)                         | `session --resume --name <id>`               |
+| `crush`    | Crush       | `scrape` | pasted once idle           | —                                                    | `--continue` (`continue_latest`)             |
+| `cline`    | Cline       | `scrape` | positional (`--tui`)       | —                                                    | relaunch                                     |
 
 The last four have no hooks SmoothFlow can receive (aider, goose) or hooks it
 does not wire yet (crush, cline); their state comes entirely from ordered
@@ -404,14 +404,14 @@ ran on a private engine (`tests/scrape_live.rs`) through: launch → first-run
 questions read needs-you → working → idle; steer → working → idle; a tool or
 edit request → needs-you → deny → idle; kill + resume → back.
 
-| harness  | version           | proof        | first-run / walls met                                                                                             | notes                                                                                                                                 |
-| -------- | ----------------- | ------------ | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `aider`  | aider-chat 0.86.2 | **live**     | `.gitignore` question, "Open documentation url?"                                                                  | prompt pasted only after the questions (th-d2a1e4); streaming has no marker, so working = the pane changing under a non-composer cursor |
-| `goose`  | 1.50.0            | **live**     | anonymous-usage question (◆); tool approval needs `GOOSE_MODE=approve`                                            | the session is named with the engine id → a true `resume_session`                                                                     |
-| `crush`  | 0.94.2            | **live**     | provider/model picker on a fresh install; "initialize this project?"                                              | the permission modal sits over an `esc cancel` footer — needs-you is ordered first                                                    |
-| `cline`  | 3.0.61            | **live**     | "Connect a model provider" sign-in screen (configured through Bring-your-own-provider → the mock); ClinePass upsell | launched `--auto-approve false`; the composer looks idle all turn, the braille spinner above it is the signal                          |
-| `auggie` | 0.36.0            | fixture only | "Login to continue / Press return to open your browser" — **not pressed**                                         | no built-in: nothing past the wall could be observed                                                                                   |
-| `kiro`   | kiro-cli 2.21.4   | fixture only | "You are not logged in. Login now?" — **not pressed**                                                             | no built-in; Kiro has agent hooks (cmux wires `kiro-cli chat --agent cmux`), a better fit for a hooked manifest                        |
+| harness  | version           | proof        | first-run / walls met                                                                                               | notes                                                                                                                                   |
+| -------- | ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `aider`  | aider-chat 0.86.2 | **live**     | `.gitignore` question, "Open documentation url?"                                                                    | prompt pasted only after the questions (th-d2a1e4); streaming has no marker, so working = the pane changing under a non-composer cursor |
+| `goose`  | 1.50.0            | **live**     | anonymous-usage question (◆); tool approval needs `GOOSE_MODE=approve`                                              | the session is named with the engine id → a true `resume_session`                                                                       |
+| `crush`  | 0.94.2            | **live**     | provider/model picker on a fresh install; "initialize this project?"                                                | the permission modal sits over an `esc cancel` footer — needs-you is ordered first                                                      |
+| `cline`  | 3.0.61            | **live**     | "Connect a model provider" sign-in screen (configured through Bring-your-own-provider → the mock); ClinePass upsell | launched `--auto-approve false`; the composer looks idle all turn, the braille spinner above it is the signal                           |
+| `auggie` | 0.36.0            | fixture only | "Login to continue / Press return to open your browser" — **not pressed**                                           | no built-in: nothing past the wall could be observed                                                                                    |
+| `kiro`   | kiro-cli 2.21.4   | fixture only | "You are not logged in. Login now?" — **not pressed**                                                               | no built-in; Kiro has agent hooks (cmux wires `kiro-cli chat --agent cmux`), a better fit for a hooked manifest                         |
 
 crush and cline also document hooks (`crush.json` hooks, `cline --hooks-dir`);
 their manifests say so and can move to `source = "hooks"` when those are wired.

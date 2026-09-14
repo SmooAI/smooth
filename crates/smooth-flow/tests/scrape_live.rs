@@ -47,7 +47,10 @@ fn answers(harness: &str, deny: bool) -> Vec<(&'static str, Vec<&'static str>)> 
         ("crush", false) => vec![(r"(?i)would you like to initialize", vec!["Right", "Enter"])],
         ("crush", true) => vec![(r"(?i)permission required", vec!["Right", "Right", "Enter"])],
         ("cline", false) => vec![(r"(?i)press enter to open, any other key", vec!["Escape"])],
-        ("cline", true) => vec![(r"(?i)approve tool call\?", vec!["n"]), (r"(?i)press enter to open, any other key", vec!["Escape"])],
+        ("cline", true) => vec![
+            (r"(?i)approve tool call\?", vec!["n"]),
+            (r"(?i)press enter to open, any other key", vec!["Escape"]),
+        ],
         _ => vec![],
     }
 }
@@ -105,7 +108,11 @@ impl Run {
             }
             if probe.state == SessionState::NeedsYou && answered < 4 {
                 // A scrolling CLI keeps answered questions on screen: only its last line is live.
-                let live = if self.harness == "aider" { pane.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("") } else { pane.as_str() };
+                let live = if self.harness == "aider" {
+                    pane.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
+                } else {
+                    pane.as_str()
+                };
                 if let Some((pat, keys)) = table.iter().find(|(p, _)| Regex::new(p).unwrap().is_match(live)) {
                     self.note(&format!("{what}: answering /{pat}/ with {keys:?}"));
                     for k in keys {
@@ -138,7 +145,9 @@ impl Run {
 }
 
 fn after_working_idle(seen: &[SessionState]) -> bool {
-    seen.iter().position(|s| *s == SessionState::Working).is_some_and(|w| seen[w..].contains(&SessionState::Idle))
+    seen.iter()
+        .position(|s| *s == SessionState::Working)
+        .is_some_and(|w| seen[w..].contains(&SessionState::Idle))
 }
 
 fn kv_list(var: &str, sep: char) -> BTreeMap<String, String> {
@@ -197,7 +206,7 @@ fn run_one(harness: &str) -> String {
     run.save_pane("3-permission");
     let deny = answers(harness, true);
     let seen = run.drive("deny", Duration::from_secs(120), &deny, |s| {
-        s.iter().position(|x| *x != SessionState::NeedsYou).is_some() && s.last() == Some(&SessionState::Idle)
+        s.iter().any(|x| *x != SessionState::NeedsYou) && s.last() == Some(&SessionState::Idle)
     });
     run.note(&format!("PROVEN denied → idle: {seen:?}"));
     run.save_pane("3-after-deny-idle");
