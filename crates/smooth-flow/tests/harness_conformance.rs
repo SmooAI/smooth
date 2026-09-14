@@ -347,7 +347,7 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
         }
         Report {
             name: m.name.clone(),
-            source: m.state.source.as_str().to_string(),
+            source: format!("{:?}", m.state.source).to_lowercase(),
             rows,
         }
     };
