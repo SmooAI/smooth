@@ -42,6 +42,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// and the engine's refusal per session (the card shows it with "Force close").
     private var pendingCloses: [Int: CloseRequest] = [:]
     @Published private(set) var closeRefusals: [String: CloseRefusal] = [:]
+    /// th-fe75ca: sessions whose close was started somewhere with no card to
+    /// land a refusal on (the sidebar menu, Session ▸ Close Out…). The engine's
+    /// reason gets its own sheet instead of disappearing into the rail.
+    private var announceRefusals: Set<String> = []
     private var nextSeq = 1
     var notifySettings = NotifySettings.load()
 
@@ -177,7 +181,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 handoffs[id] = h
             case let .error(ref, msg):
                 if let ref, let req = pendingCloses.removeValue(forKey: ref) {
-                    closeRefusals[req.sessionId] = CloseRefusal(request: req, message: msg)
+                    let refusal = CloseRefusal(request: req, message: msg)
+                    closeRefusals[req.sessionId] = refusal
+                    if announceRefusals.contains(req.sessionId), let s = store.sessions[req.sessionId] { showCloseRefusal(s, refusal) }
                 } else {
                     thOutput = msg
                 }
@@ -193,6 +199,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         if pending.count != pendingCloses.count { pendingCloses = pending }
         let refusals = closeRefusals.filter { live[$0.key] != nil }
         if refusals.count != closeRefusals.count { closeRefusals = refusals }
+        announceRefusals = announceRefusals.filter { live[$0] != nil }
     }
 
     // MARK: surfaces
@@ -273,12 +280,16 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func kill(_ s: Session, resume: Bool) { client.send(.kill(id: s.id, resume: resume)) }
 
-    /// th-883ce9: `flow.close` for a finished session. Tagged with a `seq` so
-    /// the engine's refusal (`flow.error.ref`) lands on THIS card as a
-    /// "Force close" offer instead of in the rail's generic output.
-    func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false) {
+    /// th-883ce9: `flow.close` for a session — finished or live (the engine
+    /// kills a running one first). Tagged with a `seq` so the engine's refusal
+    /// (`flow.error.ref`) lands on THIS session as a "Force close" offer
+    /// instead of in the rail's generic output: on its Inbox card, or — with
+    /// `announceRefusal`, for a close started where there is no card — in a
+    /// sheet of its own (th-fe75ca).
+    func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false, announceRefusal: Bool = false) {
         let seq = nextSeq
         nextSeq += 1
+        if announceRefusal { announceRefusals.insert(s.id) } else { announceRefusals.remove(s.id) }
         let req = CloseRequest(sessionId: s.id, closePearl: closePearl, removeWorktree: removeWorktree, force: force)
         pendingCloses[seq] = req
         closeRefusals[s.id] = nil
@@ -288,7 +299,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// Resend the refused close with `force` — the user read the reason.
     func forceClose(_ s: Session) {
         guard let r = closeRefusals[s.id] else { return }
-        close(s, closePearl: r.request.closePearl, removeWorktree: r.request.removeWorktree, force: true)
+        close(s, closePearl: r.request.closePearl, removeWorktree: r.request.removeWorktree, force: true, announceRefusal: announceRefusals.contains(s.id))
     }
 
     func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
@@ -406,6 +417,34 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func showNewSession() {
         mainWindow.contentViewController?.presentSheet { dismiss in NewSessionSheet(app: self, dismiss: dismiss) }
+    }
+
+    /// th-fe75ca: close-out, from wherever you are — the sidebar row's context
+    /// menu, Session ▸ Close Out…, or the Inbox card. A live session is closed
+    /// the same way (the engine kills it first); the sheet says so.
+    ///
+    /// The handoff is read BEFORE the sheet goes up so branch, dirty count and
+    /// pearl title are on screen the first time you see it, not a beat later.
+    func showCloseOut(_ id: String) {
+        Task {
+            await loadHandoff(for: id)
+            guard let s = store.sessions[id] else { return }
+            mainWindow?.contentViewController?.presentSheet { dismiss in
+                CloseSessionSheet(session: s, handoff: self.handoffs[id], onDismiss: dismiss) { closePearl, removeWorktree in
+                    self.close(s, closePearl: closePearl, removeWorktree: removeWorktree, announceRefusal: true)
+                }
+            }
+        }
+    }
+
+    /// The engine refused a close that had no card to land on: its reason,
+    /// verbatim, with force offered only now — after it has been read.
+    private func showCloseRefusal(_ s: Session, _ r: CloseRefusal) {
+        mainWindow?.contentViewController?.presentSheet { dismiss in
+            CloseRefusedSheet(session: s, refusal: r,
+                              force: { dismiss(); self.forceClose(s) },
+                              keep: { dismiss(); self.dismissCloseRefusal(s.id) })
+        }
     }
 
     func showFanOut(existing: String? = nil) {

@@ -108,4 +108,54 @@ final class MockServerUITests: FlowUITestCase {
         settings.buttons["settings.phones.revoke.phone-mock0000001"].click()
         XCTAssertTrue(waitUntil { !settings.staticTexts["Mock iPhone"].exists }, "revoked row disappears")
     }
+    // MARK: close-out from outside the inbox (th-fe75ca)
+
+    /// The complaint: a running session could not be closed at all. Right-click
+    /// the sidebar row → Close Out… → the sheet says it will be killed first and
+    /// names the dirty files → confirm removes the row.
+    func testSidebarContextMenuClosesALiveSession() {
+        waitForState("fs-1b8e05bb") { $0 == "working" }
+        app.staticTexts["sidebar.title.fs-1b8e05bb"].rightClick()
+        // Identifier, not title: "Close Out…" also names the Session menu item.
+        let closeOut = app.menuItems["sidebar.closeOut.fs-1b8e05bb"]
+        XCTAssertTrue(closeOut.waitForExistence(timeout: 10), "context menu on the row; tree: \(dump())")
+        closeOut.click()
+        XCTAssertTrue(app.buttons["inbox.close.confirm"].waitForExistence(timeout: 10), "close sheet; tree: \(dump())")
+        XCTAssertTrue(label("session.close.live").contains("kills it first"), "a live row says it gets killed: '\(label("session.close.live"))'")
+        XCTAssertTrue(label("session.close.dirty").contains("uncommitted"), "the dirty count is on screen: '\(label("session.close.dirty"))'")
+        XCTAssertEqual(app.buttons["inbox.close.confirm"].label, "Kill and close")
+        app.buttons["inbox.close.confirm"].click()
+        XCTAssertTrue(waitUntil { !self.app.staticTexts["sidebar.state.fs-1b8e05bb"].exists }, "sidebar row gone")
+    }
+
+    /// Session ▸ Close Out… closes whatever is focused — the keyboard path.
+    func testSessionMenuClosesTheFocusedSession() {
+        waitForState("fs-3033cccc") { $0 == "done" }
+        app.staticTexts["sidebar.title.fs-3033cccc"].click()
+        let item = app.menuBars.menuItems["Close Out…"]
+        XCTAssertTrue(item.waitForExistence(timeout: 10), "Session ▸ Close Out…")
+        item.click()
+        XCTAssertTrue(app.buttons["inbox.close.confirm"].waitForExistence(timeout: 10), "close sheet; tree: \(dump())")
+        XCTAssertTrue(app.checkBoxes["inbox.close.pearl"].exists, "the pearl toggle, named after the pearl this session carries")
+        XCTAssertTrue(app.checkBoxes["inbox.close.worktree"].exists, "the worktree toggle, with its branch underneath")
+        app.buttons["inbox.close.confirm"].click()
+        XCTAssertTrue(waitUntil { !self.app.staticTexts["sidebar.state.fs-3033cccc"].exists }, "sidebar row gone")
+    }
+
+    /// A refusal on a close started outside the inbox gets its own sheet — the
+    /// engine's reason verbatim — and Keep it leaves the session exactly alone.
+    func testSidebarCloseRefusalLeavesTheSessionAlone() {
+        waitForState("fs-3034dddd") { $0 == "done" }
+        app.staticTexts["sidebar.title.fs-3034dddd"].rightClick()
+        let closeOut = app.menuItems["sidebar.closeOut.fs-3034dddd"]
+        XCTAssertTrue(closeOut.waitForExistence(timeout: 10))
+        closeOut.click()
+        XCTAssertTrue(app.buttons["inbox.close.confirm"].waitForExistence(timeout: 10))
+        app.buttons["inbox.close.confirm"].click()
+        XCTAssertTrue(app.staticTexts["session.close.refusal"].waitForExistence(timeout: 10), "refusal sheet; tree: \(dump())")
+        XCTAssertTrue(label("session.close.refusal").contains("not merged"), label("session.close.refusal"))
+        app.buttons["session.close.keep"].click()
+        XCTAssertTrue(waitUntil { !self.app.buttons["session.close.keep"].exists }, "sheet dismissed")
+        XCTAssertTrue(app.staticTexts["sidebar.state.fs-3034dddd"].exists, "nothing touched: the row is still there")
+    }
 }
