@@ -87,6 +87,11 @@ final class GhosttyRuntime {
         return cfg
     }
 
+    /// `confirm-close-surface = false` stays OFF deliberately: libghostty does
+    /// not know these panes are views over engine-owned sessions, so its
+    /// generic "close this surface?" would be both wrong and unskippable.
+    /// SmoothFlow asks its own question — see `PaneClose.decide` and
+    /// `CenterViewController.closeFocusedPane` (th-27baa4).
     static let baseOverrides = "shell-integration = none\nconfirm-close-surface = false\nwindow-padding-x = 6\nwindow-padding-y = 4\n"
 
     /// Settings ▸ Terminal changed: rebuild the config and push it to every

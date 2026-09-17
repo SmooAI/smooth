@@ -22,6 +22,8 @@ struct CloseRefusal: Equatable {
 final class AppController: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     let store = FlowStore()
     let daemon = DaemonManager()
+    /// The live keyboard map (Settings ▸ Keyboard + ~/.smooth/smoothflow/keybindings.toml).
+    let keymap = KeymapStore()
     let permissions = Permissions()
     private(set) lazy var client = FlowClient(store: store)
 
@@ -49,6 +51,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
     private var subscriptions: Set<AnyCancellable> = []
+    /// Sessions the window has already seen, so a newly announced one can be
+    /// told apart from every redraw of the list.
+    private var knownSessionIds: Set<String> = []
 
     static let onboardedKey = "onboarded"
 
@@ -91,8 +96,14 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         }.store(in: &subscriptions)
         // @Published fires on willSet; hop once so the headers read the new value.
         store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
-            self?.mainWindow.center.refreshHeaders()
-            self?.pruneCloses(live)
+            guard let self else { return }
+            self.mainWindow.center.refreshHeaders()
+            // A session this window asked for (⌘⇧T) lands in the tab that asked.
+            for id in live.keys where self.knownSessionIds.insert(id).inserted {
+                self.mainWindow.center.adopt(newSessionId: id)
+            }
+            self.knownSessionIds.formIntersection(live.keys)
+            self.pruneCloses(live)
         }.store(in: &subscriptions)
         daemon.onRestart = { [weak self] ep in self?.client.connect(to: ep) }
 
@@ -188,6 +199,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     /// One surface per session, created on first focus and attached for the
     /// rest of its life (scrollback lives in the surface, not the engine).
+    /// The surface for `id` if one already exists — never creates one, so a
+    /// focus call cannot attach a session by accident.
+    func surfaceIfLoaded(_ id: String) -> TerminalSurfaceView? { surfaces[id] }
+
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
         let v = TerminalSurfaceView(sessionId: id)
