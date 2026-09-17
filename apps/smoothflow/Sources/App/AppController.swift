@@ -280,9 +280,12 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func kill(_ s: Session, resume: Bool) { client.send(.kill(id: s.id, resume: resume)) }
 
-    /// th-883ce9: `flow.close` for a finished session. Tagged with a `seq` so
-    /// the engine's refusal (`flow.error.ref`) lands on THIS card as a
-    /// "Force close" offer instead of in the rail's generic output.
+    /// th-883ce9: `flow.close` for a session — finished or live (the engine
+    /// kills a running one first). Tagged with a `seq` so the engine's refusal
+    /// (`flow.error.ref`) lands on THIS session as a "Force close" offer
+    /// instead of in the rail's generic output: on its Inbox card, or — with
+    /// `announceRefusal`, for a close started where there is no card — in a
+    /// sheet of its own (th-fe75ca).
     func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false, announceRefusal: Bool = false) {
         let seq = nextSeq
         nextSeq += 1
