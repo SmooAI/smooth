@@ -53,6 +53,21 @@ run() { if [[ $DRY_RUN == 1 ]]; then printf '  would run: %s\n' "$*" >&2; else "
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 [[ -x "$LSREGISTER" ]] || die "lsregister not found at $LSREGISTER"
 
+# Every registered bundle whose path involves SmoothFlow but is NOT inside the
+# official install. Matching only `*/SmoothFlow.app` is not enough: a debug
+# build also registers the bundles NESTED inside it — Sparkle's
+# `…/Sparkle.framework/Versions/B/Updater.app` and
+# `SmoothFlowUITests-Runner.app` — and a single `lsregister -u` on the outer
+# .app does not take those with it. The rows outlive the files, so deleting the
+# build directory leaves them behind pointing at nothing.
+# The exclusion is a PREFIX, not an exact match, so the copies nested inside
+# /Applications/SmoothFlow.app (which has its own Updater.app) are kept.
+stale_bundles() {
+    "$LSREGISTER" -dump 2>/dev/null |
+        grep -oE '/[^[:space:]"]*SmoothFlow[^[:space:]"]*\.app' |
+        sort -u | grep -v "^${DEST}\(/\|$\)" || true
+}
+
 W="$(mktemp -d)"
 MOUNTED=""
 cleanup() {
@@ -65,7 +80,7 @@ trap cleanup EXIT
 # Every registered bundle outside /Applications is a debug build. Unregister it
 # so `open -a SmoothFlow` can only ever resolve to the official install.
 say "Unregistering SmoothFlow bundles outside /Applications"
-STALE="$("$LSREGISTER" -dump 2>/dev/null | grep -oE '/[^[:space:]"]*/SmoothFlow\.app' | sort -u | grep -v "^${DEST}$" || true)"
+STALE="$(stale_bundles)"
 if [[ -z "$STALE" ]]; then
     ok "none registered outside /Applications"
 else
@@ -192,7 +207,7 @@ ok "Gatekeeper: Notarized Developer ID"
 xcrun stapler validate "$DEST" >/dev/null 2>&1 || die "installed copy has no stapled ticket"
 ok "stapled"
 
-REMAINING="$("$LSREGISTER" -dump 2>/dev/null | grep -oE '/[^[:space:]"]*/SmoothFlow\.app' | sort -u | grep -v "^${DEST}$" || true)"
+REMAINING="$(stale_bundles)"
 if [[ -n "$REMAINING" ]]; then
     printf '\n\033[33mwarning: still-registered copies outside /Applications:\033[0m\n%s\n' "$REMAINING" >&2
 else
