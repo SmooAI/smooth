@@ -64,7 +64,37 @@ for ARTIFACT in "$@"; do
     fi
 
     say "Notarizing $(basename "$ARTIFACT")"
-    xcrun notarytool submit "$SUBMIT" "${CREDS[@]}" --wait >&2
+    # Deliberately NOT `submit --wait`. That collapses "upload" and "poll for
+    # the result" into one call, so a network blip during the poll fails the
+    # whole step and throws away a submission Apple is already processing —
+    # which is exactly what happened on the first 0.2.3 attempt: the upload
+    # succeeded, the status poll timed out (NSURLErrorDomain -1001), and the
+    # release died holding a perfectly good submission id. Submit once, then
+    # retry the WAIT against that id. Never resubmit on a poll failure.
+    SUBMIT_OUT="$(xcrun notarytool submit "$SUBMIT" "${CREDS[@]}" 2>&1)" || { printf '%s\n' "$SUBMIT_OUT" >&2; exit 1; }
+    printf '%s\n' "$SUBMIT_OUT" >&2
+    SUB_ID="$(printf '%s\n' "$SUBMIT_OUT" | awk '/^ *id: /{print $2; exit}')"
+    [ -n "$SUB_ID" ] || { echo "error: could not parse a submission id from notarytool" >&2; exit 1; }
+
+    WAITED=0
+    for attempt in 1 2 3 4 5; do
+        if xcrun notarytool wait "$SUB_ID" "${CREDS[@]}" --timeout 30m >&2; then
+            WAITED=1
+            break
+        fi
+        echo "notarytool wait failed (attempt $attempt/5) — the submission is still queued at Apple; retrying" >&2
+        sleep 30
+    done
+    [ "$WAITED" = 1 ] || { echo "error: gave up waiting on submission $SUB_ID" >&2; exit 1; }
+
+    # `wait` returning 0 means Apple finished, not that it approved.
+    STATUS="$(xcrun notarytool info "$SUB_ID" "${CREDS[@]}" 2>&1 | awk '/^ *status: /{sub(/^ *status: */,""); print; exit}')"
+    echo "notarization status: ${STATUS:-unknown}" >&2
+    if [ "$STATUS" != "Accepted" ]; then
+        echo "error: notarization was not accepted (status: ${STATUS:-unknown}); log follows" >&2
+        xcrun notarytool log "$SUB_ID" "${CREDS[@]}" >&2 || true
+        exit 1
+    fi
 
     # Staple the ORIGINAL (the ticket belongs on the .app/.dmg, not the zip).
     say "Stapling $(basename "$ARTIFACT")"
