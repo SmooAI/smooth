@@ -43,9 +43,14 @@ const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
-/// harness's composer. ponytail: a fixed delay; scrape-for-idle first if a
-/// harness turns out to boot slower than this.
+/// harness's composer when its manifest cannot scrape an idle composer.
 const PASTE_DELAY: Duration = Duration::from_secs(4);
+/// `prompt_as = "paste"` for a manifest that CAN scrape idle (th-d2a1e4): the
+/// earliest paste, which then waits for the pane to read idle…
+const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
+/// …at most this long (a pane that never reads idle or needs-you gets the
+/// paste anyway, as before). A pending needs-you is never pasted into.
+const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
 
@@ -126,8 +131,11 @@ struct Runtime {
     claims: HashMap<String, (u32, Instant)>,
     /// Session id → when it was last resumed from a usage limit.
     limit_resumed_at: HashMap<String, Instant>,
-    /// Session id → (prompt, when to paste it) for `prompt_as = "paste"`.
-    paste_at: HashMap<String, (String, Instant)>,
+    /// Session id → pending `prompt_as = "paste"` prompt.
+    paste_at: HashMap<String, PendingPaste>,
+    /// Session id → (hash of the last captured pane text, when it last
+    /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
+    pane_seen: HashMap<String, (u64, Instant)>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
     /// Harness session ids adoption already refused (th-c103c1) — a stranger
@@ -137,6 +145,53 @@ struct Runtime {
     /// Watermark for re-broadcasting rows another daemon changed in the
     /// shared `flow.db` (th-c103c1).
     seen_changes_at: Option<DateTime<Utc>>,
+}
+
+/// A prompt waiting to be pasted into a harness's composer.
+struct PendingPaste {
+    prompt: String,
+    /// Not before.
+    at: Instant,
+    /// `Some(deadline)`: wait for a scraped idle until then (th-d2a1e4).
+    /// `None`: paste at `at`, whatever the pane shows.
+    wait_idle_until: Option<Instant>,
+}
+
+impl PendingPaste {
+    /// Is it time, given what the pane reads right now?
+    fn due(&self, now: Instant, pane: PaneState) -> bool {
+        if now < self.at {
+            return false;
+        }
+        match self.wait_idle_until {
+            None => true,
+            // A first-run question or approval owns the input: pasting now
+            // would answer it with the prompt.
+            Some(_) if pane == PaneState::AwaitingApproval => false,
+            Some(_) if pane == PaneState::Idle => true,
+            Some(deadline) => now >= deadline,
+        }
+    }
+}
+
+/// How long the pane text has held still, updating `seen` with this capture.
+/// `None` on the first look (no baseline to measure from).
+fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &str, now: Instant) -> Option<Duration> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    let hash = h.finish();
+    match seen.get_mut(id) {
+        Some((prev, changed)) if *prev == hash => Some(now.saturating_duration_since(*changed)),
+        Some(entry) => {
+            *entry = (hash, now);
+            Some(Duration::ZERO)
+        }
+        None => {
+            seen.insert(id.to_string(), (hash, now));
+            None
+        }
+    }
 }
 
 struct Inner {
@@ -300,7 +355,9 @@ pub fn manifest_for<'r>(registry: &'r Registry, kind: &SessionKind) -> Result<&'
 /// The argv that resumes a dead agent session — the manifest's `[resume]`.
 ///
 /// `resume_session` with a known harness session id renders `resume.argv`
-/// behind the row's `argv[0]`; otherwise (no id yet, or `relaunch_command`,
+/// behind the row's `argv[0]`; `continue_latest` always appends it (no id —
+/// the CLI's own "most recent conversation here") to the original argv when
+/// the prompt was pasted, to `argv[0]` when it was an argument; otherwise (no id yet, or `relaunch_command`,
 /// or no manifest) the original argv is relaunched: a fresh session, not a
 /// continuation.
 #[must_use]
@@ -317,6 +374,22 @@ pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
                 ..Default::default()
             };
             let mut v = vec![bin];
+            v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
+            v
+        }
+        (ResumeMode::ContinueLatest, _) => {
+            let vars = Vars {
+                cwd: Some(&session.worktree),
+                ..Default::default()
+            };
+            // A pasted prompt never reached the argv, so the original command
+            // (model and all) plus the continue flag is the resume; an argv
+            // prompt must not be sent twice, so only the binary is kept.
+            let mut v = if m.launch.prompt_as == PromptAs::Paste && !session.argv.is_empty() {
+                session.argv.clone()
+            } else {
+                vec![session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary())]
+            };
             v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
             v
         }
@@ -863,7 +936,26 @@ impl Engine {
             return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
         }
         if let (true, Some(p)) = (paste, prompt) {
-            self.rt().paste_at.insert(session.id.clone(), (p.to_string(), Instant::now() + PASTE_DELAY));
+            // Wait for the composer only when this manifest can tell us it is up.
+            let can_see_idle = manifest.is_some_and(|m| {
+                let sc = &m.state.scrape;
+                !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
+            });
+            let now = Instant::now();
+            let pending = if can_see_idle {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_MIN_DELAY,
+                    wait_idle_until: Some(now + PASTE_IDLE_WAIT),
+                }
+            } else {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_DELAY,
+                    wait_idle_until: None,
+                }
+            };
+            self.rt().paste_at.insert(session.id.clone(), pending);
         }
         Ok(session)
     }
@@ -1533,12 +1625,6 @@ impl Engine {
         if !s.kind.is_agent() {
             return Ok(());
         }
-        // `prompt_as = "paste"`: the composer should be up by now.
-        let paste = self.rt().paste_at.get(&s.id).filter(|(_, at)| Instant::now() >= *at).map(|(p, _)| p.clone());
-        if let Some(p) = paste {
-            self.rt().paste_at.remove(&s.id);
-            self.send(&s.id, &p)?;
-        }
         // Usage-limit resume due?
         if s.state == SessionState::Limited {
             let due = s.attention.as_ref().and_then(|a| a.resume_at).is_some_and(|at| now >= at);
@@ -1557,7 +1643,17 @@ impl Engine {
         let Some(rules) = self.rules_for(&self.registry(), &s.kind) else {
             return Ok(());
         };
-        let scrape = rules.detect(&pane);
+        // Title / alt-screen / cursor are best-effort: a rule that needs one
+        // simply does not fire without it.
+        let meta = tmux::pane_meta(&sock, t).ok();
+        let quiet_for = observe_quiet(&mut self.rt().pane_seen, &s.id, &pane, Instant::now());
+        let scrape = rules.detect_observation(&crate::scrape::PaneObservation {
+            text: &pane,
+            title: meta.as_ref().map(|m| m.title.as_str()),
+            alternate_on: meta.as_ref().map(|m| m.alternate_on),
+            cursor_y: meta.as_ref().and_then(|m| m.cursor_y),
+            quiet_for,
+        });
         match scrape.state {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
@@ -1570,7 +1666,11 @@ impl Engine {
             }
             PaneState::AwaitingApproval => {
                 if s.state != SessionState::NeedsYou && !self.has_pending(&s.id) {
-                    let mut att = Attention::new("permission").with_detail("approval prompt on screen");
+                    let detail = scrape
+                        .rule
+                        .as_deref()
+                        .map_or_else(|| "approval prompt on screen".to_string(), |r| format!("approval prompt on screen ({r})"));
+                    let mut att = Attention::new("permission").with_detail(detail);
                     att.request_id = Some(format!("scrape-{}", uuid::Uuid::new_v4().simple()));
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
@@ -1578,7 +1678,9 @@ impl Engine {
             PaneState::Working if !hooks_seen && s.state != SessionState::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
             }
-            PaneState::Idle if !hooks_seen && matches!(s.state, SessionState::Starting | SessionState::Working) => {
+            // A scraped needs-you the user answered in the pane itself (no
+            // flow.approve) ends when the pane reads idle again.
+            PaneState::Idle if !hooks_seen && (matches!(s.state, SessionState::Starting | SessionState::Working) || self.scraped_needs_you(s)) => {
                 if s.state == SessionState::Working {
                     self.with_store(|st| st.set_unread(&s.id, true))?;
                 }
@@ -1586,7 +1688,27 @@ impl Engine {
             }
             _ => {}
         }
+        // `prompt_as = "paste"`: paste once the composer is up (after this
+        // tick's state change, so a cleared needs-you is recorded first).
+        let paste = {
+            let rt = self.rt();
+            rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
+        };
+        if let Some(p) = paste {
+            self.rt().paste_at.remove(&s.id);
+            self.send(&s.id, &p)?;
+        }
         Ok(())
+    }
+
+    /// `needs_you` raised by the scraper (not a hook's pending approval).
+    fn scraped_needs_you(&self, s: &Session) -> bool {
+        s.state == SessionState::NeedsYou
+            && s.attention
+                .as_ref()
+                .and_then(|a| a.request_id.as_deref())
+                .is_some_and(|r| r.starts_with("scrape-"))
+            && !self.has_pending(&s.id)
     }
 
     /// Rule 2: unexpected death → schedule a resume with backoff, up to
@@ -2016,7 +2138,7 @@ mod tests {
         // th code: the prompt is pasted, not passed; env carries the flow id + daemon.
         assert_eq!(tail("th-code", Some("fs-1"), Some("m"), Some("p")), vec!["code", "--model", "m"]);
         assert!(argv("th-code", None, None, None)[0].ends_with("th"));
-        assert!(default_argv(&r, &"aider".parse().unwrap(), &Vars::default())
+        assert!(default_argv(&r, &"nosuchtool".parse().unwrap(), &Vars::default())
             .unwrap_err()
             .to_string()
             .contains("unknown harness kind"));
@@ -2041,7 +2163,7 @@ mod tests {
         assert_eq!(resume_argv(&no_id, &r), no_id.argv, "no id yet ⇒ relaunch, not resume");
         let th = row("th-code", Some("fs-1"), &["/x/th", "code"]);
         assert_eq!(resume_argv(&th, &r), th.argv, "relaunch_command ⇒ the original argv");
-        let unknown = row("aider", Some("x"), &["aider"]);
+        let unknown = row("nosuchtool", Some("x"), &["nosuchtool"]);
         assert_eq!(resume_argv(&unknown, &r), unknown.argv, "no manifest ⇒ relaunch");
     }
 
@@ -3003,6 +3125,186 @@ mod tests {
         tmux::kill_server(&sock);
     }
 
+    #[test]
+    fn pending_paste_waits_for_idle_and_never_types_into_a_question() {
+        let now = Instant::now();
+        let gated = PendingPaste {
+            prompt: "p".into(),
+            at: now + Duration::from_secs(1),
+            wait_idle_until: Some(now + Duration::from_secs(90)),
+        };
+        assert!(!gated.due(now, PaneState::Idle), "not before `at`");
+        let later = now + Duration::from_secs(2);
+        assert!(gated.due(later, PaneState::Idle));
+        for st in [PaneState::Working, PaneState::Unknown, PaneState::Errored, PaneState::AwaitingApproval] {
+            assert!(!gated.due(later, st), "{st:?} before the deadline");
+        }
+        let past = now + Duration::from_secs(91);
+        assert!(gated.due(past, PaneState::Unknown), "the deadline pastes anyway");
+        assert!(!gated.due(past, PaneState::AwaitingApproval), "…but never into a pending question");
+        let timed = PendingPaste {
+            prompt: "p".into(),
+            at: now + PASTE_DELAY,
+            wait_idle_until: None,
+        };
+        assert!(!timed.due(now, PaneState::Idle));
+        assert!(
+            timed.due(now + PASTE_DELAY, PaneState::AwaitingApproval),
+            "an ungated manifest keeps the old timer"
+        );
+    }
+
+    #[test]
+    fn observe_quiet_measures_since_the_last_change() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        assert_eq!(observe_quiet(&mut seen, "a", "x", t0), None, "first look is unknown");
+        assert_eq!(observe_quiet(&mut seen, "a", "x", t0 + Duration::from_secs(2)), Some(Duration::from_secs(2)));
+        assert_eq!(
+            observe_quiet(&mut seen, "a", "y", t0 + Duration::from_secs(3)),
+            Some(Duration::ZERO),
+            "a change resets"
+        );
+        assert_eq!(observe_quiet(&mut seen, "a", "y", t0 + Duration::from_secs(5)), Some(Duration::from_secs(2)));
+        assert_eq!(observe_quiet(&mut seen, "b", "y", t0), None, "per session");
+        // A clock that runs backwards (it cannot, but) saturates instead of panicking.
+        assert_eq!(observe_quiet(&mut seen, "a", "y", t0), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn continue_latest_resumes_without_a_session_id() {
+        let r = reg();
+        let mut crush = blank();
+        crush.kind = "crush".parse().unwrap();
+        crush.argv = vec!["/x/crush".into()];
+        assert_eq!(resume_argv(&crush, &r), vec!["/x/crush", "--continue"]);
+        let mut aider = blank();
+        aider.kind = "aider".parse().unwrap();
+        aider.argv = vec!["/x/aider".into(), "--model".into(), "m".into()];
+        assert_eq!(
+            resume_argv(&aider, &r),
+            vec!["/x/aider", "--model", "m", "--restore-chat-history"],
+            "a pasted-prompt harness keeps its launch flags"
+        );
+        // goose pre-assigns its session name, so it resumes by id.
+        let mut goose = blank();
+        goose.kind = "goose".parse().unwrap();
+        goose.agent_session_id = Some("fs-9".into());
+        goose.argv = vec!["/x/goose".into(), "run".into()];
+        assert_eq!(resume_argv(&goose, &r), vec!["/x/goose", "session", "--resume", "--name", "fs-9"]);
+    }
+
+    /// th-e77603 / th-d2a1e4, live against a fake scrape-only CLI: the
+    /// prompt is NOT pasted into a first-run question; the question reads
+    /// needs_you; answering it in the pane clears needs_you once the
+    /// composer is idle; then the prompt is pasted, the spinner reads
+    /// working and the composer idle again. Skips when tmux is missing.
+    #[test]
+    fn live_scraped_session_waits_to_paste_and_clears_needs_you() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-scrape-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("fake-scraped-agent.sh");
+        std::fs::write(
+            &script,
+            "printf 'Add stuff to .gitignore? (Y)es/(N)o [Yes]: '; read a; echo \"ANSWER=[$a]\"\n\
+             while :; do printf '> '; read p; echo \"PROMPT=[$p]\"; i=0; \
+             while [ $i -lt 10 ]; do printf '\\r\\342\\240\\213 thinking %s' $i; sleep 0.3; i=$((i+1)); done; \
+             printf '\\rdone            \\n'; done\n",
+        )
+        .unwrap();
+        let manifests = tmp.path().join("home/.smooth/harnesses");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("fakescrape.toml"),
+            format!(
+                r#"name = "fakescrape"
+[binary]
+names = ["sh"]
+[launch]
+argv = ["{script}"]
+prompt_as = "paste"
+[state]
+source = "scrape"
+[[state.scrape.rules]]
+name = "question"
+state = "needs_you"
+match = ['\(y\)es/\(n\)o.*:\s*$']
+where = "last_line"
+[[state.scrape.rules]]
+name = "spinner"
+state = "working"
+spinner = true
+where = "last_line"
+[[state.scrape.rules]]
+name = "composer"
+state = "idle"
+match = ['^>\s*$']
+where = "last_line"
+quiet_ms = 300
+"#,
+                script = script.display()
+            ),
+        )
+        .unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .new_session(NewRequest {
+                kind: "fakescrape".parse().unwrap(),
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                prompt: Some("hello-scrape".into()),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        let pane = || match e.snapshot(&s.id).unwrap() {
+            ServerFrame::Screen { text, .. } => text,
+            _ => String::new(),
+        };
+        let wait_for = |want: SessionState, secs: u64| {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            loop {
+                e.supervise_tick().unwrap();
+                let got = e.get(&s.id).unwrap().unwrap();
+                if got.state == want {
+                    return got;
+                }
+                assert!(Instant::now() < deadline, "never reached {want:?}; state {:?}; pane:\n{}", got.state, pane());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        let asking = wait_for(SessionState::NeedsYou, 15);
+        assert_eq!(
+            asking.attention.as_ref().unwrap().detail.as_deref(),
+            Some("approval prompt on screen (question)")
+        );
+        // Well past PASTE_MIN_DELAY: the prompt must still be waiting.
+        let hold = Instant::now() + Duration::from_millis(2500);
+        while Instant::now() < hold {
+            e.supervise_tick().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!pane().contains("hello-scrape"), "pasted into the question:\n{}", pane());
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::NeedsYou);
+        // The user answers in the pane.
+        e.send_key(&s.id, "Enter").unwrap();
+        // Idle clears needs_you; the paste fires on that idle; the turn runs.
+        let _ = wait_for(SessionState::Working, 15);
+        assert!(pane().contains("ANSWER=[]") && pane().contains("PROMPT=[hello-scrape]"), "{}", pane());
+        let done = wait_for(SessionState::Idle, 20);
+        assert!(done.unread, "a finished scraped turn marks the session unread");
+        assert!(e
+            .events(&s.id)
+            .unwrap()
+            .iter()
+            .any(|ev| ev.kind == EventKind::User && ev.text == "hello-scrape"));
+        let _ = e.kill(&s.id, false);
+        tmux::kill_server(&sock);
+    }
+
     /// th-d33afa: hooks and state changes feed the per-session event stream
     /// (the phone's Chat tab), buffered in the store for replay on attach.
     #[test]
@@ -3151,23 +3453,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let names = |v: &[HarnessInfo]| v.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&e.harnesses(true).unwrap()), ["claude", "opencode", "codex", "th-code"]);
+        let builtin: Vec<String> = crate::harness::BUILTIN.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert_eq!(names(&e.harnesses(true).unwrap()), builtin);
+        // `th-code` first, then the rest in registry order, minus `hidden`.
+        let reordered = |hidden: &[&str]| {
+            std::iter::once("th-code".to_string())
+                .chain(builtin.iter().filter(|n| *n != "th-code" && !hidden.contains(&n.as_str())).cloned())
+                .collect::<Vec<_>>()
+        };
         let mut rx = e.subscribe();
         let all = e.set_harness_prefs(Some(vec!["th-code".into()]), Some(vec!["codex".into()])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
-        assert!(all[3].hidden);
+        assert_eq!(names(&all), reordered(&[]));
+        assert!(all.iter().find(|h| h.name == "codex").unwrap().hidden);
         match rx.try_recv().unwrap() {
-            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         // Visible list + hello omit the hidden one; a partial PUT keeps the other half.
-        assert_eq!(names(&e.harnesses(false).unwrap()), ["th-code", "claude", "opencode"]);
+        assert_eq!(names(&e.harnesses(false).unwrap()), reordered(&["codex"]));
         match e.hello().unwrap() {
-            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         let all = e.set_harness_prefs(None, Some(vec![])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(names(&all), reordered(&[]));
         assert!(all.iter().all(|h| !h.hidden));
         // Persisted: a fresh engine on the same db sees the order.
         let e2 = engine(tmp.path());
@@ -3198,13 +3507,13 @@ mod tests {
         let e = engine(tmp.path());
         let err = e
             .new_session(NewRequest {
-                kind: "aider".parse().unwrap(),
+                kind: "nosuchtool".parse().unwrap(),
                 worktree: Some(tmp.path().to_string_lossy().into_owned()),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown harness kind `aider`"), "{err}");
+        assert!(err.contains("unknown harness kind `nosuchtool`"), "{err}");
         assert!(e.list().unwrap().is_empty());
     }
 }

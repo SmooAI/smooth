@@ -208,6 +208,37 @@ pub fn pane_pid(socket: &str, session: &str) -> Result<u32> {
     s.trim().parse::<u32>().with_context(|| format!("pane_pid `{s}`"))
 }
 
+/// Terminal state a scrape rule may read (th-e77603): the OSC 0/2 title, the
+/// alternate screen and the cursor row.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaneMeta {
+    pub title: String,
+    pub alternate_on: bool,
+    pub cursor_y: Option<usize>,
+}
+
+/// The format [`pane_meta`] asks for. The title goes LAST so a `|` inside it
+/// survives the split; no TAB (tmux turns one into `_` without a UTF-8 locale).
+const META_FORMAT: &str = "#{alternate_on}|#{cursor_y}|#{pane_title}";
+
+/// Parse a [`META_FORMAT`] line.
+#[must_use]
+pub fn parse_pane_meta(line: &str) -> PaneMeta {
+    let mut parts = line.splitn(3, '|');
+    let alternate_on = parts.next().is_some_and(|a| a.trim() == "1");
+    let cursor_y = parts.next().and_then(|c| c.trim().parse().ok());
+    let title = parts.next().unwrap_or("").to_string();
+    PaneMeta { title, alternate_on, cursor_y }
+}
+
+/// One `display-message` for [`PaneMeta`].
+///
+/// # Errors
+/// When the session is gone or tmux fails.
+pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
+    Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
+}
+
 /// `Some(exit_status)` once the pane's process has exited (remain-on-exit
 /// keeps the pane), `None` while it runs.
 ///
@@ -322,6 +353,27 @@ pub(crate) fn tests_env_lock() -> std::sync::MutexGuard<'static, ()> {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_meta_parses_and_keeps_pipes_in_the_title() {
+        assert_eq!(
+            parse_pane_meta("1|38|crush /tmp/a|b"),
+            PaneMeta {
+                title: "crush /tmp/a|b".into(),
+                alternate_on: true,
+                cursor_y: Some(38)
+            }
+        );
+        assert_eq!(
+            parse_pane_meta("0||"),
+            PaneMeta {
+                title: String::new(),
+                alternate_on: false,
+                cursor_y: None
+            }
+        );
+        assert_eq!(parse_pane_meta(""), PaneMeta::default());
+    }
 
     #[test]
     fn quoting_and_exec_command() {

@@ -1,0 +1,50 @@
+# harness: crush
+# expect: idle
+# rule: crush-ready
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 34
+# quiet_ms: 5000
+# source: live crush 0.94.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: `> Ready for instructions`, no busy footer
+---
+
+  ╱╱╱╱╱╱  Charm™                     v0.94.2 ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ ▄▀▀▀▀ █▀▀▀▄ █         █ ▄▀▀▀▀ █   █ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ █     █▀▀▀▄ █         █ ▀▀▀▀█ █▀▀▀█ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱  ▀▀▀▀ ▀   ▀  ▀▀▀▀▀▀▀▀▀  ▀▀▀▀  ▀   ▀ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+  /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-
+  /scrubbed-scratch-path/scrubbed-scrat
+
+  ◇ Mock Model via mock
+
+  LSPs                           MCPs                           Skills
+
+  None                           None                           ● crush-config
+                                                                ● crush-hooks
+                                                                ● jq
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   > Ready for instructions
+ :::
+ :::
+
+ / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+

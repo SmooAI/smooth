@@ -1,0 +1,73 @@
+# Cline CLI — scraped (th-e77603). Cline 3.x can run hooks (`--hooks-dir`,
+# `cline hook`); until SmoothFlow wires them this manifest learns state from
+# the pane. Rules were written against panes captured live from cline 3.0.61
+# (tests/fixtures/scrape/cline).
+#
+# The hard case: cline's composer ("❯ Ask anything...") stays on screen, looking
+# idle, for the WHOLE turn. The only live signal is the braille spinner on the
+# line above it ("⠸ Thinking... (esc to cancel)", then "⠋ <streamed text>").
+name = "cline"
+display_name = "Cline"
+
+[binary]
+names = ["cline"]
+prefer_paths = [".local/bin/cline"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# The positional prompt defaults to auto-approve; the TUI is opened explicitly
+# and approvals are left to the user (the needs_you rule surfaces them).
+argv = ["--tui", "--auto-approve", "false", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+# `--id <session>` needs an id the engine cannot learn from the pane.
+argv = []
+mode = "relaunch_command"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+usage_limit = ["exceeded your current quota", "usage limit reached", "out of credits"]
+
+# A tool approval box ("Cline needs permission / Approve tool call? … [y]
+# Approve [n] Deny"). It is drawn while the spinner above still says
+# Thinking, so it must come first.
+[[state.scrape.rules]]
+name = "cline-approval"
+state = "needs_you"
+match = ["cline needs permission", "approve tool call\\?", "^\\s*\\[y\\] approve"]
+lines = 20
+
+# Modal dialogs: the ClinePass upsell ("Press Enter to open, any other key to
+# close") and the sign-in / provider screens of a fresh install.
+[[state.scrape.rules]]
+name = "cline-dialog"
+state = "needs_you"
+match = ["press enter to open, any other key to close", "connect a model provider to get started", "^\\s*choose a provider\\s*$"]
+where = "pane"
+
+# A braille spinner at the start of a line above the composer.
+[[state.scrape.rules]]
+name = "cline-spinner"
+state = "working"
+match = ["^\\s*[\\x{2801}-\\x{28FF}]\\s", "\\(esc to cancel\\)"]
+lines = 12
+
+# The composer with no spinner anywhere in the tail.
+[[state.scrape.rules]]
+name = "cline-composer"
+state = "idle"
+match = ["^\\s*❯\\s+(ask anything|what can i do for you)"]
+lines = 12
+spinner = false
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000

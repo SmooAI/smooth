@@ -1,0 +1,50 @@
+# harness: cline
+# expect: working
+# rule: cline-spinner
+# title: > use a tool again
+# alternate_on: true
+# cursor_y: 35
+# quiet_ms: 0
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: after denying a tool the model answers; spinner prefixes the text
+---
+
+ ❯ hello cline
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the
+   terminal stays busy for a while.
+
+ ❯ use a tool please
+
+ x read_files({"command":"mkdir -p mockdir && touch mockdir/x.txt","des...)
+      Error: ✖ Invalid input
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the
+   terminal stays busy for a while.
+
+ ❯ use a tool again
+
+ x run_commands(mkdir -p mockdir && touch mockdir/x.txt)
+      Error: This tool call was rejected by the user and not executed. -- NOT a tool or system failure. Clarify with
+   user before proceeding.
+
+ ⠧ Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Ask anything...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ mock-model (10) $0.00                                                                               ○ Plan ● Act (Tab)
+ cline (main)
+ Auto-approve all disabled (Shift+Tab)

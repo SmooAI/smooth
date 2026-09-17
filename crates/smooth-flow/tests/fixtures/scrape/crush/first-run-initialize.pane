@@ -1,0 +1,49 @@
+# harness: crush
+# expect: needs_you
+# rule: crush-init
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 38
+# source: live crush 0.94.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: "Would you like to initialize this project?" Yep! / Nope
+---
+
+  ╱╱╱╱╱╱  Charm™                     v0.94.2 ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ ▄▀▀▀▀ █▀▀▀▄ █         █ ▄▀▀▀▀ █   █ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱ █     █▀▀▀▄ █         █ ▀▀▀▀█ █▀▀▀█ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ╱╱╱╱╱╱  ▀▀▀▀ ▀   ▀  ▀▀▀▀▀▀▀▀▀  ▀▀▀▀  ▀   ▀ ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Would you like to initialize this project?
+
+    /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed
+  /scrubbed-scratch-path/scrubbed
+  /scrubbed-scratch-path/scrubbed-scrat
+
+  When I initialize your codebase I examine the project and
+  put the result into an AGENTS.md file which serves as
+  general context.
+
+  You can also initialize anytime via ctrl+p.
+
+  Would you like to initialize now?
+
+    Yep!     Nope
+
+ ctrl+c quit • ctrl+c quit • ctrl+g more
+

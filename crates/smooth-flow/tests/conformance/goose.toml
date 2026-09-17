@@ -1,0 +1,136 @@
+# Screens for the built-in `goose` manifest (th-e77603), cut from the live
+# captures in tests/fixtures/scrape/goose/ (real goose panes, scratch path scrubbed):
+# boot = the top of idle-composer.pane, working = thinking-spinner-frame.pane, idle = idle-composer.pane,
+# needs_you = permission-tool-call.pane.
+[screens]
+boot = '''
+
+Help improve goose
+
+Would you like to help improve goose by sharing anonymous usage data?
+This helps us understand how goose is used and identify areas for improvement.
+
+What we collect:
+  • Operating system, version, and architecture
+  • goose version and install method
+  • Provider and model used
+  • Extensions and tool usage counts (names only)
+  • Session metrics (duration, interaction count, token usage)
+  • Error types (e.g., "rate_limit", "auth" - no details)
+
+We never collect your conversations, code, tool arguments, error messages,
+or any personal data. You can change this anytime with 'goose configure'.
+
+◇  Share anonymous usage data to help improve goose?
+│  No
+│
+●  Telemetry disabled. You can enable it anytime in settings.
+│
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_1 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> Enter to send · Ctrl+J newline
+'''
+working = '''
+
+Help improve goose
+
+Would you like to help improve goose by sharing anonymous usage data?
+This helps us understand how goose is used and identify areas for improvement.
+
+What we collect:
+  • Operating system, version, and architecture
+  • goose version and install method
+  • Provider and model used
+  • Extensions and tool usage counts (names only)
+  • Session metrics (duration, interaction count, token usage)
+  • Error types (e.g., "rate_limit", "auth" - no details)
+
+We never collect your conversations, code, tool arguments, error messages,
+or any personal data. You can change this anytime with 'goose configure'.
+
+◇  Share anonymous usage data to help improve goose?
+│  No
+│
+●  Telemetry disabled. You can enable it anytime in settings.
+│
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_1 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> hello goose
+  ✓ extensions ready
+
+◒  Gliding through branches...  (Ctrl+C to interrupt)
+'''
+idle = '''
+
+Help improve goose
+
+Would you like to help improve goose by sharing anonymous usage data?
+This helps us understand how goose is used and identify areas for improvement.
+
+What we collect:
+  • Operating system, version, and architecture
+  • goose version and install method
+  • Provider and model used
+  • Extensions and tool usage counts (names only)
+  • Session metrics (duration, interaction count, token usage)
+  • Error types (e.g., "rate_limit", "auth" - no details)
+
+We never collect your conversations, code, tool arguments, error messages,
+or any personal data. You can change this anytime with 'goose configure'.
+
+◇  Share anonymous usage data to help improve goose?
+│  No
+│
+●  Telemetry disabled. You can enable it anytime in settings.
+│
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_1 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> Enter to send · Ctrl+J newline
+'''
+needs_you = '''
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_2 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> use a tool please
+  ✓ extensions ready
+
+
+  ────────────────────────────────────────
+  ▸ analyze
+    command: echo mock-tool-call
+
+
+  Tool approval request
+    {
+      "tool_name": "analyze",
+      "arguments": {
+        "command": "echo mock-tool-call"
+      }
+    }
+
+◆  Goose would like to call the above tool, do you allow?
+│  ● Allow (Allow the tool call once)
+│  ○ Always Allow
+│  ○ Deny
+│  ○ Cancel
+└
+'''

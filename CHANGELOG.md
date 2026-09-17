@@ -1,5 +1,21 @@
 # @smooai/smooth
 
+## 0.50.0
+
+### Minor Changes
+
+- 82930b5: SmoothFlow learns the state of coding CLIs that have no hooks (th-e77603). Harness manifests gain ordered `[[state.scrape.rules]]`: each rule maps a regex over a chosen part of the pane (`tail`, `pane`, `last_line`, `cursor_line`, `title`) plus optional `all` / `unless` / `unless_below`, output quiet time, recent change, alternate screen and spinner signals to working, idle, needs-you, usage-limit or error, and the first rule that fires decides. Four new built-ins use them — `aider`, `goose`, `crush` and `cline` — each written against real captured panes and driven live through the engine. `prompt_as = "paste"` now waits for the pane to read idle instead of a fixed 4 s, so a first-run question no longer swallows the prompt (th-d2a1e4). A needs-you answered in the pane clears on the next idle, and `resume.mode = "continue_latest"` resumes CLIs that can only continue their most recent conversation.
+
+## 0.49.0
+
+### Minor Changes
+
+- 62b77a4: SmoothFlow zero-friction sessions (th-c103c1): the New Session dialog no longer demands a pearl id. A new `smooth_flow::infer` derives worktree, project (the main checkout, even inside a linked worktree), branch, pearl id, Jira key and title from a directory, served at `GET /api/flow/infer` and `th flow infer`; `flow.new` runs the same inference, so any client gets the context without sending it, and `th flow new` with no arguments starts a session in the current directory.
+
+  Plain harness sessions can now be adopted into the fleet: a `claude` or `codex` started in an ordinary terminal joins it on its first hook, with its pearl/branch/worktree attached. Off by default (`th flow adopt on`), guarded on a known harness, a git worktree and a project the fleet already works in, and explicitly not engine-owned (no attach, no kill, no resume).
+
+  Harness hooks now discover the flow engine through `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. `flow.addr` is claimed by whichever daemon hosts a live flow engine, so hooks reach the SmoothFlow app's child daemon, which deliberately does not write `daemon.addr`.
+
 ## 0.48.8
 
 ### Patch Changes

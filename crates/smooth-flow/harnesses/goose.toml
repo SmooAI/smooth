@@ -1,0 +1,73 @@
+# goose (Block) — scrape-only (th-e77603): goose has recipes and MCP
+# extensions but no lifecycle hooks a supervisor can receive. Rules were
+# written against panes captured live from goose 1.50.0
+# (tests/fixtures/scrape/goose).
+name = "goose"
+display_name = "goose"
+
+[binary]
+names = ["goose"]
+# download_cli.sh installs to ~/.local/bin; Homebrew is on PATH.
+prefer_paths = [".local/bin/goose"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# `run --interactive` takes the first message and stays in the session;
+# `--name` names the session with the engine's id so resume can find it.
+argv = ["run", "--interactive", "--name", "{session_id}", "--model", "{model}", "--text", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = ["session", "--resume", "--name", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+usage_limit = ["exceeded your current quota", "usage limit reached", "rate limit exceeded.*try again"]
+
+# goose's prompts are cliclack: the ACTIVE one is `◆  <question>?` (an
+# answered one turns into `◇`). Tool approvals ("Goose would like to call the
+# above tool, do you allow?"), the first-run telemetry question and
+# `goose configure`'s provider picker all look like this.
+[[state.scrape.rules]]
+name = "goose-prompt"
+state = "needs_you"
+match = ["^◆\\s+.*\\S"]
+lines = 10
+
+# The spinner line: "◐  Gliding through branches...  (Ctrl+C to interrupt)".
+[[state.scrape.rules]]
+name = "goose-spinner"
+state = "working"
+match = ["\\(ctrl\\+c to interrupt\\)"]
+lines = 4
+
+# The empty composer: "> Enter to send · Ctrl+J newline".
+[[state.scrape.rules]]
+name = "goose-composer"
+state = "idle"
+match = ["^>\\s+enter to send"]
+where = "last_line"
+
+# Streaming prose has no marker; the text changing under a cursor that is
+# not on the composer is the model.
+[[state.scrape.rules]]
+name = "goose-streaming"
+state = "working"
+where = "cursor_line"
+changed_within_ms = 5000
+unless = ["^>\\s"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+mcp_config = "~/.config/goose/config.yaml"

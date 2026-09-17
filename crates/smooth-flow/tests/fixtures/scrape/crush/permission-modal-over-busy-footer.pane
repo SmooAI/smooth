@@ -1,0 +1,50 @@
+# harness: crush
+# expect: needs_you
+# rule: crush-permission
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 28
+# quiet_ms: 3000
+# source: live crush 0.94.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: the Permission Required modal is drawn over a footer that still reads `esc cancel` — needs_you must win
+---
+
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+                                                                                        ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      Charm™               v0.94.2
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ▄▀▀▀▀ █▀▀▀▄ █   █ ▄▀▀▀▀ █   █
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     █     █▀▀▀▄ █   █ ▀▀▀▀█ █▀▀▀█
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.      ▀▀▀▀ ▀   ▀  ▀▀▀  ▀▀▀▀  ▀   ▀
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.     ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+                                                                                        Sure. Here is a deliberately
+   ◇ Mock Model via mock in 20s ─────────────────────────────────────────────────────   slow answer so the terminal
+
+ │ use a tool again     ╭──────────────────────────────────────────────────────────────────────╮/scrubbed-scratch
+                        │  Permission Required ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱  │/scrubbed-scratch-pa
+   ✓ Bash echo mock-tool│                                                                      │/scrubbed-scratch-
+                        │ Tool bash                                                            │
+      mock-tool-call    │ Path /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed           │/scrubbed-scratch-pat
+                        │     /scrubbed-scratch-path/scrubbed                                  │
+   Sure. Here is a delib│     /scrubbed-scratch-path/scrubbed-scrat                            │
+   Sure. Here is a delib│ Desc print a marker                                                  │odel via mock
+   Sure. Here is a delib│                                                                      │) $0.00
+   Sure. Here is a delib│                                                                      │
+   Sure. Here is a delib│   mkdir -p mockdir && touch mockdir/x.txt                            │ Files ──────────────
+   Sure. Here is a delib│                                                                      │
+                        │                                                                      │
+   ◇ Mock Model via mock│                             Allow      Allow for Session      Deny   │
+                        │                                                                      │─────────────────────
+ │ use a tool third     │ ←/→ choose • enter confirm • esc exit                                │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+   ● Bash mkdir -p mockdir && touch mockdir/x.txt
+                                                                                        MCPs ────────────────────────
+   Requesting permission...
+                                                                                        None
+
+   > Processing...                                                                      Skills ──────────────────────
+ :::
+ :::                                                                                    ● crush-config
+                                                                                        ● crush-hooks
+ esc cancel • tab focus chat • / or ctrl+p commands • ctrl+l models • ctrl+j newline • ctrl+c quit • ctrl+g more
+
