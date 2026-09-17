@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session.addItem(item(.deny))
         session.addItem(item(.killResume))
         session.addItem(item(.kill))
+        session.addItem(item(.closeOut))
         session.addItem(.separator())
         for a in FlowAction.allCases where FlowAction.focusSessionIndex(a) != nil {
             let it = item(a)
@@ -241,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .deny: if let s = app.store.focused { app.approve(s, .deny) }
         case .killResume: if let s = app.store.focused { app.kill(s, resume: true) }
         case .kill: if let s = app.store.focused { app.kill(s, resume: false) }
+        case .closeOut: if let s = app.store.focused { app.showCloseOut(s.id) }
         case .inbox: app.toggleInbox()
         case .viewTerminal: app.showTab(.terminal)
         case .viewDiff: app.showTab(.diff)

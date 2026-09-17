@@ -155,9 +155,9 @@ final class FlowStoreTests: XCTestCase {
         XCTAssertEqual(store.apply(.sessionRemoved(id: "a")), [])
         XCTAssertEqual(store.finished, [])
         XCTAssertEqual(store.order, ["b"])
-        XCTAssertTrue(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p-wt")))
-        XCTAssertFalse(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p")), "the main checkout is never offered for removal")
-        XCTAssertFalse(CloseSessionSheet.hasOwnWorktree(Session(id: "x", project: "", worktree: "")))
+        XCTAssertTrue(SessionClose.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p-wt")))
+        XCTAssertFalse(SessionClose.hasOwnWorktree(Session(id: "x", project: "/p", worktree: "/p")), "the main checkout is never offered for removal")
+        XCTAssertFalse(SessionClose.hasOwnWorktree(Session(id: "x", project: "", worktree: "")))
     }
 }
 

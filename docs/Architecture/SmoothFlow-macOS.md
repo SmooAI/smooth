@@ -362,20 +362,51 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
 
-### Closing a finished session (th-883ce9)
+### Closing a session out (th-883ce9, th-fe75ca)
 
-The finished card's **Close…** is the shell side of `flow.close`
-([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
-sheet names each action with its target — _close pearl `<id>`_ (on when the
-row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
-when the row lives in its own worktree; the main checkout is never offered) —
-and states the rule up front: a dirty or unmerged worktree is refused with
-nothing touched. The frame carries a client `seq`; the engine echoes it as
-`flow.error.ref`, so a refusal lands on **that card** in the engine's words
-with **Force close** (resends with `force`) and **Keep it**. Success is just
-`flow.session.removed`: the card and the sidebar row go. The mock
-(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
-covers both paths without a real worktree.
+Close-out is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)), reachable from three places:
+
+| Where                                      | Applies to                            |
+| ------------------------------------------ | ------------------------------------- |
+| Sidebar row ▸ right-click ▸ **Close Out…** | any session, running included         |
+| **Session ▸ Close Out…** (⌘⌥W by default)  | the focused session, running included |
+| Inbox ▸ finished card ▸ **Close…**         | a finished session (where it started) |
+
+The menu item is `FlowAction.closeOut`, so its chord is rebindable in
+Settings ▸ Keyboard like every other action (th-27baa4).
+
+Until th-fe75ca only the last one existed, so the answer to "close this
+session" was _finish it first_ — which is not an answer for the sessions you
+actually want to stop. A live row closes the same way: the engine kills it
+before anything else, and the sheet says so before you confirm
+(_"still running — closing kills it first"_), with the button reading **Kill
+and close** instead of **Close session**.
+
+It never fires blind. `SessionClose.decide(session:handoff:)` — a pure function
+over the session and its `Handoff` packet, unit-tested apart from any AppKit
+presentation — produces every toggle, default and line of copy the sheet shows,
+each action named with its target AND with what it destroys: _close pearl
+`<id>` · `<pearl title>`_ (on when the row has a pearl), _remove worktree
+`<path>` / and delete branch `<branch>`_ (on when the row lives in its own
+worktree — the main checkout, and a projectless shell row, are never offered),
+plus the live dirty-file count when there is one. The rule is stated up front:
+a dirty or unmerged worktree is refused with nothing touched.
+
+**Merged state is deliberately not precomputed.** The engine reveals it at the
+only moment it matters, by refusing the close; a flag cached in the shell would
+be a second source of truth that can disagree at the instant of the close. For
+the same reason force is never a checkbox you can arm beforehand — it appears
+only after the refusal has been read.
+
+The frame carries a client `seq`; the engine echoes it as `flow.error.ref`, so
+a refusal lands on **that card** in the engine's words with **Force close**
+(resends with `force`) and **Keep it**. A close started where there is no card
+— the sidebar menu, the Session menu — gets the same offer as its own sheet
+instead of vanishing into the rail. Success is just `flow.session.removed`: the
+card and the sidebar row go. The mock (`mock/server.mjs`) refuses `fs-3034dddd`
+until forced, so the XCUITests cover the refusal from both entry points without
+a real worktree.
 
 ## Keyboard
 
@@ -393,6 +424,7 @@ the file format and the two default changes th-27baa4 made are documented in
 | ⌘1…9      | focus session N                                                |
 | ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request                     |
 | ⌘⌥R / ⌘⌥K | kill & resume / kill                                           |
+| ⌘⌥W       | close out the focused session                                  |
 | ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab                            |
 | ⌘T / ⌘⇧T  | new tab / new shell here                                       |
 | ⌘W / ⌘⇧W  | close pane (tab, then window, collapse when empty) / close tab |
@@ -556,8 +588,10 @@ Launch contract, identifiers and how to run:
 - th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
 remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
   `th flow close`) closes the pearl, removes the merged worktree + branch and
-  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
-  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The sidebar
+  row's context menu, **Session ▸ Close Out…** and the finished card's
+  **Close…** all send it (confirm sheet + force on refusal, below; th-fe75ca
+  added the first two and the live-session path). "Merge"
   still opens the PR: merging is a review act, not something the shell does
   blind.
 - th-6198bf — closed: AppleScript / `NSRunningApplication.terminate()` quit

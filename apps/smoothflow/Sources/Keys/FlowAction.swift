@@ -16,6 +16,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case deny
     case killResume
     case kill
+    case closeOut
     case focusSession1, focusSession2, focusSession3, focusSession4, focusSession5
     case focusSession6, focusSession7, focusSession8, focusSession9
 
@@ -60,7 +61,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
 
     var category: Category {
         switch self {
-        case .newSession, .newShell, .fanOut, .steerFocused, .steerAll, .allow, .deny, .killResume, .kill,
+        case .newSession, .newShell, .fanOut, .steerFocused, .steerAll, .allow, .deny, .killResume, .kill, .closeOut,
              .focusSession1, .focusSession2, .focusSession3, .focusSession4, .focusSession5,
              .focusSession6, .focusSession7, .focusSession8, .focusSession9:
             .session
@@ -88,6 +89,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .deny: return "Deny"
         case .killResume: return "Kill & Resume"
         case .kill: return "Kill"
+        case .closeOut: return "Close Out…"
         case .newTab: return "New Tab"
         case .closePane: return "Close Pane"
         case .closeTab: return "Close Tab"
@@ -154,6 +156,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .deny: return KeyChord("n", command: true, option: true)
         case .killResume: return KeyChord("r", command: true, option: true)
         case .kill: return KeyChord("k", command: true, option: true)
+        case .closeOut: return KeyChord("w", command: true, option: true)
 
         case .newTab: return KeyChord("t", command: true)
         case .closePane: return KeyChord("w", command: true)
@@ -195,6 +198,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .newTab: return "Another surface layout over the same fleet — tabs hold panes, not sessions."
         case .closePane: return "Closes the focused pane; the tab, then the window, collapse when they empty. Asks first when a live session is on screen."
         case .closeTab: return "Closes the whole tab, splits and all."
+        case .closeOut: return "Ends the session for good: closes its pearl, removes the merged worktree and branch, drops the row. A running session is killed first."
         case .steerAll: return "Sends the steer bar's text to every working session."
         case .zoomPane: return "The focused pane fills the tab; again restores the layout."
         case .equalizePanes: return "Resets every divider in the focused tab to an even split."
