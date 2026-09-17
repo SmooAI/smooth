@@ -49,7 +49,9 @@ final class LayoutUITests: FlowUITestCase {
         // so this is the last view of a live agent — the case that must ask.
         waitForState("fs-3041bbbb") { $0.hasPrefix("limit") }
         app.staticTexts["sidebar.title.fs-3041bbbb"].click()
-        XCTAssertTrue(waitUntil { self.paneHeaders.contains { $0.contains("3041bb") } }, "\(self.paneHeaders)")
+        // The header names the session by its PEARL id, not its flow id — so
+        // the fixture's `fs-3041bbbb` reads as "SMOODEV-3041 · claude · limit".
+        XCTAssertTrue(waitUntil { self.paneHeaders.contains { $0.contains("SMOODEV-3041") } }, "\(self.paneHeaders)")
         app.typeKey("w", modifierFlags: .command)
         let cancel = app.windows["SmoothFlow"].descendants(matching: .any)["pane.close.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 10), "the confirmation sheet; tree: \(dump())")
