@@ -483,6 +483,23 @@ shipping a new public key, which installed apps will refuse — so an installed
    Never hand-install a release build — hand-installing is what skips the
    checks, and an unstapled build passes a casual look.
 
+    **Why the sweep enumerates from `lsregister -dump` instead of unregistering
+    one path.** A debug build registers _three_ LaunchServices entries, not one:
+    the outer `SmoothFlow.app`, the Sparkle `Updater.app` nested inside it, and
+    `SmoothFlowUITests-Runner.app`. `lsregister -u` on the outer bundle does not
+    take the other two with it, and **the rows outlive the files** — so deleting
+    `build/` leaves registrations pointing at nothing, and the machine looks
+    clean while `open -a SmoothFlow` can still resolve to a stale row. The sweep
+    therefore matches every registered path containing `SmoothFlow`, unregisters
+    each one outside `/Applications`, and re-runs `lsregister -f` on the official
+    install. Do not simplify it back to a single `-u` on the top-level app.
+
+    The exclusion is scoped to **paths under `/Applications/SmoothFlow.app`**,
+    not to the name `Updater.app`: the official install has its own nested
+    updater and it is legitimate. Unregistering that would break Sparkle on a
+    machine that was healthy, so the matcher is pinned in both directions by
+    `install-release.test.sh`.
+
 What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
 
 - **The appcast carries only the version just published.** `generate_appcast`
