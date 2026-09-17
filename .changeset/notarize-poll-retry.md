@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+Notarization no longer throws away a good submission when the status poll blips. `notarize-and-staple.sh` used `notarytool submit --wait`, which collapses "upload the artifact" and "poll until Apple finishes" into one call — so a transient network error during the poll fails the release while Apple is still happily processing the submission. That is exactly how the first SmoothFlow 0.2.3 publish died: the upload succeeded, the status request timed out (`NSURLErrorDomain -1001`), and a ~20-minute signed build was discarded holding a valid submission id. It now submits once, captures the id, and retries the **wait** against that id rather than resubmitting, then checks `notarytool info` for `Accepted` — because `wait` returning successfully means Apple finished, not that it approved — and dumps the notary log on rejection. This matters more since th-9c3f4e: stapling the app as well as the DMG means two notarization round-trips per release, so twice the exposure to this flake.
