@@ -451,7 +451,22 @@ shipping a new public key, which installed apps will refuse — so an installed
    `SmoothFlow-<v>-arm64.dmg` (immutable), `appcast.xml` (no-cache) and the
    `latest-arm64.dmg` alias (no-cache).
 3. Verify: `curl -s https://downloads.smoo.ai/smoothflow/appcast.xml | grep shortVersionString`.
-   Installed apps offer it on the next hourly check.
+   Installed apps offer it on the next hourly check. The run's last step also
+   re-verifies the published artifact from the CDN (appcast entry, signature,
+   both stapled tickets, no non-system dylibs).
+4. **`apps/smoothflow/scripts/install-release.sh`** — always, every release.
+   It unregisters every SmoothFlow bundle outside `/Applications` (each lane's
+   debug build registers another one, and `open -a SmoothFlow` will happily
+   launch one of those instead of the real app, so a release "verified" against
+   the wrong bundle proves nothing), deletes stale `apps/smoothflow/build/` and
+   `DerivedData/SmoothFlow-*` trees, then downloads the published DMG and
+   installs it — **refusing** unless the app inside carries its own stapled
+   ticket, verifies against `Developer ID Application: Smoo LLC (DTX9733844)`,
+   reports `Notarized Developer ID`, and links system dylibs only. It re-runs
+   those same checks against the installed copy afterwards. `--dry-run`
+   reports without changing anything; pass a version to pin one.
+   Never hand-install a release build — hand-installing is what skips the
+   checks, and an unstapled build passes a casual look.
 
 What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
 
@@ -460,11 +475,21 @@ What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
   replaces the feed rather than appending to it. Sparkle only needs the newest
   item; older `SmoothFlow-<v>-arm64.dmg` objects stay in the bucket (the sync
   never deletes) but drop out of the feed.
-- **The notarization ticket is stapled to the DMG, not the app inside it.**
-  `xcrun stapler validate` on the DMG passes; on `/Applications/SmoothFlow.app`
-  it reports no ticket, while `spctl -a -t install` still says
-  `Notarized Developer ID` (the online check). Both are correct — Sparkle
-  installs from the DMG, and Gatekeeper accepts the app either way.
+- **The notarization ticket went on the DMG, not the app inside it** — and
+  through 0.2.2 this note called that correct. It was not, and saying so here
+  is part of why it shipped three times. `xcrun stapler validate` on the DMG
+  passed; on `/Applications/SmoothFlow.app` it reported no ticket. A DMG's
+  ticket and its app's ticket are separate tickets on separate artifacts, and
+  **Sparkle installs the app**, so the DMG's ticket never reaches what the user
+  ends up running. `spctl` still said `Notarized Developer ID` — but only by
+  asking Apple over the network, so it looks fine at a desk on good wifi and
+  stalls or fails offline, behind a captive portal, or when Apple's notary
+  service is slow. Fixed in 0.2.3 (th-9c3f4e): `build-release.sh` notarizes and
+  staples the **.app first**, builds the DMG from the already-stapled app, then
+  staples the DMG as well, and the workflow `stapler validate`s both against the
+  artifact **downloaded from the CDN**, not the in-workflow copy. `stapler`
+  cannot staple a zip — only `.app`/`.dmg`/`.pkg` — so the app has to be
+  stapled in place, before `hdiutil` copies it into the image.
 - **The bundled daemon rewrites `~/.smooth/daemon.addr` on every launch** with
   its own random loopback port, clobbering the address Big Smooth advertised.
   The app never reads that file, but `th`-driven tooling on the same machine

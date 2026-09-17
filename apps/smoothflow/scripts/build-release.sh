@@ -77,11 +77,26 @@ plutil -p "$APP/Contents/Info.plist" | grep -q NSCalendarsFullAccessUsageDescrip
 plutil -p "$APP/Contents/Info.plist" | grep -q SUPublicEDKey || { echo "error: Sparkle keys missing from Info.plist" >&2; exit 1; }
 [[ -f "$APP/Contents/Resources/SmoothFlow.icns" ]] || { echo "error: SmoothFlow.icns missing from Resources" >&2; exit 1; }
 
+# Notarize and staple the .APP **before** the DMG is built from it. The ticket
+# for a DMG and the ticket for the app inside it are separate tickets on
+# separate artifacts, and Sparkle installs the *app* — so a DMG-only staple
+# never reaches what the user ends up running. Notarized-but-unstapled still
+# passes Gatekeeper, but only by asking Apple over the network at first launch,
+# which stalls or fails offline, behind a captive portal, or when the notary
+# service is slow. `stapler` cannot staple a zip, only .app/.dmg/.pkg, so the
+# app has to be stapled here, in place, before hdiutil copies it.
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    bash "$REPO/scripts/macos/notarize-and-staple.sh" "$APP"
+    xcrun stapler validate "$APP" || { echo "error: .app is not stapled after notarization" >&2; exit 1; }
+fi
+
 DMG="$OUT/SmoothFlow-$VERSION-arm64.dmg"
 hdiutil create -volname SmoothFlow -srcfolder "$APP" -ov -format UDZO "$DMG" >/dev/null
 if [[ -n "$SIGN_IDENTITY" ]]; then
     codesign --sign "$ID" $TS "$DMG"
     bash "$REPO/scripts/macos/notarize-and-staple.sh" "$DMG"
+    # Both artifacts must carry their own ticket before this leaves the builder.
+    xcrun stapler validate "$DMG" || { echo "error: DMG is not stapled" >&2; exit 1; }
     spctl -a -vvv -t install "$APP" 2>&1 | tail -2 || true
 fi
 echo "==> $DMG"
