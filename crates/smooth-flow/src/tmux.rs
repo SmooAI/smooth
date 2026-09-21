@@ -245,7 +245,19 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
 /// # Errors
 /// When the session is gone or tmux fails.
 pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
-    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}|#{pane_dead_status}"])?;
+    let s = tmux_ok(
+        socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}|#{version}",
+        ],
+    )?;
+    if s.starts_with("1||") {
+        tracing::info!(socket, session, raw = ?s, "tmux: dead pane with no exit status");
+    }
     tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
     Ok(parse_pane_dead(&s))
 }
