@@ -1,0 +1,28 @@
+# Reference SCRAPE manifest for the conformance suite (th-3cabf6): no hooks,
+# state comes only from the pane, the prompt rides a `--flag={prompt}` element,
+# resume relaunches the original command. Proves the scrape path before any
+# built-in uses it. Screens: ../conformance-scrape.toml.
+name = "conformance-scrape"
+display_name = "Conformance (scrape)"
+
+[binary]
+names = ["conformance-scrape"]
+prefer_paths = [".local/bin/conformance-scrape"]
+
+[launch]
+argv = ["--yes-always", "--message={prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = []
+mode = "relaunch_command"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+working = ["esc to interrupt"]
+idle = ["(?m)^> ?$"]
+needs_you = ["\\(y\\)es/\\(n\\)o"]
+usage_limit = ["rate limit reached"]

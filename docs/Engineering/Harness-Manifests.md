@@ -257,6 +257,7 @@ th harness hide <name> / unhide <name>
 th harness order th-code claude      # these first, in this order
 th harness add <file.toml | dir | owner/repo[/subdir][#ref]> [--force]   # validates, copies to ~/.smooth/harnesses
 th harness enable|status|disable <provider>   # unchanged — this machine's toolbox setup
+th harness doctor [name] [--json] [-v]        # does each harness WORK here? read-only verdict + the fix (th-3cabf6)
 ```
 
 `list` reads the daemon (prefs applied) when it runs, else the files with a
@@ -549,3 +550,100 @@ that rule set against `detect_state` on detect.rs's own panes, 5 000 generated
 panes and every real capture. `detect.rs` itself is unchanged. The
 th-473294 refinement the built-in manifests layer on top ("an approval above
 an idle line is not pending") is `unless_below` in a rule.
+
+## Supporting a harness — the conformance contract
+
+Pearl th-3cabf6. "Supports harness X" means X passes this contract in CI, not
+that someone launched it once. Every manifest in `harness::BUILTIN` (plus the
+reference manifests in `crates/smooth-flow/tests/conformance/manifests/`) is
+run by `crates/smooth-flow/tests/harness_conformance.rs` against
+`smooth-flow-fake-agent` — a stand-in CLI that speaks **that manifest's**
+mechanism, derived from the manifest itself — on a private engine: scratch
+HOME / flow.db / worktree, its own tmux socket, an in-process
+`POST /api/flow/hooks` listener. Never a real CLI, never the network, never
+credentials.
+
+```bash
+cargo test -p smooai-smooth-flow --test harness_conformance -- --nocapture
+SMOOTH_CONFORMANCE_ONLY=gemini,aider cargo test -p smooai-smooth-flow --test harness_conformance -- --nocapture
+SMOOTH_CONFORMANCE_KEEP=1 …   # keep each scratch dir (fake.log, spec.json, flow.db) for a post-mortem
+```
+
+CI: the `Harness conformance` job in `pr-checks.yml` (Linux, tmux installed,
+`SMOOTH_E2E_STRICT=1` so a missing tmux fails instead of skipping).
+
+### The eight steps
+
+| step         | what must hold                                                                                                                                                                                                                                                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolve`    | the fake, installed at `~/<prefer_paths[0]>` (or as `names[0]` on PATH when there are none), is what `binary` resolves to — with a decoy `names[0]` in a `cmux-cli-shims` dir **first** on PATH, which must never run                                                                                                                          |
+| `launch`     | the engine's argv is `[bin] + render(launch.argv)`, and the fake can read its prompt (and a preassigned session id, from argv or `launch.env`) back out of it by matching the template: literals in order, a placeholder binds one token or is dropped together with a bare `-flag` before it, `--flag={x}` round-trips                        |
+| `working`    | observed for the launch prompt (argv, or pasted ~4 s after launch)                                                                                                                                                                                                                                                                             |
+| `idle`       | the turn ends, and the row's `state_source` is what `state.source` promises: `hooks`, `native`, or `inferred` for scrape                                                                                                                                                                                                                       |
+| `steer`      | `flow.send` → `working` → `idle`                                                                                                                                                                                                                                                                                                               |
+| `permission` | only when the manifest claims one (hooks with the Claude table, an `event_map` entry → `needs_you`, or `state.scrape.needs_you` patterns): the row reaches `needs_you` with a `request_id`, `flow.approve(allow)` reaches the harness — as the `PermissionRequest` long-poll's reply, or as the approval keystroke `1` — and the turn finishes |
+| `resume`     | `kill(resume)` relaunches with `[bin] + render(resume.argv, session_id)` (the preassigned id, or the one **learned** from the first hook) or the original argv for `relaunch_command`, and the resumed process drives the **same row** through a steered turn back to `idle`                                                                   |
+| `kill`       | `kill` leaves the row `done`, the process gone, the tmux session gone                                                                                                                                                                                                                                                                          |
+
+### How the fake speaks your manifest
+
+- **hooks, no `event_map`** — Claude Code's names: `SessionStart`,
+  `UserPromptSubmit`, `PreToolUse`/`PostToolUse`, `Stop`, `PermissionRequest`
+  (long-polled), with `harness = <name>`, the session id and cwd.
+- **hooks / native with an `event_map`** — the map inverted: it posts the
+  first event you map to `working`, `idle`, `needs_you` (payload
+  `{"reason":"permission"}`) and `ended`. So the map **must** name at least
+  one `working` and one `idle` event, and a `needs_you` ask must be
+  answerable with the keystroke `1`.
+- **scrape** — posts nothing; clears the screen and paints the fixture's
+  screens verbatim.
+
+### What a new harness provides
+
+1. The manifest, in `crates/smooth-flow/harnesses/<name>.toml`, listed in
+   `BUILTIN`. That alone enrolls it — no test code.
+2. For `state.source = "scrape"` (optional otherwise): a fixture,
+   `crates/smooth-flow/tests/conformance/<name>.toml`, holding screens
+   **captured from the real CLI** (`th flow snapshot <id>`, ANSI stripped):
+
+    ```toml
+    [screens]
+    boot = "…"       # optional
+    working = "…"    # mid-turn — required when state.scrape.working is set
+    idle = "…"       # at rest — required
+    needs_you = "…"  # an approval prompt — required when state.scrape.needs_you is set
+    ```
+
+    Each screen is first checked against the manifest's own regexes (working →
+    `Working`, idle → `Idle`, needs_you → `AwaitingApproval`; no screen may read
+    as a usage limit) and then painted into a live pane the engine must follow.
+    The fixture is how "our patterns match what the CLI really paints" stays
+    true.
+
+3. A row in `th harness doctor`'s knowledge table
+   (`crates/smooth-cli/src/harness_doctor.rs` `known`) when the harness has an
+   install command, a hook-install/trust state, or an auth file doctor can read
+   without a prompt.
+
+A failing run names the harness and the step with the pane tail, e.g.
+``○ FAILED permission attention `permission` carries no request_id to approve``
+— which is the engine bug this suite found on its first run (a permission ask
+under a harness's own event name could not be approved; fixed in th-3cabf6).
+
+### `th harness doctor` — the same question, on a real machine
+
+The suite proves a manifest is right; doctor says whether it works **here**.
+Read-only — it never installs, trusts a hook dialog or logs in:
+
+| check     | degrades the harness when                                                                                                                                                                                   |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `binary`  | nothing resolves, or only a cmux CLI shim does (a shim in front of a real install is reported, not degrading)                                                                                               |
+| `app_env` | (macOS) it resolves from your shell but not under the SmoothFlow app's launchd PATH, or it is a `#!/usr/bin/env node` script whose interpreter the app cannot find                                          |
+| `version` | the binary cannot be executed (a failing `--version` only warns)                                                                                                                                            |
+| `hooks`   | known hooks harnesses: the smooth-agent plugin / flow hook is missing or stale, OpenCode's plugin lacks the generic `event` hook, Codex's flow hooks are not **trusted** (`[hooks.state]` in `config.toml`) |
+| `signal`  | never — a daemon that is not up only warns (`th up`)                                                                                                                                                        |
+| `auth`    | Claude Code / Codex / th code are not signed in (env key, credentials file, or the login keychain item's presence)                                                                                          |
+
+`--json` emits `{harnesses: [{name, verdict: works|degraded|not_installed,
+reason, fix, binary, app_binary, cmux_shim, version, checks: [{id, level,
+detail, fix}]}], app_path}` for the app.
