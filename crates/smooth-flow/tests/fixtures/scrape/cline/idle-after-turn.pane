@@ -1,0 +1,50 @@
+# harness: cline
+# expect: idle
+# rule: cline-composer
+# title: > hello cline
+# alternate_on: true
+# cursor_y: 35
+# quiet_ms: 5000
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: `❯ Ask anything...`, no spinner
+---
+
+ ❯ hello cline
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the
+   terminal stays busy for a while.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Ask anything...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ mock-model (10) $0.00                                                                               ○ Plan ● Act (Tab)
+ cline (main)
+ ⏵⏵ Auto-approve all enabled (Shift+Tab)

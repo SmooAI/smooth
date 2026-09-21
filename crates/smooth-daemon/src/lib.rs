@@ -32,6 +32,7 @@ pub mod auth_login;
 pub mod cloud_memory;
 pub mod config;
 pub mod cwd_route;
+mod flow_addr;
 pub mod flow_e2e;
 pub mod flow_pair_route;
 pub mod flow_route;

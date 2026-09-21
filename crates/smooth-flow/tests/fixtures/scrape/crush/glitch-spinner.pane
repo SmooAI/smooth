@@ -1,0 +1,34 @@
+# harness: crush
+# expect: working
+# rule: crush-footer-busy
+# title: crush /tmp/ws
+# alternate_on: true
+# cursor_y: 18
+# quiet_ms: 0
+# source: live crush 0.94.2, tmux 3.5a 70x24, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: crush's random-glyph spinner (`^d!~&7+2b8)_+)A 2s`) in a 70x24 pane
+---
+
+   Charm™ CRUSH ╱╱╱╱╱╱╱╱╱╱╱╱╱╱ ~/.../s/c/w/crush • 0% • ctrl+d open
+
+   ◇ Mock Model via mock in 38s ───────────────────────────────────
+
+ │ use a tool third
+
+   × Bash mkdir -p mockdir && touch mockdir/x.txt
+
+    WARN  User denied permission
+
+   ◇ Mock Model via mock in 25s ───────────────────────────────────
+
+ │ quick one
+
+   ^d!~&7+2b8)_+)A 2s
+
+
+   > Thinking...
+ :::
+ :::
+
+ esc cancel • tab focus chat • / or ctrl+p commands • ctrl+l models •
+

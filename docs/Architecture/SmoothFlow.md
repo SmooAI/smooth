@@ -357,14 +357,14 @@ empty `state.hooks.event_map` means the Claude Code table below
 working, `turn_end` → idle) uses its own names, and a `native` source marks
 the row `native` instead of `hooks`.
 
-| Event                                           | State                                                             |
-| ----------------------------------------------- | ----------------------------------------------------------------- |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                                         |
-| `Stop`                                          | `idle`, `unread = true`                                           |
-| `PermissionRequest`                             | `needs_you` (`permission`), held open ≤120 s until `flow.approve` |
-| `Notification` (permission / question / idle)   | `needs_you`                                                       |
-| `SessionEnd`                                    | nothing — the PTY decides done/dead                               |
-| everything else                                 | nothing                                                           |
+| Event                                           | State                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working`                                                                                |
+| `Stop`                                          | `idle`, `unread = true`                                                                  |
+| `PermissionRequest`                             | `needs_you` (`permission`), held open ≤120 s until `flow.approve`                        |
+| `Notification` (permission / question / idle)   | `needs_you`                                                                              |
+| `SessionEnd`                                    | nothing — the PTY decides done/dead (an ADOPTED row has no PTY, so this marks it `done`) |
+| everything else                                 | nothing                                                                                  |
 
 A `PermissionRequest` reply is the harness's own decision JSON
 (`hookSpecificOutput.decision.behavior = allow|deny`; `allow_session` adds a
@@ -375,6 +375,116 @@ Scraping (`smooth_tmux::detect`, every 2 s on the visible pane) covers what
 hooks can't: a usage limit ⇒ `limited` with `resume_at`; an approval menu with
 no pending hook request ⇒ `needs_you` (answered by keystroke: `1` / `2` /
 `Escape`); working/idle only for sessions that have never reported a hook.
+
+## Zero friction — inference and adoption (th-c103c1)
+
+Starting a session requires nothing but pressing Start. The New Session dialog
+asks for a kind and (optionally) a prompt; everything else is **discovered**
+from a directory and shown read-only, with a disclosure for explicit
+overrides. Start is never blocked on a missing pearl.
+
+### What is inferred (`smooth_flow::infer`)
+
+`GET /api/flow/infer?cwd=…` (and `th flow infer`) answers, for one directory:
+
+| Field      | Resolution                                                                                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worktree` | `git rev-parse --show-toplevel`, else the cwd itself                                                                                                                       |
+| `project`  | `--git-common-dir`'s parent — the MAIN checkout even inside a linked worktree (the pearls rule)                                                                            |
+| `branch`   | `--abbrev-ref HEAD`; `None` when detached (`HEAD`) or unborn                                                                                                               |
+| `pearl_id` | the pearl store's answer for this worktree, else `th-xxxxxx` at the front of the branch, else the same run anywhere in the worktree directory name (`smooth-th-c103c1-zf`) |
+| `jira_key` | `SMOODEV-1234` (uppercase only) in the branch, else the worktree name, else the pearl's title/description                                                                  |
+| `title`    | the pearl's title, else the branch (`main`/`master`/`trunk`/`develop` say nothing and are skipped), else the directory name                                                |
+
+`infer::infer` is pure over explicit facts and exhaustively tested;
+`infer::gather` is the thin shell that runs `git` and `th pearls`. Every field
+is independently optional: a non-git directory, a detached HEAD, a bare repo
+and a worktree whose pearl was deleted all infer what they can and drop the
+rest. A pearl id parsed off the branch survives a store miss — the worktree is
+still that pearl's worktree, the title is just unknown.
+
+`flow.new` runs the same inference on the resolved worktree, so any client
+(the phone, `th flow new`, the dialog) gets the pearl, branch and title
+without sending them. An explicit value always wins. `th flow new` with no
+arguments starts a session in the CURRENT directory.
+
+### Adoption — plain `claude` / `codex` sessions join the fleet
+
+The hook overlay `th pkg` installs into every harness already posts
+`{harness, event, session_id, cwd}` on every lifecycle event — including from
+a `claude` someone started in an ordinary terminal. When a hook names a
+session the engine has no row for, it can **adopt** it: infer the context from
+`cwd` and create a row, so that session appears in the fleet with its pearl,
+branch and worktree attached.
+
+It is **off by default** — adoption puts rows in the fleet the user never
+asked for. `th flow adopt on` (or `PUT /api/flow/settings`, or
+`SMOOTH_FLOW_ADOPT=1`) turns it on.
+
+Guards, all of them deliberate (`engine::adoptable`, each with its own refusal
+reason):
+
+| Guard                             | Why                                                                                                                   |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| opt-in required                   | the fleet is the user's, not the hook's                                                                               |
+| a harness session id              | there is nothing to key a row on without one                                                                          |
+| never a `PermissionRequest` first | adopting there would hold a plain terminal open ≤120 s for a decision nobody is watching yet                          |
+| a known harness                   | `harness` must name a manifest (`claude-code` → the `claude` manifest)                                                |
+| a git worktree                    | SmoothFlow tracks work on branches; a shell in `/tmp` is not fleet work                                               |
+| a known project                   | the daemon's workspace, or a project some session row already lives in — otherwise every repo on the machine leaks in |
+
+A refusal is cached per harness session id, so the git/`th` shell-outs happen
+once rather than on every tool call. The check-and-create runs under the store
+lock, so two concurrent hooks from one session cannot make two rows.
+
+**What an adopted session can and cannot do.** SmoothFlow did not spawn its
+PTY, so:
+
+- ✅ it appears in the fleet with title, pearl, Jira key, branch, worktree;
+  its state tracks its hooks (working / idle / needs-you), its events stream
+  into the timeline, and permission requests it sends AFTER adoption are
+  answerable from SmoothFlow like any other session.
+- ❌ **no attach** — there is no tmux pane; drive it in the terminal it is
+  running in.
+- ❌ **no kill, no resume** — the engine does not own that process, and
+  supervision skips adopted rows entirely.
+- ⚠️ **lifecycle by hook only** — its own `SessionEnd` marks it `done`; a
+  terminal closed without one leaves it live until the supervision tick calls
+  it `dead` after 6 hours of silence.
+- ⚠️ **close refuses while it is live** (nothing here can stop it, and
+  removing its worktree would be destructive); `--force` overrides.
+
+### `~/.smooth/flow.addr` — how hooks find the flow engine
+
+`flow-hook.sh` used to discover the daemon through `~/.smooth/daemon.addr`
+only. Since PR #546 the SmoothFlow app's child daemon deliberately does **not**
+write that file (th-3e6b1b: a second instance repointing `th`, the hooks and
+Big Smooth's clients at itself is the bug that file fixed) — so on a machine
+where SmoothFlow is the only daemon, hooks had nowhere to post and adoption
+could never fire.
+
+`~/.smooth/flow.addr` is the second file, owned by the flow engine rather than
+by the daemon identity. Both daemons host a flow engine and both share one
+`~/.smooth/flow.db`, so either can service a hook correctly; what matters is
+that some LIVE flow engine is reachable. The claim rule (`flow_addr`):
+
+- no file, or one naming an address that no longer answers `/health` → claim it;
+- a file naming a live daemon → leave it (that daemon serves the hooks);
+- our own address → rewrite it (a restart on the same port);
+- released on shutdown, and only when it is still ours.
+
+Discovery chain, in `flow-hook.sh` and the OpenCode plugin alike:
+`$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. Nothing
+changes on a machine that runs only Big Smooth.
+
+**Two daemons, one store.** Because they share `flow.db` but not a broadcast
+channel, a hook that lands on the other daemon is invisible to this one's
+clients until something re-reads the store. The supervision tick therefore
+re-broadcasts rows it did not write (`rebroadcast_external_changes`, keyed on
+`updated_at`); a `flow.session` frame is an upsert, so a re-emit is harmless.
+The remaining seam is a couple of seconds of latency on the non-owning
+daemon's clients — and, in a millisecond-wide race, two daemons adopting the
+same brand-new harness session into two rows.
 
 ## Supervision rules
 

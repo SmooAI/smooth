@@ -1,5 +1,73 @@
 # @smooai/smooth
 
+## 0.51.1
+
+### Patch Changes
+
+- 83ed002: install-release.sh: fix the signature gate that refused every legitimate release
+
+  Two independent bugs made `install-release.sh` reject the official signed build; it was caught installing 0.2.3 by hand.
+
+  - `codesign -dv` alone prints no `Authority=` lines; they require `--verbose=2`.
+  - Under `set -o pipefail`, `producer | grep -q` returns 141 — `grep -q` exits on the first match and SIGPIPEs the producer, so a _match_ read as a failure. This affected every verification in the script, not just `codesign`: the Gatekeeper check, the Mach-O filter and the dylib scan had the same shape.
+
+  All six check sites now capture output first and grep from a here-string. `install-release.test.sh` covers both causes, including a behavioural proof that an ad-hoc signed bundle is rejected, and refuses any future `| grep -q` while pipefail is on.
+
+## 0.51.0
+
+### Minor Changes
+
+- 7e3d856: SmoothFlow: close out a session from anywhere, not just a finished Inbox card. The sidebar row's context menu and **Session ▸ Close Out…** (⌘⌥W) both send `flow.close`, and a _running_ session closes the same way — the engine kills it first and the sheet says so before you confirm. The sheet now shows what it will destroy, not only what it will do: branch, uncommitted-file count and the pearl's title. Merged state stays uncached on purpose — the engine reveals it by refusing, and force is still offered only after that reason has been read. A refusal started outside the Inbox gets its own sheet instead of vanishing into the rail.
+
+### Patch Changes
+
+- 5bdab78: Notarization no longer throws away a good submission when the status poll blips. `notarize-and-staple.sh` used `notarytool submit --wait`, which collapses "upload the artifact" and "poll until Apple finishes" into one call — so a transient network error during the poll fails the release while Apple is still happily processing the submission. That is exactly how the first SmoothFlow 0.2.3 publish died: the upload succeeded, the status request timed out (`NSURLErrorDomain -1001`), and a ~20-minute signed build was discarded holding a valid submission id. It now submits once, captures the id, and retries the **wait** against that id rather than resubmitting, then checks `notarytool info` for `Accepted` — because `wait` returning successfully means Apple finished, not that it approved — and dumps the notary log on rejection. This matters more since th-9c3f4e: stapling the app as well as the DMG means two notarization round-trips per release, so twice the exposure to this flake.
+- 33bea47: SmoothFlow 0.2.3 — starting a session stops being paperwork. The New Session screen no longer demands a pearl id, a Jira key, or a worktree up front: pick a kind, type what you want done, hit Start, and SmoothFlow infers the rest from the prompt and the repo. Plain `claude` and `codex` sessions you started yourself are adopted into the fleet instead of sitting outside it (th-c103c1, #594). Four more agent CLIs launch out of the box — aider, goose, crush, and cline — on top of a declarative scrape-rule system that replaces the hand-written per-harness pane parsers, so teaching SmoothFlow a new CLI is now a manifest edit rather than Rust (th-e77603, #599). Also fixes aider dropping the first prompt: it needs a beat after its banner before the paste lands, and it now gets one (th-d2a1e4). th-2f31d8.
+- 5e5eea2: `install-release.sh` now unregisters the bundles **nested inside** a stray SmoothFlow build, not just the outer `.app`. A debug build registers its own Sparkle `Updater.app` and `SmoothFlowUITests-Runner.app` as separate LaunchServices entries, and a single `lsregister -u` on the outer bundle does not take them with it — so a machine that looked cleaned still carried rows pointing at deleted files. The matcher now covers any `SmoothFlow*.app` path and excludes the official install by **prefix**, so `/Applications/SmoothFlow.app`'s own nested Updater is deliberately left alone (unregistering it would break Sparkle on a healthy machine). `install-release.test.sh` pins both directions, including a guard against the test's copy of the regex drifting from the real one. th-9c3f4e.
+- de56803: SmoothFlow releases now staple the notarization ticket to the **app**, not just the DMG. A DMG's ticket and its app's ticket are separate tickets on separate artifacts, and Sparkle installs the app — so every release through 0.2.2 put a working copy of SmoothFlow in `/Applications` with no ticket on it. Gatekeeper still let it run, but only by asking Apple over the network at first launch, which stalls or fails offline, behind a captive portal, or when Apple's notary service is slow. `build-release.sh` now notarizes and staples the app first, builds the DMG from the already-stapled app, and staples that too; the publish workflow validates both tickets against the artifact downloaded from the CDN rather than its own in-workflow copy. New `apps/smoothflow/scripts/install-release.sh` makes "clean up stray copies and install the official signed build" a scripted release step: it unregisters every SmoothFlow bundle outside `/Applications` (lane debug builds accumulate there and `open -a SmoothFlow` will launch one), clears stale build trees, and installs the published DMG only if the app inside is stapled, signed by Smoo LLC, notarized, and free of non-system dylib links — refusing loudly instead of installing anything that fails. th-9c3f4e.
+- 99cc57f: SmoothFlow: tabs, directional splits, and a keyboard config pane (th-27baa4)
+
+  The surface area is now a stack of tabs, each holding a binary split tree
+  instead of a flat row of panes — so ⌘D splits right, ⌘⇧D splits down, ⌘⇧←/⌘⇧↑
+  split the other two ways, ⌘⌥arrows move focus between panes by geometry, ⌘⇧↩
+  zooms without disturbing the layout, ⌘⌥= equalizes, and ⌘T/⌘W/⌘⇧[/⌘⇧] work the
+  tabs. ⌘⇧T opens a shell session in the focused session's worktree in a new tab.
+
+  ⌘W closes the focused pane, terminal-style — the tab, then the window, collapse
+  when they empty (⌘⇧W still closes a whole tab). Because a pane is a view over an
+  engine-owned session, ⌘W asks first when a live session is on screen, and the
+  alert offers both honest answers: close the view and leave the session running,
+  or end the session (destructive, and it says what that costs). Cancel is the
+  default button. Nothing is asked for an empty pane, a finished session, or a
+  shell sitting at a prompt, and Settings ▸ Terminal can turn the confirmation off
+  entirely.
+
+  Every shortcut is user-configurable. Settings ▸ Keyboard lists every action with
+  its binding, records a new one, flags conflicts and resets per-row or all; it
+  writes ~/.smooth/smoothflow/keybindings.toml, which you can also edit by hand.
+  Only overrides are stored, a bad line loses that line rather than the map, and
+  the menu bar is built from the keymap so a rebind moves the menu with it.
+
+  Two defaults changed (both rebindable): Steer All Working is ⌘⌥↩, freeing ⌘⇧↩
+  for Zoom Pane as in every other terminal; the old untyped "Split Surface" is now
+  Split Right. See docs/Engineering/SmoothFlow-Keybindings.md.
+
+## 0.50.0
+
+### Minor Changes
+
+- 82930b5: SmoothFlow learns the state of coding CLIs that have no hooks (th-e77603). Harness manifests gain ordered `[[state.scrape.rules]]`: each rule maps a regex over a chosen part of the pane (`tail`, `pane`, `last_line`, `cursor_line`, `title`) plus optional `all` / `unless` / `unless_below`, output quiet time, recent change, alternate screen and spinner signals to working, idle, needs-you, usage-limit or error, and the first rule that fires decides. Four new built-ins use them — `aider`, `goose`, `crush` and `cline` — each written against real captured panes and driven live through the engine. `prompt_as = "paste"` now waits for the pane to read idle instead of a fixed 4 s, so a first-run question no longer swallows the prompt (th-d2a1e4). A needs-you answered in the pane clears on the next idle, and `resume.mode = "continue_latest"` resumes CLIs that can only continue their most recent conversation.
+
+## 0.49.0
+
+### Minor Changes
+
+- 62b77a4: SmoothFlow zero-friction sessions (th-c103c1): the New Session dialog no longer demands a pearl id. A new `smooth_flow::infer` derives worktree, project (the main checkout, even inside a linked worktree), branch, pearl id, Jira key and title from a directory, served at `GET /api/flow/infer` and `th flow infer`; `flow.new` runs the same inference, so any client gets the context without sending it, and `th flow new` with no arguments starts a session in the current directory.
+
+  Plain harness sessions can now be adopted into the fleet: a `claude` or `codex` started in an ordinary terminal joins it on its first hook, with its pearl/branch/worktree attached. Off by default (`th flow adopt on`), guarded on a known harness, a git worktree and a project the fleet already works in, and explicitly not engine-owned (no attach, no kill, no resume).
+
+  Harness hooks now discover the flow engine through `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. `flow.addr` is claimed by whichever daemon hosts a live flow engine, so hooks reach the SmoothFlow app's child daemon, which deliberately does not write `daemon.addr`.
+
 ## 0.48.8
 
 ### Patch Changes

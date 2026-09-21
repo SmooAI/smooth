@@ -257,6 +257,12 @@ pub struct Session {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub unread: bool,
+    /// th-c103c1: this row was ADOPTED — a harness someone started in a plain
+    /// terminal, discovered through its hooks. SmoothFlow did not spawn the
+    /// PTY, so there is no pane to attach, nothing to resume, and `kill` is
+    /// not ours to perform; the engine only tracks its state and context.
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 /// A fan-out: N candidate sessions racing one prompt.
@@ -286,6 +292,8 @@ pub struct NewSession {
     pub tmux_socket: Option<String>,
     pub owner: Option<String>,
     pub fan_out_id: Option<String>,
+    /// See [`Session::adopted`] — only [`crate::engine::Engine::hook`] sets it.
+    pub adopted: bool,
 }
 
 /// Mint a session id: `fs-` + 8 hex.
@@ -389,7 +397,8 @@ impl FlowStore {
                  unread           INTEGER NOT NULL DEFAULT 0,
                  tmux_socket      TEXT,
                  state_source     TEXT NOT NULL DEFAULT 'inferred',
-                 owner            TEXT
+                 owner            TEXT,
+                 adopted          INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_session_id);
              CREATE INDEX IF NOT EXISTS sessions_fanout_idx ON sessions(fan_out_id);
@@ -450,6 +459,15 @@ impl FlowStore {
         if !has_owner {
             conn.execute("ALTER TABLE sessions ADD COLUMN owner TEXT", []).context("add owner")?;
         }
+        // th-c103c1: adopted (not engine-spawned) rows.
+        let has_adopted = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'adopted'")?
+            .exists([])
+            .context("probe adopted column")?;
+        if !has_adopted {
+            conn.execute("ALTER TABLE sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0", [])
+                .context("add adopted")?;
+        }
         Ok(Self { conn })
     }
 
@@ -494,6 +512,7 @@ impl FlowStore {
             ended_at: ended.as_deref().map(parse_ts),
             exit_code: row.get("exit_code")?,
             unread: row.get::<_, i64>("unread")? != 0,
+            adopted: row.get::<_, i64>("adopted")? != 0,
         })
     }
 
@@ -509,8 +528,8 @@ impl FlowStore {
         self.conn
             .execute(
                 "INSERT INTO sessions (id, kind, title, project, worktree, branch, pearl_id, agent_session_id, argv, tmux_session,
-                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14)",
+                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner, adopted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14, ?15)",
                 params![
                     id,
                     kind.as_str(),
@@ -526,6 +545,7 @@ impl FlowStore {
                     now.to_rfc3339(),
                     new.tmux_socket,
                     new.owner,
+                    i64::from(new.adopted),
                 ],
             )
             .context("insert session")?;
@@ -574,6 +594,29 @@ impl FlowStore {
     /// On a database failure.
     pub fn list_live(&self) -> Result<Vec<Session>> {
         Ok(self.list()?.into_iter().filter(|s| !s.state.is_terminal()).collect())
+    }
+
+    /// Sessions whose `updated_at` is strictly after `since` — how a daemon
+    /// notices rows another daemon sharing this file changed (th-c103c1; two
+    /// daemons on one `flow.db` each broadcast only their OWN writes).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn changed_since(&self, since: DateTime<Utc>) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM sessions WHERE updated_at > ?1 ORDER BY updated_at ASC")?;
+        let rows = stmt.query_map(params![since.to_rfc3339()], Self::row_to_session)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("list changed sessions")
+    }
+
+    /// Every distinct project root this store has ever seen a session in —
+    /// the allow-list adoption checks a stranger's cwd against.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn projects(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT project FROM sessions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("list projects")
     }
 
     /// Candidates of one fan-out.

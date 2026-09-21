@@ -1,0 +1,151 @@
+# Screens for the built-in `cline` manifest (th-e77603), cut from the live
+# captures in tests/fixtures/scrape/cline/ (real cline panes, scratch path scrubbed):
+# boot = the top of idle-composer.pane, working = thinking-under-idle-looking-composer.pane, idle = idle-composer.pane,
+# needs_you = approval-under-thinking-spinner.pane.
+[screens]
+boot = '''
+
+
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                                 @@@@@    @@@@.   @@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                    @@@@@@@@@@@@@@@@.
+
+                                                 What can I do for you?
+
+                             Use / for slash commands, @ for file mentions, Ctrl+P for menu
+
+                          ────────────────────────────────────────────────────────────────────
+                          ❯ What can I do for you?
+                          ────────────────────────────────────────────────────────────────────
+
+                           mock-model (0) $0.00                            ○ Plan ● Act (Tab)
+                           cline (main)
+                           ⏵⏵ Auto-approve all enabled (Shift+Tab)
+'''
+working = '''
+
+ ❯ hello cline
+
+ ⠸ Thinking... (esc to cancel)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Ask anything...
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ mock-model (0) $0.00                                                                                ○ Plan ● Act (Tab)
+ cline (main)
+ ⏵⏵ Auto-approve all enabled (Shift+Tab)
+'''
+idle = '''
+
+
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                                 @@@@@    @@@@.   @@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                    @@@@@@@@@@@@@@@@.
+
+                                                 What can I do for you?
+
+                             Use / for slash commands, @ for file mentions, Ctrl+P for menu
+
+                          ────────────────────────────────────────────────────────────────────
+                          ❯ What can I do for you?
+                          ────────────────────────────────────────────────────────────────────
+
+                           mock-model (0) $0.00                            ○ Plan ● Act (Tab)
+                           cline (main)
+                           ⏵⏵ Auto-approve all enabled (Shift+Tab)
+'''
+needs_you = '''
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the
+   terminal stays busy for a while.
+
+ ❯ use a tool please
+
+ x read_files({"command":"mkdir -p mockdir && touch mockdir/x.txt","des...)
+      Error: ✖ Invalid input
+
+ * Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+   answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+   for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a
+   deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the    █
+   terminal stays busy for a while.                                                                                    █
+                                                                                                                       █
+ ❯ use a tool again                                                                                                    █
+                                                                                                                       █
+ ⠴ Thinking... (esc to cancel)                                                                                         █
+                                                                                                                       █
+
+ Cline needs permission
+
+ Approve tool call?
+ run_commands
+
+
+   {
+   "command": "mkdir -p mockdir && touch mockdir/x.txt",
+   "description": "print a marker",
+   "requires_approval": true
+
+  [y] Approve   [n] Deny
+
+
+ mock-model (10) $0.00                                                                               ○ Plan ● Act (Tab)
+ cline (main)
+ Auto-approve all disabled (Shift+Tab)
+'''

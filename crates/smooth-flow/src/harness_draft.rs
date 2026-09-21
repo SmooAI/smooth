@@ -610,6 +610,7 @@ pub fn scrape_from_panes(idle_pane: &str, working_pane: Option<&str>) -> ScrapeS
         needs_you: DEFAULT_NEEDS_YOU.iter().map(ToString::to_string).collect(),
         usage_limit: DEFAULT_USAGE_LIMIT.iter().map(ToString::to_string).collect(),
         error: DEFAULT_ERROR.iter().map(ToString::to_string).collect(),
+        ..ScrapeSpec::default()
     }
 }
 

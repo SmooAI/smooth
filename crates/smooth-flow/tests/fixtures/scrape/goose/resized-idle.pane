@@ -1,0 +1,30 @@
+# harness: goose
+# expect: idle
+# rule: goose-composer
+# title: 🪿 goose
+# alternate_on: false
+# cursor_y: 19
+# quiet_ms: 5000
+# source: live goose 1.50.0, tmux 3.5a 64x20, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: pane resized 120x40 → 64x20, prose re-wrapped
+---
+        "command": "echo mock-tool-call"
+      }
+    }
+
+◆  Goose would like to call the above tool, do you allow?
+
+◇  Goose would like to call the above tool, do you allow?
+│  Deny
+│
+Sure. Here is a deliberately slow answer so the terminal stays b
+usy for a while. Sure. Here is a deliberately slow answer so the
+ terminal stays busy for a while. Sure. Here is a deliberately s
+low answer so the terminal stays busy for a while. Sure. Here is
+ a deliberately slow answer so the terminal stays busy for a whi
+le. Sure. Here is a deliberately slow answer so the terminal sta
+ys busy for a while. Sure. Here is a deliberately slow answer so
+ the terminal stays busy for a while.
+  ⏱ 37.31s
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 20/128k
+> Enter to send · Ctrl+J newline

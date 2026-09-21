@@ -1,0 +1,50 @@
+# harness: cline
+# expect: needs_you
+# rule: cline-dialog
+# title: Cline
+# alternate_on: true
+# cursor_y: 20
+# quiet_ms: 0
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: the provider list behind "Bring your own provider"
+---
+
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                                 @@@@@    @@@@.   @@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                    @@@@@@@@@@@@@@@@.
+
+                          Choose a provider
+
+                          ╭──────────────────────────────────────────────────────────────────╮
+                          │ Search providers...                                              │
+                          ╰──────────────────────────────────────────────────────────────────╯
+
+                           Popular
+                           ❯ Cline Usage-Billing (OAuth)
+                             ClinePass (OAuth)
+                             OpenAI ChatGPT Subscription (OAuth)
+                             DeepSeek
+                             Anthropic
+                             OpenRouter
+                             Ollama
+                             AWS Bedrock
+                           ▼ 208 more
+
+                          Type to search, ↑/↓ navigate, Enter to select, Esc to go back,
+                          Ctrl+C to exit
+
+
+
+

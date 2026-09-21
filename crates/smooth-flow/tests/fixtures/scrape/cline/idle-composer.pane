@@ -1,0 +1,50 @@
+# harness: cline
+# expect: idle
+# rule: cline-composer
+# title: Cline
+# alternate_on: true
+# cursor_y: 23
+# quiet_ms: 5000
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: `❯ What can I do for you?` and no spinner
+---
+
+
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                                 @@@@@    @@@@.   @@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                    @@@@@@@@@@@@@@@@.
+
+                                                 What can I do for you?
+
+                             Use / for slash commands, @ for file mentions, Ctrl+P for menu
+
+                          ────────────────────────────────────────────────────────────────────
+                          ❯ What can I do for you?
+                          ────────────────────────────────────────────────────────────────────
+
+                           mock-model (0) $0.00                            ○ Plan ● Act (Tab)
+                           cline (main)
+                           ⏵⏵ Auto-approve all enabled (Shift+Tab)
+
+
+
+
+
+
+
+
+
+
+

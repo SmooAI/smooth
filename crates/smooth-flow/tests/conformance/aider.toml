@@ -1,0 +1,85 @@
+# Screens for the built-in `aider` manifest (th-e77603), cut from the live
+# captures in tests/fixtures/scrape/aider/ (real aider panes, scratch path scrubbed):
+# boot = the top of idle-composer.pane, working = waiting-spinner-frame-a.pane, idle = idle-composer.pane,
+# needs_you = permission-create-file.pane.
+[screens]
+boot = '''
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Aider v0.86.2
+Model: openai/mock-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+'''
+working = '''
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Aider v0.86.2
+Model: openai/mock-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> explain the repo please
+
+Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a
+while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately
+slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+for a while.
+
+
+Tokens: 769 sent, 103 received.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> tell me more
+
+   ░█      Waiting for openai/mock-model
+'''
+idle = '''
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Aider v0.86.2
+Model: openai/mock-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+'''
+needs_you = '''
+Aider v0.86.2
+Model: openai/mock-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> explain the repo please
+
+Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a
+while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately
+slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+for a while.
+
+
+Tokens: 769 sent, 103 received.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> tell me more
+
+Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a
+while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately
+slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy
+for a while.
+
+
+Tokens: 882 sent, 103 received.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> make a newfile please
+
+hello.py
+
+
+print('hello')
+
+
+
+Tokens: 997 sent, 12 received.
+
+hello.py
+Create new file? (Y)es/(N)o [Yes]:
+'''

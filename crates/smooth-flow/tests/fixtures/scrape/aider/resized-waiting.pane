@@ -1,0 +1,30 @@
+# harness: aider
+# expect: working
+# rule: aider-waiting
+# title: marvin
+# alternate_on: false
+# cursor_y: 18
+# quiet_ms: 0
+# source: live aider 0.86.2, tmux 3.5a 60x20, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: resized pane, prompt pasted and submitted with no delay, bar mid-frame
+---
+
+Tokens: 997 sent, 12 received.
+
+hello.py
+Create new file? (Y)es/(N)o [Yes]: y
+
+Applied edit to hello.py
+Commit 008413f hello.py
+ ```python
+ print('hello')
+ ```
+You can use /undo to undo and discard each aider commit.
+────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────
+hello.py
+hello.py
+> quick one
+
+       █░  Waiting for openai/mock-model
+

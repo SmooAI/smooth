@@ -1,0 +1,82 @@
+# Crush (Charm) — scraped (th-e77603). Crush 0.94 can run hooks configured in
+# crush.json; until SmoothFlow wires them this manifest learns state from the
+# pane. Rules were written against panes captured live from crush 0.94.2
+# (tests/fixtures/scrape/crush).
+#
+# Crush is a full-screen (alternate screen) TUI. Two traps the flat
+# `[state.scrape]` lists fall into, and the reason for ordered rules:
+# the "Permission Required" modal is drawn OVER a footer that still reads
+# `esc cancel`, and the composer placeholder rotates through phrases
+# ("> Ready?", "> Working!", "> Processing…", "> Brrrrr…").
+name = "crush"
+display_name = "Crush"
+
+[binary]
+names = ["crush"]
+prefer_paths = [".local/bin/crush", "go/bin/crush"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# No interactive prompt flag (`crush run` is one-shot): paste once idle.
+argv = []
+prompt_as = "paste"
+session_id = "learned"
+
+[resume]
+argv = ["--continue"]
+mode = "continue_latest"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+usage_limit = ["exceeded your current quota", "usage limit reached"]
+
+# Needs you, in front of everything: a tool permission modal…
+[[state.scrape.rules]]
+name = "crush-permission"
+state = "needs_you"
+match = ["permission required"]
+all = ["\\ballow\\b", "\\bdeny\\b"]
+where = "pane"
+
+# …the first-run "initialize this project?" question…
+[[state.scrape.rules]]
+name = "crush-init"
+state = "needs_you"
+match = ["would you like to initialize"]
+all = ["yep!", "nope"]
+where = "pane"
+
+# …and the provider/model picker a fresh install opens on.
+[[state.scrape.rules]]
+name = "crush-choose-provider"
+state = "needs_you"
+match = ["choose a provider and model"]
+where = "pane"
+
+# The footer gains `esc cancel` while a turn runs.
+[[state.scrape.rules]]
+name = "crush-footer-busy"
+state = "working"
+match = ["^\\s*esc cancel"]
+where = "last_line"
+
+# Idle: a `> Ready…` placeholder with no busy footer.
+[[state.scrape.rules]]
+name = "crush-ready"
+state = "idle"
+match = ["^\\s*> ready"]
+lines = 8
+unless = ["^\\s*esc cancel"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+mcp_config = "~/.config/crush/crush.json"

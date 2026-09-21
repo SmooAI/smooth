@@ -1,0 +1,30 @@
+# harness: goose
+# expect: working
+# rule: goose-spinner
+# title: 🪿 goose
+# alternate_on: false
+# cursor_y: 19
+# quiet_ms: 0
+# source: live goose 1.50.0, tmux 3.5a 64x20, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: HARD: captured with `capture-pane -e` — SGR colour codes on every line; the detector strips them
+---
+[37mle. Sure. Here is a deliberately slow answer so the terminal sta
+ys busy for a while. Sure. Here is a deliberately slow answer so
+ the terminal stays busy for a while.  [39m
+[2m  ⏱ 37.31s[0m
+  [2m[32m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m [2m0%[0m [2m20/128k[0m
+> quick one
+
+[37mSure. Here is a deliberately slow answer so the terminal stays b
+usy for a while. Sure. Here is a deliberately slow answer so the
+ terminal stays busy for a while. Sure. Here is a deliberately s
+low answer so the terminal stays busy for a while. Sure. Here is
+ a deliberately slow answer so the terminal stays busy for a whi
+le. Sure. Here is a deliberately slow answer so the terminal sta
+ys busy for a while. Sure. Here is a deliberately slow answer so
+ the terminal stays busy for a while.  [39m
+[2m  ⏱ 12.34s[0m
+  [2m[32m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m [2m0%[0m [2m20/128k[0m
+> ansi please
+
+[35m◒[39m  Gathering gigabyte galaxies...  [2m(Ctrl+C to interrupt)[0m

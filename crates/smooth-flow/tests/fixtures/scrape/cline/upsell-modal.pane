@@ -1,0 +1,50 @@
+# harness: cline
+# expect: needs_you
+# rule: cline-dialog
+# title: Cline
+# alternate_on: true
+# cursor_y: 39
+# quiet_ms: 2000
+# source: live cline 3.0.61, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: ClinePass upsell over the composer: "Press Enter to open, any other key to close"
+---
+
+
+
+
+
+                                                           @@
+                                                         @@@@@@
+                                                    @@@@@@@@@@@@@@@@
+                                                  @@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@@@@@@@@@@@@@@@@@@
+                                                 @@@@@    @@@@    @@@@@
+                                               @@@@@@     *@@@     @@@@@@
+                                               @@@@@@     *@@@     @@@@@@
+
+                                Try ClinePass
+
+                                ClinePass is a $9.99/month subscription plan to get
+                                access to the latest open-weight coding models with
+                                enough quota for day-to-day work, at a much lower cost
+                                than paying API costs directly.
+                             U                                                            u
+                                https://app.cline.bot/dashboard/subscription?
+                          ────                                                            ────
+                          ❯ Wh   Open ClinePass
+                          ────                                                            ────
+                                Press Enter to open, any other key to close
+                           moc                                                            ab)
+                           cline (main)
+                           ⏵⏵ Auto-approve all enabled (Shift+Tab)
+
+
+
+
+
+
+
+
+
+
+
