@@ -196,8 +196,10 @@ impl PendingPaste {
 pub enum PaneExit {
     /// Exited with this code.
     Code(i32),
-    /// Killed by this signal — a shell reports that as `128 + n`.
-    Signal(i32),
+    /// Killed by `signal` (`0`: one tmux named but we don't know). `code` is
+    /// the shell's `128 + n` when that is how we learned it. Kept, because a
+    /// CLI that really exits 130 is indistinguishable from a SIGINT death.
+    Signal { signal: i32, code: Option<i32> },
     /// Dead, but neither tmux nor the pane wrapper could say how. Never
     /// resumed: it may have quit on purpose.
     Unknown,
@@ -210,17 +212,21 @@ impl PaneExit {
     #[must_use]
     pub const fn from_code(code: i32) -> Self {
         if code > 128 && code <= 128 + 64 {
-            Self::Signal(code - 128)
+            Self::Signal {
+                signal: code - 128,
+                code: Some(code),
+            }
         } else {
             Self::Code(code)
         }
     }
 
-    /// The code for the row's `exit_code`: only a real exit has one.
+    /// The code for the row's `exit_code`: a real exit's, or the shell's
+    /// `128 + n`. Never invented: `Unknown` / `Vanished` have none.
     #[must_use]
     pub const fn exit_code(self) -> Option<i32> {
         match self {
-            Self::Code(c) => Some(c),
+            Self::Code(c) | Self::Signal { code: Some(c), .. } => Some(c),
             _ => None,
         }
     }
@@ -228,25 +234,31 @@ impl PaneExit {
     fn describe(self) -> String {
         match self {
             Self::Code(c) => format!("exit {c}"),
-            Self::Signal(n) => format!("killed by signal {n}"),
+            Self::Signal { signal: 0, .. } => "killed by a signal".to_string(),
+            Self::Signal { signal, .. } => format!("killed by signal {signal}"),
             Self::Unknown => "exit status unknown".to_string(),
             Self::Vanished => "process vanished".to_string(),
         }
     }
 }
 
-/// Settle a dead pane's exit — tmux's status, else the code the pane wrapper
-/// recorded ([`tmux::wrapped_command_env`]), else, once [`EXIT_STATUS_WAIT`]
-/// has passed, [`PaneExit::Unknown`]. Never `-1`.
+/// Settle a dead pane's exit: tmux's status or signal, else the code the pane
+/// wrapper recorded ([`tmux::wrapped_command_env`]), else, once
+/// [`EXIT_STATUS_WAIT`] has passed, [`PaneExit::Unknown`]. Never `-1`.
 ///
 /// `None` means "not yet": the pane is marked in `pending` and re-checked on
 /// the next supervision tick. Nothing here waits, so one pane whose status
 /// is late never holds up another session's supervision.
-fn settle_exit(pending: &mut HashMap<String, Instant>, id: &str, tmux_code: i32, recorded: Option<i32>, now: Instant) -> Option<PaneExit> {
-    let code = if tmux_code == tmux::EXIT_UNKNOWN { recorded } else { Some(tmux_code) };
-    if let Some(c) = code {
+fn settle_exit(pending: &mut HashMap<String, Instant>, id: &str, tmux: tmux::PaneDeath, recorded: Option<i32>, now: Instant) -> Option<PaneExit> {
+    let settled = match (tmux, recorded) {
+        (tmux::PaneDeath::Code(c), _) | (_, Some(c)) => Some(PaneExit::from_code(c)),
+        // The wrapper itself was killed, so it wrote nothing: a signal death.
+        (tmux::PaneDeath::Signal(signal), None) => Some(PaneExit::Signal { signal, code: None }),
+        (tmux::PaneDeath::Unreaped, None) => None,
+    };
+    if let Some(exit) = settled {
         pending.remove(id);
-        return Some(PaneExit::from_code(c));
+        return Some(exit);
     }
     let first = *pending.entry(id.to_string()).or_insert(now);
     if now.saturating_duration_since(first) >= EXIT_STATUS_WAIT {
@@ -1437,9 +1449,11 @@ impl Engine {
         let exit = tmux_name
             .as_deref()
             .and_then(|t| tmux::pane_exit_status(&sock, t).ok().flatten())
-            .filter(|c| *c != tmux::EXIT_UNKNOWN)
-            .or_else(|| self.recorded_exit(&s))
-            .and_then(|c| PaneExit::from_code(c).exit_code());
+            .and_then(|d| match d {
+                tmux::PaneDeath::Code(c) => Some(c),
+                _ => None,
+            })
+            .or_else(|| self.recorded_exit(&s));
         if let Some(t) = &tmux_name {
             tmux::kill_session(&sock, t);
         }
@@ -2032,13 +2046,13 @@ impl Engine {
             self.clear_exit_files(&s.id);
             return self.on_death(s, exit);
         }
-        if let Some(tmux_code) = exit? {
+        if let Some(death) = exit? {
             let recorded = self.recorded_exit(s);
-            let Some(exit) = settle_exit(&mut self.rt().exit_pending, &s.id, tmux_code, recorded, Instant::now()) else {
+            let Some(exit) = settle_exit(&mut self.rt().exit_pending, &s.id, death, recorded, Instant::now()) else {
                 tracing::info!(session = %s.id, "flow: pane dead, exit status not known yet — re-checking next tick");
                 return Ok(());
             };
-            tracing::info!(session = %s.id, tmux_code, recorded = ?recorded, exit = ?exit, "flow: pane exited");
+            tracing::info!(session = %s.id, tmux = ?death, recorded = ?recorded, exit = ?exit, "flow: pane exited");
             self.with_store(|st| st.set_exit_code(&s.id, exit.exit_code()))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
@@ -2546,18 +2560,30 @@ mod tests {
     fn a_dead_pane_settles_from_tmux_then_the_wrapper_then_unknown() {
         let mut pending = HashMap::new();
         let t0 = Instant::now();
-        let unknown = tmux::EXIT_UNKNOWN;
+        let unknown = tmux::PaneDeath::Unreaped;
+        let code = tmux::PaneDeath::Code;
         // tmux knows: that wins at once.
-        assert_eq!(settle_exit(&mut pending, "a", 2, None, t0), Some(PaneExit::Code(2)));
+        assert_eq!(settle_exit(&mut pending, "a", code(2), None, t0), Some(PaneExit::Code(2)));
         // tmux doesn't, the wrapper recorded it: no wait at all.
         assert_eq!(settle_exit(&mut pending, "b", unknown, Some(0), t0), Some(PaneExit::Code(0)));
-        assert_eq!(settle_exit(&mut pending, "b2", unknown, Some(137), t0), Some(PaneExit::Signal(9)));
+        assert_eq!(
+            settle_exit(&mut pending, "b2", unknown, Some(137), t0),
+            Some(PaneExit::Signal { signal: 9, code: Some(137) })
+        );
+        // The wrapper itself was killed: tmux names the signal, there is no file.
+        assert_eq!(
+            settle_exit(&mut pending, "b3", tmux::PaneDeath::Signal(9), None, t0),
+            Some(PaneExit::Signal { signal: 9, code: None })
+        );
         assert!(pending.is_empty());
         // Neither knows yet: not settled, re-checked next tick…
         assert_eq!(settle_exit(&mut pending, "c", unknown, None, t0), None);
         assert_eq!(settle_exit(&mut pending, "c", unknown, None, t0 + Duration::from_secs(1)), None);
         // …and a late status still wins inside the window.
-        assert_eq!(settle_exit(&mut pending, "c", 3, None, t0 + Duration::from_secs(2)), Some(PaneExit::Code(3)));
+        assert_eq!(
+            settle_exit(&mut pending, "c", code(3), None, t0 + Duration::from_secs(2)),
+            Some(PaneExit::Code(3))
+        );
         // Nothing ever: Unknown at the deadline — never -1.
         assert_eq!(settle_exit(&mut pending, "d", unknown, None, t0), None);
         assert_eq!(settle_exit(&mut pending, "d", unknown, None, t0 + EXIT_STATUS_WAIT), Some(PaneExit::Unknown));
@@ -2570,11 +2596,11 @@ mod tests {
     fn a_pending_pane_does_not_delay_another_session() {
         let mut pending = HashMap::new();
         let t0 = Instant::now();
-        let unknown = tmux::EXIT_UNKNOWN;
+        let unknown = tmux::PaneDeath::Unreaped;
         let started = Instant::now();
         assert_eq!(settle_exit(&mut pending, "late", unknown, None, t0), None);
         // Same tick: another session's exit settles immediately.
-        assert_eq!(settle_exit(&mut pending, "other", 1, None, t0), Some(PaneExit::Code(1)));
+        assert_eq!(settle_exit(&mut pending, "other", tmux::PaneDeath::Code(1), None, t0), Some(PaneExit::Code(1)));
         assert_eq!(settle_exit(&mut pending, "other2", unknown, Some(0), t0), Some(PaneExit::Code(0)));
         assert!(started.elapsed() < Duration::from_millis(100), "settling never waits");
         // The late one's clock started at its own first look, untouched by the others.
@@ -2587,14 +2613,16 @@ mod tests {
         assert_eq!(PaneExit::from_code(0), PaneExit::Code(0));
         assert_eq!(PaneExit::from_code(2), PaneExit::Code(2));
         assert_eq!(PaneExit::from_code(128), PaneExit::Code(128));
-        assert_eq!(PaneExit::from_code(130), PaneExit::Signal(2));
-        assert_eq!(PaneExit::from_code(137), PaneExit::Signal(9));
-        assert_eq!(PaneExit::from_code(192), PaneExit::Signal(64));
+        assert_eq!(PaneExit::from_code(130), PaneExit::Signal { signal: 2, code: Some(130) });
+        assert_eq!(PaneExit::from_code(137), PaneExit::Signal { signal: 9, code: Some(137) });
+        assert_eq!(PaneExit::from_code(192), PaneExit::Signal { signal: 64, code: Some(192) });
         assert_eq!(PaneExit::from_code(255), PaneExit::Code(255));
         assert_eq!(PaneExit::Code(3).exit_code(), Some(3));
-        assert_eq!(PaneExit::Signal(9).exit_code(), None, "a signal death is not an exit code");
+        assert_eq!(PaneExit::from_code(130).exit_code(), Some(130), "a CLI's real 130 is kept in the row");
+        assert_eq!(PaneExit::Signal { signal: 9, code: None }.exit_code(), None, "nothing invented");
         assert_eq!(PaneExit::Unknown.exit_code(), None, "never -1");
-        assert_eq!(PaneExit::Signal(9).describe(), "killed by signal 9");
+        assert_eq!(PaneExit::from_code(137).describe(), "killed by signal 9");
+        assert_eq!(PaneExit::Signal { signal: 0, code: None }.describe(), "killed by a signal");
         assert_eq!(PaneExit::Unknown.describe(), "exit status unknown");
     }
 
