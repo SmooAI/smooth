@@ -298,9 +298,14 @@ async fn learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches
     assert_eq!(s["argv"][1], "/work bind", "no --session-id in a learned launch: {s}");
 
     // The first hook from the worktree binds the id to this row.
-    let bound = d
-        .wait_until(&id, "bound", WAIT, |s| s["agent_session_id"] == "learned-abc-123" && state(s) == "idle")
-        .await;
+    d.wait_until(&id, "bound", WAIT, |s| s["agent_session_id"] == "learned-abc-123").await;
+    // That first hook is SessionStart, which already reads idle — BEFORE the
+    // `/work bind` turn runs. Let the turn finish (its Stop is posted before
+    // `worked:` is printed): killing mid-turn races the dying process's
+    // in-flight hooks against the relaunch, which is th-a9c627, not what
+    // this test is about.
+    d.wait_screen(&id, "worked: bind", WAIT).await;
+    let bound = d.wait_state(&id, "idle", WAIT).await;
     assert_eq!(bound["state_source"], "hooks");
 
     // kill --resume relaunches with `--resume <learned id>`.

@@ -75,7 +75,7 @@ async fn harness_matrix_state_source_per_manifest() {
         ["hooks", "hooks", "native", "inferred"]
     );
     // An unknown kind is refused with the pointer to `th harness list`.
-    let (status, v) = d.post("/api/flow/sessions", json!({"kind":"aider","worktree":d.ws})).await;
+    let (status, v) = d.post("/api/flow/sessions", json!({"kind":"nosuchtool","worktree":d.ws})).await;
     assert_eq!(status, 400, "{v}");
     assert!(v["error"].as_str().unwrap().contains("th harness list"), "{v}");
 }
