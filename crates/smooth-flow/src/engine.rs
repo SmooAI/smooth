@@ -47,6 +47,11 @@ const LIMIT_REARM_GRACE: Duration = Duration::from_secs(90);
 const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// How long a dead pane may report no exit status before the supervisor
+/// settles for [`PaneExit::Unknown`] (th-7ff336).
+const EXIT_STATUS_WAIT: Duration = Duration::from_secs(3);
+/// Next to `flow.db`: the pane wrappers' exit-code files.
+const EXIT_DIR: &str = "flow-exit-status";
 /// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
 /// harness's composer when its manifest cannot scrape an idle composer.
 const PASTE_DELAY: Duration = Duration::from_secs(4);
@@ -144,6 +149,9 @@ struct Runtime {
     /// Session id → (hash of the last captured pane text, when it last
     /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
     pane_seen: HashMap<String, (u64, Instant)>,
+    /// Session id → when its pane was first seen dead with no exit status
+    /// yet (th-7ff336).
+    exit_pending: HashMap<String, Instant>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
     /// Harness session ids adoption already refused (th-c103c1) — a stranger
@@ -180,6 +188,84 @@ impl PendingPaste {
             Some(deadline) => now >= deadline,
         }
     }
+}
+
+/// How a supervised session's process ended, as far as SmoothFlow knows
+/// (th-7ff336).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneExit {
+    /// Exited with this code.
+    Code(i32),
+    /// Killed by `signal` (`0`: one tmux named but we don't know). `code` is
+    /// the shell's `128 + n` when that is how we learned it. Kept, because a
+    /// CLI that really exits 130 is indistinguishable from a SIGINT death.
+    Signal { signal: i32, code: Option<i32> },
+    /// Dead, but neither tmux nor the pane wrapper could say how. Never
+    /// resumed: it may have quit on purpose.
+    Unknown,
+    /// The tmux session itself is gone.
+    Vanished,
+}
+
+impl PaneExit {
+    /// Classify a shell-style exit code: `129..=192` is a signal death.
+    #[must_use]
+    pub const fn from_code(code: i32) -> Self {
+        if code > 128 && code <= 128 + 64 {
+            Self::Signal {
+                signal: code - 128,
+                code: Some(code),
+            }
+        } else {
+            Self::Code(code)
+        }
+    }
+
+    /// The code for the row's `exit_code`: a real exit's, or the shell's
+    /// `128 + n`. Never invented: `Unknown` / `Vanished` have none.
+    #[must_use]
+    pub const fn exit_code(self) -> Option<i32> {
+        match self {
+            Self::Code(c) | Self::Signal { code: Some(c), .. } => Some(c),
+            _ => None,
+        }
+    }
+
+    fn describe(self) -> String {
+        match self {
+            Self::Code(c) => format!("exit {c}"),
+            Self::Signal { signal: 0, .. } => "killed by a signal".to_string(),
+            Self::Signal { signal, .. } => format!("killed by signal {signal}"),
+            Self::Unknown => "exit status unknown".to_string(),
+            Self::Vanished => "process vanished".to_string(),
+        }
+    }
+}
+
+/// Settle a dead pane's exit: tmux's status or signal, else the code the pane
+/// wrapper recorded ([`tmux::wrapped_command_env`]), else, once
+/// [`EXIT_STATUS_WAIT`] has passed, [`PaneExit::Unknown`]. Never `-1`.
+///
+/// `None` means "not yet": the pane is marked in `pending` and re-checked on
+/// the next supervision tick. Nothing here waits, so one pane whose status
+/// is late never holds up another session's supervision.
+fn settle_exit(pending: &mut HashMap<String, Instant>, id: &str, tmux: tmux::PaneDeath, recorded: Option<i32>, now: Instant) -> Option<PaneExit> {
+    let settled = match (tmux, recorded) {
+        (tmux::PaneDeath::Code(c), _) | (_, Some(c)) => Some(PaneExit::from_code(c)),
+        // The wrapper itself was killed, so it wrote nothing: a signal death.
+        (tmux::PaneDeath::Signal(signal), None) => Some(PaneExit::Signal { signal, code: None }),
+        (tmux::PaneDeath::Unreaped, None) => None,
+    };
+    if let Some(exit) = settled {
+        pending.remove(id);
+        return Some(exit);
+    }
+    let first = *pending.entry(id.to_string()).or_insert(now);
+    if now.saturating_duration_since(first) >= EXIT_STATUS_WAIT {
+        pending.remove(id);
+        return Some(PaneExit::Unknown);
+    }
+    None
 }
 
 /// How long the pane text has held still, updating `seen` with this capture.
@@ -227,6 +313,8 @@ struct Inner {
     resolve_env: Mutex<Option<(PathBuf, std::ffi::OsString)>>,
     /// Where per-launch hook token files live (th-91d032).
     hook_tokens: PathBuf,
+    /// Where pane wrappers record their harness's exit code (th-7ff336).
+    exit_dir: PathBuf,
 }
 
 /// A live PTY bridge and the generation it was created under.
@@ -612,6 +700,7 @@ impl Engine {
     pub fn open(cfg: EngineConfig) -> Result<Self> {
         let store = FlowStore::open(&cfg.db_path)?;
         let hook_tokens = crate::hook_auth::token_dir(&cfg.db_path);
+        let exit_dir = cfg.db_path.parent().unwrap_or_else(|| Path::new(".")).join(EXIT_DIR);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -633,6 +722,7 @@ impl Engine {
                 daemon_url: cfg.daemon_url,
                 resolve_env: Mutex::new(None),
                 hook_tokens,
+                exit_dir,
             }),
         })
     }
@@ -821,6 +911,39 @@ impl Engine {
     fn revoke_hook_token(&self, id: &str) {
         let _ = self.with_store(|st| st.set_hook_token_hash(id, None));
         crate::hook_auth::remove_token(&self.inner.hook_tokens, id);
+    }
+
+    /// `<exit_dir>/<id>`: the prefix a pane wrapper appends `.<pid>.exit` to.
+    fn exit_prefix(&self, id: &str) -> PathBuf {
+        self.inner.exit_dir.join(id)
+    }
+
+    /// The exit code this launch's wrapper recorded, if any. Keyed by the
+    /// row's pane pid, so an earlier launch's file never answers.
+    fn recorded_exit(&self, s: &Session) -> Option<i32> {
+        tmux::read_exit_file(&tmux::exit_file(&self.exit_prefix(&s.id), s.pid?))
+    }
+
+    /// Remove every exit-code file (and half-written temp) of session `id`,
+    /// and forget any pending exit-status wait for it.
+    ///
+    /// The wait is keyed by session id, and a relaunch (`kill --resume`, a
+    /// crash resume) keeps the id. A wait left behind by a pane killed or
+    /// removed mid-window would start the NEXT incarnation's clock in the
+    /// past, and its first unreaped read would settle as Unknown at once —
+    /// never resumed. Every caller of this marks an incarnation's end or a
+    /// fresh launch, which is exactly when the wait must go.
+    fn clear_exit_files(&self, id: &str) {
+        self.rt().exit_pending.remove(id);
+        let Ok(entries) = std::fs::read_dir(&self.inner.exit_dir) else { return };
+        let prefix = format!("{id}.");
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && (name.ends_with(".exit") || name.ends_with(".exit.tmp")) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     /// Subscribe to every broadcast frame.
@@ -1067,7 +1190,12 @@ impl Engine {
                 env.push((crate::hook_auth::TOKEN_FILE_ENV.to_string(), path.to_string_lossy().into_owned()));
             }
         }
-        let pid = tmux::launch_env(&sock, &tmux_name, Path::new(&session.worktree), argv, &env)?;
+        // th-7ff336: a fresh generation — whatever an earlier launch recorded
+        // is gone before this one can exit.
+        self.clear_exit_files(&session.id);
+        let _ = std::fs::create_dir_all(&self.inner.exit_dir);
+        let prefix = self.exit_prefix(&session.id);
+        let pid = tmux::launch_with(&sock, &tmux_name, Path::new(&session.worktree), argv, &env, Some(&prefix))?;
         let start = proc::start_time(pid);
         self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
         if let Some(agent) = &session.agent_session_id {
@@ -1327,12 +1455,20 @@ impl Engine {
                 proc::kill_tree(pid, KILL_GRACE);
             }
         }
-        let exit = tmux_name.as_deref().and_then(|t| tmux::pane_exit_status(&sock, t).ok().flatten());
+        let exit = tmux_name
+            .as_deref()
+            .and_then(|t| tmux::pane_exit_status(&sock, t).ok().flatten())
+            .and_then(|d| match d {
+                tmux::PaneDeath::Code(c) => Some(c),
+                _ => None,
+            })
+            .or_else(|| self.recorded_exit(&s));
         if let Some(t) = &tmux_name {
             tmux::kill_session(&sock, t);
         }
         self.drop_pty(id);
         self.revoke_hook_token(id);
+        self.clear_exit_files(id);
         self.with_store(|st| st.set_exit_code(id, exit))?;
         if resume {
             self.rt().resume_attempts.remove(id);
@@ -1372,6 +1508,7 @@ impl Engine {
             tmux::kill_session(&socket_of(&s), t);
         }
         self.revoke_hook_token(id);
+        self.clear_exit_files(id);
         self.with_store(|st| st.remove(id))?;
         self.inner.session_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
@@ -1448,6 +1585,7 @@ impl Engine {
             }
         }
         self.revoke_hook_token(id);
+        self.clear_exit_files(id);
         self.with_store(|st| st.remove(id))?;
         self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
         Ok(out)
@@ -1911,18 +2049,29 @@ impl Engine {
         let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
         tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
         if !alive {
-            return self.on_death(s, None);
+            // The wrapper may still have recorded how the harness ended.
+            let exit = self.recorded_exit(s).map_or(PaneExit::Vanished, PaneExit::from_code);
+            tracing::info!(session = %s.id, tmux = %t, state = %s.state, exit = ?exit, "flow: tmux session gone");
+            self.clear_exit_files(&s.id);
+            return self.on_death(s, exit);
         }
-        if let Some(code) = exit? {
-            self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
+        if let Some(death) = exit? {
+            let recorded = self.recorded_exit(s);
+            let Some(exit) = settle_exit(&mut self.rt().exit_pending, &s.id, death, recorded, Instant::now()) else {
+                tracing::info!(session = %s.id, "flow: pane dead, exit status not known yet — re-checking next tick");
+                return Ok(());
+            };
+            tracing::info!(session = %s.id, tmux = ?death, recorded = ?recorded, exit = ?exit, "flow: pane exited");
+            self.with_store(|st| st.set_exit_code(&s.id, exit.exit_code()))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
-            if code == 0 {
-                // Rule 5: exit 0 is proven — the PTY reported it.
+            self.clear_exit_files(&s.id);
+            if exit == PaneExit::Code(0) {
+                // Rule 5: exit 0 is proven — the PTY or the wrapper reported it.
                 self.set_state(&s.id, SessionState::Done, None)?;
                 return Ok(());
             }
-            return self.on_death(s, Some(code));
+            return self.on_death(s, exit);
         }
         if !s.kind.is_agent() {
             return Ok(());
@@ -2015,13 +2164,20 @@ impl Engine {
 
     /// Rule 2: unexpected death → schedule a resume with backoff, up to
     /// [`MAX_RESUME_ATTEMPTS`], then `dead` (attention `crashed`).
-    fn on_death(&self, s: &Session, code: Option<i32>) -> Result<()> {
+    fn on_death(&self, s: &Session, exit: PaneExit) -> Result<()> {
         self.drop_pty(&s.id);
         // The process the token was issued to is gone; a resume mints a new one.
         self.revoke_hook_token(&s.id);
-        let detail_exit = code.map_or_else(|| "process vanished".to_string(), |c| format!("exit {c}"));
+        let detail_exit = exit.describe();
+        // th-7ff336: an exit nobody could read is not evidence of a crash —
+        // the user may have quit it on purpose. Say so; never resurrect it.
+        if exit == PaneExit::Unknown {
+            let att = Attention::new("crashed").with_detail("exit status unknown — not resumed; it may have quit on purpose");
+            self.set_state(&s.id, SessionState::Dead, Some(att))?;
+            return Ok(());
+        }
         if !s.kind.is_agent() {
-            let state = if code == Some(0) { SessionState::Done } else { SessionState::Dead };
+            let state = if exit == PaneExit::Code(0) { SessionState::Done } else { SessionState::Dead };
             let att = (state == SessionState::Dead).then(|| Attention::new("crashed").with_detail(detail_exit));
             self.set_state(&s.id, state, att)?;
             return Ok(());
@@ -2408,6 +2564,96 @@ pub fn ci_rollup(rollup: Option<&Value>) -> Value {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_pane_settles_from_tmux_then_the_wrapper_then_unknown() {
+        let mut pending = HashMap::new();
+        let t0 = Instant::now();
+        let unknown = tmux::PaneDeath::Unreaped;
+        let code = tmux::PaneDeath::Code;
+        // tmux knows: that wins at once.
+        assert_eq!(settle_exit(&mut pending, "a", code(2), None, t0), Some(PaneExit::Code(2)));
+        // tmux doesn't, the wrapper recorded it: no wait at all.
+        assert_eq!(settle_exit(&mut pending, "b", unknown, Some(0), t0), Some(PaneExit::Code(0)));
+        assert_eq!(
+            settle_exit(&mut pending, "b2", unknown, Some(137), t0),
+            Some(PaneExit::Signal { signal: 9, code: Some(137) })
+        );
+        // The wrapper itself was killed: tmux names the signal, there is no file.
+        assert_eq!(
+            settle_exit(&mut pending, "b3", tmux::PaneDeath::Signal(9), None, t0),
+            Some(PaneExit::Signal { signal: 9, code: None })
+        );
+        assert!(pending.is_empty());
+        // Neither knows yet: not settled, re-checked next tick…
+        assert_eq!(settle_exit(&mut pending, "c", unknown, None, t0), None);
+        assert_eq!(settle_exit(&mut pending, "c", unknown, None, t0 + Duration::from_secs(1)), None);
+        // …and a late status still wins inside the window.
+        assert_eq!(
+            settle_exit(&mut pending, "c", code(3), None, t0 + Duration::from_secs(2)),
+            Some(PaneExit::Code(3))
+        );
+        // Nothing ever: Unknown at the deadline — never -1.
+        assert_eq!(settle_exit(&mut pending, "d", unknown, None, t0), None);
+        assert_eq!(settle_exit(&mut pending, "d", unknown, None, t0 + EXIT_STATUS_WAIT), Some(PaneExit::Unknown));
+        assert!(pending.is_empty());
+    }
+
+    /// One pane whose status is late holds up nobody else: each session's
+    /// wait is its own, and settling never sleeps.
+    #[test]
+    fn a_pending_pane_does_not_delay_another_session() {
+        let mut pending = HashMap::new();
+        let t0 = Instant::now();
+        let unknown = tmux::PaneDeath::Unreaped;
+        let started = Instant::now();
+        assert_eq!(settle_exit(&mut pending, "late", unknown, None, t0), None);
+        // Same tick: another session's exit settles immediately.
+        assert_eq!(settle_exit(&mut pending, "other", tmux::PaneDeath::Code(1), None, t0), Some(PaneExit::Code(1)));
+        assert_eq!(settle_exit(&mut pending, "other2", unknown, Some(0), t0), Some(PaneExit::Code(0)));
+        assert!(started.elapsed() < Duration::from_millis(100), "settling never waits");
+        // The late one's clock started at its own first look, untouched by the others.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(settle_exit(&mut pending, "late", unknown, None, t0 + EXIT_STATUS_WAIT), Some(PaneExit::Unknown));
+    }
+
+    /// A pending exit-status wait never outlives its incarnation: the next
+    /// launch under the same id must get a fresh clock, not Unknown at once.
+    #[test]
+    fn a_stale_exit_wait_is_forgotten_with_the_incarnation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let long_ago = Instant::now().checked_sub(EXIT_STATUS_WAIT * 10).unwrap_or_else(Instant::now);
+        e.rt().exit_pending.insert("fs-x".into(), long_ago);
+        e.rt().exit_pending.insert("fs-y".into(), long_ago);
+        e.clear_exit_files("fs-x");
+        assert!(!e.rt().exit_pending.contains_key("fs-x"), "the ended incarnation's wait is gone");
+        assert!(e.rt().exit_pending.contains_key("fs-y"), "other sessions' waits are untouched");
+        // What the leak would have done: the relaunch's first unreaped read
+        // settling as Unknown on a clock that started before it existed.
+        let now = Instant::now();
+        let mut pending = std::mem::take(&mut e.rt().exit_pending);
+        assert_eq!(settle_exit(&mut pending, "fs-x", tmux::PaneDeath::Unreaped, None, now), None, "fresh clock");
+        assert_eq!(settle_exit(&mut pending, "fs-y", tmux::PaneDeath::Unreaped, None, now), Some(PaneExit::Unknown));
+    }
+
+    #[test]
+    fn pane_exit_classifies_signal_deaths_and_keeps_codes() {
+        assert_eq!(PaneExit::from_code(0), PaneExit::Code(0));
+        assert_eq!(PaneExit::from_code(2), PaneExit::Code(2));
+        assert_eq!(PaneExit::from_code(128), PaneExit::Code(128));
+        assert_eq!(PaneExit::from_code(130), PaneExit::Signal { signal: 2, code: Some(130) });
+        assert_eq!(PaneExit::from_code(137), PaneExit::Signal { signal: 9, code: Some(137) });
+        assert_eq!(PaneExit::from_code(192), PaneExit::Signal { signal: 64, code: Some(192) });
+        assert_eq!(PaneExit::from_code(255), PaneExit::Code(255));
+        assert_eq!(PaneExit::Code(3).exit_code(), Some(3));
+        assert_eq!(PaneExit::from_code(130).exit_code(), Some(130), "a CLI's real 130 is kept in the row");
+        assert_eq!(PaneExit::Signal { signal: 9, code: None }.exit_code(), None, "nothing invented");
+        assert_eq!(PaneExit::Unknown.exit_code(), None, "never -1");
+        assert_eq!(PaneExit::from_code(137).describe(), "killed by signal 9");
+        assert_eq!(PaneExit::Signal { signal: 0, code: None }.describe(), "killed by a signal");
+        assert_eq!(PaneExit::Unknown.describe(), "exit status unknown");
+    }
 
     fn engine(tmp: &Path) -> Engine {
         Engine::open(EngineConfig {
@@ -2911,7 +3157,7 @@ mod tests {
         };
         let agent = mk(SessionKind::Claude);
         for attempt in 1..=MAX_RESUME_ATTEMPTS {
-            e.on_death(&agent, Some(137)).unwrap();
+            e.on_death(&agent, PaneExit::from_code(137)).unwrap();
             let s = e.get(&agent.id).unwrap().unwrap();
             assert_eq!(s.state, SessionState::Starting);
             let att = s.attention.unwrap();
@@ -2921,16 +3167,16 @@ mod tests {
             assert!(e.rt().relaunch_at.contains_key(&agent.id));
             e.rt().relaunch_at.remove(&agent.id);
         }
-        e.on_death(&agent, None).unwrap();
+        e.on_death(&agent, PaneExit::Vanished).unwrap();
         let s = e.get(&agent.id).unwrap().unwrap();
         assert_eq!(s.state, SessionState::Dead);
         assert!(s.attention.unwrap().detail.unwrap().contains("gave up"));
 
         let shell = mk(SessionKind::Shell);
-        e.on_death(&shell, Some(0)).unwrap();
+        e.on_death(&shell, PaneExit::Code(0)).unwrap();
         assert_eq!(e.get(&shell.id).unwrap().unwrap().state, SessionState::Done);
         let shell2 = mk(SessionKind::Shell);
-        e.on_death(&shell2, Some(1)).unwrap();
+        e.on_death(&shell2, PaneExit::Code(1)).unwrap();
         let s = e.get(&shell2.id).unwrap().unwrap();
         assert_eq!(s.state, SessionState::Dead);
         assert_eq!(s.attention.unwrap().reason, "crashed");
@@ -3688,6 +3934,84 @@ mod tests {
         assert!(h["checkpoints"].as_array().unwrap().is_empty());
         assert!(h["blocks"].as_array().unwrap().is_empty());
         assert!(h["pr"].is_null());
+    }
+
+    /// th-7ff336 / th-9d2578, deterministically, at the supervisor: tmux
+    /// reports a pane dead (`1||`) before it has any status for it. This
+    /// holds that state open instead of racing it: the pane process ignores
+    /// SIGHUP, closes every fd on its pty (tmux sees EOF and marks the pane
+    /// dead) and exits 2 only when the test says so. The pane is launched
+    /// WITHOUT the exit-code wrapper — under it the pane cannot go dead
+    /// while the wrapper lives — so neither tmux nor a file can answer, which
+    /// is exactly the state the supervisor must wait out instead of guessing.
+    /// The old code recorded `(Dead, Some(-1))` on the first tick here.
+    ///
+    /// Linux only: macOS does not report EOF on a pty master while its
+    /// session leader lives, so the state never occurs there.
+    #[test]
+    fn a_dead_pane_with_no_status_yet_is_waited_out_not_guessed() {
+        if !tmux::tmux_available() || !cfg!(target_os = "linux") {
+            eprintln!("skipping: needs tmux on Linux");
+            return;
+        }
+        let sock = format!("flow-ns-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let go = tmp.path().join("go");
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    tmux_socket: Some(sock.clone()),
+                    // Supervised by this engine (see `owned_here`), as
+                    // `new_session` would set it.
+                    owner: Some(tmux::socket_name()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let script = format!(
+            "trap '' HUP; exec </dev/null >/dev/null 2>/dev/null; while [ ! -e '{}' ]; do sleep 0.05; done; exit 2",
+            go.display()
+        );
+        let argv = vec!["sh".to_string(), "-c".to_string(), script];
+        let pid = tmux::launch_env(&sock, &s.id, tmp.path(), &argv, &[]).unwrap();
+        let start = proc::start_time(pid);
+        e.with_store(|st| st.set_process(&s.id, Some(&s.id), Some(pid), start, &argv)).unwrap();
+        e.with_store(|st| st.set_state(&s.id, SessionState::Idle, None)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_exit_status(&sock, &s.id).ok() != Some(Some(tmux::PaneDeath::Unreaped)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            tmux::pane_exit_status(&sock, &s.id).unwrap(),
+            Some(tmux::PaneDeath::Unreaped),
+            "dead with no status, even after the reap nudge"
+        );
+
+        // Inside the window: every tick leaves the row alone — no -1, no
+        // premature Unknown — and only marks the wait.
+        for _ in 0..3 {
+            e.supervise_tick().unwrap();
+        }
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Idle, None), "not guessed: {row:?}");
+        assert!(tmux::session_alive(&sock, &s.id), "the pane is kept until its status is read");
+        assert!(e.rt().exit_pending.contains_key(&s.id), "the wait is on the clock");
+
+        // The status arrives: the real code, and the wait is gone.
+        std::fs::write(&go, b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_exit_status(&sock, &s.id).ok() != Some(Some(tmux::PaneDeath::Code(2))) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        e.supervise_tick().unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Dead, Some(2)), "the real status: {row:?}");
+        assert!(!e.rt().exit_pending.contains_key(&s.id));
+        tmux::kill_server(&sock);
     }
 
     /// Live: launch a real `shell`-kind session (a `cat` loop so it never

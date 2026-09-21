@@ -13,7 +13,7 @@
 //! Send/capture reuse `smooth_tmux::TmuxDriver::open_existing` (non-owning),
 //! which gives bracketed-paste sends and scrollback capture for free.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
@@ -94,6 +94,56 @@ pub fn exec_command_env(argv: &[String], env: &[(String, String)]) -> String {
     format!("{exports}exec {}", quoted.join(" "))
 }
 
+/// The pane command for a supervised session (th-7ff336).
+///
+/// Runs `argv` as a CHILD of a small `sh`, records its exit code in
+/// `<exit_prefix>.<wrapper pid>.exit` (atomically: temp file + rename), and
+/// exits with that same code.
+///
+/// tmux knows a pane's exit status only once its server has reaped the pane
+/// process, which can lag seconds behind the pane going dead; the file is
+/// written before the wrapper exits, so it is there the moment tmux shows the
+/// pane dead. The pid in the name is the pane pid the engine records, so a
+/// file from an earlier launch never reads as this one's.
+///
+/// Signals: `trap : INT QUIT` is a no-op HANDLER, not an ignore. A handler
+/// resets to the default across `exec`, so the harness still gets Ctrl-C
+/// normally while the wrapper survives it and keeps waiting — the pane can
+/// never go dead under a harness that is still running. (`trap '' INT` would
+/// be inherited as ignored and take Ctrl-C away from the harness.) There is
+/// no job control in a non-interactive `sh`, so the harness stays in the
+/// wrapper's process group: the pty's foreground group, and what
+/// `proc::kill_tree` signals.
+#[must_use]
+pub fn wrapped_command_env(argv: &[String], env: &[(String, String)], exit_prefix: &Path) -> String {
+    let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
+    let exports = env.iter().fold(String::new(), |mut acc, (k, v)| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "export {k}={}; ", shell_quote(v));
+        acc
+    });
+    let prefix = shell_quote(&exit_prefix.to_string_lossy());
+    format!(
+        "{exports}trap : INT QUIT; {}; c=$?; f={prefix}.$$.exit; printf '%s\\n' \"$c\" >\"$f.tmp\" 2>/dev/null && mv -f \"$f.tmp\" \"$f\" 2>/dev/null; exit \"$c\"",
+        quoted.join(" ")
+    )
+}
+
+/// Where [`wrapped_command_env`] records the exit code of the launch whose
+/// pane pid is `pid`.
+#[must_use]
+pub fn exit_file(exit_prefix: &Path, pid: u32) -> PathBuf {
+    let mut name = exit_prefix.as_os_str().to_owned();
+    name.push(format!(".{pid}.exit"));
+    PathBuf::from(name)
+}
+
+/// The exit code a wrapper recorded, if it has.
+#[must_use]
+pub fn read_exit_file(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 /// Start the flow server (if needed) with the options every session relies
 /// on, in ONE tmux invocation so they hold before the first pane exists —
 /// a command that exits instantly would otherwise take the server (and its
@@ -169,10 +219,20 @@ pub fn launch(socket: &str, session: &str, cwd: &Path, argv: &[String]) -> Resul
 /// # Errors
 /// When tmux is missing or the session cannot be created.
 pub fn launch_env(socket: &str, session: &str, cwd: &Path, argv: &[String], env: &[(String, String)]) -> Result<u32> {
+    launch_with(socket, session, cwd, argv, env, None)
+}
+
+/// [`launch_env`], under [`wrapped_command_env`] when `exit_prefix` is set.
+///
+/// With a prefix the returned pid is the wrapper's, and the harness its child.
+///
+/// # Errors
+/// When tmux is missing or the session cannot be created.
+pub fn launch_with(socket: &str, session: &str, cwd: &Path, argv: &[String], env: &[(String, String)], exit_prefix: Option<&Path>) -> Result<u32> {
     if argv.is_empty() {
         return Err(anyhow!("cannot launch an empty argv"));
     }
-    let cmd = exec_command_env(argv, env);
+    let cmd = exit_prefix.map_or_else(|| exec_command_env(argv, env), |p| wrapped_command_env(argv, env, p));
     let cwd_s = cwd.to_string_lossy();
     ensure_server(socket);
     let out = tmux(
@@ -239,32 +299,101 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
     Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
 }
 
-/// `Some(exit_status)` once the pane's process has exited (remain-on-exit
-/// keeps the pane), `None` while it runs.
+/// How a dead pane's process ended, as tmux reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneDeath {
+    /// Exited with this status.
+    Code(i32),
+    /// Killed by this signal. `0` when tmux names one this table doesn't
+    /// know. tmux 3.3 prints a number, 3.5 a name (`term`, `kill`).
+    Signal(i32),
+    /// The pty is closed but tmux has no status or signal for the process
+    /// yet: it has not reaped it (th-7ff336). This is NOT an exit. Ask again.
+    Unreaped,
+}
+
+const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
+
+/// `Some(death)` once the pane's process is dead (remain-on-exit keeps the
+/// pane), `None` while it runs.
+///
+/// An [`PaneDeath::Unreaped`] read gets one nudge first: tmux can miss a
+/// pane's SIGCHLD and leave the process a zombie with no status for good
+/// (about 1 in 100–300 fast exits on Linux tmux 3.3a, measured in review of
+/// th-7ff336). Its handler reaps with `waitpid(WAIT_ANY)`, so any other child
+/// of the server exiting collects the stray too. `run-shell true` is that
+/// child, and the re-read carries the real status.
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
-pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
-    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}|#{pane_dead_status}"])?;
-    tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
-    Ok(parse_pane_dead(&s))
+pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<PaneDeath>> {
+    let read = || -> Result<Option<PaneDeath>> {
+        let s = tmux_ok(socket, &["display-message", "-p", "-t", session, DEAD_FORMAT])?;
+        tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
+        Ok(parse_pane_dead(&s))
+    };
+    let death = read()?;
+    if death != Some(PaneDeath::Unreaped) {
+        return Ok(death);
+    }
+    let _ = tmux(socket, &["run-shell", "true"]);
+    read()
 }
 
-/// Parse `#{pane_dead}|#{pane_dead_status}`: `None` while the pane runs,
-/// `Some(status)` once it died (`-1` when tmux has no status for it).
+/// Parse `#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}`: `None`
+/// while the pane runs.
+///
+/// `pane_dead` means the pty fd is closed, NOT that the process was reaped.
+/// tmux closes the fd on the pty's EOF and records the status on SIGCHLD,
+/// two separate events. Between them (or for good, when tmux misses the
+/// SIGCHLD) a query reads `1||`, which is [`PaneDeath::Unreaped`], never an
+/// exit.
 ///
 /// The separator is `|`, NOT a tab: under a non-UTF-8 locale (no `LANG` —
 /// a launchd-started daemon, a CI runner, an `env -i`) tmux rewrites every
 /// control character in `display-message -p` output to `_`, so a tab-joined
 /// format read as `1_2` and the engine never saw a pane die (th-8e3087).
 #[must_use]
-pub fn parse_pane_dead(raw: &str) -> Option<i32> {
-    let mut parts = raw.split('|');
-    let dead = parts.next().unwrap_or("0").trim() == "1";
-    if !dead {
+pub fn parse_pane_dead(raw: &str) -> Option<PaneDeath> {
+    let mut parts = raw.split('|').map(str::trim);
+    if parts.next() != Some("1") {
         return None;
     }
-    Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(-1))
+    let status = parts.next().unwrap_or("");
+    let signal = parts.next().unwrap_or("");
+    Some(match status.parse::<i32>() {
+        Ok(code) => PaneDeath::Code(code),
+        Err(_) if !signal.is_empty() => PaneDeath::Signal(signal_number(signal)),
+        Err(_) => PaneDeath::Unreaped,
+    })
+}
+
+/// A signal as tmux prints it (`9`, or `kill` / `SIGKILL`) as its number,
+/// `0` when it is not one of the common ones.
+#[must_use]
+pub fn signal_number(sig: &str) -> i32 {
+    if let Ok(n) = sig.parse() {
+        return n;
+    }
+    let name = sig.trim().to_ascii_lowercase();
+    match name.strip_prefix("sig").unwrap_or(&name) {
+        "hup" => 1,
+        "int" => 2,
+        "quit" => 3,
+        "ill" => 4,
+        "trap" => 5,
+        "abrt" | "iot" => 6,
+        "bus" => 7,
+        "fpe" => 8,
+        "kill" => 9,
+        "usr1" => 10,
+        "segv" => 11,
+        "usr2" => 12,
+        "pipe" => 13,
+        "alrm" => 14,
+        "term" => 15,
+        _ => 0,
+    }
 }
 
 /// `(cols, rows)` of the pane.
@@ -421,10 +550,18 @@ mod tests {
     #[test]
     fn pane_queries_parse_without_a_tab_separator() {
         assert_eq!(parse_pane_dead("0|"), None);
-        assert_eq!(parse_pane_dead("0|0"), None);
-        assert_eq!(parse_pane_dead("1|2"), Some(2));
-        assert_eq!(parse_pane_dead("1|0"), Some(0));
-        assert_eq!(parse_pane_dead("1|"), Some(-1));
+        assert_eq!(parse_pane_dead("0|0|"), None);
+        assert_eq!(parse_pane_dead("1|2|"), Some(PaneDeath::Code(2)));
+        assert_eq!(parse_pane_dead("1|0|"), Some(PaneDeath::Code(0)));
+        // th-7ff336: dead, no status, no signal — not reaped, never an exit.
+        assert_eq!(parse_pane_dead("1||"), Some(PaneDeath::Unreaped));
+        assert_eq!(parse_pane_dead("1|"), Some(PaneDeath::Unreaped));
+        // Killed by a signal: tmux 3.3 prints the number, 3.5 the name.
+        assert_eq!(parse_pane_dead("1||9"), Some(PaneDeath::Signal(9)));
+        assert_eq!(parse_pane_dead("1||kill"), Some(PaneDeath::Signal(9)));
+        assert_eq!(parse_pane_dead("1||term"), Some(PaneDeath::Signal(15)));
+        assert_eq!(parse_pane_dead("1||SIGHUP"), Some(PaneDeath::Signal(1)));
+        assert_eq!(parse_pane_dead("1||xcpu"), Some(PaneDeath::Signal(0)), "unknown name: still a signal death");
         assert_eq!(parse_pane_dead(""), None);
         // What a tab-joined format came back as under `LANG` unset.
         assert_eq!(parse_pane_dead("1_2"), None, "the old format read as alive — the bug");
@@ -455,6 +592,109 @@ mod tests {
         assert_eq!(socket_name(), FLOW_SOCKET);
     }
 
+    /// Poll `f` for up to 10 s.
+    fn eventually(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn wrapped_command_quotes_and_records_to_the_prefix() {
+        let cmd = wrapped_command_env(&["a b".into(), "c'd".into()], &[("K".into(), "v w".into())], Path::new("/x/fs-1"));
+        assert!(
+            cmd.starts_with("export K='v w'; trap : INT QUIT; 'a b' 'c'\\''d'; c=$?; f=/x/fs-1.$$.exit;"),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with("exit \"$c\""), "the wrapper exits with the harness's own code: {cmd}");
+        assert!(!cmd.contains("exec "), "the harness is a child, not an exec: {cmd}");
+        assert!(!cmd.contains("trap ''"), "an ignored INT would be inherited by the harness: {cmd}");
+        assert_eq!(exit_file(Path::new("/x/fs-1"), 42), PathBuf::from("/x/fs-1.42.exit"));
+    }
+
+    /// th-7ff336: the wrapper records the harness's code where the engine
+    /// looks for it, and tmux sees the same code.
+    #[test]
+    fn live_wrapper_records_the_exit_code_and_a_signal_death() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-tw-{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("fs-w");
+        let pid = launch_with(&sock, "fs-w", dir.path(), &["sh".into(), "-c".into(), "exit 7".into()], &[], Some(&prefix)).unwrap();
+        let file = exit_file(&prefix, pid);
+        assert!(eventually(|| read_exit_file(&file) == Some(7)), "recorded exit 7 at {}", file.display());
+        assert!(
+            eventually(|| pane_exit_status(&sock, "fs-w").ok().flatten() == Some(PaneDeath::Code(7))),
+            "tmux agrees"
+        );
+        assert!(!file.with_extension("exit.tmp").exists(), "the temp file was renamed away");
+        // A harness killed by a signal: the shell's 128 + n.
+        let pid = launch_with(
+            &sock,
+            "fs-k",
+            dir.path(),
+            &["sh".into(), "-c".into(), "kill -9 $$".into()],
+            &[],
+            Some(&dir.path().join("fs-k")),
+        )
+        .unwrap();
+        assert!(eventually(|| read_exit_file(&exit_file(&dir.path().join("fs-k"), pid)) == Some(137)));
+        kill_server(&sock);
+    }
+
+    /// th-7ff336: Ctrl-C reaches the harness; a harness that survives it keeps
+    /// the pane alive (the wrapper never exits before its child); one that
+    /// dies of it is recorded as 128 + SIGINT.
+    #[test]
+    fn live_wrapper_passes_ctrl_c_to_the_harness_and_outlives_nothing() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-tc-{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("int.log");
+        let prefix = dir.path().join("fs-c");
+        // Handles INT itself (like Claude Code) and keeps running.
+        let harness = format!("trap 'echo got-int >> {}' INT; echo READY; while :; do sleep 0.1; done", log.display());
+        let pid = launch_with(&sock, "fs-c", dir.path(), &["sh".into(), "-c".into(), harness], &[], Some(&prefix)).unwrap();
+        assert!(eventually(|| capture_visible(&sock, "fs-c").is_ok_and(|t| t.contains("READY"))));
+        send_key(&sock, "fs-c", "C-c").unwrap();
+        assert!(
+            eventually(|| std::fs::read_to_string(&log).is_ok_and(|l| l.contains("got-int"))),
+            "Ctrl-C reached the harness"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(pane_exit_status(&sock, "fs-c").unwrap(), None, "the pane stays alive while the harness runs");
+        assert!(crate::proc::is_alive(pid, None), "the wrapper survived Ctrl-C");
+        assert!(read_exit_file(&exit_file(&prefix, pid)).is_none());
+        // Doesn't handle INT: Ctrl-C ends it, and the wrapper records it.
+        let prefix2 = dir.path().join("fs-d");
+        let pid2 = launch_with(
+            &sock,
+            "fs-d",
+            dir.path(),
+            &["sh".into(), "-c".into(), "echo READY; sleep 30; echo AFTER".into()],
+            &[],
+            Some(&prefix2),
+        )
+        .unwrap();
+        assert!(eventually(|| capture_visible(&sock, "fs-d").is_ok_and(|t| t.contains("READY"))));
+        send_key(&sock, "fs-d", "C-c").unwrap();
+        assert!(
+            eventually(|| read_exit_file(&exit_file(&prefix2, pid2)) == Some(130)),
+            "SIGINT death recorded as 130"
+        );
+        kill_server(&sock);
+    }
+
     #[test]
     fn live_launch_exit_status_and_kill() {
         if !tmux_available() {
@@ -465,7 +705,16 @@ mod tests {
         let sock = format!("flow-t-{}", std::process::id());
         let dir = tempfile::tempdir().unwrap();
         let session = "fs-livetest";
-        let pid = launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), "echo READY; exit 7".into()]).unwrap();
+        // The process waits for GO before exiting: one that prints and exits
+        // in the same instant can lose that output before tmux reads it.
+        let go = dir.path().join("GO");
+        let script = format!("echo READY; while [ ! -e '{}' ]; do sleep 0.05; done; exit 7", go.display());
+        let pid = launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), script]).unwrap();
+        assert!(
+            eventually(|| capture_visible(&sock, session).is_ok_and(|t| t.contains("READY"))),
+            "READY painted"
+        );
+        std::fs::write(&go, "").unwrap();
         assert!(pid > 0);
         // remain-on-exit keeps the pane so the exit code is readable.
         // tmux reports the dead status before it has necessarily drained the
@@ -482,7 +731,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert_eq!(status, Some(7), "PTY-reported exit status");
+        assert_eq!(status, Some(PaneDeath::Code(7)), "PTY-reported exit status");
         assert!(session_alive(&sock, session));
         assert!(!session_alive("flow-t-other-socket", session), "sessions are per socket");
         assert!(text.contains("READY"), "{text}");
