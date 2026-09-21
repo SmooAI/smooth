@@ -227,7 +227,9 @@ async fn real_harnesses_launch_through_their_manifests() {
         return;
     }
     if !std::env::var("SMOOTH_E2E_REAL_HARNESSES").is_ok_and(|v| !v.is_empty() && v != "0") {
-        skip("SMOOTH_E2E_REAL_HARNESSES is not set — real claude/opencode/codex/th-code launches are opt-in");
+        // Not opting in is not a missing prerequisite, so strict mode (CI)
+        // must not turn it into a failure.
+        eprintln!("[skip] SMOOTH_E2E_REAL_HARNESSES is not set — real claude/opencode/codex/th-code launches are opt-in");
         return;
     }
     let d = Daemon::boot().await;
