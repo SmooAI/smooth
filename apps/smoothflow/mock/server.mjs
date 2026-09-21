@@ -96,6 +96,16 @@ const seed = [
         branch: null,
         agent_session_id: null,
     }),
+    // th-68d10a: a shell in a worktree has a branch and a diff like any agent.
+    mk('fs-shell002', {
+        kind: 'shell',
+        title: 'zsh · tab gating',
+        argv: ['zsh'],
+        worktree: `${HOME}/dev/smooai/smooth-th-68d10a`,
+        branch: 'th-68d10a-tab-gating',
+        state: 'idle',
+        agent_session_id: null,
+    }),
 ];
 for (const s of seed) sessions.set(s.id, s);
 // Sessions whose worktree the engine would refuse to remove (dirty / unmerged).
@@ -135,7 +145,8 @@ const handoff = (s) => ({
     handoff: {
         worktree: s.worktree,
         branch: s.branch,
-        head: 'a91c0e2',
+        // No branch in the fixture = not a repo (the HOME shell): no HEAD.
+        head: s.branch ? 'a91c0e2' : null,
         dirty: s.state === 'done' ? [] : ['crates/smooth-pearls/src/store.rs', 'Cargo.lock', 'docs/x.md'],
         agent_session_id: s.agent_session_id,
         next: 're-run migrate, open PR',

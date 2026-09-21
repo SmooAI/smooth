@@ -3,8 +3,10 @@ import SwiftUI
 
 enum CenterTab: Int { case terminal, diff, pr, activity }
 
-/// Center column: tab strip (terminal / diff / PR), a splittable surface area,
-/// and the steer bar. Surfaces are owned by `AppController` and merely hosted here.
+/// Center column: tab strip (terminal / diff / PR / activity), a splittable
+/// surface area, and the steer bar. Surfaces are owned by `AppController` and
+/// merely hosted here. Which tabs the focused session can use is
+/// `CenterTabGate` (th-68d10a): Diff/PR follow the worktree, Activity the harness.
 @MainActor
 final class CenterViewController: NSViewController, NSTextFieldDelegate {
     unowned let app: AppController
@@ -24,6 +26,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     private let steerField = NSTextField()
     private let steerHint = NSTextField(labelWithString: "")
     private let content = NSView()
+    /// What the focused session can use; disabled segments, never hidden ones.
+    private(set) var gate = CenterTabGate.nothingFocused
 
     init(app: AppController) {
         self.app = app
@@ -39,6 +43,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
         tabs.selectedSegment = 0
         tabs.setAccessibilityIdentifier("center.tabs")
+        diffView.setAccessibilityIdentifier("center.diff")
+        applyGate()
         pathLabel.setAccessibilityIdentifier("center.path")
         steerField.setAccessibilityIdentifier("steer.field")
         tabs.target = self
@@ -100,6 +106,10 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     var tab: CenterTab = .terminal {
         didSet {
+            // A menu chord or the inbox may ask for a tab this session can't
+            // use; land on the terminal instead of an empty pane.
+            let allowed = gate.resolve(tab)
+            if allowed != tab { tab = allowed }
             tabs.selectedSegment = tab.rawValue
             switch tab {
             case .terminal: show(surfaceArea)
@@ -111,7 +121,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 prHost = host
                 show(host)
             case .activity:
-                let host = NSHostingView(rootView: ActivityView(store: app.store))
+                let host = NSHostingView(rootView: ActivityView(store: app.store, depth: gate.activity))
                 activityHost = host
                 show(host)
             }
@@ -119,6 +129,29 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     }
 
     @objc private func tabChanged() { tab = CenterTab(rawValue: tabs.selectedSegment) ?? .terminal }
+
+    /// Re-derive the gate from the focused session, its handoff packet and the
+    /// harness list — on focus, on a new packet, on a session update.
+    func refreshTabGate() {
+        let s = app.store.focused
+        let next = CenterTabGate.of(session: s, packet: s.flatMap { app.handoffs[$0.id]?.handoff }, harnesses: app.store.harnesses)
+        guard next != gate else { return }
+        let depthChanged = next.activity != gate.activity
+        gate = next
+        applyGate()
+        if !gate.allows(tab) {
+            tab = .terminal
+        } else if tab == .activity, depthChanged {
+            tab = .activity
+        }
+    }
+
+    private func applyGate() {
+        for t in [CenterTab.diff, .pr, .activity] {
+            tabs.setEnabled(gate.allows(t), forSegment: t.rawValue)
+            tabs.setToolTip(gate.whyNot(t), forSegment: t.rawValue)
+        }
+    }
 
     // MARK: tabs + panes
 
@@ -381,6 +414,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         }
         replaceActiveTab(t)
         pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
+        refreshTabGate()
         if tab == .diff { diffView.load(worktree: s.worktree) }
         focusActiveSurface()
     }
@@ -393,6 +427,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         }
         // argv changes under a session (`claude --resume …` after a kill/resume).
         if let s = app.store.focused { pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))" }
+        refreshTabGate()
     }
 
     func focusSteer() { view.window?.makeFirstResponder(steerField) }
@@ -502,6 +537,7 @@ final class DiffView: NSScrollView {
     init() {
         super.init(frame: .zero)
         documentView = text
+        text.setAccessibilityIdentifier("center.diff.text")
         hasVerticalScroller = true
         text.isEditable = false
         text.font = Theme.monoNSFont(size: 12)
@@ -517,9 +553,16 @@ final class DiffView: NSScrollView {
         guard let worktree, !worktree.isEmpty else { text.string = "No worktree."; return }
         text.string = "Loading git diff for \(worktree)…"
         Task.detached {
-            let out = Shell.run("/usr/bin/git", ["-C", worktree, "--no-pager", "diff", "--stat", "-p", "HEAD"], cwd: nil)
-            let status = Shell.run("/usr/bin/git", ["-C", worktree, "status", "--short"], cwd: nil)
-            let s = "# git status --short\n\(status)\n# git diff HEAD\n\(out.isEmpty ? "(clean)" : out)"
+            let git = { (args: [String]) in Shell.run("/usr/bin/git", ["-C", worktree] + args, cwd: nil) }
+            let status = git(["status", "--short"])
+            // The branch's whole change: the working tree against the merge
+            // base with the default branch, not just what is uncommitted.
+            let base = DiffPlan.base { ref in
+                let out = git(["merge-base", "HEAD", ref]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return out.count >= 7 && out.allSatisfy(\.isHexDigit) ? out : nil
+            }
+            let out = git(["--no-pager", "diff", "--stat", "-p", base.sha])
+            let s = DiffPlan.render(status: status, baseRef: base.ref, diff: out)
             await MainActor.run { self.text.string = s }
         }
     }
@@ -541,8 +584,10 @@ struct PRView: View {
                         Button("Merge (opens PR)") { app.merge(s) }
                     }
                 } else {
-                    Text("PR · none yet").font(.title2.bold())
-                    Text("The engine reports a PR in the handoff packet once `th` sees one on the branch \(s.branch ?? "").").font(.caption).foregroundStyle(Color(Theme.muted))
+                    let branch = CenterTabGate.usableBranch(app.handoffs[s.id]?.handoff?.branch ?? s.branch)
+                    Text("No PR for this branch yet").font(.title2.bold()).accessibilityIdentifier("center.pr.empty")
+                    Text("It shows up here once `gh` finds a PR for \(branch.map { "`\($0)`" } ?? "this branch").")
+                        .font(.caption).foregroundStyle(Color(Theme.muted))
                 }
             } else {
                 Text("No session focused")
@@ -560,10 +605,18 @@ struct PRView: View {
 /// on the events that mean Big Smooth needs you.
 struct ActivityView: View {
     @ObservedObject var store: FlowStore
+    /// `thin` for a harness read off the screen (th-68d10a).
+    var depth: ActivityDepth = .full
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                if depth == .thin {
+                    Text("This harness is read off the screen (state.source = scrape), so Activity has supervision events only.")
+                        .font(.caption).foregroundStyle(Color(Theme.faint)).padding(.horizontal, 14).padding(.top, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("center.activity.thin")
+                }
                 if let id = store.focusedId {
                     let events = store.events[id] ?? []
                     if events.isEmpty {

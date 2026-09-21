@@ -97,7 +97,11 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             guard let self, let id else { return }
             self.mainWindow.center.showSession(id)
             self.mainWindow.center.refreshHeaders()
+            // The packet's HEAD/branch decide Diff and PR for this session (th-68d10a).
+            Task { await self.loadHandoff(for: id) }
         }.store(in: &subscriptions)
+        $handoffs.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.mainWindow.center.refreshTabGate() }.store(in: &subscriptions)
+        store.$harnesses.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.mainWindow.center.refreshTabGate() }.store(in: &subscriptions)
         // @Published fires on willSet; hop once so the headers read the new value.
         store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
             guard let self else { return }

@@ -25,6 +25,28 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(label("center.path").contains("smooth-th-1b8e05"), label("center.path"))
     }
 
+    /// th-68d10a: Diff and PR follow the worktree, not the session kind. A
+    /// shell in a worktree opens Diff and an honest empty PR; a shell outside
+    /// any repo stays on the terminal when Diff is asked for.
+    func testAShellInAWorktreeShowsDiffAndAnEmptyPR() {
+        waitForState("fs-shell002") { $0 == "idle" }
+        app.staticTexts["sidebar.title.fs-shell002"].click()
+        XCTAssertTrue(waitUntil { self.label("center.path").contains("smooth-th-68d10a") }, label("center.path"))
+        app.typeKey("2", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.descendants(matching: .any)["center.diff"].waitForExistence(timeout: 10), "Diff opens for a shell in a worktree; tree: \(dump())")
+        app.typeKey("3", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.descendants(matching: .any)["center.pr.empty"].waitForExistence(timeout: 10), "PR shows its empty state, not a missing tab")
+
+        app.typeKey("1", modifierFlags: [.command, .option])
+        app.staticTexts["sidebar.title.fs-shell001"].click()
+        XCTAssertTrue(waitUntil { !self.label("center.path").contains("smooth-th-68d10a") }, label("center.path"))
+        app.typeKey("2", modifierFlags: [.command, .option])
+        XCTAssertFalse(
+            waitUntil(timeout: 3) { self.app.descendants(matching: .any)["center.diff"].exists },
+            "a shell outside any repo has no Diff to open"
+        )
+    }
+
     func testInboxPermissionAllowFlipsSessionToWorking() {
         waitForState("fs-d3e842aa") { $0 == "approve" }
         app.typeKey("i", modifierFlags: .command)
