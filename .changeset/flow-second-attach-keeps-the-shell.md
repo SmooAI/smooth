@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+SmoothFlow: a second client attaching to a live session no longer logs out its shell (th-6d8f84). Two defects combined. First, `portable-pty` writes a newline and `^D` into the PTY when its writer is dropped, and our PTY child is a raw-mode `tmux attach` client that forwards those bytes to the pane as keystrokes. So any disposal of a bridge could hit the pane's login shell with EOF at an empty prompt: `[lost tty]`, then `logout`. That included a plain last-client detach. The writer is now released only after the tmux client has exited. Second, the bridge map was not atomic. Two overlapping attaches could each spawn a `tmux attach`, the second insert evicted the first (killing it on drop and corrupting the client count), and an EOF could evict a newer bridge. Lookup, spawn, insert and count now share one critical section, EOF only removes its own generation, and a dead bridge is replaced instead of handed out. The Mac app and phone companion attached to one session, two windows, and relay reconnects all went through these paths.

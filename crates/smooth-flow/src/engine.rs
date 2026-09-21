@@ -197,13 +197,26 @@ fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &st
 struct Inner {
     store: Mutex<FlowStore>,
     tx: broadcast::Sender<ServerFrame>,
-    ptys: Mutex<HashMap<String, Arc<PtyAttach>>>,
+    /// One PTY bridge per attached session (th-6d8f84: see `pty_for`).
+    ptys: Mutex<HashMap<String, Bridge>>,
+    /// Generation for the next bridge, so an EOF only evicts its own entry.
+    pty_gen: std::sync::atomic::AtomicU64,
+    /// Test seam: runs in `pty_for` between the unlocked miss and the locked
+    /// re-check — exactly where two attaches used to both decide to spawn.
+    #[cfg(test)]
+    pty_race_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     rt: Mutex<Runtime>,
     info: DaemonInfo,
     default_project: PathBuf,
     home: PathBuf,
     daemon_url: Option<String>,
+}
+
+/// A live PTY bridge and the generation it was created under.
+struct Bridge {
+    generation: u64,
+    pty: Arc<PtyAttach>,
 }
 
 /// The SmoothFlow engine handle.
@@ -588,6 +601,9 @@ impl Engine {
                 store: Mutex::new(store),
                 tx,
                 ptys: Mutex::new(HashMap::new()),
+                pty_gen: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                pty_race_hook: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
                 rt: Mutex::new(Runtime::default()),
                 info: DaemonInfo {
@@ -979,22 +995,59 @@ impl Engine {
         Ok(s)
     }
 
-    fn pty_for(&self, id: &str, cols: u16, rows: u16) -> Result<Arc<PtyAttach>> {
-        if let Some(p) = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id) {
-            return Ok(p.clone());
+    /// The session's PTY bridge, spawning it on a miss. `attaching` counts a
+    /// flow client onto it in the same critical section as the lookup.
+    ///
+    /// th-6d8f84: everything that decides "which bridge" happens under the
+    /// `ptys` lock — the lookup, the spawn on a miss, the insert and the
+    /// client count. The old shape dropped the lock between the miss and the
+    /// insert, so two overlapping attaches both spawned a `tmux attach`, the
+    /// second `insert` evicted the first, and dropping the evicted bridge
+    /// killed the client that the first attacher (and its refcount) was on.
+    /// Holding the lock across the spawn costs one fork/exec on a cold
+    /// attach; the checks that shell out to tmux or read the store run
+    /// before it is taken. A bridge whose client already exited is replaced
+    /// rather than handed out.
+    fn pty_for(&self, id: &str, cols: u16, rows: u16, attaching: bool) -> Result<Arc<PtyAttach>> {
+        let claim = |pty: &Arc<PtyAttach>| {
+            if attaching {
+                pty.clients.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            pty.clone()
+        };
+        if let Some(b) = self.lock_ptys().get(id).filter(|b| !b.pty.is_closed()) {
+            return Ok(claim(&b.pty));
         }
         let session = self.require(id)?;
         let (sock, tmux_name) = pane(&session)?;
         if !tmux::session_alive(&sock, &tmux_name) {
             bail!("session {id} is not running");
         }
+        #[cfg(test)]
+        {
+            // Bound first: an `if let` scrutinee would hold the guard across the call.
+            let hook = self.inner.pty_race_hook.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut ptys = self.lock_ptys();
+        if let Some(b) = ptys.get(id).filter(|b| !b.pty.is_closed()) {
+            // Lost the race to a concurrent attach: share its bridge.
+            return Ok(claim(&b.pty));
+        }
+        let generation = self.inner.pty_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sid = id.to_string();
         let weak = Arc::downgrade(&self.inner);
         let on_output: OnOutput = Arc::new(move |seq, bytes| {
             let Some(inner) = weak.upgrade() else { return };
             if bytes.is_empty() {
                 // EOF — the attach client died (session killed / detached).
-                inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&sid);
+                // Evict only this bridge: a newer one may already own the id.
+                let mut ptys = inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if ptys.get(&sid).is_some_and(|b| b.generation == generation) {
+                    ptys.remove(&sid);
+                }
                 return;
             }
             let _ = inner.tx.send(ServerFrame::Output {
@@ -1004,32 +1057,48 @@ impl Engine {
             });
         });
         let pty = PtyAttach::spawn(&tmux::attach_argv(&sock, &tmux_name), cols, rows, on_output)?;
-        self.inner
-            .ptys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), pty.clone());
-        Ok(pty)
+        let out = claim(&pty);
+        if let Some(stale) = ptys.insert(id.to_string(), Bridge { generation, pty }) {
+            // Only a bridge whose client already exited can be here.
+            stale.pty.close();
+        }
+        Ok(out)
     }
 
-    /// `flow.attach`: ensure a PTY client exists and size it.
+    fn lock_ptys(&self) -> std::sync::MutexGuard<'_, HashMap<String, Bridge>> {
+        self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `flow.attach`: ensure a PTY client exists, count this flow client on
+    /// it, and size it.
+    ///
+    /// Size policy: one tmux client serves every flow client of a session,
+    /// so there is one geometry, and the latest attach or resize sets it —
+    /// the same rule as the tmux option we rely on (`window-size latest`).
+    /// A phone and a Mac attached together therefore take turns; sizing to
+    /// the smallest client, as tmux does across *its* clients, needs
+    /// per-client sizes the engine does not track (th-87cbca).
     ///
     /// # Errors
     /// When the session is unknown or not running.
     pub fn attach(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        let pty = self.pty_for(id, cols, rows)?;
-        pty.clients.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pty.resize(cols, rows)
+        let resized = self.pty_for(id, cols, rows, true)?.resize(cols, rows);
+        if resized.is_err() {
+            // The caller will not record this client as attached, so it
+            // will never detach it: give the count back now.
+            self.detach(id);
+        }
+        resized
     }
 
     /// `flow.detach`: drop the PTY client when the last flow client leaves.
     pub fn detach(&self, id: &str) {
-        let mut ptys = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(p) = ptys.get(id) {
-            let left = p.clients.fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
+        let mut ptys = self.lock_ptys();
+        if let Some(b) = ptys.get(id) {
+            let left = b.pty.clients.fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
             if left == 0 {
-                if let Some(p) = ptys.remove(id) {
-                    p.close();
+                if let Some(b) = ptys.remove(id) {
+                    b.pty.close();
                 }
             }
         }
@@ -1044,7 +1113,7 @@ impl Engine {
             .ok()
             .and_then(|(k, t)| tmux::pane_size(&k, &t).ok())
             .unwrap_or((120, 40));
-        self.pty_for(id, cols, rows)?.write(data)
+        self.pty_for(id, cols, rows, false)?.write(data)
     }
 
     /// `flow.resize`.
@@ -1052,7 +1121,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown/not running.
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.pty_for(id, cols, rows)?.resize(cols, rows)
+        self.pty_for(id, cols, rows, false)?.resize(cols, rows)
     }
 
     /// `flow.send`: text + Enter via bracketed paste (steering, not raw bytes).
@@ -1166,9 +1235,9 @@ impl Engine {
     }
 
     fn drop_pty(&self, id: &str) {
-        let removed = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
-        if let Some(p) = removed {
-            p.close();
+        let removed = self.lock_ptys().remove(id);
+        if let Some(b) = removed {
+            b.pty.close();
         }
     }
 
@@ -3122,6 +3191,154 @@ mod tests {
         let s2 = e.get(&s2.id).unwrap().unwrap();
         assert_eq!(s2.state, SessionState::Dead);
         assert_eq!(s2.exit_code, Some(3), "PTY-reported exit code");
+        tmux::kill_server(&sock);
+    }
+
+    /// A live `cat` shell session on a private tmux socket, for the PTY
+    /// bridge tests. `cat` exits on a `^D` at the start of a line, exactly
+    /// like the login shell that printed `logout` in th-6d8f84.
+    fn cat_session(e: &Engine, tmp: &Path, sock: &str) -> Session {
+        e.new_session(NewRequest {
+            kind: SessionKind::Shell,
+            worktree: Some(tmp.to_string_lossy().into()),
+            argv: Some(vec!["sh".into(), "-c".into(), "echo FLOW-READY; cat".into()]),
+            tmux_socket: Some(sock.to_string()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// The tmux clients attached to `session` — one per live PTY bridge.
+    fn tmux_clients(sock: &str, session: &str) -> Vec<String> {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", sock, "list-clients", "-t", session, "-F", "#{client_pid}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+    }
+
+    /// `tmux_clients` once it satisfies `pred` (a spawned client takes a
+    /// moment to register with the server), or its last value at 10s.
+    fn wait_clients(sock: &str, session: &str, pred: impl Fn(usize) -> bool) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let clients = tmux_clients(sock, session);
+            if pred(clients.len()) || Instant::now() >= deadline {
+                return clients;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Drain `rx` until `id`'s output contains `needle`.
+    fn wait_output(rx: &mut broadcast::Receiver<ServerFrame>, id: &str, needle: &str) -> String {
+        let mut seen = String::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !seen.contains(needle) {
+            match rx.try_recv() {
+                Ok(ServerFrame::Output { id: got, data_b64, .. }) if got == id => {
+                    seen.push_str(&String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap()));
+                }
+                Err(broadcast::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(_) | Err(_) => {}
+            }
+        }
+        seen
+    }
+
+    /// th-6d8f84: two attaches that both miss the bridge map must end up on
+    /// ONE `tmux attach` client. The seam parks both attachers past the
+    /// unlocked miss before either may continue — the interleaving that
+    /// used to spawn two clients, evict the first from the map, and kill it
+    /// on drop — so this is deterministic, not a timing race.
+    #[test]
+    fn concurrent_attaches_share_one_tmux_client() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-ca-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = cat_session(&e, tmp.path(), &sock);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *e.inner.pty_race_hook.lock().unwrap() = Some(Arc::new(move || {
+            barrier.wait();
+        }));
+        let attachers: Vec<_> = (0..2)
+            .map(|_| {
+                let (e, id) = (e.clone(), s.id.clone());
+                std::thread::spawn(move || e.attach(&id, 100, 30))
+            })
+            .collect();
+        for t in attachers {
+            t.join().unwrap().unwrap();
+        }
+        *e.inner.pty_race_hook.lock().unwrap() = None;
+
+        let bridge = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
+        assert_eq!(
+            bridge.clients.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "both attaches counted on the one bridge"
+        );
+        assert!(!wait_clients(&sock, &s.id, |n| n > 0).is_empty(), "the bridge's tmux client registers");
+        // Give a second, racing client time to register too, if there were one.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1, "exactly one tmux attach client");
+        assert!(!bridge.is_closed(), "neither attacher's client was killed");
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1);
+
+        e.detach(&s.id);
+        e.detach(&s.id);
+        tmux::kill_server(&sock);
+    }
+
+    /// th-6d8f84: with two flow clients attached, one detaching must leave
+    /// the other's bridge streaming — and the last one detaching must drop
+    /// the bridge WITHOUT typing EOF into the pane (portable-pty's writer
+    /// sends `\n^D` on drop; `cat` would exit on it, a login shell logs out).
+    #[test]
+    fn detaching_one_of_two_clients_keeps_the_other_and_the_pane() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-dt-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mut rx = e.subscribe();
+        let s = cat_session(&e, tmp.path(), &sock);
+        let pane_pid = tmux::pane_pid(&sock, &s.id).unwrap();
+
+        e.attach(&s.id, 100, 30).unwrap();
+        e.attach(&s.id, 90, 28).unwrap();
+        let first = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
+        assert_eq!(wait_clients(&sock, &s.id, |n| n > 0).len(), 1);
+        e.detach(&s.id);
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1, "the remaining client keeps the bridge");
+        e.input(&s.id, b"still-here\r").unwrap();
+        let seen = wait_output(&mut rx, &s.id, "still-here");
+        assert!(seen.contains("still-here"), "the other client still streams: {seen:?}");
+        assert!(
+            e.lock_ptys().get(&s.id).is_some_and(|b| Arc::ptr_eq(&b.pty, &first)),
+            "input went through the same bridge, not a respawn"
+        );
+
+        // Last client leaves: the bridge goes, the pane stays.
+        e.detach(&s.id);
+        drop(first);
+        assert!(wait_clients(&sock, &s.id, |n| n == 0).is_empty(), "the last detach closes the tmux client");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(tmux::session_alive(&sock, &s.id), "the pane outlives its last client");
+        assert_eq!(tmux::pane_pid(&sock, &s.id).unwrap(), pane_pid, "and its process never saw EOF");
+
+        // A re-attach after all that is a fresh, working bridge.
+        e.attach(&s.id, 80, 24).unwrap();
+        e.input(&s.id, b"back-again\r").unwrap();
+        let seen = wait_output(&mut rx, &s.id, "back-again");
+        assert!(seen.contains("back-again"), "{seen:?}");
+        e.detach(&s.id);
         tmux::kill_server(&sock);
     }
 

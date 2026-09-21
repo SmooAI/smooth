@@ -56,6 +56,22 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   lossless bytes + resize, which is what a terminal-emulator surface needs. The
   PTY exists only while ≥1 client is attached; the last `flow.detach` drops it
   and the tmux session keeps running detached.
+- **One bridge per session, shared by every attached client (th-6d8f84).** The
+  lookup, the spawn on a miss, the insert and the client count happen in one
+  critical section on the bridge map. Two clients attaching at once (the Mac
+  app and the phone, two windows, a relay reconnect) get one `tmux attach`
+  client, and an EOF only evicts the bridge it belongs to (bridges carry a
+  generation). One bridge means one geometry: the latest attach or resize wins,
+  as with tmux's `window-size latest`, so the phone and the Mac take turns
+  rather than sizing to the smaller one (th-87cbca).
+- **Disposing a bridge must never type into the pane.** `portable-pty`'s unix
+  writer writes `\n` + `VEOF` into the PTY when dropped. Our child is a
+  raw-mode tmux client, so those arrive in the pane as a blank line and `^D`,
+  and a login shell at its prompt prints `logout` and exits. `close()` only
+  SIGHUPs the client (tmux prints `[lost tty]`), so a drop right after it raced
+  the signal: a plain last-client detach could end the user's shell. The writer
+  is held by the reader thread and released only after `child.wait()`, when
+  there is no client left to forward the bytes.
 
 ## Transport
 
