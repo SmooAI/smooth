@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use smooth_flow::harness::{render_argv, Manifest, PromptAs, ResumeMode, SessionIdMode, StateSource, Vars, BUILTIN};
 use smooth_flow::harness_conformance::{claims_permission, screen_problems, FakeSpec, Fixture, Mechanism, Step, PERMISSION_MARKER, SPEC_ENV};
-use smooth_flow::{proc, tmux, Decision, Engine, EngineConfig, HookEvent, HookReply, NewRequest, ServerFrame, Session, SessionState};
+use smooth_flow::{proc, tmux, Decision, Engine, EngineConfig, HookCaller, HookEvent, HookReply, NewRequest, ServerFrame, Session, SessionState};
 
 /// Every wait polls; the machine running this is shared with other agents.
 const WAIT: Duration = Duration::from_secs(45);
@@ -93,6 +93,7 @@ fn serve_hooks(engine: Engine) -> String {
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(conn.try_clone().unwrap());
                 let mut len = 0usize;
+                let mut token = None;
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -105,6 +106,8 @@ fn serve_hooks(engine: Engine) -> String {
                     if let Some((k, v)) = l.split_once(':') {
                         if k.eq_ignore_ascii_case("content-length") {
                             len = v.trim().parse().unwrap_or(0);
+                        } else if k.eq_ignore_ascii_case(smooth_flow::hook_auth::TOKEN_HEADER) {
+                            token = Some(v.trim().to_string());
                         }
                     }
                 }
@@ -112,7 +115,9 @@ fn serve_hooks(engine: Engine) -> String {
                 if reader.read_exact(&mut body).is_err() {
                     return;
                 }
-                let reply = match serde_json::from_slice::<HookEvent>(&body).map(|ev| engine.hook(ev)) {
+                // th-91d032: the fake presents its launch token like a real hook.
+                let caller = HookCaller { token, direct: true };
+                let reply = match serde_json::from_slice::<HookEvent>(&body).map(|ev| engine.hook(ev, &caller)) {
                     Ok(Ok(HookReply::Immediate(v))) => v,
                     Ok(Ok(HookReply::Pending { request_id, rx, payload })) => {
                         let decision = rx.blocking_recv().ok();

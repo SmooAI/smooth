@@ -6,7 +6,15 @@
 # scraping:
 #
 #   POST http://<flow.addr or daemon.addr>/api/flow/hooks
+#        X-Smooth-Flow-Hook-Token: <this launch's token>
 #        {harness, event, session_id, cwd, payload}
+#
+# Auth (th-91d032): when SmoothFlow launched this harness, the pane has
+# $SMOOTH_FLOW_HOOK_TOKEN_FILE, naming a 0600 file with a token issued to this
+# one launch. The engine only lets a hook speak for the session its token was
+# issued to. Without one (a harness started in a plain terminal) the hook still
+# posts: the engine may adopt it (th-c103c1), but it can only report state,
+# never open an approvable permission request.
 #
 # Usage (from hooks.json): flow-hook.sh <Event> [harness]
 #   harness defaults to claude-code; Codex ≥ 0.153 reads the same hooks.json
@@ -39,8 +47,8 @@
 #   * Exit code is always 0. (Only exit 2 blocks a PreToolUse; nothing here should.)
 #
 # Test: flow-hook.test.sh. Overrides for tests: SMOOTH_FLOW_ADDR,
-# SMOOTH_FLOW_ADDR_FILE, SMOOTH_DAEMON_ADDR_FILE, FLOW_HOOK_PERMISSION_TIMEOUT,
-# FLOW_HOOK_TIMEOUT.
+# SMOOTH_FLOW_ADDR_FILE, SMOOTH_DAEMON_ADDR_FILE, SMOOTH_FLOW_HOOK_TOKEN_FILE,
+# FLOW_HOOK_PERMISSION_TIMEOUT, FLOW_HOOK_TIMEOUT.
 set -u
 
 event="${1:-}"
@@ -70,6 +78,17 @@ case "$addr" in
     *) url="http://$addr/api/flow/hooks" ;;
 esac
 
+# The token reaches curl as a config line on its stdin (`-K -`), never as an
+# argument, so it cannot be read off `ps`. Unreadable file → no token.
+token=""
+if [ -n "${SMOOTH_FLOW_HOOK_TOKEN_FILE:-}" ] && [ -r "$SMOOTH_FLOW_HOOK_TOKEN_FILE" ]; then
+    token="$(tr -cd '0-9a-fA-F' <"$SMOOTH_FLOW_HOOK_TOKEN_FILE" 2>/dev/null | head -c 128)"
+fi
+curl_cfg() {
+    printf 'header = "Content-Type: application/json"\n'
+    [ -z "$token" ] || printf 'header = "X-Smooth-Flow-Hook-Token: %s"\n' "$token"
+}
+
 input="$(cat 2>/dev/null || true)"
 [ -n "$input" ] || input='{}'
 # A payload that isn't a JSON object is forwarded as {"raw": "..."} rather than dropped.
@@ -86,7 +105,7 @@ body="$(printf '%s' "$input" | jq -c --arg harness "$harness" --arg event "$even
 
 # Only a harness whose stdout is still ours can carry a decision.
 if [ "$event" = "PermissionRequest" ] && [ "$answered" = 0 ]; then
-    reply="$(curl -fsS -m "${FLOW_HOOK_PERMISSION_TIMEOUT:-120}" -X POST -H 'Content-Type: application/json' \
+    reply="$(curl_cfg | curl -K - -fsS -m "${FLOW_HOOK_PERMISSION_TIMEOUT:-120}" -X POST \
         --data-binary "$body" "$url" 2>/dev/null)" || exit 0
     # Only a real decision object goes to stdout; `{}` or garbage means "no opinion".
     if printf '%s' "$reply" | jq -e '.hookSpecificOutput.decision.behavior? | type == "string"' >/dev/null 2>&1; then
@@ -97,7 +116,7 @@ fi
 
 # Fire-and-forget: detached so the hook returns immediately even if the daemon is slow.
 (
-    curl -sS -m "${FLOW_HOOK_TIMEOUT:-2}" -X POST -H 'Content-Type: application/json' \
+    curl_cfg | curl -K - -sS -m "${FLOW_HOOK_TIMEOUT:-2}" -X POST \
         --data-binary "$body" "$url" >/dev/null 2>&1 || true
 ) </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || true

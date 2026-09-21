@@ -195,11 +195,16 @@ guessing idle.
 - **hooks** — the harness posts to `POST /api/flow/hooks` (`{harness, event,
 session_id, cwd, payload}`). `install` says how that gets wired
   (`th harness enable <x>`). `Session.state_source` reads `hooks` once the
-  first event lands, `inferred` (scraping) before.
+  first event lands, `inferred` (scraping) before. Every post must carry
+  `X-Smooth-Flow-Hook-Token`: the contents of the file the engine names in
+  the pane's `SMOOTH_FLOW_HOOK_TOKEN_FILE` (th-91d032). Without it, hooks for
+  a session SmoothFlow launched are refused. A new hook integration reads that
+  file (hex only) and sends the header, as `flow-hook.sh` does. See
+  SmoothFlow.md § Hook authentication.
 - **scrape** — pane scraping only; `state_source` stays `inferred`.
 - **native** — the harness is ours and reports its own turns. What it means
-  **today** for `th code`: the engine exports `SMOOTH_FLOW_SESSION=<id>` and
-  `SMOOTH_URL=<daemon>` into the pane; `th code` (crates/smooth-code
+  **today** for `th code`: the engine exports `SMOOTH_FLOW_SESSION=<id>`,
+  `SMOOTH_URL=<daemon>` and `SMOOTH_FLOW_HOOK_TOKEN_FILE` into the pane; `th code` (crates/smooth-code
   `FlowReporter`) POSTs `turn_start` before each `TaskStart` and `turn_end` on
   `TaskComplete`/`TaskError`, which the manifest's `event_map` turns into
   working/idle. No plugin, no hook install, no working/idle scraping.
@@ -733,12 +738,14 @@ Deliberate choices:
 ### Engine changes this needed
 
 - **`SMOOTH_FLOW_ID` in every agent pane**, posted back by `flow-hook.sh` and
-  the plugins as `flow_id`. `hook()` looks a session up by harness session id,
-  then by `flow_id`, then by cwd. The `flow_id` bind needs the posted
-  `harness` to equal the row's kind (an agent launched _inside_ a pane
-  inherits the env), and a row already bound to a different id is left alone
-  (a same-kind child). Cursor, Droid and Amp can't pre-assign an id; this binds
-  them without guessing by cwd.
+  the plugins as `flow_id`. Since th-91d032, the **hook token** names the row
+  and `flow_id` is only a consistency check: a `flow_id` that contradicts the
+  token's row is refused, and a tokenless `flow_id` binds nothing (anyone can
+  claim one). A first hook binds its harness session id only if the posted
+  `harness` maps to the row's kind (an agent launched _inside_ a pane inherits
+  the env and the token). A row already bound to a different id is left alone
+  (a same-kind child), and an ended row accepts nothing. Cursor, Droid and Amp
+  can't pre-assign an id; this binds them without guessing by cwd.
 - **Only the Claude table holds `PermissionRequest` open.** A harness with its
   own `event_map` (Droid) doesn't speak Claude's decision reply, so its ask
   is reported and the hook returns at once. A mapped **permission** ask gets a
@@ -786,7 +793,7 @@ Tests: `harness::tests::hook_capable_builtins_*` (launch/resume argv,
 session-id mode, shim-skipping resolution for all seven),
 `engine::tests::hook_capable_harness_events_map_to_flow_states` (every native
 event each manifest maps, through the engine's own `hook_outcome`, with the
-payloads those CLIs send), `flow_id_binding_rules`,
+payloads those CLIs send), `hook_auth_refuses_every_forgery`,
 `smooth_flow_id_binds_learned_harnesses_and_holds_only_claude_protocol_asks`,
 `pkg::tests::hook_only_harnesses_render_and_rm_removes_exactly_that`,
 `smooth_agent_flow_overlays_match_the_flow_manifests` (every overlay event is
