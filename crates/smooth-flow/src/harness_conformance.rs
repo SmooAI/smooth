@@ -22,7 +22,8 @@
 //!   `PermissionRequest` long-poll.
 //! - **hooks / native with an `event_map`** — the map inverted: the events it
 //!   maps to working / idle / needs_you / ended. A needs_you event is answered
-//!   by the approval keystroke.
+//!   by the manifest's `[steer] approve_keys` (th-5a2314), whose bytes the
+//!   fake reads and the rig checks.
 //! - **scrape** — posts nothing; paints the fixture's screens verbatim.
 
 use std::collections::BTreeMap;
@@ -195,8 +196,50 @@ pub struct FakeSpec {
     pub needs_you: String,
     /// How long a turn stays `working`.
     pub work_ms: u64,
+    /// `[steer] approve_keys`, as tmux key names: the fake reads their bytes
+    /// ([`key_bytes`]) off the pane when it asks permission by screen.
+    #[serde(default)]
+    pub approve_keys: Vec<String>,
     /// JSON-lines log of what the fake saw and did.
     pub log: PathBuf,
+}
+
+/// The bytes a pane's program reads when tmux `send-keys` presses `key`.
+///
+/// Normal cursor mode, no keypad mode, `-icrnl`. `None` for a name this
+/// table does not know: a manifest that names one fails `permission`
+/// rather than passing on a guess.
+#[must_use]
+pub fn key_bytes(key: &str) -> Option<String> {
+    let named = match key {
+        "Enter" => "\r",
+        "Escape" => "\x1b",
+        "Tab" => "\t",
+        "Space" => " ",
+        "BSpace" => "\x7f",
+        "Up" => "\x1b[A",
+        "Down" => "\x1b[B",
+        "Right" => "\x1b[C",
+        "Left" => "\x1b[D",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some(named.to_string());
+    }
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if !c.is_control() => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+/// The bytes `keys` press in order, or the first name [`key_bytes`] cannot
+/// map.
+///
+/// # Errors
+/// The unmapped key name.
+pub fn keys_bytes(keys: &[String]) -> Result<String, String> {
+    keys.iter().map(|k| key_bytes(k).ok_or_else(|| k.clone())).collect()
 }
 
 /// Does the manifest's `[state.scrape]` claim it can read `want` — a flat
@@ -297,6 +340,7 @@ impl FakeSpec {
             idle,
             needs_you: screens.needs_you.unwrap_or_else(|| DEFAULT_NEEDS_YOU.to_string()),
             work_ms: 2000,
+            approve_keys: m.steer.approve_keys.clone(),
             log,
         })
     }
@@ -570,6 +614,30 @@ needs_you = ["\\(y/n\\)"]
             let fixture = Fixture::load(&fixtures, name).unwrap();
             let spec = FakeSpec::for_manifest(&m, fixture.as_ref(), None, PathBuf::from("/l")).unwrap();
             assert!(screen_problems(&m, &spec).is_empty(), "{name}: {:?}", screen_problems(&m, &spec));
+        }
+    }
+
+    #[test]
+    fn key_bytes_maps_tmux_key_names_and_refuses_guesses() {
+        assert_eq!(key_bytes("y").as_deref(), Some("y"));
+        assert_eq!(key_bytes("1").as_deref(), Some("1"));
+        assert_eq!(key_bytes("Enter").as_deref(), Some("\r"));
+        assert_eq!(key_bytes("Escape").as_deref(), Some("\x1b"));
+        assert_eq!(key_bytes("Down").as_deref(), Some("\x1b[B"));
+        assert_eq!(key_bytes("Right").as_deref(), Some("\x1b[C"));
+        assert_eq!(key_bytes("C-c"), None, "not in the table ⇒ no guess");
+        assert_eq!(key_bytes("F12"), None);
+        assert_eq!(key_bytes(""), None);
+        let v = |k: &[&str]| k.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(keys_bytes(&v(&["Down", "Down", "Enter"])).unwrap(), "\x1b[B\x1b[B\r");
+        assert_eq!(keys_bytes(&v(&["y", "M-x"])).unwrap_err(), "M-x");
+        // Every built-in's approval keys are ones the rig can check.
+        let r = crate::harness::Registry::builtin();
+        for name in crate::harness::BUILTIN.iter().map(|(n, _)| *n) {
+            let st = &r.get(name).unwrap().steer;
+            for keys in [&st.approve_keys, &st.allow_session_keys, &st.deny_keys] {
+                assert!(keys_bytes(keys).is_ok(), "{name}: {keys:?}");
+            }
         }
     }
 

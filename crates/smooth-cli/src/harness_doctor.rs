@@ -200,6 +200,67 @@ pub fn known(name: &str) -> Option<Known> {
             hooks: Some(opencode_hooks),
             auth: Some(opencode_auth),
         },
+        // th-5a2314: the scraped harnesses (th-e77603). No hooks to wire;
+        // what stops a session is a missing provider, so that is the check.
+        "aider" => Known {
+            install: "uv tool install aider-chat",
+            hooks: None,
+            auth: Some(aider_auth),
+        },
+        "goose" => Known {
+            install: "curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+            hooks: None,
+            auth: Some(goose_auth),
+        },
+        "crush" => Known {
+            install: "brew install charmbracelet/tap/crush",
+            hooks: None,
+            auth: Some(crush_auth),
+        },
+        "cline" => Known {
+            install: "npm i -g cline",
+            hooks: None,
+            auth: Some(cline_auth),
+        },
+        // th-5a2314: the hook-capable harnesses (th-b00115). `th harness
+        // enable <x>` renders the smooth-agent overlay; doctor checks the
+        // rendered file still carries it. No auth rows: their credential
+        // stores are not documented well enough to read without guessing.
+        "gemini" => Known {
+            install: "npm i -g @google/gemini-cli",
+            hooks: Some(|m| overlay_hooks(m, &[".gemini/settings.json"], "flow-hook.sh", "gemini")),
+            auth: None,
+        },
+        "qwen" => Known {
+            install: "npm i -g @qwen-code/qwen-code",
+            hooks: Some(|m| overlay_hooks(m, &[".qwen/settings.json"], "flow-hook.sh", "qwen")),
+            auth: None,
+        },
+        "cursor-agent" => Known {
+            install: "curl https://cursor.com/install -fsS | bash",
+            hooks: Some(|m| overlay_hooks(m, &[".cursor/hooks.json"], "flow-hook.sh", "cursor")),
+            auth: None,
+        },
+        "droid" => Known {
+            install: "curl -fsSL https://app.factory.ai/cli | sh",
+            hooks: Some(|m| overlay_hooks(m, &[".factory/settings.json", ".factory/hooks.json"], "flow-hook.sh", "droid")),
+            auth: None,
+        },
+        "copilot" => Known {
+            install: "npm i -g @github/copilot",
+            hooks: Some(|m| overlay_hooks(m, &[".copilot/hooks/"], "flow-hook.sh", "copilot")),
+            auth: None,
+        },
+        "amp" => Known {
+            install: "npm i -g @sourcegraph/amp",
+            hooks: Some(|m| overlay_hooks(m, &[".config/amp/plugins/"], "/api/flow/hooks", "amp")),
+            auth: None,
+        },
+        "pi" => Known {
+            install: "npm i -g @mariozechner/pi-coding-agent",
+            hooks: Some(|m| overlay_hooks(m, &[".pi/agent/extensions/"], "/api/flow/hooks", "pi")),
+            auth: None,
+        },
         "th-code" => Known {
             install: "brew install SmooAI/tools/th",
             hooks: None,
@@ -221,6 +282,68 @@ fn newest_version_dir(dir: &Path) -> Option<(String, PathBuf)> {
     versions.pop().map(|(_, v)| (v.clone(), dir.join(v)))
 }
 
+/// A plugin version as comparable numbers (`0.41.4` → `[0, 41, 4]`).
+fn version_key(v: &str) -> Vec<u64> {
+    v.split('.').filter_map(|p| p.parse().ok()).collect()
+}
+
+/// A project-scoped smooth-agent install older than the user-scoped one.
+///
+/// A Claude Code session started in that project loads the project's copy.
+/// `claude plugin update` without `--scope project` never touches it, so
+/// the user-scope update reports success while that checkout keeps a plugin
+/// with no flow hook (or a stale one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalePin {
+    pub project: PathBuf,
+    pub version: String,
+    pub user_version: String,
+}
+
+impl StalePin {
+    /// The one command that fixes it.
+    #[must_use]
+    pub fn fix(&self) -> String {
+        format!("cd '{}' && claude plugin update smooth-agent@smooth --scope project", self.project.display())
+    }
+}
+
+/// Every project-scoped smooth-agent pin in `~/.claude/plugins/installed_plugins.json`
+/// that is older than the user-scoped install. Pins for directories that no
+/// longer exist are skipped: no session can start there, and pruning them is
+/// the user's call.
+#[must_use]
+pub fn stale_project_pins(home: &Path) -> Vec<StalePin> {
+    let Some(entries) = std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.pointer("/plugins/smooth-agent@smooth").and_then(Value::as_array).cloned())
+    else {
+        return Vec::new();
+    };
+    let field = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
+    let Some(user_version) = entries
+        .iter()
+        .find(|e| field(e, "scope").as_deref() == Some("user"))
+        .and_then(|e| field(e, "version"))
+    else {
+        return Vec::new();
+    };
+    let mut stale: Vec<StalePin> = entries
+        .iter()
+        .filter(|e| field(e, "scope").as_deref() == Some("project"))
+        .filter_map(|e| Some((PathBuf::from(field(e, "projectPath")?), field(e, "version")?)))
+        .filter(|(project, version)| project.is_dir() && version_key(version) < version_key(&user_version))
+        .map(|(project, version)| StalePin {
+            project,
+            version,
+            user_version: user_version.clone(),
+        })
+        .collect();
+    stale.sort_by(|a, b| a.project.cmp(&b.project));
+    stale
+}
+
 fn mentions_flow_hook(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|t| t.contains("flow-hook.sh"))
 }
@@ -235,6 +358,54 @@ fn flow_hook_is_authenticated(script: &Path) -> bool {
 /// The `flow-hook.sh` path a `hooks.json` command runs (`/p/flow-hook.sh Stop codex`).
 fn flow_hook_script(command: &str) -> Option<PathBuf> {
     command.split_whitespace().find(|w| w.ends_with("flow-hook.sh")).map(PathBuf::from)
+}
+
+/// Is the smooth-agent overlay rendered where `th pkg` puts it for this
+/// harness? `rels` are HOME-relative files, or directories (trailing `/`)
+/// where any file counts; `marker` is what the overlay contains.
+fn overlay_hooks(m: &Machine, rels: &[&str], marker: &str, enable_as: &str) -> Check {
+    let mut looked = Vec::new();
+    for rel in rels {
+        let path = m.home.join(rel.trim_end_matches('/'));
+        let files: Vec<PathBuf> = if rel.ends_with('/') {
+            std::fs::read_dir(&path)
+                .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
+                .unwrap_or_default()
+        } else {
+            vec![path.clone()]
+        };
+        if let Some((hit, text)) = files
+            .iter()
+            .find_map(|f| std::fs::read_to_string(f).ok().filter(|t| t.contains(marker)).map(|t| (f, t)))
+        {
+            // th-91d032: an overlay (or the flow-hook.sh it runs) from before
+            // hook tokens is refused by the engine for every launched session.
+            let stale = if marker == "flow-hook.sh" {
+                text.split(|c: char| c.is_whitespace() || c == '"')
+                    .filter_map(flow_hook_script)
+                    .find(|p| p.is_file() && !flow_hook_is_authenticated(p))
+                    .map(|p| p.display().to_string())
+            } else {
+                (!text.contains(smooth_flow::hook_auth::TOKEN_FILE_ENV)).then(|| hit.display().to_string())
+            };
+            if let Some(what) = stale {
+                return check(
+                    "hooks",
+                    Level::Fail,
+                    format!("{what} predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping"),
+                    Some(format!("th harness enable {enable_as}")),
+                );
+            }
+            return check("hooks", Level::Ok, format!("smooth-agent flow overlay in {}", hit.display()), None);
+        }
+        looked.push(path.display().to_string());
+    }
+    check(
+        "hooks",
+        Level::Fail,
+        format!("no SmoothFlow flow overlay in {} — state falls back to pane scraping", looked.join(" or ")),
+        Some(format!("th harness enable {enable_as}")),
+    )
 }
 
 fn claude_hooks(m: &Machine) -> Check {
@@ -278,6 +449,27 @@ fn claude_hooks(m: &Machine) -> Check {
                 "smooth-agent {version}'s flow-hook.sh predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping"
             ),
             fix,
+        );
+    }
+    // The user-scope install is fine; a project-scoped pin can still shadow
+    // it for every session started in that checkout.
+    let stale = stale_project_pins(&m.home);
+    if let Some(first) = stale.first() {
+        let list = stale
+            .iter()
+            .map(|p| format!("{} ({})", p.project.display(), p.version))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return check(
+            "hooks",
+            Level::Fail,
+            format!(
+                "smooth-agent {} is installed for the user, but {} project-scoped pin{} older: {list}. Sessions started there load the old copy",
+                first.user_version,
+                stale.len(),
+                if stale.len() == 1 { " is" } else { "s are" }
+            ),
+            Some(first.fix()),
         );
     }
     check("hooks", Level::Ok, format!("smooth-agent {version} posts every event to /api/flow/hooks"), None)
@@ -511,6 +703,105 @@ fn opencode_auth(m: &Machine) -> Check {
         Level::Warn,
         "no provider credentials — only OpenCode's free models will answer",
         Some("opencode auth login".into()),
+    )
+}
+
+/// A provider API key doctor can see in the environment, if any.
+fn provider_env_key(m: &Machine) -> Option<&'static str> {
+    ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+        .into_iter()
+        .find(|k| m.has_env(k))
+}
+
+fn aider_auth(m: &Machine) -> Check {
+    if let Some(k) = provider_env_key(m) {
+        return check("auth", Level::Ok, format!("{k} is set"), None);
+    }
+    let conf = m.home.join(".aider.conf.yml");
+    let has_key = std::fs::read_to_string(&conf).is_ok_and(|t| {
+        t.lines()
+            .filter_map(|l| l.split_once(':'))
+            .any(|(k, v)| !k.trim_start().starts_with('#') && k.trim().ends_with("api-key") && !v.trim().is_empty())
+    });
+    if has_key {
+        return check("auth", Level::Ok, format!("an API key in {}", conf.display()), None);
+    }
+    // Warn, not fail: the app's daemon may carry a key this shell does not.
+    check(
+        "auth",
+        Level::Warn,
+        "no provider API key in this environment or ~/.aider.conf.yml — aider would stop to ask for one",
+        Some("echo 'anthropic-api-key: <key>' >> ~/.aider.conf.yml".into()),
+    )
+}
+
+fn goose_auth(m: &Machine) -> Check {
+    let conf = m.home.join(".config/goose/config.yaml");
+    let provider = std::fs::read_to_string(&conf)
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.trim().strip_prefix("GOOSE_PROVIDER:").map(|v| v.trim().trim_matches(['"', '\'']).to_string()))
+        })
+        .filter(|v| !v.is_empty());
+    provider.map_or_else(
+        || {
+            check(
+                "auth",
+                Level::Fail,
+                format!("no GOOSE_PROVIDER in {} — a session would stop at goose's provider setup", conf.display()),
+                Some("goose configure".into()),
+            )
+        },
+        |p| check("auth", Level::Ok, format!("GOOSE_PROVIDER = {p} ({})", conf.display()), None),
+    )
+}
+
+/// A JSON file whose `key` is a non-empty object.
+fn json_object_nonempty(path: &Path, key: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get(key).and_then(Value::as_object).map(|o| !o.is_empty()))
+        .unwrap_or(false)
+}
+
+fn crush_auth(m: &Machine) -> Check {
+    let data = m.env.get("XDG_DATA_HOME").map_or_else(|| m.home.join(".local/share"), PathBuf::from);
+    for conf in [m.home.join(".config/crush/crush.json"), data.join("crush/crush.json")] {
+        if json_object_nonempty(&conf, "providers") {
+            return check("auth", Level::Ok, format!("providers configured in {}", conf.display()), None);
+        }
+    }
+    if let Some(k) = provider_env_key(m) {
+        return check("auth", Level::Ok, format!("{k} is set"), None);
+    }
+    check(
+        "auth",
+        Level::Fail,
+        "no provider in ~/.config/crush/crush.json or ~/.local/share/crush/crush.json — a session would open on crush's provider picker",
+        Some("crush   # pick a provider once; SmoothFlow sessions reuse it".into()),
+    )
+}
+
+fn cline_auth(m: &Machine) -> Check {
+    let file = m.home.join(".cline/data/settings/providers.json");
+    let configured = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| match &v {
+            Value::Object(o) => !o.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            _ => false,
+        });
+    if configured {
+        return check("auth", Level::Ok, format!("providers configured in {}", file.display()), None);
+    }
+    check(
+        "auth",
+        Level::Fail,
+        format!("no providers in {} — a session would open on cline's sign-in / provider screen", file.display()),
+        Some("cline   # sign in or choose a provider once; SmoothFlow sessions reuse it".into()),
     )
 }
 
@@ -944,6 +1235,7 @@ pub fn run(home: &Path, only: Option<&str>, json: bool, verbose: bool) -> Result
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[cfg(unix)]
     fn script(path: &Path, body: &str) {
@@ -1094,6 +1386,54 @@ mod tests {
         assert!(!codex_hooks(&m).detail.contains("predates"));
     }
 
+    /// A project-scoped pin older than the user install shadows it for every
+    /// session started in that project, so doctor must not report Claude
+    /// healthy. Pins for deleted directories are not ours to judge.
+    #[test]
+    fn stale_project_scoped_pins_degrade_claude_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = machine(tmp.path(), &[], None);
+        let cache = m.home.join(".claude/plugins/cache/smooth/smooth-agent/0.51.1/hooks");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("hooks.json"), r#"{"x":"flow-hook.sh"}"#).unwrap();
+        std::fs::write(cache.join("flow-hook.sh"), "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
+        std::fs::write(m.home.join(".claude/settings.json"), r#"{"enabledPlugins":{"smooth-agent@smooth":true}}"#).unwrap();
+        assert!(stale_project_pins(&m.home).is_empty(), "no installed_plugins.json ⇒ nothing to judge");
+        assert_eq!(claude_hooks(&m).level, Level::Ok);
+
+        let main = tmp.path().join("dev/smooth");
+        let other = tmp.path().join("dev/smooai");
+        let current = tmp.path().join("dev/current");
+        for d in [&main, &other, &current] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let gone = tmp.path().join("dev/smooth-th-deleted");
+        let pins = json!({"version": 2, "plugins": {"smooth-agent@smooth": [
+            {"scope": "user", "projectPath": null, "version": "0.51.1"},
+            {"scope": "project", "projectPath": main, "version": "0.31.1"},
+            {"scope": "project", "projectPath": other, "version": "0.41.4"},
+            {"scope": "project", "projectPath": current, "version": "0.51.1"},
+            {"scope": "project", "projectPath": gone, "version": "0.9.0"},
+        ]}});
+        std::fs::write(m.home.join(".claude/plugins/installed_plugins.json"), pins.to_string()).unwrap();
+        let stale = stale_project_pins(&m.home);
+        assert_eq!(
+            stale.iter().map(|p| (p.project.clone(), p.version.as_str())).collect::<Vec<_>>(),
+            vec![(other.clone(), "0.41.4"), (main, "0.31.1")],
+            "older, existing pins only; the current one and the deleted worktree are skipped"
+        );
+        let c = claude_hooks(&m);
+        assert_eq!(c.level, Level::Fail);
+        assert!(c.detail.contains("2 project-scoped pins are older"), "{c:?}");
+        assert!(c.detail.contains("0.31.1") && c.detail.contains("0.41.4"));
+        assert_eq!(
+            c.fix.as_deref(),
+            Some(format!("cd '{}' && claude plugin update smooth-agent@smooth --scope project", other.display()).as_str())
+        );
+        // Version order is numeric, not lexical: 0.9.0 < 0.51.1 < 0.100.0.
+        assert!(version_key("0.9.0") < version_key("0.51.1") && version_key("0.51.1") < version_key("0.100.0"));
+    }
+
     #[test]
     fn claude_hooks_need_an_enabled_plugin_that_ships_the_flow_hook() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1161,7 +1501,8 @@ mod tests {
         let bin = tmp.path().join("bin");
         script(&bin.join("aider"), "#!/bin/sh\necho 'aider 0.86.2'\n");
         let man = Manifest::parse(
-            "name = \"aider\"\n[binary]\nnames = [\"aider\"]\n[launch]\nargv = [\"{prompt}\"]\nprompt_as = \"argv\"\n[state]\nsource = \"scrape\"\n[state.scrape]\nidle = [\"> \"]\n",
+            // A scraped harness doctor has no knowledge row for (aider has one).
+            "name = \"scrapy\"\n[binary]\nnames = [\"aider\"]\n[launch]\nargv = [\"{prompt}\"]\nprompt_as = \"argv\"\n[state]\nsource = \"scrape\"\n[state.scrape]\nidle = [\"> \"]\n",
         )
         .unwrap();
         let d = diagnose(&man, &machine(tmp.path(), &[&bin], Some(&[&bin])));
@@ -1189,6 +1530,97 @@ mod tests {
         assert!(c.detail.contains("exited 2: nope"), "{c:?}");
         assert!(diagnose_all(&reg, &m, Some("nope")).unwrap_err().to_string().contains("th harness list"));
         assert_eq!(diagnose_all(&reg, &m, None).unwrap().len(), reg.all().len());
+    }
+
+    /// th-5a2314: every hook-capable harness has a row whose check finds the
+    /// rendered overlay, and whose fix is the enable command.
+    #[test]
+    fn hook_capable_harnesses_check_their_rendered_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = machine(tmp.path(), &[], None);
+        let cases = [
+            ("gemini", ".gemini/settings.json", "flow-hook.sh", "gemini"),
+            ("qwen", ".qwen/settings.json", "flow-hook.sh", "qwen"),
+            ("cursor-agent", ".cursor/hooks.json", "flow-hook.sh", "cursor"),
+            ("droid", ".factory/settings.json", "flow-hook.sh", "droid"),
+            ("copilot", ".copilot/hooks/smooth-agent.json", "flow-hook.sh", "copilot"),
+            ("amp", ".config/amp/plugins/smooth-agent.ts", "/api/flow/hooks", "amp"),
+            ("pi", ".pi/agent/extensions/smooth-agent.ts", "/api/flow/hooks", "pi"),
+        ];
+        for (name, rel, marker, enable) in cases {
+            let k = known(name).unwrap_or_else(|| panic!("{name} has a row"));
+            let hooks = k.hooks.unwrap();
+            let c = hooks(&m);
+            assert_eq!(c.level, Level::Fail, "{name}: nothing rendered yet");
+            assert_eq!(c.fix.as_deref(), Some(format!("th harness enable {enable}").as_str()));
+            let p = m.home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "{}").unwrap();
+            assert_eq!(hooks(&m).level, Level::Fail, "{name}: a file without the overlay is not wired");
+            if marker == "flow-hook.sh" {
+                // The overlay runs a flow-hook.sh; one without token support is stale.
+                let script = m.home.join(format!("pkg-{name}/flow-hook.sh"));
+                std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+                std::fs::write(&script, "curl …").unwrap();
+                std::fs::write(&p, format!(r#"{{"command":"{} Stop {name}"}}"#, script.display())).unwrap();
+                assert!(hooks(&m).detail.contains("predates hook tokens"), "{name}");
+                std::fs::write(&script, "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
+            } else {
+                std::fs::write(&p, format!("… {marker} …")).unwrap();
+                assert!(hooks(&m).detail.contains("predates hook tokens"), "{name}: a plugin without the token");
+                std::fs::write(&p, format!("… {marker} … SMOOTH_FLOW_HOOK_TOKEN_FILE")).unwrap();
+            }
+            assert_eq!(hooks(&m).level, Level::Ok, "{name}");
+        }
+    }
+
+    /// th-5a2314: the scraped harnesses' provider checks read files and env
+    /// only, and each failing row names its one fix.
+    #[test]
+    fn scraped_harness_auth_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut m = machine(tmp.path(), &[], None);
+        let h = m.home.clone();
+        let write = |rel: &str, text: &str| {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        for name in ["aider", "goose", "crush", "cline"] {
+            let k = known(name).unwrap();
+            assert!(k.hooks.is_none(), "{name} is scraped");
+            assert!(!k.install.is_empty());
+        }
+
+        let a = aider_auth(&m);
+        assert_eq!((a.level, a.fix.is_some()), (Level::Warn, true));
+        write(".aider.conf.yml", "model: sonnet\n# openai-api-key: commented\n");
+        assert_eq!(aider_auth(&m).level, Level::Warn, "a commented key is no key");
+        write(".aider.conf.yml", "model: sonnet\nanthropic-api-key: sk-x\n");
+        assert_eq!(aider_auth(&m).level, Level::Ok);
+
+        let g = goose_auth(&m);
+        assert_eq!((g.level, g.fix.as_deref()), (Level::Fail, Some("goose configure")));
+        write(".config/goose/config.yaml", "GOOSE_PROVIDER: \"\"\n");
+        assert_eq!(goose_auth(&m).level, Level::Fail, "an empty provider is none");
+        write(".config/goose/config.yaml", "GOOSE_PROVIDER: anthropic\nGOOSE_MODEL: x\n");
+        assert!(goose_auth(&m).detail.contains("anthropic"));
+
+        assert_eq!(crush_auth(&m).level, Level::Fail);
+        write(".config/crush/crush.json", r#"{"providers":{}}"#);
+        assert_eq!(crush_auth(&m).level, Level::Fail, "an empty providers object is none");
+        write(".local/share/crush/crush.json", r#"{"providers":{"anthropic":{"api_key":"x"}}}"#);
+        assert_eq!(crush_auth(&m).level, Level::Ok);
+
+        assert_eq!(cline_auth(&m).level, Level::Fail);
+        write(".cline/data/settings/providers.json", "{}");
+        assert_eq!(cline_auth(&m).level, Level::Fail);
+        write(".cline/data/settings/providers.json", r#"{"anthropic":{"apiKey":"x"}}"#);
+        assert_eq!(cline_auth(&m).level, Level::Ok);
+
+        m.env.insert("OPENAI_API_KEY".into(), "k".into());
+        std::fs::remove_file(m.home.join(".aider.conf.yml")).unwrap();
+        assert_eq!(aider_auth(&m).detail, "OPENAI_API_KEY is set");
     }
 
     #[cfg(unix)]

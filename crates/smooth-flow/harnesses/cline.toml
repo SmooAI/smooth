@@ -67,6 +67,10 @@ spinner = false
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# "[y] Approve   [n] Deny" — single keys, no Enter, no "always".
+approve_keys = ["y"]
+allow_session_keys = ["y"]
+deny_keys = ["n"]
 
 [kill]
 signal = "TERM"

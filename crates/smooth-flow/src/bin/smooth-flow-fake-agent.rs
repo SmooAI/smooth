@@ -21,7 +21,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use smooth_flow::harness_conformance::{match_argv, match_continue_argv, FakeSpec, Mechanism, PERMISSION_MARKER, SPEC_ENV};
+use smooth_flow::harness_conformance::{keys_bytes, match_argv, match_continue_argv, FakeSpec, Mechanism, PERMISSION_MARKER, SPEC_ENV};
 
 struct Fake {
     spec: FakeSpec,
@@ -123,14 +123,30 @@ impl Fake {
         paint(&self.spec.idle);
     }
 
-    /// One raw keypress from the pane (the engine's approval keystroke).
-    fn read_key(&self) -> String {
-        stty(&["-icanon", "min", "1"]);
-        let mut buf = [0u8; 8];
-        let n = std::io::stdin().lock().read(&mut buf).unwrap_or(0);
-        stty(&["icanon"]);
-        let key = String::from_utf8_lossy(&buf[..n]).into_owned();
-        log(&self.spec, "key", &json!({"key": key}));
+    /// The raw bytes of the engine's approval keys (th-5a2314): block for
+    /// the first press, then keep reading until the manifest's whole
+    /// `approve_keys` sequence is in, or the pane goes quiet for 2 s (a wrong,
+    /// shorter answer is logged as what it was, not waited on forever).
+    /// `-icrnl`, so Enter reads as the `\r` a real TUI sees.
+    fn read_keys(&self) -> String {
+        let want = keys_bytes(&self.spec.approve_keys).unwrap_or_default();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 64];
+        stty(&["-icanon", "-icrnl", "min", "1", "time", "0"]);
+        loop {
+            let n = std::io::stdin().lock().read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+            if got.len() >= want.len() {
+                break;
+            }
+            stty(&["min", "0", "time", "20"]);
+        }
+        stty(&["icanon", "icrnl", "min", "1", "time", "0"]);
+        let key = String::from_utf8_lossy(&got).into_owned();
+        log(&self.spec, "key", &json!({"key": key, "want": want}));
         key
     }
 
@@ -144,11 +160,11 @@ impl Fake {
             Mechanism::Mapped { needs_you: Some(ev), .. } => {
                 paint(&self.spec.needs_you);
                 self.hook(ev, &json!({"reason": "permission", "message": "run git push?"}));
-                self.read_key();
+                self.read_keys();
             }
             Mechanism::Scrape => {
                 paint(&self.spec.needs_you);
-                self.read_key();
+                self.read_keys();
             }
             Mechanism::Mapped { needs_you: None, .. } => {
                 log(&self.spec, "no_permission_mechanism", &Value::Null);

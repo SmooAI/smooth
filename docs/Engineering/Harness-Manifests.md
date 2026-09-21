@@ -105,6 +105,12 @@ where = "last_line"           # tail (default) | pane | last_line | cursor_line 
 method = "bracketed_paste"    # bracketed_paste | stdin
 submit_key = "Enter"
 submit_delay_ms = 0           # pause between the paste and submit_key (≤ 5000); gemini needs 300
+# How flow.approve answers a SCRAPED approval prompt (no pending hook
+# request), as tmux key names pressed in order, 250 ms apart (th-5a2314).
+# Defaults are Claude Code's numbered menu: ["1"] / ["2"] / ["Escape"].
+approve_keys = ["y", "Enter"]        # allow this once
+allow_session_keys = ["y", "Enter"]  # allow and stop asking — repeat approve_keys if there is no such option
+deny_keys = ["n", "Enter"]
 
 [kill]
 signal = "TERM"
@@ -140,7 +146,9 @@ else is a validation error naming the field.
   `where = "tail"` (1–500); no `unless_below` on a title; `quiet_ms` and
   `changed_within_ms` together must be satisfiable
 - every scrape pattern must compile (flat lists get `(?i)`, rules `(?im)`)
-- `steer.submit_key`, `kill.signal` non-empty; `steer.submit_delay_ms` ≤ 5000
+- `steer.submit_key`, `kill.signal` non-empty; `steer.submit_delay_ms` ≤ 5000;
+  `steer.approve_keys`, `allow_session_keys`, `deny_keys` each at least one
+  non-empty key
 
 ### Scrape precedence (same as the shared detector)
 
@@ -488,8 +496,20 @@ session has its own worktree, so "latest here" is that session's.
   the cursor is not on a composer) until its composer settles.
 - A turn stalled with no marker and no new text reads **unknown**; the engine
   keeps the previous state.
-- `flow.approve` sends Claude Code's approval keystrokes; for a scraped
-  harness, answer in the pane (the needs-you clears on the next idle).
+- `flow.approve` on a scraped prompt presses the manifest's `[steer]`
+  keys (th-5a2314). A prompt shaped differently from the one those keys
+  were written for (a new dialog in a new CLI version) can still need an
+  answer in the pane. The needs-you clears on the next idle either way.
+
+| harness | approve     | allow for session | deny                    | from the prompt                                   |
+| ------- | ----------- | ----------------- | ----------------------- | ------------------------------------------------- |
+| claude  | `1`         | `2`               | `Escape`                | the numbered menu (the default)                   |
+| aider   | `y` `Enter` | `y` `Enter`       | `n` `Enter`             | `Create new file? (Y)es/(N)o [Yes]:`              |
+| goose   | `Enter`     | `Down` `Enter`    | `Down` `Down` `Enter`   | `● Allow / ○ Always Allow / ○ Deny / ○ Cancel`    |
+| crush   | `Enter`     | `Right` `Enter`   | `Right` `Right` `Enter` | `Allow · Allow for Session · Deny`, ←/→ to choose |
+| cline   | `y`         | `y`               | `n`                     | `[y] Approve   [n] Deny`                          |
+
+The deny column is what `tests/scrape_live.rs` pressed against the real CLIs.
 
 ### How cmux and orca detect state without hooks
 
@@ -605,7 +625,13 @@ CI: the `Harness conformance` job in `pr-checks.yml` (Linux, tmux installed,
   first event you map to `working`, `idle`, `needs_you` (payload
   `{"reason":"permission"}`) and `ended`. So the map **must** name at least
   one `working` and one `idle` event, and a `needs_you` ask must be
-  answerable with the keystroke `1`.
+  answerable with the manifest's `[steer] approve_keys`.
+- **permission (mapped and scrape)** — the fake reads the raw bytes of the
+  manifest's `approve_keys` off the pane (`-icrnl`, so `Enter` is `\r`). The
+  rig requires exactly those bytes, so an engine that ignored the manifest
+  and pressed Claude's `1` fails `permission` for every non-Claude harness
+  (th-5a2314). A key name the rig cannot map to bytes fails too, rather than
+  passing on a guess.
 - **scrape** — posts nothing; clears the screen and paints the fixture's
   screens verbatim.
 
@@ -646,14 +672,14 @@ under a harness's own event name could not be approved; fixed in th-3cabf6).
 The suite proves a manifest is right; doctor says whether it works **here**.
 Read-only — it never installs, trusts a hook dialog or logs in:
 
-| check     | degrades the harness when                                                                                                                                                                                   |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `binary`  | nothing resolves, or only a cmux CLI shim does (a shim in front of a real install is reported, not degrading)                                                                                               |
-| `app_env` | (macOS) it resolves from your shell but not under the SmoothFlow app's launchd PATH, or it is a `#!/usr/bin/env node` script whose interpreter the app cannot find                                          |
-| `version` | the binary cannot be executed (a failing `--version` only warns)                                                                                                                                            |
-| `hooks`   | known hooks harnesses: the smooth-agent plugin / flow hook is missing or stale, OpenCode's plugin lacks the generic `event` hook, Codex's flow hooks are not **trusted** (`[hooks.state]` in `config.toml`) |
-| `signal`  | never — a daemon that is not up only warns (`th up`)                                                                                                                                                        |
-| `auth`    | Claude Code / Codex / th code are not signed in (env key, credentials file, or the login keychain item's presence)                                                                                          |
+| check     | degrades the harness when                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `binary`  | nothing resolves, or only a cmux CLI shim does (a shim in front of a real install is reported, not degrading)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `app_env` | (macOS) it resolves from your shell but not under the SmoothFlow app's launchd PATH, or it is a `#!/usr/bin/env node` script whose interpreter the app cannot find                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `version` | the binary cannot be executed (a failing `--version` only warns)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `hooks`   | known hooks harnesses: the smooth-agent plugin / flow hook is missing or stale, or a **project-scoped** smooth-agent pin in `~/.claude/plugins/installed_plugins.json` for an existing checkout is older than the user-scoped install (it shadows the user install there; fix: `cd <project> && claude plugin update smooth-agent@smooth --scope project`, which `th harness enable claude-code` now also runs for every such pin), OpenCode's plugin lacks the generic `event` hook, the smooth-agent overlay is missing from where `th harness enable` renders it for gemini / qwen / cursor-agent / droid / copilot / amp / pi (th-5a2314), Codex's flow hooks are not **trusted** (`[hooks.state]` in `config.toml`) |
+| `signal`  | never — a daemon that is not up only warns (`th up`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `auth`    | Claude Code / Codex / th code are not signed in (env key, credentials file, or the login keychain item's presence). goose has no `GOOSE_PROVIDER` in `~/.config/goose/config.yaml`; crush has no `providers` in `~/.config/crush/crush.json` or `~/.local/share/crush/crush.json`; cline has no `~/.cline/data/settings/providers.json` (th-5a2314). aider without a provider key only warns, because the app's daemon may carry one this shell does not.                                                                                                                                                                                                                                                                |
 
 `--json` emits `{harnesses: [{name, verdict: works|degraded|not_installed,
 reason, fix, binary, app_binary, cmux_shim, version, checks: [{id, level,
