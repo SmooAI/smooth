@@ -924,8 +924,17 @@ impl Engine {
         tmux::read_exit_file(&tmux::exit_file(&self.exit_prefix(&s.id), s.pid?))
     }
 
-    /// Remove every exit-code file (and half-written temp) of session `id`.
+    /// Remove every exit-code file (and half-written temp) of session `id`,
+    /// and forget any pending exit-status wait for it.
+    ///
+    /// The wait is keyed by session id, and a relaunch (`kill --resume`, a
+    /// crash resume) keeps the id. A wait left behind by a pane killed or
+    /// removed mid-window would start the NEXT incarnation's clock in the
+    /// past, and its first unreaped read would settle as Unknown at once —
+    /// never resumed. Every caller of this marks an incarnation's end or a
+    /// fresh launch, which is exactly when the wait must go.
     fn clear_exit_files(&self, id: &str) {
+        self.rt().exit_pending.remove(id);
         let Ok(entries) = std::fs::read_dir(&self.inner.exit_dir) else { return };
         let prefix = format!("{id}.");
         for e in entries.flatten() {
@@ -2608,6 +2617,26 @@ mod tests {
         assert_eq!(settle_exit(&mut pending, "late", unknown, None, t0 + EXIT_STATUS_WAIT), Some(PaneExit::Unknown));
     }
 
+    /// A pending exit-status wait never outlives its incarnation: the next
+    /// launch under the same id must get a fresh clock, not Unknown at once.
+    #[test]
+    fn a_stale_exit_wait_is_forgotten_with_the_incarnation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let long_ago = Instant::now().checked_sub(EXIT_STATUS_WAIT * 10).unwrap_or_else(Instant::now);
+        e.rt().exit_pending.insert("fs-x".into(), long_ago);
+        e.rt().exit_pending.insert("fs-y".into(), long_ago);
+        e.clear_exit_files("fs-x");
+        assert!(!e.rt().exit_pending.contains_key("fs-x"), "the ended incarnation's wait is gone");
+        assert!(e.rt().exit_pending.contains_key("fs-y"), "other sessions' waits are untouched");
+        // What the leak would have done: the relaunch's first unreaped read
+        // settling as Unknown on a clock that started before it existed.
+        let now = Instant::now();
+        let mut pending = std::mem::take(&mut e.rt().exit_pending);
+        assert_eq!(settle_exit(&mut pending, "fs-x", tmux::PaneDeath::Unreaped, None, now), None, "fresh clock");
+        assert_eq!(settle_exit(&mut pending, "fs-y", tmux::PaneDeath::Unreaped, None, now), Some(PaneExit::Unknown));
+    }
+
     #[test]
     fn pane_exit_classifies_signal_deaths_and_keeps_codes() {
         assert_eq!(PaneExit::from_code(0), PaneExit::Code(0));
@@ -3905,6 +3934,84 @@ mod tests {
         assert!(h["checkpoints"].as_array().unwrap().is_empty());
         assert!(h["blocks"].as_array().unwrap().is_empty());
         assert!(h["pr"].is_null());
+    }
+
+    /// th-7ff336 / th-9d2578, deterministically, at the supervisor: tmux
+    /// reports a pane dead (`1||`) before it has any status for it. This
+    /// holds that state open instead of racing it: the pane process ignores
+    /// SIGHUP, closes every fd on its pty (tmux sees EOF and marks the pane
+    /// dead) and exits 2 only when the test says so. The pane is launched
+    /// WITHOUT the exit-code wrapper — under it the pane cannot go dead
+    /// while the wrapper lives — so neither tmux nor a file can answer, which
+    /// is exactly the state the supervisor must wait out instead of guessing.
+    /// The old code recorded `(Dead, Some(-1))` on the first tick here.
+    ///
+    /// Linux only: macOS does not report EOF on a pty master while its
+    /// session leader lives, so the state never occurs there.
+    #[test]
+    fn a_dead_pane_with_no_status_yet_is_waited_out_not_guessed() {
+        if !tmux::tmux_available() || !cfg!(target_os = "linux") {
+            eprintln!("skipping: needs tmux on Linux");
+            return;
+        }
+        let sock = format!("flow-ns-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let go = tmp.path().join("go");
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Shell),
+                    tmux_socket: Some(sock.clone()),
+                    // Supervised by this engine (see `owned_here`), as
+                    // `new_session` would set it.
+                    owner: Some(tmux::socket_name()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let script = format!(
+            "trap '' HUP; exec </dev/null >/dev/null 2>/dev/null; while [ ! -e '{}' ]; do sleep 0.05; done; exit 2",
+            go.display()
+        );
+        let argv = vec!["sh".to_string(), "-c".to_string(), script];
+        let pid = tmux::launch_env(&sock, &s.id, tmp.path(), &argv, &[]).unwrap();
+        let start = proc::start_time(pid);
+        e.with_store(|st| st.set_process(&s.id, Some(&s.id), Some(pid), start, &argv)).unwrap();
+        e.with_store(|st| st.set_state(&s.id, SessionState::Idle, None)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_exit_status(&sock, &s.id).ok() != Some(Some(tmux::PaneDeath::Unreaped)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            tmux::pane_exit_status(&sock, &s.id).unwrap(),
+            Some(tmux::PaneDeath::Unreaped),
+            "dead with no status, even after the reap nudge"
+        );
+
+        // Inside the window: every tick leaves the row alone — no -1, no
+        // premature Unknown — and only marks the wait.
+        for _ in 0..3 {
+            e.supervise_tick().unwrap();
+        }
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Idle, None), "not guessed: {row:?}");
+        assert!(tmux::session_alive(&sock, &s.id), "the pane is kept until its status is read");
+        assert!(e.rt().exit_pending.contains_key(&s.id), "the wait is on the clock");
+
+        // The status arrives: the real code, and the wait is gone.
+        std::fs::write(&go, b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_exit_status(&sock, &s.id).ok() != Some(Some(tmux::PaneDeath::Code(2))) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        e.supervise_tick().unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Dead, Some(2)), "the real status: {row:?}");
+        assert!(!e.rt().exit_pending.contains_key(&s.id));
+        tmux::kill_server(&sock);
     }
 
     /// Live: launch a real `shell`-kind session (a `cat` loop so it never
