@@ -1925,12 +1925,15 @@ impl Engine {
         let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
         tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
         if !alive {
+            tracing::info!(session = %s.id, tmux = %t, state = %s.state, "flow: tmux session gone — no exit status to read");
             return self.on_death(s, None);
         }
         if let Some(code) = exit? {
             if !exit_status_settled(&mut self.rt().exit_pending, &s.id, code, Instant::now()) {
+                tracing::info!(session = %s.id, "flow: pane dead, exit status not reaped yet — waiting");
                 return Ok(());
             }
+            tracing::info!(session = %s.id, code, "flow: pane exited");
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
