@@ -342,6 +342,12 @@ pub struct HookEvent {
     pub cwd: Option<String>,
     #[serde(default)]
     pub payload: Value,
+    /// The flow session row the pane was launched as (`SMOOTH_FLOW_ID` in
+    /// the pane env, th-b00115). Binds a harness that cannot pre-assign its
+    /// session id — and one whose payload carries none — without guessing
+    /// by cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
 }
 
 /// What a hook event means for the session's state.
@@ -905,6 +911,9 @@ mod tests {
         assert_eq!(h.harness, "");
         assert!(h.cwd.is_none());
         assert!(h.payload.is_null());
+        assert!(h.flow_id.is_none());
+        let h: HookEvent = serde_json::from_str(r#"{"event":"Stop","session_id":"","flow_id":"fs-1"}"#).unwrap();
+        assert_eq!(h.flow_id.as_deref(), Some("fs-1"));
         assert!(!is_flow_frame(&json!({"type":"x"})));
         assert!(is_flow_frame(&json!({"channel":"flow"})));
     }

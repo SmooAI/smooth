@@ -143,6 +143,31 @@ if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.harness')" = "codex" ] && [ 
 out=$(echo "$PAYLOAD" | FLOW_HOOK_HARNESS=opencode bash "$HOOK" Stop 2>&1); rc=$?
 if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body.harness')" = "opencode" ] && [ "$rc" = 0 ]; then ok "FLOW_HOOK_HARNESS overrides the default"; else bad "FLOW_HOOK_HARNESS (rc=$rc)"; fi
 
+# --- other hook-capable harnesses (th-b00115) ------------------------------------
+# Payload variants: Copilot camelCase sessionId, Cursor conversation_id + workspace_roots.
+: >"$LOG"
+out=$(echo '{"sessionId":"cop-1","cwd":"/cop"}' | bash "$HOOK" Stop copilot 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '[.body.session_id, .body.cwd] | @tsv')" = "$(printf 'cop-1\t/cop')" ] && [ "$rc" = 0 ] && [ "$out" = "{}" ]; then ok "copilot: sessionId is the session id; stdout answers {}"; else bad "copilot envelope (rc=$rc out='$out')"; fi
+: >"$LOG"
+out=$(echo '{"conversation_id":"cur-1","workspace_roots":["/cur/root","/other"]}' | bash "$HOOK" beforeSubmitPrompt cursor-agent 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '[.body.harness, .body.session_id, .body.cwd] | @tsv')" = "$(printf 'cursor-agent\tcur-1\t/cur/root')" ] && [ "$rc" = 0 ] && [ "$out" = '{"continue":true}' ]; then ok "cursor-agent: conversation_id + workspace_roots[0]; beforeSubmitPrompt answers continue"; else bad "cursor-agent envelope (rc=$rc out='$out')"; fi
+out=$(echo '{}' | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" bash "$HOOK" stop cursor-agent 2>&1); expect "cursor-agent answers {} even with no daemon" 0 $? "$out" '{}'
+out=$(echo '{}' | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" bash "$HOOK" beforeSubmitPrompt cursor-agent 2>&1); expect "cursor-agent gate answers continue even with no daemon" 0 $? "$out" '{"continue":true}'
+out=$(echo '{}' | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" bash "$HOOK" AfterAgent gemini 2>&1); expect "gemini answers {} even with no daemon" 0 $? "$out" '{}'
+out=$(echo '{}' | SMOOTH_DAEMON_ADDR_FILE="$TMP/nope" bash "$HOOK" Stop droid 2>&1); expect "droid (Claude-style stdout) stays silent" 0 $? "$out"
+# A pre-answered harness never prints a second JSON document, even for a decision.
+echo decide >"$MODE"
+out=$(echo "$PAYLOAD" | bash "$HOOK" PermissionRequest copilot 2>/dev/null); expect "copilot PermissionRequest: only the {} answer, no decision passthrough" 0 $? "$out" '{}'
+# qwen speaks Claude's decision protocol: its PermissionRequest is held for the decision.
+out=$(echo "$PAYLOAD" | bash "$HOOK" PermissionRequest qwen 2>/dev/null); expect "qwen PermissionRequest passes the decision through" 0 $? "$out" '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+# SMOOTH_FLOW_ID rides along as flow_id; absent ⇒ no flow_id key at all.
+: >"$LOG"
+out=$(echo '{"session_id":""}' | SMOOTH_FLOW_ID=fs-42 bash "$HOOK" BeforeAgent gemini 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '[.body.flow_id, .body.session_id] | @tsv')" = "$(printf 'fs-42\t')" ] && [ "$rc" = 0 ]; then ok "SMOOTH_FLOW_ID is posted as flow_id"; else bad "flow_id (rc=$rc)"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | env -u SMOOTH_FLOW_ID bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body | has("flow_id")')" = "false" ] && [ "$rc" = 0 ]; then ok "no SMOOTH_FLOW_ID ⇒ no flow_id key"; else bad "flow_id absent (rc=$rc)"; fi
+
 # --- PermissionRequest: decision passthrough --------------------------------------
 echo decide >"$MODE"
 out=$(echo "$PAYLOAD" | bash "$HOOK" PermissionRequest 2>/dev/null); rc=$?

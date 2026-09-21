@@ -12,7 +12,10 @@
 //! | claude-code | handed to Claude's own plugin system: composed plugin (core `hooks/hooks.json` KEY-MERGED with `harness/claude-code/hooks/hooks.json`) under the local `th-pkg` marketplace + `enabledPlugins`/`extraKnownMarketplaces` in `~/.claude/settings.json`; `rules/` → `~/.claude/rules/<pkg>/` |
 //! | codex | `skills/` → `~/.codex/skills/`, `.mcp.json` → `[mcp_servers.*]`, `harness/codex/config.toml` key-merged into `~/.codex/config.toml`, `harness/codex/hooks.json` key-merged into `~/.codex/hooks.json` (Codex ≥ 0.153 reads Claude-style hooks), `rules/` → a managed section in `~/.codex/AGENTS.md` |
 //! | opencode | `skills/` → `~/.opencode/skills/`, `.mcp.json` → `mcp.*`, `harness/opencode/plugin.js` → `~/.config/opencode/plugins/<pkg>.js`, `rules/` → a managed section in `~/.config/opencode/AGENTS.md` |
-//! | cursor | `rules/*.md` → `~/.cursor/rules/<pkg>/*.mdc` (Cursor frontmatter; `harness/cursor/rules/<stem>.mdc` replaces a rendering), `.mcp.json` → `mcpServers.*` in `~/.cursor/mcp.json` |
+//! | cursor | `rules/*.md` → `~/.cursor/rules/<pkg>/*.mdc` (Cursor frontmatter; `harness/cursor/rules/<stem>.mdc` replaces a rendering), `.mcp.json` → `mcpServers.*` in `~/.cursor/mcp.json`, `harness/cursor/hooks.json` merged into `~/.cursor/hooks.json` |
+//! | gemini, qwen, droid | hook-only (th-b00115): `harness/<h>/hooks.json` key-merged into `~/.gemini/settings.json` / `~/.qwen/settings.json` / `~/.factory/settings.json` |
+//! | copilot | hook-only: `harness/copilot/hooks.json` → `~/.copilot/hooks/<pkg>.json` |
+//! | amp, pi | hook-only: `harness/amp/plugin.ts` → `~/.config/amp/plugins/<pkg>.ts`, `harness/pi/extension.ts` → `~/.pi/agent/extensions/<pkg>.ts` |
 //! | (all) | `skills/` → `~/.smooth/skills/` so `th` itself discovers them |
 //!
 //! Every written path (+ sha256), every owned dotted key in a merged config
@@ -45,7 +48,9 @@ pub enum Cmd {
     /// marketplace.json (path or URL) whose plugins are all installed.
     Install {
         source: String,
-        /// claude-code | codex | opencode | cursor | all (comma-separated)
+        /// claude-code | codex | opencode | cursor | gemini | qwen | droid |
+        /// copilot | amp | pi | all (comma-separated). The last six get only
+        /// their SmoothFlow state hooks/plugin.
         #[arg(long, default_value = "all")]
         harness: String,
         /// Install for this user (the only scope in M0).
@@ -70,8 +75,8 @@ pub fn cmd(cmd: Cmd) -> Result<()> {
     let paths = Paths::new(mcp_install::harness_home()?);
     match cmd {
         Cmd::Install { source, harness, global: _ } => {
-            let harnesses = parse_harnesses(&harness)?;
-            let names = install(&paths, &Source::parse(&source)?, &harnesses)?;
+            let targets = parse_harnesses(&harness)?;
+            let names = install_targets(&paths, &Source::parse(&source)?, &targets)?;
             for n in names {
                 println!("{} installed {n}", "✓".bright_green());
             }
@@ -128,21 +133,120 @@ pub fn cmd(cmd: Cmd) -> Result<()> {
     }
 }
 
-fn parse_harnesses(spec: &str) -> Result<Vec<Harness>> {
-    let mut out = Vec::new();
+/// A `--harness` selection: harnesses with a full rendering, and hook-only
+/// ones (th-b00115).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub full: Vec<Harness>,
+    pub hooks: Vec<HookHarness>,
+}
+
+impl Targets {
+    /// Every harness `th pkg` renders for.
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            full: Harness::ALL.to_vec(),
+            hooks: HookHarness::ALL.to_vec(),
+        }
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.full
+            .iter()
+            .map(ToString::to_string)
+            .chain(self.hooks.iter().map(|h| h.as_str().to_string()))
+            .collect()
+    }
+
+    /// Add `name` (a full or hook-only harness spelling) if it isn't there.
+    fn add(&mut self, name: &str) -> Result<()> {
+        if let Some(h) = HookHarness::parse(name) {
+            if !self.hooks.contains(&h) {
+                self.hooks.push(h);
+            }
+            return Ok(());
+        }
+        let h = Harness::parse(name).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown harness '{}' (expected claude-code|codex|opencode|cursor|gemini|qwen|droid|copilot|amp|pi|all)",
+                name.trim()
+            )
+        })?;
+        if !self.full.contains(&h) {
+            self.full.push(h);
+        }
+        Ok(())
+    }
+}
+
+fn parse_harnesses(spec: &str) -> Result<Targets> {
+    let mut out = Targets::default();
     for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         if part.eq_ignore_ascii_case("all") {
-            return Ok(Harness::ALL.to_vec());
+            return Ok(Targets::all());
         }
-        let h = Harness::parse(part)?;
-        if !out.contains(&h) {
-            out.push(h);
-        }
+        out.add(part)?;
     }
-    if out.is_empty() {
-        bail!("no harness given (expected claude-code|codex|opencode|cursor|all)");
+    if out.full.is_empty() && out.hooks.is_empty() {
+        bail!("no harness given (expected claude-code|codex|opencode|cursor|gemini|qwen|droid|copilot|amp|pi|all)");
     }
     Ok(out)
+}
+
+/// A harness `th pkg` renders ONLY SmoothFlow state wiring for (th-b00115):
+/// a hooks overlay or an in-process plugin that reports the CLI's lifecycle
+/// to `/api/flow/hooks`. Skills, MCP and rules are not rendered for these yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookHarness {
+    Gemini,
+    Qwen,
+    Droid,
+    Copilot,
+    Amp,
+    Pi,
+}
+
+impl HookHarness {
+    pub const ALL: [Self; 6] = [Self::Gemini, Self::Qwen, Self::Droid, Self::Copilot, Self::Amp, Self::Pi];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Qwen => "qwen",
+            Self::Droid => "droid",
+            Self::Copilot => "copilot",
+            Self::Amp => "amp",
+            Self::Pi => "pi",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gemini" | "gemini-cli" => Some(Self::Gemini),
+            "qwen" | "qwen-code" => Some(Self::Qwen),
+            "droid" | "factory" => Some(Self::Droid),
+            "copilot" | "copilot-cli" => Some(Self::Copilot),
+            "amp" => Some(Self::Amp),
+            "pi" => Some(Self::Pi),
+            _ => None,
+        }
+    }
+
+    /// The directory whose existence means "this CLI is set up here".
+    #[must_use]
+    pub fn marker_dir(self, home: &Path) -> PathBuf {
+        match self {
+            Self::Gemini => home.join(".gemini"),
+            Self::Qwen => home.join(".qwen"),
+            Self::Droid => home.join(".factory"),
+            Self::Copilot => home.join(".copilot"),
+            Self::Amp => home.join(".config").join("amp"),
+            Self::Pi => home.join(".pi").join("agent"),
+        }
+    }
 }
 
 // ------------------------------------------------------------------ paths ----
@@ -204,6 +308,22 @@ impl Paths {
     /// Cursor scans nested `.mdc` rules under here.
     fn cursor_rules(&self) -> PathBuf {
         self.home.join(".cursor").join("rules")
+    }
+    /// Cursor's user hooks (`{"version": 1, "hooks": {event: [{command}]}}`).
+    fn cursor_hooks(&self) -> PathBuf {
+        self.home.join(".cursor").join("hooks.json")
+    }
+    /// The settings file whose `hooks` key a hook-only harness reads, or the
+    /// directory its per-package hook file / plugin goes in.
+    fn hook_target(&self, h: HookHarness) -> PathBuf {
+        match h {
+            HookHarness::Gemini => self.home.join(".gemini").join("settings.json"),
+            HookHarness::Qwen => self.home.join(".qwen").join("settings.json"),
+            HookHarness::Droid => self.home.join(".factory").join("settings.json"),
+            HookHarness::Copilot => self.home.join(".copilot").join("hooks"),
+            HookHarness::Amp => self.home.join(".config").join("amp").join("plugins"),
+            HookHarness::Pi => self.home.join(".pi").join("agent").join("extensions"),
+        }
     }
 }
 
@@ -684,14 +804,29 @@ impl Index {
 /// # Errors
 /// See [`cmd`].
 pub fn install(paths: &Paths, source: &Source, harnesses: &[Harness]) -> Result<Vec<String>> {
+    install_targets(
+        paths,
+        source,
+        &Targets {
+            full: harnesses.to_vec(),
+            hooks: Vec::new(),
+        },
+    )
+}
+
+/// [`install`] for a selection that may include hook-only harnesses.
+///
+/// # Errors
+/// As [`install`].
+pub fn install_targets(paths: &Paths, source: &Source, targets: &Targets) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for f in fetch(paths, source)? {
-        names.push(install_root(paths, &f, harnesses)?);
+        names.push(install_root(paths, &f, targets)?);
     }
     Ok(names)
 }
 
-fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Result<String> {
+fn install_root(paths: &Paths, fetched: &Fetched, targets: &Targets) -> Result<String> {
     let root = &fetched.root;
     let m = load_manifest(root)?;
     let mut index = Index::load(paths)?;
@@ -699,7 +834,7 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
     // dropped a skill doesn't leave its link behind. Harnesses accumulate:
     // `--harness codex` on a package already rendered for opencode keeps
     // opencode (that is how `th harness enable` adds one harness at a time).
-    let mut harnesses = harnesses.to_vec();
+    let mut targets = targets.clone();
     let mut prev_sections = Vec::new();
     if let Some(prev) = index.packages.remove(&m.name) {
         // Managed AGENTS.md blocks are left for the re-render to replace IN
@@ -708,20 +843,19 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
         for w in remove_rendered(paths, &prev, true)? {
             println!("   {} {w}", "!".bright_yellow());
         }
-        for h in prev.harnesses.iter().filter_map(|h| Harness::parse(h).ok()) {
-            if !harnesses.contains(&h) {
-                harnesses.push(h);
-            }
+        for h in &prev.harnesses {
+            // A name this build no longer knows is simply not carried over.
+            let _ = targets.add(h);
         }
         prev_sections = prev.sections;
     }
-    let harnesses = &harnesses;
+    let harnesses = &targets.full;
     let mut rec = Installed {
         version: m.version.clone(),
         source: fetched.source.clone(),
         installed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         root: root.clone(),
-        harnesses: harnesses.iter().map(ToString::to_string).collect(),
+        harnesses: targets.names(),
         ..Installed::default()
     };
     println!("{}", format!("== {} {}", m.name, m.version.as_deref().unwrap_or("")).bold().bright_cyan());
@@ -740,6 +874,13 @@ fn install_root(paths: &Paths, fetched: &Fetched, harnesses: &[Harness]) -> Resu
             Harness::OpenCode => render_opencode(paths, root, &m, &mut rec)?,
             Harness::Cursor => render_cursor(paths, root, &m, &mut rec)?,
         }
+    }
+    for h in &targets.hooks {
+        if !h.marker_dir(&paths.home).is_dir() {
+            note(&mut rec, format!("{}: not installed on this machine — skipped", h.as_str()));
+            continue;
+        }
+        render_hook_harness(paths, root, &m, *h, &mut rec)?;
     }
     for old in prev_sections {
         match rec.sections.iter_mut().find(|s| s.file == old.file && s.name == old.name) {
@@ -992,6 +1133,9 @@ fn render_opencode(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed
 fn render_cursor(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed) -> Result<()> {
     let h = "cursor";
     render_mcp(paths, Harness::Cursor, m, rec)?;
+    // th-b00115: Cursor's hooks.json holds flat `{command}` entries (no
+    // matcher groups); merge_hooks handles both shapes.
+    render_hooks_overlay(root, h, &paths.cursor_hooks(), rec)?;
     let dir = paths.cursor_rules().join(&m.name);
     let overlay = root.join("harness").join(h).join("rules");
     let mut n = 0;
@@ -1016,6 +1160,46 @@ fn render_cursor(paths: &Paths, root: &Path, m: &Manifest, rec: &mut Installed) 
     }
     if n > 0 {
         println!("   {h}: {n} rules → {}", dir.display());
+    }
+    Ok(())
+}
+
+/// SmoothFlow state wiring for a hook-only harness (th-b00115).
+fn render_hook_harness(paths: &Paths, root: &Path, m: &Manifest, hh: HookHarness, rec: &mut Installed) -> Result<()> {
+    let h = hh.as_str();
+    let target = paths.hook_target(hh);
+    let overlay = root.join("harness").join(h);
+    match hh {
+        // Claude-style nesting under the `hooks` key of the CLI's own
+        // settings.json; every other key in that file is left alone.
+        HookHarness::Gemini | HookHarness::Qwen | HookHarness::Droid => render_hooks_overlay(root, h, &target, rec)?,
+        // Copilot reads every *.json under ~/.copilot/hooks/: the package gets
+        // a file of its own, so nothing is merged into anyone else's.
+        HookHarness::Copilot => {
+            let src = overlay.join("hooks.json");
+            if src.is_file() {
+                let mut doc = load_json(&src)?;
+                subst_plugin_root(&mut doc, root);
+                let dst = target.join(format!("{}.json", m.name));
+                let text = serde_json::to_string_pretty(&doc)? + "\n";
+                rec.files.push(write_owned(&dst, &text, h)?);
+                println!("   {h}: hooks → {}", dst.display());
+            }
+        }
+        HookHarness::Amp | HookHarness::Pi => {
+            let file = if hh == HookHarness::Amp { "plugin.ts" } else { "extension.ts" };
+            let src = overlay.join(file);
+            if src.is_file() {
+                let dst = target.join(format!("{}.ts", m.name));
+                match place_link(&src, &dst, h)? {
+                    Some(f) => {
+                        println!("   {h}: {} → {}", file.trim_end_matches(".ts"), dst.display());
+                        rec.files.push(f);
+                    }
+                    None => note(rec, format!("{h}: {} exists and is not ours — left alone", dst.display())),
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1332,6 +1516,13 @@ fn customization_points(root: &Path) -> Vec<String> {
         point("codex/hooks.json", has("harness/codex/hooks.json")),
         point("opencode/plugin.js", has("harness/opencode/plugin.js")),
         point("cursor/rules", has("harness/cursor/rules")),
+        point("cursor/hooks.json", has("harness/cursor/hooks.json")),
+        point("gemini/hooks.json", has("harness/gemini/hooks.json")),
+        point("qwen/hooks.json", has("harness/qwen/hooks.json")),
+        point("droid/hooks.json", has("harness/droid/hooks.json")),
+        point("copilot/hooks.json", has("harness/copilot/hooks.json")),
+        point("amp/plugin.ts", has("harness/amp/plugin.ts")),
+        point("pi/extension.ts", has("harness/pi/extension.ts")),
         point("rules", has("rules")),
     ]
 }
@@ -1376,7 +1567,7 @@ fn hook_present(hk: &OwnedHook) -> Result<bool> {
                 hook_matcher(g) == hk.matcher
                     && g.get("hooks")
                         .and_then(serde_json::Value::as_array)
-                        .is_some_and(|hs| hs.iter().any(|h| hook_id(h) == hk.command))
+                        .map_or_else(|| is_flat_hook(g) && hook_id(g) == hk.command, |hs| hs.iter().any(|h| hook_id(h) == hk.command))
             })
         }))
 }
@@ -1640,11 +1831,19 @@ fn toml_remove_in(item: &mut toml_edit::Item, keys: &[&str]) -> bool {
 /// matcher groups matched by (normalised) matcher, hooks appended unless an
 /// identical command is already there. Returns `(event, matcher, command)`
 /// for every hook actually added — the ones the caller now owns.
+///
+/// Cursor's flat shape (`{"version": 1, "hooks": {event: [{command,
+/// matcher?}]}}`, th-b00115) merges too: an entry with no `hooks` array IS
+/// the hook, appended unless one with the same command and matcher exists,
+/// and a top-level `version` the base lacks is carried over.
 fn merge_hooks(base: &mut serde_json::Value, add: &serde_json::Value) -> Vec<(String, String, String)> {
     let mut added = Vec::new();
     let Some(events) = add.get("hooks").and_then(serde_json::Value::as_object) else {
         return added;
     };
+    if let Some(version) = add.get("version") {
+        as_object(base).entry("version").or_insert_with(|| version.clone());
+    }
     let base_events = as_object(as_object(base).entry("hooks").or_insert_with(|| serde_json::json!({})));
     for (event, groups) in events {
         let Some(groups) = groups.as_array() else { continue };
@@ -1655,6 +1854,14 @@ fn merge_hooks(base: &mut serde_json::Value, add: &serde_json::Value) -> Vec<(St
         let Some(target) = target.as_array_mut() else { continue };
         for group in groups {
             let matcher = hook_matcher(group);
+            if is_flat_hook(group) {
+                let id = hook_id(group);
+                if !target.iter().any(|e| is_flat_hook(e) && hook_matcher(e) == matcher && hook_id(e) == id) {
+                    target.push(group.clone());
+                    added.push((event.clone(), matcher, id));
+                }
+                continue;
+            }
             let Some(hooks) = group.get("hooks").and_then(serde_json::Value::as_array) else {
                 continue;
             };
@@ -1685,6 +1892,11 @@ fn merge_hooks(base: &mut serde_json::Value, add: &serde_json::Value) -> Vec<(St
     added
 }
 
+/// A flat hook entry (Cursor): a command with no nested `hooks` array.
+fn is_flat_hook(entry: &serde_json::Value) -> bool {
+    entry.get("hooks").is_none() && entry.get("command").is_some_and(serde_json::Value::is_string)
+}
+
 /// A group's matcher; absent and `""` are the same thing to Claude/Codex.
 fn hook_matcher(group: &serde_json::Value) -> String {
     group.get("matcher").and_then(serde_json::Value::as_str).unwrap_or("").to_string()
@@ -1709,6 +1921,9 @@ fn remove_hook(doc: &mut serde_json::Value, event: &str, matcher: &str, command:
         return false;
     };
     let mut removed = false;
+    let before = groups.len();
+    groups.retain(|g| !(is_flat_hook(g) && hook_matcher(g) == matcher && hook_id(g) == command));
+    removed |= groups.len() != before;
     for g in groups.iter_mut() {
         if hook_matcher(g) != matcher {
             continue;
@@ -1720,7 +1935,7 @@ fn remove_hook(doc: &mut serde_json::Value, event: &str, matcher: &str, command:
         }
     }
     if removed {
-        groups.retain(|g| g.get("hooks").and_then(serde_json::Value::as_array).is_some_and(|h| !h.is_empty()));
+        groups.retain(|g| is_flat_hook(g) || g.get("hooks").and_then(serde_json::Value::as_array).is_some_and(|h| !h.is_empty()));
         if groups.is_empty() {
             events.remove(event);
         }
@@ -2556,7 +2771,15 @@ mod tests {
             r#"{"extraKnownMarketplaces":{"mk":{"source":{"source":"github","repo":"o/r"}}}}"#,
         )
         .unwrap();
-        install_root(&paths, &fetched(), &[Harness::ClaudeCode]).unwrap();
+        install_root(
+            &paths,
+            &fetched(),
+            &Targets {
+                full: vec![Harness::ClaudeCode],
+                hooks: vec![],
+            },
+        )
+        .unwrap();
         let rec = Index::load(&paths).unwrap().packages["fix"].clone();
         assert_eq!(rec.claude_plugin.as_deref(), Some("fix@mk"));
         assert!(!paths.claude_marketplace().exists(), "no local copy when the repo's marketplace serves it");
@@ -2573,7 +2796,15 @@ mod tests {
         // Fresh settings → we register the marketplace, and rm takes it back out.
         std::fs::remove_file(paths.claude_settings()).unwrap();
         copy_dir(&src, &paths.cache().join("fix@v1"), true).unwrap();
-        install_root(&paths, &fetched(), &[Harness::ClaudeCode]).unwrap();
+        install_root(
+            &paths,
+            &fetched(),
+            &Targets {
+                full: vec![Harness::ClaudeCode],
+                hooks: vec![],
+            },
+        )
+        .unwrap();
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(paths.claude_settings()).unwrap()).unwrap();
         assert_eq!(settings["extraKnownMarketplaces"]["mk"]["source"]["source"], "github");
         rm(&paths, "fix").unwrap();
@@ -2721,10 +2952,260 @@ mod tests {
 
     #[test]
     fn parse_harnesses_accepts_lists_and_all() {
-        assert_eq!(parse_harnesses("all").unwrap(), Harness::ALL.to_vec());
-        assert_eq!(parse_harnesses("codex, claude-code,codex").unwrap(), vec![Harness::Codex, Harness::ClaudeCode]);
-        assert_eq!(parse_harnesses("cursor").unwrap(), vec![Harness::Cursor]);
-        assert!(parse_harnesses("copilot").is_err());
+        assert_eq!(parse_harnesses("all").unwrap(), Targets::all());
+        assert_eq!(
+            parse_harnesses("codex, claude-code,codex").unwrap().full,
+            vec![Harness::Codex, Harness::ClaudeCode]
+        );
+        assert_eq!(parse_harnesses("cursor").unwrap().full, vec![Harness::Cursor]);
+        let t = parse_harnesses("copilot,pi, gemini-cli,cursor,copilot").unwrap();
+        assert_eq!(t.full, vec![Harness::Cursor]);
+        assert_eq!(t.hooks, vec![HookHarness::Copilot, HookHarness::Pi, HookHarness::Gemini]);
+        assert_eq!(t.names(), ["cursor", "copilot", "pi", "gemini"]);
+        let err = parse_harnesses("aider").unwrap_err().to_string();
+        assert!(err.contains("unknown harness 'aider'") && err.contains("|qwen|"), "{err}");
         assert!(parse_harnesses(",").is_err());
+        for h in HookHarness::ALL {
+            assert_eq!(HookHarness::parse(h.as_str()), Some(h));
+            assert!(Harness::parse(h.as_str()).is_err(), "{} is not also a full harness", h.as_str());
+        }
+    }
+
+    /// th-b00115: hook-only harnesses get exactly their SmoothFlow wiring,
+    /// user config survives, a reinstall keeps them, and rm takes back only
+    /// what was added.
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::too_many_lines, reason = "one install → reinstall → rm walk across every hook-only harness")]
+    fn hook_only_harnesses_render_and_rm_removes_exactly_that() {
+        let (tmp, paths) = home();
+        let src = pkg_dir(&tmp);
+        let w = |rel: &str, body: &str| {
+            let p = src.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let nested = |h: &str| {
+            format!(
+                r#"{{"hooks":{{"BeforeAgent":[{{"hooks":[{{"type":"command","command":"${{CLAUDE_PLUGIN_ROOT}}/hooks/flow-hook.sh BeforeAgent {h}"}}]}}]}}}}"#
+            )
+        };
+        w("harness/gemini/hooks.json", &nested("gemini"));
+        w("harness/qwen/hooks.json", &nested("qwen"));
+        w("harness/droid/hooks.json", &nested("droid"));
+        w(
+            "harness/copilot/hooks.json",
+            r#"{"version":1,"hooks":{"Stop":[{"type":"command","bash":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Stop copilot","timeoutSec":5}]}}"#,
+        );
+        w("harness/amp/plugin.ts", "export default function () {}\n");
+        w("harness/pi/extension.ts", "export default function () {}\n");
+        w(
+            "harness/cursor/hooks.json",
+            r#"{"version":1,"hooks":{"stop":[{"command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh stop cursor-agent"}]}}"#,
+        );
+        let home = tmp.path();
+        for h in HookHarness::ALL {
+            // qwen is deliberately NOT set up on this machine.
+            if h != HookHarness::Qwen {
+                std::fs::create_dir_all(h.marker_dir(home)).unwrap();
+            }
+        }
+        // User-owned settings and hooks that must survive.
+        std::fs::write(
+            home.join(".gemini/settings.json"),
+            r#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"mine.sh"}]}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            paths.cursor_hooks(),
+            r#"{"version":1,"hooks":{"stop":[{"command":"user-stop.sh"}],"afterFileEdit":[{"command":"fmt.sh"}]}}"#,
+        )
+        .unwrap();
+
+        let targets = Targets {
+            full: vec![Harness::Cursor],
+            hooks: HookHarness::ALL.to_vec(),
+        };
+        install_targets(&paths, &Source::Path(src.clone()), &targets).unwrap();
+        let index = Index::load(&paths).unwrap();
+        let rec = &index.packages["fix"];
+        let root = rec.root.display().to_string();
+        assert_eq!(rec.harnesses, ["cursor", "gemini", "qwen", "droid", "copilot", "amp", "pi"]);
+        assert!(
+            rec.notes.iter().any(|n| n == "qwen: not installed on this machine — skipped"),
+            "{:?}",
+            rec.notes
+        );
+        assert!(!home.join(".qwen").exists(), "nothing conjured for a missing harness");
+
+        // gemini: merged beside the user's hook, the rest of settings.json intact.
+        let g = load_json(&home.join(".gemini/settings.json")).unwrap();
+        assert_eq!(g["security"]["auth"]["selectedType"], "gemini-api-key");
+        let cmds: Vec<&str> = g["hooks"]["BeforeAgent"][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(cmds, ["mine.sh", &format!("{root}/hooks/flow-hook.sh BeforeAgent gemini")]);
+        // droid: settings.json created with just the hooks.
+        let d = load_json(&home.join(".factory/settings.json")).unwrap();
+        assert_eq!(
+            d["hooks"]["BeforeAgent"][0]["hooks"][0]["command"],
+            format!("{root}/hooks/flow-hook.sh BeforeAgent droid")
+        );
+        // copilot: a file of its own, root substituted.
+        let c = load_json(&home.join(".copilot/hooks/fix.json")).unwrap();
+        assert_eq!(c["hooks"]["Stop"][0]["bash"], format!("{root}/hooks/flow-hook.sh Stop copilot"));
+        // amp / pi: linked into their plugin dirs.
+        for (dst, file) in [
+            (".config/amp/plugins/fix.ts", "harness/amp/plugin.ts"),
+            (".pi/agent/extensions/fix.ts", "harness/pi/extension.ts"),
+        ] {
+            let dst = home.join(dst);
+            assert!(std::fs::symlink_metadata(&dst).unwrap().file_type().is_symlink(), "{}", dst.display());
+            assert_eq!(std::fs::read_link(&dst).unwrap(), rec.root.join(file));
+        }
+        // cursor: flat entry appended after the user's, their other event kept.
+        let cur = load_json(&paths.cursor_hooks()).unwrap();
+        let stops: Vec<&str> = cur["hooks"]["stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["command"].as_str().unwrap())
+            .collect();
+        assert_eq!(stops, ["user-stop.sh", &format!("{root}/hooks/flow-hook.sh stop cursor-agent")]);
+        assert_eq!(cur["hooks"]["afterFileEdit"][0]["command"], "fmt.sh");
+        assert_eq!(cur["version"], 1);
+
+        // Status sees every artifact and reports the new customization points.
+        let status = status_lines(rec);
+        assert!(status.iter().any(|l| l.contains(" 0 drifted/missing")), "{status:?}");
+        assert!(status
+            .iter()
+            .any(|l| l.contains("copilot/hooks.json=present") && l.contains("pi/extension.ts=present") && l.contains("cursor/hooks.json=present")));
+
+        // Reinstall with a narrower selection keeps the earlier hook-only harnesses, merges nothing twice.
+        install_targets(
+            &paths,
+            &Source::Path(src.clone()),
+            &Targets {
+                full: vec![],
+                hooks: vec![HookHarness::Pi],
+            },
+        )
+        .unwrap();
+        let rec = Index::load(&paths).unwrap().packages["fix"].clone();
+        assert!(
+            ["cursor", "gemini", "droid", "copilot", "amp", "pi"]
+                .iter()
+                .all(|h| rec.harnesses.iter().any(|x| x == h)),
+            "{:?}",
+            rec.harnesses
+        );
+        let g = load_json(&home.join(".gemini/settings.json")).unwrap();
+        assert_eq!(g["hooks"]["BeforeAgent"][0]["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(load_json(&paths.cursor_hooks()).unwrap()["hooks"]["stop"].as_array().unwrap().len(), 2);
+
+        rm(&paths, "fix").unwrap();
+        let g = load_json(&home.join(".gemini/settings.json")).unwrap();
+        assert_eq!(g["hooks"]["BeforeAgent"][0]["hooks"].as_array().unwrap().len(), 1, "only ours removed: {g}");
+        assert_eq!(g["security"]["auth"]["selectedType"], "gemini-api-key");
+        let cur = load_json(&paths.cursor_hooks()).unwrap();
+        assert_eq!(cur["hooks"]["stop"], serde_json::json!([{"command": "user-stop.sh"}]));
+        assert_eq!(cur["hooks"]["afterFileEdit"][0]["command"], "fmt.sh");
+        assert!(!home.join(".copilot/hooks/fix.json").exists());
+        assert!(std::fs::symlink_metadata(home.join(".config/amp/plugins/fix.ts")).is_err());
+        assert!(std::fs::symlink_metadata(home.join(".pi/agent/extensions/fix.ts")).is_err());
+        assert!(load_json(&home.join(".factory/settings.json")).unwrap()["hooks"].get("BeforeAgent").is_none());
+    }
+
+    #[test]
+    fn flat_hook_merge_and_remove() {
+        let mut base = serde_json::json!({"hooks": {"stop": [{"command": "a.sh"}, {"command": "b.sh", "matcher": "x"}]}});
+        let add = serde_json::json!({"version": 1, "hooks": {"stop": [{"command": "a.sh"}, {"command": "b.sh"}], "sessionEnd": [{"command": "c.sh"}]}});
+        let added = merge_hooks(&mut base, &add);
+        assert_eq!(
+            added,
+            [
+                ("stop".to_string(), String::new(), "b.sh".to_string()),
+                ("sessionEnd".to_string(), String::new(), "c.sh".to_string())
+            ],
+            "a.sh already there; b.sh with a different matcher is a different hook"
+        );
+        assert_eq!(base["version"], 1);
+        assert!(merge_hooks(&mut base, &add).is_empty(), "idempotent");
+        assert!(remove_hook(&mut base, "stop", "", "b.sh"));
+        assert_eq!(
+            base["hooks"]["stop"],
+            serde_json::json!([{"command": "a.sh"}, {"command": "b.sh", "matcher": "x"}])
+        );
+        assert!(!remove_hook(&mut base, "stop", "", "b.sh"));
+        assert!(remove_hook(&mut base, "sessionEnd", "", "c.sh"));
+        assert!(base["hooks"].get("sessionEnd").is_none(), "empty event pruned");
+        // A nested group next to flat entries survives either removal.
+        let mut mixed = serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "n.sh"}]}, {"command": "f.sh"}]}});
+        assert!(remove_hook(&mut mixed, "Stop", "", "n.sh"));
+        assert_eq!(mixed["hooks"]["Stop"], serde_json::json!([{"command": "f.sh"}]));
+    }
+
+    /// The smooth-agent package's own overlays (th-b00115) are valid, name
+    /// the harness each SmoothFlow manifest expects, and subscribe to the
+    /// events its event_map reads — no Cursor gate hook that fails closed.
+    #[test]
+    fn smooth_agent_flow_overlays_match_the_flow_manifests() {
+        let pkg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../claude-plugins/smooth-agent");
+        let registry = smooth_flow::harness::Registry::builtin();
+        // (overlay, manifest name, command field)
+        for (overlay, name, field) in [
+            ("gemini", "gemini", "command"),
+            ("qwen", "qwen", "command"),
+            ("droid", "droid", "command"),
+            ("copilot", "copilot", "bash"),
+            ("cursor", "cursor-agent", "command"),
+        ] {
+            let doc = load_json(&pkg.join("harness").join(overlay).join("hooks.json")).unwrap();
+            let manifest = registry.get(name).unwrap_or_else(|| panic!("{name} manifest"));
+            let events = doc["hooks"].as_object().unwrap();
+            assert!(!events.is_empty(), "{overlay}");
+            for (event, entries) in events {
+                for entry in entries.as_array().unwrap() {
+                    let hooks = entry
+                        .get("hooks")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_else(|| vec![entry.clone()]);
+                    for h in hooks {
+                        let cmd = h[field].as_str().unwrap_or_else(|| panic!("{overlay} {event}: no {field}"));
+                        assert_eq!(cmd, format!("${{CLAUDE_PLUGIN_ROOT}}/hooks/flow-hook.sh {event} {name}"), "{overlay}");
+                    }
+                }
+                let map = &manifest.state.hooks.event_map;
+                assert!(
+                    map.is_empty() || map.contains_key(event),
+                    "{overlay} subscribes to `{event}` but the {name} manifest doesn't map it"
+                );
+            }
+            for event in manifest.state.hooks.event_map.keys() {
+                assert!(events.contains_key(event), "{name} maps `{event}` but its overlay never subscribes");
+            }
+        }
+        let cursor = load_json(&pkg.join("harness/cursor/hooks.json")).unwrap();
+        assert_eq!(cursor["version"], 1);
+        for gate in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+            assert!(cursor["hooks"].get(gate).is_none(), "Cursor's {gate} fails closed — never subscribed");
+        }
+        // Qwen holds PermissionRequest open for flow.approve: its hook timeout outlasts the long-poll.
+        let qwen = load_json(&pkg.join("harness/qwen/hooks.json")).unwrap();
+        assert!(qwen["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64().unwrap() > 120);
+        // The plugins post the events their manifests read.
+        for (file, name) in [("harness/amp/plugin.ts", "amp"), ("harness/pi/extension.ts", "pi")] {
+            let text = std::fs::read_to_string(pkg.join(file)).unwrap();
+            let manifest = registry.get(name).unwrap();
+            for event in manifest.state.hooks.event_map.keys() {
+                assert!(text.contains(&format!("'{event}'")), "{file} never posts `{event}`");
+            }
+            assert!(text.contains(&format!("HARNESS = '{name}'")), "{file}");
+        }
     }
 }

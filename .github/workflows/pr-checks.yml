@@ -194,6 +194,65 @@ jobs:
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: cargo build --release -p smooai-smooth-cli
 
+    # Pearl th-3cabf6: every harness manifest SmoothFlow ships must pass the
+    # conformance contract (resolve · launch · working · idle · steer ·
+    # permission · resume · kill) against a fake agent that speaks its state
+    # mechanism — no real CLIs, no network, no credentials. A manifest (or an
+    # engine change) that breaks a harness fails here, by name, with the step.
+    # Linux only: the engine runs sessions under tmux. Same step-gating as
+    # `rust` so the job always reports.
+    harness_conformance:
+        name: Harness conformance
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Detect changes
+              id: filter
+              if: github.event_name == 'pull_request'
+              uses: dorny/paths-filter@v3
+              with:
+                  filters: |
+                      flow:
+                          - 'crates/smooth-flow/**'
+                          - 'crates/smooth-tmux/**'
+                          - 'Cargo.toml'
+                          - 'Cargo.lock'
+                          - 'rust-toolchain.toml'
+                          - '.github/workflows/pr-checks.yml'
+
+            - name: Gate
+              id: gate
+              run: echo "run=${{ github.event_name != 'pull_request' || steps.filter.outputs.flow == 'true' }}" >>"$GITHUB_OUTPUT"
+
+            - name: Install tmux
+              if: steps.gate.outputs.run == 'true'
+              run: |
+                  sudo rm -f /etc/apt/sources.list.d/google-chrome*
+                  sudo apt-get update && sudo apt-get install -y tmux
+
+            - uses: dtolnay/rust-toolchain@stable
+              if: steps.gate.outputs.run == 'true'
+
+            - uses: Swatinem/rust-cache@v2
+              if: steps.gate.outputs.run == 'true'
+              with:
+                  key: harness-conformance
+
+            # SMOOTH_E2E_STRICT: a runner without tmux fails instead of
+            # reporting green having run nothing.
+            - name: Conformance suite (every built-in + reference manifest)
+              if: steps.gate.outputs.run == 'true'
+              run: cargo test -p smooai-smooth-flow --test harness_conformance -- --nocapture
+              env:
+                  SMOOTH_E2E_STRICT: '1'
+                  LANG: C.UTF-8
+
+            - name: Contract unit tests
+              if: steps.gate.outputs.run == 'true'
+              run: cargo test -p smooai-smooth-flow --lib harness_conformance
+
     # Pearl th-9bee92: the ONLY repo-wide check. Deliberately ungated — no
     # dorny/paths-filter, no `if:` — because the bug this job fixes is a check
     # that verifies nothing on the diff in front of it. `rust` gates on

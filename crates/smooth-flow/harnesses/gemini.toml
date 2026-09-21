@@ -1,0 +1,66 @@
+# Gemini CLI (th-b00115). Hooks since 0.26: `hooks` in ~/.gemini/settings.json,
+# Claude-shaped nesting but its OWN event names (BeforeAgent / AfterAgent /
+# BeforeTool / AfterTool), stdin carries session_id + cwd. The session id is
+# pre-assigned with --session-id, so hooks find the row without binding.
+# References: orca src/main/gemini/hook-service.ts:34 (events), orca
+# src/shared/agent-session-resume.ts:261 (`gemini --resume <id>`), cmux
+# CLI/CMUXCLI+AgentHookCatalog.swift:105-117 (SessionStart/BeforeAgent/
+# AfterAgent/SessionEnd). Gemini's docs (bundle/docs/hooks/reference.md):
+# Notification(notification_type = "ToolPermission") is observability-only —
+# it cannot answer the prompt, so needs_you is reported, never held.
+name = "gemini"
+display_name = "Gemini CLI"
+
+[binary]
+names = ["gemini"]
+prefer_paths = [".local/bin/gemini"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# The positional query "runs in interactive mode by default"; -p would exit.
+argv = ["--session-id", "{session_id}", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness gemini  # harness/gemini/hooks.json key-merged into ~/.gemini/settings.json"
+
+[state.hooks.event_map]
+SessionStart = "ignore"
+BeforeAgent = "working"
+BeforeTool = "working"
+AfterTool = "working"
+AfterAgent = "idle"
+Notification = "needs_you"
+PreCompress = "ignore"
+SessionEnd = "ended"
+
+[state.scrape]
+working = ["esc to cancel"]
+idle = ["type your message"]
+# Captured 2026-09-14 (gemini 0.59.0, fresh folder): "Do you trust the files in this folder? ● 1. Trust folder".
+needs_you = ["do you trust the files in this folder", "allow execution", "apply this change", "waiting for user confirmation"]
+usage_limit = ["quota exceeded", "resource_exhausted", "rate limit", "usage limit reached"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+# Measured live 2026-09-14 (gemini 0.59.0): an Enter 0 or 50 ms after the paste
+# lands in the composer as a newline; 150 ms and 300 ms submit.
+submit_delay_ms = 300
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.gemini/skills"
+mcp_config = "~/.gemini/settings.json"
