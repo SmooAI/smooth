@@ -217,11 +217,13 @@ struct PhonesPane: View {
                 HStack(alignment: .top, spacing: 8) {
                     Text(relay.glyph).foregroundStyle(relay.reachable ? Color(Theme.teal) : relay.needsAttention ? Color(Theme.amber) : Color(Theme.faint))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(relay.headline).font(.callout).accessibilityIdentifier("settings.phones.relay.state")
+                        Text(relay.headline).font(.callout)
                         Text(relay.detail).font(.caption).foregroundStyle(Color(Theme.muted)).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .accessibilityElement(children: .combine)
+                // An explicit label: `.combine` alone left it empty for XCUITest.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(relay.headline). \(relay.detail)")
                 .accessibilityIdentifier("settings.phones.relay")
             }
             if let pending = app.pendingPairing {
