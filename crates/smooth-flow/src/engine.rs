@@ -43,6 +43,9 @@ const LIMIT_REARM_GRACE: Duration = Duration::from_secs(90);
 const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
+/// How long a dead pane may report no exit status before the supervisor
+/// settles for [`tmux::EXIT_UNKNOWN`] (th-7ff336).
+const EXIT_STATUS_WAIT: Duration = Duration::from_secs(3);
 /// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
 /// harness's composer when its manifest cannot scrape an idle composer.
 const PASTE_DELAY: Duration = Duration::from_secs(4);
@@ -140,6 +143,9 @@ struct Runtime {
     /// Session id → (hash of the last captured pane text, when it last
     /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
     pane_seen: HashMap<String, (u64, Instant)>,
+    /// Session id → when its pane was first seen dead with no exit status
+    /// yet (th-7ff336).
+    exit_pending: HashMap<String, Instant>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
     /// Harness session ids adoption already refused (th-c103c1) — a stranger
@@ -180,6 +186,27 @@ impl PendingPaste {
 
 /// How long the pane text has held still, updating `seen` with this capture.
 /// `None` on the first look (no baseline to measure from).
+/// Has a dead pane's exit code settled?
+///
+/// tmux flips `#{pane_dead}` when the pane's pty closes but fills
+/// `#{pane_dead_status}` only once the server has reaped the child, so a
+/// crash read in that gap is [`tmux::EXIT_UNKNOWN`] and its real code would be
+/// lost with the session (th-7ff336). An unknown code waits up to
+/// [`EXIT_STATUS_WAIT`] (a signal death never gets one), a known one settles
+/// at once.
+fn exit_status_settled(pending: &mut HashMap<String, Instant>, id: &str, code: i32, now: Instant) -> bool {
+    if code != tmux::EXIT_UNKNOWN {
+        pending.remove(id);
+        return true;
+    }
+    let first = *pending.entry(id.to_string()).or_insert(now);
+    if now.saturating_duration_since(first) >= EXIT_STATUS_WAIT {
+        pending.remove(id);
+        return true;
+    }
+    false
+}
+
 fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &str, now: Instant) -> Option<Duration> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1901,6 +1928,9 @@ impl Engine {
             return self.on_death(s, None);
         }
         if let Some(code) = exit? {
+            if !exit_status_settled(&mut self.rt().exit_pending, &s.id, code, Instant::now()) {
+                return Ok(());
+            }
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
@@ -2395,6 +2425,25 @@ pub fn ci_rollup(rollup: Option<&Value>) -> Value {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_pane_without_a_status_waits_for_one() {
+        let mut pending = HashMap::new();
+        let t0 = Instant::now();
+        // A known code settles at once and clears any wait.
+        assert!(exit_status_settled(&mut pending, "a", 2, t0));
+        assert!(pending.is_empty());
+        // Unknown: not settled until the wait runs out…
+        assert!(!exit_status_settled(&mut pending, "b", tmux::EXIT_UNKNOWN, t0));
+        assert!(!exit_status_settled(&mut pending, "b", tmux::EXIT_UNKNOWN, t0 + Duration::from_secs(1)));
+        // …unless tmux reaps it meanwhile: the real code wins.
+        assert!(exit_status_settled(&mut pending, "b", 2, t0 + Duration::from_secs(2)));
+        assert!(!pending.contains_key("b"));
+        // A signal death never gets a status: -1 after the wait.
+        assert!(!exit_status_settled(&mut pending, "c", tmux::EXIT_UNKNOWN, t0));
+        assert!(exit_status_settled(&mut pending, "c", tmux::EXIT_UNKNOWN, t0 + EXIT_STATUS_WAIT));
+        assert!(pending.is_empty());
+    }
 
     fn engine(tmp: &Path) -> Engine {
         Engine::open(EngineConfig {
