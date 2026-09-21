@@ -222,6 +222,45 @@ pub fn known(name: &str) -> Option<Known> {
             hooks: None,
             auth: Some(cline_auth),
         },
+        // th-5a2314: the hook-capable harnesses (th-b00115). `th harness
+        // enable <x>` renders the smooth-agent overlay; doctor checks the
+        // rendered file still carries it. No auth rows: their credential
+        // stores are not documented well enough to read without guessing.
+        "gemini" => Known {
+            install: "npm i -g @google/gemini-cli",
+            hooks: Some(|m| overlay_hooks(m, &[".gemini/settings.json"], "flow-hook.sh", "gemini")),
+            auth: None,
+        },
+        "qwen" => Known {
+            install: "npm i -g @qwen-code/qwen-code",
+            hooks: Some(|m| overlay_hooks(m, &[".qwen/settings.json"], "flow-hook.sh", "qwen")),
+            auth: None,
+        },
+        "cursor-agent" => Known {
+            install: "curl https://cursor.com/install -fsS | bash",
+            hooks: Some(|m| overlay_hooks(m, &[".cursor/hooks.json"], "flow-hook.sh", "cursor")),
+            auth: None,
+        },
+        "droid" => Known {
+            install: "curl -fsSL https://app.factory.ai/cli | sh",
+            hooks: Some(|m| overlay_hooks(m, &[".factory/settings.json", ".factory/hooks.json"], "flow-hook.sh", "droid")),
+            auth: None,
+        },
+        "copilot" => Known {
+            install: "npm i -g @github/copilot",
+            hooks: Some(|m| overlay_hooks(m, &[".copilot/hooks/"], "flow-hook.sh", "copilot")),
+            auth: None,
+        },
+        "amp" => Known {
+            install: "npm i -g @sourcegraph/amp",
+            hooks: Some(|m| overlay_hooks(m, &[".config/amp/plugins/"], "/api/flow/hooks", "amp")),
+            auth: None,
+        },
+        "pi" => Known {
+            install: "npm i -g @mariozechner/pi-coding-agent",
+            hooks: Some(|m| overlay_hooks(m, &[".pi/agent/extensions/"], "/api/flow/hooks", "pi")),
+            auth: None,
+        },
         "th-code" => Known {
             install: "brew install SmooAI/tools/th",
             hooks: None,
@@ -319,6 +358,54 @@ fn flow_hook_is_authenticated(script: &Path) -> bool {
 /// The `flow-hook.sh` path a `hooks.json` command runs (`/p/flow-hook.sh Stop codex`).
 fn flow_hook_script(command: &str) -> Option<PathBuf> {
     command.split_whitespace().find(|w| w.ends_with("flow-hook.sh")).map(PathBuf::from)
+}
+
+/// Is the smooth-agent overlay rendered where `th pkg` puts it for this
+/// harness? `rels` are HOME-relative files, or directories (trailing `/`)
+/// where any file counts; `marker` is what the overlay contains.
+fn overlay_hooks(m: &Machine, rels: &[&str], marker: &str, enable_as: &str) -> Check {
+    let mut looked = Vec::new();
+    for rel in rels {
+        let path = m.home.join(rel.trim_end_matches('/'));
+        let files: Vec<PathBuf> = if rel.ends_with('/') {
+            std::fs::read_dir(&path)
+                .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect())
+                .unwrap_or_default()
+        } else {
+            vec![path.clone()]
+        };
+        if let Some((hit, text)) = files
+            .iter()
+            .find_map(|f| std::fs::read_to_string(f).ok().filter(|t| t.contains(marker)).map(|t| (f, t)))
+        {
+            // th-91d032: an overlay (or the flow-hook.sh it runs) from before
+            // hook tokens is refused by the engine for every launched session.
+            let stale = if marker == "flow-hook.sh" {
+                text.split(|c: char| c.is_whitespace() || c == '"')
+                    .filter_map(flow_hook_script)
+                    .find(|p| p.is_file() && !flow_hook_is_authenticated(p))
+                    .map(|p| p.display().to_string())
+            } else {
+                (!text.contains(smooth_flow::hook_auth::TOKEN_FILE_ENV)).then(|| hit.display().to_string())
+            };
+            if let Some(what) = stale {
+                return check(
+                    "hooks",
+                    Level::Fail,
+                    format!("{what} predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping"),
+                    Some(format!("th harness enable {enable_as}")),
+                );
+            }
+            return check("hooks", Level::Ok, format!("smooth-agent flow overlay in {}", hit.display()), None);
+        }
+        looked.push(path.display().to_string());
+    }
+    check(
+        "hooks",
+        Level::Fail,
+        format!("no SmoothFlow flow overlay in {} — state falls back to pane scraping", looked.join(" or ")),
+        Some(format!("th harness enable {enable_as}")),
+    )
 }
 
 fn claude_hooks(m: &Machine) -> Check {
@@ -1443,6 +1530,48 @@ mod tests {
         assert!(c.detail.contains("exited 2: nope"), "{c:?}");
         assert!(diagnose_all(&reg, &m, Some("nope")).unwrap_err().to_string().contains("th harness list"));
         assert_eq!(diagnose_all(&reg, &m, None).unwrap().len(), reg.all().len());
+    }
+
+    /// th-5a2314: every hook-capable harness has a row whose check finds the
+    /// rendered overlay, and whose fix is the enable command.
+    #[test]
+    fn hook_capable_harnesses_check_their_rendered_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = machine(tmp.path(), &[], None);
+        let cases = [
+            ("gemini", ".gemini/settings.json", "flow-hook.sh", "gemini"),
+            ("qwen", ".qwen/settings.json", "flow-hook.sh", "qwen"),
+            ("cursor-agent", ".cursor/hooks.json", "flow-hook.sh", "cursor"),
+            ("droid", ".factory/settings.json", "flow-hook.sh", "droid"),
+            ("copilot", ".copilot/hooks/smooth-agent.json", "flow-hook.sh", "copilot"),
+            ("amp", ".config/amp/plugins/smooth-agent.ts", "/api/flow/hooks", "amp"),
+            ("pi", ".pi/agent/extensions/smooth-agent.ts", "/api/flow/hooks", "pi"),
+        ];
+        for (name, rel, marker, enable) in cases {
+            let k = known(name).unwrap_or_else(|| panic!("{name} has a row"));
+            let hooks = k.hooks.unwrap();
+            let c = hooks(&m);
+            assert_eq!(c.level, Level::Fail, "{name}: nothing rendered yet");
+            assert_eq!(c.fix.as_deref(), Some(format!("th harness enable {enable}").as_str()));
+            let p = m.home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "{}").unwrap();
+            assert_eq!(hooks(&m).level, Level::Fail, "{name}: a file without the overlay is not wired");
+            if marker == "flow-hook.sh" {
+                // The overlay runs a flow-hook.sh; one without token support is stale.
+                let script = m.home.join(format!("pkg-{name}/flow-hook.sh"));
+                std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+                std::fs::write(&script, "curl …").unwrap();
+                std::fs::write(&p, format!(r#"{{"command":"{} Stop {name}"}}"#, script.display())).unwrap();
+                assert!(hooks(&m).detail.contains("predates hook tokens"), "{name}");
+                std::fs::write(&script, "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
+            } else {
+                std::fs::write(&p, format!("… {marker} …")).unwrap();
+                assert!(hooks(&m).detail.contains("predates hook tokens"), "{name}: a plugin without the token");
+                std::fs::write(&p, format!("… {marker} … SMOOTH_FLOW_HOOK_TOKEN_FILE")).unwrap();
+            }
+            assert_eq!(hooks(&m).level, Level::Ok, "{name}");
+        }
     }
 
     /// th-5a2314: the scraped harnesses' provider checks read files and env
