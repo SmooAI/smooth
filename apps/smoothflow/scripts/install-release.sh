@@ -149,18 +149,22 @@ xcrun stapler validate "$SRC" >/dev/null 2>&1 || die "the .app inside the DMG ha
 ok "app stapled"
 
 codesign --verify --strict "$SRC" 2>/dev/null || die "the app's signature does not verify"
-codesign -dv "$SRC" 2>&1 | grep -q "Authority=$AUTHORITY" ||
+SRC_SIG="$(codesign -dv --verbose=2 "$SRC" 2>&1 || true)"
+grep -q "Authority=$AUTHORITY" <<< "$SRC_SIG" ||
     die "not signed by '$AUTHORITY' — refusing to install an unofficial build"
 ok "signed by $AUTHORITY"
 
-spctl -a -vv -t exec "$SRC" 2>&1 | grep -q "Notarized Developer ID" ||
+SRC_GK="$(spctl -a -vv -t exec "$SRC" 2>&1 || true)"
+grep -q "Notarized Developer ID" <<< "$SRC_GK" ||
     die "Gatekeeper does not report a Notarized Developer ID"
 ok "Gatekeeper: Notarized Developer ID"
 
 for f in "$SRC/Contents/MacOS"/*; do
     [[ -f "$f" ]] || continue
-    file "$f" | grep -q Mach-O || continue
-    if otool -L "$f" | tail -n +2 | grep -qE '/opt/homebrew|/usr/local'; then
+    FILE_KIND="$(file "$f" || true)"
+    grep -q Mach-O <<< "$FILE_KIND" || continue
+    LINKS="$(otool -L "$f" 2>/dev/null | tail -n +2 || true)"
+    if grep -qE '/opt/homebrew|/usr/local' <<< "$LINKS"; then
         otool -L "$f" | tail -n +2 | grep -E '/opt/homebrew|/usr/local' >&2
         die "$(basename "$f") links non-system dylibs (above) — it will not run on a clean Mac"
     fi
@@ -199,9 +203,11 @@ INSTALLED="$(defaults read "$DEST/Contents/Info" CFBundleShortVersionString)"
 [[ "$INSTALLED" == "$VERSION" ]] || die "installed copy reports $INSTALLED"
 ok "version $INSTALLED"
 codesign --verify --strict "$DEST" 2>/dev/null || die "installed copy: signature does not verify"
-codesign -dv "$DEST" 2>&1 | grep -q "Authority=$AUTHORITY" || die "installed copy: wrong signing authority"
+DEST_SIG="$(codesign -dv --verbose=2 "$DEST" 2>&1 || true)"
+grep -q "Authority=$AUTHORITY" <<< "$DEST_SIG" || die "installed copy: wrong signing authority"
 ok "signed by $AUTHORITY"
-spctl -a -vv -t exec "$DEST" 2>&1 | grep -q "Notarized Developer ID" ||
+DEST_GK="$(spctl -a -vv -t exec "$DEST" 2>&1 || true)"
+grep -q "Notarized Developer ID" <<< "$DEST_GK" ||
     die "installed copy: Gatekeeper does not report a Notarized Developer ID"
 ok "Gatekeeper: Notarized Developer ID"
 xcrun stapler validate "$DEST" >/dev/null 2>&1 || die "installed copy has no stapled ticket"
