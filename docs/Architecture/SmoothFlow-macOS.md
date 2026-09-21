@@ -408,6 +408,31 @@ card and the sidebar row go. The mock (`mock/server.mjs`) refuses `fs-3034dddd`
 until forced, so the XCUITests cover the refusal from both entry points without
 a real worktree.
 
+## Center tabs: what each session gets (th-68d10a)
+
+Terminal, Diff, PR and Activity are always in the strip. A tab the focused
+session can't use is **disabled with a tooltip saying why**, never hidden: a
+tab that appears and vanishes on conditions you can't see is its own friction.
+The rule is `CenterTabGate` (`Sources/UI/CenterTabGate.swift`), a pure
+function over the session row, its handoff packet and the harness list:
+
+| Tab      | Available when                                   | Otherwise                                                     |
+| -------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Terminal | always                                           | —                                                             |
+| Diff     | the session is in a git repo (packet has `head`) | disabled: "Not in a git repository"                           |
+| PR       | a repo **and** a branch (not detached)           | disabled; with no PR yet it shows "No PR for this branch yet" |
+| Activity | the harness's `state.source` is `hooks`/`native` | `scrape` → a thin view (supervision only); a shell → disabled |
+
+Diff and PR follow the worktree, not the session kind: a shell in a worktree
+gets both, and a shell in the main checkout still gets Diff (uncommitted work on
+`main` is worth seeing) and PR's empty state. Until the packet loads, a branch
+on the session row stands in for "is a repo", so a worktree session doesn't
+start greyed out and flicker on. The Diff tab shows `git status --short` and the
+working tree against the merge base with the default branch (`origin/HEAD`,
+then `origin/main`, `origin/master`, `main`, `master`), so a branch's whole
+change shows, not just what's uncommitted. A chord (⌘⌥2) or the inbox's "Review
+diff" asking for a tab the session can't use lands on the terminal.
+
 ## Keyboard
 
 Every shortcut is user-configurable — the table below is the shipped default,
