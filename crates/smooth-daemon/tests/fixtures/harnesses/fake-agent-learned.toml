@@ -1,0 +1,43 @@
+# fake-agent-learned — hooks state, session id LEARNED from the first hook
+# (the opencode / codex shape): no `--session-id`; the agent reports the id it
+# picked (./.fake-agent-session-id in the cwd, else a fresh one) and the engine
+# binds it to the newest id-less row in that worktree.
+name = "fake-agent-learned"
+display_name = "Fake Agent (learned id)"
+
+[binary]
+names = ["fake-agent"]
+prefer_paths = [".local/bin/fake-agent"]
+
+[launch]
+argv = ["--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[launch.env]
+SMOOTH_URL = "{daemon_url}"
+FAKE_AGENT_MODE = "hooks"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "none — fake-agent posts to /api/flow/hooks itself"
+
+[state.scrape]
+working = ["esc to interrupt"]
+idle = ["(?m)^> ?$"]
+needs_you = ["do you want to proceed"]
+usage_limit = ["usage limit", "limit will reset"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 1000
