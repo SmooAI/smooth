@@ -174,7 +174,7 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ("msg", &["th msg send <agent|all> \"body\"", "th msg inbox", "th msg watch --once --json"]),
     ("agent", &["th agent whoami", "th agent claim my-task-name", "th agent list"]),
     ("attest", &["th attest --all", "th attest rust --remote smoo-hub", "th attest --status"]),
-    ("harness", &["th harness enable all", "th harness status"]),
+    ("harness", &["th harness enable all", "th harness doctor", "th harness status"]),
     ("pkg", &["th pkg install owner/repo --harness all", "th pkg status", "th pkg rm <name>"]),
 ];
 

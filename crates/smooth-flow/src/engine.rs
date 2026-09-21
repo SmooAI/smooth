@@ -53,6 +53,9 @@ const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
 const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
+/// The pane env var naming the flow session row (th-b00115); hooks post it
+/// back as `flow_id`.
+pub const FLOW_ID_ENV: &str = "SMOOTH_FLOW_ID";
 
 /// How the engine is configured by its host.
 #[derive(Debug, Clone)]
@@ -197,13 +200,32 @@ fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &st
 struct Inner {
     store: Mutex<FlowStore>,
     tx: broadcast::Sender<ServerFrame>,
-    ptys: Mutex<HashMap<String, Arc<PtyAttach>>>,
+    /// One PTY bridge per attached session (th-6d8f84: see `pty_for`).
+    ptys: Mutex<HashMap<String, Bridge>>,
+    /// Generation for the next bridge, so an EOF only evicts its own entry.
+    pty_gen: std::sync::atomic::AtomicU64,
+    /// Test seam: runs in `pty_for` between the unlocked miss and the locked
+    /// re-check — exactly where two attaches used to both decide to spawn.
+    #[cfg(test)]
+    pty_race_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     rt: Mutex<Runtime>,
+    /// Per-session serialisation between `kill` and the supervision tick.
+    session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     info: DaemonInfo,
     default_project: PathBuf,
     home: PathBuf,
     daemon_url: Option<String>,
+    /// `(HOME, PATH)` harness binaries resolve against instead of this
+    /// process's (th-3cabf6: the conformance rig points it at a scratch HOME
+    /// holding a fake agent, so a real CLI on the machine is never launched).
+    resolve_env: Mutex<Option<(PathBuf, std::ffi::OsString)>>,
+}
+
+/// A live PTY bridge and the generation it was created under.
+struct Bridge {
+    generation: u64,
+    pty: Arc<PtyAttach>,
 }
 
 /// The SmoothFlow engine handle.
@@ -588,8 +610,12 @@ impl Engine {
                 store: Mutex::new(store),
                 tx,
                 ptys: Mutex::new(HashMap::new()),
+                pty_gen: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                pty_race_hook: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
                 rt: Mutex::new(Runtime::default()),
+                session_locks: Mutex::new(HashMap::new()),
                 info: DaemonInfo {
                     version: cfg.version,
                     machine_label: cfg.machine_label,
@@ -597,8 +623,29 @@ impl Engine {
                 default_project: cfg.default_project,
                 home: cfg.home,
                 daemon_url: cfg.daemon_url,
+                resolve_env: Mutex::new(None),
             }),
         })
+    }
+
+    /// Resolve harness binaries against `home` + `path` instead of this
+    /// process's `HOME`/`PATH` (th-3cabf6). A test seam: the conformance rig
+    /// installs a fake agent under a scratch HOME and must never fall through
+    /// to a real CLI on the machine.
+    pub fn set_resolve_env(&self, home: PathBuf, path: std::ffi::OsString) {
+        *self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((home, path));
+    }
+
+    /// `m`'s executable: [`Manifest::resolve_binary`], or against the
+    /// [`Self::set_resolve_env`] override (bare first name when nothing resolves).
+    fn resolve_bin(&self, m: &Manifest) -> String {
+        let env = self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        match env {
+            Some((home, path)) => m
+                .resolve_binary_in(&home, &path)
+                .map_or_else(|| m.binary.names[0].clone(), |p| p.to_string_lossy().into_owned()),
+            None => m.resolve_binary(),
+        }
     }
 
     // ── harnesses (th-0f6126) ─────────────────────────────────────────────
@@ -721,7 +768,7 @@ impl Engine {
     /// The pane environment a manifest asks for, rendered for `s`.
     fn launch_env(&self, m: Option<&Manifest>, s: &Session) -> Vec<(String, String)> {
         m.map(|m| {
-            crate::harness::render_env(
+            let mut env = crate::harness::render_env(
                 &m.launch.env,
                 &Vars {
                     session_id: s.agent_session_id.as_deref(),
@@ -729,7 +776,13 @@ impl Engine {
                     daemon_url: self.inner.daemon_url.as_deref(),
                     ..Default::default()
                 },
-            )
+            );
+            // th-b00115: every agent pane names its row, so a hook or plugin
+            // can post `flow_id` and bind without a pre-assigned session id.
+            if !env.iter().any(|(k, _)| k == FLOW_ID_ENV) {
+                env.push((FLOW_ID_ENV.to_string(), s.id.clone()));
+            }
+            env
         })
         .unwrap_or_default()
     }
@@ -891,15 +944,17 @@ impl Engine {
             model: req.model.as_deref(),
             daemon_url: self.inner.daemon_url.as_deref(),
         };
-        let mut argv = match req.argv.clone().filter(|a| !a.is_empty()) {
+        let explicit = req.argv.clone().filter(|a| !a.is_empty());
+        let defaulted = explicit.is_none();
+        let mut argv = match explicit {
             Some(a) => a,
             None => default_argv(&registry, &req.kind, &vars)?,
         };
         // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
         // resolution as the default argv.
         if let Some(m) = manifest {
-            if argv.first().is_some_and(|a| m.is_bare_name(a)) {
-                argv[0] = m.resolve_binary();
+            if defaulted || argv.first().is_some_and(|a| m.is_bare_name(a)) {
+                argv[0] = self.resolve_bin(m);
             }
         }
         // th-c103c1: nothing here is demanded of the caller — the pearl, the
@@ -979,22 +1034,59 @@ impl Engine {
         Ok(s)
     }
 
-    fn pty_for(&self, id: &str, cols: u16, rows: u16) -> Result<Arc<PtyAttach>> {
-        if let Some(p) = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id) {
-            return Ok(p.clone());
+    /// The session's PTY bridge, spawning it on a miss. `attaching` counts a
+    /// flow client onto it in the same critical section as the lookup.
+    ///
+    /// th-6d8f84: everything that decides "which bridge" happens under the
+    /// `ptys` lock — the lookup, the spawn on a miss, the insert and the
+    /// client count. The old shape dropped the lock between the miss and the
+    /// insert, so two overlapping attaches both spawned a `tmux attach`, the
+    /// second `insert` evicted the first, and dropping the evicted bridge
+    /// killed the client that the first attacher (and its refcount) was on.
+    /// Holding the lock across the spawn costs one fork/exec on a cold
+    /// attach; the checks that shell out to tmux or read the store run
+    /// before it is taken. A bridge whose client already exited is replaced
+    /// rather than handed out.
+    fn pty_for(&self, id: &str, cols: u16, rows: u16, attaching: bool) -> Result<Arc<PtyAttach>> {
+        let claim = |pty: &Arc<PtyAttach>| {
+            if attaching {
+                pty.clients.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            pty.clone()
+        };
+        if let Some(b) = self.lock_ptys().get(id).filter(|b| !b.pty.is_closed()) {
+            return Ok(claim(&b.pty));
         }
         let session = self.require(id)?;
         let (sock, tmux_name) = pane(&session)?;
         if !tmux::session_alive(&sock, &tmux_name) {
             bail!("session {id} is not running");
         }
+        #[cfg(test)]
+        {
+            // Bound first: an `if let` scrutinee would hold the guard across the call.
+            let hook = self.inner.pty_race_hook.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut ptys = self.lock_ptys();
+        if let Some(b) = ptys.get(id).filter(|b| !b.pty.is_closed()) {
+            // Lost the race to a concurrent attach: share its bridge.
+            return Ok(claim(&b.pty));
+        }
+        let generation = self.inner.pty_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sid = id.to_string();
         let weak = Arc::downgrade(&self.inner);
         let on_output: OnOutput = Arc::new(move |seq, bytes| {
             let Some(inner) = weak.upgrade() else { return };
             if bytes.is_empty() {
                 // EOF — the attach client died (session killed / detached).
-                inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&sid);
+                // Evict only this bridge: a newer one may already own the id.
+                let mut ptys = inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if ptys.get(&sid).is_some_and(|b| b.generation == generation) {
+                    ptys.remove(&sid);
+                }
                 return;
             }
             let _ = inner.tx.send(ServerFrame::Output {
@@ -1004,32 +1096,48 @@ impl Engine {
             });
         });
         let pty = PtyAttach::spawn(&tmux::attach_argv(&sock, &tmux_name), cols, rows, on_output)?;
-        self.inner
-            .ptys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), pty.clone());
-        Ok(pty)
+        let out = claim(&pty);
+        if let Some(stale) = ptys.insert(id.to_string(), Bridge { generation, pty }) {
+            // Only a bridge whose client already exited can be here.
+            stale.pty.close();
+        }
+        Ok(out)
     }
 
-    /// `flow.attach`: ensure a PTY client exists and size it.
+    fn lock_ptys(&self) -> std::sync::MutexGuard<'_, HashMap<String, Bridge>> {
+        self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `flow.attach`: ensure a PTY client exists, count this flow client on
+    /// it, and size it.
+    ///
+    /// Size policy: one tmux client serves every flow client of a session,
+    /// so there is one geometry, and the latest attach or resize sets it —
+    /// the same rule as the tmux option we rely on (`window-size latest`).
+    /// A phone and a Mac attached together therefore take turns; sizing to
+    /// the smallest client, as tmux does across *its* clients, needs
+    /// per-client sizes the engine does not track (th-87cbca).
     ///
     /// # Errors
     /// When the session is unknown or not running.
     pub fn attach(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        let pty = self.pty_for(id, cols, rows)?;
-        pty.clients.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pty.resize(cols, rows)
+        let resized = self.pty_for(id, cols, rows, true)?.resize(cols, rows);
+        if resized.is_err() {
+            // The caller will not record this client as attached, so it
+            // will never detach it: give the count back now.
+            self.detach(id);
+        }
+        resized
     }
 
     /// `flow.detach`: drop the PTY client when the last flow client leaves.
     pub fn detach(&self, id: &str) {
-        let mut ptys = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(p) = ptys.get(id) {
-            let left = p.clients.fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
+        let mut ptys = self.lock_ptys();
+        if let Some(b) = ptys.get(id) {
+            let left = b.pty.clients.fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
             if left == 0 {
-                if let Some(p) = ptys.remove(id) {
-                    p.close();
+                if let Some(b) = ptys.remove(id) {
+                    b.pty.close();
                 }
             }
         }
@@ -1044,7 +1152,7 @@ impl Engine {
             .ok()
             .and_then(|(k, t)| tmux::pane_size(&k, &t).ok())
             .unwrap_or((120, 40));
-        self.pty_for(id, cols, rows)?.write(data)
+        self.pty_for(id, cols, rows, false)?.write(data)
     }
 
     /// `flow.resize`.
@@ -1052,7 +1160,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown/not running.
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.pty_for(id, cols, rows)?.resize(cols, rows)
+        self.pty_for(id, cols, rows, false)?.resize(cols, rows)
     }
 
     /// `flow.send`: text + Enter via bracketed paste (steering, not raw bytes).
@@ -1062,7 +1170,19 @@ impl Engine {
     pub fn send(&self, id: &str, text: &str) -> Result<()> {
         let s = self.require(id)?;
         let (k, t) = pane(&s)?;
-        tmux::send_text(&k, &t, text)?;
+        // The manifest's [steer] says which key submits and how long to wait
+        // after the paste for it (th-b00115); a shell or unknown kind gets the
+        // plain paste + Enter.
+        match self.registry().get(s.kind.as_str()).map(|m| m.steer.clone()) {
+            Some(steer) => {
+                tmux::paste_text(&k, &t, text)?;
+                if steer.submit_delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(steer.submit_delay_ms));
+                }
+                tmux::send_key(&k, &t, &steer.submit_key)?;
+            }
+            None => tmux::send_text(&k, &t, text)?,
+        }
         self.event(id, EventKind::User, text);
         Ok(())
     }
@@ -1138,6 +1258,8 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or the relaunch fails.
     pub fn kill(&self, id: &str, resume: bool) -> Result<Session> {
+        let lock = self.session_lock(id);
+        let _held = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let s = self.require(id)?;
         if s.adopted {
             bail!(
@@ -1165,10 +1287,21 @@ impl Engine {
         self.set_state(id, SessionState::Done, None)?.ok_or_else(|| anyhow!("no such session: {id}"))
     }
 
+    /// The mutex serialising `kill` and supervision for one session.
+    fn session_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.inner
+            .session_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
+
     fn drop_pty(&self, id: &str) {
-        let removed = self.inner.ptys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
-        if let Some(p) = removed {
-            p.close();
+        let removed = self.lock_ptys().remove(id);
+        if let Some(b) = removed {
+            b.pty.close();
         }
     }
 
@@ -1185,6 +1318,7 @@ impl Engine {
             tmux::kill_session(&socket_of(&s), t);
         }
         self.with_store(|st| st.remove(id))?;
+        self.inner.session_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         self.emit(ServerFrame::SessionRemoved { id: id.to_string() });
         Ok(())
     }
@@ -1280,6 +1414,9 @@ impl Engine {
                     .find_map(|o| o.pid.filter(|p| proc::is_alive(*p, o.pid_start)))
             });
             if let Some(pid) = holder {
+                // A backoff scheduled by an earlier death would fire into this
+                // same refusal on the next tick; drop it with the hold.
+                self.rt().relaunch_at.remove(&s.id);
                 let att = Attention::new("held").with_detail(format!("session {agent} is owned by live pid {pid}"));
                 return self
                     .set_state(&s.id, SessionState::NeedsYou, Some(att))?
@@ -1308,6 +1445,14 @@ impl Engine {
     /// hook script must never block the harness) — it returns `Immediate({})`.
     pub fn hook(&self, ev: HookEvent) -> Result<HookReply> {
         let mut found = self.with_store(|st| st.get_by_agent_session(&ev.session_id))?;
+        // th-b00115: a pane we launched says which row it is (SMOOTH_FLOW_ID).
+        // That binds a harness that can't pre-assign its id without guessing
+        // by cwd, and still finds the row when the payload carries no id.
+        if found.is_none() {
+            if let Some(flow_id) = ev.flow_id.as_deref().filter(|f| !f.is_empty()) {
+                found = self.bind_by_flow_id(flow_id, &ev.harness, &ev.session_id)?;
+            }
+        }
         // opencode / codex can't pre-assign a session id: their first hook
         // from a worktree binds to the newest id-less agent row there.
         if found.is_none() && !ev.session_id.is_empty() {
@@ -1324,6 +1469,23 @@ impl Engine {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
             return Ok(HookReply::Immediate(json!({})));
         };
+        // Serialise this row against `kill` and supervision, then re-read it:
+        // `s` was resolved before the lock, and a `kill --resume` landing in
+        // that window wrote rule 4's `held` under us.
+        let lock = self.session_lock(&s.id);
+        let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(s) = self.with_store(|st| st.get(&s.id))? else {
+            return Ok(HookReply::Immediate(json!({})));
+        };
+        // Rule 4 parked this row (`held`): another live process owns this
+        // harness session id, so a hook carrying it is not evidence about
+        // THIS row. Letting one through un-held the row (a dying agent's
+        // last `Stop` read as "idle"), and the next supervision pass then
+        // took its dead tmux session for a crash (th-8e3087).
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+            tracing::debug!(session = %s.id, event = %ev.event, "flow hook for a held session — ignored");
+            return Ok(HookReply::Immediate(json!({})));
+        }
         // th-0f6126: the manifest says how this harness's events read
         // (`state.hooks.event_map`), and whether they count as `hooks` or
         // `native` state; an empty map is the Claude Code table.
@@ -1341,10 +1503,7 @@ impl Engine {
         if let Some((kind, text)) = hook_event_text(&ev.event, &ev.payload) {
             self.event(&s.id, kind, &text);
         }
-        let outcome = manifest
-            .as_ref()
-            .filter(|m| !m.state.hooks.event_map.is_empty())
-            .map_or_else(|| map_hook_event(&ev.event, &ev.payload), |m| mapped_outcome(m, &ev));
+        let (outcome, claude_protocol) = hook_outcome(manifest.as_ref(), &ev.event, &ev.payload);
         match outcome {
             HookOutcome::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
@@ -1354,7 +1513,7 @@ impl Engine {
                 self.set_state(&s.id, SessionState::Idle, None)?;
             }
             HookOutcome::NeedsYou(mut att) => {
-                if ev.event == "PermissionRequest" {
+                if claude_protocol && ev.event == "PermissionRequest" {
                     let request_id = uuid::Uuid::new_v4().simple().to_string();
                     att.request_id = Some(request_id.clone());
                     let (tx, rx) = oneshot::channel();
@@ -1376,6 +1535,11 @@ impl Engine {
                 // prompt seen twice — keep the request_id.
                 if s.state != SessionState::NeedsYou {
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
+                }
+            }
+            HookOutcome::Started => {
+                if s.state == SessionState::Starting {
+                    self.set_state(&s.id, SessionState::Idle, None)?;
                 }
             }
             HookOutcome::Ended => {
@@ -1505,6 +1669,30 @@ impl Engine {
         None
     }
 
+    /// The row a pane's `SMOOTH_FLOW_ID` names, if the hook really came from
+    /// that row's harness (th-b00115). Binds `agent_session_id` when the row
+    /// has none yet. `None` when the harness names another kind (an agent
+    /// launched from inside the pane inherits the env) or reports a different
+    /// session id than the one already bound (a child of the same kind).
+    fn bind_by_flow_id(&self, flow_id: &str, harness: &str, agent_session_id: &str) -> Result<Option<Session>> {
+        let Some(row) = self.get(flow_id)? else {
+            return Ok(None);
+        };
+        if !flow_id_accepts(&row, harness, agent_session_id) {
+            tracing::debug!(session = %row.id, %harness, harness_session = %agent_session_id, "flow hook: SMOOTH_FLOW_ID names another harness session — ignored");
+            return Ok(None);
+        }
+        if row.agent_session_id.is_none() && !agent_session_id.is_empty() {
+            self.with_store(|st| st.set_agent_session(&row.id, agent_session_id))?;
+            if let Some(pid) = row.pid {
+                self.rt().claims.insert(agent_session_id.to_string(), (pid, Instant::now()));
+            }
+            tracing::info!(session = %row.id, harness_session = %agent_session_id, "flow: bound harness session id from SMOOTH_FLOW_ID");
+            return self.get(&row.id);
+        }
+        Ok(Some(row))
+    }
+
     /// Bind harness session `agent_session_id` to the newest id-less agent
     /// row in `cwd`, so later hooks (and `--session`/`resume`) find it.
     fn bind_by_cwd(&self, cwd: &str, agent_session_id: &str) -> Result<Option<Session>> {
@@ -1588,6 +1776,13 @@ impl Engine {
     }
 
     fn supervise_one(&self, s: &Session, now: DateTime<Utc>) -> Result<()> {
+        // A `kill` is mid-flight on this row — it owns the outcome. Without
+        // this, `kill --resume` tore the tmux session down between this pass's
+        // liveness check and its write, so the tick read the kill as an
+        // unexpected death and overwrote rule 4's `held` with a crash backoff
+        // (th-8e3087, ~1-in-3 under load).
+        let lock = self.session_lock(&s.id);
+        let Ok(_held) = lock.try_lock() else { return Ok(()) };
         // A relaunch is scheduled (rule 2 backoff) — fire it when due.
         let due = self.rt().relaunch_at.get(&s.id).copied();
         if let Some(at) = due {
@@ -1606,12 +1801,31 @@ impl Engine {
             }
             return Ok(());
         }
+        // Rule 4 parked this row (`held`: its harness session is owned by a
+        // live pid). Its tmux session is gone, which is NOT an unexpected
+        // death — a human unholds it (`kill --resume` once the holder is
+        // gone). Without this the tick re-scheduled a resume every backoff,
+        // the guard refused it again, and the row flapped starting ↔ held
+        // forever (th-8e3087).
+        //
+        // Re-read the row: `s` is a snapshot taken at the top of the tick, so
+        // a hold written by a concurrent `kill --resume` (the common case —
+        // holding is what kills the tmux session this pass is reacting to) is
+        // not in it, and the stale copy sent the row to `on_death` instead.
+        let fresh = self.with_store(|st| st.get(&s.id))?;
+        let Some(s) = fresh.as_ref() else { return Ok(()) };
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+            return Ok(());
+        }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
         let sock = socket_of(s);
-        if !tmux::session_alive(&sock, t) {
+        let alive = tmux::session_alive(&sock, t);
+        let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
+        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
+        if !alive {
             return self.on_death(s, None);
         }
-        if let Some(code) = tmux::pane_exit_status(&sock, t)? {
+        if let Some(code) = exit? {
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
@@ -1897,19 +2111,70 @@ impl Engine {
     }
 }
 
-/// A hook event through a manifest's `state.hooks.event_map`.
-fn mapped_outcome(m: &Manifest, ev: &HookEvent) -> HookOutcome {
-    match m.map_event(&ev.event) {
+/// May a hook carrying `SMOOTH_FLOW_ID` = `row.id` speak for `row`?
+/// Only its own harness (the posted `harness` is the manifest name), and only
+/// for the session already bound — or any, while none is.
+fn flow_id_accepts(row: &Session, harness: &str, agent_session_id: &str) -> bool {
+    if harness != row.kind.as_str() || matches!(row.state, SessionState::Done | SessionState::Dead) {
+        return false;
+    }
+    row.agent_session_id
+        .as_deref()
+        .is_none_or(|bound| agent_session_id.is_empty() || bound == agent_session_id)
+}
+
+/// What one hook event means for a session of manifest `m`, and whether
+/// the harness speaks Claude Code's `PermissionRequest` decision protocol.
+///
+/// Pure. An empty `event_map` (or no manifest) is the Claude table, and only
+/// that table speaks the decision protocol — so only it holds a
+/// `PermissionRequest` open for `flow.approve`; a harness with its own map
+/// reports the ask and moves on (th-b00115).
+#[must_use]
+pub fn hook_outcome(m: Option<&Manifest>, event: &str, payload: &Value) -> (HookOutcome, bool) {
+    m.filter(|m| !m.state.hooks.event_map.is_empty())
+        .map_or_else(|| (map_hook_event(event, payload), true), |m| (map_manifest_event(m, event, payload), false))
+}
+
+/// A hook event through a manifest's `state.hooks.event_map` (th-0f6126).
+///
+/// Pure. One refinement over the flat map (th-b00115): an event mapped to
+/// `needs_you` that carries a `notification_type` is only an ask when that
+/// type is one — Copilot and Qwen send idle and auth notices through the
+/// same event as permission prompts.
+#[must_use]
+pub fn map_manifest_event(m: &Manifest, event: &str, payload: &Value) -> HookOutcome {
+    match m.map_event(event) {
         Some(FlowEventName::Working) => HookOutcome::Working,
         Some(FlowEventName::Idle) => HookOutcome::Idle,
         Some(FlowEventName::NeedsYou) => {
-            let reason = ev.payload.get("reason").and_then(Value::as_str).unwrap_or("question");
-            let detail = ev
-                .payload
+            let ntype = ["notification_type", "notificationType"]
+                .iter()
+                .find_map(|k| payload.get(*k).and_then(Value::as_str))
+                .map(str::to_ascii_lowercase);
+            let permission = event.to_ascii_lowercase().contains("permission");
+            let reason = match ntype.as_deref() {
+                Some(t) if t.contains("permission") => "permission",
+                Some("elicitation_dialog") => "question",
+                Some(_) => return HookOutcome::None,
+                None if permission => "permission",
+                None => payload.get("reason").and_then(Value::as_str).unwrap_or("question"),
+            };
+            let detail = payload
                 .get("message")
                 .and_then(Value::as_str)
-                .map_or_else(|| permission_detail(&ev.payload), str::to_string);
-            HookOutcome::NeedsYou(Attention::new(reason).with_detail(detail))
+                .filter(|m| !m.trim().is_empty())
+                .map_or_else(|| permission_detail(payload), str::to_string);
+            let mut att = Attention::new(reason).with_detail(detail);
+            // th-3cabf6 / th-b00115: a permission ask under the harness's own
+            // event name has no long-poll to answer, but `flow.approve` (and
+            // every client) needs a request id to address it — the unknown id
+            // falls through to the approval keystroke, as a scraped prompt's
+            // does. A question is answered, not approved: no id.
+            if att.reason == "permission" {
+                att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
+            }
+            HookOutcome::NeedsYou(att)
         }
         Some(FlowEventName::Ended) => HookOutcome::Ended,
         Some(FlowEventName::Ignore) | None => HookOutcome::None,
@@ -2210,6 +2475,7 @@ mod tests {
             session_id: sid.into(),
             cwd: Some(cwd.into()),
             payload: json!({}),
+            flow_id: None,
         };
         // Wrong cwd ⇒ nothing binds.
         e.hook(ev("SessionStart", "ses_1", "/elsewhere")).unwrap();
@@ -2306,6 +2572,66 @@ mod tests {
         assert!(root == d || root.join(".git").exists());
     }
 
+    /// th-8e3087: a `SessionStart` that arrives while a kill+resume is still
+    /// deciding the row's state must still promote it.
+    ///
+    /// The original bug was pure ordering: `hook` read the row BEFORE
+    /// `relaunch` wrote `Starting`, saw the pre-kill `idle`, and
+    /// [`HookOutcome::Started`]'s `state == Starting` test declined — the
+    /// resumed row then sat at `starting` until the test timed out. The kill's
+    /// slow half is simulated by holding the session lock (no `KILL_GRACE`
+    /// sleep) so this pins the ordering, not the timing.
+    #[test]
+    fn session_start_during_a_kill_resume_still_promotes_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Claude),
+                    agent_session_id: Some("uuid-resume".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        // The row as a finished turn leaves it: idle, not starting.
+        e.set_state(&s.id, SessionState::Idle, None).unwrap();
+
+        // Stand in for `kill`'s locked tail, which ends by writing `Starting`.
+        let lock = e.session_lock(&s.id);
+        let held = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let hooking = {
+            let e = e.clone();
+            std::thread::spawn(move || {
+                e.hook(HookEvent {
+                    harness: "claude-code".into(),
+                    event: "SessionStart".into(),
+                    session_id: "uuid-resume".into(),
+                    cwd: None,
+                    flow_id: None,
+                    payload: json!({ "source": "resume" }),
+                })
+                .unwrap();
+            })
+        };
+        // Give the hook thread every chance to read the row early — which is
+        // exactly what it used to do.
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Idle);
+        e.set_state(&s.id, SessionState::Starting, None).unwrap();
+        drop(held);
+
+        hooking.join().unwrap();
+        assert_eq!(
+            e.get(&s.id).unwrap().unwrap().state,
+            SessionState::Idle,
+            "SessionStart must promote the row relaunch just marked `starting`"
+        );
+    }
+
     #[test]
     fn hook_for_unknown_session_is_a_quiet_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2317,6 +2643,7 @@ mod tests {
                 session_id: "nope".into(),
                 cwd: None,
                 payload: json!({}),
+                flow_id: None,
             })
             .unwrap();
         assert!(matches!(r, HookReply::Immediate(v) if v == json!({})));
@@ -2344,10 +2671,25 @@ mod tests {
             session_id: "uuid-1".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
+        // th-8e3087: SessionStart on a starting row ⇒ idle, not unread — a
+        // resumed / prompt-less harness is otherwise `starting` for good.
+        assert_eq!(s.state, SessionState::Starting);
+        e.hook(ev("SessionStart", json!({"source":"resume"}))).unwrap();
+        let up = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(up.state, SessionState::Idle);
+        assert!(!up.unread, "nothing happened yet");
+        assert_eq!(up.state_source, "hooks");
+        while rx.try_recv().is_ok() {}
+
         e.hook(ev("UserPromptSubmit", json!({}))).unwrap();
         assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working);
         assert!(matches!(rx.try_recv().unwrap(), ServerFrame::Session { .. }));
+        // …and a SessionStart mid-turn changes nothing.
+        e.hook(ev("SessionStart", json!({}))).unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working);
+        while rx.try_recv().is_ok() {}
 
         e.hook(ev("Stop", json!({}))).unwrap();
         let after = e.get(&s.id).unwrap().unwrap();
@@ -2670,11 +3012,21 @@ mod tests {
         e.with_store(|st| st.set_process(&holder.id, Some("x"), Some(me), proc::start_time(me), &["claude".into()]))
             .unwrap();
         let victim = mk();
+        // The victim's own pane is gone (that is why it is being resumed).
+        e.with_store(|st| st.set_process(&victim.id, Some("gone-pane"), Some(4_000_000), None, &["claude".into()]))
+            .unwrap();
         let out = e.relaunch(&victim).unwrap();
         assert_eq!(out.state, SessionState::NeedsYou);
-        let att = out.attention.unwrap();
+        let att = out.attention.clone().unwrap();
         assert_eq!(att.reason, "held");
         assert!(att.detail.unwrap().contains(&me.to_string()));
+        // th-8e3087: the supervisor leaves a held row alone — its dead tmux
+        // session is not an unexpected death to schedule a resume for.
+        e.supervise_tick().unwrap();
+        let still = e.get(&victim.id).unwrap().unwrap();
+        assert_eq!(still.state, SessionState::NeedsYou, "{still:?}");
+        assert_eq!(still.attention.as_ref().map(|a| a.reason.as_str()), Some("held"));
+        assert!(!e.rt().relaunch_at.contains_key(&victim.id), "no resume scheduled for a held row");
     }
 
     #[test]
@@ -2822,6 +3174,7 @@ mod tests {
             session_id: session.into(),
             cwd: Some(cwd.to_string_lossy().into_owned()),
             payload: json!({}),
+            flow_id: None,
         }
     }
 
@@ -3125,6 +3478,154 @@ mod tests {
         tmux::kill_server(&sock);
     }
 
+    /// A live `cat` shell session on a private tmux socket, for the PTY
+    /// bridge tests. `cat` exits on a `^D` at the start of a line, exactly
+    /// like the login shell that printed `logout` in th-6d8f84.
+    fn cat_session(e: &Engine, tmp: &Path, sock: &str) -> Session {
+        e.new_session(NewRequest {
+            kind: SessionKind::Shell,
+            worktree: Some(tmp.to_string_lossy().into()),
+            argv: Some(vec!["sh".into(), "-c".into(), "echo FLOW-READY; cat".into()]),
+            tmux_socket: Some(sock.to_string()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// The tmux clients attached to `session` — one per live PTY bridge.
+    fn tmux_clients(sock: &str, session: &str) -> Vec<String> {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", sock, "list-clients", "-t", session, "-F", "#{client_pid}"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+    }
+
+    /// `tmux_clients` once it satisfies `pred` (a spawned client takes a
+    /// moment to register with the server), or its last value at 10s.
+    fn wait_clients(sock: &str, session: &str, pred: impl Fn(usize) -> bool) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let clients = tmux_clients(sock, session);
+            if pred(clients.len()) || Instant::now() >= deadline {
+                return clients;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Drain `rx` until `id`'s output contains `needle`.
+    fn wait_output(rx: &mut broadcast::Receiver<ServerFrame>, id: &str, needle: &str) -> String {
+        let mut seen = String::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !seen.contains(needle) {
+            match rx.try_recv() {
+                Ok(ServerFrame::Output { id: got, data_b64, .. }) if got == id => {
+                    seen.push_str(&String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap()));
+                }
+                Err(broadcast::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(_) | Err(_) => {}
+            }
+        }
+        seen
+    }
+
+    /// th-6d8f84: two attaches that both miss the bridge map must end up on
+    /// ONE `tmux attach` client. The seam parks both attachers past the
+    /// unlocked miss before either may continue — the interleaving that
+    /// used to spawn two clients, evict the first from the map, and kill it
+    /// on drop — so this is deterministic, not a timing race.
+    #[test]
+    fn concurrent_attaches_share_one_tmux_client() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-ca-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = cat_session(&e, tmp.path(), &sock);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *e.inner.pty_race_hook.lock().unwrap() = Some(Arc::new(move || {
+            barrier.wait();
+        }));
+        let attachers: Vec<_> = (0..2)
+            .map(|_| {
+                let (e, id) = (e.clone(), s.id.clone());
+                std::thread::spawn(move || e.attach(&id, 100, 30))
+            })
+            .collect();
+        for t in attachers {
+            t.join().unwrap().unwrap();
+        }
+        *e.inner.pty_race_hook.lock().unwrap() = None;
+
+        let bridge = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
+        assert_eq!(
+            bridge.clients.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "both attaches counted on the one bridge"
+        );
+        assert!(!wait_clients(&sock, &s.id, |n| n > 0).is_empty(), "the bridge's tmux client registers");
+        // Give a second, racing client time to register too, if there were one.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1, "exactly one tmux attach client");
+        assert!(!bridge.is_closed(), "neither attacher's client was killed");
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1);
+
+        e.detach(&s.id);
+        e.detach(&s.id);
+        tmux::kill_server(&sock);
+    }
+
+    /// th-6d8f84: with two flow clients attached, one detaching must leave
+    /// the other's bridge streaming — and the last one detaching must drop
+    /// the bridge WITHOUT typing EOF into the pane (portable-pty's writer
+    /// sends `\n^D` on drop; `cat` would exit on it, a login shell logs out).
+    #[test]
+    fn detaching_one_of_two_clients_keeps_the_other_and_the_pane() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-dt-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mut rx = e.subscribe();
+        let s = cat_session(&e, tmp.path(), &sock);
+        let pane_pid = tmux::pane_pid(&sock, &s.id).unwrap();
+
+        e.attach(&s.id, 100, 30).unwrap();
+        e.attach(&s.id, 90, 28).unwrap();
+        let first = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
+        assert_eq!(wait_clients(&sock, &s.id, |n| n > 0).len(), 1);
+        e.detach(&s.id);
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1, "the remaining client keeps the bridge");
+        e.input(&s.id, b"still-here\r").unwrap();
+        let seen = wait_output(&mut rx, &s.id, "still-here");
+        assert!(seen.contains("still-here"), "the other client still streams: {seen:?}");
+        assert!(
+            e.lock_ptys().get(&s.id).is_some_and(|b| Arc::ptr_eq(&b.pty, &first)),
+            "input went through the same bridge, not a respawn"
+        );
+
+        // Last client leaves: the bridge goes, the pane stays.
+        e.detach(&s.id);
+        drop(first);
+        assert!(wait_clients(&sock, &s.id, |n| n == 0).is_empty(), "the last detach closes the tmux client");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(tmux::session_alive(&sock, &s.id), "the pane outlives its last client");
+        assert_eq!(tmux::pane_pid(&sock, &s.id).unwrap(), pane_pid, "and its process never saw EOF");
+
+        // A re-attach after all that is a fresh, working bridge.
+        e.attach(&s.id, 80, 24).unwrap();
+        e.input(&s.id, b"back-again\r").unwrap();
+        let seen = wait_output(&mut rx, &s.id, "back-again");
+        assert!(seen.contains("back-again"), "{seen:?}");
+        e.detach(&s.id);
+        tmux::kill_server(&sock);
+    }
+
     #[test]
     fn pending_paste_waits_for_idle_and_never_types_into_a_question() {
         let now = Instant::now();
@@ -3329,6 +3830,7 @@ quiet_ms = 300
             session_id: "uuid-ev".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
         e.hook(ev("UserPromptSubmit", json!({"prompt":"fix it"}))).unwrap();
         e.hook(ev("PreToolUse", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))).unwrap();
@@ -3393,6 +3895,7 @@ quiet_ms = 300
             session_id: "fs-native".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
         e.hook(ev("turn_start", json!({}))).unwrap();
         let row = e.get(&s.id).unwrap().unwrap();
@@ -3410,30 +3913,25 @@ quiet_ms = 300
             "name=\"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[state.hooks.event_map]\nask=\"needs_you\"\nbye=\"ended\"\nmeh=\"ignore\"",
         )
         .unwrap();
-        let mk = |event: &str, payload: Value| HookEvent {
-            harness: "x".into(),
-            event: event.into(),
-            session_id: "s".into(),
-            cwd: None,
-            payload,
-        };
-        match mapped_outcome(&m, &mk("ask", json!({"reason":"permission","message":"rm -rf"}))) {
+        match map_manifest_event(&m, "ask", &json!({"reason":"permission","message":"rm -rf"})) {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "permission");
                 assert_eq!(a.detail.as_deref(), Some("rm -rf"));
+                assert!(a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")), "approvable: {a:?}");
             }
             other => panic!("{other:?}"),
         }
-        match mapped_outcome(&m, &mk("ask", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))) {
+        match map_manifest_event(&m, "ask", &json!({"tool_name":"Bash","tool_input":{"command":"ls"}})) {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "question");
                 assert_eq!(a.detail.as_deref(), Some("Bash: ls"));
+                assert!(a.request_id.is_none(), "a question is answered, not approved");
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(mapped_outcome(&m, &mk("bye", json!({}))), HookOutcome::Ended);
-        assert_eq!(mapped_outcome(&m, &mk("meh", json!({}))), HookOutcome::None);
-        assert_eq!(mapped_outcome(&m, &mk("Stop", json!({}))), HookOutcome::None, "unlisted ⇒ nothing");
+        assert_eq!(map_manifest_event(&m, "bye", &json!({})), HookOutcome::Ended);
+        assert_eq!(map_manifest_event(&m, "meh", &json!({})), HookOutcome::None);
+        assert_eq!(map_manifest_event(&m, "Stop", &json!({})), HookOutcome::None, "unlisted ⇒ nothing");
     }
 
     /// th-0f6126: prefs persist in flow.db, order/hide the list, reach
@@ -3488,6 +3986,8 @@ quiet_ms = 300
         // A user manifest under the engine's home shows up with its origin.
         let dir = tmp.path().join("home/.smooth/harnesses");
         std::fs::create_dir_all(&dir).unwrap();
+        // A binary name nothing installs, so the assertion holds on a
+        // machine that happens to have the real tool (th-8e3087 hit `aider`).
         std::fs::write(
             dir.join("nosuchtool.toml"),
             "name=\"nosuchtool\"\n[binary]\nnames=[\"nosuchtool-xyzzy\"]\n[launch]\nargv=[\"{prompt}\"]\n",
@@ -3515,5 +4015,314 @@ quiet_ms = 300
             .to_string();
         assert!(err.contains("unknown harness kind `nosuchtool`"), "{err}");
         assert!(e.list().unwrap().is_empty());
+    }
+
+    /// The short name of an outcome, so a table can say what it expects.
+    fn outcome_name(o: &HookOutcome) -> String {
+        match o {
+            HookOutcome::Working => "working".into(),
+            HookOutcome::Idle => "idle".into(),
+            HookOutcome::NeedsYou(a) => format!("needs_you:{}", a.reason),
+            HookOutcome::Ended => "ended".into(),
+            HookOutcome::Started => "started".into(),
+            HookOutcome::None => "none".into(),
+        }
+    }
+
+    // (harness, event, payload, expected outcome, speaks Claude's decision protocol)
+    #[allow(clippy::too_many_lines, reason = "a data table: one row per harness event")]
+    fn hook_event_table() -> Vec<(&'static str, &'static str, Value, &'static str, bool)> {
+        let none = || json!({});
+        let perm = || json!({"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf build"}});
+        vec![
+            // Gemini CLI — its own names; Notification is only ever ToolPermission.
+            ("gemini", "SessionStart", json!({"source": "startup"}), "none", false),
+            ("gemini", "BeforeAgent", json!({"prompt": "hi"}), "working", false),
+            ("gemini", "BeforeTool", perm(), "working", false),
+            ("gemini", "AfterTool", perm(), "working", false),
+            ("gemini", "AfterAgent", json!({"prompt_response": "done"}), "idle", false),
+            (
+                "gemini",
+                "Notification",
+                json!({"notification_type": "ToolPermission", "message": "Allow rm?"}),
+                "needs_you:permission",
+                false,
+            ),
+            ("gemini", "PreCompress", json!({"trigger": "auto"}), "none", false),
+            ("gemini", "SessionEnd", json!({"reason": "exit"}), "ended", false),
+            ("gemini", "BeforeModel", none(), "none", false),
+            ("gemini", "Stop", none(), "none", false),
+            // Qwen Code — Claude's names and protocol (the Claude table).
+            ("qwen", "UserPromptSubmit", none(), "working", true),
+            ("qwen", "PreToolUse", perm(), "working", true),
+            ("qwen", "PostToolUse", perm(), "working", true),
+            ("qwen", "Stop", json!({"last_assistant_message": "ok"}), "idle", true),
+            ("qwen", "PermissionRequest", perm(), "needs_you:permission", true),
+            (
+                "qwen",
+                "Notification",
+                json!({"notification_type": "permission_prompt", "message": "Qwen needs permission"}),
+                "needs_you:permission",
+                true,
+            ),
+            (
+                "qwen",
+                "Notification",
+                json!({"notification_type": "auth_success", "message": "signed in"}),
+                "none",
+                true,
+            ),
+            ("qwen", "SessionEnd", none(), "ended", true),
+            // th-8e3087: the Claude table's SessionStart settles a starting row.
+            ("qwen", "SessionStart", none(), "started", true),
+            // Cursor Agent — camelCase; no gate hooks subscribed, so no needs_you.
+            ("cursor-agent", "sessionStart", none(), "none", false),
+            ("cursor-agent", "beforeSubmitPrompt", json!({"prompt": "hi"}), "working", false),
+            ("cursor-agent", "postToolUse", none(), "working", false),
+            ("cursor-agent", "postToolUseFailure", none(), "working", false),
+            ("cursor-agent", "afterShellExecution", none(), "working", false),
+            ("cursor-agent", "afterAgentResponse", none(), "none", false),
+            ("cursor-agent", "stop", json!({"status": "completed"}), "idle", false),
+            ("cursor-agent", "sessionEnd", none(), "ended", false),
+            ("cursor-agent", "preToolUse", perm(), "none", false),
+            // Copilot CLI — PermissionRequest precedes the rules, a Notification is the ask.
+            ("copilot", "SessionStart", none(), "none", false),
+            ("copilot", "UserPromptSubmit", none(), "working", false),
+            ("copilot", "PreToolUse", perm(), "working", false),
+            ("copilot", "PostToolUse", perm(), "working", false),
+            ("copilot", "PostToolUseFailure", perm(), "working", false),
+            ("copilot", "PermissionRequest", perm(), "none", false),
+            ("copilot", "PreCompact", none(), "none", false),
+            (
+                "copilot",
+                "Notification",
+                json!({"notification_type": "permission_prompt", "message": "Allow bash?"}),
+                "needs_you:permission",
+                false,
+            ),
+            (
+                "copilot",
+                "Notification",
+                json!({"notificationType": "elicitation_dialog", "message": "Pick one"}),
+                "needs_you:question",
+                false,
+            ),
+            (
+                "copilot",
+                "Notification",
+                json!({"notification_type": "idle_prompt", "message": "waiting"}),
+                "none",
+                false,
+            ),
+            ("copilot", "Stop", none(), "idle", false),
+            ("copilot", "ErrorOccurred", json!({"recoverable": false}), "none", false),
+            ("copilot", "SessionEnd", none(), "ended", false),
+            // Factory Droid — Claude's names, NOT Claude's decision protocol.
+            ("droid", "SessionStart", none(), "none", false),
+            ("droid", "UserPromptSubmit", none(), "working", false),
+            ("droid", "PreToolUse", perm(), "working", false),
+            ("droid", "PostToolUse", perm(), "working", false),
+            ("droid", "Stop", none(), "idle", false),
+            ("droid", "SubagentStop", none(), "none", false),
+            ("droid", "PermissionRequest", perm(), "needs_you:permission", false),
+            ("droid", "Notification", json!({"message": "Droid is waiting for your input"}), "none", false),
+            ("droid", "SessionEnd", none(), "ended", false),
+            ("droid", "PreCompact", none(), "none", false),
+            // Amp plugin events.
+            ("amp", "session.start", none(), "none", false),
+            ("amp", "agent.start", json!({"message": "hi"}), "working", false),
+            ("amp", "tool.call", none(), "none", false),
+            ("amp", "tool.result", none(), "working", false),
+            ("amp", "agent.end", json!({"status": "done"}), "idle", false),
+            ("amp", "agent.end", json!({"status": "cancelled"}), "idle", false),
+            ("amp", "Stop", none(), "none", false),
+            // Pi extension events.
+            ("pi", "session_start", json!({"reason": "startup"}), "none", false),
+            ("pi", "agent_start", none(), "working", false),
+            ("pi", "tool_execution_start", none(), "working", false),
+            ("pi", "agent_end", none(), "idle", false),
+            ("pi", "session_shutdown", json!({"reason": "quit"}), "ended", false),
+            ("pi", "turn_end", none(), "none", false),
+        ]
+    }
+
+    /// th-b00115: every hook-capable built-in's native events, through the
+    /// exact function the engine runs, with the payloads those CLIs send.
+    #[test]
+    fn hook_capable_harness_events_map_to_flow_states() {
+        let r = reg();
+        let none = json!({});
+        let perm = json!({"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf build"}});
+        let table = hook_event_table();
+        for (harness, event, payload, want, claude) in &table {
+            let m = r.get(harness).unwrap_or_else(|| panic!("{harness} is built in"));
+            let (outcome, protocol) = hook_outcome(Some(m), event, payload);
+            assert_eq!(outcome_name(&outcome), *want, "{harness} {event} {payload}");
+            assert_eq!(protocol, *claude, "{harness} {event}: decision protocol");
+        }
+        // Every event a manifest names is exercised above (no silent map entry).
+        for name in ["gemini", "cursor-agent", "copilot", "droid", "amp", "pi"] {
+            for event in r.get(name).unwrap().state.hooks.event_map.keys() {
+                assert!(table.iter().any(|(h, e, ..)| h == &name && e == event), "{name}: `{event}` has no table row");
+            }
+        }
+        // No manifest ⇒ the Claude table, with the protocol.
+        assert!(matches!(hook_outcome(None, "Stop", &none), (HookOutcome::Idle, true)));
+        // Detail: message first, else the tool.
+        let m = r.get("droid").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "PermissionRequest", &perm) else {
+            panic!()
+        };
+        assert_eq!(a.detail.as_deref(), Some("run_shell_command: rm -rf build"));
+        let m = r.get("gemini").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "Notification", &json!({"notification_type": "ToolPermission", "message": "Allow rm?"}))
+        else {
+            panic!()
+        };
+        assert_eq!(a.detail.as_deref(), Some("Allow rm?"));
+        assert!(
+            a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")),
+            "a ToolPermission ask is approvable: {a:?}"
+        );
+        let m = r.get("copilot").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "Notification", &json!({"notification_type": "elicitation_dialog"})) else {
+            panic!()
+        };
+        assert!(a.request_id.is_none(), "a question is answered, not approved");
+    }
+
+    #[test]
+    fn flow_id_binding_rules() {
+        let row = |kind: &str, bound: Option<&str>, state: SessionState| Session {
+            kind: kind.parse().unwrap(),
+            agent_session_id: bound.map(str::to_string),
+            state,
+            ..serde_json::from_value::<Session>(json!({
+                "id": "fs-1", "kind": "shell", "title": "t", "project": "/p", "worktree": "/p",
+                "argv": [], "state": "working", "created_at": "2026-09-14T00:00:00Z", "updated_at": "2026-09-14T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        // (row kind, row's bound id, row state, posted harness, posted session id, accepted)
+        let table = [
+            ("droid", None, SessionState::Starting, "droid", "d-1", true),
+            ("droid", None, SessionState::Starting, "droid", "", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "d-1", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "d-2", false),
+            ("droid", None, SessionState::Starting, "claude-code", "c-1", false),
+            ("droid", None, SessionState::Starting, "", "d-1", false),
+            ("claude", None, SessionState::Starting, "claude-code", "c-1", false),
+            ("amp", None, SessionState::Done, "amp", "T-1", false),
+            ("amp", None, SessionState::Dead, "amp", "T-1", false),
+            ("amp", None, SessionState::NeedsYou, "amp", "T-1", true),
+        ];
+        for (kind, bound, state, harness, sid, want) in table {
+            assert_eq!(
+                flow_id_accepts(&row(kind, bound, state), harness, sid),
+                want,
+                "{kind} bound={bound:?} {state:?} ← {harness}/{sid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smooth_flow_id_binds_learned_harnesses_and_holds_only_claude_protocol_asks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let wt = tmp.path().to_string_lossy().into_owned();
+        let mk = |kind: &str, sid: Option<&str>| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(kind.parse().unwrap()),
+                    agent_session_id: sid.map(str::to_string),
+                    project: wt.clone(),
+                    worktree: wt.clone(),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        let ev = |harness: &str, event: &str, sid: &str, flow_id: Option<&str>, payload: Value| HookEvent {
+            harness: harness.into(),
+            event: event.into(),
+            session_id: sid.into(),
+            cwd: Some("/not/the/worktree".into()),
+            payload,
+            flow_id: flow_id.map(str::to_string),
+        };
+        // The pane env names the row, alongside the manifest's own env.
+        let droid = mk("droid", None);
+        let reg = e.registry();
+        let env = e.launch_env(reg.get("droid"), &droid);
+        assert!(env.contains(&(FLOW_ID_ENV.to_string(), droid.id.clone())), "{env:?}");
+        let thc = mk("th-code", Some("thc-1"));
+        let env = e.launch_env(reg.get("th-code"), &thc);
+        assert!(env.contains(&(FLOW_ID_ENV.to_string(), thc.id)) && env.iter().any(|(k, _)| k == "SMOOTH_FLOW_SESSION"));
+
+        // A hook from ANOTHER harness inheriting the env does not bind.
+        e.hook(ev("claude-code", "UserPromptSubmit", "c-9", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().agent_session_id, None);
+        // Droid's first hook binds its id by flow_id (the cwd does not even match).
+        e.hook(ev("droid", "SessionStart", "d-1", Some(&droid.id), json!({}))).unwrap();
+        let bound = e.get(&droid.id).unwrap().unwrap();
+        assert_eq!(bound.agent_session_id.as_deref(), Some("d-1"));
+        assert_eq!(bound.state_source, "hooks");
+        e.hook(ev("droid", "UserPromptSubmit", "d-1", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Working);
+        // A same-kind child with a different id is ignored.
+        e.hook(ev("droid", "Stop", "d-child", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Working);
+        // Droid's PermissionRequest is reported, not held: no pending, immediate reply.
+        let reply = e
+            .hook(ev(
+                "droid",
+                "PermissionRequest",
+                "d-1",
+                Some(&droid.id),
+                json!({"tool_name": "Execute", "tool_input": {"command": "ls"}}),
+            ))
+            .unwrap();
+        assert!(matches!(reply, HookReply::Immediate(ref v) if *v == json!({})), "droid asks are not held");
+        let now = e.get(&droid.id).unwrap().unwrap();
+        assert_eq!(now.state, SessionState::NeedsYou);
+        let att = now.attention.as_ref().unwrap();
+        assert_eq!(att.reason, "permission");
+        // Not held, but still answerable: flow.approve sends the keystroke for a `hook-` id.
+        assert!(att.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")), "{att:?}");
+        assert!(!e.has_pending(&droid.id));
+        // No tmux pane here, so the keystroke path is an error — not a hang, not a pending send.
+        assert!(e.approve(&droid.id, att.request_id.as_deref().unwrap(), Decision::Allow).is_err());
+        assert!(!e.has_pending(&droid.id));
+        e.hook(ev("droid", "Stop", "d-1", None, json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Idle, "found by id without flow_id");
+
+        // A payload with no session id at all (an Amp event before its thread id) still lands.
+        let amp = mk("amp", None);
+        e.hook(ev("amp", "agent.start", "", Some(&amp.id), json!({}))).unwrap();
+        let a = e.get(&amp.id).unwrap().unwrap();
+        assert_eq!((a.state, a.agent_session_id), (SessionState::Working, None));
+
+        // Qwen speaks Claude's protocol: its PermissionRequest IS held for flow.approve.
+        let qwen = mk("qwen", Some("q-1"));
+        let reply = e
+            .hook(ev(
+                "qwen",
+                "PermissionRequest",
+                "q-1",
+                Some(&qwen.id),
+                json!({"tool_name": "run_shell_command"}),
+            ))
+            .unwrap();
+        let HookReply::Pending { request_id, .. } = reply else {
+            panic!("qwen asks are held")
+        };
+        assert!(e.has_pending(&qwen.id));
+        assert!(!request_id.starts_with("hook-"), "a held ask carries its pending id");
+        e.approve(&qwen.id, &request_id, Decision::Allow).unwrap();
+
+        // An unknown flow id is a quiet OK, like an unknown session.
+        let r = e.hook(ev("droid", "Stop", "zzz", Some("fs-nope"), json!({}))).unwrap();
+        assert!(matches!(r, HookReply::Immediate(v) if v == json!({})));
     }
 }

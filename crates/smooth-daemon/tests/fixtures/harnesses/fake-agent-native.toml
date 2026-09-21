@@ -1,0 +1,46 @@
+# fake-agent-native — NATIVE state (the th code shape): the agent reports its
+# own turns with its own event names, mapped by `event_map`; no SessionStart,
+# no permission long-poll (an `ask` is a plain needs_you the scraper's
+# keystroke path answers).
+name = "fake-agent-native"
+display_name = "Fake Agent (native)"
+
+[binary]
+names = ["fake-agent"]
+prefer_paths = [".local/bin/fake-agent"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[launch.env]
+SMOOTH_URL = "{daemon_url}"
+FAKE_AGENT_MODE = "native"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "native"
+
+[state.hooks]
+install = "none — fake-agent reports turn_start / turn_end itself"
+
+[state.hooks.event_map]
+turn_start = "working"
+turn_end = "idle"
+ask = "needs_you"
+bye = "ended"
+
+[state.scrape]
+usage_limit = ["usage limit", "limit will reset"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 1000

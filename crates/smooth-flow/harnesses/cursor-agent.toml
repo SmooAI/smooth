@@ -1,0 +1,64 @@
+# Cursor Agent CLI (th-b00115). Cursor hooks live in ~/.cursor/hooks.json
+# (`{"version": 1, "hooks": {event: [{command}]}}`, camelCase events), stdin
+# carries conversation_id + workspace_roots (no cwd, no session_id —
+# flow-hook.sh reads both). The gate hooks (preToolUse / beforeShellExecution /
+# beforeMCPExecution) FAIL CLOSED on empty or invalid stdout, and answering
+# them means deciding every tool call, so the overlay subscribes to none of
+# them: needs_you comes from the pane. orca answers them with
+# {"permission":"allow"} (src/main/cursor/hook-events.ts:16-25), which silently
+# auto-approves — deliberately not copied.
+# References: orca src/main/cursor/hook-events.ts:3-12 (events),
+# src/shared/agent-hook-listener/providers/cursor-events.ts:16-34 (afterAgentResponse
+# can follow stop), cmux CLI/CMUXCLI+AgentHookCatalog.swift:87-103,
+# cmux .../AgentResumeArgv.swift:443 (`cursor-agent --resume <id>`).
+name = "cursor-agent"
+display_name = "Cursor Agent"
+
+[binary]
+names = ["cursor-agent"]
+prefer_paths = [".local/bin/cursor-agent"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--model", "{model}", "{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness cursor  # harness/cursor/hooks.json merged into ~/.cursor/hooks.json"
+
+[state.hooks.event_map]
+sessionStart = "ignore"
+beforeSubmitPrompt = "working"
+postToolUse = "working"
+postToolUseFailure = "working"
+afterShellExecution = "working"
+afterAgentResponse = "ignore"
+stop = "idle"
+sessionEnd = "ended"
+
+[state.scrape]
+working = ["ctrl\\+c to stop", "esc to stop"]
+idle = ["→ add a follow-up", "add a follow-up"]
+needs_you = ["run this command\\?", "\\(y\\) \\(enter\\)", "workspace trust", "press any key to sign in"]
+usage_limit = ["usage limit", "out of credits", "you've hit your limit"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+rules_dir = "~/.cursor/rules"
+mcp_config = "~/.cursor/mcp.json"
