@@ -54,7 +54,13 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   `tmux::pane_life` returns `Unreaped` instead. When it sees that, it runs
   `run-shell true`, a server child whose exit makes tmux's
   `waitpid(WAIT_ANY)` collect the missed one, and reads again. Supervision
-  leaves a still-unreaped row for a later tick while the process exists.
+  leaves a still-unreaped row for a later tick while the process exists. It
+  costs a fixed few tmux reads per tick and never waits, so other sessions
+  are not held up. SmoothFlow never shows an invented `-1`. A signal death is
+  "killed by signal N" and is resumed like any crash. A process that is gone
+  with still no status (tmux < 3.3, which cannot report signals) is recorded
+  as **exit status unknown**, with no exit code, and is never auto-resumed,
+  because it may have quit on purpose.
 - **`exec` in the pane.** The launch line is `sh -c 'exec <argv>'`, so the pane
   pid _is_ the agent's pid. The engine records `pid` + start time (from
   `ps -o lstart=`) as the liveness index: a recycled pid can't pass for the agent.

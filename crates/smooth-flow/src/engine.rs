@@ -599,19 +599,68 @@ pub fn adopted_is_stale(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(updated_at).num_seconds() >= ADOPTED_STALE_AFTER_SECS
 }
 
-/// A pane tmux still reports dead-but-unreaped after [`tmux::pane_life`]'s
-/// reap nudge (th-9d2578). `None` = not yet: the process still exists — its
-/// pty closed while it keeps running — and its real status will come, so the
-/// row is left for a later tick. Settling it earlier recorded `-1` for an
-/// agent that exited 2, and would turn a proven exit 0 into a crash + resume.
-/// Once the process is gone and there is still no status, the tmux is older
-/// than 3.3, which cannot report a signal death at all: `-1`.
-fn settle_unreaped(s: &Session) -> Option<i32> {
-    if s.pid.is_some_and(|pid| proc::is_alive(pid, s.pid_start)) {
-        None
-    } else {
-        Some(-1)
+/// How a supervised session's process ended, as far as SmoothFlow can
+/// tell (th-9d2578). There is deliberately no `-1`: a made-up number reads
+/// as a real exit code on the crash card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneExit {
+    /// Exited with this status.
+    Code(i32),
+    /// Killed by this signal, as tmux names it (`9` or `kill`).
+    Signal(String),
+    /// Dead, and nothing can say how. Never resumed: it may have quit on
+    /// purpose, and resurrecting a clean exit is half of this bug.
+    Unknown,
+    /// The tmux session itself is gone.
+    Vanished,
+}
+
+impl PaneExit {
+    /// The row's `exit_code`: only a real exit status has one.
+    #[must_use]
+    pub const fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Code(c) => Some(*c),
+            Self::Signal(_) | Self::Unknown | Self::Vanished => None,
+        }
     }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::Code(c) => format!("exit {c}"),
+            Self::Signal(sig) => format!("killed by signal {sig}"),
+            Self::Unknown => "exit status unknown".to_string(),
+            Self::Vanished => "process vanished".to_string(),
+        }
+    }
+}
+
+/// Settle a pane tmux still reports dead-but-unreaped after
+/// [`tmux::pane_life`]'s reap nudge (th-9d2578).
+///
+/// `None` = not yet: the process still exists (its pty closed while it keeps
+/// running; a zombie counts), so the real status is coming and the row is
+/// left for a later tick. Settling earlier recorded `-1` for an agent that
+/// exited 2, and would turn a proven exit 0 into a crash + resume.
+///
+/// Once the process is gone, tmux has reaped it — and records the status in
+/// the same handler — so `requery` now gives the answer. Still nothing means
+/// a tmux older than 3.3, which cannot report a signal death at all:
+/// [`PaneExit::Unknown`], never a number. Checking liveness BEFORE the
+/// re-query is what makes that last step sound; the other order could read
+/// the pane just before a reap and call a real exit unknown.
+///
+/// Costs nothing that grows: one liveness check, and one tmux read only once
+/// the process is gone. Nothing waits.
+fn settle_unreaped(process_alive: bool, requery: impl FnOnce() -> Result<tmux::PaneLife>) -> Result<Option<PaneExit>> {
+    if process_alive {
+        return Ok(None);
+    }
+    Ok(Some(match requery()? {
+        tmux::PaneLife::Exited(code) => PaneExit::Code(code),
+        tmux::PaneLife::Signaled(sig) => PaneExit::Signal(sig),
+        tmux::PaneLife::Running | tmux::PaneLife::Unreaped => PaneExit::Unknown,
+    }))
 }
 
 impl Engine {
@@ -1913,26 +1962,30 @@ impl Engine {
         let life = if alive { tmux::pane_life(&sock, t) } else { Ok(tmux::PaneLife::Running) };
         tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, life = ?life, "flow: supervise");
         if !alive {
-            return self.on_death(s, None);
+            return self.on_death(s, &PaneExit::Vanished);
         }
         let exit = match life? {
             tmux::PaneLife::Running => None,
-            tmux::PaneLife::Exited(code) => Some(code),
-            tmux::PaneLife::Unreaped => match settle_unreaped(s) {
-                Some(code) => Some(code),
-                None => return Ok(()),
-            },
+            tmux::PaneLife::Exited(code) => Some(PaneExit::Code(code)),
+            tmux::PaneLife::Signaled(sig) => Some(PaneExit::Signal(sig)),
+            tmux::PaneLife::Unreaped => {
+                let process_alive = s.pid.is_some_and(|pid| proc::is_alive(pid, s.pid_start));
+                match settle_unreaped(process_alive, || tmux::pane_life(&sock, t))? {
+                    Some(exit) => Some(exit),
+                    None => return Ok(()),
+                }
+            }
         };
-        if let Some(code) = exit {
-            self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
+        if let Some(exit) = exit {
+            self.with_store(|st| st.set_exit_code(&s.id, exit.exit_code()))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
-            if code == 0 {
+            if exit == PaneExit::Code(0) {
                 // Rule 5: exit 0 is proven — the PTY reported it.
                 self.set_state(&s.id, SessionState::Done, None)?;
                 return Ok(());
             }
-            return self.on_death(s, Some(code));
+            return self.on_death(s, &exit);
         }
         if !s.kind.is_agent() {
             return Ok(());
@@ -2025,13 +2078,20 @@ impl Engine {
 
     /// Rule 2: unexpected death → schedule a resume with backoff, up to
     /// [`MAX_RESUME_ATTEMPTS`], then `dead` (attention `crashed`).
-    fn on_death(&self, s: &Session, code: Option<i32>) -> Result<()> {
+    fn on_death(&self, s: &Session, exit: &PaneExit) -> Result<()> {
         self.drop_pty(&s.id);
         // The process the token was issued to is gone; a resume mints a new one.
         self.revoke_hook_token(&s.id);
-        let detail_exit = code.map_or_else(|| "process vanished".to_string(), |c| format!("exit {c}"));
+        let detail_exit = exit.describe();
+        // th-9d2578: an exit nobody could read is not evidence of a crash —
+        // it may have quit on purpose. Say so, and never resurrect it.
+        if *exit == PaneExit::Unknown {
+            let att = Attention::new("crashed").with_detail("exit status unknown — not resumed; it may have quit on purpose");
+            self.set_state(&s.id, SessionState::Dead, Some(att))?;
+            return Ok(());
+        }
         if !s.kind.is_agent() {
-            let state = if code == Some(0) { SessionState::Done } else { SessionState::Dead };
+            let state = if *exit == PaneExit::Code(0) { SessionState::Done } else { SessionState::Dead };
             let att = (state == SessionState::Dead).then(|| Attention::new("crashed").with_detail(detail_exit));
             self.set_state(&s.id, state, att)?;
             return Ok(());
@@ -2921,7 +2981,7 @@ mod tests {
         };
         let agent = mk(SessionKind::Claude);
         for attempt in 1..=MAX_RESUME_ATTEMPTS {
-            e.on_death(&agent, Some(137)).unwrap();
+            e.on_death(&agent, &PaneExit::Code(137)).unwrap();
             let s = e.get(&agent.id).unwrap().unwrap();
             assert_eq!(s.state, SessionState::Starting);
             let att = s.attention.unwrap();
@@ -2931,16 +2991,16 @@ mod tests {
             assert!(e.rt().relaunch_at.contains_key(&agent.id));
             e.rt().relaunch_at.remove(&agent.id);
         }
-        e.on_death(&agent, None).unwrap();
+        e.on_death(&agent, &PaneExit::Vanished).unwrap();
         let s = e.get(&agent.id).unwrap().unwrap();
         assert_eq!(s.state, SessionState::Dead);
         assert!(s.attention.unwrap().detail.unwrap().contains("gave up"));
 
         let shell = mk(SessionKind::Shell);
-        e.on_death(&shell, Some(0)).unwrap();
+        e.on_death(&shell, &PaneExit::Code(0)).unwrap();
         assert_eq!(e.get(&shell.id).unwrap().unwrap().state, SessionState::Done);
         let shell2 = mk(SessionKind::Shell);
-        e.on_death(&shell2, Some(1)).unwrap();
+        e.on_death(&shell2, &PaneExit::Code(1)).unwrap();
         let s = e.get(&shell2.id).unwrap().unwrap();
         assert_eq!(s.state, SessionState::Dead);
         assert_eq!(s.attention.unwrap().reason, "crashed");
@@ -3698,6 +3758,123 @@ mod tests {
         assert!(h["checkpoints"].as_array().unwrap().is_empty());
         assert!(h["blocks"].as_array().unwrap().is_empty());
         assert!(h["pr"].is_null());
+    }
+
+    /// th-9d2578: settling an unreaped pane never invents a number. While
+    /// the process exists nothing is decided (and tmux is not asked again);
+    /// once it is gone the re-read decides, and "still nothing" is Unknown.
+    #[test]
+    fn settle_unreaped_waits_then_reads_and_never_says_minus_one() {
+        let never = || -> Result<tmux::PaneLife> { panic!("no re-query while the process exists") };
+        assert_eq!(settle_unreaped(true, never).unwrap(), None);
+        let settle = |life: tmux::PaneLife| settle_unreaped(false, move || Ok(life)).unwrap();
+        assert_eq!(settle(tmux::PaneLife::Exited(2)), Some(PaneExit::Code(2)), "reaped since the query");
+        assert_eq!(settle(tmux::PaneLife::Exited(0)), Some(PaneExit::Code(0)), "a clean exit stays clean");
+        assert_eq!(settle(tmux::PaneLife::Signaled("kill".into())), Some(PaneExit::Signal("kill".into())));
+        assert_eq!(settle(tmux::PaneLife::Unreaped), Some(PaneExit::Unknown), "tmux < 3.3 after a signal death");
+        for exit in [PaneExit::Signal("9".into()), PaneExit::Unknown, PaneExit::Vanished] {
+            assert_eq!(exit.exit_code(), None, "only a real status is an exit code: {exit:?}");
+        }
+        assert_eq!(PaneExit::Code(2).exit_code(), Some(2));
+        assert_eq!(PaneExit::Unknown.describe(), "exit status unknown");
+        assert_eq!(PaneExit::Signal("kill".into()).describe(), "killed by signal kill");
+    }
+
+    /// th-9d2578: an Unknown exit is shown as unknown and NEVER resumed —
+    /// for an agent as much as a shell — while a signal death still is.
+    #[test]
+    fn an_unknown_exit_is_dead_and_never_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mk = |kind: SessionKind| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    agent_session_id: (kind == SessionKind::Claude).then(|| format!("u-{kind:?}")),
+                    kind: Some(kind),
+                    argv: vec!["x".into()],
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        for kind in [SessionKind::Claude, SessionKind::Shell] {
+            let s = mk(kind.clone());
+            e.on_death(&s, &PaneExit::Unknown).unwrap();
+            let row = e.get(&s.id).unwrap().unwrap();
+            assert_eq!(row.state, SessionState::Dead, "{kind:?}");
+            let att = row.attention.unwrap();
+            assert_eq!(att.reason, "crashed");
+            assert!(att.detail.as_deref().unwrap().starts_with("exit status unknown"), "{att:?}");
+            assert!(att.resume_at.is_none());
+            assert!(!e.rt().relaunch_at.contains_key(&s.id), "no resume scheduled");
+            assert!(!e.rt().resume_attempts.contains_key(&s.id), "not even counted as an attempt");
+            assert_eq!(row.exit_code, None);
+        }
+        let agent = mk(SessionKind::Claude);
+        e.on_death(&agent, &PaneExit::Signal("kill".into())).unwrap();
+        let row = e.get(&agent.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Starting, "a signal death is a crash: resumed");
+        assert!(row.attention.unwrap().detail.unwrap().starts_with("killed by signal kill"));
+    }
+
+    /// th-9d2578: a pane that stays unreaped holds up no other session. One
+    /// tick settles the exited session while the unreaped one is left alone,
+    /// and it keeps doing so tick after tick — the unreaped pane costs a
+    /// fixed few tmux reads per tick (read, reap nudge, re-read) and nothing
+    /// waits on it. Linux only, for the same reason as the test below.
+    #[test]
+    fn an_unreaped_pane_does_not_hold_up_another_session() {
+        if !tmux::tmux_available() || !cfg!(target_os = "linux") {
+            eprintln!("skipping: needs tmux on Linux");
+            return;
+        }
+        let sock = format!("flow-nd-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let go = tmp.path().join("go");
+        let e = engine(tmp.path());
+        let shell = |script: String| {
+            e.new_session(NewRequest {
+                kind: SessionKind::Shell,
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                argv: Some(vec!["sh".into(), "-c".into(), script]),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let stuck = shell(format!(
+            "trap '' HUP; exec </dev/null >/dev/null 2>/dev/null; while [ ! -e '{}' ]; do sleep 0.05; done; exit 2",
+            go.display()
+        ));
+        let other = shell("exit 3".into());
+        let until = |id: &str, want: tmux::PaneLife| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && tmux::pane_life(&sock, id).ok() != Some(want.clone()) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(tmux::pane_life(&sock, id).unwrap(), want, "{id}");
+        };
+        until(&stuck.id, tmux::PaneLife::Unreaped);
+        until(&other.id, tmux::PaneLife::Exited(3));
+
+        let started = Instant::now();
+        e.supervise_tick().unwrap();
+        let tick = started.elapsed();
+        let row = e.get(&other.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Dead, Some(3)), "settled in the same tick: {row:?}");
+        let row = e.get(&stuck.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Idle, None), "left for a later tick: {row:?}");
+        // Nothing sleeps or waits out a window: a tick with the stuck pane is
+        // a handful of tmux calls, nowhere near a second.
+        assert!(tick < Duration::from_secs(2), "tick took {tick:?}");
+        for _ in 0..5 {
+            e.supervise_tick().unwrap();
+        }
+        assert_eq!(e.get(&stuck.id).unwrap().unwrap().state, SessionState::Idle, "still waiting, still not guessed");
+        std::fs::write(&go, b"").unwrap();
+        tmux::kill_server(&sock);
     }
 
     /// th-9d2578, deterministically: tmux marks a pane dead when its pty

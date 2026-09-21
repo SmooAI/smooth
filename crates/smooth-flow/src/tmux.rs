@@ -240,7 +240,7 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
 }
 
 /// Where a pane's process is in dying (remain-on-exit keeps the pane).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneLife {
     /// The process is running.
     Running,
@@ -248,9 +248,12 @@ pub enum PaneLife {
     /// its exit status is not known (th-9d2578). Ask again: this is NOT an
     /// exit, and reading it as one records a bogus status.
     Unreaped,
-    /// The process exited with this status, or `-1` when it died of a
-    /// signal (or tmux predates `pane_dead_signal` and reports nothing).
+    /// The process exited with this status.
     Exited(i32),
+    /// The process died of this signal, as tmux names it: a number on
+    /// tmux 3.3/3.4 (`9`), a name on 3.5 (`kill`). tmux older than 3.3 has
+    /// no `pane_dead_signal` and reads as [`PaneLife::Unreaped`] forever.
+    Signaled(String),
 }
 
 const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
@@ -275,6 +278,8 @@ pub fn pane_life(socket: &str, session: &str) -> Result<PaneLife> {
         Ok(parse_pane_dead(&s))
     };
     let life = read()?;
+    // One nudge per call — a pane that stays unreaped (its process really
+    // is still running) costs this one extra call per tick, never more.
     if life != PaneLife::Unreaped {
         return Ok(life);
     }
@@ -290,7 +295,7 @@ pub fn pane_life(socket: &str, session: &str) -> Result<PaneLife> {
 pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
     Ok(match pane_life(socket, session)? {
         PaneLife::Exited(code) => Some(code),
-        PaneLife::Running | PaneLife::Unreaped => None,
+        PaneLife::Running | PaneLife::Unreaped | PaneLife::Signaled(_) => None,
     })
 }
 
@@ -317,7 +322,7 @@ pub fn parse_pane_dead(raw: &str) -> PaneLife {
     let signal = parts.next().unwrap_or("");
     match status.parse::<i32>() {
         Ok(code) => PaneLife::Exited(code),
-        Err(_) if !signal.is_empty() => PaneLife::Exited(-1),
+        Err(_) if !signal.is_empty() => PaneLife::Signaled(signal.to_string()),
         Err(_) => PaneLife::Unreaped,
     }
 }
@@ -482,8 +487,8 @@ mod tests {
         assert_eq!(parse_pane_dead("1||"), PaneLife::Unreaped);
         assert_eq!(parse_pane_dead("1|"), PaneLife::Unreaped);
         assert_eq!(parse_pane_dead("1"), PaneLife::Unreaped);
-        assert_eq!(parse_pane_dead("1||term"), PaneLife::Exited(-1));
-        assert_eq!(parse_pane_dead("1||1"), PaneLife::Exited(-1));
+        assert_eq!(parse_pane_dead("1||term"), PaneLife::Signaled("term".into()), "tmux 3.5 names it");
+        assert_eq!(parse_pane_dead("1||9"), PaneLife::Signaled("9".into()), "tmux 3.3/3.4 numbers it");
         assert_eq!(parse_pane_dead("1|2|"), PaneLife::Exited(2), "a status wins");
     }
 
