@@ -493,17 +493,6 @@ pub fn permission_reply(decision: Decision, payload: &Value) -> Value {
     })
 }
 
-/// The keystroke that answers a *scraped* (non-hook) Claude Code approval
-/// menu: `1` = yes, `2` = yes and don't ask again, `Escape` = no.
-#[must_use]
-pub const fn approval_keystroke(decision: Decision) -> &'static str {
-    match decision {
-        Decision::Allow => "1",
-        Decision::AllowSession => "2",
-        Decision::Deny => "Escape",
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
@@ -896,13 +885,6 @@ mod tests {
         assert_eq!(sess["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["destination"], "session");
         let sess_no_tool = permission_reply(Decision::AllowSession, &json!({}));
         assert!(sess_no_tool["hookSpecificOutput"]["decision"]["updatedPermissions"].is_null());
-    }
-
-    #[test]
-    fn approval_keystrokes() {
-        assert_eq!(approval_keystroke(Decision::Allow), "1");
-        assert_eq!(approval_keystroke(Decision::AllowSession), "2");
-        assert_eq!(approval_keystroke(Decision::Deny), "Escape");
     }
 
     #[test]

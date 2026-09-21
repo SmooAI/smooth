@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use smooth_flow::harness::{render_argv, Manifest, PromptAs, ResumeMode, SessionIdMode, StateSource, Vars, BUILTIN};
-use smooth_flow::harness_conformance::{claims_permission, screen_problems, FakeSpec, Fixture, Mechanism, Step, PERMISSION_MARKER, SPEC_ENV};
+use smooth_flow::harness_conformance::{claims_permission, keys_bytes, screen_problems, FakeSpec, Fixture, Mechanism, Step, PERMISSION_MARKER, SPEC_ENV};
 use smooth_flow::{proc, tmux, Decision, Engine, EngineConfig, HookCaller, HookEvent, HookReply, NewRequest, ServerFrame, Session, SessionState};
 
 /// Every wait polls; the machine running this is shared with other agents.
@@ -546,11 +546,18 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
                 }
                 return Ok(format!("{} → approve → hook reply allow", att.reason));
             }
-            let k = rig.wait_log("key", 1).ok_or("the approval keystroke never reached the harness")?;
-            if k["key"] != "1" {
-                return Err(format!("the harness read key {}, expected \"1\"", k["key"]));
+            // th-5a2314: the manifest's own approve_keys, byte for byte — the
+            // Claude `1` typed into aider's `(Y)es/(N)o` prompt does nothing.
+            let want = keys_bytes(&m.steer.approve_keys).map_err(|k| format!("[steer] approve_keys names `{k}`, which the rig cannot check"))?;
+            let k = rig.wait_log("key", 1).ok_or("the approval keys never reached the harness")?;
+            if k["key"].as_str() != Some(want.as_str()) {
+                return Err(format!(
+                    "the harness read {:?}, but [steer] approve_keys {:?} press {want:?}",
+                    k["key"].as_str().unwrap_or_default(),
+                    m.steer.approve_keys
+                ));
             }
-            Ok(format!("{} → approve → keystroke 1", att.reason))
+            Ok(format!("{} → approve → keys {}", att.reason, m.steer.approve_keys.join(" ")))
         })();
         rows.push((Step::Permission, outcome.map_or_else(Outcome::Fail, Outcome::Pass)));
     } else {

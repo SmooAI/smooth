@@ -389,8 +389,11 @@ so the harness falls back to its own prompt — which the scraper then sees.
 
 Scraping (`smooth_tmux::detect`, every 2 s on the visible pane) covers what
 hooks can't: a usage limit ⇒ `limited` with `resume_at`; an approval menu with
-no pending hook request ⇒ `needs_you` (answered by keystroke: `1` / `2` /
-`Escape`); working/idle only for sessions that have never reported a hook.
+no pending hook request ⇒ `needs_you`, answered by pressing the manifest's
+`[steer] approve_keys` / `allow_session_keys` / `deny_keys` (th-5a2314:
+`y` `Enter` for aider, `Enter` on goose's and crush's preselected Allow, `y`
+for cline; Claude Code's `1` / `2` / `Escape` is the default); working/idle
+only for sessions that have never reported a hook.
 
 ### Hook authentication (th-91d032)
 

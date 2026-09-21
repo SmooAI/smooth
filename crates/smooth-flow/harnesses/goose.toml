@@ -64,6 +64,11 @@ unless = ["^>\\s"]
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# A select list with the cursor on "Allow": Always Allow is one down,
+# Deny two (proven live, tests/scrape_live.rs).
+approve_keys = ["Enter"]
+allow_session_keys = ["Down", "Enter"]
+deny_keys = ["Down", "Down", "Enter"]
 
 [kill]
 signal = "TERM"

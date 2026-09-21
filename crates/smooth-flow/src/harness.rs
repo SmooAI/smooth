@@ -288,6 +288,12 @@ pub enum SteerMethod {
 }
 
 /// `[steer]`.
+///
+/// The `*_keys` lists answer a *scraped* approval prompt (th-5a2314): a
+/// `flow.approve` with no pending hook request presses them in order, as tmux
+/// key names. They default to Claude Code's numbered menu, which is wrong for
+/// every harness whose prompt reads differently, so a scraped manifest that
+/// can reach `needs_you` states its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Steer {
@@ -300,6 +306,16 @@ pub struct Steer {
     /// as a newline, so the steer never submits.
     #[serde(default)]
     pub submit_delay_ms: u64,
+    /// Allow this one request.
+    #[serde(default = "default_approve_keys")]
+    pub approve_keys: Vec<String>,
+    /// Allow it and stop asking (for the session, or for good, whichever
+    /// the harness offers). With no such option, repeat `approve_keys`.
+    #[serde(default = "default_allow_session_keys")]
+    pub allow_session_keys: Vec<String>,
+    /// Refuse it.
+    #[serde(default = "default_deny_keys")]
+    pub deny_keys: Vec<String>,
 }
 
 /// The longest `steer.submit_delay_ms` a manifest may ask for.
@@ -309,12 +325,39 @@ fn default_submit_key() -> String {
     "Enter".to_string()
 }
 
+fn default_approve_keys() -> Vec<String> {
+    vec!["1".to_string()]
+}
+
+fn default_allow_session_keys() -> Vec<String> {
+    vec!["2".to_string()]
+}
+
+fn default_deny_keys() -> Vec<String> {
+    vec!["Escape".to_string()]
+}
+
 impl Default for Steer {
     fn default() -> Self {
         Self {
             method: SteerMethod::default(),
             submit_key: default_submit_key(),
             submit_delay_ms: 0,
+            approve_keys: default_approve_keys(),
+            allow_session_keys: default_allow_session_keys(),
+            deny_keys: default_deny_keys(),
+        }
+    }
+}
+
+impl Steer {
+    /// The keys that answer a scraped approval prompt with `decision`.
+    #[must_use]
+    pub fn approval_keys(&self, decision: crate::protocol::Decision) -> &[String] {
+        match decision {
+            crate::protocol::Decision::Allow => &self.approve_keys,
+            crate::protocol::Decision::AllowSession => &self.allow_session_keys,
+            crate::protocol::Decision::Deny => &self.deny_keys,
         }
     }
 }
@@ -466,6 +509,15 @@ impl Manifest {
         }
         if self.steer.submit_key.trim().is_empty() {
             bail!("steer.submit_key: must not be empty");
+        }
+        for (field, keys) in [
+            ("approve_keys", &self.steer.approve_keys),
+            ("allow_session_keys", &self.steer.allow_session_keys),
+            ("deny_keys", &self.steer.deny_keys),
+        ] {
+            if keys.is_empty() || keys.iter().any(|k| k.trim().is_empty()) {
+                bail!("steer.{field}: needs at least one key, and no empty ones");
+            }
         }
         if self.kill.signal.trim().is_empty() {
             bail!("kill.signal: must not be empty");
@@ -986,6 +1038,30 @@ mod tests {
         assert_eq!(r.get("claude").unwrap().launch.session_id, SessionIdMode::Preassigned);
     }
 
+    /// th-5a2314: every built-in that can reach a scraped `needs_you` states
+    /// the keys ITS prompt reads — the Claude `1`/`2`/`Escape` default typed
+    /// into aider or cline does nothing. Deny keys are the ones proven live
+    /// against the real CLIs (tests/scrape_live.rs).
+    #[test]
+    fn scraped_builtins_answer_approvals_with_their_own_keys() {
+        use crate::protocol::Decision::{Allow, AllowSession, Deny};
+        let r = Registry::builtin();
+        let keys = |name: &str| {
+            let st = &r.get(name).unwrap().steer;
+            (
+                st.approval_keys(Allow).to_vec(),
+                st.approval_keys(AllowSession).to_vec(),
+                st.approval_keys(Deny).to_vec(),
+            )
+        };
+        let v = |k: &[&str]| k.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(keys("aider"), (v(&["y", "Enter"]), v(&["y", "Enter"]), v(&["n", "Enter"])));
+        assert_eq!(keys("goose"), (v(&["Enter"]), v(&["Down", "Enter"]), v(&["Down", "Down", "Enter"])));
+        assert_eq!(keys("crush"), (v(&["Enter"]), v(&["Right", "Enter"]), v(&["Right", "Right", "Enter"])));
+        assert_eq!(keys("cline"), (v(&["y"]), v(&["y"]), v(&["n"])));
+        assert_eq!(keys("claude"), (v(&["1"]), v(&["2"]), v(&["Escape"])));
+    }
+
     #[test]
     fn minimal_manifest_gets_defaults() {
         let m = Manifest::parse("name = \"pi\"\n[binary]\nnames = [\"pi\"]\n[launch]\nargv = [\"{prompt}\"]\n").unwrap();
@@ -996,6 +1072,9 @@ mod tests {
         assert_eq!(m.resume.mode, ResumeMode::RelaunchCommand);
         assert_eq!(m.state.source, StateSource::Hooks);
         assert_eq!(m.steer.submit_key, "Enter");
+        assert_eq!(m.steer.approval_keys(crate::protocol::Decision::Allow), ["1"], "Claude Code's menu by default");
+        assert_eq!(m.steer.approval_keys(crate::protocol::Decision::AllowSession), ["2"]);
+        assert_eq!(m.steer.approval_keys(crate::protocol::Decision::Deny), ["Escape"]);
         assert_eq!(m.kill.grace_ms, 3000);
         assert_eq!(m.kill.signal, "TERM");
         assert_eq!(m.origin, Origin::Builtin);
@@ -1041,6 +1120,18 @@ mod tests {
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nsubmit_delay_ms=5001",
                 "steer.submit_delay_ms",
+            ),
+            (
+                "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\napprove_keys=[]",
+                "steer.approve_keys",
+            ),
+            (
+                "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\ndeny_keys=[\"n\", \" \"]",
+                "steer.deny_keys",
+            ),
+            (
+                "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nallow_session_keys=[\"\"]",
+                "steer.allow_session_keys",
             ),
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[kill]\nsignal=\"\"",

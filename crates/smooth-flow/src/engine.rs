@@ -23,13 +23,17 @@ use tokio::sync::{broadcast, oneshot};
 use crate::harness::{FlowEventName, HarnessInfo, Manifest, Prefs, PromptAs, Registry, ResumeMode, ScrapeRules, SessionIdMode, StateSource, Vars};
 use crate::hook_auth::HookCaller;
 use crate::protocol::{
-    approval_keystroke, hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, CloseOutcome, DaemonInfo, Decision, EventKind,
-    FlowEvent, HookEvent, HookOutcome, ServerFrame,
+    hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, CloseOutcome, DaemonInfo, Decision, EventKind, FlowEvent, HookEvent,
+    HookOutcome, ServerFrame,
 };
 use crate::pty::{OnOutput, PtyAttach};
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
 use crate::{limit, proc, tmux};
 
+/// Between the keys of a multi-key approval (`Down`, `Down`, `Enter`): a TUI
+/// redraws its selection between presses. The gap the live runs against the
+/// real CLIs used (tests/scrape_live.rs).
+const APPROVAL_KEY_GAP: Duration = Duration::from_millis(250);
 /// Supervision rule 2: relaunch attempts before `dead`.
 pub const MAX_RESUME_ATTEMPTS: u32 = 3;
 /// Base of the exponential backoff between relaunches.
@@ -1285,8 +1289,17 @@ impl Engine {
         if let Some(tx) = pending {
             let _ = tx.send(decision);
         } else {
+            // th-5a2314: a scraped prompt reads the way its harness draws it
+            // — `y`+Enter for aider, Enter on goose's selected "Allow" — so
+            // the manifest names the keys; Claude Code's menu is the default.
             let (k, t) = pane(&s)?;
-            tmux::send_key(&k, &t, approval_keystroke(decision))?;
+            let steer = self.registry().get(s.kind.as_str()).map(|m| m.steer.clone()).unwrap_or_default();
+            for (i, key) in steer.approval_keys(decision).iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(APPROVAL_KEY_GAP);
+                }
+                tmux::send_key(&k, &t, key)?;
+            }
         }
         self.event(id, EventKind::User, &format!("approve: {}", decision.as_str()));
         self.set_state(id, SessionState::Working, None)?;

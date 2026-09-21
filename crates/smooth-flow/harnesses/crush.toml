@@ -73,6 +73,11 @@ unless = ["^\\s*esc cancel"]
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# "Allow · Allow for Session · Deny", ←/→ to choose, Allow selected on
+# open (deny proven live, tests/scrape_live.rs).
+approve_keys = ["Enter"]
+allow_session_keys = ["Right", "Enter"]
+deny_keys = ["Right", "Right", "Enter"]
 
 [kill]
 signal = "TERM"

@@ -76,6 +76,11 @@ unless = ["^\\s*(\\w+\\s*)?>(\\s|$)"]
 [steer]
 method = "bracketed_paste"
 submit_key = "Enter"
+# "Create new file? (Y)es/(N)o [Yes]:" — a typed answer, then Enter. A
+# plain Y/N offers no "always", so allow-for-session answers yes once.
+approve_keys = ["y", "Enter"]
+allow_session_keys = ["y", "Enter"]
+deny_keys = ["n", "Enter"]
 
 [kill]
 signal = "TERM"

@@ -200,6 +200,28 @@ pub fn known(name: &str) -> Option<Known> {
             hooks: Some(opencode_hooks),
             auth: Some(opencode_auth),
         },
+        // th-5a2314: the scraped harnesses (th-e77603). No hooks to wire;
+        // what stops a session is a missing provider, so that is the check.
+        "aider" => Known {
+            install: "uv tool install aider-chat",
+            hooks: None,
+            auth: Some(aider_auth),
+        },
+        "goose" => Known {
+            install: "curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+            hooks: None,
+            auth: Some(goose_auth),
+        },
+        "crush" => Known {
+            install: "brew install charmbracelet/tap/crush",
+            hooks: None,
+            auth: Some(crush_auth),
+        },
+        "cline" => Known {
+            install: "npm i -g cline",
+            hooks: None,
+            auth: Some(cline_auth),
+        },
         "th-code" => Known {
             install: "brew install SmooAI/tools/th",
             hooks: None,
@@ -511,6 +533,105 @@ fn opencode_auth(m: &Machine) -> Check {
         Level::Warn,
         "no provider credentials — only OpenCode's free models will answer",
         Some("opencode auth login".into()),
+    )
+}
+
+/// A provider API key doctor can see in the environment, if any.
+fn provider_env_key(m: &Machine) -> Option<&'static str> {
+    ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]
+        .into_iter()
+        .find(|k| m.has_env(k))
+}
+
+fn aider_auth(m: &Machine) -> Check {
+    if let Some(k) = provider_env_key(m) {
+        return check("auth", Level::Ok, format!("{k} is set"), None);
+    }
+    let conf = m.home.join(".aider.conf.yml");
+    let has_key = std::fs::read_to_string(&conf).is_ok_and(|t| {
+        t.lines()
+            .filter_map(|l| l.split_once(':'))
+            .any(|(k, v)| !k.trim_start().starts_with('#') && k.trim().ends_with("api-key") && !v.trim().is_empty())
+    });
+    if has_key {
+        return check("auth", Level::Ok, format!("an API key in {}", conf.display()), None);
+    }
+    // Warn, not fail: the app's daemon may carry a key this shell does not.
+    check(
+        "auth",
+        Level::Warn,
+        "no provider API key in this environment or ~/.aider.conf.yml — aider would stop to ask for one",
+        Some("echo 'anthropic-api-key: <key>' >> ~/.aider.conf.yml".into()),
+    )
+}
+
+fn goose_auth(m: &Machine) -> Check {
+    let conf = m.home.join(".config/goose/config.yaml");
+    let provider = std::fs::read_to_string(&conf)
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.trim().strip_prefix("GOOSE_PROVIDER:").map(|v| v.trim().trim_matches(['"', '\'']).to_string()))
+        })
+        .filter(|v| !v.is_empty());
+    provider.map_or_else(
+        || {
+            check(
+                "auth",
+                Level::Fail,
+                format!("no GOOSE_PROVIDER in {} — a session would stop at goose's provider setup", conf.display()),
+                Some("goose configure".into()),
+            )
+        },
+        |p| check("auth", Level::Ok, format!("GOOSE_PROVIDER = {p} ({})", conf.display()), None),
+    )
+}
+
+/// A JSON file whose `key` is a non-empty object.
+fn json_object_nonempty(path: &Path, key: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get(key).and_then(Value::as_object).map(|o| !o.is_empty()))
+        .unwrap_or(false)
+}
+
+fn crush_auth(m: &Machine) -> Check {
+    let data = m.env.get("XDG_DATA_HOME").map_or_else(|| m.home.join(".local/share"), PathBuf::from);
+    for conf in [m.home.join(".config/crush/crush.json"), data.join("crush/crush.json")] {
+        if json_object_nonempty(&conf, "providers") {
+            return check("auth", Level::Ok, format!("providers configured in {}", conf.display()), None);
+        }
+    }
+    if let Some(k) = provider_env_key(m) {
+        return check("auth", Level::Ok, format!("{k} is set"), None);
+    }
+    check(
+        "auth",
+        Level::Fail,
+        "no provider in ~/.config/crush/crush.json or ~/.local/share/crush/crush.json — a session would open on crush's provider picker",
+        Some("crush   # pick a provider once; SmoothFlow sessions reuse it".into()),
+    )
+}
+
+fn cline_auth(m: &Machine) -> Check {
+    let file = m.home.join(".cline/data/settings/providers.json");
+    let configured = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| match &v {
+            Value::Object(o) => !o.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            _ => false,
+        });
+    if configured {
+        return check("auth", Level::Ok, format!("providers configured in {}", file.display()), None);
+    }
+    check(
+        "auth",
+        Level::Fail,
+        format!("no providers in {} — a session would open on cline's sign-in / provider screen", file.display()),
+        Some("cline   # sign in or choose a provider once; SmoothFlow sessions reuse it".into()),
     )
 }
 
@@ -1161,7 +1282,8 @@ mod tests {
         let bin = tmp.path().join("bin");
         script(&bin.join("aider"), "#!/bin/sh\necho 'aider 0.86.2'\n");
         let man = Manifest::parse(
-            "name = \"aider\"\n[binary]\nnames = [\"aider\"]\n[launch]\nargv = [\"{prompt}\"]\nprompt_as = \"argv\"\n[state]\nsource = \"scrape\"\n[state.scrape]\nidle = [\"> \"]\n",
+            // A scraped harness doctor has no knowledge row for (aider has one).
+            "name = \"scrapy\"\n[binary]\nnames = [\"aider\"]\n[launch]\nargv = [\"{prompt}\"]\nprompt_as = \"argv\"\n[state]\nsource = \"scrape\"\n[state.scrape]\nidle = [\"> \"]\n",
         )
         .unwrap();
         let d = diagnose(&man, &machine(tmp.path(), &[&bin], Some(&[&bin])));
@@ -1189,6 +1311,55 @@ mod tests {
         assert!(c.detail.contains("exited 2: nope"), "{c:?}");
         assert!(diagnose_all(&reg, &m, Some("nope")).unwrap_err().to_string().contains("th harness list"));
         assert_eq!(diagnose_all(&reg, &m, None).unwrap().len(), reg.all().len());
+    }
+
+    /// th-5a2314: the scraped harnesses' provider checks read files and env
+    /// only, and each failing row names its one fix.
+    #[test]
+    fn scraped_harness_auth_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut m = machine(tmp.path(), &[], None);
+        let h = m.home.clone();
+        let write = |rel: &str, text: &str| {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        for name in ["aider", "goose", "crush", "cline"] {
+            let k = known(name).unwrap();
+            assert!(k.hooks.is_none(), "{name} is scraped");
+            assert!(!k.install.is_empty());
+        }
+
+        let a = aider_auth(&m);
+        assert_eq!((a.level, a.fix.is_some()), (Level::Warn, true));
+        write(".aider.conf.yml", "model: sonnet\n# openai-api-key: commented\n");
+        assert_eq!(aider_auth(&m).level, Level::Warn, "a commented key is no key");
+        write(".aider.conf.yml", "model: sonnet\nanthropic-api-key: sk-x\n");
+        assert_eq!(aider_auth(&m).level, Level::Ok);
+
+        let g = goose_auth(&m);
+        assert_eq!((g.level, g.fix.as_deref()), (Level::Fail, Some("goose configure")));
+        write(".config/goose/config.yaml", "GOOSE_PROVIDER: \"\"\n");
+        assert_eq!(goose_auth(&m).level, Level::Fail, "an empty provider is none");
+        write(".config/goose/config.yaml", "GOOSE_PROVIDER: anthropic\nGOOSE_MODEL: x\n");
+        assert!(goose_auth(&m).detail.contains("anthropic"));
+
+        assert_eq!(crush_auth(&m).level, Level::Fail);
+        write(".config/crush/crush.json", r#"{"providers":{}}"#);
+        assert_eq!(crush_auth(&m).level, Level::Fail, "an empty providers object is none");
+        write(".local/share/crush/crush.json", r#"{"providers":{"anthropic":{"api_key":"x"}}}"#);
+        assert_eq!(crush_auth(&m).level, Level::Ok);
+
+        assert_eq!(cline_auth(&m).level, Level::Fail);
+        write(".cline/data/settings/providers.json", "{}");
+        assert_eq!(cline_auth(&m).level, Level::Fail);
+        write(".cline/data/settings/providers.json", r#"{"anthropic":{"apiKey":"x"}}"#);
+        assert_eq!(cline_auth(&m).level, Level::Ok);
+
+        m.env.insert("OPENAI_API_KEY".into(), "k".into());
+        std::fs::remove_file(m.home.join(".aider.conf.yml")).unwrap();
+        assert_eq!(aider_auth(&m).detail, "OPENAI_API_KEY is set");
     }
 
     #[cfg(unix)]
