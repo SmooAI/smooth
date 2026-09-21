@@ -454,7 +454,7 @@ the kernel-sandboxed tool subprocesses, which cannot read `~/.smooth`.
 **Upgrading.** An installed `smooth-agent` plugin whose `flow-hook.sh`
 predates this change sends no token, so its hooks for SmoothFlow-launched
 sessions are refused and those sessions fall back to scraped state.
-`th harness enable claude-code` (or `codex`/`opencode`) updates it.
+`th harness doctor` flags this as degraded, with the fix: `th harness enable claude-code` (or `codex`/`opencode`), then restart the harness's sessions, because a running session keeps the hooks it started with. Codex also asks for its "Hooks need review" trust again.
 
 ## Zero friction — inference and adoption (th-c103c1)
 

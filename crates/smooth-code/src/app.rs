@@ -2163,6 +2163,7 @@ mod exec_mode_tests {
 
     /// th-91d032: the token file is reduced to hex; missing or empty → none.
     #[test]
+    #[allow(clippy::unwrap_used, reason = "test setup")]
     fn hook_token_file_reads_hex_only() {
         use super::read_hook_token;
         let tmp = tempfile::tempdir().unwrap();
