@@ -574,6 +574,23 @@ fn claude_plugin_step(home: &Path) {
     }
     if claude_plugin_cache(home).is_some() {
         run_step("plugin", "claude", &["plugin", "update", "smooth-agent@smooth"]);
+        // A project-scoped pin shadows the user install for every session
+        // started in that checkout, and the update above never touches it.
+        for pin in crate::harness_doctor::stale_project_pins(home) {
+            match Command::new("claude")
+                .args(["plugin", "update", "smooth-agent@smooth", "--scope", "project"])
+                .current_dir(&pin.project)
+                .output()
+            {
+                Ok(out) if out.status.success() => println!("   plugin: {} {} → {} (project scope)", pin.project.display(), pin.version, pin.user_version),
+                _ => println!(
+                    "   plugin: {} could not update {} — run: {}",
+                    "FAILED".bright_red(),
+                    pin.project.display(),
+                    pin.fix()
+                ),
+            }
+        }
     } else {
         // Marketplace add is idempotent-ish; an "already exists" failure is fine
         // because the install right after is the step that matters.

@@ -243,6 +243,68 @@ fn newest_version_dir(dir: &Path) -> Option<(String, PathBuf)> {
     versions.pop().map(|(_, v)| (v.clone(), dir.join(v)))
 }
 
+/// A plugin version as comparable numbers (`0.41.4` → `[0, 41, 4]`).
+fn version_key(v: &str) -> Vec<u64> {
+    v.split('.').filter_map(|p| p.parse().ok()).collect()
+}
+
+/// A project-scoped smooth-agent install older than the user-scoped one.
+///
+/// A Claude Code session started in that project loads the project's copy.
+/// `claude plugin update` without `--scope project` never touches it, so
+/// the user-scope update reports success while that checkout keeps a plugin
+/// with no flow hook (or a stale one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalePin {
+    pub project: PathBuf,
+    pub version: String,
+    pub user_version: String,
+}
+
+impl StalePin {
+    /// The one command that fixes it.
+    #[must_use]
+    pub fn fix(&self) -> String {
+        format!("cd '{}' && claude plugin update smooth-agent@smooth --scope project", self.project.display())
+    }
+}
+
+/// Every project-scoped smooth-agent pin in `~/.claude/plugins/installed_plugins.json`
+/// that is older than the user-scoped install. Pins for directories that no
+/// longer exist are skipped: no session can start there, and pruning them is
+/// the user's call.
+#[must_use]
+pub fn stale_project_pins(home: &Path) -> Vec<StalePin> {
+    let Some(entries) = std::fs::read_to_string(home.join(".claude/plugins/installed_plugins.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.pointer("/plugins/smooth-agent@smooth").and_then(Value::as_array).cloned())
+    else {
+        return Vec::new();
+    };
+    let field = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
+    let Some(user_version) = entries
+        .iter()
+        .find(|e| field(e, "scope").as_deref() == Some("user"))
+        .and_then(|e| field(e, "version"))
+    else {
+        return Vec::new();
+    };
+    let mut stale: Vec<StalePin> = entries
+        .iter()
+        .filter(|e| field(e, "scope").as_deref() == Some("project"))
+        .filter_map(|e| Some((PathBuf::from(field(e, "projectPath")?), field(e, "version")?)))
+        .filter(|(project, version)| project.is_dir() && version_key(version) < version_key(&user_version))
+        .map(|(project, version)| StalePin {
+            project,
+            version,
+            user_version: user_version.clone(),
+        })
+        .collect();
+    stale.sort_by(|a, b| a.project.cmp(&b.project));
+    stale
+}
+
 fn mentions_flow_hook(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|t| t.contains("flow-hook.sh"))
 }
@@ -300,6 +362,27 @@ fn claude_hooks(m: &Machine) -> Check {
                 "smooth-agent {version}'s flow-hook.sh predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping"
             ),
             fix,
+        );
+    }
+    // The user-scope install is fine; a project-scoped pin can still shadow
+    // it for every session started in that checkout.
+    let stale = stale_project_pins(&m.home);
+    if let Some(first) = stale.first() {
+        let list = stale
+            .iter()
+            .map(|p| format!("{} ({})", p.project.display(), p.version))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return check(
+            "hooks",
+            Level::Fail,
+            format!(
+                "smooth-agent {} is installed for the user, but {} project-scoped pin{} older: {list}. Sessions started there load the old copy",
+                first.user_version,
+                stale.len(),
+                if stale.len() == 1 { " is" } else { "s are" }
+            ),
+            Some(first.fix()),
         );
     }
     check("hooks", Level::Ok, format!("smooth-agent {version} posts every event to /api/flow/hooks"), None)
@@ -1065,6 +1148,7 @@ pub fn run(home: &Path, only: Option<&str>, json: bool, verbose: bool) -> Result
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[cfg(unix)]
     fn script(path: &Path, body: &str) {
@@ -1213,6 +1297,54 @@ mod tests {
         assert!(c.fix.as_deref().unwrap().starts_with("th harness enable codex"));
         std::fs::write(&script, "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
         assert!(!codex_hooks(&m).detail.contains("predates"));
+    }
+
+    /// A project-scoped pin older than the user install shadows it for every
+    /// session started in that project, so doctor must not report Claude
+    /// healthy. Pins for deleted directories are not ours to judge.
+    #[test]
+    fn stale_project_scoped_pins_degrade_claude_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = machine(tmp.path(), &[], None);
+        let cache = m.home.join(".claude/plugins/cache/smooth/smooth-agent/0.51.1/hooks");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("hooks.json"), r#"{"x":"flow-hook.sh"}"#).unwrap();
+        std::fs::write(cache.join("flow-hook.sh"), "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
+        std::fs::write(m.home.join(".claude/settings.json"), r#"{"enabledPlugins":{"smooth-agent@smooth":true}}"#).unwrap();
+        assert!(stale_project_pins(&m.home).is_empty(), "no installed_plugins.json ⇒ nothing to judge");
+        assert_eq!(claude_hooks(&m).level, Level::Ok);
+
+        let main = tmp.path().join("dev/smooth");
+        let other = tmp.path().join("dev/smooai");
+        let current = tmp.path().join("dev/current");
+        for d in [&main, &other, &current] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let gone = tmp.path().join("dev/smooth-th-deleted");
+        let pins = json!({"version": 2, "plugins": {"smooth-agent@smooth": [
+            {"scope": "user", "projectPath": null, "version": "0.51.1"},
+            {"scope": "project", "projectPath": main, "version": "0.31.1"},
+            {"scope": "project", "projectPath": other, "version": "0.41.4"},
+            {"scope": "project", "projectPath": current, "version": "0.51.1"},
+            {"scope": "project", "projectPath": gone, "version": "0.9.0"},
+        ]}});
+        std::fs::write(m.home.join(".claude/plugins/installed_plugins.json"), pins.to_string()).unwrap();
+        let stale = stale_project_pins(&m.home);
+        assert_eq!(
+            stale.iter().map(|p| (p.project.clone(), p.version.as_str())).collect::<Vec<_>>(),
+            vec![(other.clone(), "0.41.4"), (main, "0.31.1")],
+            "older, existing pins only; the current one and the deleted worktree are skipped"
+        );
+        let c = claude_hooks(&m);
+        assert_eq!(c.level, Level::Fail);
+        assert!(c.detail.contains("2 project-scoped pins are older"), "{c:?}");
+        assert!(c.detail.contains("0.31.1") && c.detail.contains("0.41.4"));
+        assert_eq!(
+            c.fix.as_deref(),
+            Some(format!("cd '{}' && claude plugin update smooth-agent@smooth --scope project", other.display()).as_str())
+        );
+        // Version order is numeric, not lexical: 0.9.0 < 0.51.1 < 0.100.0.
+        assert!(version_key("0.9.0") < version_key("0.51.1") && version_key("0.51.1") < version_key("0.100.0"));
     }
 
     #[test]
