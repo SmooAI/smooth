@@ -31,6 +31,14 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("goose", include_str!("../harnesses/goose.toml")),
     ("crush", include_str!("../harnesses/crush.toml")),
     ("cline", include_str!("../harnesses/cline.toml")),
+    // Hook-capable CLIs (th-b00115) — each reports real lifecycle events.
+    ("gemini", include_str!("../harnesses/gemini.toml")),
+    ("qwen", include_str!("../harnesses/qwen.toml")),
+    ("cursor-agent", include_str!("../harnesses/cursor-agent.toml")),
+    ("copilot", include_str!("../harnesses/copilot.toml")),
+    ("droid", include_str!("../harnesses/droid.toml")),
+    ("amp", include_str!("../harnesses/amp.toml")),
+    ("pi", include_str!("../harnesses/pi.toml")),
 ];
 
 /// Any `PATH` entry under a directory with this name is a cmux CLI shim —
@@ -287,7 +295,15 @@ pub struct Steer {
     pub method: SteerMethod,
     #[serde(default = "default_submit_key")]
     pub submit_key: String,
+    /// Pause between the paste and `submit_key` (th-b00115). 0 = none. Gemini
+    /// CLI folds an Enter that arrives within ~100 ms of a paste into the paste
+    /// as a newline, so the steer never submits.
+    #[serde(default)]
+    pub submit_delay_ms: u64,
 }
+
+/// The longest `steer.submit_delay_ms` a manifest may ask for.
+pub const MAX_SUBMIT_DELAY_MS: u64 = 5_000;
 
 fn default_submit_key() -> String {
     "Enter".to_string()
@@ -298,6 +314,7 @@ impl Default for Steer {
         Self {
             method: SteerMethod::default(),
             submit_key: default_submit_key(),
+            submit_delay_ms: 0,
         }
     }
 }
@@ -444,6 +461,9 @@ impl Manifest {
             bail!("state.scrape: source = \"scrape\" needs working and/or idle patterns (or a working/idle rule)");
         }
         ScrapeRules::compile(&self.state.scrape)?;
+        if self.steer.submit_delay_ms > MAX_SUBMIT_DELAY_MS {
+            bail!("steer.submit_delay_ms: {} is over the {MAX_SUBMIT_DELAY_MS} ms cap", self.steer.submit_delay_ms);
+        }
         if self.steer.submit_key.trim().is_empty() {
             bail!("steer.submit_key: must not be empty");
         }
@@ -957,7 +977,8 @@ mod tests {
         let r = Registry::builtin();
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         let names: Vec<&str> = r.all().iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["claude", "opencode", "codex", "th-code", "aider", "goose", "crush", "cline"]);
+        assert_eq!(names[..4], ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(names.len(), BUILTIN.len(), "every BUILTIN entry registers");
         assert_eq!(r.get("claude").unwrap().display_name, "Claude Code");
         assert_eq!(r.get("th-code").unwrap().state.source, StateSource::Native);
         assert_eq!(r.get("th-code").unwrap().map_event("turn_end"), Some(FlowEventName::Idle));
@@ -1016,6 +1037,10 @@ mod tests {
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nsubmit_key=\"\"",
                 "steer.submit_key",
+            ),
+            (
+                "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nsubmit_delay_ms=5001",
+                "steer.submit_delay_ms",
             ),
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[kill]\nsignal=\"\"",
@@ -1334,8 +1359,8 @@ mod tests {
         let r = Registry::load(&home, Some(&project));
         assert_eq!(r.get("mytool").unwrap().display_name, "Pkg My Tool");
         assert!(matches!(r.get("mytool").unwrap().origin, Origin::Package(_)));
-        assert_eq!(r.get("amp").unwrap().origin.label(), "package");
-        assert_eq!(r.all().len(), BUILTIN.len() + 2);
+        assert_eq!(r.get("amp").unwrap().origin.label(), "package", "a package's amp replaces the built-in one");
+        assert_eq!(r.all().len(), BUILTIN.len() + 1);
     }
 
     #[test]
@@ -1368,5 +1393,164 @@ mod tests {
         assert!(!visible.iter().any(|i| i.name == "opencode"));
         let v: serde_json::Value = serde_json::to_value(&visible[0]).unwrap();
         assert!(v.get("hidden").is_none(), "false hidden is omitted on the wire: {v}");
+    }
+
+    /// th-b00115: the hook-capable built-ins — launch shape, session-id mode,
+    /// resume argv, and where their hooks come from — as the reference matrix
+    /// in docs/Engineering/Harness-Manifests.md describes them.
+    #[test]
+    fn hook_capable_builtins_launch_and_resume_as_documented() {
+        type Row<'a> = (&'a str, StateSource, SessionIdMode, &'a [&'a str], &'a [&'a str], &'a [&'a str], PromptAs);
+        let r = Registry::builtin();
+        let full = Vars {
+            prompt: Some("fix it"),
+            session_id: Some("sid-1"),
+            model: Some("m1"),
+            ..Default::default()
+        };
+        let bare = Vars {
+            session_id: Some("sid-1"),
+            ..Default::default()
+        };
+        // (name, source, session id mode, launch with prompt+model, launch with neither, resume argv, prompt_as)
+        let table: &[Row<'_>] = &[
+            (
+                "gemini",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "qwen",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "-i", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "cursor-agent",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &["--model", "m1", "fix it"],
+                &[],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "copilot",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "-i", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume=sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "droid",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &["fix it"],
+                &[],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "amp",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &[],
+                &[],
+                &["threads", "continue", "sid-1"],
+                PromptAs::Paste,
+            ),
+            (
+                "pi",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--session-id", "sid-1"],
+                PromptAs::Argv,
+            ),
+        ];
+        for (name, source, sid, launch_full, launch_bare, resume, prompt_as) in table {
+            let m = r.get(name).unwrap_or_else(|| panic!("{name} is built in"));
+            assert_eq!(m.origin, Origin::Builtin, "{name}");
+            assert_eq!(m.state.source, *source, "{name}");
+            assert_eq!(m.launch.session_id, *sid, "{name}");
+            assert_eq!(m.launch.prompt_as, *prompt_as, "{name}");
+            let full = if *prompt_as == PromptAs::Paste { Vars { prompt: None, ..full } } else { full };
+            assert_eq!(render_argv(&m.launch.argv, &full), *launch_full, "{name} launch");
+            assert_eq!(render_argv(&m.launch.argv, &bare), *launch_bare, "{name} bare launch");
+            assert_eq!(m.resume.mode, ResumeMode::ResumeSession, "{name}");
+            assert_eq!(render_argv(&m.resume.argv, &bare), *resume, "{name} resume");
+            assert!(m.binary.skip_path_patterns.iter().any(|p| p == CMUX_SHIM_DIR), "{name} skips cmux shims");
+            assert!(
+                m.binary.prefer_paths.iter().all(|p| !p.starts_with('/') && !p.starts_with('~')),
+                "{name}: prefer_paths are HOME-relative"
+            );
+            assert!(!m.state.hooks.install.is_empty(), "{name} says how its hooks are wired");
+            ScrapeRules::compile(&m.state.scrape).unwrap_or_else(|e| panic!("{name} scrape: {e}"));
+        }
+        // Steer: Gemini needs a pause before Enter; everything else submits at once.
+        for (name, delay) in [
+            ("gemini", 300),
+            ("qwen", 0),
+            ("cursor-agent", 0),
+            ("copilot", 0),
+            ("droid", 0),
+            ("amp", 0),
+            ("pi", 0),
+            ("claude", 0),
+        ] {
+            let steer = &r.get(name).unwrap().steer;
+            assert_eq!((steer.submit_delay_ms, steer.submit_key.as_str()), (delay, "Enter"), "{name}");
+        }
+        // Qwen speaks Claude's hook names + decision protocol: the empty map IS the Claude table.
+        assert!(r.get("qwen").unwrap().state.hooks.event_map.is_empty());
+        for name in ["gemini", "cursor-agent", "copilot", "droid", "amp", "pi"] {
+            assert!(!r.get(name).unwrap().state.hooks.event_map.is_empty(), "{name} maps its own event names");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hook_capable_builtins_resolve_real_installs_over_cmux_shims() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let home = tmp.path().join("home");
+        let shims = tmp.path().join("var/folders/xy/T/cmux-cli-shims/F00D");
+        let bin = tmp.path().join("usr/local/bin");
+        let path = std::env::join_paths([&shims, &bin]).unwrap();
+        let r = Registry::builtin();
+        for (name, exe) in [
+            ("gemini", "gemini"),
+            ("qwen", "qwen"),
+            ("cursor-agent", "cursor-agent"),
+            ("copilot", "copilot"),
+            ("droid", "droid"),
+            ("amp", "amp"),
+            ("pi", "pi"),
+        ] {
+            let m = r.get(name).unwrap();
+            mk(&format!("var/folders/xy/T/cmux-cli-shims/F00D/{exe}"));
+            assert_eq!(m.resolve_binary_in(&home, &path), None, "{name}: a cmux shim alone is not an install");
+            let on_path = mk(&format!("usr/local/bin/{exe}"));
+            assert_eq!(m.resolve_binary_in(&home, &path), Some(on_path.clone()), "{name}: PATH past the shim");
+            let preferred = mk(&format!("home/{}", m.binary.prefer_paths[0]));
+            assert_eq!(m.resolve_binary_in(&home, &path), Some(preferred), "{name}: prefer_paths beat PATH");
+        }
     }
 }

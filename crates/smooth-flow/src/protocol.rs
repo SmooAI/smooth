@@ -342,6 +342,12 @@ pub struct HookEvent {
     pub cwd: Option<String>,
     #[serde(default)]
     pub payload: Value,
+    /// The flow session row the pane was launched as (`SMOOTH_FLOW_ID` in
+    /// the pane env, th-b00115). Binds a harness that cannot pre-assign its
+    /// session id — and one whose payload carries none — without guessing
+    /// by cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
 }
 
 /// What a hook event means for the session's state.
@@ -355,7 +361,13 @@ pub enum HookOutcome {
     NeedsYou(Attention),
     /// The harness session ended (`SessionEnd`); exit is decided by the PTY.
     Ended,
-    /// Nothing to do (SessionStart, PreCompact, SubagentStop, unknown).
+    /// The harness is up (`SessionStart`): a `starting` row becomes `idle`
+    /// (not unread — nothing happened yet); any other state is untouched.
+    /// Without this a resumed or prompt-less harness sat in `starting` for
+    /// good — its first hook switched the source to `hooks`, which stops
+    /// the pane scraper, and nothing else ever said idle (th-8e3087).
+    Started,
+    /// Nothing to do (PreCompact, SubagentStop, unknown).
     None,
 }
 
@@ -402,6 +414,7 @@ pub fn map_hook_event(event: &str, payload: &Value) -> HookOutcome {
             }
         }
         "SessionEnd" => HookOutcome::Ended,
+        "SessionStart" => HookOutcome::Started,
         _ => HookOutcome::None,
     }
 }
@@ -447,7 +460,7 @@ pub const fn outcome_state(outcome: &HookOutcome) -> Option<SessionState> {
         HookOutcome::Working => Some(SessionState::Working),
         HookOutcome::Idle => Some(SessionState::Idle),
         HookOutcome::NeedsYou(_) => Some(SessionState::NeedsYou),
-        HookOutcome::Ended | HookOutcome::None => None,
+        HookOutcome::Ended | HookOutcome::Started | HookOutcome::None => None,
     }
 }
 
@@ -826,7 +839,12 @@ mod tests {
         assert_eq!(map_hook_event("PostToolUse", &empty), HookOutcome::Working);
         assert_eq!(map_hook_event("Stop", &empty), HookOutcome::Idle);
         assert_eq!(map_hook_event("SessionEnd", &empty), HookOutcome::Ended);
-        assert_eq!(map_hook_event("SessionStart", &empty), HookOutcome::None);
+        assert_eq!(
+            map_hook_event("SessionStart", &empty),
+            HookOutcome::Started,
+            "th-8e3087: up ⇒ idle when starting"
+        );
+        assert_eq!(outcome_state(&HookOutcome::Started), None, "the engine decides from the current state");
         assert_eq!(map_hook_event("PreCompact", &empty), HookOutcome::None);
         assert_eq!(map_hook_event("SubagentStop", &empty), HookOutcome::None);
         assert_eq!(map_hook_event("Whatever", &empty), HookOutcome::None);
@@ -893,6 +911,9 @@ mod tests {
         assert_eq!(h.harness, "");
         assert!(h.cwd.is_none());
         assert!(h.payload.is_null());
+        assert!(h.flow_id.is_none());
+        let h: HookEvent = serde_json::from_str(r#"{"event":"Stop","session_id":"","flow_id":"fs-1"}"#).unwrap();
+        assert_eq!(h.flow_id.as_deref(), Some("fs-1"));
         assert!(!is_flow_frame(&json!({"type":"x"})));
         assert!(is_flow_frame(&json!({"channel":"flow"})));
     }

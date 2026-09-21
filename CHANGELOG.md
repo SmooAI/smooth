@@ -1,5 +1,27 @@
 # @smooai/smooth
 
+## 0.52.1
+
+### Patch Changes
+
+- 08b366c: Add SMOOTH_DEMO mode: a locked-down daemon for the App Store reviewer demo (th-a455be).
+
+  Big Smooth iOS can't be reviewed without a paired Mac daemon (its empty state is "Open Big Smooth on your Mac"), so submitting it needs a safe hosted demo a review account auto-connects to over the relay. But relay phones authenticate as the daemon owner (full toolset, Bypass) — Plan mode and family RBAC don't gate them — so env-only lockdown isn't airtight. `SMOOTH_DEMO=1` clamps every turn to a deny-by-default read-only allowlist (`DEMO_SAFE_TOOLS`) applied last and unconditionally, so a reviewer (or anyone with the demo creds) gets chat + safe reads only — never bash / write / th / calendar / imessage / MCP — regardless of mode or principal. Pair with `SMOOTH_WORKSPACE` (throwaway dir) + `SMOOTH_EGRESS_ALLOWLIST`. Runbook: docs/Operations/App-Store-Reviewer-Demo.md.
+
+- 78acaf2: SmoothFlow: a second client attaching to a live session no longer logs out its shell (th-6d8f84). Two defects combined. First, `portable-pty` writes a newline and `^D` into the PTY when its writer is dropped, and our PTY child is a raw-mode `tmux attach` client that forwards those bytes to the pane as keystrokes. So any disposal of a bridge could hit the pane's login shell with EOF at an empty prompt: `[lost tty]`, then `logout`. That included a plain last-client detach. The writer is now released only after the tmux client has exited. Second, the bridge map was not atomic. Two overlapping attaches could each spawn a `tmux attach`, the second insert evicted the first (killing it on drop and corrupting the client count), and an EOF could evict a newer bridge. Lookup, spawn, insert and count now share one critical section, EOF only removes its own generation, and a dead bridge is replaced instead of handed out. The Mac app and phone companion attached to one session, two windows, and relay reconnects all went through these paths.
+
+## 0.52.0
+
+### Minor Changes
+
+- e99ae43: SmoothFlow gains seven hook-capable harnesses: Gemini CLI, Qwen Code, Cursor Agent, GitHub Copilot CLI, Factory Droid, Amp and Pi (th-b00115). Each ships a built-in manifest and a `th pkg` overlay (hooks, Amp plugin or Pi extension) that reports its real lifecycle to the flow engine, so their sessions show working, idle and needs-you from the CLI itself instead of pane scraping. `th pkg install --harness` accepts gemini, qwen, droid, copilot, amp and pi as hook-only targets, and Cursor gets its hooks merged too.
+
+  Engine: agent panes carry `SMOOTH_FLOW_ID` so a CLI that cannot pre-assign a session id binds to its row. Only Claude-protocol harnesses hold a permission request open; other asks get an id that `th flow approve` answers by keystroke. Steering honors `steer.submit_key` and the new `steer.submit_delay_ms` (Gemini drops an Enter sent right after a paste). Proven live against Pi, Qwen and Gemini.
+
+### Patch Changes
+
+- 8a95bc9: Harness support you can verify (th-3cabf6). **Conformance contract:** every built-in harness manifest now runs `resolve · launch · working · idle · steer · permission · resume · kill` against `smooth-flow-fake-agent`, a stand-in CLI that derives its argv parsing and hook events from the manifest itself, on a private engine (`cargo test -p smooai-smooth-flow --test harness_conformance`, and a new `Harness conformance` CI job). A new harness enrolls by being listed in `BUILTIN`; a scraped one adds screens captured from the real CLI. No real CLIs, network or credentials. **`th harness doctor [name] [--json]`:** a read-only per-machine verdict — works / degraded / not installed — covering the binary actually launched (and cmux shims), `--version`, resolution under the SmoothFlow app's launchd PATH (including `#!/usr/bin/env node` scripts), hooks installed and trusted (Codex's "Hooks need review", stale smooth-agent plugins), daemon reachability and sign-in, with the one command that fixes each degraded row. **Fix:** a permission ask reported under a harness's own `event_map` name carried no `request_id`, so `th flow approve` and the apps could not approve it; it now gets one that falls through to the approval keystroke.
+
 ## 0.51.1
 
 ### Patch Changes

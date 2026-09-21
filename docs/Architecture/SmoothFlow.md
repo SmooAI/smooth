@@ -56,6 +56,22 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   lossless bytes + resize, which is what a terminal-emulator surface needs. The
   PTY exists only while ≥1 client is attached; the last `flow.detach` drops it
   and the tmux session keeps running detached.
+- **One bridge per session, shared by every attached client (th-6d8f84).** The
+  lookup, the spawn on a miss, the insert and the client count happen in one
+  critical section on the bridge map. Two clients attaching at once (the Mac
+  app and the phone, two windows, a relay reconnect) get one `tmux attach`
+  client, and an EOF only evicts the bridge it belongs to (bridges carry a
+  generation). One bridge means one geometry: the latest attach or resize wins,
+  as with tmux's `window-size latest`, so the phone and the Mac take turns
+  rather than sizing to the smaller one (th-87cbca).
+- **Disposing a bridge must never type into the pane.** `portable-pty`'s unix
+  writer writes `\n` + `VEOF` into the PTY when dropped. Our child is a
+  raw-mode tmux client, so those arrive in the pane as a blank line and `^D`,
+  and a login shell at its prompt prints `logout` and exits. `close()` only
+  SIGHUPs the client (tmux prints `[lost tty]`), so a drop right after it raced
+  the signal: a plain last-client detach could end the user's shell. The writer
+  is held by the reader thread and released only after `child.wait()`, when
+  there is no client left to forward the bytes.
 
 ## Transport
 
@@ -546,3 +562,11 @@ nonce layout, tamper + replay rejection) and regenerate/verify the shared
 fixture (`SMOOTH_E2E_WRITE_FIXTURE=1` rewrites it). All live tests name a
 private tmux socket per call (`tmux_socket` on the request) so they never
 touch a running daemon's sessions.
+
+End to end (th-8e3087): `crates/smooth-daemon/tests/flow_e2e` boots a REAL
+`smooth-daemon` per test — its own HOME, port, tmux server — and drives it the
+way the apps, `th flow` and a harness's hook script do, with `fake-agent`
+installed through a manifest in the four state-source flavours. The full
+strategy (what runs where, the fake-agent contract, runtimes, the CI split) is
+[SmoothFlow-Testing.md](../Engineering/SmoothFlow-Testing.md); the macOS UI
+lane is [SmoothFlow-Testing-macOS.md](../Engineering/SmoothFlow-Testing-macOS.md).
