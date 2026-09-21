@@ -239,32 +239,87 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
     Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
 }
 
-/// `Some(exit_status)` once the pane's process has exited (remain-on-exit
-/// keeps the pane), `None` while it runs.
+/// Where a pane's process is in dying (remain-on-exit keeps the pane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneLife {
+    /// The process is running.
+    Running,
+    /// tmux has seen the pty close but has not reaped the process yet, so
+    /// its exit status is not known (th-9d2578). Ask again: this is NOT an
+    /// exit, and reading it as one records a bogus status.
+    Unreaped,
+    /// The process exited with this status, or `-1` when it died of a
+    /// signal (or tmux predates `pane_dead_signal` and reports nothing).
+    Exited(i32),
+}
+
+const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
+
+/// The pane process's [`PaneLife`].
+///
+/// An [`PaneLife::Unreaped`] read gets one nudge before it is returned:
+/// tmux can MISS a pane's SIGCHLD and leave the process a zombie with no
+/// recorded status indefinitely (th-9d2578: about 1 in 100–300 fast-exiting
+/// panes on Linux tmux 3.3a, the zombie still there seconds later). Its
+/// handler reaps with `waitpid(WAIT_ANY)`, so any other child of the server
+/// exiting collects the lost one too — `run-shell true` is that child, and
+/// the re-read then carries the real status. A process that is genuinely
+/// still running (its pty closed, its body not done) stays `Unreaped`.
+///
+/// # Errors
+/// When the session is gone or tmux fails.
+pub fn pane_life(socket: &str, session: &str) -> Result<PaneLife> {
+    let read = || -> Result<PaneLife> {
+        let s = tmux_ok(socket, &["display-message", "-p", "-t", session, DEAD_FORMAT])?;
+        tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
+        Ok(parse_pane_dead(&s))
+    };
+    let life = read()?;
+    if life != PaneLife::Unreaped {
+        return Ok(life);
+    }
+    let _ = tmux(socket, &["run-shell", "true"]);
+    read()
+}
+
+/// `Some(exit_status)` once the pane's process has exited and tmux has its
+/// status, `None` while it runs or is still being reaped.
 ///
 /// # Errors
 /// When the session is gone or tmux fails.
 pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
-    let s = tmux_ok(socket, &["display-message", "-p", "-t", session, "#{pane_dead}|#{pane_dead_status}"])?;
-    tracing::trace!(socket, session, raw = ?s, "tmux: pane_dead query");
-    Ok(parse_pane_dead(&s))
+    Ok(match pane_life(socket, session)? {
+        PaneLife::Exited(code) => Some(code),
+        PaneLife::Running | PaneLife::Unreaped => None,
+    })
 }
 
-/// Parse `#{pane_dead}|#{pane_dead_status}`: `None` while the pane runs,
-/// `Some(status)` once it died (`-1` when tmux has no status for it).
+/// Parse `#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}`.
+///
+/// `pane_dead` is tmux's "the pty fd is closed", NOT "the process was
+/// reaped". tmux closes the fd on the pty's EOF and records the status on
+/// SIGCHLD, two separate events; in between — or for good, when tmux
+/// misses the SIGCHLD (see [`pane_life`]) — a query reads `1||`. th-9d2578:
+/// CI recorded exit `-1` for an agent that exited 2. So a dead pane with
+/// neither a status nor a signal is [`PaneLife::Unreaped`], never an exit.
 ///
 /// The separator is `|`, NOT a tab: under a non-UTF-8 locale (no `LANG` —
 /// a launchd-started daemon, a CI runner, an `env -i`) tmux rewrites every
 /// control character in `display-message -p` output to `_`, so a tab-joined
 /// format read as `1_2` and the engine never saw a pane die (th-8e3087).
 #[must_use]
-pub fn parse_pane_dead(raw: &str) -> Option<i32> {
-    let mut parts = raw.split('|');
-    let dead = parts.next().unwrap_or("0").trim() == "1";
-    if !dead {
-        return None;
+pub fn parse_pane_dead(raw: &str) -> PaneLife {
+    let mut parts = raw.split('|').map(str::trim);
+    if parts.next() != Some("1") {
+        return PaneLife::Running;
     }
-    Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(-1))
+    let status = parts.next().unwrap_or("");
+    let signal = parts.next().unwrap_or("");
+    match status.parse::<i32>() {
+        Ok(code) => PaneLife::Exited(code),
+        Err(_) if !signal.is_empty() => PaneLife::Exited(-1),
+        Err(_) => PaneLife::Unreaped,
+    }
 }
 
 /// `(cols, rows)` of the pane.
@@ -418,16 +473,29 @@ mod tests {
 
     /// th-8e3087: tmux under a C locale turns a tab into `_` — the joined
     /// format must survive that, and the parsers must read what tmux prints.
+    /// th-9d2578: the pty closed but tmux has not reaped the process yet —
+    /// no status, no signal. That is not an exit (it used to read as `-1`).
+    /// A signal death has a signal and no status (3.3 prints a number, 3.5
+    /// a name).
+    #[test]
+    fn a_dead_pane_without_a_status_is_unreaped_not_exited() {
+        assert_eq!(parse_pane_dead("1||"), PaneLife::Unreaped);
+        assert_eq!(parse_pane_dead("1|"), PaneLife::Unreaped);
+        assert_eq!(parse_pane_dead("1"), PaneLife::Unreaped);
+        assert_eq!(parse_pane_dead("1||term"), PaneLife::Exited(-1));
+        assert_eq!(parse_pane_dead("1||1"), PaneLife::Exited(-1));
+        assert_eq!(parse_pane_dead("1|2|"), PaneLife::Exited(2), "a status wins");
+    }
+
     #[test]
     fn pane_queries_parse_without_a_tab_separator() {
-        assert_eq!(parse_pane_dead("0|"), None);
-        assert_eq!(parse_pane_dead("0|0"), None);
-        assert_eq!(parse_pane_dead("1|2"), Some(2));
-        assert_eq!(parse_pane_dead("1|0"), Some(0));
-        assert_eq!(parse_pane_dead("1|"), Some(-1));
-        assert_eq!(parse_pane_dead(""), None);
+        assert_eq!(parse_pane_dead("0||"), PaneLife::Running);
+        assert_eq!(parse_pane_dead("0|0|"), PaneLife::Running);
+        assert_eq!(parse_pane_dead("1|2|"), PaneLife::Exited(2));
+        assert_eq!(parse_pane_dead("1|0|"), PaneLife::Exited(0));
+        assert_eq!(parse_pane_dead(""), PaneLife::Running);
         // What a tab-joined format came back as under `LANG` unset.
-        assert_eq!(parse_pane_dead("1_2"), None, "the old format read as alive — the bug");
+        assert_eq!(parse_pane_dead("1_2"), PaneLife::Running, "the old format read as alive — the bug");
         assert_eq!(parse_pane_size("120|40"), (120, 40));
         assert_eq!(parse_pane_size("garbage"), (80, 24));
         assert_eq!(parse_pane_size("100|"), (100, 24));
@@ -465,19 +533,30 @@ mod tests {
         let sock = format!("flow-t-{}", std::process::id());
         let dir = tempfile::tempdir().unwrap();
         let session = "fs-livetest";
-        let pid = launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), "echo READY; exit 7".into()]).unwrap();
+        // The process prints, then waits to be told to exit. Printing and
+        // exiting at once is a race this test must not depend on: on Linux
+        // the pty can report EIO before the last output is readable, and
+        // tmux then never sees it (th-9d2578 measured ~1 in 25 runs).
+        let go = dir.path().join("go");
+        let script = format!("echo READY; while [ ! -e '{}' ]; do sleep 0.05; done; exit 7", go.display());
+        let pid = launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), script]).unwrap();
         assert!(pid > 0);
-        // remain-on-exit keeps the pane so the exit code is readable.
-        // tmux reports the dead status before it has necessarily drained the
-        // last output, so poll for both.
-        let mut status = None;
         let mut text = String::new();
         for _ in 0..100 {
-            status = pane_exit_status(&sock, session).unwrap();
-            // A dead pane's last line scrolls into history behind tmux's
-            // "Pane is dead" banner, so read the scrollback.
             text = capture_scrollback(&sock, session).unwrap();
-            if status.is_some() && text.contains("READY") {
+            if text.contains("READY") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(text.contains("READY"), "{text}");
+        assert_eq!(pane_exit_status(&sock, session).unwrap(), None, "still running");
+        std::fs::write(&go, b"").unwrap();
+        // remain-on-exit keeps the pane so the exit code is readable.
+        let mut status = None;
+        for _ in 0..100 {
+            status = pane_exit_status(&sock, session).unwrap();
+            if status.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -485,7 +564,10 @@ mod tests {
         assert_eq!(status, Some(7), "PTY-reported exit status");
         assert!(session_alive(&sock, session));
         assert!(!session_alive("flow-t-other-socket", session), "sessions are per socket");
-        assert!(text.contains("READY"), "{text}");
+        // A dead pane's last line scrolls into history behind tmux's "Pane is
+        // dead" banner, so read the scrollback.
+        let text = capture_scrollback(&sock, session).unwrap();
+        assert!(text.contains("READY"), "the dead pane keeps its output: {text}");
         let (cols, rows) = pane_size(&sock, session).unwrap();
         assert!(cols > 0 && rows > 0);
         kill_session(&sock, session);

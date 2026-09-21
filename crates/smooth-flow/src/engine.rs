@@ -599,6 +599,21 @@ pub fn adopted_is_stale(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(updated_at).num_seconds() >= ADOPTED_STALE_AFTER_SECS
 }
 
+/// A pane tmux still reports dead-but-unreaped after [`tmux::pane_life`]'s
+/// reap nudge (th-9d2578). `None` = not yet: the process still exists — its
+/// pty closed while it keeps running — and its real status will come, so the
+/// row is left for a later tick. Settling it earlier recorded `-1` for an
+/// agent that exited 2, and would turn a proven exit 0 into a crash + resume.
+/// Once the process is gone and there is still no status, the tmux is older
+/// than 3.3, which cannot report a signal death at all: `-1`.
+fn settle_unreaped(s: &Session) -> Option<i32> {
+    if s.pid.is_some_and(|pid| proc::is_alive(pid, s.pid_start)) {
+        None
+    } else {
+        Some(-1)
+    }
+}
+
 impl Engine {
     /// Open the store and build the engine. Reconciles nothing eagerly —
     /// the first supervision tick does.
@@ -1895,12 +1910,20 @@ impl Engine {
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
         let sock = socket_of(s);
         let alive = tmux::session_alive(&sock, t);
-        let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
-        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
+        let life = if alive { tmux::pane_life(&sock, t) } else { Ok(tmux::PaneLife::Running) };
+        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, life = ?life, "flow: supervise");
         if !alive {
             return self.on_death(s, None);
         }
-        if let Some(code) = exit? {
+        let exit = match life? {
+            tmux::PaneLife::Running => None,
+            tmux::PaneLife::Exited(code) => Some(code),
+            tmux::PaneLife::Unreaped => match settle_unreaped(s) {
+                Some(code) => Some(code),
+                None => return Ok(()),
+            },
+        };
+        if let Some(code) = exit {
             self.with_store(|st| st.set_exit_code(&s.id, Some(code)))?;
             tmux::kill_session(&sock, t);
             self.drop_pty(&s.id);
@@ -3675,6 +3698,73 @@ mod tests {
         assert!(h["checkpoints"].as_array().unwrap().is_empty());
         assert!(h["blocks"].as_array().unwrap().is_empty());
         assert!(h["pr"].is_null());
+    }
+
+    /// th-9d2578, deterministically: tmux marks a pane dead when its pty
+    /// closes and records the exit status only when it reaps the process —
+    /// two events. A tick between them read `#{pane_dead}` = 1 with no
+    /// status and recorded exit `-1` (CI: an agent that exited 2 came back
+    /// `-1`, and an exit 0 would have been read as a crash). This pane
+    /// holds that window open instead of racing it: the process ignores
+    /// SIGHUP, closes every fd on the pty (so tmux sees EOF and closes the
+    /// pane), and exits 2 only when the test says so.
+    ///
+    /// Linux only: macOS does not report EOF on a pty master while its
+    /// session leader lives, so the window never opens there.
+    #[test]
+    fn a_tick_while_tmux_has_not_reaped_the_pane_waits_for_the_real_status() {
+        if !tmux::tmux_available() || !cfg!(target_os = "linux") {
+            eprintln!("skipping: needs tmux on Linux");
+            return;
+        }
+        let sock = format!("flow-ur-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let go = tmp.path().join("go");
+        let script = format!(
+            "trap '' HUP; exec </dev/null >/dev/null 2>/dev/null; while [ ! -e '{}' ]; do sleep 0.05; done; exit 2",
+            go.display()
+        );
+        let e = engine(tmp.path());
+        let s = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                argv: Some(vec!["sh".into(), "-c".into(), script]),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        // Wait for tmux (not the engine) to reach the window.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_life(&sock, &s.id).ok() != Some(tmux::PaneLife::Unreaped) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            tmux::pane_life(&sock, &s.id).unwrap(),
+            tmux::PaneLife::Unreaped,
+            "the pane is dead but unreaped"
+        );
+
+        for _ in 0..3 {
+            e.supervise_tick().unwrap();
+        }
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(
+            (row.state, row.exit_code),
+            (SessionState::Idle, None),
+            "no exit settled without a status: {row:?}"
+        );
+        assert!(tmux::session_alive(&sock, &s.id), "the pane is kept until its status is read");
+
+        std::fs::write(&go, b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && tmux::pane_life(&sock, &s.id).ok() != Some(tmux::PaneLife::Exited(2)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        e.supervise_tick().unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.exit_code), (SessionState::Dead, Some(2)), "the real status: {row:?}");
+        tmux::kill_server(&sock);
     }
 
     /// Live: launch a real `shell`-kind session (a `cat` loop so it never

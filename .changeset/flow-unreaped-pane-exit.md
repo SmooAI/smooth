@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+SmoothFlow no longer records a bogus exit code when tmux hasn't reaped a dead pane yet (th-9d2578). tmux marks a pane dead when its pty closes and records the exit status later, when it reaps the process. It also sometimes misses the SIGCHLD and leaves the process a zombie with no status at all: about 1 in 100–300 fast exits on Linux, measured. The supervisor read "dead with no status" as exit `-1`. An agent that exited 2 was recorded as `-1`, which made `flow_e2e`'s `agent_that_dies_is_resumed_with_its_session_id` flake inside the required Rust check. Worse, a clean exit 0 could have been treated as a crash and resumed. A dead pane with neither a status nor a signal is now "unreaped". The engine nudges tmux to reap (`run-shell true`, whose exit makes the server collect the missed child), reads again, and leaves the row for a later tick while the process still exists. `live_launch_exit_status_and_kill` no longer depends on output from a process that prints and exits in the same instant, which Linux can lose.

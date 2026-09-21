@@ -45,6 +45,16 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   so a dead pane stays until the engine has read `#{pane_dead_status}` — the
   PTY's own exit report, which is the only proof of exit 0 the spec accepts
   (rule 5).
+- **`pane_dead` is not "exited" (th-9d2578).** tmux marks a pane dead when its
+  pty closes and records the status when it reaps the process: two events.
+  In between, and indefinitely when tmux misses the SIGCHLD (it does, about 1
+  in 100–300 fast exits on Linux), `#{pane_dead_status}` is empty. The engine
+  used to read that as exit `-1`, so an agent that exited 2 was recorded as
+  `-1` and a clean exit 0 would have been read as a crash and resumed.
+  `tmux::pane_life` returns `Unreaped` instead. When it sees that, it runs
+  `run-shell true`, a server child whose exit makes tmux's
+  `waitpid(WAIT_ANY)` collect the missed one, and reads again. Supervision
+  leaves a still-unreaped row for a later tick while the process exists.
 - **`exec` in the pane.** The launch line is `sh -c 'exec <argv>'`, so the pane
   pid _is_ the agent's pid. The engine records `pid` + start time (from
   `ps -o lstart=`) as the liveness index: a recycled pid can't pass for the agent.
