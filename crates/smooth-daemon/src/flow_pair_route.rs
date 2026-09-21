@@ -5,8 +5,12 @@
 //! - `POST /api/flow/pair` → mint a QR: `{pairing_id, url, code, device,
 //!   label, daemon_public_key, expires_at, relay_enabled}`
 //! - `GET /api/flow/pair/{id}` → `{state: pending|paired|expired|unknown, …}`
-//! - `GET /api/flow/pairings` → `{pairings: [{device, label, platform,
-//!   public_key, created_at, last_seen_at}]}` (keys never leave the daemon)
+//! - `GET /api/flow/pairings` → `{device, label, relay_enabled, relay:
+//!   {state, detail, since}, pairings: [{device, label, platform, public_key,
+//!   created_at, last_seen_at}]}` (keys never leave the daemon). `relay` is
+//!   the live link state (th-37c286) — `online` is the only reachable one;
+//!   `authenticating` / `unauthenticated` mean a socket the relay has not
+//!   registered as a peer.
 //! - `DELETE /api/flow/pairings/{device}` → `{revoked: bool}`
 //!
 //! All gated by the daemon's local token, like every other flow route.
@@ -22,6 +26,7 @@ use serde_json::{json, Value};
 
 use crate::flow_e2e::PairingState;
 use crate::flow_route::authorized;
+use crate::relay_status::{RelayPhase, RelayStatusHandle};
 
 type ApiErr = (StatusCode, Json<Value>);
 
@@ -30,15 +35,21 @@ type ApiErr = (StatusCode, Json<Value>);
 pub struct PairRouteState {
     pairing: Arc<PairingState>,
     token: Option<Arc<String>>,
-    relay_enabled: bool,
+    relay: RelayStatusHandle,
+}
+
+impl PairRouteState {
+    fn relay_enabled(&self) -> bool {
+        self.relay.get().state != RelayPhase::Disabled
+    }
 }
 
 /// The router. `token = None` disables the gate (tests only).
-pub fn pair_router(pairing: Arc<PairingState>, token: Option<String>, relay_enabled: bool) -> Router {
+pub fn pair_router(pairing: Arc<PairingState>, token: Option<String>, relay: RelayStatusHandle) -> Router {
     let state = PairRouteState {
         pairing,
         token: token.map(Arc::new),
-        relay_enabled,
+        relay,
     };
     Router::new()
         .route("/api/flow/pair", post(begin))
@@ -71,7 +82,7 @@ async fn begin(State(st): State<PairRouteState>, headers: HeaderMap, Query(q): Q
         "label": qr.label,
         "daemon_public_key": qr.daemon_public_key,
         "expires_at": expires_at,
-        "relay_enabled": st.relay_enabled,
+        "relay_enabled": st.relay_enabled(),
     })))
 }
 
@@ -95,7 +106,8 @@ async fn list(State(st): State<PairRouteState>, headers: HeaderMap, Query(q): Qu
     Ok(Json(json!({
         "device": st.pairing.daemon_device(),
         "label": st.pairing.daemon_label(),
-        "relay_enabled": st.relay_enabled,
+        "relay_enabled": st.relay_enabled(),
+        "relay": st.relay.get(),
         "pairings": st.pairing.list(),
     })))
 }
@@ -144,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_are_token_gated() {
-        let router = pair_router(Arc::new(state()), Some("secret".into()), true);
+        let router = pair_router(Arc::new(state()), Some("secret".into()), RelayStatusHandle::new(RelayPhase::Online, ""));
         assert_eq!(call(&router, "POST", "/api/flow/pair", None).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(call(&router, "GET", "/api/flow/pairings", Some("wrong")).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(call(&router, "GET", "/api/flow/pairings", Some("secret")).await.0, StatusCode::OK);
@@ -153,9 +165,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pairings_report_the_live_relay_state() {
+        // th-37c286: connected-but-unauthenticated must be visible as such, and
+        // must follow the supervisor's updates without a restart.
+        let relay = RelayStatusHandle::new(RelayPhase::Authenticating, "waiting");
+        let router = pair_router(Arc::new(state()), None, relay.clone());
+        let (_, l) = call(&router, "GET", "/api/flow/pairings", None).await;
+        assert_eq!(l["relay_enabled"], true);
+        assert_eq!(l["relay"]["state"], "authenticating");
+        relay.set(RelayPhase::Unauthenticated, "no ack");
+        let (_, l) = call(&router, "GET", "/api/flow/pairings", None).await;
+        assert_eq!(l["relay"]["state"], "unauthenticated");
+        assert_eq!(l["relay"]["detail"], "no ack");
+        assert!(l["relay"]["since"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_disabled_relay_reports_disabled() {
+        let router = pair_router(Arc::new(state()), None, RelayStatusHandle::disabled());
+        let (_, l) = call(&router, "GET", "/api/flow/pairings", None).await;
+        assert_eq!(l["relay_enabled"], false);
+        assert_eq!(l["relay"]["state"], "disabled");
+    }
+
+    #[tokio::test]
     async fn begin_status_list_revoke_round_trip() {
         let st = Arc::new(state());
-        let router = pair_router(st.clone(), None, false);
+        let router = pair_router(st.clone(), None, RelayStatusHandle::disabled());
         let (code, v) = call(&router, "POST", "/api/flow/pair", None).await;
         assert_eq!(code, StatusCode::OK);
         let id = v["pairing_id"].as_str().unwrap().to_string();

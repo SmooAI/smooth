@@ -123,6 +123,11 @@ final class MockServerUITests: FlowUITestCase {
         phonesTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")
         XCTAssertTrue(settings.staticTexts["Brent’s Pixel"].waitForExistence(timeout: 10), "seeded pairing is listed")
+        // th-37c286: a link that is up but not authenticated says so, rather
+        // than leaving an empty-looking pane that reads as "offline".
+        let relay = settings.descendants(matching: .any)["settings.phones.relay"]
+        XCTAssertTrue(relay.waitForExistence(timeout: 10), "relay link state is shown")
+        XCTAssertTrue(relay.label.contains("NOT authenticated"), "unauthenticated is named: \(relay.label)")
         settings.buttons["settings.phones.pair"].click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.phones.qr"].waitForExistence(timeout: 10), "QR on screen")
         XCTAssertTrue(settings.staticTexts["Mock iPhone"].waitForExistence(timeout: 15), "the mock's scan lands as a paired row")

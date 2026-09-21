@@ -51,6 +51,7 @@ pub mod org_auth;
 pub mod plugins_route;
 pub mod push;
 pub mod relay;
+pub mod relay_status;
 pub mod schedule;
 pub mod scheduler;
 pub mod search;

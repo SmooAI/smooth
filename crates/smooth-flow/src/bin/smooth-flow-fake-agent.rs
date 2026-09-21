@@ -52,6 +52,14 @@ fn stty(args: &[&str]) {
     let _ = Command::new("stty").args(args).stdin(Stdio::inherit()).status();
 }
 
+/// This launch's hook token (th-91d032): the file the engine names in
+/// `SMOOTH_FLOW_HOOK_TOKEN_FILE`, hex only. A real harness hook presents it.
+fn hook_token() -> Option<String> {
+    let path = std::env::var_os(smooth_flow::hook_auth::TOKEN_FILE_ENV)?;
+    let t: String = std::fs::read_to_string(path).ok()?.chars().filter(char::is_ascii_hexdigit).collect();
+    (!t.is_empty()).then_some(t)
+}
+
 /// POST `body` to the hook URL; the reply body (a long-poll blocks here).
 fn post(url: &str, body: &Value) -> Option<String> {
     let rest = url.strip_prefix("http://")?;
@@ -59,8 +67,11 @@ fn post(url: &str, body: &Value) -> Option<String> {
     let mut stream = TcpStream::connect(host).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(180)));
     let payload = body.to_string();
+    let token = hook_token()
+        .map(|t| format!("{}: {t}\r\n", smooth_flow::hook_auth::TOKEN_HEADER))
+        .unwrap_or_default();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n{token}Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
     stream.write_all(req.as_bytes()).ok()?;

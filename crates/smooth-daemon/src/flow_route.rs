@@ -10,9 +10,12 @@
 //! **Auth.** Every route except `/api/flow/hooks` requires the daemon's local
 //! token (`?token=`, `Authorization: Bearer`, or `X-Smooth-Token`) — a flow
 //! session is a shell on this machine, and the daemon may be reachable over a
-//! tailnet. Hooks are unauthenticated on purpose: the hook script must never
-//! block the harness, and it can only touch a session whose pre-assigned
-//! 128-bit id it already knows.
+//! tailnet. Hooks authenticate differently (th-91d032): each engine launch is
+//! issued its own hook token, presented in `X-Smooth-Flow-Hook-Token`, which
+//! speaks for that one session only. A tokenless hook reaches adopted rows
+//! only, is refused through a browser or proxy, and can never open an
+//! approvable permission request. See `smooth_flow::hook_auth`. Every hook
+//! reply is still a 200: the hook script must never block the harness.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,7 +31,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use smooth_flow::protocol::{client_seq, parse_client_frame, CandidateSpec};
-use smooth_flow::{ClientFrame, Decision, Engine, HookEvent, HookReply, NewRequest, ServerFrame, SessionKind};
+use smooth_flow::{ClientFrame, Decision, Engine, HookCaller, HookEvent, HookReply, NewRequest, ServerFrame, SessionKind};
 
 /// Route error: status + `{"error": …}` body (small, so clippy's
 /// `result_large_err` stays quiet).
@@ -366,8 +369,6 @@ async fn handoff(
     Ok(Json(blocking(move || e.handoff(&id)).await?))
 }
 
-/// `POST /api/flow/hooks` — always 200 with a JSON body, so a hook script can
-/// pass it straight through to the harness.
 /// `GET /api/flow/harnesses` — every manifest (hidden ones included, flagged),
 /// in the user's order, with the resolved binary.
 async fn list_harnesses(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
@@ -445,9 +446,13 @@ async fn put_settings(
     Ok(Json(json!({ "adopt_plain_sessions": adopt })))
 }
 
-async fn hooks(State(st): State<FlowState>, Json(ev): Json<HookEvent>) -> Json<Value> {
+/// `POST /api/flow/hooks` — always 200 with a JSON body, so a hook script can
+/// pass it straight through to the harness. A refused caller gets `{}`, the
+/// same "no opinion" as an unknown session, so a probe learns nothing.
+async fn hooks(State(st): State<FlowState>, headers: HeaderMap, Json(ev): Json<HookEvent>) -> Json<Value> {
+    let caller = HookCaller::from_headers(|name| headers.get(name).and_then(|v| v.to_str().ok()));
     let e = st.engine.clone();
-    let reply = match tokio::task::spawn_blocking(move || e.hook(ev)).await {
+    let reply = match tokio::task::spawn_blocking(move || e.hook(ev, &caller)).await {
         Ok(Ok(r)) => r,
         Ok(Err(err)) => {
             tracing::warn!(error = %err, "flow hook failed");
@@ -686,6 +691,30 @@ mod tests {
     use smooth_flow::EngineConfig;
     use tower::ServiceExt as _;
 
+    /// A claude row (no process) with harness id `agent`, issued a hook token
+    /// the way a launch is — written straight to the shared flow.db. Returns
+    /// (flow session id, token).
+    fn tokened_row(tmp: &std::path::Path, agent: &str, adopted: bool) -> (String, String) {
+        use smooth_flow::store::NewSession;
+        let st = smooth_flow::FlowStore::open(&tmp.join("flow.db")).unwrap();
+        let id = st
+            .create(NewSession {
+                kind: Some(SessionKind::Claude),
+                agent_session_id: Some(agent.into()),
+                project: tmp.to_string_lossy().into(),
+                worktree: tmp.to_string_lossy().into(),
+                adopted,
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let token = smooth_flow::hook_auth::mint();
+        if !adopted {
+            st.set_hook_token_hash(&id, Some(&smooth_flow::hook_auth::hash(&token))).unwrap();
+        }
+        (id, token)
+    }
+
     fn engine(tmp: &std::path::Path) -> Engine {
         Engine::open(EngineConfig {
             db_path: tmp.join("flow.db"),
@@ -800,7 +829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_routes_are_gated_and_hooks_are_not() {
+    async fn http_routes_are_gated_and_hooks_answer_without_the_daemon_token() {
         let tmp = tempfile::tempdir().unwrap();
         let router = flow_router(engine(tmp.path()), Some("tok".into()));
         let resp = router
@@ -828,7 +857,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "hooks never need a token");
+        assert_eq!(resp.status(), StatusCode::OK, "a hook is never refused with an error status");
         assert_eq!(body_json(resp).await, json!({}));
         // Unknown session on a gated route is 404 with an error object.
         let resp = router
@@ -914,19 +943,7 @@ mod tests {
     async fn hello_nudge_handoff_and_events_over_ws() {
         let tmp = tempfile::tempdir().unwrap();
         let engine = engine(tmp.path());
-        let sid = {
-            use smooth_flow::store::NewSession;
-            let st = smooth_flow::FlowStore::open(&tmp.path().join("flow.db")).unwrap();
-            st.create(NewSession {
-                kind: Some(SessionKind::Claude),
-                agent_session_id: Some("uuid-ev".into()),
-                project: tmp.path().to_string_lossy().into(),
-                worktree: tmp.path().to_string_lossy().into(),
-                ..Default::default()
-            })
-            .unwrap()
-            .id
-        };
+        let (sid, token) = tokened_row(tmp.path(), "uuid-ev", false);
         let app = flow_router(engine.clone(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -958,6 +975,7 @@ mod tests {
 
         reqwest::Client::new()
             .post(format!("http://{addr}/api/flow/hooks"))
+            .header("x-smooth-flow-hook-token", &token)
             .json(&json!({"harness":"claude-code","event":"UserPromptSubmit","session_id":"uuid-ev","payload":{"prompt":"go"}}))
             .send()
             .await
@@ -1039,19 +1057,7 @@ mod tests {
         let engine = engine(tmp.path());
         // A claude session row with a known harness id, no process (same
         // db file — WAL lets a second connection write it).
-        let sid = {
-            use smooth_flow::store::NewSession;
-            let st = smooth_flow::FlowStore::open(&tmp.path().join("flow.db")).unwrap();
-            st.create(NewSession {
-                kind: Some(SessionKind::Claude),
-                agent_session_id: Some("uuid-hook".into()),
-                project: "/p".into(),
-                worktree: "/p".into(),
-                ..Default::default()
-            })
-            .unwrap()
-            .id
-        };
+        let (sid, token) = tokened_row(tmp.path(), "uuid-hook", false);
         let app = flow_router(engine.clone(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1066,6 +1072,7 @@ mod tests {
         let http = reqwest::Client::new();
         let post = tokio::spawn(async move {
             http.post(format!("http://{addr}/api/flow/hooks"))
+                .header("x-smooth-flow-hook-token", &token)
                 .json(&json!({
                     "harness":"claude-code","event":"PermissionRequest","session_id":"uuid-hook","cwd":"/p",
                     "payload":{"tool_name":"Bash","tool_input":{"command":"ls"}}
@@ -1107,5 +1114,103 @@ mod tests {
         let body = tokio::time::timeout(Duration::from_secs(5), post).await.unwrap().unwrap();
         assert_eq!(body["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
         assert_eq!(body["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
+    /// th-91d032, adversarial, over real HTTP: every forged permission
+    /// request is answered `{}` at once — never held open, never shown as
+    /// approvable — and only the session's own token opens the long-poll.
+    #[tokio::test]
+    async fn forged_hooks_are_refused_over_http() {
+        type Case<'a> = (&'a str, Value, Vec<(&'static str, String)>);
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = engine(tmp.path());
+        let (a, ta) = tokened_row(tmp.path(), "agent-a", false);
+        let (b, tb) = tokened_row(tmp.path(), "agent-b", false);
+        let (adopted, _) = tokened_row(tmp.path(), "plain", true);
+        let app = flow_router(engine.clone(), Some("daemon-tok".into()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+        let perm = |sid: &str| json!({"harness":"claude-code","event":"PermissionRequest","session_id":sid,"payload":{"tool_name":"Bash","tool_input":{"command":"rm -rf ~"}}});
+        let post = |body: Value, headers: Vec<(&'static str, String)>| {
+            let mut req = http.post(format!("http://{addr}/api/flow/hooks")).json(&body);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            async move {
+                let resp = tokio::time::timeout(Duration::from_secs(5), req.send()).await;
+                assert!(resp.is_ok(), "answered at once, not held open");
+                let resp = resp.unwrap().unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                resp.json::<Value>().await.unwrap()
+            }
+        };
+        let tok = |t: &str| vec![("x-smooth-flow-hook-token", t.to_string())];
+        let cases: Vec<Case> = vec![
+            ("missing token", perm("agent-a"), vec![]),
+            ("wrong token", perm("agent-a"), tok(&smooth_flow::hook_auth::mint())),
+            ("empty token", perm("agent-a"), tok("")),
+            ("another session's token", perm("agent-a"), tok(&tb)),
+            ("the daemon's own token is not a hook token", perm("agent-a"), tok("daemon-tok")),
+            ("the stored hash is not the token", perm("agent-a"), tok(&smooth_flow::hook_auth::hash(&ta))),
+            ("right token, other harness session (nested / replayed)", perm("someone-else"), tok(&ta)),
+            ("adopted session asking permission", perm("plain"), vec![]),
+            ("tokenless from a browser", perm("plain"), vec![("origin", "https://evil.example".into())]),
+            (
+                "tokenless through tailscale serve",
+                perm("plain"),
+                vec![("tailscale-user-login", "peer@example.com".into())],
+            ),
+            ("tokenless through a proxy", perm("plain"), vec![("x-forwarded-for", "100.64.0.9".into())]),
+        ];
+        for (name, body, headers) in cases {
+            assert_eq!(post(body, headers).await, json!({}), "{name}");
+            for id in [&a, &b] {
+                assert!(!engine.has_pending(id), "{name}: no approvable request on {id}");
+            }
+            assert!(!engine.has_pending(&adopted), "{name}: nothing approvable on the adopted row");
+        }
+        for id in [&a, &b] {
+            let row = engine.get(id).unwrap().unwrap();
+            assert!(row.attention.is_none(), "{id} never showed a forged prompt: {:?}", row.attention);
+        }
+
+        // Replay: close B; its token no longer speaks for anything.
+        engine.kill(&b, false).unwrap();
+        engine.remove(&b).unwrap();
+        let stop = json!({"harness":"claude-code","event":"UserPromptSubmit","session_id":"agent-b","payload":{}});
+        assert_eq!(post(stop, tok(&tb)).await, json!({}), "a token for a session that no longer exists");
+
+        // Control: A's own token opens the long-poll, and it is held.
+        let real = {
+            let http = http.clone();
+            let ta = ta.clone();
+            tokio::spawn(async move {
+                http.post(format!("http://{addr}/api/flow/hooks"))
+                    .header("x-smooth-flow-hook-token", ta)
+                    .json(&json!({"harness":"claude-code","event":"PermissionRequest","session_id":"agent-a","payload":{}}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Value>()
+                    .await
+                    .unwrap()
+            })
+        };
+        let mut request_id = None;
+        for _ in 0..50 {
+            if let Some(r) = engine.get(&a).unwrap().unwrap().attention.and_then(|at| at.request_id) {
+                request_id = Some(r);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(request_id.is_some(), "A's own hook opened an approvable request");
+        let request_id = request_id.unwrap();
+        assert!(!real.is_finished());
+        engine.approve(&a, &request_id, Decision::Allow).unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(5), real).await.unwrap().unwrap();
+        assert_eq!(body["hookSpecificOutput"]["decision"]["behavior"], "allow");
     }
 }

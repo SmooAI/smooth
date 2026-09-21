@@ -485,7 +485,19 @@ const server = http.createServer((req, res) => {
         return json(200, { state: 'paired', pairing_id: m[1], device: phone.device, label: phone.label, platform: phone.platform });
     }
     if (req.method === 'GET' && url.pathname === '/api/flow/pairings')
-        return json(200, { device: 'daemon-mock00000000', label: 'mock', relay_enabled: true, pairings: [...pairings.values()] });
+        return json(200, {
+            device: 'daemon-mock00000000',
+            label: 'mock',
+            relay_enabled: true,
+            // th-37c286: the mock's link is up but never authenticated — the
+            // case that used to look exactly like "offline".
+            relay: {
+                state: 'unauthenticated',
+                detail: 'The relay accepted the socket but never authenticated this daemon (no ack in 15s), so it is NOT a peer.',
+                since: new Date().toISOString(),
+            },
+            pairings: [...pairings.values()],
+        });
     if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/flow\/pairings\/([^/]+)$/)))
         return json(200, { device: m[1], revoked: pairings.delete(m[1]) });
     json(404, { code: 'not_found', message: url.pathname });

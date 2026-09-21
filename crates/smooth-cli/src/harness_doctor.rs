@@ -225,8 +225,22 @@ fn mentions_flow_hook(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|t| t.contains("flow-hook.sh"))
 }
 
+/// Whether an installed `flow-hook.sh` presents the per-launch hook token
+/// (th-91d032). One that predates it is refused by the engine for every
+/// session SmoothFlow launched, so those sessions silently scrape.
+fn flow_hook_is_authenticated(script: &Path) -> bool {
+    std::fs::read_to_string(script).is_ok_and(|t| t.contains(smooth_flow::hook_auth::TOKEN_FILE_ENV))
+}
+
+/// The `flow-hook.sh` path a `hooks.json` command runs (`/p/flow-hook.sh Stop codex`).
+fn flow_hook_script(command: &str) -> Option<PathBuf> {
+    command.split_whitespace().find(|w| w.ends_with("flow-hook.sh")).map(PathBuf::from)
+}
+
 fn claude_hooks(m: &Machine) -> Check {
-    let fix = Some("th harness enable claude-code".to_string());
+    // `claude plugin update` restarts nothing: a running session keeps the
+    // hooks it started with.
+    let fix = Some("th harness enable claude-code   # then restart Claude Code sessions".to_string());
     let enabled = std::fs::read_to_string(m.home.join(".claude/settings.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -253,6 +267,16 @@ fn claude_hooks(m: &Machine) -> Check {
             "hooks",
             Level::Fail,
             format!("smooth-agent {version} predates SmoothFlow's flow hook — sessions fall back to pane scraping"),
+            fix,
+        );
+    }
+    if !flow_hook_is_authenticated(&dir.join("hooks/flow-hook.sh")) {
+        return check(
+            "hooks",
+            Level::Fail,
+            format!(
+                "smooth-agent {version}'s flow-hook.sh predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping"
+            ),
             fix,
         );
     }
@@ -300,6 +324,25 @@ fn codex_flow_hook_keys(hooks_json: &Path) -> Vec<String> {
     keys
 }
 
+/// Every distinct `flow-hook.sh` path `hooks.json` runs.
+fn codex_flow_hook_scripts(hooks_json: &Path) -> Vec<PathBuf> {
+    let Some(v) = std::fs::read_to_string(hooks_json).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+        return Vec::new();
+    };
+    let table = v.get("hooks").unwrap_or(&v);
+    let mut out: Vec<PathBuf> = table
+        .as_object()
+        .into_iter()
+        .flat_map(|events| events.values())
+        .flat_map(|groups| groups.as_array().into_iter().flatten())
+        .flat_map(|group| group.get("hooks").and_then(Value::as_array).into_iter().flatten())
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str).and_then(flow_hook_script))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn codex_hooks(m: &Machine) -> Check {
     let dir = codex_home(m);
     let hooks_json = dir.join("hooks.json");
@@ -310,6 +353,21 @@ fn codex_hooks(m: &Machine) -> Check {
             Level::Fail,
             format!("no SmoothFlow flow hook in {} — state falls back to pane scraping", hooks_json.display()),
             Some("th harness enable codex".into()),
+        );
+    }
+    let stale: Vec<PathBuf> = codex_flow_hook_scripts(&hooks_json)
+        .into_iter()
+        .filter(|p| p.is_file() && !flow_hook_is_authenticated(p))
+        .collect();
+    if let Some(script) = stale.first() {
+        return check(
+            "hooks",
+            Level::Fail,
+            format!(
+                "{} predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping",
+                script.display()
+            ),
+            Some("th harness enable codex   # then accept Codex's \"Hooks need review\" dialog again".into()),
         );
     }
     let trusted: Vec<String> = std::fs::read_to_string(dir.join("config.toml"))
@@ -363,6 +421,17 @@ fn opencode_hooks(m: &Machine) -> Check {
             "hooks",
             Level::Fail,
             format!("{} predates SmoothFlow — it posts no flow events", target.display()),
+            fix,
+        );
+    }
+    if !text.contains(smooth_flow::hook_auth::TOKEN_FILE_ENV) {
+        return check(
+            "hooks",
+            Level::Fail,
+            format!(
+                "{} predates hook tokens (th-91d032) — SmoothFlow refuses its hooks, sessions fall back to pane scraping",
+                target.display()
+            ),
             fix,
         );
     }
@@ -1004,8 +1073,25 @@ mod tests {
             format!("[hooks.state.\"{hooks}:session_start:0:1\"]\ntrusted_hash = \"abc\"\n[hooks.state.\"{hooks}:stop:0:0\"]\ntrusted_hash = \"def\"\n"),
         )
         .unwrap();
-        assert_eq!(codex_hooks(&m).level, Level::Ok);
+        assert_eq!(codex_hooks(&m).level, Level::Ok, "a script that isn't there is not judged");
         assert_eq!(snake("UserPromptSubmit"), "user_prompt_submit");
+        assert_eq!(codex_flow_hook_scripts(&codex.join("hooks.json")), vec![PathBuf::from("/x/flow-hook.sh")]);
+        assert_eq!(flow_hook_script("th prime"), None);
+
+        // th-91d032: a rendered flow-hook.sh that sends no token is refused.
+        let script = tmp.path().join("pkg/flow-hook.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "curl …/api/flow/hooks").unwrap();
+        let wired = std::fs::read_to_string(codex.join("hooks.json"))
+            .unwrap()
+            .replace("/x/flow-hook.sh", &script.display().to_string());
+        std::fs::write(codex.join("hooks.json"), wired).unwrap();
+        let c = codex_hooks(&m);
+        assert_eq!(c.level, Level::Fail);
+        assert!(c.detail.contains("predates hook tokens"), "{c:?}");
+        assert!(c.fix.as_deref().unwrap().starts_with("th harness enable codex"));
+        std::fs::write(&script, "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
+        assert!(!codex_hooks(&m).detail.contains("predates"));
     }
 
     #[test]
@@ -1021,6 +1107,13 @@ mod tests {
         let c = claude_hooks(&m);
         assert!(c.detail.contains("smooth-agent 0.41.4 predates"), "newest by version, not by name: {c:?}");
         std::fs::write(cache.join("0.41.4/hooks/hooks.json"), r#"{"x":"flow-hook.sh"}"#).unwrap();
+        // th-91d032: a flow-hook.sh that sends no token is refused by the engine.
+        std::fs::write(cache.join("0.41.4/hooks/flow-hook.sh"), "curl …/api/flow/hooks").unwrap();
+        let c = claude_hooks(&m);
+        assert_eq!(c.level, Level::Fail);
+        assert!(c.detail.contains("0.41.4's flow-hook.sh predates hook tokens"), "{c:?}");
+        assert_eq!(c.fix.as_deref(), Some("th harness enable claude-code   # then restart Claude Code sessions"));
+        std::fs::write(cache.join("0.41.4/hooks/flow-hook.sh"), "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
         assert_eq!(claude_hooks(&m).level, Level::Ok);
         std::fs::write(m.home.join(".claude/settings.json"), "{}").unwrap();
         assert!(claude_hooks(&m).detail.contains("not enabled"));
@@ -1105,12 +1198,24 @@ mod tests {
         let m = machine(tmp.path(), &[], None);
         assert!(opencode_hooks(&m).detail.contains("not linked"));
         let src = tmp.path().join("plugin.js");
-        std::fs::write(&src, "export default { 'session.idle': () => fetch('/api/flow/hooks') }").unwrap();
+        std::fs::write(&src, "export default { event: ({event}) => fetch('/api/flow/hooks') }").unwrap();
         let link = m.home.join(".config/opencode/plugins/smooth-agent.js");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&src, &link).unwrap();
+        let c = opencode_hooks(&m);
+        assert!(c.detail.contains("predates hook tokens"), "a tokenless plugin is refused by the engine: {c:?}");
+        assert_eq!(c.fix.as_deref(), Some("th harness enable opencode"));
+        std::fs::write(
+            &src,
+            "// SMOOTH_FLOW_HOOK_TOKEN_FILE\nexport default { 'session.idle': () => fetch('/api/flow/hooks') }",
+        )
+        .unwrap();
         assert!(opencode_hooks(&m).detail.contains("never fires"));
-        std::fs::write(&src, "export default { event: ({event}) => fetch('/api/flow/hooks') }").unwrap();
+        std::fs::write(
+            &src,
+            "// SMOOTH_FLOW_HOOK_TOKEN_FILE\nexport default { event: ({event}) => fetch('/api/flow/hooks') }",
+        )
+        .unwrap();
         assert_eq!(opencode_hooks(&m).level, Level::Ok);
     }
 }
