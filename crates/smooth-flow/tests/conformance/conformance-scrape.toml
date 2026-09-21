@@ -1,0 +1,25 @@
+# Screens for manifests/conformance-scrape.toml — the shape of what a scraped
+# CLI paints (an aider-style scrolling REPL). A real harness's fixture holds
+# text captured from its pane with `th flow snapshot <id>`.
+[screens]
+boot = """
+conformance-scrape v1.0
+Model: fake-model
+"""
+working = """
+conformance-scrape v1.0
+> fix the tests
+
+Waiting for fake-model… (esc to interrupt)
+"""
+idle = """
+conformance-scrape v1.0
+Tokens: 1.2k sent, 80 received.
+
+> 
+"""
+needs_you = """
+conformance-scrape v1.0
+Run shell command `git push`?
+(Y)es/(N)o [Yes]:
+"""

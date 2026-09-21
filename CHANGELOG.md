@@ -1,5 +1,30 @@
 # @smooai/smooth
 
+## 0.52.0
+
+### Minor Changes
+
+- e99ae43: SmoothFlow gains seven hook-capable harnesses: Gemini CLI, Qwen Code, Cursor Agent, GitHub Copilot CLI, Factory Droid, Amp and Pi (th-b00115). Each ships a built-in manifest and a `th pkg` overlay (hooks, Amp plugin or Pi extension) that reports its real lifecycle to the flow engine, so their sessions show working, idle and needs-you from the CLI itself instead of pane scraping. `th pkg install --harness` accepts gemini, qwen, droid, copilot, amp and pi as hook-only targets, and Cursor gets its hooks merged too.
+
+  Engine: agent panes carry `SMOOTH_FLOW_ID` so a CLI that cannot pre-assign a session id binds to its row. Only Claude-protocol harnesses hold a permission request open; other asks get an id that `th flow approve` answers by keystroke. Steering honors `steer.submit_key` and the new `steer.submit_delay_ms` (Gemini drops an Enter sent right after a paste). Proven live against Pi, Qwen and Gemini.
+
+### Patch Changes
+
+- 8a95bc9: Harness support you can verify (th-3cabf6). **Conformance contract:** every built-in harness manifest now runs `resolve · launch · working · idle · steer · permission · resume · kill` against `smooth-flow-fake-agent`, a stand-in CLI that derives its argv parsing and hook events from the manifest itself, on a private engine (`cargo test -p smooai-smooth-flow --test harness_conformance`, and a new `Harness conformance` CI job). A new harness enrolls by being listed in `BUILTIN`; a scraped one adds screens captured from the real CLI. No real CLIs, network or credentials. **`th harness doctor [name] [--json]`:** a read-only per-machine verdict — works / degraded / not installed — covering the binary actually launched (and cmux shims), `--version`, resolution under the SmoothFlow app's launchd PATH (including `#!/usr/bin/env node` scripts), hooks installed and trusted (Codex's "Hooks need review", stale smooth-agent plugins), daemon reachability and sign-in, with the one command that fixes each degraded row. **Fix:** a permission ask reported under a harness's own `event_map` name carried no `request_id`, so `th flow approve` and the apps could not approve it; it now gets one that falls through to the approval keystroke.
+
+## 0.51.1
+
+### Patch Changes
+
+- 83ed002: install-release.sh: fix the signature gate that refused every legitimate release
+
+  Two independent bugs made `install-release.sh` reject the official signed build; it was caught installing 0.2.3 by hand.
+
+  - `codesign -dv` alone prints no `Authority=` lines; they require `--verbose=2`.
+  - Under `set -o pipefail`, `producer | grep -q` returns 141 — `grep -q` exits on the first match and SIGPIPEs the producer, so a _match_ read as a failure. This affected every verification in the script, not just `codesign`: the Gatekeeper check, the Mach-O filter and the dylib scan had the same shape.
+
+  All six check sites now capture output first and grep from a here-string. `install-release.test.sh` covers both causes, including a behavioural proof that an ad-hoc signed bundle is rejected, and refuses any future `| grep -q` while pipefail is on.
+
 ## 0.51.0
 
 ### Minor Changes

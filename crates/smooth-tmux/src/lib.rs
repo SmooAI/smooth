@@ -239,6 +239,18 @@ impl TmuxDriver {
     /// # Errors
     /// On any underlying tmux command failure.
     pub fn send(&self, text: &str) -> Result<()> {
+        self.paste(text)?;
+        self.send_enter()
+    }
+
+    /// Bracketed-paste `text` into the pane WITHOUT submitting it — for a
+    /// harness that needs a pause (or a different key) before the submit
+    /// (pearl th-b00115: Gemini CLI folds an Enter that arrives within ~100 ms
+    /// of a paste into the paste as a newline).
+    ///
+    /// # Errors
+    /// On tmux failure.
+    pub fn paste(&self, text: &str) -> Result<()> {
         let buffer = format!("smth-{}-{}", self.session, uuid::Uuid::new_v4().simple());
 
         let mut child = Command::new("tmux")
@@ -273,8 +285,7 @@ impl TmuxDriver {
                 .status();
             return Err(anyhow!("tmux paste-buffer exited non-zero: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
-
-        self.send_enter()
+        Ok(())
     }
 
     /// Send a bare `Enter` keystroke (submit the current input).

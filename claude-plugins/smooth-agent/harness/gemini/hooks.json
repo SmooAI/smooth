@@ -1,0 +1,92 @@
+{
+    "hooks": {
+        "SessionStart": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "BeforeAgent": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh BeforeAgent gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "BeforeTool": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh BeforeTool gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "AfterTool": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh AfterTool gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "AfterAgent": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh AfterAgent gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "Notification": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Notification gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "PreCompress": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PreCompress gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ],
+        "SessionEnd": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionEnd gemini",
+                        "timeout": 5000
+                    }
+                ]
+            }
+        ]
+    }
+}

@@ -76,6 +76,27 @@ th harness add --agentic gemini [--binary gemini] [--docs <url>] [--iterations 3
                                    # Needs a provider: you're offered the Smoo AI Gateway or your own key (th-473294)
 ```
 
+**Does it work here? (pearl th-3cabf6).** `list` says a binary resolves;
+`doctor` says whether a SmoothFlow session on it will behave — read-only, it
+never installs, trusts a hook dialog or logs in:
+
+```bash
+th harness doctor                  # every manifest: ● works / ◐ degraded (why + the one fix) / ○ not installed
+th harness doctor codex -v         # one harness, every check shown
+th harness doctor --json           # {harnesses:[{name, verdict, reason, fix, binary, app_binary, cmux_shim, version, checks}]}
+```
+
+Checks: the binary SmoothFlow runs and whether `which` returns a cmux shim
+instead; `--version`; whether it resolves under the SmoothFlow app's launchd
+PATH (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` + `prefer_paths`), not
+just your shell's — including a `#!/usr/bin/env node` script whose `node` the
+app cannot see; hooks installed **and trusted** (Codex's "Hooks need review",
+a stale smooth-agent plugin without the flow hook, an OpenCode plugin without
+the generic `event` hook); whether the daemon reports go to is listening; and
+sign-in from env keys / credential files. Every manifest also passes the
+conformance contract in CI — see
+[Harness-Manifests.md § Supporting a harness](Harness-Manifests.md#supporting-a-harness--the-conformance-contract).
+
 `list`/`show` read the files directly (with the daemon's order/hide prefs
 when it runs); `hide`/`unhide`/`order` write the prefs through the daemon
 (`PUT /api/flow/harnesses/prefs`), which then updates every picker via

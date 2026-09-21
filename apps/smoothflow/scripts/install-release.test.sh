@@ -60,5 +60,70 @@ grep -qF "grep -oE '/[^[:space:]\"]*SmoothFlow[^[:space:]\"]*\\.app'" "$SRC" || 
     fail=1
 }
 
+
+# ---------------------------------------------------------------- signature gate
+# Two independent bugs made this gate refuse every legitimate release; it was
+# caught only by installing 0.2.3 by hand. Failing closed is the safe direction,
+# but it made the standing release step useless, and nothing covered it.
+#
+#   1. `codesign -dv` alone prints NO Authority lines — they need --verbose=2.
+#   2. Under `set -o pipefail`, `producer | grep -q` returns 141: grep exits on
+#      the first match and SIGPIPEs the producer, so a MATCH reads as a failure.
+#      This one bites every check in the script, not just codesign.
+AUTHORITY="Developer ID Application: Smoo LLC (DTX9733844)"
+
+grep -q 'codesign -dv --verbose=2 "\$SRC"' "$SRC" ||
+    { echo "FAIL: downloaded-app authority check must use 'codesign -dv --verbose=2' (bare -dv prints no Authority lines)"; fail=1; }
+grep -q 'codesign -dv --verbose=2 "\$DEST"' "$SRC" ||
+    { echo "FAIL: installed-copy authority check must use 'codesign -dv --verbose=2'"; fail=1; }
+
+# No verification may pipe a producer straight into `grep -q` while pipefail is
+# on. Capture first, then grep from a here-string.
+if grep -q '^set -[a-z]*o pipefail' "$SRC" && grep -nE '\| *grep -q' "$SRC" | grep -q .; then
+    echo "FAIL: pipefail is on and a check still pipes into 'grep -q' (returns 141 on a match):"
+    grep -nE '\| *grep -q' "$SRC" | sed 's/^/       /'
+    fail=1
+fi
+
+# Behavioural proof of bug 2, independent of the script's text.
+PIPED=0; bash -c 'set -uo pipefail; printf "Authority=x\n" | grep -q Authority=' || PIPED=$?
+CAPTURED=0; bash -c 'set -uo pipefail; out="$(printf "Authority=x\n")"; grep -q Authority= <<< "$out"' || CAPTURED=$?
+[[ $CAPTURED == 0 ]] || { echo "FAIL: capture-then-grep should succeed on a match (got $CAPTURED)"; fail=1; }
+
+# Behavioural proof of the gate itself: ad-hoc signing yields no Authority line,
+# so the Developer ID gate must reject such a bundle.
+TMPROOT=$(mktemp -d); TMPAPP="$TMPROOT/T.app"
+mkdir -p "$TMPAPP/Contents/MacOS"
+printf '#!/bin/sh\n' > "$TMPAPP/Contents/MacOS/T"; chmod +x "$TMPAPP/Contents/MacOS/T"
+cat > "$TMPAPP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>T</string>
+<key>CFBundleIdentifier</key><string>ai.smoo.installreleasetest</string>
+</dict></plist>
+PLIST
+if codesign -s - "$TMPAPP" >/dev/null 2>&1; then
+    ADHOC="$(codesign -dv --verbose=2 "$TMPAPP" 2>&1 || true)"
+    grep -q "Authority=$AUTHORITY" <<< "$ADHOC" &&
+        { echo "FAIL: an ad-hoc signed bundle must not satisfy the Developer ID gate"; fail=1; }
+else
+    echo "skip: codesign unavailable — ad-hoc rejection not exercised"
+fi
+rm -rf "$TMPROOT"
+
+# Positive case needs a real Developer ID signature, so it runs only where an
+# official install exists. Skipped in CI rather than faked.
+if [[ -d "$DEST" ]] && codesign --verify --strict "$DEST" >/dev/null 2>&1; then
+    REAL="$(codesign -dv --verbose=2 "$DEST" 2>&1 || true)"
+    grep -q "Authority=$AUTHORITY" <<< "$REAL" ||
+        { echo "FAIL: the installed release does not present '$AUTHORITY' under --verbose=2"; fail=1; }
+    BARE="$(codesign -dv "$DEST" 2>&1 || true)"
+    grep -q "Authority=" <<< "$BARE" &&
+        echo "NOTE: bare -dv prints Authority on this macOS; requiring --verbose=2 remains correct"
+else
+    echo "skip: no verifiable /Applications/SmoothFlow.app — positive case not exercised"
+fi
+
 [[ $fail == 0 ]] && echo "install-release.sh matcher: all checks passed"
 exit $fail
