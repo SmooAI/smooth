@@ -211,6 +211,20 @@ struct PhonesPane: View {
                 .font(.caption).foregroundStyle(Color(Theme.muted))
             if let list = app.pairedPhones, !list.relayEnabled {
                 Text("The relay is off for this engine (SMOOTH_RELAY=0) — phones cannot reach it.").font(.caption).foregroundStyle(Color(Theme.amber))
+            } else if let relay = app.pairedPhones?.relay {
+                // th-37c286: say which "can't reach" this is — signed out, up but
+                // not authenticated, or unreachable — never a silent empty list.
+                HStack(alignment: .top, spacing: 8) {
+                    Text(relay.glyph).foregroundStyle(relay.reachable ? Color(Theme.teal) : relay.needsAttention ? Color(Theme.amber) : Color(Theme.faint))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(relay.headline).font(.callout)
+                        Text(relay.detail).font(.caption).foregroundStyle(Color(Theme.muted)).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                // An explicit label: `.combine` alone left it empty for XCUITest.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(relay.headline). \(relay.detail)")
+                .accessibilityIdentifier("settings.phones.relay")
             }
             if let pending = app.pendingPairing {
                 HStack(alignment: .top, spacing: 14) {
@@ -264,7 +278,14 @@ struct PhonesPane: View {
             }
             Spacer()
         }
-        .task { await app.loadPairings() }
+        // Re-read while visible so the relay line follows the link (a sign-in
+        // elsewhere puts the engine on the relay within seconds).
+        .task {
+            while !Task.isCancelled {
+                await app.loadPairings()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
         .onDisappear { app.cancelPairing() }
     }
 }

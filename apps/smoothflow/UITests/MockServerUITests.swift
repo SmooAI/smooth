@@ -25,6 +25,28 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(label("center.path").contains("smooth-th-1b8e05"), label("center.path"))
     }
 
+    /// th-68d10a: Diff and PR follow the worktree, not the session kind. A
+    /// shell in a worktree opens Diff and an honest empty PR; a shell outside
+    /// any repo stays on the terminal when Diff is asked for.
+    func testAShellInAWorktreeShowsDiffAndAnEmptyPR() {
+        waitForState("fs-shell002") { $0 == "idle" }
+        app.staticTexts["sidebar.title.fs-shell002"].click()
+        XCTAssertTrue(waitUntil { self.label("center.path").contains("smooth-th-68d10a") }, label("center.path"))
+        app.typeKey("2", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.descendants(matching: .any)["center.diff"].waitForExistence(timeout: 10), "Diff opens for a shell in a worktree; tree: \(dump())")
+        app.typeKey("3", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.descendants(matching: .any)["center.pr.empty"].waitForExistence(timeout: 10), "PR shows its empty state, not a missing tab")
+
+        app.typeKey("1", modifierFlags: [.command, .option])
+        app.staticTexts["sidebar.title.fs-shell001"].click()
+        XCTAssertTrue(waitUntil { !self.label("center.path").contains("smooth-th-68d10a") }, label("center.path"))
+        app.typeKey("2", modifierFlags: [.command, .option])
+        XCTAssertFalse(
+            waitUntil(timeout: 3) { self.app.descendants(matching: .any)["center.diff"].exists },
+            "a shell outside any repo has no Diff to open"
+        )
+    }
+
     func testInboxPermissionAllowFlipsSessionToWorking() {
         waitForState("fs-d3e842aa") { $0 == "approve" }
         app.typeKey("i", modifierFlags: .command)
@@ -101,6 +123,11 @@ final class MockServerUITests: FlowUITestCase {
         phonesTab.click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.pane.phones"].waitForExistence(timeout: 10), "Phones pane")
         XCTAssertTrue(settings.staticTexts["Brent’s Pixel"].waitForExistence(timeout: 10), "seeded pairing is listed")
+        // th-37c286: a link that is up but not authenticated says so, rather
+        // than leaving an empty-looking pane that reads as "offline".
+        let relay = settings.descendants(matching: .any)["settings.phones.relay"]
+        XCTAssertTrue(relay.waitForExistence(timeout: 10), "relay link state is shown")
+        XCTAssertTrue(relay.label.contains("NOT authenticated"), "unauthenticated is named: \(relay.label)")
         settings.buttons["settings.phones.pair"].click()
         XCTAssertTrue(settings.descendants(matching: .any)["settings.phones.qr"].waitForExistence(timeout: 10), "QR on screen")
         XCTAssertTrue(settings.staticTexts["Mock iPhone"].waitForExistence(timeout: 15), "the mock's scan lands as a paired row")

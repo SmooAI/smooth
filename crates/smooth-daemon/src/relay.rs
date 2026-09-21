@@ -20,9 +20,13 @@
 //!
 //! Auth: the daemon's stored Smoo session (`th auth login`, kept fresh by the
 //! credential heartbeat in [`crate::auth_login`]). The access token is re-read
-//! from [`CredentialsStore`] on EVERY (re)connect — the heartbeat rotates it —
-//! and a signed-out daemon simply waits and retries: the relay is a
-//! reachability layer, never a reason the daemon can't boot.
+//! from [`CredentialsStore`] on EVERY (re)connect — the heartbeat rotates it.
+//! A signed-out daemon dials nothing and waits: the relay is a reachability
+//! layer, never a reason the daemon can't boot. The link follows the
+//! credentials file too, not just the socket (th-37c286): a login dials at
+//! once, a logout leaves, and a socket the relay never acknowledges with
+//! `{"type":"connected"}` is reported as `unauthenticated`, never online —
+//! rules in [`crate::relay_status`].
 //!
 //! **Flow channel (th-7f0af3).** An envelope whose frame carries
 //! `"channel":"flow"` is bridged to the daemon's flow WS (`/api/flow/ws`)
@@ -65,11 +69,12 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use smooai_client_shared::auth::storage::CredentialsStore;
-use tokio::sync::mpsc;
+use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::flow_e2e::{self, E2eSession, Inbound, PairingState, PENDING_OUT_MAX};
+use crate::relay_status::{on_cred_change, waiting_phase, CredDecision, CredView, Link, RelayPhase, RelayStatusHandle};
 
 /// The production relay endpoint (SMOODEV-2828).
 const DEFAULT_RELAY_URL: &str = "wss://relay.smoo.ai/ws";
@@ -90,8 +95,18 @@ const LABEL_MAX_CHARS: usize = 120;
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
-/// How long a signed-out daemon waits before checking for credentials again.
+/// Safety net for a signed-out daemon: re-check the credentials this often
+/// even if the watcher never reports a change.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(60);
+/// How often the credential watcher re-reads the credentials file. It's a
+/// small local read; 5s means a `th auth login` (or the heartbeat renewing an
+/// expired session) puts the daemon on the relay within seconds instead of
+/// waiting out a retry timer — or a restart (th-37c286).
+const CRED_POLL: Duration = Duration::from_secs(5);
+/// How long an open socket may wait for the relay's `{"type":"connected"}`
+/// auth ack before we call it what it is — connected but NOT a peer — and
+/// re-dial with a refreshed token (th-37c286).
+const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often a daemon whose device id another local process holds re-checks
 /// the lock (the other daemon may have quit).
 const IDENTITY_RECHECK: Duration = Duration::from_secs(30);
@@ -337,7 +352,11 @@ fn connect_url(relay_url: &str, token: &str, device: &str, label: &str, kind: Re
 enum RelayMsg {
     /// Relay heartbeat — answer with `{"type":"pong"}`.
     Ping,
-    /// Registration ack / pong / other control noise — nothing to do.
+    /// `{"type":"connected"}` — the relay verified our token and registered
+    /// this daemon as a peer. Until this arrives we are NOT reachable, however
+    /// open the socket looks (th-37c286).
+    Connected,
+    /// Pong / other control noise — nothing to do.
     Ignore,
     /// The addressed peer (a phone we sent to) is connected nowhere — drop its bridge.
     PeerOffline(String),
@@ -354,6 +373,7 @@ fn classify_relay_msg(text: &str) -> RelayMsg {
     };
     match v.get("type").and_then(Value::as_str) {
         Some("ping") => return RelayMsg::Ping,
+        Some("connected") => return RelayMsg::Connected,
         Some("peer_offline") => {
             return v
                 .get("to")
@@ -364,7 +384,7 @@ fn classify_relay_msg(text: &str) -> RelayMsg {
             tracing::warn!(frame = %text, "relay: server error frame");
             return RelayMsg::Ignore;
         }
-        Some(_) => return RelayMsg::Ignore, // connected / pong / future control frames
+        Some(_) => return RelayMsg::Ignore, // pong / future control frames
         None => {}
     }
     match (v.get("from").and_then(Value::as_str), v.get("frame")) {
@@ -772,17 +792,47 @@ fn needs_refresh(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool 
     matches!(expires_at, Some(exp) if now >= exp - ChronoDuration::seconds(REFRESH_MARGIN_SECS))
 }
 
+/// What the supervisor can dial with right now.
+#[derive(Debug)]
+enum TokenOutcome {
+    /// A token to put on the wire, and the user it belongs to.
+    Dial { token: String, user: Option<String> },
+    /// Nothing usable — signed out, or expired beyond renewal. Carries the view
+    /// so the status says which.
+    NoSession(CredView),
+}
+
+/// Turn what a (possibly refreshed) credentials read produced into something
+/// to dial. Pure over `now`: an access token already past expiry is NOT
+/// dialled — the relay would reject it and the supervisor would hammer it —
+/// the daemon waits for a sign-in instead (th-37c286).
+fn token_outcome(creds: Option<Credentials>, now: DateTime<Utc>) -> TokenOutcome {
+    match (CredView::observe(creds.as_ref(), now), creds) {
+        (CredView::Usable { .. }, Some(c)) => TokenOutcome::Dial {
+            token: c.access_token,
+            user: c.user,
+        },
+        (view, _) => TokenOutcome::NoSession(view),
+    }
+}
+
 /// Read the freshest USABLE Smoo access token from the stored session,
 /// refreshing it first when it's expired/near-expiry (or `force`d after a
-/// 4401) and persisting the rotated tokens. `None` when signed out / no store —
-/// the supervisor waits and retries. Best-effort: a failed refresh still
-/// returns the existing token so the connect is attempted, never crashing the
-/// daemon (th-c6a542).
-async fn fresh_access_token(http: &reqwest::Client, force: bool) -> Option<String> {
-    let store = CredentialsStore::default_user().ok()?;
-    let creds = store.load().ok().flatten()?;
+/// 4401) and persisting the rotated tokens. [`TokenOutcome::NoSession`] when
+/// signed out / no store / expired beyond renewal — the supervisor waits for
+/// the credentials to change. Best-effort: a failed refresh of a token that
+/// still has runway returns the existing token so the connect is attempted,
+/// never crashing the daemon (th-c6a542).
+async fn fresh_access_token(http: &reqwest::Client, force: bool) -> TokenOutcome {
+    let Some(store) = CredentialsStore::default_user().ok() else {
+        return TokenOutcome::NoSession(CredView::SignedOut);
+    };
+    let creds = store.load().ok().flatten();
+    let Some(creds) = creds else {
+        return TokenOutcome::NoSession(CredView::SignedOut);
+    };
     if !force && !needs_refresh(creds.expires_at, Utc::now()) {
-        return Some(creds.access_token).filter(|t| !t.is_empty());
+        return token_outcome(Some(creds), Utc::now());
     }
     // Refresh under the SHARED credential lock (th-c6a542). The old path here
     // refreshed unlocked, so it raced the credential heartbeat and any `th`
@@ -811,15 +861,102 @@ async fn fresh_access_token(http: &reqwest::Client, force: bool) -> Option<Strin
             creds
         }
     };
-    Some(creds.access_token).filter(|t| !t.is_empty())
+    token_outcome(Some(creds), Utc::now())
+}
+
+/// Watch the Smoo credentials file and publish a [`CredView`] whenever what it
+/// says changes — a `th auth login`, the credential heartbeat renewing the
+/// session, a logout, a different user. The supervisor dials on these rather
+/// than only on a socket drop, which is what left a daemon that booted before
+/// sign-in off the relay until a restart (th-37c286).
+///
+/// A read error (the file caught mid-write) keeps the last view instead of
+/// reporting "signed out" and dropping a healthy link.
+fn spawn_credential_watch() -> watch::Receiver<CredView> {
+    fn read() -> Option<CredView> {
+        let Ok(store) = CredentialsStore::default_user() else {
+            return Some(CredView::SignedOut);
+        };
+        store.load().ok().map(|creds| CredView::observe(creds.as_ref(), Utc::now()))
+    }
+    let (tx, rx) = watch::channel(read().unwrap_or(CredView::SignedOut));
+    tokio::spawn(async move {
+        while !tx.is_closed() {
+            tokio::time::sleep(CRED_POLL).await;
+            if let Some(view) = read() {
+                tx.send_if_modified(|v| {
+                    if *v == view {
+                        return false;
+                    }
+                    *v = view;
+                    true
+                });
+            }
+        }
+    });
+    rx
+}
+
+/// Resolve when the credential view changes. Never resolves if the watcher is
+/// gone, so a dead watcher can't turn the supervisor into a hot loop.
+async fn creds_changed(rx: &mut watch::Receiver<CredView>) {
+    if rx.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The human sentence for a daemon waiting on a sign-in.
+const fn waiting_detail(phase: RelayPhase) -> &'static str {
+    match phase {
+        RelayPhase::SessionExpired => {
+            "The Smoo session expired and could not be renewed — sign in again (`smoo auth login`) and this daemon rejoins the relay on its own."
+        }
+        _ => "Not signed in to Smoo — nothing is dialled until you sign in (`smoo auth login`); the daemon then joins the relay on its own.",
+    }
+}
+
+/// Record why a connection failed and say whether the next dial must force a
+/// token refresh (the relay rejected the token, or never acknowledged it).
+fn report_failed_end(status: &RelayStatusHandle, end: &ConnEnd) -> bool {
+    match end {
+        ConnEnd::AuthRejected => {
+            status.set(
+                RelayPhase::AuthRejected,
+                "The relay rejected this daemon's Smoo token; refreshing the session and retrying.",
+            );
+            tracing::warn!("relay: token rejected — refreshing the Smoo session and reconnecting");
+            true
+        }
+        ConnEnd::NoAck => {
+            status.set(
+                RelayPhase::Unauthenticated,
+                format!(
+                    "The relay accepted the socket but never authenticated this daemon (no ack in {}s), so it is NOT a peer — phones see it as offline. Re-dialling with a refreshed session.",
+                    AUTH_ACK_TIMEOUT.as_secs()
+                ),
+            );
+            true
+        }
+        ConnEnd::Normal | ConnEnd::CredsChanged | ConnEnd::SignedOut => {
+            if status.get().state != RelayPhase::Offline {
+                status.set(RelayPhase::Offline, "The relay connection dropped; reconnecting.");
+            }
+            tracing::warn!("relay: connection ended; reconnecting");
+            false
+        }
+    }
 }
 
 /// Spawn the relay supervisor.
 ///
 /// (Re)connects to the relay with a fresh token, forwards envelopes phone ⇄
 /// operator via per-device loopback bridges, backs off exponentially on drops,
-/// and waits patiently while signed out. Never fails the daemon — every error
-/// is a log line and a retry.
+/// and waits for a sign-in while signed out. The link follows the credentials
+/// store as well as the socket (th-37c286): a login dials at once, a logout
+/// disconnects, a changed user re-authenticates, and a socket the relay never
+/// acknowledges is reported as `unauthenticated` — never as online. Every
+/// phase lands in `status` for `/api/flow/pairings` (the app's Phones pane).
+/// Never fails the daemon — every error is a log line and a retry.
 ///
 /// `identity` is resolved once by the caller ([`device_identity`]) — the id
 /// must be identical across reconnects (or the relay sees a new device every
@@ -831,6 +968,7 @@ pub fn spawn_relay(
     local_token: String,
     identity: RelayIdentity,
     pairing: Arc<PairingState>,
+    status: RelayStatusHandle,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let http = reqwest::Client::default();
@@ -839,20 +977,26 @@ pub fn spawn_relay(
         let RelayIdentity { device, label, kind } = identity;
         tracing::info!(%device, %label, kind = kind.as_str(), "relay: this daemon's identity");
         let lock_dir = identity_lock_dir();
+        let mut creds_rx = spawn_credential_watch();
         // Held for the life of the task once claimed; `None` while another
         // local process owns the id (or when there is nothing to lock).
         let mut claim: Option<IdentityLock> = None;
         let mut lock_unavailable = false;
         let mut backoff = BACKOFF_MIN;
-        // Set after an auth rejection (4401 close / 401 handshake): the next
-        // read forces a token refresh before reconnecting. Normal backoff still
-        // applies, so a persistently-dead refresh token can't hammer the relay.
+        // Set after an auth rejection (4401 close / 401 handshake / no ack):
+        // the next read forces a token refresh before reconnecting. Normal
+        // backoff still applies, so a persistently-dead refresh token can't
+        // hammer the relay.
         let mut force_refresh = false;
         loop {
             if claim.is_none() && !lock_unavailable {
                 match claim_identity(lock_dir.as_deref(), &device) {
                     IdentityClaim::Held(lock) => claim = Some(lock),
                     IdentityClaim::Busy => {
+                        status.set(
+                            RelayPhase::IdentityBusy,
+                            format!("Another daemon on this Mac is already on the relay as {device}; this one stays off until it lets go."),
+                        );
                         tracing::error!(
                             %device,
                             "relay: another daemon on this machine is ALREADY online as this device id — not connecting with it \
@@ -869,40 +1013,81 @@ pub fn spawn_relay(
                     }
                 }
             }
-            let Some(token) = fresh_access_token(&http, force_refresh).await else {
-                force_refresh = false;
-                tracing::debug!("relay: no Smoo session (signed out) — retrying in {SIGNED_OUT_RECHECK:?}");
-                tokio::time::sleep(SIGNED_OUT_RECHECK).await;
-                continue;
+            // Mark the current view seen BEFORE reading the store, so any change
+            // from here on (a logout mid-dial included) wakes the connection.
+            creds_rx.borrow_and_update();
+            let (token, user) = match fresh_access_token(&http, force_refresh).await {
+                TokenOutcome::Dial { token, user } => (token, user),
+                TokenOutcome::NoSession(view) => {
+                    force_refresh = false;
+                    let phase = waiting_phase(&view);
+                    let detail = waiting_detail(phase);
+                    if status.set(phase, detail) {
+                        tracing::info!(state = phase.as_str(), "relay: {detail}");
+                    }
+                    // Wake on the credentials changing; the timeout is only a
+                    // safety net under the watcher.
+                    let _ = tokio::time::timeout(SIGNED_OUT_RECHECK, creds_changed(&mut creds_rx)).await;
+                    backoff = BACKOFF_MIN;
+                    continue;
+                }
             };
             force_refresh = false;
+            let dialled = CredView::dialled(user, &token);
             let url = connect_url(&relay_url, &token, &device, &label, kind);
+            status.set(RelayPhase::Connecting, format!("Dialling {relay_url}."));
             let connected_at = std::time::Instant::now();
-            match tokio_tungstenite::connect_async(&url).await {
+            let end = match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
-                    tracing::info!(relay = %relay_url, kind = kind.as_str(), "relay: connected — {} is reachable without tailscale", kind.product());
-                    match run_connection(stream, &local_ws_url, &flow_ws_url, &pairing).await {
-                        ConnEnd::AuthRejected => {
-                            tracing::warn!("relay: token rejected (4401) — refreshing the Smoo session and reconnecting");
-                            force_refresh = true;
-                        }
-                        ConnEnd::Normal => tracing::warn!("relay: connection ended; reconnecting"),
-                    }
+                    // The upgrade is NOT authentication: the relay verifies the
+                    // token, then registers the peer and acks `connected`.
+                    tracing::info!(relay = %relay_url, kind = kind.as_str(), "relay: socket open — waiting for the relay to authenticate this daemon");
+                    status.set(
+                        RelayPhase::Authenticating,
+                        "Socket open; waiting for the relay to authenticate this daemon. Phones cannot see it yet.",
+                    );
+                    let ctx = ConnCtx {
+                        local_ws_url: &local_ws_url,
+                        flow_ws_url: &flow_ws_url,
+                        pairing: &pairing,
+                        dialled: &dialled,
+                        status: &status,
+                        device: &device,
+                        kind,
+                        ack_timeout: AUTH_ACK_TIMEOUT,
+                    };
+                    run_connection(stream, &ctx, &mut creds_rx).await
+                }
+                Err(e) if is_auth_handshake_error(&e) => {
+                    tracing::warn!(error = %e, relay = %relay_url, "relay: handshake rejected (401) — refreshing the Smoo session and reconnecting");
+                    ConnEnd::AuthRejected
                 }
                 Err(e) => {
-                    if is_auth_handshake_error(&e) {
-                        tracing::warn!(error = %e, relay = %relay_url, "relay: handshake rejected (401) — refreshing the Smoo session and reconnecting");
-                        force_refresh = true;
-                    } else {
-                        tracing::warn!(error = %e, relay = %relay_url, "relay: connect failed");
-                    }
+                    tracing::warn!(error = %e, relay = %relay_url, "relay: connect failed");
+                    status.set(RelayPhase::Offline, format!("Cannot reach {relay_url}; retrying."));
+                    ConnEnd::Normal
                 }
+            };
+            if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut) {
+                // Straight back to the top: re-dial with the new session, or
+                // report signed-out and wait. No backoff — this isn't a failure.
+                backoff = BACKOFF_MIN;
+                continue;
             }
+            force_refresh = report_failed_end(&status, &end);
             // A connection that lived a while earns a fresh backoff.
             if connected_at.elapsed() > BACKOFF_RESET_AFTER {
                 backoff = BACKOFF_MIN;
             }
-            tokio::time::sleep(backoff).await;
+            // Back off — but a credentials change (a fresh login after a
+            // rejection, say) cuts the wait short.
+            tokio::select! {
+                () = tokio::time::sleep(backoff) => {}
+                () = creds_changed(&mut creds_rx) => {
+                    backoff = BACKOFF_MIN;
+                    continue;
+                }
+            }
             backoff = (backoff * 2).min(BACKOFF_MAX);
         }
     })
@@ -915,30 +1100,97 @@ fn is_auth_handshake_error(e: &tokio_tungstenite::tungstenite::Error) -> bool {
     matches!(e, tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status().as_u16() == 401)
 }
 
-/// How a relay connection ended — normally, or because the relay rejected our
-/// token (4401), which the supervisor answers with a refresh + reconnect.
+/// How a relay connection ended. Each variant is a different answer from the
+/// supervisor: back off, refresh-and-retry, or go straight back to the top.
 #[derive(Debug, PartialEq, Eq)]
 enum ConnEnd {
+    /// Dropped (or never connected) — back off and retry.
     Normal,
+    /// The relay rejected our token (4401 close / 401 handshake) — refresh.
     AuthRejected,
+    /// The socket opened but the relay never acked auth — connected, NOT a
+    /// peer (th-37c286). Refresh and retry.
+    NoAck,
+    /// The Smoo session changed under the socket — re-dial with it now.
+    CredsChanged,
+    /// Signed out (or expired beyond renewal) — leave the relay and wait.
+    SignedOut,
 }
 
-/// One live relay connection: pump relay ⇄ bridges until the socket ends.
+/// What a live connection needs from the supervisor.
+struct ConnCtx<'a> {
+    local_ws_url: &'a str,
+    flow_ws_url: &'a str,
+    pairing: &'a Arc<PairingState>,
+    /// The session this socket was dialled with.
+    dialled: &'a CredView,
+    status: &'a RelayStatusHandle,
+    device: &'a str,
+    kind: RelayKind,
+    /// How long to wait for the relay's auth ack ([`AUTH_ACK_TIMEOUT`]).
+    ack_timeout: Duration,
+}
+
+/// One live relay connection: pump relay ⇄ bridges until the socket ends, the
+/// relay fails to authenticate us in time, or the credentials change enough to
+/// matter ([`on_cred_change`]).
+#[allow(
+    clippy::too_many_lines,
+    reason = "one select loop over the socket, the auth-ack deadline and the credentials watch"
+)]
 async fn run_connection(
     stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    local_ws_url: &str,
-    flow_ws_url: &str,
-    pairing: &Arc<PairingState>,
+    ctx: &ConnCtx<'_>,
+    creds: &mut watch::Receiver<CredView>,
 ) -> ConnEnd {
+    let ConnCtx {
+        local_ws_url,
+        flow_ws_url,
+        pairing,
+        dialled,
+        status,
+        device,
+        kind,
+        ack_timeout,
+    } = *ctx;
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
     // writer to the relay socket.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     let mut bridges: HashMap<String, Bridge> = HashMap::new();
     let mut end = ConnEnd::Normal;
+    let mut link = Link::Authenticating;
+    let ack_deadline = tokio::time::sleep(ack_timeout);
+    tokio::pin!(ack_deadline);
 
     loop {
         tokio::select! {
+            () = &mut ack_deadline, if link == Link::Authenticating => {
+                tracing::error!(
+                    %device,
+                    "relay: CONNECTED BUT UNAUTHENTICATED — the relay accepted the socket but has not acknowledged auth after \
+                     {ack_timeout:?}, so this daemon is NOT registered as a peer and phones will see it as offline. \
+                     Refreshing the Smoo session and re-dialling."
+                );
+                end = ConnEnd::NoAck;
+                break;
+            }
+            () = creds_changed(creds) => {
+                let now = creds.borrow_and_update().clone();
+                match on_cred_change(link, dialled, &now) {
+                    CredDecision::Keep => {}
+                    CredDecision::Reconnect => {
+                        tracing::info!("relay: the Smoo session changed — re-authenticating with it");
+                        end = ConnEnd::CredsChanged;
+                        break;
+                    }
+                    CredDecision::Disconnect => {
+                        tracing::info!("relay: the Smoo session ended (signed out or expired) — leaving the relay");
+                        end = ConnEnd::SignedOut;
+                        break;
+                    }
+                }
+            }
             envelope = out_rx.recv() => match envelope {
                 // Bridges hold clones of out_tx, so recv() only ever yields
                 // None when… it can't (we hold out_tx too). Guard anyway.
@@ -968,6 +1220,13 @@ async fn run_connection(
                     }
                 };
                 match classify_relay_msg(&text) {
+                    RelayMsg::Connected => {
+                        if link != Link::Online {
+                            link = Link::Online;
+                            status.set(RelayPhase::Online, format!("Registered on the relay as {device} — phones can reach this {}.", kind.product()));
+                            tracing::info!(%device, kind = kind.as_str(), "relay: authenticated — {} is a relay peer; phones can reach it without tailscale", kind.product());
+                        }
+                    }
                     RelayMsg::Ping => {
                         if sink.send(Message::Text(r#"{"type":"pong"}"#.into())).await.is_err() {
                             break;
@@ -1013,6 +1272,10 @@ async fn run_connection(
     }
     // Dropping the map aborts every bridge task (Bridge::drop).
     bridges.clear();
+    if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut | ConnEnd::NoAck) {
+        // We're the ones leaving — say so, rather than letting the relay time us out.
+        let _ = sink.send(Message::Close(None)).await;
+    }
     end
 }
 
@@ -1245,7 +1508,8 @@ mod tests {
     #[test]
     fn classify_ping_and_control_noise() {
         assert_eq!(classify_relay_msg(r#"{"type":"ping"}"#), RelayMsg::Ping);
-        assert_eq!(classify_relay_msg(r#"{"type":"connected"}"#), RelayMsg::Ignore);
+        // The auth ack is NOT noise: it is the only proof we're a peer (th-37c286).
+        assert_eq!(classify_relay_msg(r#"{"type":"connected"}"#), RelayMsg::Connected);
         assert_eq!(classify_relay_msg(r#"{"type":"pong"}"#), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"type":"error","message":"x"}"#), RelayMsg::Ignore);
         // Presence control frames (SMOODEV-2834) are the phone's business, not ours.
@@ -1428,6 +1692,176 @@ mod tests {
         let loaded = store.load().unwrap().expect("present");
         assert_eq!(loaded.access_token, "new-access");
         assert_eq!(loaded.refresh_token.as_deref(), Some("rot-abc"));
+    }
+
+    // ── credential-driven relay link (th-37c286) ─────────────────────────────
+
+    #[test]
+    fn token_outcome_dials_only_a_usable_session() {
+        let now = Utc::now();
+        assert!(matches!(token_outcome(None, now), TokenOutcome::NoSession(CredView::SignedOut)));
+        let expired = creds_expiring(Some(now - ChronoDuration::minutes(1)), Some("r"));
+        assert!(
+            matches!(token_outcome(Some(expired), now), TokenOutcome::NoSession(CredView::Expired { .. })),
+            "an expired token (refresh failed) must not be dialled — the relay would only reject it"
+        );
+        let live = creds_expiring(Some(now + ChronoDuration::hours(1)), Some("r"));
+        match token_outcome(Some(live), now) {
+            TokenOutcome::Dial { token, user } => {
+                assert_eq!(token, "acc");
+                assert_eq!(user.as_deref(), Some("brent@smoo.ai"));
+            }
+            other @ TokenOutcome::NoSession(_) => panic!("expected a dial, got {other:?}"),
+        }
+    }
+
+    /// A fake relay: accepts the upgrade, optionally acks `connected`, and
+    /// reports whether the daemon closed the socket from its side.
+    async fn fake_relay(ack: bool) -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<bool>) {
+        use axum::extract::ws::{Message as AxMsg, WebSocketUpgrade};
+        use axum::routing::get;
+        use axum::Router;
+
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let closed_tx = Arc::new(std::sync::Mutex::new(Some(closed_tx)));
+        let app = Router::new().route(
+            "/ws",
+            get(move |u: WebSocketUpgrade| {
+                let closed_tx = closed_tx.clone();
+                async move {
+                    u.on_upgrade(move |mut ws| async move {
+                        if ack {
+                            let _ = ws.send(AxMsg::Text(r#"{"type":"connected"}"#.into())).await;
+                        }
+                        let mut client_closed = false;
+                        while let Some(msg) = ws.recv().await {
+                            if matches!(msg, Ok(AxMsg::Close(_))) {
+                                client_closed = true;
+                                break;
+                            }
+                        }
+                        if let Some(tx) = closed_tx.lock().unwrap().take() {
+                            let _ = tx.send(client_closed);
+                        }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, closed_rx)
+    }
+
+    struct Harness {
+        status: RelayStatusHandle,
+        creds_tx: watch::Sender<CredView>,
+        creds_rx: watch::Receiver<CredView>,
+        dialled: CredView,
+        pairing: Arc<PairingState>,
+    }
+
+    fn harness() -> Harness {
+        let dialled = CredView::dialled(Some("a@x".into()), "t1");
+        let (creds_tx, creds_rx) = watch::channel(dialled.clone());
+        Harness {
+            status: RelayStatusHandle::new(RelayPhase::Authenticating, ""),
+            creds_tx,
+            creds_rx,
+            dialled,
+            pairing: Arc::new(crate::flow_e2e::tests::state()),
+        }
+    }
+
+    async fn run_against(addr: std::net::SocketAddr, h: &mut Harness, ack_timeout: Duration) -> ConnEnd {
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();
+        let ctx = ConnCtx {
+            local_ws_url: "ws://127.0.0.1:1/ws",
+            flow_ws_url: "ws://127.0.0.1:1/api/flow/ws",
+            pairing: &h.pairing,
+            dialled: &h.dialled,
+            status: &h.status,
+            device: "daemon-test",
+            kind: RelayKind::Flow,
+            ack_timeout,
+        };
+        tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx))
+            .await
+            .expect("the connection must end on its own")
+    }
+
+    #[tokio::test]
+    async fn a_socket_the_relay_never_acks_is_unauthenticated_not_online() {
+        let (addr, closed) = fake_relay(false).await;
+        let mut h = harness();
+        let end = run_against(addr, &mut h, Duration::from_millis(300)).await;
+        assert_eq!(end, ConnEnd::NoAck);
+        assert_ne!(h.status.get().state, RelayPhase::Online, "no ack must never read as online");
+        // The supervisor's report for this end is the observable state.
+        assert!(report_failed_end(&h.status, &end), "no ack forces a token refresh");
+        assert_eq!(h.status.get().state, RelayPhase::Unauthenticated);
+        assert!(h.status.get().detail.contains("NOT a peer"));
+        assert!(closed.await.unwrap(), "the daemon closes the socket it gave up on");
+    }
+
+    #[tokio::test]
+    async fn the_ack_puts_the_link_online_and_a_logout_takes_it_off() {
+        let (addr, closed) = fake_relay(true).await;
+        let mut h = harness();
+        let status = h.status.clone();
+        let mut watch_status = status.subscribe();
+        let creds_tx = h.creds_tx.clone();
+        tokio::spawn(async move {
+            while watch_status.borrow_and_update().state != RelayPhase::Online {
+                watch_status.changed().await.unwrap();
+            }
+            // Online — a token rotation must NOT drop it...
+            creds_tx.send(CredView::dialled(Some("a@x".into()), "t2")).unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // ...a logout must.
+            creds_tx.send(CredView::SignedOut).unwrap();
+        });
+        let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
+        assert_eq!(end, ConnEnd::SignedOut);
+        assert!(closed.await.unwrap(), "leaving on logout closes the socket");
+    }
+
+    #[tokio::test]
+    async fn a_rotation_before_the_ack_re_authenticates() {
+        let (addr, _closed) = fake_relay(false).await;
+        let mut h = harness();
+        let creds_tx = h.creds_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            creds_tx.send(CredView::dialled(Some("a@x".into()), "t2")).unwrap();
+        });
+        let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
+        assert_eq!(end, ConnEnd::CredsChanged);
+    }
+
+    #[tokio::test]
+    async fn a_new_user_re_authenticates_even_when_online() {
+        let (addr, _closed) = fake_relay(true).await;
+        let mut h = harness();
+        let mut watch_status = h.status.subscribe();
+        let creds_tx = h.creds_tx.clone();
+        tokio::spawn(async move {
+            while watch_status.borrow_and_update().state != RelayPhase::Online {
+                watch_status.changed().await.unwrap();
+            }
+            creds_tx.send(CredView::dialled(Some("b@x".into()), "t9")).unwrap();
+        });
+        let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
+        assert_eq!(end, ConnEnd::CredsChanged);
+    }
+
+    #[test]
+    fn a_plain_drop_reports_offline_without_forcing_a_refresh() {
+        let status = RelayStatusHandle::new(RelayPhase::Online, "");
+        assert!(!report_failed_end(&status, &ConnEnd::Normal));
+        assert_eq!(status.get().state, RelayPhase::Offline);
+        assert!(report_failed_end(&status, &ConnEnd::AuthRejected));
+        assert_eq!(status.get().state, RelayPhase::AuthRejected);
     }
 
     // ── bridge integration: fake operator + fake relay channel ───────────────

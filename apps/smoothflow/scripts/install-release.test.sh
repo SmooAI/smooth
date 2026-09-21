@@ -125,5 +125,17 @@ else
     echo "skip: no verifiable /Applications/SmoothFlow.app — positive case not exercised"
 fi
 
+# ---------------------------------------------------------------- own mount
+# Verifying the DMG mounts it, and macOS registers the app on that mount. Unless
+# the script unregisters it, every run leaves a stray copy — the thing it exists
+# to remove. It must forget its own mount both on the normal path (after the
+# install's detach) and on every exit path (cleanup, e.g. --dry-run or a refusal).
+grep -q '^forget_own_mount()' "$SRC" ||
+    { echo "FAIL: install-release.sh must define forget_own_mount"; fail=1; }
+awk '/^cleanup\(\)/,/^}/' "$SRC" | grep -q 'forget_own_mount' ||
+    { echo "FAIL: cleanup() must call forget_own_mount so --dry-run and refusals don't leave a stray registration"; fail=1; }
+grep -A1 'hdiutil detach "\$MOUNTED" >/dev/null 2>&1 && MOUNTED=""' "$SRC" | grep -q 'forget_own_mount' ||
+    { echo "FAIL: the install path must call forget_own_mount right after detaching, before the still-registered check"; fail=1; }
+
 [[ $fail == 0 ]] && echo "install-release.sh matcher: all checks passed"
 exit $fail

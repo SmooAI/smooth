@@ -70,8 +70,21 @@ stale_bundles() {
 
 W="$(mktemp -d)"
 MOUNTED=""
+# Mounting the DMG to verify it makes macOS register the app ON THAT MOUNT, so
+# this script would otherwise leave behind exactly the kind of stray
+# registration it exists to remove. LaunchServices records the realpath
+# (/private/var/…) while $W may read /var/…, so match on the temp dir's name.
+forget_own_mount() {
+    local tag
+    tag="$(basename "$W")"
+    stale_bundles | grep -F "/$tag/" | while IFS= read -r p; do
+        "$LSREGISTER" -u "$p" >/dev/null 2>&1 || true
+    done
+}
+
 cleanup() {
     [[ -n "$MOUNTED" ]] && hdiutil detach "$MOUNTED" >/dev/null 2>&1 || true
+    forget_own_mount
     rm -rf "$W"
 }
 trap cleanup EXIT
@@ -193,6 +206,7 @@ say "Installing to $DEST"
 [[ -e "$DEST" ]] && rm -rf "$DEST"
 ditto "$SRC" "$DEST" || die "copy to $DEST failed"
 hdiutil detach "$MOUNTED" >/dev/null 2>&1 && MOUNTED=""
+forget_own_mount
 ok "copied"
 
 "$LSREGISTER" -f "$DEST" || true
