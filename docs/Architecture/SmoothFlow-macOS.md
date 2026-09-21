@@ -158,6 +158,31 @@ off the relay until the first exits, rather than racing it. Phones: the relay
 `flow` and `daemon` peers and auto-picks a lone `flow` one, Big Smooth mobile
 keeps listing `daemon` peers only.
 
+**The relay link follows the Smoo session, not just the socket (th-37c286).**
+The app spawns its child daemon at launch whether or not you are signed in, and
+a daemon that booted before sign-in used to sit on a socket the relay never
+registered as a peer: phones' `list_peers` came back empty, identical to "Mac
+offline", until a daemon restart. Now `relay.rs` watches the credentials file
+(every 5s) and the relay's `{"type":"connected"}` auth ack, with the rules as
+pure functions in `crates/smooth-daemon/src/relay_status.rs`:
+
+| Credentials / socket                      | The link does                                       | `relay.state`                    |
+| ----------------------------------------- | --------------------------------------------------- | -------------------------------- |
+| no session                                | dials nothing                                       | `signed_out`                     |
+| session on disk, expired past renewal     | dials nothing                                       | `session_expired`                |
+| a session appears (login, heartbeat)      | dials at once, no retry timer                       | `connecting` → `authenticating`  |
+| socket open, no ack within 15s            | logs `CONNECTED BUT UNAUTHENTICATED`, re-dials      | `unauthenticated` (never online) |
+| ack received                              | registered as a peer                                | `online`                         |
+| token rotates before the ack              | re-dials with the new token                         | `authenticating`                 |
+| token rotates after the ack               | keeps the socket (the relay checks at connect only) | `online`                         |
+| a different user signs in                 | re-dials as that user                               | `authenticating`                 |
+| logout, or expiry the heartbeat can't fix | closes the socket                                   | `signed_out` / `session_expired` |
+
+`GET /api/flow/pairings` carries it as `relay: {state, detail, since}`, and
+Settings ▸ Phones shows it (re-read every 5s while the pane is open), so
+"signed out", "up but not authenticated" and "unreachable" read as three
+different things.
+
 ### TCC matrix (measured 2026-09-07, macOS 26.4, Developer-ID-signed ad-hoc-equivalent build)
 
 Probe: `scripts/tcc-probe.sh` — prints the responsible pid
