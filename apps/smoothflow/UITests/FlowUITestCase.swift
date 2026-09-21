@@ -102,7 +102,12 @@ class FlowUITestCase: XCTestCase {
         p.arguments = ["--addr", "127.0.0.1:0", "--workspace", ws.path, "--db", ws.appendingPathComponent("flow.db").path, "--token", token!, "--tmux-socket", sock]
         // xctrunner's PATH is the bare system one; the engine shells out to tmux (Homebrew).
         let path = ([bin.path, "/opt/homebrew/bin", "/usr/local/bin"] + (env["PATH"] ?? "/usr/bin:/bin").split(separator: ":").map(String.init)).joined(separator: ":")
-        p.environment = env.merging(["PATH": path, "HOME": tmp.appendingPathComponent("home").path]) { $1 }
+        var engineEnv = env.merging(["PATH": path, "HOME": tmp.appendingPathComponent("home").path]) { $1 }
+        // The shape of a daemon launched by a Finder-started app: no locale at
+        // all. tmux then draws `_` for every non-ASCII cell unless the engine
+        // forces UTF-8 on its clients (th-bcd819) — GlyphUITests pins that.
+        for k in ["LANG", "LC_ALL", "LC_CTYPE"] { engineEnv.removeValue(forKey: k) }
+        p.environment = engineEnv
         p.standardOutput = FileHandle.nullDevice
         try p.run()
         processes.append(p)

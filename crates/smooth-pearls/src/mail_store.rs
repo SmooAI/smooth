@@ -601,6 +601,54 @@ impl MailStore {
         Ok(rows)
     }
 
+    /// Messages addressed to `agent` (or broadcast) with `seq` strictly greater
+    /// than `after_seq`, oldest first — the peek query behind `th msg watch`'s
+    /// `--peek` watermark mode.
+    ///
+    /// Unlike [`MailStore::inbox`], a watcher tracks its position by `seq`, so
+    /// this neither depends on nor mutates ack state: a machine consumer can
+    /// react to a message without acking it (reading is not acking — the caller
+    /// decides when a message has actually been handled). Optional `from` /
+    /// `kind` narrow the stream to one sender or one message type. `read_at` is
+    /// still populated for this agent, for callers that want to show it.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn inbox_since(&self, agent: &str, after_seq: i64, from: Option<&str>, kind: Option<MessageKind>, limit: usize) -> Result<Vec<MailMessage>> {
+        let agent = agent.trim();
+        let from = from.map(str::trim);
+        let kind = kind.map(MessageKind::as_str);
+        let sql = format!(
+            "SELECT {MSG_COLS}, r.read_at
+             FROM messages m
+             LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
+             WHERE (m.to_agent = ?1 OR m.to_agent = '{BROADCAST}') AND m.from_agent != ?1
+               AND m.seq > ?2
+               AND (?3 IS NULL OR m.from_agent = ?3)
+               AND (?4 IS NULL OR m.type = ?4)
+             ORDER BY m.seq ASC
+             LIMIT ?5"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![agent, after_seq, from, kind, i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+                let read_at = r.get::<_, Option<String>>(9)?;
+                row_to_message(r, read_at.as_deref())
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The current maximum message `seq` in the store, or 0 when it is empty —
+    /// the starting watermark for a `--peek` watcher that wants only mail that
+    /// arrives from now on.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn max_seq(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM messages", [], |r| r.get(0))?)
+    }
+
     /// Messages sent by `agent`, newest first.
     ///
     /// # Errors
@@ -818,6 +866,56 @@ mod tests {
         s.touch("a").unwrap();
         assert!(s.get_agent("a").unwrap().unwrap().last_seen >= before);
         s.touch("nobody").unwrap(); // no-op, not an error
+    }
+
+    #[test]
+    fn inbox_since_tracks_by_seq_filters_and_never_consumes() {
+        let (_t, s) = store();
+        for a in ["me", "alice", "bob"] {
+            reg(&s, a);
+        }
+        // seq order: 1 alice→me, 2 me→alice (own send), 3 bob→me (request),
+        // 4 alice→all (broadcast), 5 bob→me (result).
+        s.send("alice", "me", "one", MessageKind::Note, 0, None).unwrap();
+        s.send("me", "alice", "mine", MessageKind::Note, 0, None).unwrap();
+        s.send("bob", "me", "please", MessageKind::Request, 0, None).unwrap();
+        s.send("alice", BROADCAST, "everyone", MessageKind::Note, 0, None).unwrap();
+        s.send("bob", "me", "done", MessageKind::Result, 0, None).unwrap();
+
+        assert_eq!(s.max_seq().unwrap(), 5);
+
+        // From the beginning: everything addressed to me or broadcast, oldest
+        // first, and NOT my own send.
+        let all = s.inbox_since("me", 0, None, None, 200).unwrap();
+        assert_eq!(all.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["one", "please", "everyone", "done"]);
+        assert!(all.iter().all(|m| m.from_agent != "me"), "never echoes the watcher's own sends");
+        assert!(all.windows(2).all(|w| w[0].seq < w[1].seq), "ordered by seq ascending");
+
+        // Watermark: only messages strictly after a given seq.
+        let after_first = s.inbox_since("me", all[0].seq, None, None, 200).unwrap();
+        assert_eq!(after_first.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["please", "everyone", "done"]);
+
+        // from filter (includes that sender's broadcast).
+        let from_alice = s.inbox_since("me", 0, Some("alice"), None, 200).unwrap();
+        assert_eq!(from_alice.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["one", "everyone"]);
+
+        // kind filter.
+        let requests = s.inbox_since("me", 0, None, Some(MessageKind::Request), 200).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body, "please");
+
+        // Combined from + kind.
+        let bob_results = s.inbox_since("me", 0, Some("bob"), Some(MessageKind::Result), 200).unwrap();
+        assert_eq!(bob_results.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["done"]);
+
+        // Peeking never marks anything read.
+        assert_eq!(s.unread_count("me").unwrap(), 4, "inbox_since must not ack");
+    }
+
+    #[test]
+    fn max_seq_is_zero_on_an_empty_store() {
+        let (_t, s) = store();
+        assert_eq!(s.max_seq().unwrap(), 0);
     }
 
     #[test]

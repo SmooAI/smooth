@@ -20,14 +20,29 @@ pub fn parse_lstart(s: &str) -> Option<i64> {
     Local.from_local_datetime(&naive).earliest().map(|d| d.timestamp())
 }
 
+/// Parse `ps -o stat=,lstart=` output: `None` for a zombie (`Z…` — it has
+/// exited; only its parent's reaping is outstanding), else the start time.
+#[must_use]
+pub fn parse_stat_lstart(s: &str) -> Option<i64> {
+    let (stat, lstart) = s.trim_start().split_once(char::is_whitespace)?;
+    if stat.starts_with('Z') {
+        return None;
+    }
+    parse_lstart(lstart)
+}
+
 /// The start time (local epoch seconds) of `pid`, or `None` when it is gone.
+///
+/// A zombie counts as gone in every way that matters here: a kill that left
+/// one succeeded, and it owns no harness session (th-b00115 found the
+/// conformance suite waiting on `<defunct>` fakes tmux had yet to reap).
 #[must_use]
 pub fn start_time(pid: u32) -> Option<i64> {
-    let out = Command::new("ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
+    let out = Command::new("ps").args(["-o", "stat=,lstart=", "-p", &pid.to_string()]).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    parse_lstart(&String::from_utf8_lossy(&out.stdout))
+    parse_stat_lstart(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// True when `pid` is alive AND started when we recorded it did. A `None`
@@ -87,6 +102,31 @@ mod tests {
         assert_eq!(ts, expected);
         assert!(parse_lstart("").is_none());
         assert!(parse_lstart("garbage in here now ok").is_none());
+    }
+
+    #[test]
+    fn a_zombie_has_no_start_time() {
+        let expected = Local.with_ymd_and_hms(2026, 9, 7, 21, 57, 0).unwrap().timestamp();
+        assert_eq!(parse_stat_lstart("Ss   Mon Sep  7 21:57:00 2026\n"), Some(expected));
+        assert_eq!(parse_stat_lstart("S+ Mon Sep  7 21:57:00 2026"), Some(expected));
+        assert_eq!(parse_stat_lstart("Zs   Mon Sep  7 21:57:00 2026"), None, "exited, unreaped");
+        assert_eq!(parse_stat_lstart("Z+ Mon Sep  7 21:57:00 2026"), None);
+        assert_eq!(parse_stat_lstart(""), None);
+        assert_eq!(parse_stat_lstart("Ss"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreaped_child_is_not_alive() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        // Not waited on: once `true` exits it is a zombie of this process.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while start_time(pid).is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!is_alive(pid, None), "a zombie is not a live process");
+        let _ = child.wait();
     }
 
     #[test]

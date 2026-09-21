@@ -1,0 +1,49 @@
+# harness: goose
+# expect: needs_you
+# rule: goose-prompt
+# title: marvin
+# alternate_on: false
+# cursor_y: 24
+# source: live goose 1.50.0, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: fresh $HOME: the anonymous-usage question (cliclack ◆)
+---
+
+Welcome to goose! Let's get you set up.
+  you can rerun this command later to update your configuration
+
+
+Help improve goose
+
+Would you like to help improve goose by sharing anonymous usage data?
+This helps us understand how goose is used and identify areas for improvement.
+
+What we collect:
+  • Operating system, version, and architecture
+  • goose version and install method
+  • Provider and model used
+  • Extensions and tool usage counts (names only)
+  • Session metrics (duration, interaction count, token usage)
+  • Error types (e.g., "rate_limit", "auth" - no details)
+
+We never collect your conversations, code, tool arguments, error messages,
+or any personal data. You can change this anytime with 'goose configure'.
+
+◆  Share anonymous usage data to help improve goose?
+│  ● Yes  / ○ No
+└
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -43,11 +43,19 @@ const BROADCAST_CAPACITY: usize = 4096;
 /// Kill grace before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(3);
 /// `prompt_as = "paste"`: how long after launch the prompt is pasted into the
-/// harness's composer. ponytail: a fixed delay; scrape-for-idle first if a
-/// harness turns out to boot slower than this.
+/// harness's composer when its manifest cannot scrape an idle composer.
 const PASTE_DELAY: Duration = Duration::from_secs(4);
+/// `prompt_as = "paste"` for a manifest that CAN scrape idle (th-d2a1e4): the
+/// earliest paste, which then waits for the pane to read idle…
+const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
+/// …at most this long (a pane that never reads idle or needs-you gets the
+/// paste anyway, as before). A pending needs-you is never pasted into.
+const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
+/// The pane env var naming the flow session row (th-b00115); hooks post it
+/// back as `flow_id`.
+pub const FLOW_ID_ENV: &str = "SMOOTH_FLOW_ID";
 
 /// How the engine is configured by its host.
 #[derive(Debug, Clone)]
@@ -126,10 +134,67 @@ struct Runtime {
     claims: HashMap<String, (u32, Instant)>,
     /// Session id → when it was last resumed from a usage limit.
     limit_resumed_at: HashMap<String, Instant>,
-    /// Session id → (prompt, when to paste it) for `prompt_as = "paste"`.
-    paste_at: HashMap<String, (String, Instant)>,
+    /// Session id → pending `prompt_as = "paste"` prompt.
+    paste_at: HashMap<String, PendingPaste>,
+    /// Session id → (hash of the last captured pane text, when it last
+    /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
+    pane_seen: HashMap<String, (u64, Instant)>,
     /// Compiled `[state.scrape]` rules per kind.
     rules: HashMap<String, Arc<ScrapeRules>>,
+    /// Harness session ids adoption already refused (th-c103c1) — a stranger
+    /// posts a hook on every tool call, and re-running git + `th pearls` for
+    /// each one would be a shell-out storm.
+    adopt_refused: HashMap<String, AdoptRefusal>,
+    /// Watermark for re-broadcasting rows another daemon changed in the
+    /// shared `flow.db` (th-c103c1).
+    seen_changes_at: Option<DateTime<Utc>>,
+}
+
+/// A prompt waiting to be pasted into a harness's composer.
+struct PendingPaste {
+    prompt: String,
+    /// Not before.
+    at: Instant,
+    /// `Some(deadline)`: wait for a scraped idle until then (th-d2a1e4).
+    /// `None`: paste at `at`, whatever the pane shows.
+    wait_idle_until: Option<Instant>,
+}
+
+impl PendingPaste {
+    /// Is it time, given what the pane reads right now?
+    fn due(&self, now: Instant, pane: PaneState) -> bool {
+        if now < self.at {
+            return false;
+        }
+        match self.wait_idle_until {
+            None => true,
+            // A first-run question or approval owns the input: pasting now
+            // would answer it with the prompt.
+            Some(_) if pane == PaneState::AwaitingApproval => false,
+            Some(_) if pane == PaneState::Idle => true,
+            Some(deadline) => now >= deadline,
+        }
+    }
+}
+
+/// How long the pane text has held still, updating `seen` with this capture.
+/// `None` on the first look (no baseline to measure from).
+fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &str, now: Instant) -> Option<Duration> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    let hash = h.finish();
+    match seen.get_mut(id) {
+        Some((prev, changed)) if *prev == hash => Some(now.saturating_duration_since(*changed)),
+        Some(entry) => {
+            *entry = (hash, now);
+            Some(Duration::ZERO)
+        }
+        None => {
+            seen.insert(id.to_string(), (hash, now));
+            None
+        }
+    }
 }
 
 struct Inner {
@@ -142,6 +207,10 @@ struct Inner {
     default_project: PathBuf,
     home: PathBuf,
     daemon_url: Option<String>,
+    /// `(HOME, PATH)` harness binaries resolve against instead of this
+    /// process's (th-3cabf6: the conformance rig points it at a scratch HOME
+    /// holding a fake agent, so a real CLI on the machine is never launched).
+    resolve_env: Mutex<Option<(PathBuf, std::ffi::OsString)>>,
 }
 
 /// The SmoothFlow engine handle.
@@ -217,6 +286,12 @@ fn owned_here(s: &Session) -> bool {
 
 /// `(socket, tmux session)` of a launched session.
 fn pane(s: &Session) -> Result<(String, String)> {
+    if s.adopted {
+        bail!(
+            "session {} was adopted from a plain terminal (th-c103c1) — SmoothFlow never spawned its PTY, so there is no pane to attach; drive it where it is running",
+            s.id
+        );
+    }
     let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
     Ok((socket_of(s), t))
 }
@@ -287,7 +362,9 @@ pub fn manifest_for<'r>(registry: &'r Registry, kind: &SessionKind) -> Result<&'
 /// The argv that resumes a dead agent session — the manifest's `[resume]`.
 ///
 /// `resume_session` with a known harness session id renders `resume.argv`
-/// behind the row's `argv[0]`; otherwise (no id yet, or `relaunch_command`,
+/// behind the row's `argv[0]`; `continue_latest` always appends it (no id —
+/// the CLI's own "most recent conversation here") to the original argv when
+/// the prompt was pasted, to `argv[0]` when it was an argument; otherwise (no id yet, or `relaunch_command`,
 /// or no manifest) the original argv is relaunched: a fresh session, not a
 /// continuation.
 #[must_use]
@@ -307,6 +384,22 @@ pub fn resume_argv(session: &Session, registry: &Registry) -> Vec<String> {
             v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
             v
         }
+        (ResumeMode::ContinueLatest, _) => {
+            let vars = Vars {
+                cwd: Some(&session.worktree),
+                ..Default::default()
+            };
+            // A pasted prompt never reached the argv, so the original command
+            // (model and all) plus the continue flag is the resume; an argv
+            // prompt must not be sent twice, so only the binary is kept.
+            let mut v = if m.launch.prompt_as == PromptAs::Paste && !session.argv.is_empty() {
+                session.argv.clone()
+            } else {
+                vec![session.argv.first().cloned().unwrap_or_else(|| m.resolve_binary())]
+            };
+            v.extend(crate::harness::render_argv(&m.resume.argv, &vars));
+            v
+        }
         _ => session.argv.clone(),
     }
 }
@@ -317,12 +410,17 @@ pub fn resume_backoff(attempt: u32) -> Duration {
     RESUME_BACKOFF_BASE.saturating_mul(2u32.saturating_pow(attempt.min(10)))
 }
 
-/// Default title for a new session.
+/// Default title for a new session: the prompt, else what the worktree says
+/// it is working on (th-c103c1 — the pearl's title, else the branch), else
+/// the pearl id, else `kind · dir`.
 #[must_use]
-pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, worktree: &Path) -> String {
+pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<&str>, inferred: Option<&str>, worktree: &Path) -> String {
     if let Some(p) = prompt.map(str::trim).filter(|p| !p.is_empty()) {
         let short: String = p.chars().take(60).collect();
         return short;
+    }
+    if let Some(t) = inferred.map(str::trim).filter(|t| !t.is_empty()) {
+        return t.to_string();
     }
     if let Some(p) = pearl_id {
         return p.to_string();
@@ -341,6 +439,146 @@ pub fn claim_holder(claims: &HashMap<String, (u32, Instant)>, agent_session_id: 
         return None;
     }
     alive(*pid).then_some(*pid)
+}
+
+// ── adoption (th-c103c1) ──────────────────────────────────────────────────
+
+/// The `config` key the adoption opt-in is stored under.
+pub const ADOPT_KEY: &str = "adopt_plain_sessions";
+/// `$SMOOTH_FLOW_ADOPT` overrides the stored opt-in (tests, and a one-off
+/// daemon run).
+pub const ADOPT_ENV: &str = "SMOOTH_FLOW_ADOPT";
+/// An adopted session that has gone this long without a hook is presumed
+/// gone: its terminal was closed without a `SessionEnd`, and nothing here can
+/// see its process.
+pub const ADOPTED_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
+/// How far back of its own watermark the cross-daemon re-broadcast looks.
+pub const REBROADCAST_SLACK_SECS: i64 = 2;
+/// Cap on the per-session adoption-refusal cache, so a long-lived daemon that
+/// sees thousands of strangers does not grow a map forever.
+const ADOPT_REFUSED_CAP: usize = 1024;
+
+/// Why adoption declined a hook.
+///
+/// Every refusal is a deliberate guard, and the reason is cached per harness
+/// session so the check runs once, not per event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptRefusal {
+    /// The opt-in is off (the default).
+    Disabled,
+    /// The hook carried no harness session id — nothing to key a row on.
+    NoSessionId,
+    /// The hook carried no cwd, or it is not a git repo. SmoothFlow tracks
+    /// work on branches; a shell in `/tmp` is not fleet work.
+    NotGit,
+    /// `harness` names no manifest this machine knows.
+    UnknownHarness,
+    /// The cwd's project has never had a session here. Adopting it would pull
+    /// unrelated repos into the fleet.
+    UnknownProject,
+    /// A permission request is the one event that must not be the first: the
+    /// engine would hold the harness open for a decision about a session
+    /// nobody is watching yet.
+    PermissionFirst,
+}
+
+impl AdoptRefusal {
+    /// A short reason for logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "adoption is off",
+            Self::NoSessionId => "no harness session id",
+            Self::NotGit => "cwd is not a git worktree",
+            Self::UnknownHarness => "unknown harness",
+            Self::UnknownProject => "project has no sessions here",
+            Self::PermissionFirst => "first event is a permission request",
+        }
+    }
+}
+
+/// The opt-in, pure: `$SMOOTH_FLOW_ADOPT` (`1`/`true`/`on` — or `0`/`false`/
+/// `off`) beats the stored value, which defaults to OFF.
+#[must_use]
+pub fn adopt_setting(env: Option<&str>, stored: Option<&str>) -> bool {
+    let truthy = |v: &str| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes");
+    match env.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => truthy(v),
+        None => stored.is_some_and(truthy),
+    }
+}
+
+/// The manifest kind a hook's `harness` field names: the manifest name
+/// itself, else the `-code` spelling the Claude Code hooks send
+/// (`claude-code` → `claude`).
+#[must_use]
+pub fn kind_for_harness(registry: &Registry, harness: &str) -> Option<SessionKind> {
+    let h = harness.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return None;
+    }
+    let name = if registry.get(&h).is_some() {
+        h
+    } else {
+        let stripped = h.strip_suffix("-code")?.to_string();
+        registry.get(&stripped).is_some().then_some(stripped)?
+    };
+    name.parse().ok()
+}
+
+/// Whether `project` is one the fleet already works in.
+///
+/// That means the daemon's own workspace, or a project some session row
+/// already lives in. Every argument must already be [`canon`]icalised —
+/// `/var/…` and `/private/var/…` are the same directory, and git always
+/// answers with the resolved one.
+#[must_use]
+pub fn project_is_known(project: &str, default_project: &str, known: &[String]) -> bool {
+    project == default_project || known.iter().any(|k| k == project)
+}
+
+/// A path with symlinks resolved, falling back to the input when it cannot be
+/// resolved (a project that has since been deleted still compares by name).
+#[must_use]
+pub fn canon(p: &str) -> String {
+    std::fs::canonicalize(p).map_or_else(|_| p.to_string(), |c| c.to_string_lossy().into_owned())
+}
+
+/// The adoption guards, pure over the facts. `Ok(kind)` means "create a row".
+///
+/// # Errors
+/// The refusal reason, which the caller caches per harness session.
+pub fn adoptable(
+    ev_event: &str,
+    session_id: &str,
+    enabled: bool,
+    inferred: Option<&crate::infer::Inferred>,
+    kind: Option<SessionKind>,
+    project_known: bool,
+) -> std::result::Result<SessionKind, AdoptRefusal> {
+    if !enabled {
+        return Err(AdoptRefusal::Disabled);
+    }
+    if session_id.trim().is_empty() {
+        return Err(AdoptRefusal::NoSessionId);
+    }
+    if ev_event == "PermissionRequest" {
+        return Err(AdoptRefusal::PermissionFirst);
+    }
+    let kind = kind.ok_or(AdoptRefusal::UnknownHarness)?;
+    if !inferred.is_some_and(|i| i.is_git) {
+        return Err(AdoptRefusal::NotGit);
+    }
+    if !project_known {
+        return Err(AdoptRefusal::UnknownProject);
+    }
+    Ok(kind)
+}
+
+/// Whether an adopted row has been silent long enough to call dead.
+#[must_use]
+pub fn adopted_is_stale(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(updated_at).num_seconds() >= ADOPTED_STALE_AFTER_SECS
 }
 
 impl Engine {
@@ -366,8 +604,29 @@ impl Engine {
                 default_project: cfg.default_project,
                 home: cfg.home,
                 daemon_url: cfg.daemon_url,
+                resolve_env: Mutex::new(None),
             }),
         })
+    }
+
+    /// Resolve harness binaries against `home` + `path` instead of this
+    /// process's `HOME`/`PATH` (th-3cabf6). A test seam: the conformance rig
+    /// installs a fake agent under a scratch HOME and must never fall through
+    /// to a real CLI on the machine.
+    pub fn set_resolve_env(&self, home: PathBuf, path: std::ffi::OsString) {
+        *self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((home, path));
+    }
+
+    /// `m`'s executable: [`Manifest::resolve_binary`], or against the
+    /// [`Self::set_resolve_env`] override (bare first name when nothing resolves).
+    fn resolve_bin(&self, m: &Manifest) -> String {
+        let env = self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        match env {
+            Some((home, path)) => m
+                .resolve_binary_in(&home, &path)
+                .map_or_else(|| m.binary.names[0].clone(), |p| p.to_string_lossy().into_owned()),
+            None => m.resolve_binary(),
+        }
     }
 
     // ── harnesses (th-0f6126) ─────────────────────────────────────────────
@@ -490,7 +749,7 @@ impl Engine {
     /// The pane environment a manifest asks for, rendered for `s`.
     fn launch_env(&self, m: Option<&Manifest>, s: &Session) -> Vec<(String, String)> {
         m.map(|m| {
-            crate::harness::render_env(
+            let mut env = crate::harness::render_env(
                 &m.launch.env,
                 &Vars {
                     session_id: s.agent_session_id.as_deref(),
@@ -498,7 +757,13 @@ impl Engine {
                     daemon_url: self.inner.daemon_url.as_deref(),
                     ..Default::default()
                 },
-            )
+            );
+            // th-b00115: every agent pane names its row, so a hook or plugin
+            // can post `flow_id` and bind without a pre-assigned session id.
+            if !env.iter().any(|(k, _)| k == FLOW_ID_ENV) {
+                env.push((FLOW_ID_ENV.to_string(), s.id.clone()));
+            }
+            env
         })
         .unwrap_or_default()
     }
@@ -660,22 +925,29 @@ impl Engine {
             model: req.model.as_deref(),
             daemon_url: self.inner.daemon_url.as_deref(),
         };
-        let mut argv = match req.argv.clone().filter(|a| !a.is_empty()) {
+        let explicit = req.argv.clone().filter(|a| !a.is_empty());
+        let defaulted = explicit.is_none();
+        let mut argv = match explicit {
             Some(a) => a,
             None => default_argv(&registry, &req.kind, &vars)?,
         };
         // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
         // resolution as the default argv.
         if let Some(m) = manifest {
-            if argv.first().is_some_and(|a| m.is_bare_name(a)) {
-                argv[0] = m.resolve_binary();
+            if defaulted || argv.first().is_some_and(|a| m.is_bare_name(a)) {
+                argv[0] = self.resolve_bin(m);
             }
         }
-        let branch = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
+        // th-c103c1: nothing here is demanded of the caller — the pearl, the
+        // branch and the title are inferred from the worktree when they were
+        // not given. An explicit value always wins.
+        let inferred = crate::infer::gather(&worktree);
+        let branch = inferred.branch.clone().or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
+        let pearl_id = req.pearl_id.clone().or_else(|| inferred.pearl_id.clone());
         let title = req
             .title
             .clone()
-            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), &worktree));
+            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), pearl_id.as_deref(), Some(&inferred.title), &worktree));
         let session = self.with_store(|st| {
             st.create(NewSession {
                 kind: Some(req.kind.clone()),
@@ -683,13 +955,14 @@ impl Engine {
                 project: project.to_string_lossy().into_owned(),
                 worktree: worktree.to_string_lossy().into_owned(),
                 branch,
-                pearl_id: req.pearl_id.clone(),
+                pearl_id: pearl_id.clone(),
                 agent_session_id: agent_session_id.clone(),
                 argv: argv.clone(),
                 tmux_session: None,
                 tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
                 owner: Some(tmux::socket_name()),
                 fan_out_id: req.fan_out_id.clone(),
+                adopted: false,
             })
         })?;
         let env = self.launch_env(manifest, &session);
@@ -699,7 +972,26 @@ impl Engine {
             return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
         }
         if let (true, Some(p)) = (paste, prompt) {
-            self.rt().paste_at.insert(session.id.clone(), (p.to_string(), Instant::now() + PASTE_DELAY));
+            // Wait for the composer only when this manifest can tell us it is up.
+            let can_see_idle = manifest.is_some_and(|m| {
+                let sc = &m.state.scrape;
+                !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
+            });
+            let now = Instant::now();
+            let pending = if can_see_idle {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_MIN_DELAY,
+                    wait_idle_until: Some(now + PASTE_IDLE_WAIT),
+                }
+            } else {
+                PendingPaste {
+                    prompt: p.to_string(),
+                    at: now + PASTE_DELAY,
+                    wait_idle_until: None,
+                }
+            };
+            self.rt().paste_at.insert(session.id.clone(), pending);
         }
         Ok(session)
     }
@@ -806,9 +1098,33 @@ impl Engine {
     pub fn send(&self, id: &str, text: &str) -> Result<()> {
         let s = self.require(id)?;
         let (k, t) = pane(&s)?;
-        tmux::send_text(&k, &t, text)?;
+        // The manifest's [steer] says which key submits and how long to wait
+        // after the paste for it (th-b00115); a shell or unknown kind gets the
+        // plain paste + Enter.
+        match self.registry().get(s.kind.as_str()).map(|m| m.steer.clone()) {
+            Some(steer) => {
+                tmux::paste_text(&k, &t, text)?;
+                if steer.submit_delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(steer.submit_delay_ms));
+                }
+                tmux::send_key(&k, &t, &steer.submit_key)?;
+            }
+            None => tmux::send_text(&k, &t, text)?,
+        }
         self.event(id, EventKind::User, text);
         Ok(())
+    }
+
+    /// A named tmux key (`Enter`, `Escape`, `1`) into the pane — answering a
+    /// dialog, not steering: no bracketed paste, no `User` event row. Harness
+    /// validation uses it to accept a first-run prompt's default (th-473294).
+    ///
+    /// # Errors
+    /// When the session is unknown or tmux refuses.
+    pub fn send_key(&self, id: &str, key: &str) -> Result<()> {
+        let s = self.require(id)?;
+        let (k, t) = pane(&s)?;
+        tmux::send_key(&k, &t, key)
     }
 
     /// `flow.snapshot`: plain-text visible pane.
@@ -871,6 +1187,12 @@ impl Engine {
     /// When the session is unknown or the relaunch fails.
     pub fn kill(&self, id: &str, resume: bool) -> Result<Session> {
         let s = self.require(id)?;
+        if s.adopted {
+            bail!(
+                "session {id} was adopted from a plain terminal — SmoothFlow does not own its process and cannot {} it; stop it where it is running (`th flow close {id}` drops the row)",
+                if resume { "resume" } else { "kill" }
+            );
+        }
         let sock = socket_of(&s);
         let tmux_name = s.tmux_session.clone();
         if let Some(pid) = s.pid {
@@ -945,7 +1267,18 @@ impl Engine {
             }
         }
         if !s.state.is_terminal() {
-            self.kill(id, false)?;
+            if s.adopted {
+                // Nothing here can stop it, and removing a live session's
+                // worktree out from under it would be destructive.
+                if !force {
+                    bail!(
+                        "session {id} is adopted and still {} — stop it where it is running, or close with force",
+                        s.state
+                    );
+                }
+            } else {
+                self.kill(id, false)?;
+            }
         }
         let mut out = CloseOutcome {
             id: id.to_string(),
@@ -1023,12 +1356,25 @@ impl Engine {
     /// hook script must never block the harness) — it returns `Immediate({})`.
     pub fn hook(&self, ev: HookEvent) -> Result<HookReply> {
         let mut found = self.with_store(|st| st.get_by_agent_session(&ev.session_id))?;
+        // th-b00115: a pane we launched says which row it is (SMOOTH_FLOW_ID).
+        // That binds a harness that can't pre-assign its id without guessing
+        // by cwd, and still finds the row when the payload carries no id.
+        if found.is_none() {
+            if let Some(flow_id) = ev.flow_id.as_deref().filter(|f| !f.is_empty()) {
+                found = self.bind_by_flow_id(flow_id, &ev.harness, &ev.session_id)?;
+            }
+        }
         // opencode / codex can't pre-assign a session id: their first hook
         // from a worktree binds to the newest id-less agent row there.
         if found.is_none() && !ev.session_id.is_empty() {
             if let Some(cwd) = ev.cwd.as_deref().filter(|c| !c.is_empty()) {
                 found = self.bind_by_cwd(cwd, &ev.session_id)?;
             }
+        }
+        // th-c103c1: still nobody? This may be a `claude`/`codex` someone
+        // started in a plain terminal — adopt it into the fleet.
+        if found.is_none() {
+            found = self.try_adopt(&ev)?;
         }
         let Some(s) = found else {
             tracing::debug!(session = %ev.session_id, event = %ev.event, "flow hook for an unknown session");
@@ -1051,10 +1397,7 @@ impl Engine {
         if let Some((kind, text)) = hook_event_text(&ev.event, &ev.payload) {
             self.event(&s.id, kind, &text);
         }
-        let outcome = manifest
-            .as_ref()
-            .filter(|m| !m.state.hooks.event_map.is_empty())
-            .map_or_else(|| map_hook_event(&ev.event, &ev.payload), |m| mapped_outcome(m, &ev));
+        let (outcome, claude_protocol) = hook_outcome(manifest.as_ref(), &ev.event, &ev.payload);
         match outcome {
             HookOutcome::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
@@ -1064,7 +1407,7 @@ impl Engine {
                 self.set_state(&s.id, SessionState::Idle, None)?;
             }
             HookOutcome::NeedsYou(mut att) => {
-                if ev.event == "PermissionRequest" {
+                if claude_protocol && ev.event == "PermissionRequest" {
                     let request_id = uuid::Uuid::new_v4().simple().to_string();
                     att.request_id = Some(request_id.clone());
                     let (tx, rx) = oneshot::channel();
@@ -1088,9 +1431,155 @@ impl Engine {
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
             }
-            HookOutcome::Ended | HookOutcome::None => {}
+            HookOutcome::Ended => {
+                // Engine-spawned rows learn their exit from the PTY; an
+                // adopted one has no pane, so `SessionEnd` IS the end.
+                if s.adopted {
+                    self.set_state(&s.id, SessionState::Done, None)?;
+                }
+            }
+            HookOutcome::None => {}
         }
         Ok(HookReply::Immediate(json!({})))
+    }
+
+    /// Whether hooks from sessions this engine never launched are adopted
+    /// (th-c103c1). Off unless `$SMOOTH_FLOW_ADOPT` or the stored opt-in says
+    /// otherwise — adoption puts rows in the fleet that the user did not ask
+    /// for, so it is theirs to turn on.
+    #[must_use]
+    pub fn adopt_enabled(&self) -> bool {
+        let stored = self.with_store(|st| st.get_config(ADOPT_KEY)).ok().flatten();
+        adopt_setting(std::env::var(ADOPT_ENV).ok().as_deref(), stored.as_deref())
+    }
+
+    /// Turn adoption on or off (persisted in the flow store).
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn set_adopt(&self, on: bool) -> Result<()> {
+        self.with_store(|st| st.set_config(ADOPT_KEY, if on { "1" } else { "0" }))?;
+        self.rt().adopt_refused.clear();
+        Ok(())
+    }
+
+    /// What a session started in `cwd` would be working on — the New Session
+    /// dialog's read-only context (`GET /api/flow/infer`). `None` uses the
+    /// daemon's workspace.
+    #[must_use]
+    pub fn infer_context(&self, cwd: Option<&Path>) -> crate::infer::Inferred {
+        crate::infer::gather(cwd.unwrap_or(&self.inner.default_project))
+    }
+
+    /// Adopt the harness session `ev` belongs to, if every guard allows it.
+    /// A refusal is cached per harness session id so the git/`th` shell-outs
+    /// happen once, not on every hook event.
+    fn try_adopt(&self, ev: &HookEvent) -> Result<Option<Session>> {
+        // Bound before the `if let` so the runtime lock is not held across
+        // the body.
+        let cached = self.rt().adopt_refused.get(&ev.session_id).copied();
+        if let Some(why) = cached {
+            tracing::trace!(session = %ev.session_id, why = why.as_str(), "flow: adoption already refused");
+            return Ok(None);
+        }
+        let enabled = self.adopt_enabled();
+        let kind = kind_for_harness(&self.registry(), &ev.harness);
+        // Cheap guards first: inference shells out to git and `th`.
+        if let Err(why) = adoptable(&ev.event, &ev.session_id, enabled, None, kind.clone(), true) {
+            if why != AdoptRefusal::NotGit {
+                return Ok(self.refuse_adoption(&ev.session_id, why));
+            }
+        }
+        let Some(cwd) = ev.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+            return Ok(self.refuse_adoption(&ev.session_id, AdoptRefusal::NotGit));
+        };
+        let inferred = crate::infer::gather(Path::new(cwd));
+        let known: Vec<String> = self.with_store(FlowStore::projects)?.iter().map(|k| canon(k)).collect();
+        let project_known = project_is_known(&canon(&inferred.project), &canon(&self.inner.default_project.to_string_lossy()), &known);
+        let kind = match adoptable(&ev.event, &ev.session_id, enabled, Some(&inferred), kind, project_known) {
+            Ok(k) => k,
+            Err(why) => return Ok(self.refuse_adoption(&ev.session_id, why)),
+        };
+        let agent_id = ev.session_id.clone();
+        // Check-and-create under the store lock: two hooks from the same
+        // session can land concurrently (the script is fire-and-forget).
+        //
+        // KNOWN SEAM (th-c103c1): this lock is per PROCESS, and two daemons
+        // can share one flow.db (Big Smooth + the SmoothFlow app's child).
+        // If a brand-new harness session's first two hooks reach BOTH daemons
+        // within the same millisecond, each can miss the other's insert and
+        // adopt it into its own row — two rows for one terminal. The window
+        // is the width of one SQLite insert, both rows are harmless (adopted
+        // rows are inert: no pane, no supervision), and closing it properly
+        // means a cross-process claim. Documented rather than fixed; if you
+        // are here because you saw a duplicate, that is this.
+        let created = self.with_store(|st| {
+            if let Some(existing) = st.get_by_agent_session(&agent_id)? {
+                return Ok::<_, anyhow::Error>(Some((existing, false)));
+            }
+            let s = st.create(NewSession {
+                kind: Some(kind.clone()),
+                title: inferred.title.clone(),
+                project: inferred.project.clone(),
+                worktree: inferred.worktree.clone(),
+                branch: inferred.branch.clone(),
+                pearl_id: inferred.pearl_id.clone(),
+                agent_session_id: Some(agent_id.clone()),
+                argv: Vec::new(),
+                tmux_session: None,
+                tmux_socket: None,
+                owner: Some(tmux::socket_name()),
+                fan_out_id: None,
+                adopted: true,
+            })?;
+            Ok(Some((s, true)))
+        })?;
+        let Some((session, fresh)) = created else { return Ok(None) };
+        if fresh {
+            tracing::info!(
+                session = %session.id, harness_session = %agent_id, kind = %kind, worktree = %session.worktree,
+                pearl = session.pearl_id.as_deref().unwrap_or("-"),
+                "flow: adopted a harness session started outside SmoothFlow"
+            );
+            self.event(&session.id, EventKind::System, "adopted — started outside SmoothFlow (no pane to attach)");
+            self.emit_session(&session);
+        }
+        Ok(Some(session))
+    }
+
+    /// Cache a refusal and return `None`.
+    fn refuse_adoption(&self, session_id: &str, why: AdoptRefusal) -> Option<Session> {
+        tracing::debug!(session = %session_id, why = why.as_str(), "flow: not adopting");
+        let mut rt = self.rt();
+        if rt.adopt_refused.len() >= ADOPT_REFUSED_CAP {
+            rt.adopt_refused.clear();
+        }
+        rt.adopt_refused.insert(session_id.to_string(), why);
+        None
+    }
+
+    /// The row a pane's `SMOOTH_FLOW_ID` names, if the hook really came from
+    /// that row's harness (th-b00115). Binds `agent_session_id` when the row
+    /// has none yet. `None` when the harness names another kind (an agent
+    /// launched from inside the pane inherits the env) or reports a different
+    /// session id than the one already bound (a child of the same kind).
+    fn bind_by_flow_id(&self, flow_id: &str, harness: &str, agent_session_id: &str) -> Result<Option<Session>> {
+        let Some(row) = self.get(flow_id)? else {
+            return Ok(None);
+        };
+        if !flow_id_accepts(&row, harness, agent_session_id) {
+            tracing::debug!(session = %row.id, %harness, harness_session = %agent_session_id, "flow hook: SMOOTH_FLOW_ID names another harness session — ignored");
+            return Ok(None);
+        }
+        if row.agent_session_id.is_none() && !agent_session_id.is_empty() {
+            self.with_store(|st| st.set_agent_session(&row.id, agent_session_id))?;
+            if let Some(pid) = row.pid {
+                self.rt().claims.insert(agent_session_id.to_string(), (pid, Instant::now()));
+            }
+            tracing::info!(session = %row.id, harness_session = %agent_session_id, "flow: bound harness session id from SMOOTH_FLOW_ID");
+            return self.get(&row.id);
+        }
+        Ok(Some(row))
     }
 
     /// Bind harness session `agent_session_id` to the newest id-less agent
@@ -1141,6 +1630,37 @@ impl Engine {
                 tracing::warn!(session = %s.id, error = %e, "flow supervision");
             }
         }
+        self.rebroadcast_external_changes(now)?;
+        Ok(())
+    }
+
+    /// Re-broadcast rows another daemon changed in the shared `flow.db`
+    /// (th-c103c1). Big Smooth and the SmoothFlow app's child daemon share
+    /// one file but not one broadcast channel, so a hook that lands on the
+    /// other one is invisible to this one's clients until something re-reads
+    /// the store. A `Session` frame is an upsert, so re-emitting a row this
+    /// engine already emitted is harmless.
+    fn rebroadcast_external_changes(&self, now: DateTime<Utc>) -> Result<()> {
+        let since = self.rt().seen_changes_at;
+        self.rt().seen_changes_at = Some(now);
+        let Some(since) = since else {
+            // First tick: take the watermark, emit nothing (clients just got
+            // the whole list in `flow.hello`).
+            return Ok(());
+        };
+        // The window is deliberately slack: `updated_at` is RFC3339 text with
+        // variable sub-second precision, so a strict watermark can mis-order
+        // two writes in the same millisecond. A re-emit is an idempotent
+        // upsert, a missed one is a stale client.
+        //
+        // KNOWN SEAM (th-c103c1): this is a POLL, so a client attached to the
+        // daemon that did NOT write the row sees the change up to one
+        // supervision tick late (SUPERVISE_EVERY, 2 s) — a state dot that
+        // lags on one of two running daemons is this, not a lost frame.
+        let since = since - chrono::Duration::seconds(REBROADCAST_SLACK_SECS);
+        for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s)) {
+            self.emit_session(s);
+        }
         Ok(())
     }
 
@@ -1151,6 +1671,15 @@ impl Engine {
             if Instant::now() >= at {
                 self.rt().relaunch_at.remove(&s.id);
                 self.relaunch(s)?;
+            }
+            return Ok(());
+        }
+        // An adopted session has no pane and no pid here: the only liveness
+        // signal is its own hooks, so silence is the only thing to act on.
+        if s.adopted {
+            if adopted_is_stale(s.updated_at, now) {
+                let att = Attention::new("crashed").with_detail("adopted session went silent — its terminal is gone");
+                self.set_state(&s.id, SessionState::Dead, Some(att))?;
             }
             return Ok(());
         }
@@ -1173,12 +1702,6 @@ impl Engine {
         if !s.kind.is_agent() {
             return Ok(());
         }
-        // `prompt_as = "paste"`: the composer should be up by now.
-        let paste = self.rt().paste_at.get(&s.id).filter(|(_, at)| Instant::now() >= *at).map(|(p, _)| p.clone());
-        if let Some(p) = paste {
-            self.rt().paste_at.remove(&s.id);
-            self.send(&s.id, &p)?;
-        }
         // Usage-limit resume due?
         if s.state == SessionState::Limited {
             let due = s.attention.as_ref().and_then(|a| a.resume_at).is_some_and(|at| now >= at);
@@ -1197,7 +1720,17 @@ impl Engine {
         let Some(rules) = self.rules_for(&self.registry(), &s.kind) else {
             return Ok(());
         };
-        let scrape = rules.detect(&pane);
+        // Title / alt-screen / cursor are best-effort: a rule that needs one
+        // simply does not fire without it.
+        let meta = tmux::pane_meta(&sock, t).ok();
+        let quiet_for = observe_quiet(&mut self.rt().pane_seen, &s.id, &pane, Instant::now());
+        let scrape = rules.detect_observation(&crate::scrape::PaneObservation {
+            text: &pane,
+            title: meta.as_ref().map(|m| m.title.as_str()),
+            alternate_on: meta.as_ref().map(|m| m.alternate_on),
+            cursor_y: meta.as_ref().and_then(|m| m.cursor_y),
+            quiet_for,
+        });
         match scrape.state {
             PaneState::UsageLimit => {
                 let recently_resumed = self.rt().limit_resumed_at.get(&s.id).is_some_and(|at| at.elapsed() < LIMIT_REARM_GRACE);
@@ -1210,7 +1743,11 @@ impl Engine {
             }
             PaneState::AwaitingApproval => {
                 if s.state != SessionState::NeedsYou && !self.has_pending(&s.id) {
-                    let mut att = Attention::new("permission").with_detail("approval prompt on screen");
+                    let detail = scrape
+                        .rule
+                        .as_deref()
+                        .map_or_else(|| "approval prompt on screen".to_string(), |r| format!("approval prompt on screen ({r})"));
+                    let mut att = Attention::new("permission").with_detail(detail);
                     att.request_id = Some(format!("scrape-{}", uuid::Uuid::new_v4().simple()));
                     self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 }
@@ -1218,7 +1755,9 @@ impl Engine {
             PaneState::Working if !hooks_seen && s.state != SessionState::Working => {
                 self.set_state(&s.id, SessionState::Working, None)?;
             }
-            PaneState::Idle if !hooks_seen && matches!(s.state, SessionState::Starting | SessionState::Working) => {
+            // A scraped needs-you the user answered in the pane itself (no
+            // flow.approve) ends when the pane reads idle again.
+            PaneState::Idle if !hooks_seen && (matches!(s.state, SessionState::Starting | SessionState::Working) || self.scraped_needs_you(s)) => {
                 if s.state == SessionState::Working {
                     self.with_store(|st| st.set_unread(&s.id, true))?;
                 }
@@ -1226,7 +1765,27 @@ impl Engine {
             }
             _ => {}
         }
+        // `prompt_as = "paste"`: paste once the composer is up (after this
+        // tick's state change, so a cleared needs-you is recorded first).
+        let paste = {
+            let rt = self.rt();
+            rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
+        };
+        if let Some(p) = paste {
+            self.rt().paste_at.remove(&s.id);
+            self.send(&s.id, &p)?;
+        }
         Ok(())
+    }
+
+    /// `needs_you` raised by the scraper (not a hook's pending approval).
+    fn scraped_needs_you(&self, s: &Session) -> bool {
+        s.state == SessionState::NeedsYou
+            && s.attention
+                .as_ref()
+                .and_then(|a| a.request_id.as_deref())
+                .is_some_and(|r| r.starts_with("scrape-"))
+            && !self.has_pending(&s.id)
     }
 
     /// Rule 2: unexpected death → schedule a resume with backoff, up to
@@ -1415,19 +1974,70 @@ impl Engine {
     }
 }
 
-/// A hook event through a manifest's `state.hooks.event_map`.
-fn mapped_outcome(m: &Manifest, ev: &HookEvent) -> HookOutcome {
-    match m.map_event(&ev.event) {
+/// May a hook carrying `SMOOTH_FLOW_ID` = `row.id` speak for `row`?
+/// Only its own harness (the posted `harness` is the manifest name), and only
+/// for the session already bound — or any, while none is.
+fn flow_id_accepts(row: &Session, harness: &str, agent_session_id: &str) -> bool {
+    if harness != row.kind.as_str() || matches!(row.state, SessionState::Done | SessionState::Dead) {
+        return false;
+    }
+    row.agent_session_id
+        .as_deref()
+        .is_none_or(|bound| agent_session_id.is_empty() || bound == agent_session_id)
+}
+
+/// What one hook event means for a session of manifest `m`, and whether
+/// the harness speaks Claude Code's `PermissionRequest` decision protocol.
+///
+/// Pure. An empty `event_map` (or no manifest) is the Claude table, and only
+/// that table speaks the decision protocol — so only it holds a
+/// `PermissionRequest` open for `flow.approve`; a harness with its own map
+/// reports the ask and moves on (th-b00115).
+#[must_use]
+pub fn hook_outcome(m: Option<&Manifest>, event: &str, payload: &Value) -> (HookOutcome, bool) {
+    m.filter(|m| !m.state.hooks.event_map.is_empty())
+        .map_or_else(|| (map_hook_event(event, payload), true), |m| (map_manifest_event(m, event, payload), false))
+}
+
+/// A hook event through a manifest's `state.hooks.event_map` (th-0f6126).
+///
+/// Pure. One refinement over the flat map (th-b00115): an event mapped to
+/// `needs_you` that carries a `notification_type` is only an ask when that
+/// type is one — Copilot and Qwen send idle and auth notices through the
+/// same event as permission prompts.
+#[must_use]
+pub fn map_manifest_event(m: &Manifest, event: &str, payload: &Value) -> HookOutcome {
+    match m.map_event(event) {
         Some(FlowEventName::Working) => HookOutcome::Working,
         Some(FlowEventName::Idle) => HookOutcome::Idle,
         Some(FlowEventName::NeedsYou) => {
-            let reason = ev.payload.get("reason").and_then(Value::as_str).unwrap_or("question");
-            let detail = ev
-                .payload
+            let ntype = ["notification_type", "notificationType"]
+                .iter()
+                .find_map(|k| payload.get(*k).and_then(Value::as_str))
+                .map(str::to_ascii_lowercase);
+            let permission = event.to_ascii_lowercase().contains("permission");
+            let reason = match ntype.as_deref() {
+                Some(t) if t.contains("permission") => "permission",
+                Some("elicitation_dialog") => "question",
+                Some(_) => return HookOutcome::None,
+                None if permission => "permission",
+                None => payload.get("reason").and_then(Value::as_str).unwrap_or("question"),
+            };
+            let detail = payload
                 .get("message")
                 .and_then(Value::as_str)
-                .map_or_else(|| permission_detail(&ev.payload), str::to_string);
-            HookOutcome::NeedsYou(Attention::new(reason).with_detail(detail))
+                .filter(|m| !m.trim().is_empty())
+                .map_or_else(|| permission_detail(payload), str::to_string);
+            let mut att = Attention::new(reason).with_detail(detail);
+            // th-3cabf6 / th-b00115: a permission ask under the harness's own
+            // event name has no long-poll to answer, but `flow.approve` (and
+            // every client) needs a request id to address it — the unknown id
+            // falls through to the approval keystroke, as a scraped prompt's
+            // does. A question is answered, not approved: no id.
+            if att.reason == "permission" {
+                att.request_id = Some(format!("hook-{}", uuid::Uuid::new_v4().simple()));
+            }
+            HookOutcome::NeedsYou(att)
         }
         Some(FlowEventName::Ended) => HookOutcome::Ended,
         Some(FlowEventName::Ignore) | None => HookOutcome::None,
@@ -1605,10 +2215,20 @@ mod tests {
         assert_eq!(slugify("Fix the Auth bug!!", 24), "fix-the-auth-bug");
         assert_eq!(slugify("   ", 24), "");
         assert!(slugify(&"x".repeat(100), 10).len() <= 10);
-        assert_eq!(default_title(&SessionKind::Claude, Some("  do it  "), None, Path::new("/a/b")), "do it");
-        assert_eq!(default_title(&SessionKind::Claude, None, Some("th-1"), Path::new("/a/b")), "th-1");
-        assert_eq!(default_title(&SessionKind::Shell, None, None, Path::new("/a/b")), "shell · b");
-        assert_eq!(default_title(&"th-code".parse().unwrap(), None, None, Path::new("/a/b")), "th-code · b");
+        assert_eq!(
+            default_title(&SessionKind::Claude, Some("  do it  "), None, Some("inferred"), Path::new("/a/b")),
+            "do it"
+        );
+        assert_eq!(
+            default_title(&SessionKind::Claude, None, Some("th-1"), Some("Pearl title"), Path::new("/a/b")),
+            "Pearl title"
+        );
+        assert_eq!(default_title(&SessionKind::Claude, None, Some("th-1"), None, Path::new("/a/b")), "th-1");
+        assert_eq!(default_title(&SessionKind::Shell, None, None, None, Path::new("/a/b")), "shell · b");
+        assert_eq!(
+            default_title(&"th-code".parse().unwrap(), None, None, Some("  "), Path::new("/a/b")),
+            "th-code · b"
+        );
     }
 
     /// th-0f6126 regression: the three built-in manifests reproduce EXACTLY
@@ -1646,7 +2266,7 @@ mod tests {
         // th code: the prompt is pasted, not passed; env carries the flow id + daemon.
         assert_eq!(tail("th-code", Some("fs-1"), Some("m"), Some("p")), vec!["code", "--model", "m"]);
         assert!(argv("th-code", None, None, None)[0].ends_with("th"));
-        assert!(default_argv(&r, &"aider".parse().unwrap(), &Vars::default())
+        assert!(default_argv(&r, &"nosuchtool".parse().unwrap(), &Vars::default())
             .unwrap_err()
             .to_string()
             .contains("unknown harness kind"));
@@ -1671,7 +2291,7 @@ mod tests {
         assert_eq!(resume_argv(&no_id, &r), no_id.argv, "no id yet ⇒ relaunch, not resume");
         let th = row("th-code", Some("fs-1"), &["/x/th", "code"]);
         assert_eq!(resume_argv(&th, &r), th.argv, "relaunch_command ⇒ the original argv");
-        let unknown = row("aider", Some("x"), &["aider"]);
+        let unknown = row("nosuchtool", Some("x"), &["nosuchtool"]);
         assert_eq!(resume_argv(&unknown, &r), unknown.argv, "no manifest ⇒ relaunch");
     }
 
@@ -1718,6 +2338,7 @@ mod tests {
             session_id: sid.into(),
             cwd: Some(cwd.into()),
             payload: json!({}),
+            flow_id: None,
         };
         // Wrong cwd ⇒ nothing binds.
         e.hook(ev("SessionStart", "ses_1", "/elsewhere")).unwrap();
@@ -1825,6 +2446,7 @@ mod tests {
                 session_id: "nope".into(),
                 cwd: None,
                 payload: json!({}),
+                flow_id: None,
             })
             .unwrap();
         assert!(matches!(r, HookReply::Immediate(v) if v == json!({})));
@@ -1852,6 +2474,7 @@ mod tests {
             session_id: "uuid-1".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
         e.hook(ev("UserPromptSubmit", json!({}))).unwrap();
         assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working);
@@ -2224,6 +2847,293 @@ mod tests {
     /// is process-wide and cargo runs tests in parallel.
     static TH_BIN_LOCK: Mutex<()> = Mutex::new(());
 
+    // ── adoption (th-c103c1) ──────────────────────────────────────────────
+
+    #[test]
+    fn adopt_setting_env_beats_the_store_and_defaults_off() {
+        assert!(!adopt_setting(None, None), "adoption is opt-in");
+        assert!(adopt_setting(None, Some("1")));
+        assert!(adopt_setting(None, Some("true")));
+        assert!(!adopt_setting(None, Some("0")));
+        assert!(!adopt_setting(None, Some("")));
+        assert!(adopt_setting(Some("on"), Some("0")), "the env wins");
+        assert!(!adopt_setting(Some("off"), Some("1")), "…in both directions");
+        assert!(adopt_setting(Some("  "), Some("yes")), "a blank env is not a value");
+    }
+
+    #[test]
+    fn harness_names_map_onto_manifest_kinds() {
+        let r = reg();
+        assert_eq!(kind_for_harness(&r, "claude-code"), Some(SessionKind::Claude), "what the Claude hooks send");
+        assert_eq!(kind_for_harness(&r, "claude"), Some(SessionKind::Claude));
+        assert_eq!(kind_for_harness(&r, "CODEX"), Some(SessionKind::Codex));
+        assert_eq!(kind_for_harness(&r, "opencode"), Some(SessionKind::Opencode));
+        assert_eq!(kind_for_harness(&r, "th-code"), Some("th-code".parse().unwrap()));
+        assert_eq!(kind_for_harness(&r, "cursor"), None, "no manifest, no adoption");
+        assert_eq!(kind_for_harness(&r, "-code"), None);
+        assert_eq!(kind_for_harness(&r, ""), None);
+    }
+
+    #[test]
+    fn only_projects_the_fleet_already_works_in_are_known() {
+        let known = vec!["/dev/smooai".to_string()];
+        assert!(project_is_known("/dev/smooth", "/dev/smooth", &known), "the daemon's own workspace");
+        assert!(project_is_known("/dev/smooai", "/dev/smooth", &known), "a project with sessions");
+        assert!(!project_is_known("/dev/stranger", "/dev/smooth", &known));
+        // The symlink trap this guard fell into first: git answers with the
+        // resolved path, so both sides go through `canon`.
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = tmp.path().to_string_lossy().into_owned();
+        assert!(project_is_known(&canon(&raw), &canon(&raw), &[]));
+        assert_eq!(canon("/definitely/not/a/path"), "/definitely/not/a/path", "unresolvable falls back");
+    }
+
+    #[test]
+    fn adoption_guards_each_refuse_for_their_own_reason() {
+        let git = crate::infer::infer(
+            Path::new("/dev/smooth"),
+            &crate::infer::GitFacts {
+                toplevel: Some("/dev/smooth".into()),
+                common_dir: Some("/dev/smooth/.git".into()),
+                branch: Some("th-c103c1-zf".into()),
+            },
+            &crate::infer::PearlFacts::default(),
+        );
+        let no_git = crate::infer::infer(Path::new("/tmp/x"), &crate::infer::GitFacts::default(), &crate::infer::PearlFacts::default());
+        let claude = Some(SessionKind::Claude);
+        assert_eq!(adoptable("Stop", "u1", false, Some(&git), claude.clone(), true), Err(AdoptRefusal::Disabled));
+        assert_eq!(adoptable("Stop", "  ", true, Some(&git), claude.clone(), true), Err(AdoptRefusal::NoSessionId));
+        assert_eq!(
+            adoptable("PermissionRequest", "u1", true, Some(&git), claude.clone(), true),
+            Err(AdoptRefusal::PermissionFirst),
+            "adopting here would hold a plain terminal open for a decision nobody can see"
+        );
+        assert_eq!(adoptable("Stop", "u1", true, Some(&git), None, true), Err(AdoptRefusal::UnknownHarness));
+        assert_eq!(adoptable("Stop", "u1", true, Some(&no_git), claude.clone(), true), Err(AdoptRefusal::NotGit));
+        assert_eq!(adoptable("Stop", "u1", true, None, claude.clone(), true), Err(AdoptRefusal::NotGit));
+        assert_eq!(
+            adoptable("Stop", "u1", true, Some(&git), claude.clone(), false),
+            Err(AdoptRefusal::UnknownProject)
+        );
+        assert_eq!(adoptable("Stop", "u1", true, Some(&git), claude, true), Ok(SessionKind::Claude));
+    }
+
+    #[test]
+    fn an_adopted_session_goes_dead_only_after_a_long_silence() {
+        let now = Utc::now();
+        assert!(!adopted_is_stale(now, now));
+        assert!(!adopted_is_stale(now - chrono::Duration::hours(5), now));
+        assert!(adopted_is_stale(now - chrono::Duration::hours(7), now));
+    }
+
+    /// A git repo at `dir` on `branch`, with one commit.
+    fn git_repo(dir: &Path, branch: &str) {
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        run(&["checkout", "-q", "-b", branch]);
+    }
+
+    fn hook_from(session: &str, event: &str, cwd: &Path) -> HookEvent {
+        HookEvent {
+            harness: "claude-code".into(),
+            event: event.into(),
+            session_id: session.into(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            payload: json!({}),
+            flow_id: None,
+        }
+    }
+
+    /// An engine whose workspace is a real repo, with `th` pointed nowhere so
+    /// inference never touches the developer's pearl store.
+    fn adopting_engine(tmp: &Path, branch: &str, on: bool) -> Engine {
+        git_repo(tmp, branch);
+        let e = engine(tmp);
+        e.set_adopt(on).unwrap();
+        e
+    }
+
+    #[test]
+    fn a_plain_session_is_not_adopted_unless_the_user_opted_in() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-c103c1-zf", false);
+        let reply = e.hook(hook_from("plain-1", "UserPromptSubmit", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert!(matches!(reply, HookReply::Immediate(_)));
+        assert!(e.list().unwrap().is_empty(), "adoption is off by default");
+    }
+
+    #[test]
+    fn a_plain_session_is_adopted_with_its_pearl_branch_and_worktree() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-c103c1-zero-friction", true);
+        e.hook(hook_from("plain-2", "UserPromptSubmit", tmp.path())).unwrap();
+        // A second event must bind to the SAME row, not adopt again.
+        e.hook(hook_from("plain-2", "PostToolUse", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+
+        let rows = e.list().unwrap();
+        assert_eq!(rows.len(), 1, "one harness session is one row");
+        let s = &rows[0];
+        assert!(s.adopted);
+        assert_eq!(s.kind, SessionKind::Claude, "`claude-code` is the claude manifest");
+        assert_eq!(s.agent_session_id.as_deref(), Some("plain-2"));
+        assert_eq!(s.branch.as_deref(), Some("th-c103c1-zero-friction"));
+        assert_eq!(s.pearl_id.as_deref(), Some("th-c103c1"), "inferred off the branch");
+        assert_eq!(s.title, "th-c103c1-zero-friction");
+        assert!(s.argv.is_empty(), "we did not launch it");
+        assert_eq!(s.tmux_session, None);
+        assert_eq!(s.state, SessionState::Working);
+    }
+
+    #[test]
+    fn adoption_refuses_strangers_non_repos_and_permission_requests() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-aaa111-x", true);
+        // Another repo entirely.
+        let other = tempfile::tempdir().unwrap();
+        git_repo(other.path(), "th-bbb222-y");
+        e.hook(hook_from("stranger", "Stop", other.path())).unwrap();
+        // Not a repo at all.
+        let plain = tempfile::tempdir().unwrap();
+        e.hook(hook_from("nogit", "Stop", plain.path())).unwrap();
+        // A permission request is never the first thing adopted.
+        e.hook(hook_from("perm", "PermissionRequest", tmp.path())).unwrap();
+        // No cwd at all.
+        let mut bare = hook_from("nocwd", "Stop", tmp.path());
+        bare.cwd = None;
+        e.hook(bare).unwrap();
+        // An unknown harness.
+        let mut cursor = hook_from("cursor-1", "Stop", tmp.path());
+        cursor.harness = "cursor".into();
+        e.hook(cursor).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert!(e.list().unwrap().is_empty(), "every guard refused");
+    }
+
+    #[test]
+    fn a_refusal_is_cached_so_the_shell_outs_happen_once() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-ccc333-z", true);
+        let plain = tempfile::tempdir().unwrap();
+        e.hook(hook_from("nogit", "Stop", plain.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert_eq!(e.rt().adopt_refused.get("nogit").copied(), Some(AdoptRefusal::NotGit));
+        // …and turning adoption on clears the cache, so the user's decision
+        // takes effect without restarting the daemon.
+        e.set_adopt(true).unwrap();
+        assert!(e.rt().adopt_refused.is_empty());
+    }
+
+    #[test]
+    fn an_adopted_session_ends_on_its_own_hook_and_refuses_engine_lifecycle() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-ddd444-w", true);
+        e.hook(hook_from("plain-3", "UserPromptSubmit", tmp.path())).unwrap();
+        let id = e.list().unwrap()[0].id.clone();
+
+        let kill = e.kill(&id, false).unwrap_err().to_string();
+        assert!(kill.contains("adopted"), "we do not own that process: {kill}");
+        let attach = e.attach(&id, 80, 24).unwrap_err().to_string();
+        assert!(attach.contains("no pane to attach"), "{attach}");
+        let close = e.close(&id, false, false, false).unwrap_err().to_string();
+        assert!(close.contains("adopted"), "{close}");
+
+        // Its own SessionEnd is the only end-of-life signal there is.
+        e.hook(hook_from("plain-3", "SessionEnd", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        assert_eq!(e.get(&id).unwrap().unwrap().state, SessionState::Done);
+        // Terminal now, so closing it out is allowed.
+        e.close(&id, false, false, false).unwrap();
+        assert!(e.get(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn supervision_leaves_a_fresh_adopted_row_alone_and_buries_a_silent_one() {
+        let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_TH_BIN", "/definitely/not/a/binary");
+        let tmp = tempfile::tempdir().unwrap();
+        let e = adopting_engine(tmp.path(), "th-eee555-v", true);
+        e.hook(hook_from("plain-4", "UserPromptSubmit", tmp.path())).unwrap();
+        std::env::remove_var("SMOOTH_TH_BIN");
+        let s = e.list().unwrap()[0].clone();
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Working, "no pane is not a death");
+
+        let stale = Session {
+            updated_at: Utc::now() - chrono::Duration::hours(9),
+            ..s
+        };
+        e.supervise_one(&stale, Utc::now()).unwrap();
+        let after = e.get(&stale.id).unwrap().unwrap();
+        assert_eq!(after.state, SessionState::Dead);
+        assert_eq!(after.attention.unwrap().reason, "crashed");
+    }
+
+    #[test]
+    fn the_refusal_cache_is_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        for i in 0..=ADOPT_REFUSED_CAP {
+            e.refuse_adoption(&format!("s{i}"), AdoptRefusal::NotGit);
+        }
+        assert!(
+            e.rt().adopt_refused.len() <= ADOPT_REFUSED_CAP,
+            "a long-lived daemon must not grow this forever"
+        );
+    }
+
+    #[test]
+    fn rows_another_daemon_changed_are_rebroadcast() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        // First tick only takes the watermark.
+        e.supervise_tick().unwrap();
+        let mut rx = e.subscribe();
+        // A row owned by SOMEBODY ELSE's daemon, written straight to the
+        // shared store — exactly what the other daemon's hook handler does.
+        let s = e
+            .with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(SessionKind::Claude),
+                    owner: Some("some-other-daemon".into()),
+                    project: tmp.path().to_string_lossy().into(),
+                    worktree: tmp.path().to_string_lossy().into(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        e.supervise_tick().unwrap();
+        let frame = rx.try_recv().expect("the other daemon's row is re-broadcast");
+        match frame {
+            ServerFrame::Session { session } => assert_eq!(session.id, s.id),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
     #[test]
     fn handoff_degrades_without_th_or_gh() {
         let _g = TH_BIN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2347,6 +3257,186 @@ mod tests {
         tmux::kill_server(&sock);
     }
 
+    #[test]
+    fn pending_paste_waits_for_idle_and_never_types_into_a_question() {
+        let now = Instant::now();
+        let gated = PendingPaste {
+            prompt: "p".into(),
+            at: now + Duration::from_secs(1),
+            wait_idle_until: Some(now + Duration::from_secs(90)),
+        };
+        assert!(!gated.due(now, PaneState::Idle), "not before `at`");
+        let later = now + Duration::from_secs(2);
+        assert!(gated.due(later, PaneState::Idle));
+        for st in [PaneState::Working, PaneState::Unknown, PaneState::Errored, PaneState::AwaitingApproval] {
+            assert!(!gated.due(later, st), "{st:?} before the deadline");
+        }
+        let past = now + Duration::from_secs(91);
+        assert!(gated.due(past, PaneState::Unknown), "the deadline pastes anyway");
+        assert!(!gated.due(past, PaneState::AwaitingApproval), "…but never into a pending question");
+        let timed = PendingPaste {
+            prompt: "p".into(),
+            at: now + PASTE_DELAY,
+            wait_idle_until: None,
+        };
+        assert!(!timed.due(now, PaneState::Idle));
+        assert!(
+            timed.due(now + PASTE_DELAY, PaneState::AwaitingApproval),
+            "an ungated manifest keeps the old timer"
+        );
+    }
+
+    #[test]
+    fn observe_quiet_measures_since_the_last_change() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        assert_eq!(observe_quiet(&mut seen, "a", "x", t0), None, "first look is unknown");
+        assert_eq!(observe_quiet(&mut seen, "a", "x", t0 + Duration::from_secs(2)), Some(Duration::from_secs(2)));
+        assert_eq!(
+            observe_quiet(&mut seen, "a", "y", t0 + Duration::from_secs(3)),
+            Some(Duration::ZERO),
+            "a change resets"
+        );
+        assert_eq!(observe_quiet(&mut seen, "a", "y", t0 + Duration::from_secs(5)), Some(Duration::from_secs(2)));
+        assert_eq!(observe_quiet(&mut seen, "b", "y", t0), None, "per session");
+        // A clock that runs backwards (it cannot, but) saturates instead of panicking.
+        assert_eq!(observe_quiet(&mut seen, "a", "y", t0), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn continue_latest_resumes_without_a_session_id() {
+        let r = reg();
+        let mut crush = blank();
+        crush.kind = "crush".parse().unwrap();
+        crush.argv = vec!["/x/crush".into()];
+        assert_eq!(resume_argv(&crush, &r), vec!["/x/crush", "--continue"]);
+        let mut aider = blank();
+        aider.kind = "aider".parse().unwrap();
+        aider.argv = vec!["/x/aider".into(), "--model".into(), "m".into()];
+        assert_eq!(
+            resume_argv(&aider, &r),
+            vec!["/x/aider", "--model", "m", "--restore-chat-history"],
+            "a pasted-prompt harness keeps its launch flags"
+        );
+        // goose pre-assigns its session name, so it resumes by id.
+        let mut goose = blank();
+        goose.kind = "goose".parse().unwrap();
+        goose.agent_session_id = Some("fs-9".into());
+        goose.argv = vec!["/x/goose".into(), "run".into()];
+        assert_eq!(resume_argv(&goose, &r), vec!["/x/goose", "session", "--resume", "--name", "fs-9"]);
+    }
+
+    /// th-e77603 / th-d2a1e4, live against a fake scrape-only CLI: the
+    /// prompt is NOT pasted into a first-run question; the question reads
+    /// needs_you; answering it in the pane clears needs_you once the
+    /// composer is idle; then the prompt is pasted, the spinner reads
+    /// working and the composer idle again. Skips when tmux is missing.
+    #[test]
+    fn live_scraped_session_waits_to_paste_and_clears_needs_you() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-scrape-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("fake-scraped-agent.sh");
+        std::fs::write(
+            &script,
+            "printf 'Add stuff to .gitignore? (Y)es/(N)o [Yes]: '; read a; echo \"ANSWER=[$a]\"\n\
+             while :; do printf '> '; read p; echo \"PROMPT=[$p]\"; i=0; \
+             while [ $i -lt 10 ]; do printf '\\r\\342\\240\\213 thinking %s' $i; sleep 0.3; i=$((i+1)); done; \
+             printf '\\rdone            \\n'; done\n",
+        )
+        .unwrap();
+        let manifests = tmp.path().join("home/.smooth/harnesses");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("fakescrape.toml"),
+            format!(
+                r#"name = "fakescrape"
+[binary]
+names = ["sh"]
+[launch]
+argv = ["{script}"]
+prompt_as = "paste"
+[state]
+source = "scrape"
+[[state.scrape.rules]]
+name = "question"
+state = "needs_you"
+match = ['\(y\)es/\(n\)o.*:\s*$']
+where = "last_line"
+[[state.scrape.rules]]
+name = "spinner"
+state = "working"
+spinner = true
+where = "last_line"
+[[state.scrape.rules]]
+name = "composer"
+state = "idle"
+match = ['^>\s*$']
+where = "last_line"
+quiet_ms = 300
+"#,
+                script = script.display()
+            ),
+        )
+        .unwrap();
+        let e = engine(tmp.path());
+        let s = e
+            .new_session(NewRequest {
+                kind: "fakescrape".parse().unwrap(),
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                prompt: Some("hello-scrape".into()),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        let pane = || match e.snapshot(&s.id).unwrap() {
+            ServerFrame::Screen { text, .. } => text,
+            _ => String::new(),
+        };
+        let wait_for = |want: SessionState, secs: u64| {
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            loop {
+                e.supervise_tick().unwrap();
+                let got = e.get(&s.id).unwrap().unwrap();
+                if got.state == want {
+                    return got;
+                }
+                assert!(Instant::now() < deadline, "never reached {want:?}; state {:?}; pane:\n{}", got.state, pane());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        let asking = wait_for(SessionState::NeedsYou, 15);
+        assert_eq!(
+            asking.attention.as_ref().unwrap().detail.as_deref(),
+            Some("approval prompt on screen (question)")
+        );
+        // Well past PASTE_MIN_DELAY: the prompt must still be waiting.
+        let hold = Instant::now() + Duration::from_millis(2500);
+        while Instant::now() < hold {
+            e.supervise_tick().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!pane().contains("hello-scrape"), "pasted into the question:\n{}", pane());
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::NeedsYou);
+        // The user answers in the pane.
+        e.send_key(&s.id, "Enter").unwrap();
+        // Idle clears needs_you; the paste fires on that idle; the turn runs.
+        let _ = wait_for(SessionState::Working, 15);
+        assert!(pane().contains("ANSWER=[]") && pane().contains("PROMPT=[hello-scrape]"), "{}", pane());
+        let done = wait_for(SessionState::Idle, 20);
+        assert!(done.unread, "a finished scraped turn marks the session unread");
+        assert!(e
+            .events(&s.id)
+            .unwrap()
+            .iter()
+            .any(|ev| ev.kind == EventKind::User && ev.text == "hello-scrape"));
+        let _ = e.kill(&s.id, false);
+        tmux::kill_server(&sock);
+    }
+
     /// th-d33afa: hooks and state changes feed the per-session event stream
     /// (the phone's Chat tab), buffered in the store for replay on attach.
     #[test]
@@ -2371,6 +3461,7 @@ mod tests {
             session_id: "uuid-ev".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
         e.hook(ev("UserPromptSubmit", json!({"prompt":"fix it"}))).unwrap();
         e.hook(ev("PreToolUse", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))).unwrap();
@@ -2435,6 +3526,7 @@ mod tests {
             session_id: "fs-native".into(),
             cwd: None,
             payload,
+            flow_id: None,
         };
         e.hook(ev("turn_start", json!({}))).unwrap();
         let row = e.get(&s.id).unwrap().unwrap();
@@ -2452,56 +3544,68 @@ mod tests {
             "name=\"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[state.hooks.event_map]\nask=\"needs_you\"\nbye=\"ended\"\nmeh=\"ignore\"",
         )
         .unwrap();
-        let mk = |event: &str, payload: Value| HookEvent {
-            harness: "x".into(),
-            event: event.into(),
-            session_id: "s".into(),
-            cwd: None,
-            payload,
-        };
-        match mapped_outcome(&m, &mk("ask", json!({"reason":"permission","message":"rm -rf"}))) {
+        match map_manifest_event(&m, "ask", &json!({"reason":"permission","message":"rm -rf"})) {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "permission");
                 assert_eq!(a.detail.as_deref(), Some("rm -rf"));
+                assert!(a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")), "approvable: {a:?}");
             }
             other => panic!("{other:?}"),
         }
-        match mapped_outcome(&m, &mk("ask", json!({"tool_name":"Bash","tool_input":{"command":"ls"}}))) {
+        match map_manifest_event(&m, "ask", &json!({"tool_name":"Bash","tool_input":{"command":"ls"}})) {
             HookOutcome::NeedsYou(a) => {
                 assert_eq!(a.reason, "question");
                 assert_eq!(a.detail.as_deref(), Some("Bash: ls"));
+                assert!(a.request_id.is_none(), "a question is answered, not approved");
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(mapped_outcome(&m, &mk("bye", json!({}))), HookOutcome::Ended);
-        assert_eq!(mapped_outcome(&m, &mk("meh", json!({}))), HookOutcome::None);
-        assert_eq!(mapped_outcome(&m, &mk("Stop", json!({}))), HookOutcome::None, "unlisted ⇒ nothing");
+        assert_eq!(map_manifest_event(&m, "bye", &json!({})), HookOutcome::Ended);
+        assert_eq!(map_manifest_event(&m, "meh", &json!({})), HookOutcome::None);
+        assert_eq!(map_manifest_event(&m, "Stop", &json!({})), HookOutcome::None, "unlisted ⇒ nothing");
     }
 
     /// th-0f6126: prefs persist in flow.db, order/hide the list, reach
     /// `flow.hello` and broadcast `flow.harnesses`.
+    /// th-473294: a key press addresses a pane, so an unknown session is an
+    /// error, not a silent no-op.
+    #[test]
+    fn send_key_needs_a_known_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let err = e.send_key("fs-nope", "Enter").unwrap_err().to_string();
+        assert!(err.contains("no such session"), "{err}");
+    }
+
     #[test]
     fn harness_prefs_persist_order_and_hide() {
         let tmp = tempfile::tempdir().unwrap();
         let e = engine(tmp.path());
         let names = |v: &[HarnessInfo]| v.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names(&e.harnesses(true).unwrap()), ["claude", "opencode", "codex", "th-code"]);
+        let builtin: Vec<String> = crate::harness::BUILTIN.iter().map(|(n, _)| (*n).to_string()).collect();
+        assert_eq!(names(&e.harnesses(true).unwrap()), builtin);
+        // `th-code` first, then the rest in registry order, minus `hidden`.
+        let reordered = |hidden: &[&str]| {
+            std::iter::once("th-code".to_string())
+                .chain(builtin.iter().filter(|n| *n != "th-code" && !hidden.contains(&n.as_str())).cloned())
+                .collect::<Vec<_>>()
+        };
         let mut rx = e.subscribe();
         let all = e.set_harness_prefs(Some(vec!["th-code".into()]), Some(vec!["codex".into()])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
-        assert!(all[3].hidden);
+        assert_eq!(names(&all), reordered(&[]));
+        assert!(all.iter().find(|h| h.name == "codex").unwrap().hidden);
         match rx.try_recv().unwrap() {
-            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Harnesses { harnesses } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         // Visible list + hello omit the hidden one; a partial PUT keeps the other half.
-        assert_eq!(names(&e.harnesses(false).unwrap()), ["th-code", "claude", "opencode"]);
+        assert_eq!(names(&e.harnesses(false).unwrap()), reordered(&["codex"]));
         match e.hello().unwrap() {
-            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), ["th-code", "claude", "opencode"]),
+            ServerFrame::Hello { harnesses, .. } => assert_eq!(names(&harnesses), reordered(&["codex"])),
             other => panic!("{other:?}"),
         }
         let all = e.set_harness_prefs(None, Some(vec![])).unwrap();
-        assert_eq!(names(&all), ["th-code", "claude", "opencode", "codex"]);
+        assert_eq!(names(&all), reordered(&[]));
         assert!(all.iter().all(|h| !h.hidden));
         // Persisted: a fresh engine on the same db sees the order.
         let e2 = engine(tmp.path());
@@ -2514,15 +3618,15 @@ mod tests {
         let dir = tmp.path().join("home/.smooth/harnesses");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("aider.toml"),
-            "name=\"aider\"\n[binary]\nnames=[\"aider\"]\n[launch]\nargv=[\"{prompt}\"]\n",
+            dir.join("nosuchtool.toml"),
+            "name=\"nosuchtool\"\n[binary]\nnames=[\"nosuchtool-xyzzy\"]\n[launch]\nargv=[\"{prompt}\"]\n",
         )
         .unwrap();
         let all = e.harnesses(true).unwrap();
-        let aider = all.iter().find(|h| h.name == "aider").unwrap();
-        assert_eq!(aider.origin, "user");
-        assert!(!aider.installed);
-        assert!(aider.reason.as_deref().unwrap().contains("`aider` not found on PATH"));
+        let user = all.iter().find(|h| h.name == "nosuchtool").unwrap();
+        assert_eq!(user.origin, "user");
+        assert!(!user.installed);
+        assert!(user.reason.as_deref().unwrap().contains("`nosuchtool-xyzzy` not found on PATH"));
     }
 
     /// th-0f6126: an unknown kind is refused before anything is created.
@@ -2532,13 +3636,320 @@ mod tests {
         let e = engine(tmp.path());
         let err = e
             .new_session(NewRequest {
-                kind: "aider".parse().unwrap(),
+                kind: "nosuchtool".parse().unwrap(),
                 worktree: Some(tmp.path().to_string_lossy().into_owned()),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown harness kind `aider`"), "{err}");
+        assert!(err.contains("unknown harness kind `nosuchtool`"), "{err}");
         assert!(e.list().unwrap().is_empty());
+    }
+
+    /// The short name of an outcome, so a table can say what it expects.
+    fn outcome_name(o: &HookOutcome) -> String {
+        match o {
+            HookOutcome::Working => "working".into(),
+            HookOutcome::Idle => "idle".into(),
+            HookOutcome::NeedsYou(a) => format!("needs_you:{}", a.reason),
+            HookOutcome::Ended => "ended".into(),
+            HookOutcome::None => "none".into(),
+        }
+    }
+
+    // (harness, event, payload, expected outcome, speaks Claude's decision protocol)
+    #[allow(clippy::too_many_lines, reason = "a data table: one row per harness event")]
+    fn hook_event_table() -> Vec<(&'static str, &'static str, Value, &'static str, bool)> {
+        let none = || json!({});
+        let perm = || json!({"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf build"}});
+        vec![
+            // Gemini CLI — its own names; Notification is only ever ToolPermission.
+            ("gemini", "SessionStart", json!({"source": "startup"}), "none", false),
+            ("gemini", "BeforeAgent", json!({"prompt": "hi"}), "working", false),
+            ("gemini", "BeforeTool", perm(), "working", false),
+            ("gemini", "AfterTool", perm(), "working", false),
+            ("gemini", "AfterAgent", json!({"prompt_response": "done"}), "idle", false),
+            (
+                "gemini",
+                "Notification",
+                json!({"notification_type": "ToolPermission", "message": "Allow rm?"}),
+                "needs_you:permission",
+                false,
+            ),
+            ("gemini", "PreCompress", json!({"trigger": "auto"}), "none", false),
+            ("gemini", "SessionEnd", json!({"reason": "exit"}), "ended", false),
+            ("gemini", "BeforeModel", none(), "none", false),
+            ("gemini", "Stop", none(), "none", false),
+            // Qwen Code — Claude's names and protocol (the Claude table).
+            ("qwen", "UserPromptSubmit", none(), "working", true),
+            ("qwen", "PreToolUse", perm(), "working", true),
+            ("qwen", "PostToolUse", perm(), "working", true),
+            ("qwen", "Stop", json!({"last_assistant_message": "ok"}), "idle", true),
+            ("qwen", "PermissionRequest", perm(), "needs_you:permission", true),
+            (
+                "qwen",
+                "Notification",
+                json!({"notification_type": "permission_prompt", "message": "Qwen needs permission"}),
+                "needs_you:permission",
+                true,
+            ),
+            (
+                "qwen",
+                "Notification",
+                json!({"notification_type": "auth_success", "message": "signed in"}),
+                "none",
+                true,
+            ),
+            ("qwen", "SessionEnd", none(), "ended", true),
+            ("qwen", "SessionStart", none(), "none", true),
+            // Cursor Agent — camelCase; no gate hooks subscribed, so no needs_you.
+            ("cursor-agent", "sessionStart", none(), "none", false),
+            ("cursor-agent", "beforeSubmitPrompt", json!({"prompt": "hi"}), "working", false),
+            ("cursor-agent", "postToolUse", none(), "working", false),
+            ("cursor-agent", "postToolUseFailure", none(), "working", false),
+            ("cursor-agent", "afterShellExecution", none(), "working", false),
+            ("cursor-agent", "afterAgentResponse", none(), "none", false),
+            ("cursor-agent", "stop", json!({"status": "completed"}), "idle", false),
+            ("cursor-agent", "sessionEnd", none(), "ended", false),
+            ("cursor-agent", "preToolUse", perm(), "none", false),
+            // Copilot CLI — PermissionRequest precedes the rules, a Notification is the ask.
+            ("copilot", "SessionStart", none(), "none", false),
+            ("copilot", "UserPromptSubmit", none(), "working", false),
+            ("copilot", "PreToolUse", perm(), "working", false),
+            ("copilot", "PostToolUse", perm(), "working", false),
+            ("copilot", "PostToolUseFailure", perm(), "working", false),
+            ("copilot", "PermissionRequest", perm(), "none", false),
+            ("copilot", "PreCompact", none(), "none", false),
+            (
+                "copilot",
+                "Notification",
+                json!({"notification_type": "permission_prompt", "message": "Allow bash?"}),
+                "needs_you:permission",
+                false,
+            ),
+            (
+                "copilot",
+                "Notification",
+                json!({"notificationType": "elicitation_dialog", "message": "Pick one"}),
+                "needs_you:question",
+                false,
+            ),
+            (
+                "copilot",
+                "Notification",
+                json!({"notification_type": "idle_prompt", "message": "waiting"}),
+                "none",
+                false,
+            ),
+            ("copilot", "Stop", none(), "idle", false),
+            ("copilot", "ErrorOccurred", json!({"recoverable": false}), "none", false),
+            ("copilot", "SessionEnd", none(), "ended", false),
+            // Factory Droid — Claude's names, NOT Claude's decision protocol.
+            ("droid", "SessionStart", none(), "none", false),
+            ("droid", "UserPromptSubmit", none(), "working", false),
+            ("droid", "PreToolUse", perm(), "working", false),
+            ("droid", "PostToolUse", perm(), "working", false),
+            ("droid", "Stop", none(), "idle", false),
+            ("droid", "SubagentStop", none(), "none", false),
+            ("droid", "PermissionRequest", perm(), "needs_you:permission", false),
+            ("droid", "Notification", json!({"message": "Droid is waiting for your input"}), "none", false),
+            ("droid", "SessionEnd", none(), "ended", false),
+            ("droid", "PreCompact", none(), "none", false),
+            // Amp plugin events.
+            ("amp", "session.start", none(), "none", false),
+            ("amp", "agent.start", json!({"message": "hi"}), "working", false),
+            ("amp", "tool.call", none(), "none", false),
+            ("amp", "tool.result", none(), "working", false),
+            ("amp", "agent.end", json!({"status": "done"}), "idle", false),
+            ("amp", "agent.end", json!({"status": "cancelled"}), "idle", false),
+            ("amp", "Stop", none(), "none", false),
+            // Pi extension events.
+            ("pi", "session_start", json!({"reason": "startup"}), "none", false),
+            ("pi", "agent_start", none(), "working", false),
+            ("pi", "tool_execution_start", none(), "working", false),
+            ("pi", "agent_end", none(), "idle", false),
+            ("pi", "session_shutdown", json!({"reason": "quit"}), "ended", false),
+            ("pi", "turn_end", none(), "none", false),
+        ]
+    }
+
+    /// th-b00115: every hook-capable built-in's native events, through the
+    /// exact function the engine runs, with the payloads those CLIs send.
+    #[test]
+    fn hook_capable_harness_events_map_to_flow_states() {
+        let r = reg();
+        let none = json!({});
+        let perm = json!({"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf build"}});
+        let table = hook_event_table();
+        for (harness, event, payload, want, claude) in &table {
+            let m = r.get(harness).unwrap_or_else(|| panic!("{harness} is built in"));
+            let (outcome, protocol) = hook_outcome(Some(m), event, payload);
+            assert_eq!(outcome_name(&outcome), *want, "{harness} {event} {payload}");
+            assert_eq!(protocol, *claude, "{harness} {event}: decision protocol");
+        }
+        // Every event a manifest names is exercised above (no silent map entry).
+        for name in ["gemini", "cursor-agent", "copilot", "droid", "amp", "pi"] {
+            for event in r.get(name).unwrap().state.hooks.event_map.keys() {
+                assert!(table.iter().any(|(h, e, ..)| h == &name && e == event), "{name}: `{event}` has no table row");
+            }
+        }
+        // No manifest ⇒ the Claude table, with the protocol.
+        assert!(matches!(hook_outcome(None, "Stop", &none), (HookOutcome::Idle, true)));
+        // Detail: message first, else the tool.
+        let m = r.get("droid").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "PermissionRequest", &perm) else {
+            panic!()
+        };
+        assert_eq!(a.detail.as_deref(), Some("run_shell_command: rm -rf build"));
+        let m = r.get("gemini").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "Notification", &json!({"notification_type": "ToolPermission", "message": "Allow rm?"}))
+        else {
+            panic!()
+        };
+        assert_eq!(a.detail.as_deref(), Some("Allow rm?"));
+        assert!(
+            a.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")),
+            "a ToolPermission ask is approvable: {a:?}"
+        );
+        let m = r.get("copilot").unwrap();
+        let (HookOutcome::NeedsYou(a), _) = hook_outcome(Some(m), "Notification", &json!({"notification_type": "elicitation_dialog"})) else {
+            panic!()
+        };
+        assert!(a.request_id.is_none(), "a question is answered, not approved");
+    }
+
+    #[test]
+    fn flow_id_binding_rules() {
+        let row = |kind: &str, bound: Option<&str>, state: SessionState| Session {
+            kind: kind.parse().unwrap(),
+            agent_session_id: bound.map(str::to_string),
+            state,
+            ..serde_json::from_value::<Session>(json!({
+                "id": "fs-1", "kind": "shell", "title": "t", "project": "/p", "worktree": "/p",
+                "argv": [], "state": "working", "created_at": "2026-09-14T00:00:00Z", "updated_at": "2026-09-14T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        // (row kind, row's bound id, row state, posted harness, posted session id, accepted)
+        let table = [
+            ("droid", None, SessionState::Starting, "droid", "d-1", true),
+            ("droid", None, SessionState::Starting, "droid", "", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "d-1", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "", true),
+            ("droid", Some("d-1"), SessionState::Working, "droid", "d-2", false),
+            ("droid", None, SessionState::Starting, "claude-code", "c-1", false),
+            ("droid", None, SessionState::Starting, "", "d-1", false),
+            ("claude", None, SessionState::Starting, "claude-code", "c-1", false),
+            ("amp", None, SessionState::Done, "amp", "T-1", false),
+            ("amp", None, SessionState::Dead, "amp", "T-1", false),
+            ("amp", None, SessionState::NeedsYou, "amp", "T-1", true),
+        ];
+        for (kind, bound, state, harness, sid, want) in table {
+            assert_eq!(
+                flow_id_accepts(&row(kind, bound, state), harness, sid),
+                want,
+                "{kind} bound={bound:?} {state:?} ← {harness}/{sid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smooth_flow_id_binds_learned_harnesses_and_holds_only_claude_protocol_asks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let wt = tmp.path().to_string_lossy().into_owned();
+        let mk = |kind: &str, sid: Option<&str>| {
+            e.with_store(|st| {
+                st.create(NewSession {
+                    kind: Some(kind.parse().unwrap()),
+                    agent_session_id: sid.map(str::to_string),
+                    project: wt.clone(),
+                    worktree: wt.clone(),
+                    ..Default::default()
+                })
+            })
+            .unwrap()
+        };
+        let ev = |harness: &str, event: &str, sid: &str, flow_id: Option<&str>, payload: Value| HookEvent {
+            harness: harness.into(),
+            event: event.into(),
+            session_id: sid.into(),
+            cwd: Some("/not/the/worktree".into()),
+            payload,
+            flow_id: flow_id.map(str::to_string),
+        };
+        // The pane env names the row, alongside the manifest's own env.
+        let droid = mk("droid", None);
+        let reg = e.registry();
+        let env = e.launch_env(reg.get("droid"), &droid);
+        assert!(env.contains(&(FLOW_ID_ENV.to_string(), droid.id.clone())), "{env:?}");
+        let thc = mk("th-code", Some("thc-1"));
+        let env = e.launch_env(reg.get("th-code"), &thc);
+        assert!(env.contains(&(FLOW_ID_ENV.to_string(), thc.id)) && env.iter().any(|(k, _)| k == "SMOOTH_FLOW_SESSION"));
+
+        // A hook from ANOTHER harness inheriting the env does not bind.
+        e.hook(ev("claude-code", "UserPromptSubmit", "c-9", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().agent_session_id, None);
+        // Droid's first hook binds its id by flow_id (the cwd does not even match).
+        e.hook(ev("droid", "SessionStart", "d-1", Some(&droid.id), json!({}))).unwrap();
+        let bound = e.get(&droid.id).unwrap().unwrap();
+        assert_eq!(bound.agent_session_id.as_deref(), Some("d-1"));
+        assert_eq!(bound.state_source, "hooks");
+        e.hook(ev("droid", "UserPromptSubmit", "d-1", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Working);
+        // A same-kind child with a different id is ignored.
+        e.hook(ev("droid", "Stop", "d-child", Some(&droid.id), json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Working);
+        // Droid's PermissionRequest is reported, not held: no pending, immediate reply.
+        let reply = e
+            .hook(ev(
+                "droid",
+                "PermissionRequest",
+                "d-1",
+                Some(&droid.id),
+                json!({"tool_name": "Execute", "tool_input": {"command": "ls"}}),
+            ))
+            .unwrap();
+        assert!(matches!(reply, HookReply::Immediate(ref v) if *v == json!({})), "droid asks are not held");
+        let now = e.get(&droid.id).unwrap().unwrap();
+        assert_eq!(now.state, SessionState::NeedsYou);
+        let att = now.attention.as_ref().unwrap();
+        assert_eq!(att.reason, "permission");
+        // Not held, but still answerable: flow.approve sends the keystroke for a `hook-` id.
+        assert!(att.request_id.as_deref().is_some_and(|r| r.starts_with("hook-")), "{att:?}");
+        assert!(!e.has_pending(&droid.id));
+        // No tmux pane here, so the keystroke path is an error — not a hang, not a pending send.
+        assert!(e.approve(&droid.id, att.request_id.as_deref().unwrap(), Decision::Allow).is_err());
+        assert!(!e.has_pending(&droid.id));
+        e.hook(ev("droid", "Stop", "d-1", None, json!({}))).unwrap();
+        assert_eq!(e.get(&droid.id).unwrap().unwrap().state, SessionState::Idle, "found by id without flow_id");
+
+        // A payload with no session id at all (an Amp event before its thread id) still lands.
+        let amp = mk("amp", None);
+        e.hook(ev("amp", "agent.start", "", Some(&amp.id), json!({}))).unwrap();
+        let a = e.get(&amp.id).unwrap().unwrap();
+        assert_eq!((a.state, a.agent_session_id), (SessionState::Working, None));
+
+        // Qwen speaks Claude's protocol: its PermissionRequest IS held for flow.approve.
+        let qwen = mk("qwen", Some("q-1"));
+        let reply = e
+            .hook(ev(
+                "qwen",
+                "PermissionRequest",
+                "q-1",
+                Some(&qwen.id),
+                json!({"tool_name": "run_shell_command"}),
+            ))
+            .unwrap();
+        let HookReply::Pending { request_id, .. } = reply else {
+            panic!("qwen asks are held")
+        };
+        assert!(e.has_pending(&qwen.id));
+        assert!(!request_id.starts_with("hook-"), "a held ask carries its pending id");
+        e.approve(&qwen.id, &request_id, Decision::Allow).unwrap();
+
+        // An unknown flow id is a quiet OK, like an unknown session.
+        let r = e.hook(ev("droid", "Stop", "zzz", Some("fs-nope"), json!({}))).unwrap();
+        assert!(matches!(r, HookReply::Immediate(v) if v == json!({})));
     }
 }

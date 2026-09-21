@@ -59,8 +59,10 @@ One `TerminalSurfaceView` per session, created on first focus and kept for the
 session's life, so scrollback lives in the surface. Keys go through
 `interpretKeyEvents` (IME/dead keys work) then `ghostty_surface_key`; mouse,
 scroll (precise + momentum bits), resize (`flow.resize` on grid change), focus
-and content scale are forwarded. `⌘D` splits the surface area (NSSplitView,
-no third-party splitter — bonsplit's submodule is not vendored here).
+and content scale are forwarded. The surface area is a stack of **tabs**, each
+holding a **binary split tree** of panes (nested `NSSplitView`s — no
+third-party splitter, bonsplit's submodule is not vendored here); see
+[SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
 
 ## Daemon lifecycle and TCC — the part cmux gets wrong
 
@@ -114,16 +116,47 @@ completes in ~4 s instead of never; a TERM-honoring daemon is gone in ~1 s.
 
 ### What the child daemon is started with
 
-| env                          | value                              | why                                                                                 |
-| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
-| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                       | agents run under the **app-owned** tmux server (the TCC story below)                |
-| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new  | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
-| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db` | never share Big Smooth's operator store                                             |
-| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`     | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
-| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                | Big Smooth may be running; we are a separate product on our own port                |
-| `SMOOTH_TAILSCALE_SERVE`     | `0`                                | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+| env                          | value                                  | why                                                                                 |
+| ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `SMOOTH_FLOW_TMUX_SOCKET`    | `smoothflow`                           | agents run under the **app-owned** tmux server (the TCC story below)                |
+| `SMOOTH_LOCAL_TOKEN`         | `~/.smooth/operator-token` or new      | every `/api/flow/*` route but `/hooks` is token-gated; app and child agree          |
+| `SMOOTH_OPERATOR_DB`         | `~/.smooth/smoothflow-operator.db`     | never share Big Smooth's operator store                                             |
+| `SMOOTH_FLOW_DB`             | `~/.smooth/smoothflow-flow.db`         | a second daemon on the same `flow.db` marks our rows "process vanished" (th-4f7866) |
+| `SMOOTH_ALLOW_SECOND_DAEMON` | `1`                                    | Big Smooth may be running; we are a separate product on our own port                |
+| `SMOOTH_TAILSCALE_SERVE`     | `0`                                    | Big Smooth owns the tailnet port; phones reach SmoothFlow through the relay         |
+| `SMOOTH_RELAY_DEVICE_ID`     | `~/.smooth/smoothflow-relay-device-id` | its OWN relay identity — Big Smooth's is `~/.smooth/relay-device-id` (th-a1bb12)    |
+| `SMOOTH_RELAY_LABEL`         | `<host> · SmoothFlow`                  | what a phone's device list calls this daemon                                        |
+| `SMOOTH_RELAY_KIND`          | `flow`                                 | relay presence kind: SmoothFlow phones prefer it, Big Smooth phones skip it         |
 
 The token rides as `?token=` on the WebSocket and `X-Smooth-Token` on HTTP.
+
+### Two daemons, one machine
+
+Big Smooth (`th up` / the Big Smooth app) and the SmoothFlow child are two
+`smooth-daemon` processes on one Mac. They must not share anything that names
+a machine-wide singleton. Every isolation knob, and what went wrong before it:
+
+| Resource        | Big Smooth                                 | SmoothFlow child                                                                                               | Without it                                                                                                            |
+| --------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| HTTP/WS port    | `:8899` app / `:4400` `th up`              | a free port per launch (`--addr 127.0.0.1:0`-style pick in `DaemonManager`)                                    | bind failure                                                                                                          |
+| single-instance | `~/.smooth/daemon.lock`                    | `SMOOTH_ALLOW_SECOND_DAEMON=1`                                                                                 | the child refuses to start                                                                                            |
+| operator store  | `~/.smooth/operator-storage.db`            | `SMOOTH_OPERATOR_DB=~/.smooth/smoothflow-operator.db`                                                          | shared conversations + SQLite lock fights (th-2c8c1f)                                                                 |
+| flow store      | `~/.smooth/flow.db`                        | `SMOOTH_FLOW_DB=~/.smooth/smoothflow-flow.db`                                                                  | Big Smooth supervised our rows on its socket → "process vanished" (th-4f7866)                                         |
+| tmux server     | `tmux -L smooth-flow`                      | `SMOOTH_FLOW_TMUX_SOCKET=smoothflow` (the app-owned server, TCC)                                               | panes attributed to the wrong process                                                                                 |
+| tailnet         | `tailscale serve` → `:443`                 | `SMOOTH_TAILSCALE_SERVE=0`                                                                                     | the child re-pointed the tailnet port at itself                                                                       |
+| `daemon.addr`   | written                                    | not written (a `SMOOTH_ALLOW_SECOND_DAEMON` instance never advertises, #546)                                   | `th flow` and clients discovered the child instead of Big Smooth (th-3e6b1b)                                          |
+| relay identity  | `~/.smooth/relay-device-id`, `kind=daemon` | `SMOOTH_RELAY_DEVICE_ID` from `~/.smooth/smoothflow-relay-device-id`, `kind=flow`, label `<host> · SmoothFlow` | both dialed `relay.smoo.ai` as ONE device; presence flapped and phones landed on whichever connected last (th-a1bb12) |
+
+The relay id is minted once by the app (`RelayIdentity.load`, mode 600, same
+`daemon-<12 hex>` shape the daemon mints for itself) and passed down on every
+launch, so the pairing QR and the phone's remembered daemon stay stable across
+app restarts. The daemon side also holds an advisory lock per device id
+(`~/.smooth/relay-locks/<device>.lock`): a second local daemon that resolves
+the same id — say `th up` next to the Big Smooth app — logs an error and stays
+off the relay until the first exits, rather than racing it. Phones: the relay
+(`rust/relay-ws`, SMOODEV-3142) accepts `kind=flow`; SmoothFlow mobile lists
+`flow` and `daemon` peers and auto-picks a lone `flow` one, Big Smooth mobile
+keeps listing `daemon` peers only.
 
 ### TCC matrix (measured 2026-09-07, macOS 26.4, Developer-ID-signed ad-hoc-equivalent build)
 
@@ -266,6 +299,56 @@ build, so a rebuilt Debug app is asked again); after Allow the pane reads
 FDA the other way round. Attribution follows the app through the real
 engine's daemon → tmux → pane chain, exactly as the matrix predicted.
 
+## Terminal font (th-bcd819)
+
+The panes use **JetBrainsMono Nerd Font** (OFL, four faces in
+`Resources/Fonts`, ~10 MB), registered for the process at launch with
+`CTFontManagerRegisterFontsForURL(.process)` — nothing is installed for the
+user. libghostty already compiled in JetBrains Mono + a Symbols Nerd Font
+fallback, which is why starship glyphs rendered before; now the font is named,
+picked, and the same face carries the app's own monospace text (`Theme.mono`:
+pearl rail, activity, paths, sheets), so chrome and panes match.
+
+Precedence, highest first (`TerminalFont.overrides`):
+
+1. **Settings ▸ Terminal** — family (bundled first, then every installed
+   fixed-pitch family), size, ligatures. Saved to UserDefaults and applied live
+   to every open surface through `ghostty_app_update_config`.
+2. **The user's Ghostty config** — a `font-family` / `font-size` in
+   `~/.config/ghostty/config` (or the Application Support config) is left alone.
+   `config-file` includes are not followed.
+3. **The bundled default** at 13 pt.
+
+Ghostty treats `font-family` as a list (a repeat adds a fallback), so the
+overrides clear each key (`font-family =`) before setting it. Ligatures off
+becomes `font-feature = -calt/-liga/-dlig`.
+
+### The 0.2.1 blank-prompt bug was tmux, not fonts
+
+Brent's starship prompt rendered `_` for `❯` and blanks for the branch / cloud
+icons in the shipped 0.2.1 while Ghostty.app drew them. The release binary's
+embedded Symbols Nerd Font was fine (an isolated 0.2.1 copy fed the same
+glyphs through the mock rendered every one). The cause: a Finder-launched app
+has **no `LANG`**, the child daemon inherits that, and **tmux treats a client
+without a UTF-8 locale as a non-UTF-8 terminal and draws `_` for every
+non-ASCII cell** — the daemon's `tmux attach` is exactly such a client, and its
+bytes are what the pane shows. (A dev build launched from a terminal inherited
+`LANG`, which is why it never showed.) Two fixes: the engine passes `-u` to
+every tmux client (`smooth-flow/src/tmux.rs`), and the app gives the child
+`LANG` / `LC_CTYPE` (`DaemonManager.utf8Locale`, the user's locale when
+`/usr/share/locale` knows it, else `en_US.UTF-8`) so agents' shells speak UTF-8
+too. `GlyphUITests` runs the engine with no locale and asserts the streamed
+`flow.output` carries `❯ \u{e0a0} ☁` intact.
+
+The **theme** not applying was separate and older: `theme = …` resolves under
+libghostty's resources dir, which Ghostty.app sets for itself and SmoothFlow
+never did. The bundle now carries `Contents/Resources/ghostty/themes` (Ghostty
+1.3.1's set, MIT) and `GhosttyRuntime` exports `GHOSTTY_RESOURCES_DIR` before
+`ghostty_init` (an explicit env value is respected; an installed Ghostty.app's
+dir is the fallback).
+
+![terminal font](assets/smoothflow/terminal-font.png)
+
 ## Attention → notifications
 
 `AttentionNotifier.notification(for:settings:)` is a pure map from a session
@@ -279,33 +362,78 @@ session (identifier `session:<id>`), cleared when the session is focused.
 
 ![inbox](assets/smoothflow/inbox.png)
 
-### Closing a finished session (th-883ce9)
+### Closing a session out (th-883ce9, th-fe75ca)
 
-The finished card's **Close…** is the shell side of `flow.close`
-([SmoothFlow.md](SmoothFlow.md#flow.close)). It never fires blind: a confirm
-sheet names each action with its target — _close pearl `<id>`_ (on when the
-row has a pearl), _remove worktree `<path>` and delete branch `<branch>`_ (on
-when the row lives in its own worktree; the main checkout is never offered) —
-and states the rule up front: a dirty or unmerged worktree is refused with
-nothing touched. The frame carries a client `seq`; the engine echoes it as
-`flow.error.ref`, so a refusal lands on **that card** in the engine's words
-with **Force close** (resends with `force`) and **Keep it**. Success is just
-`flow.session.removed`: the card and the sidebar row go. The mock
-(`mock/server.mjs`) refuses `fs-3034dddd` until forced, so the XCUITest
-covers both paths without a real worktree.
+Close-out is the shell side of `flow.close`
+([SmoothFlow.md](SmoothFlow.md#flow.close)), reachable from three places:
+
+| Where                                      | Applies to                            |
+| ------------------------------------------ | ------------------------------------- |
+| Sidebar row ▸ right-click ▸ **Close Out…** | any session, running included         |
+| **Session ▸ Close Out…** (⌘⌥W by default)  | the focused session, running included |
+| Inbox ▸ finished card ▸ **Close…**         | a finished session (where it started) |
+
+The menu item is `FlowAction.closeOut`, so its chord is rebindable in
+Settings ▸ Keyboard like every other action (th-27baa4).
+
+Until th-fe75ca only the last one existed, so the answer to "close this
+session" was _finish it first_ — which is not an answer for the sessions you
+actually want to stop. A live row closes the same way: the engine kills it
+before anything else, and the sheet says so before you confirm
+(_"still running — closing kills it first"_), with the button reading **Kill
+and close** instead of **Close session**.
+
+It never fires blind. `SessionClose.decide(session:handoff:)` — a pure function
+over the session and its `Handoff` packet, unit-tested apart from any AppKit
+presentation — produces every toggle, default and line of copy the sheet shows,
+each action named with its target AND with what it destroys: _close pearl
+`<id>` · `<pearl title>`_ (on when the row has a pearl), _remove worktree
+`<path>` / and delete branch `<branch>`_ (on when the row lives in its own
+worktree — the main checkout, and a projectless shell row, are never offered),
+plus the live dirty-file count when there is one. The rule is stated up front:
+a dirty or unmerged worktree is refused with nothing touched.
+
+**Merged state is deliberately not precomputed.** The engine reveals it at the
+only moment it matters, by refusing the close; a flag cached in the shell would
+be a second source of truth that can disagree at the instant of the close. For
+the same reason force is never a checkbox you can arm beforehand — it appears
+only after the refusal has been read.
+
+The frame carries a client `seq`; the engine echoes it as `flow.error.ref`, so
+a refusal lands on **that card** in the engine's words with **Force close**
+(resends with `force`) and **Keep it**. A close started where there is no card
+— the sidebar menu, the Session menu — gets the same offer as its own sheet
+instead of vanishing into the rail. Success is just `flow.session.removed`: the
+card and the sidebar row go. The mock (`mock/server.mjs`) refuses `fs-3034dddd`
+until forced, so the XCUITests cover the refusal from both entry points without
+a real worktree.
 
 ## Keyboard
 
-| Keys      | Action                                     |
-| --------- | ------------------------------------------ |
-| ⌘N / ⌘⇧N  | new session / fan out                      |
-| ⌘I        | inbox                                      |
-| ⌘↩ / ⌘⇧↩  | steer focused / steer all working          |
-| ⌘1…9      | focus session N                            |
-| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request |
-| ⌘⌥R / ⌘⌥K | kill & resume / kill                       |
-| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab        |
-| ⌘D / ⌘⇧W  | split / close split                        |
+Every shortcut is user-configurable — the table below is the shipped default,
+not a contract. Settings ▸ Keyboard (⌘,) and
+`~/.smooth/smoothflow/keybindings.toml` are the same store; the whole model,
+the file format and the two default changes th-27baa4 made are documented in
+[SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
+
+| Keys      | Action                                                         |
+| --------- | -------------------------------------------------------------- |
+| ⌘N / ⌘⇧N  | new session / fan out                                          |
+| ⌘I        | inbox                                                          |
+| ⌘↩ / ⌘⌥↩  | steer focused / steer all working                              |
+| ⌘1…9      | focus session N                                                |
+| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request                     |
+| ⌘⌥R / ⌘⌥K | kill & resume / kill                                           |
+| ⌘⌥W       | close out the focused session                                  |
+| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab                            |
+| ⌘T / ⌘⇧T  | new tab / new shell here                                       |
+| ⌘W / ⌘⇧W  | close pane (tab, then window, collapse when empty) / close tab |
+| ⌘⇧[ / ⌘⇧] | previous / next tab                                            |
+| ⌘D / ⌘⇧D  | split right / split down                                       |
+| ⌘⇧← / ⌘⇧↑ | split left / split up                                          |
+| ⌘⌥←↑→↓    | move focus between panes                                       |
+| ⌘⇧↩ / ⌘⌥= | zoom pane / equalize panes                                     |
+| ⌘⌃S / ⌘⌃P | toggle sidebar / pearl rail                                    |
 
 ![fan-out](assets/smoothflow/fanout.png)
 
@@ -370,7 +498,22 @@ shipping a new public key, which installed apps will refuse — so an installed
    `SmoothFlow-<v>-arm64.dmg` (immutable), `appcast.xml` (no-cache) and the
    `latest-arm64.dmg` alias (no-cache).
 3. Verify: `curl -s https://downloads.smoo.ai/smoothflow/appcast.xml | grep shortVersionString`.
-   Installed apps offer it on the next hourly check.
+   Installed apps offer it on the next hourly check. The run's last step also
+   re-verifies the published artifact from the CDN (appcast entry, signature,
+   both stapled tickets, no non-system dylibs).
+4. **`apps/smoothflow/scripts/install-release.sh`** — always, every release.
+   It unregisters every SmoothFlow bundle outside `/Applications` (each lane's
+   debug build registers another one, and `open -a SmoothFlow` will happily
+   launch one of those instead of the real app, so a release "verified" against
+   the wrong bundle proves nothing), deletes stale `apps/smoothflow/build/` and
+   `DerivedData/SmoothFlow-*` trees, then downloads the published DMG and
+   installs it — **refusing** unless the app inside carries its own stapled
+   ticket, verifies against `Developer ID Application: Smoo LLC (DTX9733844)`,
+   reports `Notarized Developer ID`, and links system dylibs only. It re-runs
+   those same checks against the installed copy afterwards. `--dry-run`
+   reports without changing anything; pass a version to pin one.
+   Never hand-install a release build — hand-installing is what skips the
+   checks, and an unstapled build passes a casual look.
 
 What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
 
@@ -379,11 +522,21 @@ What the first two publishes (0.2.0 → 0.2.1, 2026-09-09, th-b4e4de) taught:
   replaces the feed rather than appending to it. Sparkle only needs the newest
   item; older `SmoothFlow-<v>-arm64.dmg` objects stay in the bucket (the sync
   never deletes) but drop out of the feed.
-- **The notarization ticket is stapled to the DMG, not the app inside it.**
-  `xcrun stapler validate` on the DMG passes; on `/Applications/SmoothFlow.app`
-  it reports no ticket, while `spctl -a -t install` still says
-  `Notarized Developer ID` (the online check). Both are correct — Sparkle
-  installs from the DMG, and Gatekeeper accepts the app either way.
+- **The notarization ticket went on the DMG, not the app inside it** — and
+  through 0.2.2 this note called that correct. It was not, and saying so here
+  is part of why it shipped three times. `xcrun stapler validate` on the DMG
+  passed; on `/Applications/SmoothFlow.app` it reported no ticket. A DMG's
+  ticket and its app's ticket are separate tickets on separate artifacts, and
+  **Sparkle installs the app**, so the DMG's ticket never reaches what the user
+  ends up running. `spctl` still said `Notarized Developer ID` — but only by
+  asking Apple over the network, so it looks fine at a desk on good wifi and
+  stalls or fails offline, behind a captive portal, or when Apple's notary
+  service is slow. Fixed in 0.2.3 (th-9c3f4e): `build-release.sh` notarizes and
+  staples the **.app first**, builds the DMG from the already-stapled app, then
+  staples the DMG as well, and the workflow `stapler validate`s both against the
+  artifact **downloaded from the CDN**, not the in-workflow copy. `stapler`
+  cannot staple a zip — only `.app`/`.dmg`/`.pkg` — so the app has to be
+  stapled in place, before `hdiutil` copies it into the image.
 - **The bundled daemon rewrites `~/.smooth/daemon.addr` on every launch** with
   its own random loopback port, clobbering the address Big Smooth advertised.
   The app never reads that file, but `th`-driven tooling on the same machine
@@ -435,8 +588,10 @@ Launch contract, identifiers and how to run:
 - th-e126cc / th-883ce9 — closed on both sides: `flow.close {id, close_pearl,
 remove_worktree, force}` (and `POST /api/flow/sessions/{id}/close`,
   `th flow close`) closes the pearl, removes the merged worktree + branch and
-  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The finished
-  card's **Close…** sends it (confirm sheet + force on refusal, below). "Merge"
+  drops the row — see [SmoothFlow.md](SmoothFlow.md#flow.close). The sidebar
+  row's context menu, **Session ▸ Close Out…** and the finished card's
+  **Close…** all send it (confirm sheet + force on refusal, below; th-fe75ca
+  added the first two and the live-session path). "Merge"
   still opens the PR: merging is a review act, not something the shell does
   blind.
 - th-6198bf — closed: AppleScript / `NSRunningApplication.terminate()` quit

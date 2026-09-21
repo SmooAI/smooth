@@ -1,5 +1,246 @@
 # @smooai/smooth
 
+## 0.52.0
+
+### Minor Changes
+
+- e99ae43: SmoothFlow gains seven hook-capable harnesses: Gemini CLI, Qwen Code, Cursor Agent, GitHub Copilot CLI, Factory Droid, Amp and Pi (th-b00115). Each ships a built-in manifest and a `th pkg` overlay (hooks, Amp plugin or Pi extension) that reports its real lifecycle to the flow engine, so their sessions show working, idle and needs-you from the CLI itself instead of pane scraping. `th pkg install --harness` accepts gemini, qwen, droid, copilot, amp and pi as hook-only targets, and Cursor gets its hooks merged too.
+
+  Engine: agent panes carry `SMOOTH_FLOW_ID` so a CLI that cannot pre-assign a session id binds to its row. Only Claude-protocol harnesses hold a permission request open; other asks get an id that `th flow approve` answers by keystroke. Steering honors `steer.submit_key` and the new `steer.submit_delay_ms` (Gemini drops an Enter sent right after a paste). Proven live against Pi, Qwen and Gemini.
+
+### Patch Changes
+
+- 8a95bc9: Harness support you can verify (th-3cabf6). **Conformance contract:** every built-in harness manifest now runs `resolve · launch · working · idle · steer · permission · resume · kill` against `smooth-flow-fake-agent`, a stand-in CLI that derives its argv parsing and hook events from the manifest itself, on a private engine (`cargo test -p smooai-smooth-flow --test harness_conformance`, and a new `Harness conformance` CI job). A new harness enrolls by being listed in `BUILTIN`; a scraped one adds screens captured from the real CLI. No real CLIs, network or credentials. **`th harness doctor [name] [--json]`:** a read-only per-machine verdict — works / degraded / not installed — covering the binary actually launched (and cmux shims), `--version`, resolution under the SmoothFlow app's launchd PATH (including `#!/usr/bin/env node` scripts), hooks installed and trusted (Codex's "Hooks need review", stale smooth-agent plugins), daemon reachability and sign-in, with the one command that fixes each degraded row. **Fix:** a permission ask reported under a harness's own `event_map` name carried no `request_id`, so `th flow approve` and the apps could not approve it; it now gets one that falls through to the approval keystroke.
+
+## 0.51.1
+
+### Patch Changes
+
+- 83ed002: install-release.sh: fix the signature gate that refused every legitimate release
+
+  Two independent bugs made `install-release.sh` reject the official signed build; it was caught installing 0.2.3 by hand.
+
+  - `codesign -dv` alone prints no `Authority=` lines; they require `--verbose=2`.
+  - Under `set -o pipefail`, `producer | grep -q` returns 141 — `grep -q` exits on the first match and SIGPIPEs the producer, so a _match_ read as a failure. This affected every verification in the script, not just `codesign`: the Gatekeeper check, the Mach-O filter and the dylib scan had the same shape.
+
+  All six check sites now capture output first and grep from a here-string. `install-release.test.sh` covers both causes, including a behavioural proof that an ad-hoc signed bundle is rejected, and refuses any future `| grep -q` while pipefail is on.
+
+## 0.51.0
+
+### Minor Changes
+
+- 7e3d856: SmoothFlow: close out a session from anywhere, not just a finished Inbox card. The sidebar row's context menu and **Session ▸ Close Out…** (⌘⌥W) both send `flow.close`, and a _running_ session closes the same way — the engine kills it first and the sheet says so before you confirm. The sheet now shows what it will destroy, not only what it will do: branch, uncommitted-file count and the pearl's title. Merged state stays uncached on purpose — the engine reveals it by refusing, and force is still offered only after that reason has been read. A refusal started outside the Inbox gets its own sheet instead of vanishing into the rail.
+
+### Patch Changes
+
+- 5bdab78: Notarization no longer throws away a good submission when the status poll blips. `notarize-and-staple.sh` used `notarytool submit --wait`, which collapses "upload the artifact" and "poll until Apple finishes" into one call — so a transient network error during the poll fails the release while Apple is still happily processing the submission. That is exactly how the first SmoothFlow 0.2.3 publish died: the upload succeeded, the status request timed out (`NSURLErrorDomain -1001`), and a ~20-minute signed build was discarded holding a valid submission id. It now submits once, captures the id, and retries the **wait** against that id rather than resubmitting, then checks `notarytool info` for `Accepted` — because `wait` returning successfully means Apple finished, not that it approved — and dumps the notary log on rejection. This matters more since th-9c3f4e: stapling the app as well as the DMG means two notarization round-trips per release, so twice the exposure to this flake.
+- 33bea47: SmoothFlow 0.2.3 — starting a session stops being paperwork. The New Session screen no longer demands a pearl id, a Jira key, or a worktree up front: pick a kind, type what you want done, hit Start, and SmoothFlow infers the rest from the prompt and the repo. Plain `claude` and `codex` sessions you started yourself are adopted into the fleet instead of sitting outside it (th-c103c1, #594). Four more agent CLIs launch out of the box — aider, goose, crush, and cline — on top of a declarative scrape-rule system that replaces the hand-written per-harness pane parsers, so teaching SmoothFlow a new CLI is now a manifest edit rather than Rust (th-e77603, #599). Also fixes aider dropping the first prompt: it needs a beat after its banner before the paste lands, and it now gets one (th-d2a1e4). th-2f31d8.
+- 5e5eea2: `install-release.sh` now unregisters the bundles **nested inside** a stray SmoothFlow build, not just the outer `.app`. A debug build registers its own Sparkle `Updater.app` and `SmoothFlowUITests-Runner.app` as separate LaunchServices entries, and a single `lsregister -u` on the outer bundle does not take them with it — so a machine that looked cleaned still carried rows pointing at deleted files. The matcher now covers any `SmoothFlow*.app` path and excludes the official install by **prefix**, so `/Applications/SmoothFlow.app`'s own nested Updater is deliberately left alone (unregistering it would break Sparkle on a healthy machine). `install-release.test.sh` pins both directions, including a guard against the test's copy of the regex drifting from the real one. th-9c3f4e.
+- de56803: SmoothFlow releases now staple the notarization ticket to the **app**, not just the DMG. A DMG's ticket and its app's ticket are separate tickets on separate artifacts, and Sparkle installs the app — so every release through 0.2.2 put a working copy of SmoothFlow in `/Applications` with no ticket on it. Gatekeeper still let it run, but only by asking Apple over the network at first launch, which stalls or fails offline, behind a captive portal, or when Apple's notary service is slow. `build-release.sh` now notarizes and staples the app first, builds the DMG from the already-stapled app, and staples that too; the publish workflow validates both tickets against the artifact downloaded from the CDN rather than its own in-workflow copy. New `apps/smoothflow/scripts/install-release.sh` makes "clean up stray copies and install the official signed build" a scripted release step: it unregisters every SmoothFlow bundle outside `/Applications` (lane debug builds accumulate there and `open -a SmoothFlow` will launch one), clears stale build trees, and installs the published DMG only if the app inside is stapled, signed by Smoo LLC, notarized, and free of non-system dylib links — refusing loudly instead of installing anything that fails. th-9c3f4e.
+- 99cc57f: SmoothFlow: tabs, directional splits, and a keyboard config pane (th-27baa4)
+
+  The surface area is now a stack of tabs, each holding a binary split tree
+  instead of a flat row of panes — so ⌘D splits right, ⌘⇧D splits down, ⌘⇧←/⌘⇧↑
+  split the other two ways, ⌘⌥arrows move focus between panes by geometry, ⌘⇧↩
+  zooms without disturbing the layout, ⌘⌥= equalizes, and ⌘T/⌘W/⌘⇧[/⌘⇧] work the
+  tabs. ⌘⇧T opens a shell session in the focused session's worktree in a new tab.
+
+  ⌘W closes the focused pane, terminal-style — the tab, then the window, collapse
+  when they empty (⌘⇧W still closes a whole tab). Because a pane is a view over an
+  engine-owned session, ⌘W asks first when a live session is on screen, and the
+  alert offers both honest answers: close the view and leave the session running,
+  or end the session (destructive, and it says what that costs). Cancel is the
+  default button. Nothing is asked for an empty pane, a finished session, or a
+  shell sitting at a prompt, and Settings ▸ Terminal can turn the confirmation off
+  entirely.
+
+  Every shortcut is user-configurable. Settings ▸ Keyboard lists every action with
+  its binding, records a new one, flags conflicts and resets per-row or all; it
+  writes ~/.smooth/smoothflow/keybindings.toml, which you can also edit by hand.
+  Only overrides are stored, a bad line loses that line rather than the map, and
+  the menu bar is built from the keymap so a rebind moves the menu with it.
+
+  Two defaults changed (both rebindable): Steer All Working is ⌘⌥↩, freeing ⌘⇧↩
+  for Zoom Pane as in every other terminal; the old untyped "Split Surface" is now
+  Split Right. See docs/Engineering/SmoothFlow-Keybindings.md.
+
+## 0.50.0
+
+### Minor Changes
+
+- 82930b5: SmoothFlow learns the state of coding CLIs that have no hooks (th-e77603). Harness manifests gain ordered `[[state.scrape.rules]]`: each rule maps a regex over a chosen part of the pane (`tail`, `pane`, `last_line`, `cursor_line`, `title`) plus optional `all` / `unless` / `unless_below`, output quiet time, recent change, alternate screen and spinner signals to working, idle, needs-you, usage-limit or error, and the first rule that fires decides. Four new built-ins use them — `aider`, `goose`, `crush` and `cline` — each written against real captured panes and driven live through the engine. `prompt_as = "paste"` now waits for the pane to read idle instead of a fixed 4 s, so a first-run question no longer swallows the prompt (th-d2a1e4). A needs-you answered in the pane clears on the next idle, and `resume.mode = "continue_latest"` resumes CLIs that can only continue their most recent conversation.
+
+## 0.49.0
+
+### Minor Changes
+
+- 62b77a4: SmoothFlow zero-friction sessions (th-c103c1): the New Session dialog no longer demands a pearl id. A new `smooth_flow::infer` derives worktree, project (the main checkout, even inside a linked worktree), branch, pearl id, Jira key and title from a directory, served at `GET /api/flow/infer` and `th flow infer`; `flow.new` runs the same inference, so any client gets the context without sending it, and `th flow new` with no arguments starts a session in the current directory.
+
+  Plain harness sessions can now be adopted into the fleet: a `claude` or `codex` started in an ordinary terminal joins it on its first hook, with its pearl/branch/worktree attached. Off by default (`th flow adopt on`), guarded on a known harness, a git worktree and a project the fleet already works in, and explicitly not engine-owned (no attach, no kill, no resume).
+
+  Harness hooks now discover the flow engine through `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. `flow.addr` is claimed by whichever daemon hosts a live flow engine, so hooks reach the SmoothFlow app's child daemon, which deliberately does not write `daemon.addr`.
+
+## 0.48.8
+
+### Patch Changes
+
+- 2a8f30a: th attest: never stall or hang on the build box — fail fast, bound the run, fall back to local
+
+  `th attest rust` routes to a remote build box. Three ways that stalled or hung `th`,
+  now closed:
+
+  - **Unreachable box:** the ssh calls had no `ConnectTimeout`, so they stalled on the
+    full TCP handshake. Both now use `ConnectTimeout=10`.
+  - **Wedged mid-run:** once connected, a check could wedge (measured: cargo finished but
+    `rust.sh` hung in a docker probe) and `child.wait()` never returned, hanging `th`
+    with it (th-7db71c). A watchdog now kills the ssh after a deadline
+    (`SMOOTH_ATTEST_REMOTE_DEADLINE_SECS`, default 45 min); killing the local client drops
+    the connection so the remote check is torn down too.
+  - **Either way:** a remote infrastructure failure (unreachable / no disk / dropped /
+    timed out) no longer blocks and defers the whole row to CI. It prints a visible
+    `⚠ <host>: <reason>` and runs the check **locally** — a real verdict on this machine.
+    Slower (no warm cache), which is why the warning is loud.
+
+## 0.48.7
+
+### Patch Changes
+
+- c01bd97: Desktop: don't run the PWA service worker in the Electron app — no more double update prompt, no stale SPA (th-003dc7).
+
+  The desktop app updates via its own OTA (electron-updater) and serves the SPA from the bundled daemon, so the service worker only produced a SECOND "A fresh Big Smooth is ready / Refresh now" prompt on top of the app's "Restart now", and a stale cached SPA after an OTA. Push on desktop is native (`window.bigSmooth.notify`), not the SW, so nothing there depends on it. `PWAUpdater` now detects the desktop shell (`window.bigSmooth`) and, instead of registering the SW updater, tears down any existing service worker + caches — the Electron webview always loads fresh from the local daemon. Browser and installed-PWA (mobile/web) users keep the full update-prompt flow unchanged.
+
+## 0.48.6
+
+### Patch Changes
+
+- f688096: th attest: serialize remote runs so two agents can't corrupt the shared build box
+
+  The remote attest host has ONE worktree and ONE cargo target, but agents attest
+  concurrently (measured live: two `th attest rust` against the same box). Without a
+  mutex their `git checkout` / `git clean` / cargo runs stomp each other — one run's
+  clean deletes the other's in-flight tree — producing phantom failures (th-983292).
+
+  `remote_script` now takes a `mkdir` lock (the portable mutex; macOS has no `flock`)
+  before the checkout and releases it via a trap on exit, so exactly one run touches
+  the worktree at a time. A crashed holder's lock (its trap never fired) is broken once
+  it's older than any real run; the wait is hard-capped so a wedged holder reads as a
+  busy box (exit 97) rather than hanging forever (th-7db71c, waiter side). The check now
+  runs as `bash` not `exec bash`, so the release trap actually fires. A `bash -n` test
+  guards the hand-rolled locking against a syntax slip.
+
+- 4f12260: Big Smooth desktop: native Sparkle-style update dialog
+
+  The Electron desktop app now presents a native update dialog modeled on the Sparkle
+  one the native macOS companion (SmoothFlow) shows. Electron can't use Sparkle, so the
+  UX is reproduced with Electron's own `dialog.showMessageBox`, driven by
+  electron-updater's `update-available` event: title "A new version of Big Smooth is
+  available!", the "X is now available—you have Y" body, a **Skip This Version / Remind
+  Me Later / Install Update** button row, and an "Automatically download and install
+  updates in the future" checkbox.
+
+  `autoDownload` is now off — nothing downloads until the user picks Install (or has
+  opted into auto-download via the checkbox). Install starts `downloadUpdate()` and the
+  existing guarded restart step (stop daemon → `quitAndInstall`) finishes the job; Skip
+  persists the version to a skip list so it's never offered again; Remind Me Later defers
+  to the next launch/poll; the checkbox persists an `autoUpdate` preference that silently
+  downloads future updates. The decision layer stays pure and unit-tested
+  (`decideAvailableAction`), and everything still flows through the existing attempt-cap /
+  give-up / once-per-session guards so an un-installable bundle falls back to a manual
+  download instead of nagging forever.
+
+## 0.48.5
+
+### Patch Changes
+
+- 030541c: th attest: refuse a dirty working tree instead of crediting a commit that wasn't tested
+
+  `th attest` credits the HEAD commit, but the checks run against the working tree. It
+  never checked the two match — so a dirty tree (uncommitted work, or codegen drift
+  where a tracked generated file was regenerated but not committed) produced a green a
+  PR would not reproduce, or the confusing "passed everything, credited nothing" with no
+  stated reason.
+
+  Now it checks tracked-file cleanliness (`git status --porcelain -uno`) both before and
+  after the run: a dirty tree up front is refused with the offending files named
+  (`--allow-dirty` opts out); a check that leaves a tracked file modified (the codegen-
+  drift shape) refuses to credit, since HEAD still holds the stale output and would fail
+  that check in CI. New exit code 3 marks "nothing credited because the tree wasn't the
+  commit," distinct from a real check failure. Untracked scratch files are ignored.
+
+## 0.48.4
+
+### Patch Changes
+
+- ba2d625: th attest: clean the remote worktree after checkout so a stale box can't post a false red
+
+  `th attest` delegates `rust` to a build box (smoo-hub) by fetching the commit and
+  running `git checkout --detach --force <sha>`. That resets tracked files but leaves
+  untracked ones in place, so a file abandoned by an earlier branch (the incident was
+  a stray `api-prime/tests/*.rs`) survived into the tree under test — cargo compiled it
+  and the box posted a FALSE `ci-attest/rust: failure` naming a plausible cause, which
+  reads to a reviewer as a genuine Rust failure (th-5123e5).
+
+  The remote script now runs `git clean -ffd` after the checkout, so the worktree
+  matches the SHA exactly. No `-x`: the cargo cache lives in an external
+  CARGO_TARGET_DIR, so ignored files inside the worktree are cheap to keep and are not
+  what poisons the build. A clean failure exits as a precondition (97) like the cd /
+  fetch / checkout lines — a wrong box, never a verdict on the commit.
+
+## 0.48.3
+
+### Patch Changes
+
+- 11ee74e: th msg watch: add `--from` / `--type` filters and a non-consuming `--peek` mode
+
+  Watching the agent-mail bus for a specific correspondent used to mean hand-rolling
+  a `sqlite3` poll over `~/.smooth/mail.db` — the existing `th msg watch` could only
+  watch your whole inbox and, in continuous mode, acked (consumed) every message it
+  saw. Two additions close that gap so every harness can use the one tested command:
+
+  - `--from <agent>` and `--type <kind>` narrow the stream to one sender or one
+    message type (both normal and peek mode).
+  - `--peek` tracks position by message `seq` instead of read-state and never acks,
+    so a machine consumer (a harness responder, the th-mail skill) reacts to each new
+    message without marking it read — the owner still decides when it has actually
+    been handled. `--since <seq>` pins a durable watermark across restarts.
+
+  Backed by new `MailStore::inbox_since` / `max_seq` (and the `Mail` backend wrappers;
+  cloud emulates via a filtered inbox fetch). Part of the resilient-messaging epic
+  (th-826c4a).
+
+## 0.48.2
+
+### Patch Changes
+
+- 8856243: `th pearls projects` no longer fills up with hook litter. Opening the pearl store used to register whatever directory it was opened from, and `th prime` (the Codex SessionStart hook) opens it from any cwd — so `~/.smooth/registry.json` collected Codex scratch dirs, `$TMPDIR`, `$HOME`, even `/`. A plain open now registers the project only when its root is a git repository other than `/` or `$HOME`; `th pearls init` registers any directory explicitly and that entry survives. Every open also prunes implicit entries that are not git repos (alongside the existing dead-path prune), so an existing registry heals on the next `th pearls` call. (th-92e046)
+
+## 0.48.1
+
+### Patch Changes
+
+- 21922ae: SmoothFlow 0.2.2 — the first release that ships the real fix for `_`-instead-of-glyphs prompts. A Finder-launched app has no `LANG`, the child daemon inherited that, and tmux then treated the attach client as non-UTF-8 and replaced every non-ASCII cell with `_`; the daemon now attaches with `tmux -u` and gives the child a UTF-8 locale. Ghostty themes never applied either, because `GHOSTTY_RESOURCES_DIR` was unset before `ghostty_init` — Catppuccin Mocha now renders. Also in this cut: a bundled Nerd Font and a Settings ▸ Terminal pane (th-bcd819), SmoothFlow's own relay identity (`kind=flow`, th-a1bb12), agentic `add_harness` manifest drafting (th-473294), harness manifests so any coding-agent CLI can launch (th-0f6126), end-to-end encrypted relay frames with QR pairing (th-d98fde), `flow.close` with a confirm sheet that closes the pearl and GCs the merged worktree (th-883ce9, th-e126cc), bounded daemon shutdown on quit (th-6198bf), and per-daemon supervision ownership of flow.db rows (th-4f7866). th-4efb09.
+
+## 0.48.0
+
+### Minor Changes
+
+- 7ea4bfc: Agentic "add a harness" (th-473294, phase 2 of th-faa590): the daemon tool `add_harness` probes a coding-agent CLI's `--help` (and a docs URL), drafts a SmoothFlow harness manifest with Big Smooth's model, validates it by launching a real session on a private flow engine (launch → working → idle, steer, kill+resume — each step proven, unproven or failed), iterates on failures, installs it to `~/.smooth/harnesses/<name>.toml` and reports what it could not prove. `th harness add --agentic <name>` drives it over the daemon's canonical WebSocket. `GET /api/llm/provider` is the provider gate: with no model the tool answers `needs_provider` and the CLI offers the Smoo AI Gateway (sign in, mint the org's llm.smoo.ai key, save it) or bring-your-own-key. Deterministic parts — help parsing → ranked argv candidates, scrape patterns from captured panes, the validation state machine — live in `smooth-flow` (`harness_draft`, `harness_validate`) with tests against real help texts (gemini, aider, cursor-agent, claude). The validator answers first-run dialogs the way a person would (gemini's folder-trust and auth-method dialogs, aider's `.gitignore` question: `Enter` accepts the default, "open the docs?" gets `n`), capped and recorded in the verdict so the manifest's `needs_you` matches each; sign-in prompts are never pressed through. The manifest scraper no longer reports `needs_you` for an answered question that a scrolling CLI keeps on screen above its own `>` prompt (an idle marker on a later line wins). Also fixes th-0a3c7f: the harness-prefs engine test no longer depends on whether `aider` is installed on the host.
+
+### Patch Changes
+
+- 4638a20: SmoothFlow terminal font and glyphs (th-bcd819). The 0.2.1 blank starship prompt (`_` for `❯`, no branch/cloud icons) was tmux: a Finder-launched app has no `LANG`, so the child daemon's `tmux attach` client was treated as non-UTF-8 and every non-ASCII cell became `_`. The flow engine now passes `-u` to every tmux client and the app gives the child a UTF-8 `LANG`/`LC_CTYPE`. On top: JetBrainsMono Nerd Font ships in the bundle (OFL), registered per process and named in the ghostty overrides with a 13 pt default; Settings ▸ Terminal picks family / size / ligatures live; a `font-family` / `font-size` in the user's own Ghostty config still wins over the bundled default, a Settings choice over both; the app's monospace text uses the same face. `theme = …` in the user's Ghostty config now applies too: the bundle carries libghostty's themes and exports `GHOSTTY_RESOURCES_DIR`.
+- 9337424: SmoothFlow no longer shares Big Smooth's relay identity (th-a1bb12). The app mints and keeps its own relay device id (`~/.smooth/smoothflow-relay-device-id`) and starts its child daemon with `SMOOTH_RELAY_DEVICE_ID`, `SMOOTH_RELAY_LABEL="<host> · SmoothFlow"` and the new `SMOOTH_RELAY_KIND=flow`, so a phone's device list shows Big Smooth and SmoothFlow as two peers instead of one identity whose presence flapped between two sockets. `smooth-daemon` also holds an advisory lock per relay device id: a second daemon on the same machine that resolves the same id logs an error and stays off the relay until the first exits.
+
+## 0.47.1
+
+### Patch Changes
+
+- 37e60fe: Big Smooth desktop now supervises its bundled `smooth-daemon` child (th-4b189c). The app once ran for hours with the daemon dead — nothing on the port, no log of the exit — because the exit handler only cleared a variable. An exit (or a child that stops answering `/api/mode`, probed every 30s) is now logged with its code/signal, uptime and the last stderr lines to `~/Library/Logs/Big Smooth/daemon.log` (rotating), respawned with exponential backoff (1s…60s, giving up after 8 consecutive failures), and shown in the tray (`Daemon crashed — restarting…` / `Daemon stopped — click to retry`) plus a new **About Big Smooth…** item with pid, port, uptime and restart count. `smooth-daemon` gained `SMOOTH_LOG_FILE`: when set, tracing goes to that size-rotated file instead of stderr; the desktop app sets it to `~/Library/Logs/Big Smooth/smooth-daemon.log` so the next death is diagnosable.
+- 4889772: SmoothFlow macOS: the finished-session inbox card sends `flow.close` (th-883ce9). **Close…** opens a confirm sheet naming what will happen — close pearl `<id>`, remove worktree `<path>` + delete branch `<branch>` (each a toggle; the main checkout is never offered) — and the frame carries a client `seq` the engine echoes as `flow.error.ref`, so a refusal (dirty / unmerged worktree, nothing touched) lands on that card with **Force close**. The mock server answers `flow.close` (+ `POST /api/flow/sessions/{id}/close`) and refuses an unmerged fixture until forced; XCUITests cover both paths.
+- 973adeb: SmoothFlow macOS: quit is honored from every sender — ⌘Q, the menus, AppleScript `quit`, `NSRunningApplication.terminate()` — and is bounded. The app used to block in `waitUntilExit()` on its child daemon inside `applicationWillTerminate`, so a daemon that did not exit on SIGTERM left the app running forever after the Quit Apple event was accepted (the 0.2.0 "quit did nothing, had to kill the pid" symptom). `applicationShouldTerminate` now takes the fleet down first and always answers `.terminateNow`; the `sh` supervisor records the daemon pid and escalates TERM→KILL after 3 s, and the app SIGKILLs the supervisor + daemon after 5 s as a backstop. Pinned by supervisor XCTests and a `QuitUITests` lane with a `trap '' TERM` daemon (th-6198bf).
+- 4dfbebc: SmoothFlow macOS: the Settings window uses the classic grouped tab strip. Under the macOS 26 SDK a plain `TabView` became a window-toolbar tab bar, and in the titled Settings window every tab collapsed into a `»` overflow — the CI runner (Xcode 26.6) showed an empty toolbar and the Daemon / Phones panes were unreachable, which had the `smoothflow-mac` lane red on every PR since the Phones pane landed (th-2ecc1c).
+- 3d48f45: SmoothFlow macOS: the unit-test host is inert (th-dccc80). `SmoothFlowTests` runs inside SmoothFlow.app, and every `xcodebuild test` used to start the real fleet against the developer's HOME — a `tmux -L smoothflow kill-server`, a stray `smooth-daemon` child, and before #546 a rewritten `~/.smooth/daemon.addr`. Under XCTest the app now builds its menu and stops (opt in with `SMOOTHFLOW_TEST_START=1`), `shutdown()` is a no-op before `start()`, and the scheme pins the host's HOME to `/tmp/smoothflow-xctest-home`.
+
 ## 0.47.0
 
 ### Minor Changes

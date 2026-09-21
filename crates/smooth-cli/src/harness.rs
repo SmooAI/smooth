@@ -74,11 +74,37 @@ pub enum Cmd {
     /// Validate a manifest and copy it into ~/.smooth/harnesses/<name>.toml.
     /// SOURCE is a .toml file, a directory holding harness.toml (or
     /// harness/<name>/harness.toml), or owner/repo[/subdir][#ref] on GitHub.
+    ///
+    /// With --agentic, SOURCE is a harness NAME and Big Smooth writes the
+    /// manifest itself: it probes the CLI's --help (and --docs), drafts a
+    /// manifest, validates it by launching a real session on a private
+    /// engine (launch → working → idle, steer, kill+resume), iterates, installs
+    /// it, and reports what it could not prove. Needs a running daemon with an
+    /// LLM provider — you are offered the Smoo AI Gateway or your own key.
     Add {
         source: String,
         /// Overwrite an existing ~/.smooth/harnesses/<name>.toml.
         #[arg(long)]
         force: bool,
+        /// Let Big Smooth draft + validate the manifest (SOURCE = harness name).
+        #[arg(long)]
+        agentic: bool,
+        /// The executable's name or path when it differs from the name
+        /// (e.g. `gemini-cli` → `gemini`). --agentic only.
+        #[arg(long, requires = "agentic")]
+        binary: Option<String>,
+        /// A docs page (CLI reference / hooks) to give the drafter. --agentic only.
+        #[arg(long, requires = "agentic", value_name = "URL")]
+        docs: Option<String>,
+        /// Draft → validate rounds before giving up (1–6). --agentic only.
+        #[arg(long, requires = "agentic", default_value_t = 3)]
+        iterations: u8,
+        /// Install the best draft even when no run reached idle. --agentic only.
+        #[arg(long, requires = "agentic")]
+        install_unverified: bool,
+        /// Model to pass through `{model}` while validating. --agentic only.
+        #[arg(long, requires = "agentic")]
+        model: Option<String>,
     },
     /// Set up (or update) a harness: register the `th mcp serve` MCP server,
     /// install/update the smooth-agent plugin where the harness has a plugin
@@ -93,6 +119,24 @@ pub enum Cmd {
     /// Show, per harness: installed?, MCP entry state, plugin/skills state,
     /// and (Claude Code) whether a statusline is wired.
     Status,
+    /// Does each harness actually work on this machine? Read-only.
+    ///
+    /// Per harness manifest: the binary SmoothFlow runs (and whether `which`
+    /// hands you a cmux shim), its version, whether it resolves under the
+    /// SmoothFlow app's launchd environment, whether its hooks are installed
+    /// AND trusted (Codex's "Hooks need review"), whether the daemon its
+    /// reports go to is up, and sign-in state where it can be read without a
+    /// prompt. Verdict: works / degraded / not installed, with the one command
+    /// that fixes each degraded row. Never installs, trusts or logs in.
+    Doctor {
+        /// One harness (default: every manifest).
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Show every check, not just the ones that need attention.
+        #[arg(long, short)]
+        verbose: bool,
+    },
     /// Remove what smooth wrote for a harness: the MCP entry and any skill
     /// symlinks that resolve into smooth-owned sources. Never touches
     /// user-owned config; plugin uninstall stays with the harness's own CLI.
@@ -117,13 +161,38 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             print_harnesses(&infos_of(&v), true);
             Ok(())
         }
-        Cmd::Add { source, force } => add(&home, &source, force),
+        Cmd::Add {
+            source,
+            force,
+            agentic,
+            binary,
+            docs,
+            iterations,
+            install_unverified,
+            model,
+        } => {
+            if agentic {
+                add_agentic(crate::harness_agentic::AgenticArgs {
+                    name: source,
+                    binary,
+                    docs,
+                    iterations: iterations.clamp(1, 6),
+                    force,
+                    install_unverified,
+                    model,
+                })
+                .await
+            } else {
+                add(&home, &source, force)
+            }
+        }
         Cmd::Enable { provider } => {
             for h in providers(&provider)? {
                 enable(h, &home);
             }
             Ok(())
         }
+        Cmd::Doctor { name, json, verbose } => crate::harness_doctor::run(&home, name.as_deref(), json, verbose),
         Cmd::Status => {
             for h in Harness::ALL {
                 status(h, &home);
@@ -368,6 +437,57 @@ fn add(home: &Path, source: &str, force: bool) -> Result<()> {
             .dimmed()
             .to_string())
     );
+    Ok(())
+}
+
+/// `th harness add --agentic <name>`: the provider gate, then one turn of
+/// Big Smooth calling its `add_harness` tool; the manifest lands in
+/// ~/.smooth/harnesses via the daemon (pearl th-473294).
+async fn add_agentic(args: crate::harness_agentic::AgenticArgs) -> Result<()> {
+    if !manifests::Manifest::parse(&format!(
+        "name = \"{}\"\n[binary]\nnames = [\"x\"]\n[launch]\nargv = [\"{{prompt}}\"]\n",
+        args.name
+    ))
+    .is_ok()
+    {
+        bail!(
+            "`{}` is not a valid harness name (lowercase letters, digits, dashes)\n  → th harness add --agentic gemini",
+            args.name
+        );
+    }
+    if !crate::harness_agentic::ensure_provider().await? {
+        return Ok(());
+    }
+    let reply = crate::harness_agentic::run_turn(&args).await?;
+    // The report is authoritative: if the daemon installed it, it is on disk now.
+    let home = mcp_install::harness_home()?;
+    let dest = user_manifests_dir(&home).join(format!("{}.toml", args.name));
+    if dest.is_file() {
+        let m = manifests::load_file(&dest)?;
+        let binary = m.resolve_binary_in(&home, &std::env::var_os("PATH").unwrap_or_default());
+        println!(
+            "{} {} → {}  ({})",
+            paint("●", |g| g.bold().to_string()),
+            m.name,
+            dest.display(),
+            binary.map_or_else(|| format!("`{}` not on PATH", m.binary.names.join("`/`")), |b| b.display().to_string())
+        );
+        println!(
+            "{}",
+            paint(
+                &format!("  th flow new --kind {} --prompt \"say hi\"   ·   th harness show {}", m.name, m.name),
+                |t| t.dimmed().to_string()
+            )
+        );
+    } else if !reply.to_ascii_lowercase().contains("needs_provider") {
+        println!(
+            "{}",
+            paint(
+                "  not installed — the report above has the draft; th harness add <file> installs an edited one",
+                |t| t.dimmed().to_string()
+            )
+        );
+    }
     Ok(())
 }
 
@@ -1058,14 +1178,35 @@ mod tests {
         let tmp = home();
         let reg = Registry::load(tmp.path(), None);
         let rows = reg.infos(&Prefs::default(), true, tmp.path(), &std::ffi::OsString::new());
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), smooth_flow::harness::BUILTIN.len());
         let v = serde_json::to_value(&rows).unwrap();
         assert_eq!(v[0]["name"], "claude");
         assert_eq!(v[0]["installed"], false);
         assert_eq!(v[0]["order_index"], 0);
-        assert_eq!(infos_of(&json!({ "harnesses": v })).len(), 4);
+        assert_eq!(infos_of(&json!({ "harnesses": v })).len(), rows.len());
         print_harnesses(&rows, true);
         print_harnesses(&[], false);
+    }
+
+    #[test]
+    fn doctor_parses_an_optional_name_json_and_verbose() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let cli = Cli::try_parse_from(["th", "doctor", "codex", "--json", "-v"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Doctor { name: Some(ref n), json: true, verbose: true } if n == "codex"));
+        let cli = Cli::try_parse_from(["th", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Doctor {
+                name: None,
+                json: false,
+                verbose: false
+            }
+        ));
     }
 
     #[test]

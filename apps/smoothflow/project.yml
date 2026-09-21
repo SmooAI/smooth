@@ -38,7 +38,12 @@ targets:
             # and CFBundleIconFile never resolves.
             - path: Resources
               buildPhase: resources
-              excludes: [README.txt]
+              excludes: [README.txt, ghostty]
+            # libghostty's resources (themes) — a folder reference so the
+            # `ghostty/themes/<name>` layout survives (th-bcd819).
+            - path: Resources/ghostty
+              type: folder
+              buildPhase: resources
             - path: LaunchAgents
               buildPhase:
                   copyFiles:

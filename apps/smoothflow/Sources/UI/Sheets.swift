@@ -26,18 +26,23 @@ struct HarnessPicker: View {
     }
 }
 
-/// ⌘N — `flow.new`.
+/// ⌘N — `flow.new`. Zero friction (th-c103c1): pick a kind, hit Start.
+/// The pearl, Jira key, worktree and title are INFERRED from where the work
+/// already is — shown, not demanded — and every one of them is overridable
+/// behind the disclosure. Start is never blocked on a missing pearl.
 struct NewSessionSheet: View {
     @ObservedObject var app: AppController
     @State private var kind = ""
+    @State private var prompt = ""
+    @State private var showOverrides = false
     @State private var worktree = ""
     @State private var pearlId = ""
-    @State private var prompt = ""
     @State private var title = ""
     var dismiss: () -> Void = {}
 
     private var selected: HarnessInfo? { app.store.harnesses.first { $0.name == kind } }
     private var launchable: Bool { kind == "shell" || selected?.installed == true }
+    private var context: InferredContext? { app.inferred }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -48,23 +53,62 @@ struct NewSessionSheet: View {
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }
-            TextField("Pearl id (th-xxxxxx) — the engine creates the worktree", text: $pearlId).font(.body.monospaced())
-            TextField("Worktree path (blank = derive from pearl / cwd)", text: $worktree).font(.body.monospaced())
-            TextField("Title (optional)", text: $title)
+            inferredContext
             TextField("Prompt (optional)", text: $prompt, axis: .vertical).lineLimit(3...6)
+            DisclosureGroup("Override context", isExpanded: $showOverrides) {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Pearl id (th-xxxxxx) — with no worktree, the engine creates one", text: $pearlId).font(Theme.mono(.body))
+                    TextField("Worktree path", text: $worktree).font(Theme.mono(.body))
+                    TextField("Title", text: $title)
+                }.padding(.top, 6)
+            }
+            .font(.caption)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Start") {
-                    app.newSession(NewSession(kind: kind, worktree: worktree.nilIfEmpty, project: nil, pearlId: pearlId.nilIfEmpty,
-                                              prompt: prompt.nilIfEmpty, argv: nil, title: title.nilIfEmpty))
-                    dismiss()
-                }.keyboardShortcut(.defaultAction).disabled(!launchable)
+                Button("Start") { start() }.keyboardShortcut(.defaultAction).disabled(!launchable)
             }
         }
         .padding(20)
         .frame(width: 520)
         .onAppear { if kind.isEmpty { kind = HarnessPicker.defaultKind(app.store) } }
+        .task { await app.loadInference(cwd: app.inferSeedCwd) }
+    }
+
+    /// What the session will inherit if you just press Start.
+    @ViewBuilder private var inferredContext: some View {
+        if let c = context {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(c.title).font(.body.weight(.medium)).lineLimit(1)
+                Text(c.summary).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)).lineLimit(2)
+                if !c.isGit {
+                    Text("not a git worktree — no pearl, no branch").font(.caption2).foregroundStyle(Color(Theme.faint))
+                } else if c.pearlId == nil {
+                    Text("no pearl here — starting anyway is fine").font(.caption2).foregroundStyle(Color(Theme.faint))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+        } else {
+            Text("reading the context…").font(.caption).foregroundStyle(Color(Theme.faint))
+        }
+    }
+
+    /// An override wins; otherwise the inferred value goes on the wire, so the
+    /// session records exactly the context the dialog showed.
+    private func start() {
+        let c = context
+        app.newSession(NewSession(
+            kind: kind,
+            worktree: worktree.nilIfEmpty ?? (pearlId.nilIfEmpty == nil ? c?.worktree.nilIfEmpty : nil),
+            project: c?.project.nilIfEmpty,
+            pearlId: pearlId.nilIfEmpty ?? c?.pearlId,
+            prompt: prompt.nilIfEmpty,
+            argv: nil,
+            title: title.nilIfEmpty
+        ))
+        dismiss()
     }
 }
 
@@ -110,7 +154,7 @@ struct FanOutSheet: View {
 
     private var compose: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Pearl id", text: $pearlId).font(.body.monospaced())
+            TextField("Pearl id", text: $pearlId).font(Theme.mono(.body))
             TextField("Prompt", text: $prompt, axis: .vertical).lineLimit(3...8)
             Text("CANDIDATES").font(.caption).foregroundStyle(Color(Theme.muted))
             ForEach(candidates.indices, id: \.self) { i in
@@ -119,7 +163,7 @@ struct FanOutSheet: View {
                     TextField("model", text: Binding(get: { candidates[i].model ?? "" }, set: { candidates[i].model = $0.nilIfEmpty })).frame(width: 140)
                     TextField("label", text: $candidates[i].label)
                     Button("−") { candidates.remove(at: i) }
-                }.font(.body.monospaced())
+                }.font(Theme.mono(.body))
             }
             Button("+ add") {
                 let k = HarnessPicker.defaultKind(store, includeShell: false)
@@ -140,13 +184,13 @@ struct FanOutSheet: View {
         let cands = (store.fanOutCandidates[f.id] ?? []).compactMap { store.sessions[$0] }
         return VStack(alignment: .leading, spacing: 10) {
             Text(f.prompt).font(.body)
-            if let b = f.baseCommit { Text("base: \(b)").font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)) }
+            if let b = f.baseCommit { Text("base: \(b)").font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)) }
             HStack(alignment: .top, spacing: 12) {
                 ForEach(Array(cands.enumerated()), id: \.element.id) { i, s in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack { StateDot(session: s); Text("\(Character(UnicodeScalar(65 + i)!)) · \(s.title)").font(.headline) }
                         Text(Theme.stateLabel(s) + " · " + Theme.relative(s.updatedAt)).font(.caption)
-                        Text(s.worktree).font(.caption.monospaced()).foregroundStyle(Color(Theme.muted)).lineLimit(1)
+                        Text(s.worktree).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)).lineLimit(1)
                         if let d = app.handoffs[s.id]?.handoff?.dirty { Text("\(d.count) files").font(.caption) }
                         HStack {
                             Button("Pick winner") { app.fanoutPick(fanOutId: f.id, winner: s.id); dismiss() }

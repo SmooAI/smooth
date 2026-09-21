@@ -1,0 +1,50 @@
+# harness: goose
+# expect: idle
+# rule: goose-composer
+# title: 🪿 goose
+# alternate_on: false
+# cursor_y: 39
+# quiet_ms: 5000
+# source: live goose 1.50.0, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: finished turn: ⏱ elapsed, context bar, composer
+---
+
+Help improve goose
+
+Would you like to help improve goose by sharing anonymous usage data?
+This helps us understand how goose is used and identify areas for improvement.
+
+What we collect:
+  • Operating system, version, and architecture
+  • goose version and install method
+  • Provider and model used
+  • Extensions and tool usage counts (names only)
+  • Session metrics (duration, interaction count, token usage)
+  • Error types (e.g., "rate_limit", "auth" - no details)
+
+We never collect your conversations, code, tool arguments, error messages,
+or any personal data. You can change this anytime with 'goose configure'.
+
+◇  Share anonymous usage data to help improve goose?
+│  No
+│
+●  Telemetry disabled. You can enable it anytime in settings.
+│
+
+    __( O)>  ● new session · openai mock-model
+   \____)    20260914_1 · /scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrubbed-scratch-path/scrub
+/scrubbed-scratch-path/scru
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> hello goose
+  ✓ extensions ready
+
+Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answe
+r so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a whil
+e. Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow an
+swer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a w
+hile.
+  ⏱ 12.39s
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 20/128k
+> Enter to send · Ctrl+J newline

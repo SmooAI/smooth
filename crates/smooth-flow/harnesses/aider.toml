@@ -1,0 +1,82 @@
+# Aider (aider-chat) — scrape-only (th-e77603). Aider has no lifecycle hooks,
+# so everything the engine knows comes from the pane. Rules were written
+# against panes captured live from aider 0.86.2 (tests/fixtures/scrape/aider).
+#
+# Aider is a SCROLLING CLI, not a full-screen TUI: its composer is a bare `>`
+# on the last line, questions are `… (Y)es/(N)o [Yes]:` on the last line, and
+# the model's answer streams below the echoed `> your prompt` with no status
+# marker at all — so turn state leans on WHERE a line is and on the clock.
+name = "aider"
+display_name = "Aider"
+
+[binary]
+names = ["aider"]
+# `uv tool install aider-chat` / `pipx install aider-chat` / aider-install.
+prefer_paths = [".local/bin/aider"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# Aider's --message runs one turn and EXITS, so the prompt is pasted into the
+# composer once the pane reads idle (the engine waits for the idle rule and
+# never pastes into a pending first-run question — th-d2a1e4).
+argv = ["--model", "{model}"]
+prompt_as = "paste"
+session_id = "learned"
+
+[resume]
+# No per-session id; aider can reload this directory's chat history.
+argv = ["--restore-chat-history"]
+mode = "continue_latest"
+
+[state]
+source = "scrape"
+
+[state.scrape]
+usage_limit = ["exceeded your current quota", "insufficient_quota"]
+error = ["litellm\\.\\w*error", "^error: "]
+
+# A question owns the last line: "Add .aider* to .gitignore (recommended)?
+# (Y)es/(N)o [Yes]:", "Create new file? (Y)es/(N)o [Yes]:", "Open
+# documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]:".
+# An ANSWERED question has the answer and more output after it, so it is
+# never the last line.
+[[state.scrape.rules]]
+name = "aider-question"
+state = "needs_you"
+match = ["\\(y\\)es/\\(n\\)o.*:\\s*$"]
+where = "last_line"
+
+# The "Waiting for <model>" knight-rider bar ("   ░█      Waiting for …").
+[[state.scrape.rules]]
+name = "aider-waiting"
+state = "working"
+match = ["(░█|█░)\\s+waiting for ", "^\\s*(░|█)+\\s+(waiting for|updating repo map|scanning repo)"]
+where = "last_line"
+
+# Idle: the bare composer on the last line (`>`, or a mode prefix such as
+# `ask>` / `architect>` / `multi>`), and the pane has held still. The echoed
+# `> explain the repo` of a turn in progress is not bare, so it never matches.
+[[state.scrape.rules]]
+name = "aider-composer"
+state = "idle"
+match = ["^\\s*(\\w+\\s*)?>\\s*$"]
+where = "last_line"
+quiet_ms = 1500
+
+# Streaming: no marker, just text arriving. The cursor sits on the line being
+# written; when it sits on a `>` composer line instead, the change is the
+# user typing, not the model.
+[[state.scrape.rules]]
+name = "aider-streaming"
+state = "working"
+where = "cursor_line"
+changed_within_ms = 5000
+unless = ["^\\s*(\\w+\\s*)?>(\\s|$)"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000

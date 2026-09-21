@@ -65,7 +65,7 @@ struct InboxView: View {
             switch a?.reason {
             case .permission:
                 title("Permission request", s)
-                Text(a?.detail ?? "").font(.body.monospaced())
+                Text(a?.detail ?? "").font(Theme.mono(.body))
                 HStack {
                     Button("Allow") { app.approve(s, .allow) }.keyboardShortcut("a", modifiers: []).accessibilityIdentifier("inbox.allow.\(s.id)")
                     Button("Deny") { app.approve(s, .deny) }.keyboardShortcut("d", modifiers: []).accessibilityIdentifier("inbox.deny.\(s.id)")
@@ -83,7 +83,7 @@ struct InboxView: View {
                 HStack { Button("Open session") { app.focus(s.id); app.toggleInbox() } }
             case .held:
                 title("FYI · idle session held by another process", s)
-                Text(a?.detail ?? "owned by pid \(a?.pid.map(String.init) ?? "?")").font(.caption.monospaced())
+                Text(a?.detail ?? "owned by pid \(a?.pid.map(String.init) ?? "?")").font(Theme.mono(.caption))
                 HStack {
                     Button("Kill and resume here") { app.kill(s, resume: true) }
                     Button("Leave it") { app.markRead(s.id) }
@@ -167,57 +167,72 @@ struct InboxView: View {
     }
 }
 
-/// "What will happen" before `flow.close` goes out: each action is named with
-/// its target and can be left out; the refusal rule is stated up front so a
-/// dirty worktree is never a surprise. Confirm is the default button.
+/// "What will happen" before `flow.close` goes out: every action is named with
+/// its target, can be left out, and — since th-fe75ca — is shown next to what
+/// it DESTROYS (branch, uncommitted files, the pearl by title). A live session
+/// says so first: the engine kills it before anything else.
+///
+/// The decision and all of this copy are `SessionClose.decide`; this view only
+/// lays it out. Force is never a checkbox here — it appears on the card only
+/// after the engine has refused and said why.
 struct CloseSessionSheet: View {
     let session: Session
     let handoff: Handoff?
     let confirm: (_ closePearl: Bool, _ removeWorktree: Bool) -> Void
+    /// Set when an AppKit controller presented us (`presentSheet`): SwiftUI's
+    /// environment dismiss does not end an NSViewController sheet reliably.
+    var onDismiss: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var closePearl: Bool
     @State private var removeWorktree: Bool
+    private let plan: SessionClose.Plan
 
-    init(session: Session, handoff: Handoff?, confirm: @escaping (_ closePearl: Bool, _ removeWorktree: Bool) -> Void) {
+    init(session: Session, handoff: Handoff?, onDismiss: (() -> Void)? = nil, confirm: @escaping (_ closePearl: Bool, _ removeWorktree: Bool) -> Void) {
         self.session = session
         self.handoff = handoff
+        self.onDismiss = onDismiss
         self.confirm = confirm
-        _closePearl = State(initialValue: session.pearlId != nil)
-        _removeWorktree = State(initialValue: Self.hasOwnWorktree(session))
+        let plan = SessionClose.decide(session: session, handoff: handoff)
+        self.plan = plan
+        _closePearl = State(initialValue: plan.defaultClosePearl)
+        _removeWorktree = State(initialValue: plan.defaultRemoveWorktree)
     }
-
-    /// The main checkout is never removed (the engine refuses too); only a
-    /// row that lives in its own worktree offers the toggle.
-    static func hasOwnWorktree(_ s: Session) -> Bool { !s.worktree.isEmpty && s.worktree != s.project }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Close \(session.label)").font(.headline)
+            Text(plan.title).font(.headline)
             Text("This finishes the session for good. It leaves the fleet; its scrollback stays until you quit.").font(.caption).foregroundStyle(Color(Theme.muted))
-            if let p = session.pearlId {
-                Toggle(isOn: $closePearl) { Text("Close pearl \(p)").font(.body.monospaced()) }.accessibilityIdentifier("inbox.close.pearl")
-            } else {
-                Text("No pearl on this session.").font(.caption).foregroundStyle(Color(Theme.faint))
+            if let w = plan.liveWarning {
+                Text(w).font(.caption).foregroundStyle(Color(Theme.amber)).accessibilityIdentifier("session.close.live")
             }
-            if Self.hasOwnWorktree(session) {
+            if let label = plan.pearlLabel {
+                Toggle(isOn: $closePearl) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(label).font(Theme.mono(.body))
+                        if let t = plan.pearlDetail { Text(t).font(.caption).foregroundStyle(Color(Theme.muted)).lineLimit(2) }
+                    }
+                }.accessibilityIdentifier("inbox.close.pearl")
+            } else if let note = plan.pearlNote {
+                Text(note).font(.caption).foregroundStyle(Color(Theme.faint))
+            }
+            if let label = plan.worktreeLabel {
                 Toggle(isOn: $removeWorktree) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Remove worktree \(session.worktree)").font(.body.monospaced())
-                        if let b = session.branch { Text("and delete branch \(b)").font(.caption).foregroundStyle(Color(Theme.muted)) }
+                        Text(label).font(Theme.mono(.body))
+                        if let b = plan.branchLabel { Text(b).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)) }
                     }
                 }.accessibilityIdentifier("inbox.close.worktree")
-                Text("Only once the branch is merged and the worktree is clean; otherwise the engine refuses and touches nothing — you can force it from the card.")
-                    .font(.caption).foregroundStyle(Color(Theme.muted))
-                if let dirty = handoff?.handoff?.dirty, !dirty.isEmpty {
-                    Text("\(dirty.count) uncommitted files right now.").font(.caption).foregroundStyle(Color(Theme.ink))
+                Text(plan.worktreeNote).font(.caption).foregroundStyle(Color(Theme.muted))
+                if let d = plan.dirtyLabel {
+                    Text(d).font(.caption).foregroundStyle(Color(Theme.ink)).accessibilityIdentifier("session.close.dirty")
                 }
             } else {
-                Text("Main checkout — the worktree is kept.").font(.caption).foregroundStyle(Color(Theme.faint))
+                Text(plan.worktreeNote).font(.caption).foregroundStyle(Color(Theme.faint))
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).accessibilityIdentifier("inbox.close.cancel")
-                Button("Close session") { confirm(closePearl, removeWorktree); dismiss() }
+                Button("Cancel") { close() }.keyboardShortcut(.cancelAction).accessibilityIdentifier("inbox.close.cancel")
+                Button(plan.confirmTitle) { confirm(closePearl, removeWorktree); close() }
                     .keyboardShortcut(.defaultAction).accessibilityIdentifier("inbox.close.confirm")
             }
         }
@@ -225,6 +240,39 @@ struct CloseSessionSheet: View {
         .frame(width: 460)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inbox.close.sheet")
+    }
+
+    private func close() {
+        if let onDismiss { onDismiss() } else { dismiss() }
+    }
+}
+
+/// The engine refused a close started outside the Inbox (sidebar menu, Session
+/// ▸ Close Out…): its reason verbatim, and force offered only now — never as a
+/// checkbox armed before the reason existed. Nothing was touched.
+struct CloseRefusedSheet: View {
+    let session: Session
+    let refusal: CloseRefusal
+    let force: () -> Void
+    let keep: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Not closed · \(session.label)").font(.headline)
+            Text(refusal.message).font(Theme.mono(.caption)).textSelection(.enabled)
+                .accessibilityIdentifier("session.close.refusal")
+            Text("Nothing was touched. Force removes the worktree and its branch anyway — the uncommitted work goes with it.")
+                .font(.caption).foregroundStyle(Color(Theme.muted))
+            HStack {
+                Spacer()
+                Button("Keep it") { keep() }.keyboardShortcut(.cancelAction).accessibilityIdentifier("session.close.keep")
+                Button("Force close") { force() }.accessibilityIdentifier("session.close.force")
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("session.close.refused.sheet")
     }
 }
 

@@ -1,0 +1,71 @@
+# GitHub Copilot CLI (th-b00115). Hooks are per-file under ~/.copilot/hooks/
+# (`{"version": 1, "hooks": {event: [{type, bash, timeoutSec}]}}` — flat
+# entries, not Claude's matcher groups). PascalCase event names get the
+# VS Code-compatible payload (session_id, tool_name); camelCase ones get
+# sessionId/toolName — flow-hook.sh reads both. Its PermissionRequest fires
+# BEFORE the allow/ask/deny rules resolve (orca
+# src/shared/agent-hook-listener/providers/copilot-events.ts:15), so it is not
+# an ask; a Notification is, but only for permission_prompt/elicitation_dialog
+# — map_manifest_event drops the other notification types.
+# References: orca src/main/copilot/copilot-managed-hook-definitions.ts:10-27
+# (events), src/main/copilot/hook-service.ts:29-36 (~/.copilot/hooks/<file>.json,
+# COPILOT_HOME), src/shared/agent-session-resume.ts:289 (`--resume=<id>`);
+# cmux CLI/CMUXCLI+AgentHookCatalog.swift:186-198; GitHub docs
+# copilot/reference/hooks-configuration. copilot 1.0.83 --help: -i/--interactive
+# <prompt>, --session-id <id> "set the UUID for a new session", -r/--resume[=id].
+name = "copilot"
+display_name = "GitHub Copilot CLI"
+
+[binary]
+names = ["copilot"]
+prefer_paths = [".local/bin/copilot"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = ["--session-id", "{session_id}", "--model", "{model}", "-i", "{prompt}"]
+prompt_as = "argv"
+session_id = "preassigned"
+
+[resume]
+argv = ["--resume={session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness copilot  # harness/copilot/hooks.json → ~/.copilot/hooks/<pkg>.json"
+
+[state.hooks.event_map]
+SessionStart = "ignore"
+UserPromptSubmit = "working"
+PreToolUse = "working"
+PostToolUse = "working"
+PostToolUseFailure = "working"
+# PermissionRequest is not subscribed at all: it fires before the allow/deny
+# rules resolve, and its stdout is a decision we must not give.
+Notification = "needs_you"
+Stop = "idle"
+ErrorOccurred = "ignore"
+SessionEnd = "ended"
+
+[state.scrape]
+working = ["esc to cancel", "esc to interrupt"]
+idle = ["type @ to mention files", "ctrl\\+c exit"]
+# Captured 2026-09-14 (copilot 1.0.83, fresh HOME): "Confirm folder trust …
+# Do you trust the files in this folder? ❯ 1. Yes … ↑/↓ to navigate · enter to select".
+needs_you = ["do you trust the files in this folder", "enter to select", "do you want to run this command", "❯ 1\\. yes"]
+usage_limit = ["quota exceeded", "rate limit", "usage limit"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.copilot/skills"
+mcp_config = "~/.copilot/mcp-config.json"

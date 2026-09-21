@@ -1,0 +1,50 @@
+# harness: aider
+# expect: idle
+# rule: aider-composer
+# title: marvin
+# alternate_on: false
+# cursor_y: 6
+# quiet_ms: 5000
+# source: live aider 0.86.2, tmux 3.5a 120x40, fresh scratch $HOME, driven against a local mock OpenAI-compatible server (no credentials), 2026-09-14
+# note: the bare `>` composer, held still
+---
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Aider v0.86.2
+Model: openai/mock-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -70,7 +70,32 @@ th harness unhide codex
 th harness order th-code claude    # these first, in this order; the rest follow
 th harness add ./aider.toml        # validate + copy into ~/.smooth/harnesses/aider.toml
 th harness add owner/repo[/subdir][#ref]   # same, from a GitHub repo's harness.toml / harness/<name>/harness.toml
+th harness add --agentic gemini [--binary gemini] [--docs <url>] [--iterations 3] [--force] [--install-unverified] [--model m]
+                                   # Big Smooth probes --help, drafts the manifest, VALIDATES it on a private engine
+                                   # (launch → idle, steer, kill+resume), iterates, installs, reports what it could not prove.
+                                   # Needs a provider: you're offered the Smoo AI Gateway or your own key (th-473294)
 ```
+
+**Does it work here? (pearl th-3cabf6).** `list` says a binary resolves;
+`doctor` says whether a SmoothFlow session on it will behave — read-only, it
+never installs, trusts a hook dialog or logs in:
+
+```bash
+th harness doctor                  # every manifest: ● works / ◐ degraded (why + the one fix) / ○ not installed
+th harness doctor codex -v         # one harness, every check shown
+th harness doctor --json           # {harnesses:[{name, verdict, reason, fix, binary, app_binary, cmux_shim, version, checks}]}
+```
+
+Checks: the binary SmoothFlow runs and whether `which` returns a cmux shim
+instead; `--version`; whether it resolves under the SmoothFlow app's launchd
+PATH (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` + `prefer_paths`), not
+just your shell's — including a `#!/usr/bin/env node` script whose `node` the
+app cannot see; hooks installed **and trusted** (Codex's "Hooks need review",
+a stale smooth-agent plugin without the flow hook, an OpenCode plugin without
+the generic `event` hook); whether the daemon reports go to is listening; and
+sign-in from env keys / credential files. Every manifest also passes the
+conformance contract in CI — see
+[Harness-Manifests.md § Supporting a harness](Harness-Manifests.md#supporting-a-harness--the-conformance-contract).
 
 `list`/`show` read the files directly (with the daemon's order/hide prefs
 when it runs); `hide`/`unhide`/`order` write the prefs through the daemon
@@ -957,7 +982,7 @@ If you hit one of these workarounds and there's no `smoo admin` for it yet, **fi
 
 See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls create / list / ready / show / update / close`. Always prefer this over `TodoWrite` or ad-hoc markdown.
 
-**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file.
+**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file. A plain open (any `th pearls` verb, or the `th prime` SessionStart hook) only registers the project when its root is a git repo other than `/` or `$HOME`, so scratch dirs never show up in `th pearls projects` — `th pearls init` is the explicit opt-in for anything else (th-92e046).
 
 **Legacy `.smooth/dolt` stores.** The Dolt shim and `th pearls migrate-from-dolt` were deleted in pearl th-c6ba83. A machine that still has one must migrate with th ≤ 0.42.x before upgrading — see the History section of [Pearls](../Architecture/Pearls.md).
 
@@ -997,6 +1022,8 @@ th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
 th msg unread-count [--agent <h>]          # just the number, for a statusline/prompt
 th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
+th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
+th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
 th inbox                                   # alias for `th msg inbox` (default identity)
 th agent backend status [--json]           # which mailbox am I on, and (cloud) my trial state
 th agent backend set sqlite|cloud          # local (default, free) or cross-machine (paid)
@@ -1217,6 +1244,9 @@ the only state holder; `th flow` connects and never launches the daemon.
 
 ```bash
 th flow ls [--json]                                      # every session: state glyph, attention, worktree
+th flow new                                              # zero friction: a claude in THIS directory, pearl/branch/title inferred
+th flow infer [--cwd <dir>]                              # what a session here would work on (worktree/project/branch/pearl/jira)
+th flow adopt [on|off]                                   # adopt plain `claude`/`codex` sessions started outside SmoothFlow
 th flow new --kind claude --prompt "fix the flaky test"  # pre-assigned --session-id, launched under tmux
 th flow new --kind claude --pearl th-abc123 --prompt "…" # creates ../<repo>-th-abc123-<slug> first
 th flow new --kind shell --worktree ../some-worktree     # a login shell in that dir
@@ -1257,8 +1287,23 @@ States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `done` · `dead`. Attention reasons in brackets: `permission`, `question`,
 `usage_limit`, `crashed`, `held` (another live pid owns that harness session).
 
+**Nothing is demanded (th-c103c1).** `th flow new` with no arguments starts a
+session in the current directory; the engine infers the worktree, the project
+(the main checkout, even inside a linked worktree), the branch, the pearl id
+(off the branch or the worktree name) and a title. `th flow infer` shows
+exactly what it would use; any explicit flag wins.
+
+`th flow adopt on` lets a `claude` or `codex` you started in an ordinary
+terminal join the fleet on its first hook, with its pearl and branch attached.
+It is off by default, and an adopted session is not engine-owned: no attach,
+no kill, no resume — the engine only tracks it. Rules:
+[`SmoothFlow.md`](../Architecture/SmoothFlow.md#zero-friction--inference-and-adoption-th-c103c1).
+
 Discovery is `~/.smooth/daemon.addr`; auth is the daemon's local token
-(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Errors are two lines:
+(`SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token`). Harness HOOKS use a
+wider chain — `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` →
+`~/.smooth/daemon.addr` — because the SmoothFlow app's child daemon
+deliberately does not advertise itself in `daemon.addr`. Errors are two lines:
 what failed, then what to do.
 
 ### Worktree helpers

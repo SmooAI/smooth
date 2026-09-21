@@ -22,6 +22,8 @@ struct CloseRefusal: Equatable {
 final class AppController: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     let store = FlowStore()
     let daemon = DaemonManager()
+    /// The live keyboard map (Settings ▸ Keyboard + ~/.smooth/smoothflow/keybindings.toml).
+    let keymap = KeymapStore()
     let permissions = Permissions()
     private(set) lazy var client = FlowClient(store: store)
 
@@ -40,6 +42,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// and the engine's refusal per session (the card shows it with "Force close").
     private var pendingCloses: [Int: CloseRequest] = [:]
     @Published private(set) var closeRefusals: [String: CloseRefusal] = [:]
+    /// th-fe75ca: sessions whose close was started somewhere with no card to
+    /// land a refusal on (the sidebar menu, Session ▸ Close Out…). The engine's
+    /// reason gets its own sheet instead of disappearing into the rail.
+    private var announceRefusals: Set<String> = []
     private var nextSeq = 1
     var notifySettings = NotifySettings.load()
 
@@ -49,6 +55,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
     private var subscriptions: Set<AnyCancellable> = []
+    /// Sessions the window has already seen, so a newly announced one can be
+    /// told apart from every redraw of the list.
+    private var knownSessionIds: Set<String> = []
 
     static let onboardedKey = "onboarded"
 
@@ -91,8 +100,14 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         }.store(in: &subscriptions)
         // @Published fires on willSet; hop once so the headers read the new value.
         store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
-            self?.mainWindow.center.refreshHeaders()
-            self?.pruneCloses(live)
+            guard let self else { return }
+            self.mainWindow.center.refreshHeaders()
+            // A session this window asked for (⌘⇧T) lands in the tab that asked.
+            for id in live.keys where self.knownSessionIds.insert(id).inserted {
+                self.mainWindow.center.adopt(newSessionId: id)
+            }
+            self.knownSessionIds.formIntersection(live.keys)
+            self.pruneCloses(live)
         }.store(in: &subscriptions)
         daemon.onRestart = { [weak self] ep in self?.client.connect(to: ep) }
 
@@ -166,7 +181,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 handoffs[id] = h
             case let .error(ref, msg):
                 if let ref, let req = pendingCloses.removeValue(forKey: ref) {
-                    closeRefusals[req.sessionId] = CloseRefusal(request: req, message: msg)
+                    let refusal = CloseRefusal(request: req, message: msg)
+                    closeRefusals[req.sessionId] = refusal
+                    if announceRefusals.contains(req.sessionId), let s = store.sessions[req.sessionId] { showCloseRefusal(s, refusal) }
                 } else {
                     thOutput = msg
                 }
@@ -182,12 +199,17 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         if pending.count != pendingCloses.count { pendingCloses = pending }
         let refusals = closeRefusals.filter { live[$0.key] != nil }
         if refusals.count != closeRefusals.count { closeRefusals = refusals }
+        announceRefusals = announceRefusals.filter { live[$0] != nil }
     }
 
     // MARK: surfaces
 
     /// One surface per session, created on first focus and attached for the
     /// rest of its life (scrollback lives in the surface, not the engine).
+    /// The surface for `id` if one already exists — never creates one, so a
+    /// focus call cannot attach a session by accident.
+    func surfaceIfLoaded(_ id: String) -> TerminalSurfaceView? { surfaces[id] }
+
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
         let v = TerminalSurfaceView(sessionId: id)
@@ -258,12 +280,16 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func kill(_ s: Session, resume: Bool) { client.send(.kill(id: s.id, resume: resume)) }
 
-    /// th-883ce9: `flow.close` for a finished session. Tagged with a `seq` so
-    /// the engine's refusal (`flow.error.ref`) lands on THIS card as a
-    /// "Force close" offer instead of in the rail's generic output.
-    func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false) {
+    /// th-883ce9: `flow.close` for a session — finished or live (the engine
+    /// kills a running one first). Tagged with a `seq` so the engine's refusal
+    /// (`flow.error.ref`) lands on THIS session as a "Force close" offer
+    /// instead of in the rail's generic output: on its Inbox card, or — with
+    /// `announceRefusal`, for a close started where there is no card — in a
+    /// sheet of its own (th-fe75ca).
+    func close(_ s: Session, closePearl: Bool, removeWorktree: Bool, force: Bool = false, announceRefusal: Bool = false) {
         let seq = nextSeq
         nextSeq += 1
+        if announceRefusal { announceRefusals.insert(s.id) } else { announceRefusals.remove(s.id) }
         let req = CloseRequest(sessionId: s.id, closePearl: closePearl, removeWorktree: removeWorktree, force: force)
         pendingCloses[seq] = req
         closeRefusals[s.id] = nil
@@ -273,11 +299,25 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// Resend the refused close with `force` — the user read the reason.
     func forceClose(_ s: Session) {
         guard let r = closeRefusals[s.id] else { return }
-        close(s, closePearl: r.request.closePearl, removeWorktree: r.request.removeWorktree, force: true)
+        close(s, closePearl: r.request.closePearl, removeWorktree: r.request.removeWorktree, force: true, announceRefusal: announceRefusals.contains(s.id))
     }
 
     func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
     func newSession(_ n: NewSession) { client.send(.new(n)) }
+
+    /// th-c103c1: the context a new session would inherit. Seeded from the
+    /// focused session's worktree (you are almost always starting a second
+    /// agent on the work you are looking at), else the daemon's workspace.
+    @Published private(set) var inferred: InferredContext?
+
+    /// The directory the New Session dialog infers from.
+    var inferSeedCwd: String? { store.focused?.worktree }
+
+    /// Load the inferred context for `cwd` (nil ⇒ the daemon's workspace).
+    /// A failure simply leaves the dialog with no context to show.
+    func loadInference(cwd: String?) async {
+        inferred = try? await client.infer(cwd: cwd)
+    }
     func fanoutNew(prompt: String, pearlId: String?, candidates: [FanOutCandidate]) {
         client.send(.fanoutNew(prompt: prompt, pearlId: pearlId, candidates: candidates))
     }
@@ -377,6 +417,34 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func showNewSession() {
         mainWindow.contentViewController?.presentSheet { dismiss in NewSessionSheet(app: self, dismiss: dismiss) }
+    }
+
+    /// th-fe75ca: close-out, from wherever you are — the sidebar row's context
+    /// menu, Session ▸ Close Out…, or the Inbox card. A live session is closed
+    /// the same way (the engine kills it first); the sheet says so.
+    ///
+    /// The handoff is read BEFORE the sheet goes up so branch, dirty count and
+    /// pearl title are on screen the first time you see it, not a beat later.
+    func showCloseOut(_ id: String) {
+        Task {
+            await loadHandoff(for: id)
+            guard let s = store.sessions[id] else { return }
+            mainWindow?.contentViewController?.presentSheet { dismiss in
+                CloseSessionSheet(session: s, handoff: self.handoffs[id], onDismiss: dismiss) { closePearl, removeWorktree in
+                    self.close(s, closePearl: closePearl, removeWorktree: removeWorktree, announceRefusal: true)
+                }
+            }
+        }
+    }
+
+    /// The engine refused a close that had no card to land on: its reason,
+    /// verbatim, with force offered only now — after it has been read.
+    private func showCloseRefusal(_ s: Session, _ r: CloseRefusal) {
+        mainWindow?.contentViewController?.presentSheet { dismiss in
+            CloseRefusedSheet(session: s, refusal: r,
+                              force: { dismiss(); self.forceClose(s) },
+                              keep: { dismiss(); self.dismissCloseRefusal(s.id) })
+        }
     }
 
     func showFanOut(existing: String? = nil) {

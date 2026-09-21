@@ -57,6 +57,18 @@ struct FleetSidebar: View {
             if s.unread { UnreadBadge() }
         }
         .padding(.vertical, 2)
+        // th-fe75ca: close-out is reachable from the row itself — a running
+        // session included (the engine kills it first, and the sheet says so).
+        // Right-click was the only gesture that did nothing here.
+        .contextMenu {
+            Button("Open") { app.focus(s.id) }
+            if s.isLive {
+                Button("Kill & Resume") { app.kill(s, resume: true) }
+                Button("Kill") { app.kill(s, resume: false) }
+            }
+            Divider()
+            Button("Close Out…") { app.showCloseOut(s.id) }.accessibilityIdentifier("sidebar.closeOut.\(s.id)")
+        }
         // No identifier on the row itself: SwiftUI would stamp it onto both Texts,
         // hiding sidebar.title.* / sidebar.state.* from XCUITest.
     }

@@ -38,12 +38,27 @@
 //! encrypts outbound ones, and rejects plaintext from a paired (or revoked)
 //! phone with a visible `flow.error`. See `flow_e2e.rs` for the protocol.
 //!
+//! **Two daemons, one machine (th-a1bb12).** The SmoothFlow app runs its own
+//! child daemon next to Big Smooth. Both used to read the same
+//! `~/.smooth/relay-device-id`, connect as one device, and the relay's presence
+//! flapped between two sockets — phones landed on whichever connected last. Now
+//! the app pins a second id (`SMOOTH_RELAY_DEVICE_ID`, minted into
+//! `~/.smooth/smoothflow-relay-device-id`) and announces `kind=flow`
+//! (`SMOOTH_RELAY_KIND`), so the relay's device list carries Big Smooth and
+//! SmoothFlow as two peers and SmoothFlow phones can prefer the flow one. As a
+//! belt-and-braces guard every daemon also holds an advisory lock on its
+//! device id (`~/.smooth/relay-locks/<device>.lock`): a second process on the
+//! same machine that resolves the SAME id logs an error and stays off the
+//! relay until the first lets go, instead of racing it.
+//!
 //! Config: `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the default
 //! relay endpoint; `SMOOTH_RELAY_DEVICE_ID` / `SMOOTH_RELAY_LABEL` pin the
-//! identity (the env-knob precedent of `config.rs`).
+//! identity and `SMOOTH_RELAY_KIND` (`daemon` | `flow`) the presence kind (the
+//! env-knob precedent of `config.rs`).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs::{File, TryLockError};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,8 +75,13 @@ use crate::flow_e2e::{self, E2eSession, Inbound, PairingState, PENDING_OUT_MAX};
 const DEFAULT_RELAY_URL: &str = "wss://relay.smoo.ai/ws";
 /// Where the per-machine device id is persisted, under `~/.smooth/`.
 const DEVICE_ID_FILE: &str = "relay-device-id";
+/// Where per-device-id advisory locks live, under `~/.smooth/` (th-a1bb12).
+const LOCK_DIR: &str = "relay-locks";
 /// Label fallback when the host has no usable hostname.
 const DEFAULT_LABEL: &str = "big-smooth";
+/// Suffix a flow-only daemon (the SmoothFlow app's child) adds to its
+/// hostname label so a phone's device list tells the two daemons apart.
+const FLOW_LABEL_SUFFIX: &str = " · SmoothFlow";
 /// Labels are display-only; cap them so a junk `$SMOOTH_RELAY_LABEL` can't
 /// bloat every connect URL.
 const LABEL_MAX_CHARS: usize = 120;
@@ -72,6 +92,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 /// How long a signed-out daemon waits before checking for credentials again.
 const SIGNED_OUT_RECHECK: Duration = Duration::from_secs(60);
+/// How often a daemon whose device id another local process holds re-checks
+/// the lock (the other daemon may have quit).
+const IDENTITY_RECHECK: Duration = Duration::from_secs(30);
 /// Refresh the Smoo session when the access token is inside this window of
 /// expiry (or already past). ~60s beats a connect round-trip without
 /// refreshing on every reconnect (th-c6a542).
@@ -126,22 +149,127 @@ fn resolve_device_id_from(override_env: Option<&str>, base_dir: Option<&Path>) -
     id
 }
 
+/// Which side of the relay's device list this daemon sits on — the `?kind=`
+/// of the connect URL (`rust/relay-ws` `presence::sanitize_kind`, SMOODEV-2834
+/// / SMOODEV-3142). Anything the relay does not know degrades to `phone` there,
+/// so this is a closed enum, never free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayKind {
+    /// Big Smooth — the personal agent daemon (chat + flow engine).
+    #[default]
+    Daemon,
+    /// A flow-only daemon: the SmoothFlow app's child (th-a1bb12).
+    Flow,
+}
+
+impl RelayKind {
+    /// The wire value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::Flow => "flow",
+        }
+    }
+
+    /// What this daemon calls itself in logs.
+    const fn product(self) -> &'static str {
+        match self {
+            Self::Daemon => "Big Smooth",
+            Self::Flow => "SmoothFlow",
+        }
+    }
+}
+
+/// `SMOOTH_RELAY_KIND` → [`RelayKind`]. Unset / empty / `daemon` ⇒ `Daemon`;
+/// `flow` ⇒ `Flow` (case-insensitive, trimmed). Junk is logged and treated as
+/// `Daemon` — the relay would have coerced it to `phone`, which would hide the
+/// daemon from every picker.
+fn resolve_kind_from(override_env: Option<&str>) -> RelayKind {
+    match override_env.map(str::trim).filter(|v| !v.is_empty()) {
+        None => RelayKind::Daemon,
+        Some(v) if v.eq_ignore_ascii_case("daemon") => RelayKind::Daemon,
+        Some(v) if v.eq_ignore_ascii_case("flow") => RelayKind::Flow,
+        Some(v) => {
+            tracing::warn!(value = %v, "relay: SMOOTH_RELAY_KIND must be `daemon` or `flow` — using `daemon`");
+            RelayKind::Daemon
+        }
+    }
+}
+
 /// This daemon's relay identity — resolved ONCE at boot so the pairing QR and
 /// the relay connection agree on the device id across reconnects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayIdentity {
     pub device: String,
     pub label: String,
+    pub kind: RelayKind,
 }
 
 /// Resolve [`RelayIdentity`] from the environment + `~/.smooth`.
 pub fn device_identity() -> RelayIdentity {
+    let kind = resolve_kind_from(std::env::var("SMOOTH_RELAY_KIND").ok().as_deref());
     let device = resolve_device_id_from(
         std::env::var("SMOOTH_RELAY_DEVICE_ID").ok().as_deref(),
         dirs_next::home_dir().map(|h| h.join(".smooth")).as_deref(),
     );
-    let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref());
-    RelayIdentity { device, label }
+    let label = resolve_label_from(std::env::var("SMOOTH_RELAY_LABEL").ok().as_deref(), host_name().as_deref(), kind);
+    RelayIdentity { device, label, kind }
+}
+
+/// Holds this process's claim on a relay device id for its lifetime; dropping
+/// it (or dying) releases the claim. Advisory, same mechanism as
+/// `single_instance::InstanceLock`.
+#[derive(Debug)]
+pub struct IdentityLock {
+    _file: File,
+}
+
+/// The outcome of trying to claim a device id on this machine.
+#[derive(Debug)]
+pub enum IdentityClaim {
+    /// Ours now — keep the lock alive for as long as the identity is in use.
+    Held(IdentityLock),
+    /// Another live process on this machine holds the same device id.
+    Busy,
+    /// No lock dir / unwritable — nothing to enforce; the caller proceeds.
+    Unavailable(String),
+}
+
+/// The file name a device id locks under: the relay grammar is
+/// `[A-Za-z0-9._-]`, but `SMOOTH_RELAY_DEVICE_ID` is free text, so anything
+/// else becomes `_`.
+fn lock_file_name(device: &str) -> String {
+    let safe: String = device
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    format!("{safe}.lock")
+}
+
+/// Try to claim `device` under `<dir>/relay-locks/`. Pure over its dir for tests.
+fn claim_identity(dir: Option<&Path>, device: &str) -> IdentityClaim {
+    let Some(dir) = dir else {
+        return IdentityClaim::Unavailable("no home dir".into());
+    };
+    let locks = dir.join(LOCK_DIR);
+    if let Err(e) = std::fs::create_dir_all(&locks) {
+        return IdentityClaim::Unavailable(format!("creating {}: {e}", locks.display()));
+    }
+    let path = locks.join(lock_file_name(device));
+    let file = match File::options().create(true).truncate(false).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => return IdentityClaim::Unavailable(format!("opening {}: {e}", path.display())),
+    };
+    match file.try_lock() {
+        Ok(()) => IdentityClaim::Held(IdentityLock { _file: file }),
+        Err(TryLockError::WouldBlock) => IdentityClaim::Busy,
+        Err(TryLockError::Error(e)) => IdentityClaim::Unavailable(format!("locking {}: {e}", path.display())),
+    }
+}
+
+/// Where [`claim_identity`] locks for the real daemon: `~/.smooth`.
+fn identity_lock_dir() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".smooth"))
 }
 
 fn mint_device_id() -> String {
@@ -151,21 +279,27 @@ fn mint_device_id() -> String {
 
 /// The human label for this daemon on the relay's device list.
 ///
-/// Pure over (`SMOOTH_RELAY_LABEL`, the raw hostname) — the env override wins,
-/// a hostname is shortened to its first DNS label, and both are stripped of
+/// Pure over (`SMOOTH_RELAY_LABEL`, the raw hostname, the kind) — the env
+/// override wins verbatim; otherwise a hostname shortened to its first DNS
+/// label, with ` · SmoothFlow` appended for a flow-only daemon so a phone's
+/// device list reads `smoo-hub` / `smoo-hub · SmoothFlow`. Both are stripped of
 /// control characters and capped so the value stays URL- and UI-safe.
-fn resolve_label_from(override_env: Option<&str>, hostname: Option<&str>) -> String {
+fn resolve_label_from(override_env: Option<&str>, hostname: Option<&str>, kind: RelayKind) -> String {
     let from_env = override_env.map(str::trim).filter(|s| !s.is_empty()).map(sanitize_label);
     let from_host = hostname
         .map(str::trim)
         // `hostname` may hand back an FQDN; the short form is what a human reads.
         .and_then(|h| h.split('.').next())
-        .map(sanitize_label);
-    from_env
-        .into_iter()
-        .chain(from_host)
-        .find(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_LABEL.to_string())
+        .map(sanitize_label)
+        .filter(|s| !s.is_empty())
+        .map(|host| match kind {
+            RelayKind::Daemon => host,
+            RelayKind::Flow => sanitize_label(&format!("{host}{FLOW_LABEL_SUFFIX}")),
+        });
+    from_env.into_iter().chain(from_host).find(|s| !s.is_empty()).unwrap_or_else(|| match kind {
+        RelayKind::Daemon => DEFAULT_LABEL.to_string(),
+        RelayKind::Flow => format!("{DEFAULT_LABEL}{FLOW_LABEL_SUFFIX}"),
+    })
 }
 
 fn sanitize_label(raw: &str) -> String {
@@ -184,14 +318,16 @@ fn host_name() -> Option<String> {
     String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Assemble the relay connect URL. `kind=daemon` tells the relay which side of
-/// the presence list this connection belongs on (SMOODEV-2834).
-fn connect_url(relay_url: &str, token: &str, device: &str, label: &str) -> String {
+/// Assemble the relay connect URL. `kind=` tells the relay which side of the
+/// presence list this connection belongs on (SMOODEV-2834; `flow` since
+/// SMOODEV-3142).
+fn connect_url(relay_url: &str, token: &str, device: &str, label: &str, kind: RelayKind) -> String {
     format!(
-        "{relay_url}?token={}&device={}&label={}&kind=daemon",
+        "{relay_url}?token={}&device={}&label={}&kind={}",
         urlencode(token),
         urlencode(device),
-        urlencode(label)
+        urlencode(label),
+        kind.as_str()
     )
 }
 
@@ -700,14 +836,39 @@ pub fn spawn_relay(
         let http = reqwest::Client::default();
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
         let flow_ws_url = flow_ws_url(local_port, &local_token);
-        let RelayIdentity { device, label } = identity;
-        tracing::info!(%device, %label, "relay: this daemon's identity");
+        let RelayIdentity { device, label, kind } = identity;
+        tracing::info!(%device, %label, kind = kind.as_str(), "relay: this daemon's identity");
+        let lock_dir = identity_lock_dir();
+        // Held for the life of the task once claimed; `None` while another
+        // local process owns the id (or when there is nothing to lock).
+        let mut claim: Option<IdentityLock> = None;
+        let mut lock_unavailable = false;
         let mut backoff = BACKOFF_MIN;
         // Set after an auth rejection (4401 close / 401 handshake): the next
         // read forces a token refresh before reconnecting. Normal backoff still
         // applies, so a persistently-dead refresh token can't hammer the relay.
         let mut force_refresh = false;
         loop {
+            if claim.is_none() && !lock_unavailable {
+                match claim_identity(lock_dir.as_deref(), &device) {
+                    IdentityClaim::Held(lock) => claim = Some(lock),
+                    IdentityClaim::Busy => {
+                        tracing::error!(
+                            %device,
+                            "relay: another daemon on this machine is ALREADY online as this device id — not connecting with it \
+                             (phones would flap between the two). If that is Big Smooth and this is SmoothFlow's child, give this one \
+                             its own SMOOTH_RELAY_DEVICE_ID (the app does: ~/.smooth/smoothflow-relay-device-id, th-a1bb12); \
+                             otherwise stop the other daemon. Re-checking in {IDENTITY_RECHECK:?}"
+                        );
+                        tokio::time::sleep(IDENTITY_RECHECK).await;
+                        continue;
+                    }
+                    IdentityClaim::Unavailable(why) => {
+                        tracing::warn!(%device, %why, "relay: cannot lock this device id locally — connecting without the duplicate-identity guard");
+                        lock_unavailable = true;
+                    }
+                }
+            }
             let Some(token) = fresh_access_token(&http, force_refresh).await else {
                 force_refresh = false;
                 tracing::debug!("relay: no Smoo session (signed out) — retrying in {SIGNED_OUT_RECHECK:?}");
@@ -715,11 +876,11 @@ pub fn spawn_relay(
                 continue;
             };
             force_refresh = false;
-            let url = connect_url(&relay_url, &token, &device, &label);
+            let url = connect_url(&relay_url, &token, &device, &label, kind);
             let connected_at = std::time::Instant::now();
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((stream, _)) => {
-                    tracing::info!(relay = %relay_url, "relay: connected — Big Smooth is reachable without tailscale");
+                    tracing::info!(relay = %relay_url, kind = kind.as_str(), "relay: connected — {} is reachable without tailscale", kind.product());
                     match run_connection(stream, &local_ws_url, &flow_ws_url, &pairing).await {
                         ConnEnd::AuthRejected => {
                             tracing::warn!("relay: token rejected (4401) — refreshing the Smoo session and reconnecting");
@@ -961,31 +1122,45 @@ mod tests {
 
     #[test]
     fn label_prefers_the_env_override() {
-        assert_eq!(resolve_label_from(Some(" Brent's Laptop "), Some("smoo-hub")), "Brent's Laptop");
+        assert_eq!(
+            resolve_label_from(Some(" Brent's Laptop "), Some("smoo-hub"), RelayKind::Daemon),
+            "Brent's Laptop"
+        );
+        // Verbatim for a flow daemon too — the app composes its own label.
+        assert_eq!(
+            resolve_label_from(Some("smoo-hub · SmoothFlow"), Some("smoo-hub"), RelayKind::Flow),
+            "smoo-hub · SmoothFlow"
+        );
     }
 
     #[test]
     fn label_uses_the_short_hostname() {
-        assert_eq!(resolve_label_from(None, Some("smoo-hub.local")), "smoo-hub");
-        assert_eq!(resolve_label_from(None, Some("  mac-studio\n")), "mac-studio");
+        assert_eq!(resolve_label_from(None, Some("smoo-hub.local"), RelayKind::Daemon), "smoo-hub");
+        assert_eq!(resolve_label_from(None, Some("  mac-studio\n"), RelayKind::Daemon), "mac-studio");
+    }
+
+    #[test]
+    fn flow_daemon_label_says_so() {
+        assert_eq!(resolve_label_from(None, Some("smoo-hub.local"), RelayKind::Flow), "smoo-hub · SmoothFlow");
+        assert_eq!(resolve_label_from(None, None, RelayKind::Flow), "big-smooth · SmoothFlow");
     }
 
     #[test]
     fn label_falls_back_when_there_is_no_hostname() {
-        assert_eq!(resolve_label_from(None, None), DEFAULT_LABEL);
-        assert_eq!(resolve_label_from(None, Some("")), DEFAULT_LABEL);
-        assert_eq!(resolve_label_from(Some("  "), Some("   ")), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(None, None, RelayKind::Daemon), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(None, Some(""), RelayKind::Daemon), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(Some("  "), Some("   "), RelayKind::Daemon), DEFAULT_LABEL);
         // A label that sanitizes down to nothing is not a label.
-        assert_eq!(resolve_label_from(Some("\u{7}\u{0}"), None), DEFAULT_LABEL);
+        assert_eq!(resolve_label_from(Some("\u{7}\u{0}"), None, RelayKind::Daemon), DEFAULT_LABEL);
     }
 
     #[test]
     fn label_strips_control_chars_and_caps_length() {
-        assert_eq!(resolve_label_from(Some("big\u{0}sm\noth"), None), "bigsmoth");
-        let long = resolve_label_from(Some(&"x".repeat(500)), None);
+        assert_eq!(resolve_label_from(Some("big\u{0}sm\noth"), None, RelayKind::Daemon), "bigsmoth");
+        let long = resolve_label_from(Some(&"x".repeat(500)), None, RelayKind::Daemon);
         assert_eq!(long.chars().count(), LABEL_MAX_CHARS);
         // Multi-byte labels are cut on char boundaries, not bytes.
-        let emoji = resolve_label_from(Some(&"é".repeat(500)), None);
+        let emoji = resolve_label_from(Some(&"é".repeat(500)), None, RelayKind::Daemon);
         assert_eq!(emoji.chars().count(), LABEL_MAX_CHARS);
     }
 
@@ -993,11 +1168,76 @@ mod tests {
 
     #[test]
     fn connect_url_carries_device_label_and_kind() {
-        let u = connect_url("wss://relay.smoo.ai/ws", "tok en", "daemon-abc123", "Brent's Laptop");
+        let u = connect_url("wss://relay.smoo.ai/ws", "tok en", "daemon-abc123", "Brent's Laptop", RelayKind::Daemon);
         assert_eq!(
             u,
             "wss://relay.smoo.ai/ws?token=tok%20en&device=daemon-abc123&label=Brent%27s%20Laptop&kind=daemon"
         );
+        let u = connect_url("wss://relay.smoo.ai/ws", "t", "daemon-flow01", "smoo-hub · SmoothFlow", RelayKind::Flow);
+        assert_eq!(
+            u,
+            "wss://relay.smoo.ai/ws?token=t&device=daemon-flow01&label=smoo-hub%20%C2%B7%20SmoothFlow&kind=flow"
+        );
+    }
+
+    // ── kind (th-a1bb12) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn kind_defaults_to_daemon_and_accepts_flow() {
+        assert_eq!(resolve_kind_from(None), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some("")), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some("daemon")), RelayKind::Daemon);
+        assert_eq!(resolve_kind_from(Some(" flow ")), RelayKind::Flow);
+        assert_eq!(resolve_kind_from(Some("FLOW")), RelayKind::Flow);
+    }
+
+    #[test]
+    fn junk_kind_stays_a_daemon_rather_than_becoming_a_phone() {
+        // The relay coerces unknown kinds to `phone`, which would hide the
+        // daemon from every picker — never send what we did not recognise.
+        for junk in ["phone", "root", "flow\u{0}", "daemon; drop"] {
+            assert_eq!(resolve_kind_from(Some(junk)), RelayKind::Daemon, "junk kind: {junk:?}");
+        }
+    }
+
+    // ── identity lock (th-a1bb12) ─────────────────────────────────────────────
+
+    #[test]
+    fn identity_is_claimed_once_and_busy_for_a_second_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = claim_identity(Some(dir.path()), "daemon-abc123");
+        assert!(matches!(first, IdentityClaim::Held(_)), "{first:?}");
+        assert!(dir.path().join(LOCK_DIR).join("daemon-abc123.lock").is_file());
+        // A second open of the same path is a distinct file description, so
+        // the OS reports the conflict even within one process.
+        assert!(matches!(claim_identity(Some(dir.path()), "daemon-abc123"), IdentityClaim::Busy));
+        // A different id on the same machine is a different lock.
+        assert!(matches!(claim_identity(Some(dir.path()), "daemon-flow01"), IdentityClaim::Held(_)));
+        drop(first);
+        // Released on drop. Polled, not asserted once: a sibling test that is
+        // mid-spawn shares our open file descriptions until its child execs
+        // (O_CLOEXEC), and flock follows the description — seen once under a
+        // load average of 23.
+        let reclaimed = (0..50).any(|_| {
+            let held = matches!(claim_identity(Some(dir.path()), "daemon-abc123"), IdentityClaim::Held(_));
+            if !held {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            held
+        });
+        assert!(reclaimed, "released on drop");
+    }
+
+    #[test]
+    fn identity_lock_tolerates_junk_ids_and_a_missing_home() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(claim_identity(Some(dir.path()), "../../etc/passwd"), IdentityClaim::Held(_)));
+        assert_eq!(lock_file_name("../../etc/passwd"), ".._.._etc_passwd.lock");
+        assert!(
+            dir.path().join(LOCK_DIR).join(".._.._etc_passwd.lock").is_file(),
+            "the lock stays inside relay-locks/"
+        );
+        assert!(matches!(claim_identity(None, "daemon-abc123"), IdentityClaim::Unavailable(_)));
     }
 
     // ── inbound classification ────────────────────────────────────────────────

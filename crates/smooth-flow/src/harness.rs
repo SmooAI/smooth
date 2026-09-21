@@ -26,6 +26,19 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("opencode", include_str!("../harnesses/opencode.toml")),
     ("codex", include_str!("../harnesses/codex.toml")),
     ("th-code", include_str!("../harnesses/th-code.toml")),
+    // Scrape-only / scraped harnesses (th-e77603) — `[[state.scrape.rules]]`.
+    ("aider", include_str!("../harnesses/aider.toml")),
+    ("goose", include_str!("../harnesses/goose.toml")),
+    ("crush", include_str!("../harnesses/crush.toml")),
+    ("cline", include_str!("../harnesses/cline.toml")),
+    // Hook-capable CLIs (th-b00115) — each reports real lifecycle events.
+    ("gemini", include_str!("../harnesses/gemini.toml")),
+    ("qwen", include_str!("../harnesses/qwen.toml")),
+    ("cursor-agent", include_str!("../harnesses/cursor-agent.toml")),
+    ("copilot", include_str!("../harnesses/copilot.toml")),
+    ("droid", include_str!("../harnesses/droid.toml")),
+    ("amp", include_str!("../harnesses/amp.toml")),
+    ("pi", include_str!("../harnesses/pi.toml")),
 ];
 
 /// Any `PATH` entry under a directory with this name is a cmux CLI shim —
@@ -155,6 +168,13 @@ pub enum ResumeMode {
     /// Always relaunch the original argv (a fresh session, not a continuation).
     #[default]
     RelaunchCommand,
+    /// `resume.argv` with no session id — the CLI's own "continue the most
+    /// recent conversation in this directory" (`crush --continue`,
+    /// `aider --restore-chat-history`), appended to the original argv when
+    /// the prompt was pasted, to the binary alone when it was an argument. For harnesses whose session id the engine
+    /// cannot learn (scrape-only); each SmoothFlow session has its own
+    /// worktree, so "latest here" is this session's (th-e77603).
+    ContinueLatest,
 }
 
 /// `[resume]`.
@@ -219,7 +239,9 @@ pub struct HooksSpec {
     pub event_map: BTreeMap<String, FlowEventName>,
 }
 
-/// `[state.scrape]` — case-insensitive regexes over the visible pane.
+/// `[state.scrape]` — case-insensitive regexes over the visible pane, plus
+/// ordered `[[state.scrape.rules]]` (th-e77603, `crate::scrape`) evaluated
+/// before the flat lists.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScrapeSpec {
@@ -235,6 +257,13 @@ pub struct ScrapeSpec {
     pub usage_limit: Vec<String>,
     #[serde(default)]
     pub error: Vec<String>,
+    /// Live window for `where = "tail"` rules and the flat `working` / `idle`
+    /// lists. Default 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_lines: Option<usize>,
+    /// Ordered rules; the first that fires decides, before the flat lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::scrape::RuleSpec>,
 }
 
 /// `[state]`.
@@ -266,7 +295,15 @@ pub struct Steer {
     pub method: SteerMethod,
     #[serde(default = "default_submit_key")]
     pub submit_key: String,
+    /// Pause between the paste and `submit_key` (th-b00115). 0 = none. Gemini
+    /// CLI folds an Enter that arrives within ~100 ms of a paste into the paste
+    /// as a newline, so the steer never submits.
+    #[serde(default)]
+    pub submit_delay_ms: u64,
 }
+
+/// The longest `steer.submit_delay_ms` a manifest may ask for.
+pub const MAX_SUBMIT_DELAY_MS: u64 = 5_000;
 
 fn default_submit_key() -> String {
     "Enter".to_string()
@@ -277,6 +314,7 @@ impl Default for Steer {
         Self {
             method: SteerMethod::default(),
             submit_key: default_submit_key(),
+            submit_delay_ms: 0,
         }
     }
 }
@@ -406,10 +444,26 @@ impl Manifest {
                 bail!("resume.argv: mode = \"resume_session\" needs a `{{session_id}}` placeholder");
             }
         }
-        if self.state.source == StateSource::Scrape && self.state.scrape.working.is_empty() && self.state.scrape.idle.is_empty() {
-            bail!("state.scrape: source = \"scrape\" needs working and/or idle patterns");
+        if self.resume.mode == ResumeMode::ContinueLatest {
+            if self.resume.argv.is_empty() {
+                bail!("resume.argv: mode = \"continue_latest\" needs an argv");
+            }
+            if self.resume.argv.iter().any(|a| a.contains("{session_id}") || a.contains("{prompt}")) {
+                bail!("resume.argv: mode = \"continue_latest\" takes no `{{session_id}}` or `{{prompt}}` (use resume_session for an id)");
+            }
+        }
+        let scrape = &self.state.scrape;
+        let rule_decides_turns = scrape
+            .rules
+            .iter()
+            .any(|r| matches!(r.state, crate::scrape::Verdict::Working | crate::scrape::Verdict::Idle));
+        if self.state.source == StateSource::Scrape && scrape.working.is_empty() && scrape.idle.is_empty() && !rule_decides_turns {
+            bail!("state.scrape: source = \"scrape\" needs working and/or idle patterns (or a working/idle rule)");
         }
         ScrapeRules::compile(&self.state.scrape)?;
+        if self.steer.submit_delay_ms > MAX_SUBMIT_DELAY_MS {
+            bail!("steer.submit_delay_ms: {} is over the {MAX_SUBMIT_DELAY_MS} ms cap", self.steer.submit_delay_ms);
+        }
         if self.steer.submit_key.trim().is_empty() {
             bail!("steer.submit_key: must not be empty");
         }
@@ -551,6 +605,8 @@ pub fn render_env(template: &BTreeMap<String, String>, vars: &Vars<'_>) -> Vec<(
 /// Compiled `[state.scrape]` patterns.
 #[derive(Debug, Clone)]
 pub struct ScrapeRules {
+    rules: Vec<crate::scrape::Rule>,
+    tail_lines: usize,
     working: Vec<Regex>,
     idle: Vec<Regex>,
     needs_you: Vec<Regex>,
@@ -564,6 +620,9 @@ pub struct Scrape {
     pub state: PaneState,
     /// The `reset` capture of the matching usage-limit pattern, if any.
     pub reset_text: Option<String>,
+    /// The `[[state.scrape.rules]]` entry that decided (its `name`, or
+    /// `rules[i]`); `None` when the flat lists did.
+    pub rule: Option<String>,
 }
 
 fn compile_all(field: &str, pats: &[String]) -> Result<Vec<Regex>> {
@@ -578,7 +637,19 @@ impl ScrapeRules {
     /// # Errors
     /// Naming the field and pattern that failed to compile.
     pub fn compile(spec: &ScrapeSpec) -> Result<Self> {
+        let tail_lines = spec.tail_lines.unwrap_or(LIVE_TAIL_LINES);
+        if tail_lines == 0 || tail_lines > crate::scrape::MAX_TAIL_LINES {
+            bail!("state.scrape.tail_lines: must be 1..={}, got {tail_lines}", crate::scrape::MAX_TAIL_LINES);
+        }
+        let rules = spec
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| crate::scrape::Rule::compile(i, r, tail_lines))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            rules,
+            tail_lines,
             working: compile_all("working", &spec.working)?,
             idle: compile_all("idle", &spec.idle)?,
             needs_you: compile_all("needs_you", &spec.needs_you)?,
@@ -591,14 +662,52 @@ impl ScrapeRules {
     /// `smooth_tmux::detect::detect_state`: a live working hint in the tail
     /// wins, then a usage limit anywhere, then an approval, then an error,
     /// then an idle hint in the tail.
+    ///
+    /// One refinement over "an approval anywhere" (th-473294): an approval
+    /// the harness has already moved past — an idle marker on a LATER line —
+    /// is not pending. Scrolling CLIs (aider) keep the answered question on
+    /// screen, `… (Y)es/(N)o [Yes]: y`, and print their `>` prompt under it;
+    /// a modal dialog (gemini's folder trust, Claude Code's approval) has no
+    /// idle marker below it, so it still wins.
     #[must_use]
     pub fn detect(&self, pane: &str) -> Scrape {
-        let tail = live_tail(pane);
+        self.detect_observation(&crate::scrape::PaneObservation::text(pane))
+    }
+
+    /// [`Self::detect`] with the terminal state and timing the engine
+    /// observed: `[[state.scrape.rules]]` first (in order), then the flat
+    /// lists on the text alone.
+    #[must_use]
+    pub fn detect_observation(&self, obs: &crate::scrape::PaneObservation<'_>) -> Scrape {
+        let text = crate::scrape::strip_ansi(obs.text);
+        let title = obs.title.map(crate::scrape::strip_ansi);
+        let obs = &crate::scrape::PaneObservation {
+            text: &text,
+            title: title.as_deref(),
+            ..*obs
+        };
+        if let Some(hit) = crate::scrape::first_hit(&self.rules, obs) {
+            return Scrape {
+                state: hit.state.pane_state(),
+                reset_text: hit.reset_text,
+                rule: Some(hit.rule),
+            };
+        }
+        let pane = obs.text;
+        let tail = live_tail(pane, self.tail_lines);
         let any = |res: &[Regex], hay: &str| res.iter().any(|r| r.is_match(hay));
+        let last_line_matching = |res: &[Regex]| {
+            pane.lines()
+                .enumerate()
+                .filter(|(_, l)| !l.trim().is_empty() && any(res, l))
+                .map(|(i, _)| i)
+                .last()
+        };
         if any(&self.working, &tail) {
             return Scrape {
                 state: PaneState::Working,
                 reset_text: None,
+                rule: None,
             };
         }
         if let Some(r) = self.usage_limit.iter().find(|r| r.is_match(pane)) {
@@ -606,9 +715,15 @@ impl ScrapeRules {
             return Scrape {
                 state: PaneState::UsageLimit,
                 reset_text,
+                rule: None,
             };
         }
-        let state = if any(&self.needs_you, pane) {
+        let pending_approval = match (last_line_matching(&self.needs_you), last_line_matching(&self.idle)) {
+            (Some(approval), Some(idle)) => approval > idle,
+            (Some(_), None) => true,
+            (None, _) => any(&self.needs_you, pane),
+        };
+        let state = if pending_approval {
             PaneState::AwaitingApproval
         } else if any(&self.error, pane) {
             PaneState::Errored
@@ -617,14 +732,18 @@ impl ScrapeRules {
         } else {
             PaneState::Unknown
         };
-        Scrape { state, reset_text: None }
+        Scrape {
+            state,
+            reset_text: None,
+            rule: None,
+        }
     }
 }
 
-/// The last [`LIVE_TAIL_LINES`] non-blank lines of `pane`, joined.
-fn live_tail(pane: &str) -> String {
+/// The last `n` non-blank lines of `pane`, joined.
+fn live_tail(pane: &str, n: usize) -> String {
     let lines: Vec<&str> = pane.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
+    let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
 }
 
@@ -858,7 +977,8 @@ mod tests {
         let r = Registry::builtin();
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         let names: Vec<&str> = r.all().iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(names[..4], ["claude", "opencode", "codex", "th-code"]);
+        assert_eq!(names.len(), BUILTIN.len(), "every BUILTIN entry registers");
         assert_eq!(r.get("claude").unwrap().display_name, "Claude Code");
         assert_eq!(r.get("th-code").unwrap().state.source, StateSource::Native);
         assert_eq!(r.get("th-code").unwrap().map_event("turn_end"), Some(FlowEventName::Idle));
@@ -917,6 +1037,10 @@ mod tests {
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nsubmit_key=\"\"",
                 "steer.submit_key",
+            ),
+            (
+                "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[steer]\nsubmit_delay_ms=5001",
+                "steer.submit_delay_ms",
             ),
             (
                 "name = \"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n[kill]\nsignal=\"\"",
@@ -1105,6 +1229,73 @@ mod tests {
         assert_eq!(th.detect("usage limit reached").state, PaneState::UsageLimit);
     }
 
+    /// th-473294: an answered prompt that stays on screen above the CLI's own
+    /// `>` prompt is not pending; a dialog with nothing idle below it is.
+    #[test]
+    fn an_approval_above_an_idle_marker_is_not_pending() {
+        let spec = ScrapeSpec {
+            idle: vec!["(?m)^>".into()],
+            needs_you: vec![r"\(y\)es/\(n\)o".into(), "do you trust".into()],
+            ..Default::default()
+        };
+        let rules = ScrapeRules::compile(&spec).unwrap();
+        let aider_answered = "Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]: y\nAdded .aider* to .gitignore\nAider v0.86.2\nMain model: x\n> ";
+        assert_eq!(rules.detect(aider_answered).state, PaneState::Idle);
+        let aider_pending = "Aider v0.86.2\n> \nAdd .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]:";
+        assert_eq!(rules.detect(aider_pending).state, PaneState::AwaitingApproval);
+        // gemini: the composer `>` is painted ABOVE the trust dialog.
+        let gemini_dialog = "> Reply with READY\n╭───╮\n│ Do you trust the files in this folder?\n│ ● 1. Trust folder\n╰───╯";
+        assert_eq!(rules.detect(gemini_dialog).state, PaneState::AwaitingApproval);
+        // Claude Code's approval dialog: numbered options, nothing idle below.
+        let claude = ScrapeRules::compile(&claude().state.scrape).unwrap();
+        assert_eq!(
+            claude.detect("> \nEdit file foo.rs?\n  Do you want to proceed?\n  ❯ 1. Yes\n  2. No").state,
+            PaneState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn continue_latest_and_scrape_rules_validate() {
+        let base = "name=\"x\"\n[binary]\nnames=[\"x\"]\n[launch]\nargv=[\"{prompt}\"]\n";
+        let err = |extra: &str| format!("{:#}", Manifest::parse(&format!("{base}{extra}")).unwrap_err());
+        assert!(err("[resume]\nmode=\"continue_latest\"").contains("continue_latest\" needs an argv"));
+        assert!(err("[resume]\nmode=\"continue_latest\"\nargv=[\"--resume\",\"{session_id}\"]").contains("takes no"));
+        assert!(err("[resume]\nmode=\"continue_latest\"\nargv=[\"{prompt}\"]").contains("takes no"));
+        let m = Manifest::parse(&format!("{base}[resume]\nmode=\"continue_latest\"\nargv=[\"--continue\"]")).unwrap();
+        assert_eq!(m.resume.mode, ResumeMode::ContinueLatest);
+        // source = scrape is satisfied by a working/idle RULE alone…
+        let ok = format!("{base}[state]\nsource=\"scrape\"\n[[state.scrape.rules]]\nstate=\"idle\"\nmatch=[\"^>\"]\nwhere=\"last_line\"");
+        assert!(Manifest::parse(&ok).is_ok());
+        // …but not by a needs_you rule.
+        assert!(err("[state]\nsource=\"scrape\"\n[[state.scrape.rules]]\nstate=\"needs_you\"\nmatch=[\"y/n\"]").contains("needs working and/or idle"));
+        // Rule errors surface through the manifest with their index.
+        assert!(err("[[state.scrape.rules]]\nstate=\"idle\"\nmatch=[\"(\"]").contains("state.scrape.rules[0].match: bad regex"));
+        assert!(err("[[state.scrape.rules]]\nstate=\"idle\"\nwhere=\"everywhere\"\nmatch=[\"x\"]").contains("where"));
+        assert!(err("[state.scrape]\ntail_lines=0").contains("tail_lines: must be"));
+        // A manifest without rules serialises exactly as before (no empty `rules`/`tail_lines` keys).
+        let round = toml::to_string(&claude()).unwrap();
+        assert!(
+            !round.contains("scrape.rules") && !round.contains("\nrules =") && !round.contains("tail_lines"),
+            "{round}"
+        );
+    }
+
+    #[test]
+    fn rules_run_before_the_flat_lists_and_tail_lines_applies_to_both() {
+        let spec: ScrapeSpec = toml::from_str(
+            "working = [\"esc cancel\"]\nidle = [\"ready\"]\ntail_lines = 2\n[[rules]]\nname = \"modal\"\nstate = \"needs_you\"\nmatch = [\"permission required\"]\nwhere = \"pane\"",
+        )
+        .unwrap();
+        let rules = ScrapeRules::compile(&spec).unwrap();
+        let modal = "Permission Required\n> Processing\nesc cancel";
+        let hit = rules.detect(modal);
+        assert_eq!((hit.state, hit.rule.as_deref()), (PaneState::AwaitingApproval, Some("modal")));
+        let busy = rules.detect("> Processing\nesc cancel");
+        assert_eq!((busy.state, busy.rule), (PaneState::Working, None), "flat list, no rule name");
+        // tail_lines = 2: a working hint three non-blank lines up is out of the live window.
+        assert_eq!(rules.detect("esc cancel\n> Ready\nfooter").state, PaneState::Idle);
+    }
+
     #[test]
     fn usage_limit_reset_capture() {
         let spec = ScrapeSpec {
@@ -1131,28 +1322,28 @@ mod tests {
         let toml =
             |name: &str, display: &str| format!("name=\"{name}\"\ndisplay_name=\"{display}\"\n[binary]\nnames=[\"{name}\"]\n[launch]\nargv=[\"{{prompt}}\"]\n");
         // Nothing on disk ⇒ built-ins only.
-        assert_eq!(Registry::load(&home, Some(&project)).all().len(), 4);
+        assert_eq!(Registry::load(&home, Some(&project)).all().len(), BUILTIN.len());
         // User overrides a built-in and adds one; a broken file is reported, not fatal.
         w(&home.join(".smooth/harnesses/claude.toml"), &toml("claude", "User Claude"));
-        w(&home.join(".smooth/harnesses/aider.toml"), &toml("aider", "Aider"));
+        w(&home.join(".smooth/harnesses/mytool.toml"), &toml("mytool", "My Tool"));
         w(&home.join(".smooth/harnesses/broken.toml"), "name = \"broken\"\n");
         w(&home.join(".smooth/harnesses/notes.md"), "ignored");
         let r = Registry::load(&home, Some(&project));
         assert_eq!(r.get("claude").unwrap().display_name, "User Claude");
         assert!(matches!(r.get("claude").unwrap().origin, Origin::User(_)));
-        assert_eq!(r.get("aider").unwrap().display_name, "Aider");
+        assert_eq!(r.get("mytool").unwrap().display_name, "My Tool");
         assert_eq!(r.errors.len(), 1);
         assert!(r.errors[0].0.ends_with("broken.toml"));
-        assert_eq!(r.all().len(), 5, "override keeps its slot, new one appends");
+        assert_eq!(r.all().len(), BUILTIN.len() + 1, "override keeps its slot, new one appends");
         assert_eq!(r.all()[0].name, "claude");
         // Project beats user.
-        w(&project.join(".smooth/harnesses/aider.toml"), &toml("aider", "Project Aider"));
+        w(&project.join(".smooth/harnesses/mytool.toml"), &toml("mytool", "Project My Tool"));
         let r = Registry::load(&home, Some(&project));
-        assert_eq!(r.get("aider").unwrap().display_name, "Project Aider");
-        assert!(matches!(r.get("aider").unwrap().origin, Origin::Project(_)));
+        assert_eq!(r.get("mytool").unwrap().display_name, "Project My Tool");
+        assert!(matches!(r.get("mytool").unwrap().origin, Origin::Project(_)));
         // A th pkg package beats project.
         let pkg = tmp.path().join("pkgroot");
-        w(&pkg.join("harness/aider/harness.toml"), &toml("aider", "Pkg Aider"));
+        w(&pkg.join("harness/mytool/harness.toml"), &toml("mytool", "Pkg My Tool"));
         w(&pkg.join("harness/amp/harness.toml"), &toml("amp", "Amp"));
         // Serialize the path with toml (a Windows path's backslashes would be
         // invalid escapes in a hand-written basic string).
@@ -1166,10 +1357,10 @@ mod tests {
         };
         w(&home.join(".smooth/pkg/index.toml"), &toml::to_string(&index).unwrap());
         let r = Registry::load(&home, Some(&project));
-        assert_eq!(r.get("aider").unwrap().display_name, "Pkg Aider");
-        assert!(matches!(r.get("aider").unwrap().origin, Origin::Package(_)));
-        assert_eq!(r.get("amp").unwrap().origin.label(), "package");
-        assert_eq!(r.all().len(), 6);
+        assert_eq!(r.get("mytool").unwrap().display_name, "Pkg My Tool");
+        assert!(matches!(r.get("mytool").unwrap().origin, Origin::Package(_)));
+        assert_eq!(r.get("amp").unwrap().origin.label(), "package", "a package's amp replaces the built-in one");
+        assert_eq!(r.all().len(), BUILTIN.len() + 1);
     }
 
     #[test]
@@ -1180,15 +1371,13 @@ mod tests {
             hidden: vec!["opencode".into()],
         };
         let names: Vec<&str> = r.ordered(&prefs).iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["th-code", "codex", "claude", "opencode"],
-            "listed first, unknown skipped, rest in registry order"
-        );
+        let rest: Vec<&str> = BUILTIN.iter().map(|(n, _)| *n).filter(|n| !["th-code", "codex"].contains(n)).collect();
+        assert_eq!(names[..2], ["th-code", "codex"], "listed first, unknown skipped");
+        assert_eq!(names[2..], rest[..], "rest in registry order");
         let tmp = tempfile::tempdir().unwrap();
         let empty = std::ffi::OsString::new();
         let all = r.infos(&prefs, true, tmp.path(), &empty);
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), BUILTIN.len());
         assert_eq!(all[3].name, "opencode");
         assert!(all[3].hidden);
         assert_eq!(all[3].order_index, 3);
@@ -1197,8 +1386,171 @@ mod tests {
         assert_eq!(all[0].state_source, "native");
         assert_eq!(all[0].origin, "builtin");
         let visible = r.infos(&prefs, false, tmp.path(), &empty);
-        assert_eq!(visible.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["th-code", "codex", "claude"]);
+        assert_eq!(
+            visible.iter().map(|i| i.name.as_str()).take(3).collect::<Vec<_>>(),
+            ["th-code", "codex", "claude"]
+        );
+        assert!(!visible.iter().any(|i| i.name == "opencode"));
         let v: serde_json::Value = serde_json::to_value(&visible[0]).unwrap();
         assert!(v.get("hidden").is_none(), "false hidden is omitted on the wire: {v}");
+    }
+
+    /// th-b00115: the hook-capable built-ins — launch shape, session-id mode,
+    /// resume argv, and where their hooks come from — as the reference matrix
+    /// in docs/Engineering/Harness-Manifests.md describes them.
+    #[test]
+    fn hook_capable_builtins_launch_and_resume_as_documented() {
+        type Row<'a> = (&'a str, StateSource, SessionIdMode, &'a [&'a str], &'a [&'a str], &'a [&'a str], PromptAs);
+        let r = Registry::builtin();
+        let full = Vars {
+            prompt: Some("fix it"),
+            session_id: Some("sid-1"),
+            model: Some("m1"),
+            ..Default::default()
+        };
+        let bare = Vars {
+            session_id: Some("sid-1"),
+            ..Default::default()
+        };
+        // (name, source, session id mode, launch with prompt+model, launch with neither, resume argv, prompt_as)
+        let table: &[Row<'_>] = &[
+            (
+                "gemini",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "qwen",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "-i", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "cursor-agent",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &["--model", "m1", "fix it"],
+                &[],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "copilot",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "-i", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--resume=sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "droid",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &["fix it"],
+                &[],
+                &["--resume", "sid-1"],
+                PromptAs::Argv,
+            ),
+            (
+                "amp",
+                StateSource::Hooks,
+                SessionIdMode::Learned,
+                &[],
+                &[],
+                &["threads", "continue", "sid-1"],
+                PromptAs::Paste,
+            ),
+            (
+                "pi",
+                StateSource::Hooks,
+                SessionIdMode::Preassigned,
+                &["--session-id", "sid-1", "--model", "m1", "fix it"],
+                &["--session-id", "sid-1"],
+                &["--session-id", "sid-1"],
+                PromptAs::Argv,
+            ),
+        ];
+        for (name, source, sid, launch_full, launch_bare, resume, prompt_as) in table {
+            let m = r.get(name).unwrap_or_else(|| panic!("{name} is built in"));
+            assert_eq!(m.origin, Origin::Builtin, "{name}");
+            assert_eq!(m.state.source, *source, "{name}");
+            assert_eq!(m.launch.session_id, *sid, "{name}");
+            assert_eq!(m.launch.prompt_as, *prompt_as, "{name}");
+            let full = if *prompt_as == PromptAs::Paste { Vars { prompt: None, ..full } } else { full };
+            assert_eq!(render_argv(&m.launch.argv, &full), *launch_full, "{name} launch");
+            assert_eq!(render_argv(&m.launch.argv, &bare), *launch_bare, "{name} bare launch");
+            assert_eq!(m.resume.mode, ResumeMode::ResumeSession, "{name}");
+            assert_eq!(render_argv(&m.resume.argv, &bare), *resume, "{name} resume");
+            assert!(m.binary.skip_path_patterns.iter().any(|p| p == CMUX_SHIM_DIR), "{name} skips cmux shims");
+            assert!(
+                m.binary.prefer_paths.iter().all(|p| !p.starts_with('/') && !p.starts_with('~')),
+                "{name}: prefer_paths are HOME-relative"
+            );
+            assert!(!m.state.hooks.install.is_empty(), "{name} says how its hooks are wired");
+            ScrapeRules::compile(&m.state.scrape).unwrap_or_else(|e| panic!("{name} scrape: {e}"));
+        }
+        // Steer: Gemini needs a pause before Enter; everything else submits at once.
+        for (name, delay) in [
+            ("gemini", 300),
+            ("qwen", 0),
+            ("cursor-agent", 0),
+            ("copilot", 0),
+            ("droid", 0),
+            ("amp", 0),
+            ("pi", 0),
+            ("claude", 0),
+        ] {
+            let steer = &r.get(name).unwrap().steer;
+            assert_eq!((steer.submit_delay_ms, steer.submit_key.as_str()), (delay, "Enter"), "{name}");
+        }
+        // Qwen speaks Claude's hook names + decision protocol: the empty map IS the Claude table.
+        assert!(r.get("qwen").unwrap().state.hooks.event_map.is_empty());
+        for name in ["gemini", "cursor-agent", "copilot", "droid", "amp", "pi"] {
+            assert!(!r.get(name).unwrap().state.hooks.event_map.is_empty(), "{name} maps its own event names");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hook_capable_builtins_resolve_real_installs_over_cmux_shims() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let home = tmp.path().join("home");
+        let shims = tmp.path().join("var/folders/xy/T/cmux-cli-shims/F00D");
+        let bin = tmp.path().join("usr/local/bin");
+        let path = std::env::join_paths([&shims, &bin]).unwrap();
+        let r = Registry::builtin();
+        for (name, exe) in [
+            ("gemini", "gemini"),
+            ("qwen", "qwen"),
+            ("cursor-agent", "cursor-agent"),
+            ("copilot", "copilot"),
+            ("droid", "droid"),
+            ("amp", "amp"),
+            ("pi", "pi"),
+        ] {
+            let m = r.get(name).unwrap();
+            mk(&format!("var/folders/xy/T/cmux-cli-shims/F00D/{exe}"));
+            assert_eq!(m.resolve_binary_in(&home, &path), None, "{name}: a cmux shim alone is not an install");
+            let on_path = mk(&format!("usr/local/bin/{exe}"));
+            assert_eq!(m.resolve_binary_in(&home, &path), Some(on_path.clone()), "{name}: PATH past the shim");
+            let preferred = mk(&format!("home/{}", m.binary.prefer_paths[0]));
+            assert_eq!(m.resolve_binary_in(&home, &path), Some(preferred), "{name}: prefer_paths beat PATH");
+        }
     }
 }
