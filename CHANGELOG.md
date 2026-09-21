@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.52.0
+
+### Minor Changes
+
+- e99ae43: SmoothFlow gains seven hook-capable harnesses: Gemini CLI, Qwen Code, Cursor Agent, GitHub Copilot CLI, Factory Droid, Amp and Pi (th-b00115). Each ships a built-in manifest and a `th pkg` overlay (hooks, Amp plugin or Pi extension) that reports its real lifecycle to the flow engine, so their sessions show working, idle and needs-you from the CLI itself instead of pane scraping. `th pkg install --harness` accepts gemini, qwen, droid, copilot, amp and pi as hook-only targets, and Cursor gets its hooks merged too.
+
+  Engine: agent panes carry `SMOOTH_FLOW_ID` so a CLI that cannot pre-assign a session id binds to its row. Only Claude-protocol harnesses hold a permission request open; other asks get an id that `th flow approve` answers by keystroke. Steering honors `steer.submit_key` and the new `steer.submit_delay_ms` (Gemini drops an Enter sent right after a paste). Proven live against Pi, Qwen and Gemini.
+
+### Patch Changes
+
+- 8a95bc9: Harness support you can verify (th-3cabf6). **Conformance contract:** every built-in harness manifest now runs `resolve · launch · working · idle · steer · permission · resume · kill` against `smooth-flow-fake-agent`, a stand-in CLI that derives its argv parsing and hook events from the manifest itself, on a private engine (`cargo test -p smooai-smooth-flow --test harness_conformance`, and a new `Harness conformance` CI job). A new harness enrolls by being listed in `BUILTIN`; a scraped one adds screens captured from the real CLI. No real CLIs, network or credentials. **`th harness doctor [name] [--json]`:** a read-only per-machine verdict — works / degraded / not installed — covering the binary actually launched (and cmux shims), `--version`, resolution under the SmoothFlow app's launchd PATH (including `#!/usr/bin/env node` scripts), hooks installed and trusted (Codex's "Hooks need review", stale smooth-agent plugins), daemon reachability and sign-in, with the one command that fixes each degraded row. **Fix:** a permission ask reported under a harness's own `event_map` name carried no `request_id`, so `th flow approve` and the apps could not approve it; it now gets one that falls through to the approval keystroke.
+
 ## 0.51.1
 
 ### Patch Changes
