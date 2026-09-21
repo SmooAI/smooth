@@ -31,8 +31,8 @@ dumb view.
 Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
                                               │
                                               ├── tmux -L smooth-flow   (outlives the daemon)
-                                              │     ├── fs-1a2b3c4d: sh -c 'exec claude --session-id <uuid> …'
-                                              │     └── fs-9e8f7a6b: sh -c 'exec zsh -l'
+                                              │     ├── fs-1a2b3c4d: sh -c 'trap : INT QUIT; claude --session-id <uuid> …; c=$?; …; exit $c'
+                                              │     └── fs-9e8f7a6b: sh -c 'trap : INT QUIT; zsh -l; c=$?; …; exit $c'
                                               │
                                               └── per attached session: portable-pty ⟷ `tmux attach -t fs-…`
                                                                           │
@@ -42,12 +42,33 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
 - **Sessions run under tmux, not under the daemon.** A daemon restart or an
   app crash never kills a PTY: the engine re-opens `flow.db`, finds the tmux
   session by name (the flow session id) and carries on. `remain-on-exit` is on
-  so a dead pane stays until the engine has read `#{pane_dead_status}` — the
-  PTY's own exit report, which is the only proof of exit 0 the spec accepts
-  (rule 5).
-- **`exec` in the pane.** The launch line is `sh -c 'exec <argv>'`, so the pane
-  pid _is_ the agent's pid. The engine records `pid` + start time (from
-  `ps -o lstart=`) as the liveness index: a recycled pid can't pass for the agent.
+  so a dead pane stays until the engine has read how it ended.
+- **A wrapper in the pane records the exit code (th-7ff336).** tmux knows a
+  pane's `#{pane_dead_status}` only once its server has reaped the process.
+  On Linux that lagged seconds, and tmux sometimes misses the SIGCHLD
+  entirely, long enough for a clean exit 0 to be resumed as a crash. So the
+  launch line runs the agent as a CHILD of a small `sh`
+  (`tmux::wrapped_command_env`). The wrapper writes the agent's `$?` to
+  `flow-exit-status/<id>.<pane pid>.exit` (temp file + rename) and exits with
+  that same code, so tmux and the file agree. `trap : INT QUIT` is a no-op
+  handler, and handlers reset across `exec`, so Ctrl-C still reaches the
+  agent while the wrapper survives it and keeps waiting. The pane never goes
+  dead under a live agent. `trap '' INT` would be inherited as ignored. A
+  non-interactive `sh` has no job control, so the agent stays in the wrapper's
+  process group, the one `kill_tree` signals.
+- **The pane pid is the wrapper's.** The engine records `pid` + start time (from
+  `ps -o lstart=`) as the liveness index, so a recycled pid can't pass for the
+  agent. The wrapper lives exactly as long as it waits on the agent. The file
+  name carries that pid, and launch, kill and close clear a session's files,
+  so an earlier launch's code is never read.
+- **How an exit settles** (`settle_exit`): tmux's status or signal (after one
+  `run-shell true` nudge, which makes tmux collect a missed child), else the
+  wrapper's file, else, after 3 s, an explicit **unknown**. There is never a
+  fake `-1`. Unknown is shown as "exit status unknown" and is **never
+  auto-resumed**, since the agent may have quit on purpose. `128 + n` is shown
+  as "killed by signal n" and keeps its code in the row. The wait marks the
+  session and returns, and the next tick re-checks, so the supervisor never
+  blocks.
 - **Streaming is a tmux client on a PTY, not `pipe-pane`.** `pipe-pane` yields
   bytes positioned for the pane's own geometry and only from the moment the
   pipe opens, so a late-joining client gets no initial screen. A `tmux attach`
@@ -581,7 +602,9 @@ same brand-new harness session into two rows.
 4. Duplicate-resume guard: a 60 s claim on the agent session id plus pid
    liveness, and any other live row owning the same id. A held id raises
    attention `held` with the holder pid instead of launching.
-5. Exit code 0 is unproven unless the PTY reported it (`#{pane_dead_status}`).
+5. Exit code 0 is unproven unless the PTY (`#{pane_dead_status}`) or the pane
+   wrapper's exit file reported it. An exit nobody can read is **unknown**:
+   `dead`, attention `crashed` with "exit status unknown", and never resumed.
 6. Engine, tmux server and agents are spawned by the app (or its LaunchAgent)
    so TCC grants attribute to it. `th flow` connects; it never launches the
    daemon.
