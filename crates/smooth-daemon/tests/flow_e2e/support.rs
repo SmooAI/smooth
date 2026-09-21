@@ -311,15 +311,40 @@ impl Daemon {
         self.http.get(self.url(path)).send().await.expect("GET").status().as_u16()
     }
 
-    /// `POST /api/flow/hooks` — what a hook script posts. Never sends the
-    /// token (hooks are unauthenticated by contract). Waits up to 150 s so a
-    /// `PermissionRequest` long-poll can be awaited.
+    /// `POST /api/flow/hooks` with NO hook token — what a harness SmoothFlow
+    /// did not launch posts (th-91d032: only adopted rows listen). Waits up to
+    /// 150 s so a `PermissionRequest` long-poll can be awaited.
     pub async fn hook(&self, harness: &str, event: &str, session_id: &str, cwd: Option<&str>, payload: Value) -> (u16, Value) {
+        self.hook_with(None, harness, event, session_id, cwd, payload).await
+    }
+
+    /// Flow session `flow_id`'s current hook token, read the way its hook
+    /// script reads it (the file the engine named in the pane).
+    pub fn hook_token(&self, flow_id: &str) -> String {
+        let p = self.home.join(".smooth").join("flow-hook-tokens").join(format!("{flow_id}.token"));
+        std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("hook token {}: {e}", p.display()))
+            .trim()
+            .to_string()
+    }
+
+    /// `POST /api/flow/hooks` as the harness running in flow session
+    /// `flow_id`: with that launch's hook token.
+    pub async fn hook_as(&self, flow_id: &str, harness: &str, event: &str, session_id: &str, cwd: Option<&str>, payload: Value) -> (u16, Value) {
+        let token = self.hook_token(flow_id);
+        self.hook_with(Some(&token), harness, event, session_id, cwd, payload).await
+    }
+
+    pub async fn hook_with(&self, token: Option<&str>, harness: &str, event: &str, session_id: &str, cwd: Option<&str>, payload: Value) -> (u16, Value) {
         let mut body = json!({ "harness": harness, "event": event, "session_id": session_id, "payload": payload });
         if let Some(c) = cwd {
             body["cwd"] = json!(c);
         }
-        let r = self.http.post(self.url("/api/flow/hooks")).json(&body).send().await.expect("POST hooks");
+        let mut req = self.http.post(self.url("/api/flow/hooks")).json(&body);
+        if let Some(t) = token {
+            req = req.header("x-smooth-flow-hook-token", t);
+        }
+        let r = req.send().await.expect("POST hooks");
         let status = r.status().as_u16();
         (status, r.json().await.unwrap_or(Value::Null))
     }

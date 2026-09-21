@@ -88,9 +88,8 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   requires the daemon's local token — `?token=`, `Authorization: Bearer`, or
   `X-Smooth-Token`. A flow session is a shell on this machine and the daemon
   may be reachable over a tailnet, so the gate is not optional. Clients already
-  carry the token for the operator WS. Hooks stay open on purpose: the hook
-  script must never block the harness, and it can only touch a session whose
-  pre-assigned 128-bit id it already knows.
+  carry the token for the operator WS. Hooks authenticate per launch instead;
+  see [Hook authentication](#hook-authentication-th-91d032).
 - **Relay (phones).** The envelope stays `{to, frame}`. A frame carrying
   `"channel":"flow"` is bridged to `/api/flow/ws` by a second per-phone
   loopback bridge; no `channel` ⇒ operator WS, unchanged. Outbound
@@ -318,8 +317,8 @@ hard-coded table (th-5c5457) is now the built-ins, byte-for-byte:
 | kind       | launch (binary + rendered `launch.argv`)             | harness session id                                        | restore (`flow.kill {resume:true}`, rule 2) | state                                                        |
 | ---------- | ---------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------ |
 | `claude`   | `claude --session-id <uuid> [--model m] [prompt]`    | pre-assigned by the engine                                | `claude --resume <uuid>`                    | `hooks` (smooth-agent plugin → `flow-hook.sh`)               |
-| `opencode` | `opencode [--model m] --prompt <prompt>` (th-b423aa) | learned from the plugin's `session.created` by cwd        | `opencode --session <id>`                   | `hooks` (smooth-agent OpenCode plugin posts the same body)   |
-| `codex`    | `codex [--model m] <prompt>`                         | learned from a hook by cwd when hooks are wired           | `codex resume <id>`                         | `inferred` (pane scraping) until `~/.codex/hooks.json` posts |
+| `opencode` | `opencode [--model m] --prompt <prompt>` (th-b423aa) | learned from the first hook carrying the launch's token   | `opencode --session <id>`                   | `hooks` (smooth-agent OpenCode plugin posts the same body)   |
+| `codex`    | `codex [--model m] <prompt>`                         | learned from the first tokened hook, when hooks are wired | `codex resume <id>`                         | `inferred` (pane scraping) until `~/.codex/hooks.json` posts |
 | `th-code`  | `th code [--model m]`, prompt pasted ~4 s later      | pre-assigned; `SMOOTH_FLOW_SESSION` + `SMOOTH_URL` in env | relaunch (th code resumes by its own query) | `native` — th code POSTs `turn_start`/`turn_end` itself      |
 | `shell`    | `$SHELL -l`                                          | —                                                         | never (shells don't resume)                 | `idle` from launch                                           |
 
@@ -365,9 +364,10 @@ phones) renders exactly this list: an uninstalled harness is disabled with
 
 ## Hooks — state comes from hooks, scraping is the fallback
 
-`POST /api/flow/hooks` body `{harness, event, session_id, cwd, payload}`. The
-engine matches `session_id` to `sessions.agent_session_id` — that is why
-session ids are pre-assigned. The session's manifest decides the mapping: an
+`POST /api/flow/hooks` body `{harness, event, session_id, cwd, payload}`, with
+the launch's hook token in `X-Smooth-Flow-Hook-Token`. The token names the
+session; the body's `session_id` must match that row's `agent_session_id` (or,
+for a row that has none yet, becomes it). The session's manifest decides the mapping: an
 empty `state.hooks.event_map` means the Claude Code table below
 (`protocol::map_hook_event`); a mapped harness (th code: `turn_start` →
 working, `turn_end` → idle) uses its own names, and a `native` source marks
@@ -391,6 +391,70 @@ Scraping (`smooth_tmux::detect`, every 2 s on the visible pane) covers what
 hooks can't: a usage limit ⇒ `limited` with `resume_at`; an approval menu with
 no pending hook request ⇒ `needs_you` (answered by keystroke: `1` / `2` /
 `Escape`); working/idle only for sessions that have never reported a hook.
+
+### Hook authentication (th-91d032)
+
+The hooks endpoint is the one flow route the daemon's local token does not
+gate, because its callers are shell scripts that third-party CLIs run. Left
+open, any local process, web page (DNS rebinding) or tailnet peer could post
+fake state, or put a forged permission prompt in front of the user. The fix
+is a **per-launch hook token** (`smooth_flow::hook_auth`):
+
+- Every time the engine launches an agent's process (`flow.new`, a resume, a
+  crash relaunch), it mints 256 random bits. The token goes into
+  `~/.smooth/flow-hook-tokens/<id>.token` (directory `0700`, file `0600`,
+  replaced atomically). The pane gets only the file's path, as
+  `SMOOTH_FLOW_HOOK_TOKEN_FILE`, so the secret is in neither argv (other users
+  can read it on Linux) nor the environment (agents print that into
+  transcripts). `flow.db` stores only its SHA-256, so both daemons that share
+  the store can check it.
+- `flow-hook.sh`, the OpenCode plugin, `th code` and the fake-claude fixture
+  read the file and send `X-Smooth-Flow-Hook-Token`. `flow-hook.sh` hands the
+  header to curl as a config line on stdin, never as an argument. Only hex
+  survives the read, so a hostile file cannot inject a curl option or a header.
+- The engine resolves the session **from the token**, never from the body. A
+  hook whose `session_id` is not the row's is refused: a nested harness that
+  inherited the pane's variable, or a token replayed against another
+  session.
+- A token dies with its launch. A relaunch rotates it, and `kill`, death and
+  `close` revoke it (clearing the hash and deleting the file).
+
+**Why per-session and not one daemon-wide token.** A daemon-wide secret in
+every agent's environment would let any agent speak for every other
+session. If it were the daemon's own token, it would also let any agent
+spawn shells and approve prompts. A per-launch token grants exactly one
+thing: reporting this session's hooks.
+
+**Tokenless hooks** come from harnesses SmoothFlow did not launch:
+
+| Target                                                                                     | Tokenless hook                                                                               |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| an engine-spawned row                                                                      | refused, even from loopback (its own hooks carry the token)                                  |
+| an adopted row                                                                             | **state only**: working / idle / needs-you, events, `SessionEnd`                             |
+| an adopted row's `PermissionRequest`                                                       | shown as `needs_you` with **no `request_id`**, answered `{}` at once; nothing can approve it |
+| a new row (adoption, when on)                                                              | allowed, under the adoption guards below                                                     |
+| anything, with `Origin`/`Sec-Fetch-Site`/`Forwarded`/`X-Forwarded-*`/`Tailscale-*` headers | refused: not a hook script talking to loopback                                               |
+
+An adopted session gets no approvals because its identity is only a claim.
+Anything that can reach the port can say it is that `claude`. An approvable
+prompt would put text the claimant wrote next to that session's name, with an
+Approve button, and would hold a long-poll open for whoever asked. The prompt
+still shows, so the user knows to answer it in the terminal.
+
+A presented but unknown token is refused outright and never falls back to
+adoption: it is stale or forged. Every refusal is the same `200 {}` that an
+unknown session gets, so a probe learns nothing, and the hook contract ("never
+block the harness") holds.
+
+**Out of scope:** code running as the same OS user. It can read the token files
+and the daemon's `operator-token`. The boundary here is between sessions, and
+between this user and everyone else: other users, browsers, tailnet peers, and
+the kernel-sandboxed tool subprocesses, which cannot read `~/.smooth`.
+
+**Upgrading.** An installed `smooth-agent` plugin whose `flow-hook.sh`
+predates this change sends no token, so its hooks for SmoothFlow-launched
+sessions are refused and those sessions fall back to scraped state.
+`th harness doctor` flags this as degraded, with the fix: `th harness enable claude-code` (or `codex`/`opencode`), then restart the harness's sessions, because a running session keeps the hooks it started with. Codex also asks for its "Hooks need review" trust again.
 
 ## Zero friction — inference and adoption (th-c103c1)
 
@@ -458,8 +522,9 @@ PTY, so:
 
 - ✅ it appears in the fleet with title, pearl, Jira key, branch, worktree;
   its state tracks its hooks (working / idle / needs-you), its events stream
-  into the timeline, and permission requests it sends AFTER adoption are
-  answerable from SmoothFlow like any other session.
+  into the timeline. Its permission requests show as needs-you, but are
+  answered in its own terminal, not from SmoothFlow (th-91d032: its hooks
+  carry no token, so its identity is only a claim).
 - ❌ **no attach** — there is no tmux pane; drive it in the terminal it is
   running in.
 - ❌ **no kill, no resume** — the engine does not own that process, and

@@ -54,14 +54,33 @@ const readAddr = async (env) => {
     }
 };
 
+/**
+ * This launch's SmoothFlow hook token (th-91d032): the 0600 file the engine
+ * names in SMOOTH_FLOW_HOOK_TOKEN_FILE, hex only. '' when SmoothFlow did not
+ * launch this process; the engine then treats the hook as unauthenticated.
+ */
+export const flowHookToken = async (env) => {
+    const file = env.SMOOTH_FLOW_HOOK_TOKEN_FILE || '';
+    if (!file) return '';
+    try {
+        const fs = await import('node:fs/promises');
+        return (await fs.readFile(file, 'utf8')).replace(/[^0-9a-fA-F]/g, '').slice(0, 128);
+    } catch {
+        return '';
+    }
+};
+
 /** Fire-and-forget POST; resolves when sent (or given up), never rejects. */
 export const postFlow = async (body, env = process.env, fetchImpl = globalThis.fetch) => {
     try {
         const url = flowHooksUrl(await readAddr(env));
         if (!url || typeof fetchImpl !== 'function') return;
+        const headers = { 'content-type': 'application/json' };
+        const token = await flowHookToken(env);
+        if (token) headers['x-smooth-flow-hook-token'] = token;
         await fetchImpl(url, {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers,
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(FLOW_TIMEOUT_MS),
         }).catch(() => {});

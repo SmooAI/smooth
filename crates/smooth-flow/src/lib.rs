@@ -12,6 +12,7 @@ pub mod harness;
 pub mod harness_conformance;
 pub mod harness_draft;
 pub mod harness_validate;
+pub mod hook_auth;
 pub mod infer;
 pub mod limit;
 pub mod proc;
@@ -22,6 +23,7 @@ pub mod store;
 pub mod tmux;
 
 pub use engine::{Engine, EngineConfig, HookReply, NewRequest};
+pub use hook_auth::HookCaller;
 pub use infer::{infer, Inferred};
 pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ServerFrame};
 pub use store::{Attention, FanOut, FlowStore, Session, SessionKind, SessionState};
