@@ -1243,6 +1243,13 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
     let relay_url = crate::relay::resolve_relay_url();
     let relay_identity = crate::relay::device_identity();
+    // What the relay link is doing, for the app's Phones pane (th-37c286): a
+    // daemon connected-but-unauthenticated must never read as offline, or as online.
+    let relay_status = if relay_url.is_some() {
+        crate::relay_status::RelayStatusHandle::new(crate::relay_status::RelayPhase::Connecting, "Starting the relay link.")
+    } else {
+        crate::relay_status::RelayStatusHandle::disabled()
+    };
     let pairing = Arc::new(crate::flow_e2e::PairingState::new(
         flow_engine,
         relay_identity.device.clone(),
@@ -1320,7 +1327,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // /api/flow/pair* — phone pairing for end-to-end encrypted relay
                 // frames (th-d98fde): the QR the macOS app / `th flow pair` show,
                 // the pairing list, revoke. Shares the flow engine's store.
-                .merge(crate::flow_pair_route::pair_router(pairing.clone(), Some(token.clone()), relay_url.is_some()))
+                .merge(crate::flow_pair_route::pair_router(pairing.clone(), Some(token.clone()), relay_status.clone()))
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
@@ -1410,7 +1417,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // like tailscale above: signed-out or unreachable just waits and retries.
     let _relay = relay_url.map(|relay_url| {
         tracing::info!(relay = %relay_url, "Smoo Relay armed — phones can reach Big Smooth without tailscale");
-        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone(), relay_identity, pairing)
+        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone(), relay_identity, pairing, relay_status)
     });
 
     // Proactivity: the always-on agent fires due schedules into its *own*

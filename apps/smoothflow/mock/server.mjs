@@ -96,6 +96,16 @@ const seed = [
         branch: null,
         agent_session_id: null,
     }),
+    // th-68d10a: a shell in a worktree has a branch and a diff like any agent.
+    mk('fs-shell002', {
+        kind: 'shell',
+        title: 'zsh · tab gating',
+        argv: ['zsh'],
+        worktree: `${HOME}/dev/smooai/smooth-th-68d10a`,
+        branch: 'th-68d10a-tab-gating',
+        state: 'idle',
+        agent_session_id: null,
+    }),
 ];
 for (const s of seed) sessions.set(s.id, s);
 // Sessions whose worktree the engine would refuse to remove (dirty / unmerged).
@@ -135,7 +145,8 @@ const handoff = (s) => ({
     handoff: {
         worktree: s.worktree,
         branch: s.branch,
-        head: 'a91c0e2',
+        // No branch in the fixture = not a repo (the HOME shell): no HEAD.
+        head: s.branch ? 'a91c0e2' : null,
         dirty: s.state === 'done' ? [] : ['crates/smooth-pearls/src/store.rs', 'Cargo.lock', 'docs/x.md'],
         agent_session_id: s.agent_session_id,
         next: 're-run migrate, open PR',
@@ -474,7 +485,19 @@ const server = http.createServer((req, res) => {
         return json(200, { state: 'paired', pairing_id: m[1], device: phone.device, label: phone.label, platform: phone.platform });
     }
     if (req.method === 'GET' && url.pathname === '/api/flow/pairings')
-        return json(200, { device: 'daemon-mock00000000', label: 'mock', relay_enabled: true, pairings: [...pairings.values()] });
+        return json(200, {
+            device: 'daemon-mock00000000',
+            label: 'mock',
+            relay_enabled: true,
+            // th-37c286: the mock's link is up but never authenticated — the
+            // case that used to look exactly like "offline".
+            relay: {
+                state: 'unauthenticated',
+                detail: 'The relay accepted the socket but never authenticated this daemon (no ack in 15s), so it is NOT a peer.',
+                since: new Date().toISOString(),
+            },
+            pairings: [...pairings.values()],
+        });
     if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/flow\/pairings\/([^/]+)$/)))
         return json(200, { device: m[1], revoked: pairings.delete(m[1]) });
     json(404, { code: 'not_found', message: url.pathname });

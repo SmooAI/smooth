@@ -24,9 +24,11 @@
 // SmoothFlow (pearl th-5c5457): every lifecycle event is ALSO posted to the
 // daemon's flow engine, the same body flow-hook.sh sends for Claude Code —
 // {harness:"opencode", event:<Claude event name>, session_id, cwd, payload} —
-// so an opencode session's state comes from hooks, not pane scraping. The
-// engine binds the session id from the first event by cwd (opencode can't
-// pre-assign one). Fire-and-forget, 2 s cap, silent when the daemon is down.
+// so an opencode session's state comes from hooks, not pane scraping. Each
+// post carries this launch's hook token (th-91d032, from the 0600 file named by
+// $SMOOTH_FLOW_HOOK_TOKEN_FILE); the engine binds the session id from the first
+// event that presents it (opencode can't pre-assign one). Fire-and-forget,
+// 2 s cap, silent when the daemon is down.
 
 const HARNESS = 'opencode';
 const TOUCH_EVERY_MS = 60_000;
@@ -62,19 +64,27 @@ export const flowHooksUrl = async (
     return `${/^https?:\/\//.test(addr) ? addr : `http://${addr}`}/api/flow/hooks`;
 };
 
+/// This launch's SmoothFlow hook token (th-91d032), hex only, or '' when
+/// SmoothFlow did not launch this process.
+export const flowHookToken = async (file = process.env.SMOOTH_FLOW_HOOK_TOKEN_FILE || '') =>
+    file ? (await readFile(file)).replace(/[^0-9a-fA-F]/g, '').slice(0, 128) : '';
+
 const sanitize = (s) => s.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
 export const SmoothAgent = async ({ $, directory }) => {
     const cwd = directory || process.cwd();
     const base = sanitize(cwd.split('/').filter(Boolean).pop() || 'session') || 'session';
     const flowUrl = await flowHooksUrl();
+    const flowToken = await flowHookToken();
     const flow = (hook, sid, payload) => {
         const event = FLOW_EVENTS[hook];
         if (!flowUrl || !event || typeof fetch !== 'function') return;
         const body = JSON.stringify({ harness: HARNESS, event, session_id: sid, cwd, payload });
+        const headers = { 'content-type': 'application/json' };
+        if (flowToken) headers['x-smooth-flow-hook-token'] = flowToken;
         fetch(flowUrl, {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers,
             body,
             signal: AbortSignal.timeout(FLOW_TIMEOUT_MS),
         }).catch(() => {});

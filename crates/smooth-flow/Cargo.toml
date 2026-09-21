@@ -24,6 +24,9 @@ chrono.workspace = true
 dirs-next.workspace = true
 base64 = "0.22"
 regex = "1"
+# th-91d032: per-launch hook tokens (OS randomness; only the SHA-256 is stored).
+rand = "0.8"
+sha2 = "0.10"
 toml.workspace = true
 # PTY for streaming a `tmux attach` client's bytes to flow WS clients. Pinned:
 # the master/child API moved between minors before 0.9.

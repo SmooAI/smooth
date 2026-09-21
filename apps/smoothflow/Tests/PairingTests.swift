@@ -34,6 +34,32 @@ final class PairingTests: XCTestCase {
         XCTAssertNil(l.pairings[0].lastSeenAt)
     }
 
+    func testRelayLinkStatusDecodesAndKeepsTheCantReachCasesApart() throws {
+        let raw = """
+        {"device":"daemon-0123456789ab","label":"marvin","relay_enabled":true,
+         "relay":{"state":"unauthenticated","detail":"no ack in 15s","since":"2026-09-20T12:00:00Z"},"pairings":[]}
+        """
+        let l = try JSONDecoder().decode(PairingsList.self, from: Data(raw.utf8))
+        let r = try XCTUnwrap(l.relay)
+        XCTAssertEqual(r.state, "unauthenticated")
+        XCTAssertFalse(r.reachable, "connected-but-unauthenticated is not reachable")
+        XCTAssertTrue(r.needsAttention)
+        XCTAssertTrue(r.headline.contains("NOT authenticated"))
+
+        let online = RelayLinkStatus(state: "online", detail: "", since: nil)
+        XCTAssertTrue(online.reachable); XCTAssertFalse(online.needsAttention); XCTAssertEqual(online.glyph, "●")
+        let signedOut = RelayLinkStatus(state: "signed_out", detail: "", since: nil)
+        XCTAssertFalse(signedOut.reachable); XCTAssertTrue(signedOut.needsAttention)
+        XCTAssertNotEqual(signedOut.headline, r.headline, "signed out and unauthenticated must read differently")
+        let authenticating = RelayLinkStatus(state: "authenticating", detail: "", since: nil)
+        XCTAssertFalse(authenticating.reachable); XCTAssertEqual(authenticating.glyph, "◐")
+    }
+
+    func testAnOlderEngineWithoutRelayStatusStillDecodes() throws {
+        let raw = #"{"device":"d","label":"l","relay_enabled":true,"pairings":[]}"#
+        XCTAssertNil(try JSONDecoder().decode(PairingsList.self, from: Data(raw.utf8)).relay)
+    }
+
     func testPresenceIsAGlyphFromLastSeen() {
         let now = ISO8601DateFormatter().date(from: "2026-09-09T12:00:00Z")!
         XCTAssertEqual(PhonePresence.of(lastSeen: nil, now: now), .away)

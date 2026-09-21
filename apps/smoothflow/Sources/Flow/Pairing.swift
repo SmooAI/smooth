@@ -51,9 +51,56 @@ struct PairingsList: Decodable, Equatable {
     var device: String
     var label: String
     var relayEnabled: Bool
+    /// The live relay link (th-37c286). Optional so an older engine that
+    /// doesn't report it still decodes.
+    var relay: RelayLinkStatus?
     var pairings: [PairedPhone]
 
-    enum CodingKeys: String, CodingKey { case device, label, relayEnabled = "relay_enabled", pairings }
+    enum CodingKeys: String, CodingKey { case device, label, relayEnabled = "relay_enabled", relay, pairings }
+}
+
+/// What the engine's relay link is doing (`relay.state` from
+/// `/api/flow/pairings`, th-37c286). The point is to keep three situations
+/// apart that all look like "my phone can't see this Mac": signed out,
+/// connected-but-not-authenticated, and genuinely unreachable.
+struct RelayLinkStatus: Decodable, Equatable {
+    var state: String
+    var detail: String
+    var since: String?
+
+    /// Phones can reach this Mac only when the relay acknowledged it.
+    var reachable: Bool { state == "online" }
+
+    /// Needs the user (sign in, or a link that is up but not a peer) — amber.
+    var needsAttention: Bool {
+        ["signed_out", "session_expired", "unauthenticated", "auth_rejected", "identity_busy"].contains(state)
+    }
+
+    /// Short, human headline for the phase; `detail` carries the what-to-do.
+    var headline: String {
+        switch state {
+        case "online": "On the relay — phones can reach this Mac"
+        case "connecting": "Connecting to the relay…"
+        case "authenticating": "Connected, waiting for the relay to authenticate"
+        case "unauthenticated": "Connected but NOT authenticated — phones see this Mac as offline"
+        case "auth_rejected": "The relay rejected this Mac's Smoo session"
+        case "signed_out": "Not signed in to Smoo — not on the relay"
+        case "session_expired": "Smoo session expired — not on the relay"
+        case "identity_busy": "Another engine on this Mac holds the relay identity"
+        case "offline": "Relay unreachable — retrying"
+        case "disabled": "The relay is off for this engine"
+        default: "Relay: \(state)"
+        }
+    }
+
+    /// Form, not just color: ● reachable, ◐ on the way, ○ not on the relay.
+    var glyph: String {
+        switch state {
+        case "online": "●"
+        case "connecting", "authenticating": "◐"
+        default: "○"
+        }
+    }
 }
 
 /// Presence of a paired phone, from its last-seen time — encoded in FORM (a

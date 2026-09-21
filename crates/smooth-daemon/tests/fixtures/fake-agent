@@ -83,8 +83,11 @@ hook() {
     if [ "$mode" = scrape ]; then
         return 0
     fi
-    local reply
+    local reply token
+    # th-91d032: the pane's per-launch hook token, exactly as flow-hook.sh sends it.
+    token="$(tr -cd '0-9a-fA-F' <"${SMOOTH_FLOW_HOOK_TOKEN_FILE:-/nonexistent}" 2>/dev/null)"
     reply="$(curl -sS -m "${3:-5}" -X POST -H 'Content-Type: application/json' \
+        -H "X-Smooth-Flow-Hook-Token: $token" \
         --data-binary "{\"harness\":\"$harness\",\"event\":\"$1\",\"session_id\":\"$sid\",\"cwd\":\"$PWD\",\"payload\":$2}" \
         "$addr/api/flow/hooks" 2>/dev/null)"
     logline "hook $1 → ${reply:-<none>}"

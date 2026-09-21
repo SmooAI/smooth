@@ -18,7 +18,7 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-        posted.push({ url: req.url, body: JSON.parse(body) });
+        posted.push({ url: req.url, token: req.headers['x-smooth-flow-hook-token'], body: JSON.parse(body) });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
     });
@@ -46,6 +46,25 @@ for (const mod of [amp, pi]) {
     await mod.postFlow({}, { SMOOTH_DAEMON_ADDR_FILE: addrFile }, () => Promise.reject(new Error('down')));
 }
 assert.equal(posted.length, 0, 'none of the degrade paths posted');
+
+// th-91d032: each post presents the launch's hook token (hex only); no file ⇒ no header.
+{
+    const tokFile = path.join(dir, 'fs-1.token');
+    await fs.writeFile(tokFile, 'c0ffee\n"; x\n');
+    for (const mod of [amp, pi]) {
+        assert.equal(await mod.flowHookToken({ SMOOTH_FLOW_HOOK_TOKEN_FILE: tokFile }), 'c0ffee', 'hex only');
+        assert.equal(await mod.flowHookToken({}), '');
+        assert.equal(await mod.flowHookToken({ SMOOTH_FLOW_HOOK_TOKEN_FILE: path.join(dir, 'nope') }), '');
+        await mod.postFlow({ harness: 't' }, { SMOOTH_DAEMON_ADDR_FILE: addrFile, SMOOTH_FLOW_HOOK_TOKEN_FILE: tokFile });
+        await mod.postFlow({ harness: 't' }, { SMOOTH_DAEMON_ADDR_FILE: addrFile });
+    }
+    await waitPosts(4);
+    assert.deepEqual(
+        posted.map((p) => p.token ?? null),
+        ['c0ffee', null, 'c0ffee', null],
+    );
+    posted.length = 0;
+}
 
 // ── Amp: envelope table ────────────────────────────────────────────────────────
 const env = { SMOOTH_FLOW_ID: 'fs-7' };

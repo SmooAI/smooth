@@ -8,7 +8,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SmoothAgent, flowHooksUrl } from './plugin.js';
+import { SmoothAgent, flowHookToken, flowHooksUrl } from './plugin.js';
 
 // SmoothFlow hooks (th-5c5457): a fake daemon captures what the plugin posts.
 const posted = [];
@@ -16,7 +16,7 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-        posted.push({ url: req.url, body: JSON.parse(body) });
+        posted.push({ url: req.url, token: req.headers['x-smooth-flow-hook-token'], body: JSON.parse(body) });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
     });
@@ -44,6 +44,19 @@ assert.equal(await flowHooksUrl('/nonexistent/daemon.addr', '/nonexistent/flow.a
     process.env.SMOOTH_FLOW_ADDR = '127.0.0.1:9999';
     assert.equal(await flowHooksUrl(daemonAddr, flowAddr), 'http://127.0.0.1:9999/api/flow/hooks', 'the env wins over both');
     delete process.env.SMOOTH_FLOW_ADDR;
+}
+
+// th-91d032: the launch's hook token comes from the file the engine names;
+// only hex survives, and no file means no token.
+{
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'flowtok-'));
+    const tok = path.join(dir, 'fs-1.token');
+    await fs.writeFile(tok, 'ab12\n"; evil\n');
+    assert.equal(await flowHookToken(tok), 'ab12e', 'hex only');
+    assert.equal(await flowHookToken(''), '', 'no file named ⇒ no token');
+    assert.equal(await flowHookToken(path.join(dir, 'missing')), '', 'missing file ⇒ no token, no throw');
+    await fs.writeFile(tok, 'c0ffee\n');
+    process.env.SMOOTH_FLOW_HOOK_TOKEN_FILE = tok;
 }
 
 const calls = [];
@@ -131,6 +144,10 @@ assert.match(calls[0], /^agent register --name oc-bus-0001 --harness opencode/);
 assert.equal(calls.at(-1), 'agent status --name oc-bus-0001 --status offline');
 assert.equal(calls.length, 3, 'register, idle, offline — the bus path is the same lifecycle');
 assert.ok(posted.every((p) => p.url === '/api/flow/hooks'));
+assert.ok(
+    posted.every((p) => p.token === 'c0ffee'),
+    'every post carries the launch token',
+);
 const first = posted[0].body;
 assert.equal(first.harness, 'opencode');
 assert.equal(first.session_id, 'ses_abcd1234');

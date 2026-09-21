@@ -1,7 +1,8 @@
 # fake-agent-learned — hooks state, session id LEARNED from the first hook
 # (the opencode / codex shape): no `--session-id`; the agent reports the id it
 # picked (./.fake-agent-session-id in the cwd, else a fresh one) and the engine
-# binds it to the newest id-less row in that worktree.
+# binds it to the row whose hook token the post carries (th-91d032). It posts
+# its own manifest name: a hook naming another kind never binds a row.
 name = "fake-agent-learned"
 display_name = "Fake Agent (learned id)"
 
@@ -17,6 +18,7 @@ session_id = "learned"
 [launch.env]
 SMOOTH_URL = "{daemon_url}"
 FAKE_AGENT_MODE = "hooks"
+FAKE_AGENT_HARNESS = "fake-agent-learned"
 
 [resume]
 argv = ["--resume", "{session_id}"]
