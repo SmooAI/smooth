@@ -424,13 +424,16 @@ fn match_from(template: &[String], argv: &[String], vars: &mut BTreeMap<String, 
 
 /// Match `argv` (after the binary) against a manifest argv template.
 ///
-/// How long a painted screen has held still when [`screen_problems`] judges
-/// it — past any `quiet_ms` a built-in rule asks for.
+/// How long a painted screen has held still when [`screen_problems`] judges it.
+///
+/// Past any `quiet_ms` a built-in rule asks for.
 const SETTLED: Duration = Duration::from_secs(60);
 
-/// A `continue_latest` resume argv: `resume` follows either the launch argv
-/// (the prompt was pasted, so the original command is kept) or nothing (the
-/// bare binary). `None` when `argv` does not end in `resume`.
+/// Match a `continue_latest` resume argv.
+///
+/// `resume` follows either the launch argv (the prompt was pasted, so the
+/// original command is kept) or nothing (the bare binary). `None` when `argv`
+/// does not end in `resume`.
 #[must_use]
 pub fn match_continue_argv(launch: &[String], resume: &[String], argv: &[String]) -> Option<Matched> {
     let split = argv.len().checked_sub(resume.len())?;

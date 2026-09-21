@@ -44,7 +44,10 @@ install = "th pkg install <smooth-agent> --harness amp  # harness/amp/plugin.ts 
 
 [state.scrape]
 working = ["esc to cancel", "esc to interrupt"]
-idle = ["ctrl\\+o"]
+# No `idle`: nothing past the sign-in wall has been captured, and a paste
+# prompt waits (up to 90 s) for a scraped idle when the manifest has one
+# (th-d2a1e4). An unverified marker would stall every launch; without one the
+# prompt is pasted after the fixed delay. Add it from a real capture.
 # Captured 2026-09-14 (fresh HOME): "No API key found. Starting login flow...
 # Would you like to log in to Amp? [(y)es, (n)o]".
 needs_you = ["would you like to log in to amp", "\\[\\(y\\)es, \\(n\\)o\\]", "allow once"]
