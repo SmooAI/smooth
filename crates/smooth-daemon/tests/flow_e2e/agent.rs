@@ -294,7 +294,12 @@ async fn learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches
     std::fs::write(d.ws.join(".fake-agent-session-id"), "learned-abc-123\n").unwrap();
     let s = d.new_session("fake-agent-learned", Some("/work bind")).await;
     let id = s["id"].as_str().unwrap().to_string();
-    assert!(s["agent_session_id"].is_null(), "learned: no id until the harness reports one: {s}");
+    // The engine assigns no id; the harness's first hook may already have
+    // bound its own by the time the launch response is read (fast runners).
+    assert!(
+        s["agent_session_id"].is_null() || s["agent_session_id"] == "learned-abc-123",
+        "learned: no id but the one the harness reports: {s}"
+    );
     assert_eq!(s["argv"][1], "/work bind", "no --session-id in a learned launch: {s}");
 
     // The first hook from the worktree binds the id to this row.
