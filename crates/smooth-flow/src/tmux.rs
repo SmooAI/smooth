@@ -13,7 +13,7 @@
 //! Send/capture reuse `smooth_tmux::TmuxDriver::open_existing` (non-owning),
 //! which gives bracketed-paste sends and scrollback capture for free.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
@@ -94,6 +94,56 @@ pub fn exec_command_env(argv: &[String], env: &[(String, String)]) -> String {
     format!("{exports}exec {}", quoted.join(" "))
 }
 
+/// The pane command for a supervised session (th-7ff336).
+///
+/// Runs `argv` as a CHILD of a small `sh`, records its exit code in
+/// `<exit_prefix>.<wrapper pid>.exit` (atomically: temp file + rename), and
+/// exits with that same code.
+///
+/// tmux knows a pane's exit status only once its server has reaped the pane
+/// process, which can lag seconds behind the pane going dead; the file is
+/// written before the wrapper exits, so it is there the moment tmux shows the
+/// pane dead. The pid in the name is the pane pid the engine records, so a
+/// file from an earlier launch never reads as this one's.
+///
+/// Signals: `trap : INT QUIT` is a no-op HANDLER, not an ignore. A handler
+/// resets to the default across `exec`, so the harness still gets Ctrl-C
+/// normally while the wrapper survives it and keeps waiting — the pane can
+/// never go dead under a harness that is still running. (`trap '' INT` would
+/// be inherited as ignored and take Ctrl-C away from the harness.) There is
+/// no job control in a non-interactive `sh`, so the harness stays in the
+/// wrapper's process group: the pty's foreground group, and what
+/// `proc::kill_tree` signals.
+#[must_use]
+pub fn wrapped_command_env(argv: &[String], env: &[(String, String)], exit_prefix: &Path) -> String {
+    let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
+    let exports = env.iter().fold(String::new(), |mut acc, (k, v)| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "export {k}={}; ", shell_quote(v));
+        acc
+    });
+    let prefix = shell_quote(&exit_prefix.to_string_lossy());
+    format!(
+        "{exports}trap : INT QUIT; {}; c=$?; f={prefix}.$$.exit; printf '%s\\n' \"$c\" >\"$f.tmp\" 2>/dev/null && mv -f \"$f.tmp\" \"$f\" 2>/dev/null; exit \"$c\"",
+        quoted.join(" ")
+    )
+}
+
+/// Where [`wrapped_command_env`] records the exit code of the launch whose
+/// pane pid is `pid`.
+#[must_use]
+pub fn exit_file(exit_prefix: &Path, pid: u32) -> PathBuf {
+    let mut name = exit_prefix.as_os_str().to_owned();
+    name.push(format!(".{pid}.exit"));
+    PathBuf::from(name)
+}
+
+/// The exit code a wrapper recorded, if it has.
+#[must_use]
+pub fn read_exit_file(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
 /// Start the flow server (if needed) with the options every session relies
 /// on, in ONE tmux invocation so they hold before the first pane exists —
 /// a command that exits instantly would otherwise take the server (and its
@@ -169,10 +219,20 @@ pub fn launch(socket: &str, session: &str, cwd: &Path, argv: &[String]) -> Resul
 /// # Errors
 /// When tmux is missing or the session cannot be created.
 pub fn launch_env(socket: &str, session: &str, cwd: &Path, argv: &[String], env: &[(String, String)]) -> Result<u32> {
+    launch_with(socket, session, cwd, argv, env, None)
+}
+
+/// [`launch_env`], under [`wrapped_command_env`] when `exit_prefix` is set.
+///
+/// With a prefix the returned pid is the wrapper's, and the harness its child.
+///
+/// # Errors
+/// When tmux is missing or the session cannot be created.
+pub fn launch_with(socket: &str, session: &str, cwd: &Path, argv: &[String], env: &[(String, String)], exit_prefix: Option<&Path>) -> Result<u32> {
     if argv.is_empty() {
         return Err(anyhow!("cannot launch an empty argv"));
     }
-    let cmd = exec_command_env(argv, env);
+    let cmd = exit_prefix.map_or_else(|| exec_command_env(argv, env), |p| wrapped_command_env(argv, env, p));
     let cwd_s = cwd.to_string_lossy();
     ensure_server(socket);
     let out = tmux(
@@ -266,10 +326,11 @@ pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
 /// status for (yet — see th-7ff336 in the engine's supervisor).
 pub const EXIT_UNKNOWN: i32 = -1;
 
-/// Parse `#{pane_dead}|#{pane_dead_status}`: `None` while the pane runs,
-/// `Some(status)` once it died ([`EXIT_UNKNOWN`] when tmux has no status for
-/// it: the pane's pty closed before the server reaped the child, or it died
-/// by a signal).
+/// Parse `#{pane_dead}|#{pane_dead_status}`.
+///
+/// `None` while the pane runs, `Some(status)` once it died ([`EXIT_UNKNOWN`]
+/// when tmux has no status for it: the pane's pty closed before the server
+/// reaped the child, or it died by a signal).
 ///
 /// The separator is `|`, NOT a tab: under a non-UTF-8 locale (no `LANG` —
 /// a launchd-started daemon, a CI runner, an `env -i`) tmux rewrites every
@@ -471,6 +532,106 @@ mod tests {
         assert_eq!(socket_name(), "flow-test-sock");
         std::env::remove_var("SMOOTH_FLOW_TMUX_SOCKET");
         assert_eq!(socket_name(), FLOW_SOCKET);
+    }
+
+    /// Poll `f` for up to 10 s.
+    fn eventually(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..100 {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn wrapped_command_quotes_and_records_to_the_prefix() {
+        let cmd = wrapped_command_env(&["a b".into(), "c'd".into()], &[("K".into(), "v w".into())], Path::new("/x/fs-1"));
+        assert!(
+            cmd.starts_with("export K='v w'; trap : INT QUIT; 'a b' 'c'\\''d'; c=$?; f=/x/fs-1.$$.exit;"),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with("exit \"$c\""), "the wrapper exits with the harness's own code: {cmd}");
+        assert!(!cmd.contains("exec "), "the harness is a child, not an exec: {cmd}");
+        assert!(!cmd.contains("trap ''"), "an ignored INT would be inherited by the harness: {cmd}");
+        assert_eq!(exit_file(Path::new("/x/fs-1"), 42), PathBuf::from("/x/fs-1.42.exit"));
+    }
+
+    /// th-7ff336: the wrapper records the harness's code where the engine
+    /// looks for it, and tmux sees the same code.
+    #[test]
+    fn live_wrapper_records_the_exit_code_and_a_signal_death() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-tw-{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("fs-w");
+        let pid = launch_with(&sock, "fs-w", dir.path(), &["sh".into(), "-c".into(), "exit 7".into()], &[], Some(&prefix)).unwrap();
+        let file = exit_file(&prefix, pid);
+        assert!(eventually(|| read_exit_file(&file) == Some(7)), "recorded exit 7 at {}", file.display());
+        assert!(eventually(|| pane_exit_status(&sock, "fs-w").ok().flatten() == Some(7)), "tmux agrees");
+        assert!(!file.with_extension("exit.tmp").exists(), "the temp file was renamed away");
+        // A harness killed by a signal: the shell's 128 + n.
+        let pid = launch_with(
+            &sock,
+            "fs-k",
+            dir.path(),
+            &["sh".into(), "-c".into(), "kill -9 $$".into()],
+            &[],
+            Some(&dir.path().join("fs-k")),
+        )
+        .unwrap();
+        assert!(eventually(|| read_exit_file(&exit_file(&dir.path().join("fs-k"), pid)) == Some(137)));
+        kill_server(&sock);
+    }
+
+    /// th-7ff336: Ctrl-C reaches the harness; a harness that survives it keeps
+    /// the pane alive (the wrapper never exits before its child); one that
+    /// dies of it is recorded as 128 + SIGINT.
+    #[test]
+    fn live_wrapper_passes_ctrl_c_to_the_harness_and_outlives_nothing() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-tc-{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("int.log");
+        let prefix = dir.path().join("fs-c");
+        // Handles INT itself (like Claude Code) and keeps running.
+        let harness = format!("trap 'echo got-int >> {}' INT; echo READY; while :; do sleep 0.1; done", log.display());
+        let pid = launch_with(&sock, "fs-c", dir.path(), &["sh".into(), "-c".into(), harness], &[], Some(&prefix)).unwrap();
+        assert!(eventually(|| capture_visible(&sock, "fs-c").is_ok_and(|t| t.contains("READY"))));
+        send_key(&sock, "fs-c", "C-c").unwrap();
+        assert!(
+            eventually(|| std::fs::read_to_string(&log).is_ok_and(|l| l.contains("got-int"))),
+            "Ctrl-C reached the harness"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(pane_exit_status(&sock, "fs-c").unwrap(), None, "the pane stays alive while the harness runs");
+        assert!(crate::proc::is_alive(pid, None), "the wrapper survived Ctrl-C");
+        assert!(read_exit_file(&exit_file(&prefix, pid)).is_none());
+        // Doesn't handle INT: Ctrl-C ends it, and the wrapper records it.
+        let prefix2 = dir.path().join("fs-d");
+        let pid2 = launch_with(
+            &sock,
+            "fs-d",
+            dir.path(),
+            &["sh".into(), "-c".into(), "echo READY; sleep 30; echo AFTER".into()],
+            &[],
+            Some(&prefix2),
+        )
+        .unwrap();
+        assert!(eventually(|| capture_visible(&sock, "fs-d").is_ok_and(|t| t.contains("READY"))));
+        send_key(&sock, "fs-d", "C-c").unwrap();
+        assert!(
+            eventually(|| read_exit_file(&exit_file(&prefix2, pid2)) == Some(130)),
+            "SIGINT death recorded as 130"
+        );
+        kill_server(&sock);
     }
 
     #[test]
