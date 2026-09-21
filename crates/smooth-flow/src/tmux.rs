@@ -250,8 +250,14 @@ pub fn pane_exit_status(socket: &str, session: &str) -> Result<Option<i32>> {
     Ok(parse_pane_dead(&s))
 }
 
+/// The exit code [`parse_pane_dead`] reports for a dead pane tmux has no
+/// status for (yet — see th-7ff336 in the engine's supervisor).
+pub const EXIT_UNKNOWN: i32 = -1;
+
 /// Parse `#{pane_dead}|#{pane_dead_status}`: `None` while the pane runs,
-/// `Some(status)` once it died (`-1` when tmux has no status for it).
+/// `Some(status)` once it died ([`EXIT_UNKNOWN`] when tmux has no status for
+/// it: the pane's pty closed before the server reaped the child, or it died
+/// by a signal).
 ///
 /// The separator is `|`, NOT a tab: under a non-UTF-8 locale (no `LANG` —
 /// a launchd-started daemon, a CI runner, an `env -i`) tmux rewrites every
@@ -264,7 +270,7 @@ pub fn parse_pane_dead(raw: &str) -> Option<i32> {
     if !dead {
         return None;
     }
-    Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(-1))
+    Some(parts.next().unwrap_or("").trim().parse::<i32>().unwrap_or(EXIT_UNKNOWN))
 }
 
 /// `(cols, rows)` of the pane.
