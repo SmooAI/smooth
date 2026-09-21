@@ -27,11 +27,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use smooth_tmux::detect::PaneState;
 
 use crate::harness::{FlowEventName, Manifest, PromptAs, ResumeMode, ScrapeRules, SessionIdMode, StateSource, PLACEHOLDERS};
+use crate::scrape::{PaneObservation, Verdict};
 
 /// The env var the fake agent reads its [`FakeSpec`] path from.
 pub const SPEC_ENV: &str = "SMOOTH_CONFORMANCE_SPEC";
@@ -177,6 +179,10 @@ pub struct FakeSpec {
     pub resume_argv: Vec<String>,
     /// `resume.mode = "resume_session"`.
     pub resume_session: bool,
+    /// `resume.mode = "continue_latest"`: `resume.argv` follows the launch
+    /// argv (a pasted prompt) or the bare binary (an argv prompt).
+    #[serde(default)]
+    pub resume_continue: bool,
     /// Env var names whose template carries `{session_id}` (th code's
     /// `SMOOTH_FLOW_SESSION`) — where a preassigned id arrives besides argv.
     #[serde(default)]
@@ -193,11 +199,26 @@ pub struct FakeSpec {
     pub log: PathBuf,
 }
 
+/// Does the manifest's `[state.scrape]` claim it can read `want` — a flat
+/// pattern list or a `[[state.scrape.rules]]` entry (th-e77603)?
+#[must_use]
+pub fn scrape_claims(m: &Manifest, want: Verdict) -> bool {
+    let sc = &m.state.scrape;
+    let flat = match want {
+        Verdict::Working => &sc.working,
+        Verdict::Idle => &sc.idle,
+        Verdict::NeedsYou => &sc.needs_you,
+        Verdict::UsageLimit => &sc.usage_limit,
+        Verdict::Error => &sc.error,
+    };
+    !flat.is_empty() || sc.rules.iter().any(|r| r.state == want)
+}
+
 /// Does the manifest claim it can surface a permission request?
 #[must_use]
 pub fn claims_permission(m: &Manifest) -> bool {
     match m.state.source {
-        StateSource::Scrape => !m.state.scrape.needs_you.is_empty(),
+        StateSource::Scrape => scrape_claims(m, Verdict::NeedsYou),
         StateSource::Hooks | StateSource::Native => {
             m.state.hooks.event_map.is_empty() || m.state.hooks.event_map.values().any(|v| *v == FlowEventName::NeedsYou)
         }
@@ -236,13 +257,13 @@ impl FakeSpec {
         };
         if mechanism == Mechanism::Scrape {
             let mut missing = Vec::new();
-            if screens.working.is_none() && !m.state.scrape.working.is_empty() {
+            if screens.working.is_none() && scrape_claims(m, Verdict::Working) {
                 missing.push("working");
             }
             if screens.idle.is_none() {
                 missing.push("idle");
             }
-            if screens.needs_you.is_none() && !m.state.scrape.needs_you.is_empty() {
+            if screens.needs_you.is_none() && scrape_claims(m, Verdict::NeedsYou) {
                 missing.push("needs_you");
             }
             if !missing.is_empty() {
@@ -268,6 +289,7 @@ impl FakeSpec {
             launch_argv: m.launch.argv.clone(),
             resume_argv: m.resume.argv.clone(),
             resume_session: m.resume.mode == ResumeMode::ResumeSession,
+            resume_continue: m.resume.mode == ResumeMode::ContinueLatest,
             session_id_env,
             learned_session_id: m.launch.session_id == SessionIdMode::Learned,
             boot: screens.boot.unwrap_or_else(|| DEFAULT_BOOT.to_string()),
@@ -287,6 +309,10 @@ impl FakeSpec {
 /// the real CLI paints. Every manifest: no screen may read as a usage limit,
 /// and only the needs_you screen may read as an approval (the engine scrapes
 /// both for hooks harnesses too).
+///
+/// Screens are judged as the engine sees them once the fake has painted
+/// them: the working screen just changed, every other screen has held still
+/// — so a rule's `quiet_ms` / `changed_within_ms` means what it does live.
 #[must_use]
 pub fn screen_problems(m: &Manifest, spec: &FakeSpec) -> Vec<String> {
     let rules = match ScrapeRules::compile(&m.state.scrape) {
@@ -296,7 +322,13 @@ pub fn screen_problems(m: &Manifest, spec: &FakeSpec) -> Vec<String> {
     let scrape = spec.mechanism == Mechanism::Scrape;
     let mut out = Vec::new();
     let mut check = |label: &str, text: &str, want: Option<PaneState>| {
-        let got = rules.detect(text).state;
+        let quiet_for = Some(if label == "working" { Duration::ZERO } else { SETTLED });
+        let got = rules
+            .detect_observation(&PaneObservation {
+                quiet_for,
+                ..PaneObservation::text(text)
+            })
+            .state;
         if let Some(want) = want {
             if got != want {
                 out.push(format!("the {label} screen scrapes as {got:?}, not {want:?}"));
@@ -309,10 +341,10 @@ pub fn screen_problems(m: &Manifest, spec: &FakeSpec) -> Vec<String> {
     check(
         "working",
         &spec.working,
-        (scrape && !m.state.scrape.working.is_empty()).then_some(PaneState::Working),
+        (scrape && scrape_claims(m, Verdict::Working)).then_some(PaneState::Working),
     );
     check("idle", &spec.idle, scrape.then_some(PaneState::Idle));
-    if scrape && !m.state.scrape.needs_you.is_empty() {
+    if scrape && scrape_claims(m, Verdict::NeedsYou) {
         check("needs_you", &spec.needs_you, Some(PaneState::AwaitingApproval));
     }
     out
@@ -392,6 +424,25 @@ fn match_from(template: &[String], argv: &[String], vars: &mut BTreeMap<String, 
 
 /// Match `argv` (after the binary) against a manifest argv template.
 ///
+/// How long a painted screen has held still when [`screen_problems`] judges
+/// it — past any `quiet_ms` a built-in rule asks for.
+const SETTLED: Duration = Duration::from_secs(60);
+
+/// A `continue_latest` resume argv: `resume` follows either the launch argv
+/// (the prompt was pasted, so the original command is kept) or nothing (the
+/// bare binary). `None` when `argv` does not end in `resume`.
+#[must_use]
+pub fn match_continue_argv(launch: &[String], resume: &[String], argv: &[String]) -> Option<Matched> {
+    let split = argv.len().checked_sub(resume.len())?;
+    if resume.is_empty() || match_argv(resume, &argv[split..]).is_none() {
+        return None;
+    }
+    if split == 0 {
+        return Some(Matched::default());
+    }
+    match_argv(launch, &argv[..split])
+}
+
 /// The inverse of [`crate::harness::render_argv`]: literals must appear in order,
 /// a placeholder element binds one token or is absent, and a bare `-flag`
 /// literal may be absent together with the placeholder after it. `None` when
@@ -510,11 +561,53 @@ needs_you = ["\\(y/n\\)"]
         );
         assert_eq!(th.session_id_env, vec!["SMOOTH_FLOW_SESSION".to_string()]);
         assert!(!th.resume_session);
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance");
         for (name, _) in BUILTIN {
             let m = builtin(name);
-            let spec = FakeSpec::for_manifest(&m, None, None, PathBuf::from("/l")).unwrap();
+            let fixture = Fixture::load(&fixtures, name).unwrap();
+            let spec = FakeSpec::for_manifest(&m, fixture.as_ref(), None, PathBuf::from("/l")).unwrap();
             assert!(screen_problems(&m, &spec).is_empty(), "{name}: {:?}", screen_problems(&m, &spec));
         }
+    }
+
+    #[test]
+    fn match_continue_argv_reads_a_continue_latest_resume() {
+        let launch = s(&["--model", "{model}"]);
+        let resume = s(&["--continue"]);
+        // Pasted prompt: the original command, then the flag.
+        let m = match_continue_argv(&launch, &resume, &s(&["--model", "m1", "--continue"])).unwrap();
+        assert_eq!(m.get("model"), Some("m1"));
+        // Argv prompt: the bare binary, then the flag.
+        assert!(match_continue_argv(&launch, &resume, &s(&["--continue"])).is_some());
+        // Not a resume: no trailing flag, or a launch the template cannot render.
+        assert!(match_continue_argv(&launch, &resume, &s(&["--model", "m1"])).is_none());
+        assert!(match_continue_argv(&launch, &resume, &s(&["--bogus", "--continue"])).is_none());
+        assert!(
+            match_continue_argv(&launch, &[], &s(&["--model", "m1"])).is_none(),
+            "an empty resume argv is never a continue"
+        );
+        // Every continue_latest built-in round-trips its own render.
+        for (name, _) in BUILTIN {
+            let m = builtin(name);
+            if m.resume.mode != ResumeMode::ContinueLatest {
+                continue;
+            }
+            let mut argv = render_argv(&m.launch.argv, &Vars::default());
+            argv.extend(render_argv(&m.resume.argv, &Vars::default()));
+            assert!(match_continue_argv(&m.launch.argv, &m.resume.argv, &argv).is_some(), "{name}: {argv:?}");
+        }
+    }
+
+    #[test]
+    fn scrape_claims_counts_flat_patterns_and_rules() {
+        let flat = Manifest::parse(SCRAPE).unwrap();
+        assert!(scrape_claims(&flat, Verdict::Working) && scrape_claims(&flat, Verdict::NeedsYou));
+        assert!(!scrape_claims(&flat, Verdict::UsageLimit));
+        // aider has no flat working / needs_you lists — only rules.
+        let aider = builtin("aider");
+        assert!(aider.state.scrape.working.is_empty() && aider.state.scrape.needs_you.is_empty());
+        assert!(scrape_claims(&aider, Verdict::Working) && scrape_claims(&aider, Verdict::Idle) && scrape_claims(&aider, Verdict::NeedsYou));
+        assert!(claims_permission(&aider), "a needs_you rule is a permission claim");
     }
 
     #[test]

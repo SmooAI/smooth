@@ -21,7 +21,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use smooth_flow::harness_conformance::{match_argv, FakeSpec, Mechanism, PERMISSION_MARKER, SPEC_ENV};
+use smooth_flow::harness_conformance::{match_argv, match_continue_argv, FakeSpec, Mechanism, PERMISSION_MARKER, SPEC_ENV};
 
 struct Fake {
     spec: FakeSpec,
@@ -175,7 +175,13 @@ fn main() -> ExitCode {
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Resume first: a resume argv is never a launch argv plus leftovers.
-    let resumed = if spec.resume_session { match_argv(&spec.resume_argv, &args) } else { None };
+    let resumed = if spec.resume_session {
+        match_argv(&spec.resume_argv, &args)
+    } else if spec.resume_continue {
+        match_continue_argv(&spec.launch_argv, &spec.resume_argv, &args)
+    } else {
+        None
+    };
     let is_resume = resumed.is_some();
     let Some(matched) = resumed.or_else(|| match_argv(&spec.launch_argv, &args)) else {
         log(&spec, "argv_mismatch", &json!({"argv": args}));

@@ -574,6 +574,21 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
                 ));
                 v
             }
+            // th-e77603: the CLI's own "most recent conversation here" — the
+            // flag follows the original command when the prompt was pasted
+            // (it never reached the argv), the bare binary when it was an
+            // argument (it must not be sent twice).
+            (ResumeMode::ContinueLatest, _) => {
+                let mut v = if paste { before.argv.clone() } else { vec![before.argv[0].clone()] };
+                v.extend(render_argv(
+                    &m.resume.argv,
+                    &Vars {
+                        cwd: Some(&before.worktree),
+                        ..Vars::default()
+                    },
+                ));
+                v
+            }
             _ => before.argv.clone(),
         };
         if relaunched.argv != want {
@@ -582,6 +597,9 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
         let parsed = rig
             .wait_log("argv", argv_seen + 1)
             .ok_or_else(|| format!("the resumed harness never started; pane: {}", rig.pane(&id)))?;
+        if m.resume.mode == ResumeMode::ContinueLatest && parsed["resume"] != true {
+            return Err("the relaunch argv did not parse as launch + the manifest's continue_latest resume.argv".into());
+        }
         if m.resume.mode == ResumeMode::ResumeSession && before.agent_session_id.is_some() {
             if parsed["resume"] != true {
                 return Err("the relaunch argv did not parse as the manifest's resume template".into());
@@ -606,6 +624,7 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
         }
         Ok(match (m.resume.mode, before.agent_session_id.is_some()) {
             (ResumeMode::ResumeSession, true) => format!("{} → steered turn idle", want[1..].join(" ")),
+            (ResumeMode::ContinueLatest, _) => format!("continue_latest {} → steered turn idle", m.resume.argv.join(" ")),
             _ => "relaunched the original command → steered turn idle".into(),
         })
     })();
