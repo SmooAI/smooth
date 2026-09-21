@@ -290,6 +290,14 @@ pub fn send_text(socket: &str, session: &str, text: &str) -> Result<()> {
     driver(socket, session).send(text)
 }
 
+/// Bracketed-paste `text` into the pane without submitting it.
+///
+/// # Errors
+/// When the session is gone or tmux fails.
+pub fn paste_text(socket: &str, session: &str, text: &str) -> Result<()> {
+    driver(socket, session).paste(text)
+}
+
 /// A named key (`Enter`, `Escape`, `C-c`, `1`).
 ///
 /// # Errors

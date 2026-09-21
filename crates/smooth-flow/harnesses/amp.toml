@@ -1,0 +1,67 @@
+# Amp (th-b00115). No command hooks: Amp runs TypeScript plugins (under Bun)
+# from ~/.config/amp/plugins/*.ts with amp.on('session.start' | 'agent.start' |
+# 'tool.call' | 'tool.result' | 'agent.end'). The smooth-agent plugin posts
+# session.start / agent.start / tool.result / agent.end to /api/flow/hooks with
+# the thread id as session_id and SMOOTH_FLOW_ID as flow_id. There is no
+# permission event, so needs_you comes from the pane.
+# References: `amp plugins show-docs` (Amp 0.0.1789416054, 2026-09-14: locations,
+# event map, AgentEndEvent.status done|error|cancelled); orca
+# src/main/amp/agent-status-plugin-source.ts, src/shared/agent-hook-listener/
+# providers/amp-events.ts:28-33 (agent.start/tool.* → working, agent.end → done);
+# cmux CLI/CMUXCLI+AmpExtensionSourcePart3.swift:17-121 and
+# .../AgentResumeArgv.swift:439-442 (`amp threads continue <id>`). Amp takes no
+# interactive prompt flag (orca: stdin-after-start), so the prompt is pasted.
+name = "amp"
+display_name = "Amp"
+
+[binary]
+names = ["amp"]
+prefer_paths = [".local/bin/amp", ".amp/bin/amp"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+argv = []
+prompt_as = "paste"
+session_id = "learned"
+
+[resume]
+argv = ["threads", "continue", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness amp  # harness/amp/plugin.ts → ~/.config/amp/plugins/<pkg>.ts"
+
+[state.hooks.event_map]
+"session.start" = "ignore"
+"agent.start" = "working"
+# Not tool.call: its handler MUST answer allow/reject/modify, and answering
+# `allow` would step around Amp's own permission rules. tool.result may return void.
+"tool.result" = "working"
+"agent.end" = "idle"
+
+[state.scrape]
+working = ["esc to cancel", "esc to interrupt"]
+# No `idle`: nothing past the sign-in wall has been captured, and a paste
+# prompt waits (up to 90 s) for a scraped idle when the manifest has one
+# (th-d2a1e4). An unverified marker would stall every launch; without one the
+# prompt is pasted after the fixed delay. Add it from a real capture.
+# Captured 2026-09-14 (fresh HOME): "No API key found. Starting login flow...
+# Would you like to log in to Amp? [(y)es, (n)o]".
+needs_you = ["would you like to log in to amp", "\\[\\(y\\)es, \\(n\\)o\\]", "allow once"]
+usage_limit = ["out of credits", "insufficient credit", "usage limit"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.config/agents/skills"
+mcp_config = "~/.config/amp/settings.json"

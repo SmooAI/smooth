@@ -1,0 +1,45 @@
+{
+    "version": 1,
+    "hooks": {
+        "sessionStart": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh sessionStart cursor-agent"
+            }
+        ],
+        "beforeSubmitPrompt": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh beforeSubmitPrompt cursor-agent"
+            }
+        ],
+        "postToolUse": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh postToolUse cursor-agent"
+            }
+        ],
+        "postToolUseFailure": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh postToolUseFailure cursor-agent"
+            }
+        ],
+        "afterShellExecution": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh afterShellExecution cursor-agent"
+            }
+        ],
+        "afterAgentResponse": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh afterAgentResponse cursor-agent"
+            }
+        ],
+        "stop": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh stop cursor-agent"
+            }
+        ],
+        "sessionEnd": [
+            {
+                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh sessionEnd cursor-agent"
+            }
+        ]
+    }
+}

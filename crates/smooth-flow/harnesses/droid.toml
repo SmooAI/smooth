@@ -1,0 +1,67 @@
+# Factory Droid (th-b00115). Claude-compatible hooks — the same event names and
+# a session_id + cwd on stdin — in ~/.factory/settings.json (or hooks.json).
+# Its PermissionRequest reply is not Claude's decision protocol, so the
+# manifest carries its own event_map: the ask is reported, not held.
+# References: orca src/main/droid/hook-service.ts:36-58 (events, incl.
+# PermissionRequest), orca src/shared/agent-hook-listener/providers/
+# droid-events.ts:23-53 (SessionStart fires idle; no Stop on interrupt),
+# orca src/shared/agent-session-resume.ts:277 + cmux
+# Packages/macOS/CMUXAgentLaunch/.../AgentResumeArgv.swift:469 (`droid --resume <id>`).
+# droid 0.218.2 --help: `droid [prompt...]` starts the REPL with a prompt,
+# `-r, --resume [sessionId]`; a session id can only be set in `droid exec`,
+# so it is learned from the first hook (SMOOTH_FLOW_ID binds it).
+name = "droid"
+display_name = "Factory Droid"
+
+[binary]
+names = ["droid"]
+prefer_paths = [".local/bin/droid", ".factory/bin/droid"]
+skip_path_patterns = ["cmux-cli-shims"]
+
+[launch]
+# droid 0.218 has no top-level --model (only `droid exec -m`).
+argv = ["{prompt}"]
+prompt_as = "argv"
+session_id = "learned"
+
+[resume]
+argv = ["--resume", "{session_id}"]
+mode = "resume_session"
+
+[state]
+source = "hooks"
+
+[state.hooks]
+install = "th pkg install <smooth-agent> --harness droid  # harness/droid/hooks.json key-merged into ~/.factory/settings.json"
+
+[state.hooks.event_map]
+SessionStart = "ignore"
+UserPromptSubmit = "working"
+PreToolUse = "working"
+PostToolUse = "working"
+Stop = "idle"
+SubagentStop = "ignore"
+PermissionRequest = "needs_you"
+Notification = "ignore"
+PreCompact = "ignore"
+SessionEnd = "ended"
+
+[state.scrape]
+working = ["esc to stop", "esc to interrupt"]
+idle = ["shift\\+tab to cycle modes", "\\? for help"]
+# Captured 2026-09-14 (droid 0.218.2, fresh HOME): the login wall is a menu.
+needs_you = ["please login with your factory account", "allow once", "do you want to", "1\\. yes"]
+usage_limit = ["usage limit", "out of credits", "rate limit"]
+error = ["api error", "fatal error"]
+
+[steer]
+method = "bracketed_paste"
+submit_key = "Enter"
+
+[kill]
+signal = "TERM"
+grace_ms = 3000
+
+[install]
+skills_dir = "~/.factory/skills"
+mcp_config = "~/.factory/mcp.json"
