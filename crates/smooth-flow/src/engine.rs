@@ -2542,6 +2542,7 @@ mod tests {
                     event: "SessionStart".into(),
                     session_id: "uuid-resume".into(),
                     cwd: None,
+                    flow_id: None,
                     payload: json!({ "source": "resume" }),
                 })
                 .unwrap();
@@ -3806,6 +3807,7 @@ quiet_ms = 300
             HookOutcome::Idle => "idle".into(),
             HookOutcome::NeedsYou(a) => format!("needs_you:{}", a.reason),
             HookOutcome::Ended => "ended".into(),
+            HookOutcome::Started => "started".into(),
             HookOutcome::None => "none".into(),
         }
     }
@@ -3854,7 +3856,8 @@ quiet_ms = 300
                 true,
             ),
             ("qwen", "SessionEnd", none(), "ended", true),
-            ("qwen", "SessionStart", none(), "none", true),
+            // th-8e3087: the Claude table's SessionStart settles a starting row.
+            ("qwen", "SessionStart", none(), "started", true),
             // Cursor Agent — camelCase; no gate hooks subscribed, so no needs_you.
             ("cursor-agent", "sessionStart", none(), "none", false),
             ("cursor-agent", "beforeSubmitPrompt", json!({"prompt": "hi"}), "working", false),

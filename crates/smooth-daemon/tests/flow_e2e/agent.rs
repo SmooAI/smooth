@@ -391,8 +391,12 @@ async fn native_harness_reports_its_own_turns() {
     let ask = d.wait_state(&id, "needs_you", WAIT).await;
     assert_eq!(ask["attention"]["reason"], "permission");
     assert_eq!(ask["attention"]["detail"], "run git push?");
-    assert!(ask["attention"]["request_id"].is_null(), "{ask}");
-    d.approve(&id, "none", "allow").await;
+    // th-3cabf6: a permission ask under the harness's own event name carries
+    // an id so a client can address it; unknown to the long-poll table, it
+    // falls through to the approval keystroke.
+    let request_id = ask["attention"]["request_id"].as_str().unwrap_or_default().to_string();
+    assert!(request_id.starts_with("hook-"), "{ask}");
+    d.approve(&id, &request_id, "allow").await;
     d.wait_state(&id, "working", WAIT).await;
     // The keystroke path typed `1`; the next steer line shows it (tmux can't
     // paste an empty buffer, so the line is `1x`).
