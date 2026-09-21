@@ -640,7 +640,14 @@ fn run_contract(m: &Manifest, manifest_text: Option<&str>) -> Report {
         let start = Instant::now();
         while s.pid.is_some_and(|p| proc::is_alive(p, s.pid_start)) {
             if start.elapsed() > Duration::from_secs(10) {
-                return Err(format!("pid {:?} still alive 10s after kill", s.pid));
+                // What is left says whose bug it is: a `Z` (exited, unreaped —
+                // the parent's job) is not a `S`/`T` (never got the signal).
+                let ps = std::process::Command::new("ps")
+                    .args(["-o", "pid=,ppid=,stat=,args=", "-p", &s.pid.unwrap_or_default().to_string()])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                return Err(format!("pid {:?} still alive 10s after kill; ps: {ps}", s.pid));
             }
             std::thread::sleep(POLL);
         }
