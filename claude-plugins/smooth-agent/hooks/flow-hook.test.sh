@@ -48,7 +48,7 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         with open(LOG, "a") as f:
-            f.write(json.dumps({"path": self.path, "body": json.loads(body)}) + "\n")
+            f.write(json.dumps({"path": self.path, "token": self.headers.get("X-Smooth-Flow-Hook-Token"), "body": json.loads(body)}) + "\n")
         ev = json.loads(body).get("event")
         if self.path != "/api/flow/hooks":
             self.send_response(404); self.end_headers(); return
@@ -167,6 +167,33 @@ if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '[.body.flow_id, .body.session_id] 
 : >"$LOG"
 out=$(echo "$PAYLOAD" | env -u SMOOTH_FLOW_ID bash "$HOOK" Stop 2>&1); rc=$?
 if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.body | has("flow_id")')" = "false" ] && [ "$rc" = 0 ]; then ok "no SMOOTH_FLOW_ID ⇒ no flow_id key"; else bad "flow_id absent (rc=$rc)"; fi
+
+# --- hook token (th-91d032) ---------------------------------------------------------
+TOK=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+printf '%s\n' "$TOK" >"$TMP/hook.token"; chmod 600 "$TMP/hook.token"
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/hook.token" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.token')" = "$TOK" ] && [ "$rc" = 0 ] && [ -z "$out" ]; then ok "the launch's token rides X-Smooth-Flow-Hook-Token"; else bad "token header (rc=$rc out='$out' log=$(tail -1 "$LOG"))"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.token')" = "null" ] && [ "$rc" = 0 ]; then ok "no token file → no header (an adopted harness still reports)"; else bad "tokenless post (rc=$rc)"; fi
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/no-such.token" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.token')" = "null" ] && [ "$rc" = 0 ] && [ -z "$out" ]; then ok "a missing token file never blocks the hook"; else bad "missing token file (rc=$rc out='$out')"; fi
+# A hostile token file cannot smuggle curl config (a second url, an output file).
+printf 'abc"\nurl = "http://127.0.0.1:1/x"\noutput = "%s/pwned"\n' "$TMP" >"$TMP/evil.token"
+: >"$LOG"
+out=$(echo "$PAYLOAD" | SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/evil.token" bash "$HOOK" Stop 2>&1); rc=$?
+if wait_log 1 && [ "$(tail -1 "$LOG" | jq -r '.path')" = "/api/flow/hooks" ] && tail -1 "$LOG" | jq -r '.token' | grep -Eq '^abc[0-9a-fA-F]*$' && [ ! -e "$TMP/pwned" ] && [ "$rc" = 0 ]; then ok "token file is reduced to hex — no curl-config injection"; else bad "token injection (rc=$rc log=$(tail -1 "$LOG"))"; fi
+# The token is never an argument: a curl shim records argv.
+mkdir -p "$TMP/shim"
+REAL_CURL="$(command -v curl)"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s/curl-argv"\nexec "%s" "$@"\n' "$TMP" "$REAL_CURL" >"$TMP/shim/curl"
+chmod +x "$TMP/shim/curl"
+: >"$TMP/curl-argv"
+echo decide >"$MODE"
+out=$(echo "$PAYLOAD" | PATH="$TMP/shim:$PATH" SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/hook.token" bash "$HOOK" PermissionRequest 2>/dev/null); rc=$?
+if [ "$rc" = 0 ] && [ -s "$TMP/curl-argv" ] && ! grep -q "$TOK" "$TMP/curl-argv" && [ "$(tail -1 "$LOG" | jq -r '.token')" = "$TOK" ] && [ -n "$out" ]; then ok "the token never appears in curl's argv (ps-safe)"; else bad "token in argv? rc=$rc argv=$(cat "$TMP/curl-argv")"; fi
 
 # --- PermissionRequest: decision passthrough --------------------------------------
 echo decide >"$MODE"

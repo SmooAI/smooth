@@ -468,6 +468,18 @@ impl FlowStore {
             conn.execute("ALTER TABLE sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0", [])
                 .context("add adopted")?;
         }
+        // th-91d032: SHA-256 of the per-launch hook token. Kept off
+        // [`Session`] on purpose — a row is broadcast to every client.
+        let has_hook_token = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'hook_token_hash'")?
+            .exists([])
+            .context("probe hook_token_hash column")?;
+        if !has_hook_token {
+            conn.execute("ALTER TABLE sessions ADD COLUMN hook_token_hash TEXT", [])
+                .context("add hook_token_hash")?;
+        }
+        conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
+            .context("index hook_token_hash")?;
         Ok(Self { conn })
     }
 
@@ -847,6 +859,30 @@ impl FlowStore {
         Ok(())
     }
 
+    /// Record (or with `None`, revoke) the hook token hash for `id`'s
+    /// current launch (th-91d032).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_hook_token_hash(&self, id: &str, hash: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE sessions SET hook_token_hash = ?2 WHERE id = ?1", params![id, hash])
+            .context("set hook_token_hash")?;
+        Ok(())
+    }
+
+    /// The session whose current launch was issued the hook token hashing to
+    /// `hash` (th-91d032). `None` for a revoked, rotated, or never-issued token.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn get_by_hook_token_hash(&self, hash: &str) -> Result<Option<Session>> {
+        self.conn
+            .query_row("SELECT * FROM sessions WHERE hook_token_hash = ?1 LIMIT 1", params![hash], Self::row_to_session)
+            .optional()
+            .context("get session by hook token")
+    }
+
     /// Bind a harness session id learned from its first hook to a row that
     /// launched without one (opencode / codex can't pre-assign ids).
     ///
@@ -860,21 +896,6 @@ impl FlowStore {
             )
             .context("set agent_session_id")?;
         Ok(())
-    }
-
-    /// The newest live agent session running in `worktree` that has no
-    /// harness session id yet — the row a first hook from that cwd binds to.
-    ///
-    /// # Errors
-    /// On a database failure.
-    pub fn find_bindable(&self, worktree: &str) -> Result<Option<Session>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM sessions WHERE worktree = ?1 AND agent_session_id IS NULL AND kind != 'shell'
-             AND state NOT IN ('done', 'dead') ORDER BY created_at DESC LIMIT 1",
-        )?;
-        stmt.query_row(params![worktree], Self::row_to_session)
-            .optional()
-            .context("find bindable session")
     }
 
     /// Append one event line to `session_id`'s stream (`flow.event`,

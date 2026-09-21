@@ -195,11 +195,16 @@ guessing idle.
 - **hooks** — the harness posts to `POST /api/flow/hooks` (`{harness, event,
 session_id, cwd, payload}`). `install` says how that gets wired
   (`th harness enable <x>`). `Session.state_source` reads `hooks` once the
-  first event lands, `inferred` (scraping) before.
+  first event lands, `inferred` (scraping) before. Every post must carry
+  `X-Smooth-Flow-Hook-Token`: the contents of the file the engine names in
+  the pane's `SMOOTH_FLOW_HOOK_TOKEN_FILE` (th-91d032). Without it, hooks for
+  a session SmoothFlow launched are refused. A new hook integration reads that
+  file (hex only) and sends the header, as `flow-hook.sh` does. See
+  SmoothFlow.md § Hook authentication.
 - **scrape** — pane scraping only; `state_source` stays `inferred`.
 - **native** — the harness is ours and reports its own turns. What it means
-  **today** for `th code`: the engine exports `SMOOTH_FLOW_SESSION=<id>` and
-  `SMOOTH_URL=<daemon>` into the pane; `th code` (crates/smooth-code
+  **today** for `th code`: the engine exports `SMOOTH_FLOW_SESSION=<id>`,
+  `SMOOTH_URL=<daemon>` and `SMOOTH_FLOW_HOOK_TOKEN_FILE` into the pane; `th code` (crates/smooth-code
   `FlowReporter`) POSTs `turn_start` before each `TaskStart` and `turn_end` on
   `TaskComplete`/`TaskError`, which the manifest's `event_map` turns into
   working/idle. No plugin, no hook install, no working/idle scraping.

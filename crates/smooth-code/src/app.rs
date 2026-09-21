@@ -1611,21 +1611,26 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 /// The SmoothFlow engine's hook endpoint, when this `th code` was launched by
 /// it (th-0f6126). The engine sets `SMOOTH_FLOW_SESSION` (the harness session
 /// id it pre-assigned) and `SMOOTH_URL` in the pane; every turn boundary is
-/// POSTed to `/api/flow/hooks` with the `th-code` manifest's event names.
+/// POSTed to `/api/flow/hooks` with the `th-code` manifest's event names,
+/// carrying the launch's hook token (th-91d032) from the file the engine
+/// names in `SMOOTH_FLOW_HOOK_TOKEN_FILE`.
 /// Fire-and-forget: the engine being gone must never break a chat.
 struct FlowReporter {
     url: Option<String>,
     session_id: String,
     cwd: Option<String>,
+    token: Option<String>,
 }
 
 impl FlowReporter {
     fn from_env(daemon_url: &str, cwd: Option<String>) -> Self {
         let session_id = std::env::var("SMOOTH_FLOW_SESSION").unwrap_or_default();
+        let token = std::env::var_os("SMOOTH_FLOW_HOOK_TOKEN_FILE").and_then(|p| read_hook_token(std::path::Path::new(&p)));
         Self {
             url: (!session_id.trim().is_empty()).then(|| format!("{}/api/flow/hooks", daemon_url.trim_end_matches('/'))),
             session_id,
             cwd,
+            token,
         }
     }
 
@@ -1644,9 +1649,20 @@ impl FlowReporter {
         let Some(url) = &self.url else { return };
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build();
         if let Ok(client) = client {
-            let _ = client.post(url).json(&self.body(event)).send().await;
+            let mut req = client.post(url).json(&self.body(event));
+            if let Some(t) = &self.token {
+                req = req.header("x-smooth-flow-hook-token", t);
+            }
+            let _ = req.send().await;
         }
     }
+}
+
+/// The hook token in `path`, hex only; `None` when unreadable or empty.
+fn read_hook_token(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let t: String = raw.chars().filter(char::is_ascii_hexdigit).take(128).collect();
+    (!t.is_empty()).then_some(t)
 }
 
 /// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s
@@ -2127,12 +2143,14 @@ mod exec_mode_tests {
             url: None,
             session_id: String::new(),
             cwd: None,
+            token: None,
         };
         assert!(off.url.is_none());
         let on = FlowReporter {
             url: Some("http://127.0.0.1:1/api/flow/hooks".into()),
             session_id: "fs-1".into(),
             cwd: Some("/w".into()),
+            token: Some("ab".into()),
         };
         let b = on.body("turn_start");
         assert_eq!(b["harness"], "th-code");
@@ -2140,5 +2158,21 @@ mod exec_mode_tests {
         assert_eq!(b["session_id"], "fs-1");
         assert_eq!(b["cwd"], "/w");
         assert!(b["payload"].is_object());
+        assert!(b.get("token").is_none(), "the token rides a header, never the body");
+    }
+
+    /// th-91d032: the token file is reduced to hex; missing or empty → none.
+    #[test]
+    fn hook_token_file_reads_hex_only() {
+        use super::read_hook_token;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("fs-1.token");
+        std::fs::write(&p, "c0ffee\n").unwrap();
+        assert_eq!(read_hook_token(&p).as_deref(), Some("c0ffee"));
+        std::fs::write(&p, "ab\r\nX-Q: z").unwrap();
+        assert_eq!(read_hook_token(&p).as_deref(), Some("ab"), "no header injection");
+        std::fs::write(&p, "\n").unwrap();
+        assert_eq!(read_hook_token(&p), None);
+        assert_eq!(read_hook_token(&tmp.path().join("missing")), None);
     }
 }

@@ -10,7 +10,7 @@
 #   daemon   `./.flow-e2e-addr` in the cwd (host:port or http://…), else
 #            `$HOME/.smooth/daemon.addr` — the same discovery flow-hook.sh uses.
 #   hooks    POST {harness:"claude-code", event, session_id, cwd, payload} to
-#            /api/flow/hooks, exactly like flow-hook.sh: SessionStart on boot,
+#            /api/flow/hooks with the pane's hook token, exactly like flow-hook.sh: SessionStart on boot,
 #            UserPromptSubmit → PreToolUse → PostToolUse → Stop per `/work`,
 #            PermissionRequest (long-poll; the decision body is printed) per
 #            `/perm`, SessionEnd per `/exit`.
@@ -43,9 +43,14 @@ case "$addr" in
     *) addr="http://$addr" ;;
 esac
 
+# The per-launch hook token the engine issued this pane (th-91d032), same as
+# flow-hook.sh: the env var names a 0600 file holding it.
+token="$(cat "${SMOOTH_FLOW_HOOK_TOKEN_FILE:-/nonexistent}" 2>/dev/null | tr -d '[:space:]')"
+
 # hook <Event> <payload-json> [timeout-s] — prints the daemon's reply body.
 hook() {
     curl -sS -m "${3:-5}" -X POST -H 'Content-Type: application/json' \
+        -H "X-Smooth-Flow-Hook-Token: $token" \
         --data-binary "{\"harness\":\"claude-code\",\"event\":\"$1\",\"session_id\":\"$sid\",\"cwd\":\"$PWD\",\"payload\":$2}" \
         "$addr/api/flow/hooks" 2>/dev/null
 }

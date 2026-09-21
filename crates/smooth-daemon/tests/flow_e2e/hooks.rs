@@ -32,12 +32,13 @@ async fn hooks_contract_per_event() {
     let cwd = d.ws.to_string_lossy().into_owned();
     let idle = d.wait_state(&id, "idle", WAIT).await;
     assert_eq!(idle["state_source"], "hooks", "fake-agent's SessionStart already flipped the source: {idle}");
+    let flow_id = id.as_str();
     let hook = |event: &'static str, payload: Value| {
         let d = &d;
         let agent = agent.clone();
         let cwd = cwd.clone();
         async move {
-            let (status, body) = d.hook("claude-code", event, &agent, Some(&cwd), payload).await;
+            let (status, body) = d.hook_as(flow_id, "claude-code", event, &agent, Some(&cwd), payload).await;
             assert_eq!(status, 200, "{event}: {body}");
             body
         }
@@ -138,10 +139,11 @@ async fn permission_request_long_polls_until_approved_each_decision_shape() {
     d.wait_state(&id, "idle", WAIT).await;
 
     for (decision, want_behavior) in [("deny", "deny"), ("allow", "allow"), ("allow_session", "allow")] {
-        let (dd, aa) = (d.url("/api/flow/hooks"), agent.clone());
+        let (dd, aa, tok) = (d.url("/api/flow/hooks"), agent.clone(), d.hook_token(&id));
         let post = tokio::spawn(async move {
             reqwest::Client::new()
                 .post(dd)
+                .header("x-smooth-flow-hook-token", tok)
                 .json(&json!({"harness":"claude-code","event":"PermissionRequest","session_id":aa,
                     "payload":{"tool_name":"Bash","tool_input":{"command":"git push"}}}))
                 .send()
@@ -162,7 +164,8 @@ async fn permission_request_long_polls_until_approved_each_decision_shape() {
         assert!(!post.is_finished(), "held open until a decision");
 
         // A Notification for the same prompt keeps the request_id.
-        d.hook(
+        d.hook_as(
+            &id,
             "claude-code",
             "Notification",
             &agent,
@@ -197,7 +200,7 @@ async fn permission_request_long_polls_until_approved_each_decision_shape() {
 }
 
 #[tokio::test]
-async fn hooks_are_unauthenticated_and_everything_else_is_gated() {
+async fn hooks_answer_without_the_daemon_token_and_everything_else_is_gated() {
     if !prereqs() {
         return;
     }
@@ -225,4 +228,49 @@ async fn hooks_are_unauthenticated_and_everything_else_is_gated() {
     let (status, v) = d.get("/api/flow/sessions/fs-nope/snapshot").await;
     assert_eq!(status, 404, "{v}");
     assert!(v["error"].is_string());
+}
+
+/// th-91d032, against a real daemon and a live agent: a hook without the
+/// session's token, with another session's token, or with a token from
+/// before a resume moves nothing, and a forged PermissionRequest is answered
+/// at once rather than held open for someone to approve.
+#[tokio::test]
+async fn forged_hooks_move_nothing_on_a_live_session() {
+    if !prereqs() {
+        return;
+    }
+    let d = Daemon::boot().await;
+    let a = d.new_session("fake-agent", None).await;
+    let b = d.new_session("fake-agent", None).await;
+    let (a_id, a_agent) = (a["id"].as_str().unwrap().to_string(), a["agent_session_id"].as_str().unwrap().to_string());
+    let b_id = b["id"].as_str().unwrap().to_string();
+    d.wait_state(&a_id, "idle", WAIT).await;
+    d.wait_state(&b_id, "idle", WAIT).await;
+    let b_token = d.hook_token(&b_id);
+    let old_a = d.hook_token(&a_id);
+
+    let perm = json!({"tool_name":"Bash","tool_input":{"command":"rm -rf ~"}});
+    for (what, token) in [("no token", None), ("B's token", Some(b_token.as_str())), ("a made-up token", Some("00ff"))] {
+        let started = std::time::Instant::now();
+        let (status, body) = d.hook_with(token, "claude-code", "PermissionRequest", &a_agent, None, perm.clone()).await;
+        assert_eq!((status, body), (200, json!({})), "{what}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{what}: answered at once, not held open");
+        let (_, _) = d.hook_with(token, "claude-code", "UserPromptSubmit", &a_agent, None, json!({})).await;
+        let s = d.session(&a_id).await;
+        assert_eq!(state(&s), "idle", "{what} moved A: {s}");
+        assert!(s["attention"].is_null(), "{what} put a prompt on A: {s}");
+    }
+
+    // Resume A: the token rotates, and the old one is dead.
+    d.kill(&a_id, true).await;
+    d.wait_state(&a_id, "idle", WAIT).await;
+    assert_ne!(d.hook_token(&a_id), old_a, "a resume issues a new token");
+    d.hook_with(Some(&old_a), "claude-code", "UserPromptSubmit", &a_agent, None, json!({})).await;
+    assert_eq!(state(&d.session(&a_id).await), "idle", "a replayed pre-resume token moved A");
+    // …while the current one still speaks.
+    d.hook_as(&a_id, "claude-code", "UserPromptSubmit", &a_agent, None, json!({})).await;
+    d.wait_state(&a_id, "working", WAIT).await;
+
+    d.kill(&a_id, false).await;
+    d.kill(&b_id, false).await;
 }
