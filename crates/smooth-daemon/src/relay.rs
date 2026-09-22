@@ -107,6 +107,14 @@ const CRED_POLL: Duration = Duration::from_secs(5);
 /// auth ack before we call it what it is — connected but NOT a peer — and
 /// re-dial with a refreshed token (th-37c286).
 const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a connected socket may go without a single inbound frame before
+/// we treat it as dead and re-dial. The relay pings every 30s
+/// (`rust/relay-ws` `HEARTBEAT_INTERVAL`), so silence this long means the pings
+/// stopped arriving: a half-open TCP leg after sleep or a network change. The
+/// daemon only ever WRITES in reply to a ping, so without this watchdog such a
+/// socket never errors and the daemon sits "connected" while the relay has
+/// long since dropped it as a peer — phones see it offline for days (th-6c500f).
+const RELAY_SILENCE_TIMEOUT: Duration = Duration::from_secs(75);
 /// How often a daemon whose device id another local process holds re-checks
 /// the lock (the other daemon may have quit).
 const IDENTITY_RECHECK: Duration = Duration::from_secs(30);
@@ -937,6 +945,16 @@ fn report_failed_end(status: &RelayStatusHandle, end: &ConnEnd) -> bool {
             );
             true
         }
+        ConnEnd::Silent => {
+            status.set(
+                RelayPhase::Offline,
+                format!(
+                    "The relay went silent (no heartbeat in {}s) — the socket was dead without saying so. Re-dialling.",
+                    RELAY_SILENCE_TIMEOUT.as_secs()
+                ),
+            );
+            false
+        }
         ConnEnd::Normal | ConnEnd::CredsChanged | ConnEnd::SignedOut => {
             if status.get().state != RelayPhase::Offline {
                 status.set(RelayPhase::Offline, "The relay connection dropped; reconnecting.");
@@ -1055,6 +1073,7 @@ pub fn spawn_relay(
                         device: &device,
                         kind,
                         ack_timeout: AUTH_ACK_TIMEOUT,
+                        silence_timeout: RELAY_SILENCE_TIMEOUT,
                     };
                     run_connection(stream, &ctx, &mut creds_rx).await
                 }
@@ -1115,6 +1134,9 @@ enum ConnEnd {
     CredsChanged,
     /// Signed out (or expired beyond renewal) — leave the relay and wait.
     SignedOut,
+    /// No inbound frame (not even the relay's heartbeat ping) for
+    /// [`RELAY_SILENCE_TIMEOUT`] — a silently dead socket (th-6c500f). Re-dial.
+    Silent,
 }
 
 /// What a live connection needs from the supervisor.
@@ -1129,6 +1151,9 @@ struct ConnCtx<'a> {
     kind: RelayKind,
     /// How long to wait for the relay's auth ack ([`AUTH_ACK_TIMEOUT`]).
     ack_timeout: Duration,
+    /// How long the socket may be silent before it counts as dead
+    /// ([`RELAY_SILENCE_TIMEOUT`]).
+    silence_timeout: Duration,
 }
 
 /// One live relay connection: pump relay ⇄ bridges until the socket ends, the
@@ -1152,6 +1177,7 @@ async fn run_connection(
         device,
         kind,
         ack_timeout,
+        silence_timeout,
     } = *ctx;
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
@@ -1162,6 +1188,9 @@ async fn run_connection(
     let mut link = Link::Authenticating;
     let ack_deadline = tokio::time::sleep(ack_timeout);
     tokio::pin!(ack_deadline);
+    // Reset on every inbound frame; firing means the heartbeat stopped.
+    let silence = tokio::time::sleep(silence_timeout);
+    tokio::pin!(silence);
 
     loop {
         tokio::select! {
@@ -1173,6 +1202,15 @@ async fn run_connection(
                      Refreshing the Smoo session and re-dialling."
                 );
                 end = ConnEnd::NoAck;
+                break;
+            }
+            () = &mut silence => {
+                tracing::warn!(
+                    %device,
+                    "relay: no frame from the relay in {silence_timeout:?} (it pings every 30s) — the socket is dead without \
+                     having said so, and phones see this daemon as offline. Re-dialling."
+                );
+                end = ConnEnd::Silent;
                 break;
             }
             () = creds_changed(creds) => {
@@ -1202,6 +1240,9 @@ async fn run_connection(
                 None => break,
             },
             msg = source.next() => {
+                if matches!(msg, Some(Ok(_))) {
+                    silence.as_mut().reset(tokio::time::Instant::now() + silence_timeout);
+                }
                 let text = match msg {
                     Some(Ok(Message::Text(t))) => t,
                     Some(Ok(Message::Close(frame))) => {
@@ -1272,7 +1313,7 @@ async fn run_connection(
     }
     // Dropping the map aborts every bridge task (Bridge::drop).
     bridges.clear();
-    if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut | ConnEnd::NoAck) {
+    if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut | ConnEnd::NoAck | ConnEnd::Silent) {
         // We're the ones leaving — say so, rather than letting the relay time us out.
         let _ = sink.send(Message::Close(None)).await;
     }
@@ -1774,6 +1815,10 @@ mod tests {
     }
 
     async fn run_against(addr: std::net::SocketAddr, h: &mut Harness, ack_timeout: Duration) -> ConnEnd {
+        run_against_with(addr, h, ack_timeout, Duration::from_secs(30)).await
+    }
+
+    async fn run_against_with(addr: std::net::SocketAddr, h: &mut Harness, ack_timeout: Duration, silence_timeout: Duration) -> ConnEnd {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();
         let ctx = ConnCtx {
             local_ws_url: "ws://127.0.0.1:1/ws",
@@ -1784,10 +1829,80 @@ mod tests {
             device: "daemon-test",
             kind: RelayKind::Flow,
             ack_timeout,
+            silence_timeout,
         };
         tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx))
             .await
             .expect("the connection must end on its own")
+    }
+
+    /// A fake relay that acks, sends `pings` heartbeats `every` apart, then goes
+    /// silent while keeping the socket open — the half-open socket th-6c500f
+    /// left a daemon stuck on for two days.
+    async fn relay_that_goes_quiet(pings: u32, every: Duration) -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<bool>) {
+        use axum::extract::ws::{Message as AxMsg, WebSocketUpgrade};
+        use axum::routing::get;
+        use axum::Router;
+
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let closed_tx = Arc::new(std::sync::Mutex::new(Some(closed_tx)));
+        let app = Router::new().route(
+            "/ws",
+            get(move |u: WebSocketUpgrade| {
+                let closed_tx = closed_tx.clone();
+                async move {
+                    u.on_upgrade(move |ws| async move {
+                        let (mut tx, mut rx) = ws.split();
+                        let _ = tx.send(AxMsg::Text(r#"{"type":"connected"}"#.into())).await;
+                        tokio::spawn(async move {
+                            for _ in 0..pings {
+                                tokio::time::sleep(every).await;
+                                if tx.send(AxMsg::Text(r#"{"type":"ping"}"#.into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                            // Silent from here on, but hold the sender so the socket stays open.
+                            std::future::pending::<()>().await;
+                            drop(tx);
+                        });
+                        let mut client_closed = false;
+                        while let Some(msg) = rx.next().await {
+                            if matches!(msg, Ok(AxMsg::Close(_))) {
+                                client_closed = true;
+                                break;
+                            }
+                        }
+                        if let Some(tx) = closed_tx.lock().unwrap().take() {
+                            let _ = tx.send(client_closed);
+                        }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, closed_rx)
+    }
+
+    #[tokio::test]
+    async fn heartbeats_keep_the_link_up_and_silence_takes_it_down() {
+        // Pings every 100ms for ~1s against a 400ms silence window: the link
+        // must outlive the window many times over, then drop once pings stop.
+        let (addr, closed) = relay_that_goes_quiet(10, Duration::from_millis(100)).await;
+        let mut h = harness();
+        let started = std::time::Instant::now();
+        let end = run_against_with(addr, &mut h, Duration::from_secs(5), Duration::from_millis(400)).await;
+        assert_eq!(end, ConnEnd::Silent);
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "heartbeats must reset the silence timer (ended after {:?})",
+            started.elapsed()
+        );
+        assert!(!report_failed_end(&h.status, &end), "silence is a dead socket, not a bad token");
+        assert_eq!(h.status.get().state, RelayPhase::Offline, "a silent link must never keep reading as online");
+        assert!(h.status.get().detail.contains("silent"));
+        assert!(closed.await.unwrap(), "the daemon closes the socket it gave up on");
     }
 
     #[tokio::test]
