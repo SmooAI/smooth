@@ -235,7 +235,10 @@ impl PaneExit {
         match self {
             Self::Code(c) => format!("exit {c}"),
             Self::Signal { signal: 0, .. } => "killed by a signal".to_string(),
-            Self::Signal { signal, .. } => format!("killed by signal {signal}"),
+            // The name, not only the number: numbers differ by OS (th-7be58a).
+            Self::Signal { signal, .. } => {
+                tmux::signal_name(signal).map_or_else(|| format!("killed by signal {signal}"), |name| format!("killed by {name} (signal {signal})"))
+            }
             Self::Unknown => "exit status unknown".to_string(),
             Self::Vanished => "process vanished".to_string(),
         }
@@ -2650,7 +2653,12 @@ mod tests {
         assert_eq!(PaneExit::from_code(130).exit_code(), Some(130), "a CLI's real 130 is kept in the row");
         assert_eq!(PaneExit::Signal { signal: 9, code: None }.exit_code(), None, "nothing invented");
         assert_eq!(PaneExit::Unknown.exit_code(), None, "never -1");
-        assert_eq!(PaneExit::from_code(137).describe(), "killed by signal 9");
+        assert_eq!(PaneExit::from_code(137).describe(), "killed by SIGKILL (signal 9)");
+        assert_eq!(
+            PaneExit::Signal { signal: 64, code: None }.describe(),
+            "killed by signal 64",
+            "no name for an uncommon one"
+        );
         assert_eq!(PaneExit::Signal { signal: 0, code: None }.describe(), "killed by a signal");
         assert_eq!(PaneExit::Unknown.describe(), "exit status unknown");
     }
