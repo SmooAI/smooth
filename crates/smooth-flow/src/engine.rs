@@ -83,6 +83,10 @@ pub struct EngineConfig {
     /// `http://host:port` of the daemon hosting this engine, for the
     /// `{daemon_url}` placeholder (a `th code` pane connects back to it).
     pub daemon_url: Option<String>,
+    /// Run the harness doctor in the background and report each harness's
+    /// `health` to pickers (th-51bf88). Off by default: it runs every
+    /// installed CLI's `--version`, which tests and scratch engines must not.
+    pub harness_doctor: bool,
 }
 
 impl EngineConfig {
@@ -97,6 +101,7 @@ impl EngineConfig {
             machine_label: short_hostname(),
             home: dirs_next::home_dir().unwrap_or_default(),
             daemon_url: None,
+            harness_doctor: false,
         }
     }
 }
@@ -318,7 +323,24 @@ struct Inner {
     hook_tokens: PathBuf,
     /// Where pane wrappers record their harness's exit code (th-7ff336).
     exit_dir: PathBuf,
+    /// `Some` when the host asked for the harness doctor (th-51bf88).
+    health: Option<Mutex<HealthCache>>,
 }
+
+/// The harness doctor's last verdicts (th-51bf88). Refreshed off-thread: a
+/// pass runs each installed CLI's `--version`, seconds in total, so nothing
+/// that answers a client ever waits on one.
+#[derive(Default)]
+struct HealthCache {
+    by_name: HashMap<String, crate::harness::HarnessHealth>,
+    checked_at: Option<Instant>,
+    running: bool,
+}
+
+/// How long a doctor pass stays fresh. A client asking for the harness list
+/// after that starts a new one in the background, so running a fix (say
+/// `th harness enable codex`) clears the badge within about this long.
+const HEALTH_TTL: Duration = Duration::from_secs(120);
 
 /// A live PTY bridge and the generation it was created under.
 struct Bridge {
@@ -726,6 +748,7 @@ impl Engine {
                 resolve_env: Mutex::new(None),
                 hook_tokens,
                 exit_dir,
+                health: cfg.harness_doctor.then(|| Mutex::new(HealthCache::default())),
             }),
         })
     }
@@ -821,9 +844,81 @@ impl Engine {
     /// On a store failure.
     pub fn harnesses(&self, all: bool) -> Result<Vec<HarnessInfo>> {
         let prefs = self.harness_prefs()?;
-        Ok(self
+        let mut infos = self
             .registry()
-            .infos(&prefs, all, &self.inner.home, &std::env::var_os("PATH").unwrap_or_default()))
+            .infos(&prefs, all, &self.inner.home, &std::env::var_os("PATH").unwrap_or_default());
+        if let Some(cache) = &self.inner.health {
+            let cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for info in &mut infos {
+                info.health = cache.by_name.get(&info.name).cloned();
+            }
+        }
+        self.refresh_harness_health();
+        Ok(infos)
+    }
+
+    /// Start a background harness-doctor pass unless one is running or the
+    /// last is still fresh (th-51bf88). The first starts with the first
+    /// request for the list (a client's `flow.hello`), so a daemon nobody
+    /// looks at runs no CLI. When a verdict changes, every client
+    /// gets `flow.harnesses` again, so a picker's badge appears or clears
+    /// without a reconnect. A no-op for engines without the doctor.
+    fn refresh_harness_health(&self) {
+        let Some(cache) = &self.inner.health else { return };
+        {
+            let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if c.running || c.checked_at.is_some_and(|t| t.elapsed() < HEALTH_TTL) {
+                return;
+            }
+            c.running = true;
+        }
+        let engine = self.clone();
+        let spawned = std::thread::Builder::new().name("flow-harness-doctor".into()).spawn(move || {
+            let resolve_env = engine.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let machine = match resolve_env {
+                // The conformance seam: judge the harnesses it resolves.
+                Some((home, path)) => crate::doctor::Machine {
+                    shell_path: path,
+                    ..crate::doctor::Machine::daemon(home)
+                },
+                None => crate::doctor::Machine::daemon(engine.inner.home.clone()),
+            };
+            let fresh: HashMap<_, _> = engine
+                .registry()
+                .all()
+                .iter()
+                .map(|m| (m.name.clone(), crate::doctor::diagnose(m, &machine).health()))
+                .collect();
+            engine.store_harness_health(fresh);
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "flow: could not start the harness doctor");
+            cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
+        }
+    }
+
+    /// Record a doctor pass; broadcast `flow.harnesses` if any verdict moved.
+    fn store_harness_health(&self, fresh: HashMap<String, crate::harness::HarnessHealth>) {
+        let Some(cache) = &self.inner.health else { return };
+        let changed = {
+            let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = c.by_name != fresh;
+            for (name, h) in &fresh {
+                if h.verdict != "works" && c.by_name.get(name) != Some(h) {
+                    tracing::info!(harness = %name, verdict = %h.verdict, reason = h.reason.as_deref().unwrap_or("-"), "flow: harness doctor");
+                }
+            }
+            c.by_name = fresh;
+            c.checked_at = Some(Instant::now());
+            c.running = false;
+            changed
+        };
+        if changed {
+            match self.harnesses(false) {
+                Ok(harnesses) => self.emit(ServerFrame::Harnesses { harnesses }),
+                Err(e) => tracing::warn!(error = %e, "flow: harness list after a doctor pass"),
+            }
+        }
     }
 
     /// `PUT /api/flow/harnesses/prefs`: replace `order` and/or `hidden`
@@ -2671,12 +2766,94 @@ mod tests {
             machine_label: "m".into(),
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
+            harness_doctor: false,
         })
         .unwrap()
     }
 
     fn reg() -> Registry {
         Registry::builtin()
+    }
+
+    fn health(verdict: &str, fix: Option<&str>) -> crate::harness::HarnessHealth {
+        crate::harness::HarnessHealth {
+            verdict: verdict.into(),
+            reason: fix.map(|_| "why".into()),
+            fix: fix.map(Into::into),
+        }
+    }
+
+    /// th-51bf88: a doctor verdict reaches every picker row, and a changed
+    /// one is broadcast as `flow.harnesses` so an open picker updates.
+    #[test]
+    fn doctor_verdicts_ride_the_harness_list_and_broadcast_on_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut db = EngineConfig::new(tmp.path().to_path_buf());
+        db.db_path = tmp.path().join("flow.db");
+        db.home = tmp.path().join("home");
+        db.harness_doctor = true;
+        let e = Engine::open(db).unwrap();
+        let cache = e.inner.health.as_ref().unwrap();
+        assert!(
+            cache.lock().unwrap().checked_at.is_none() && !cache.lock().unwrap().running,
+            "no pass before anyone asks"
+        );
+        // Judge against an empty PATH so no real CLI's --version runs.
+        e.set_resolve_env(tmp.path().join("home"), std::ffi::OsString::new());
+        assert!(
+            e.harnesses(true).unwrap().iter().all(|h| h.health.is_none()),
+            "the first answer never waits for the doctor"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while cache.lock().unwrap().checked_at.is_none() {
+            assert!(Instant::now() < deadline, "doctor pass never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let claude = e.harnesses(true).unwrap().into_iter().find(|h| h.name == "claude").unwrap();
+        let h = claude.health.expect("a finished pass covers every harness");
+        assert_eq!(h.verdict, "not_installed", "nothing on an empty PATH");
+        assert_eq!(
+            h.fix.as_deref(),
+            Some("curl -fsSL https://claude.ai/install.sh | bash"),
+            "the picker can say how to install it"
+        );
+
+        let mut rx = e.subscribe();
+        let mut verdicts: HashMap<String, crate::harness::HarnessHealth> =
+            e.harnesses(true).unwrap().into_iter().map(|h| (h.name, health("works", None))).collect();
+        verdicts.insert("codex".into(), health("degraded", Some("codex trust hooks")));
+        e.store_harness_health(verdicts.clone());
+        let codex = e.harnesses(true).unwrap().into_iter().find(|h| h.name == "codex").unwrap();
+        assert_eq!(codex.health.as_ref().map(|h| h.verdict.as_str()), Some("degraded"));
+        assert_eq!(codex.health.and_then(|h| h.fix).as_deref(), Some("codex trust hooks"));
+        // The first pass's own broadcast may land after `subscribe`; the
+        // latest frame is the one a picker ends up showing.
+        let mut last = None;
+        while let Ok(f) = rx.try_recv() {
+            if let ServerFrame::Harnesses { harnesses } = f {
+                last = Some(harnesses);
+            }
+        }
+        let last = last.expect("a changed verdict is broadcast as flow.harnesses");
+        let c = last.iter().find(|h| h.name == "codex").unwrap();
+        assert_eq!(c.health.as_ref().unwrap().verdict, "degraded");
+        e.store_harness_health(verdicts);
+        assert!(rx.try_recv().is_err(), "the same verdicts again broadcast nothing");
+        assert!(!cache.lock().unwrap().running);
+        assert!(
+            cache.lock().unwrap().checked_at.is_some_and(|t| t.elapsed() < HEALTH_TTL),
+            "a pass is fresh, so no new one starts"
+        );
+    }
+
+    #[test]
+    fn an_engine_without_the_doctor_reports_no_health() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        assert!(e.inner.health.is_none());
+        assert!(e.harnesses(true).unwrap().iter().all(|h| h.health.is_none()));
+        let v = serde_json::to_value(&e.harnesses(true).unwrap()[0]).unwrap();
+        assert!(v.get("health").is_none(), "absent, not null, so old clients see the same row: {v}");
     }
 
     #[test]

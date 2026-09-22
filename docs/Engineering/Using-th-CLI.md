@@ -93,8 +93,10 @@ just your shell's — including a `#!/usr/bin/env node` script whose `node` the
 app cannot see; hooks installed **and trusted** (Codex's "Hooks need review",
 a stale smooth-agent plugin without the flow hook, an OpenCode plugin without
 the generic `event` hook); whether the daemon reports go to is listening; and
-sign-in from env keys / credential files. Every manifest also passes the
-conformance contract in CI — see
+sign-in from env keys / credential files. The SmoothFlow daemon runs the same
+checks, and every picker badges a degraded harness with its fix
+([SmoothFlow.md § Harness list + prefs](../Architecture/SmoothFlow.md#harness-list--prefs), th-51bf88).
+Every manifest also passes the conformance contract in CI — see
 [Harness-Manifests.md § Supporting a harness](Harness-Manifests.md#supporting-a-harness--the-conformance-contract).
 
 `list`/`show` read the files directly (with the daemon's order/hide prefs

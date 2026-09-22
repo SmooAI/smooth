@@ -28,6 +28,8 @@ regex = "1"
 rand = "0.8"
 sha2 = "0.10"
 toml.workspace = true
+# th-51bf88: the harness doctor reads Codex's config.toml hook-trust table.
+toml_edit.workspace = true
 # PTY for streaming a `tmux attach` client's bytes to flow WS clients. Pinned:
 # the master/child API moved between minors before 0.9.
 portable-pty = "=0.9.0"
