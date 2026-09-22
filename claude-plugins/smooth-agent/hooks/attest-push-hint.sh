@@ -96,7 +96,7 @@ CHECKS=$(
     cd "$ROOT/scripts/ci" 2>/dev/null || exit 0
     for f in *.sh; do
         [[ -x "$f" ]] || continue
-        case "$f" in _* | *.test.sh | attest.sh) continue ;; esac
+        case "$f" in (_* | *.test.sh | attest.sh) continue ;; esac
         printf '%s ' "${f%.sh}"
     done
 )
