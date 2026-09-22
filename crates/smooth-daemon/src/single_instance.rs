@@ -235,10 +235,13 @@ mod tests {
     const OK: &str = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
     const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
     const FAST: Duration = Duration::from_millis(200);
+    /// Long enough for a refusal everywhere: Windows retries the SYN and
+    /// reports a refused loopback connect only after ~2 s (Unix: at once).
+    const REFUSAL: Duration = Duration::from_secs(8);
 
     #[tokio::test]
     async fn refused_is_dead_and_a_2xx_is_alive() {
-        assert_eq!(probe_once("127.0.0.1:1", FAST).await, Liveness::Dead);
+        assert_eq!(probe_once("127.0.0.1:1", REFUSAL).await, Liveness::Dead);
         let addr = scripted_server(vec![Some(OK)]).await;
         assert_eq!(probe_once(&addr, FAST).await, Liveness::Alive);
     }
@@ -272,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn refused_is_dead_without_a_second_probe() {
         let started = std::time::Instant::now();
-        assert!(!probe_liveness("127.0.0.1:1", FAST, Duration::from_secs(30), FAST).await);
-        assert!(started.elapsed() < Duration::from_secs(5), "a refusal is conclusive: no pause, no retry");
+        assert!(!probe_liveness("127.0.0.1:1", REFUSAL, Duration::from_secs(60), REFUSAL).await);
+        assert!(started.elapsed() < Duration::from_secs(30), "a refusal is conclusive: no pause, no retry");
     }
 }
