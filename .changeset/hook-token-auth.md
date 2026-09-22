@@ -1,5 +1,0 @@
----
-'@smooai/smooth': minor
----
-
-SmoothFlow: authenticate `POST /api/flow/hooks` with a per-launch hook token (th-91d032). Each agent launch gets a 256-bit token. It is delivered as a `0600` file named by `SMOOTH_FLOW_HOOK_TOKEN_FILE`, and only its SHA-256 is stored in `flow.db`. The token speaks for that one session, rotates on relaunch, and is revoked on kill, death and close. `flow-hook.sh`, the OpenCode plugin and `th code` present it in `X-Smooth-Flow-Hook-Token`. Tokenless hooks now reach only adopted sessions, and only for state: an adopted session's permission request shows as needs-you, but it can no longer be approved from SmoothFlow. Hooks through a browser or a proxy (`Origin`, `X-Forwarded-*`, `Tailscale-*`) are refused. The cwd-based session binding is gone; a session binds from the first hook that carries its token. `th harness doctor` now reports a plugin, Codex hook or OpenCode plugin that sends no token as degraded. To fix it, run `th harness enable claude-code` (or `codex` / `opencode`) to update it.

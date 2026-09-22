@@ -1,5 +1,0 @@
----
-'@smooai/smooth': patch
----
-
-The Smoo Relay link now follows the Smoo session instead of only the socket (th-37c286). A daemon that booted before sign-in (SmoothFlow spawns its child daemon at launch either way) could sit on a relay socket that was never registered as a peer: phones saw an empty peer list, which looked exactly like "Mac offline", until a daemon restart. The relay supervisor now watches the credentials file and dials as soon as a session appears, re-authenticates when the signed-in user changes (or the token rotates before the relay has acknowledged it), and leaves the relay on logout or on an expiry the heartbeat cannot renew. It also waits for the relay's `connected` auth ack: a socket without one after 15s is logged as `CONNECTED BUT UNAUTHENTICATED` and re-dialled, and is never reported as online. The link state (`signed_out`, `session_expired`, `connecting`, `authenticating`, `online`, `unauthenticated`, `auth_rejected`, `offline`, …) is served on `GET /api/flow/pairings` as `relay` and shown in SmoothFlow's Settings ▸ Phones.
