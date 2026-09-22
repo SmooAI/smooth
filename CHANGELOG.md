@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.53.4
+
+### Patch Changes
+
+- 80591b3: SmoothFlow pickers flag a harness that launches but won't fully work (th-51bf88). The daemon now runs the `th harness doctor` checks itself, in the background, and adds `health: {verdict, reason?, fix?}` to every row of `flow.hello` / `flow.harnesses`. When a verdict changes it broadcasts the list again. On macOS the New Session sheet labels such a harness "needs setup" and shows why: Codex's untrusted hooks, a stale smooth-agent plugin without the flow hook, a missing login. It also gives the one fix command to copy. The harness stays startable. The doctor's checks moved from `smooth-cli` into `smooth_flow::doctor` so the CLI and the daemon share one implementation. `th harness doctor` prints exactly what it did before. `SMOOTH_FLOW_HARNESS_DOCTOR=0` turns the daemon's pass off.
+- c0b4ae6: SmoothFlow 0.2.6. The New Session picker flags a harness that launches but won't fully work: Codex with untrusted hooks, a stale plugin without the SmoothFlow hook, a missing login. It labels it "needs setup", explains why, and gives the fix command to copy (th-51bf88). Crash cards name the signal with macOS numbering (th-7be58a). A daemon that is merely slow no longer loses the hook address to a second daemon (th-4af55f).
+
 ## 0.53.3
 
 ### Patch Changes
