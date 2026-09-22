@@ -833,6 +833,24 @@ pub struct HarnessInfo {
     /// `builtin` | `user` | `project` | `package`.
     #[serde(default)]
     pub origin: String,
+    /// What the harness doctor found, once the daemon has looked (th-51bf88).
+    /// Absent until then, and from engines that do not run it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HarnessHealth>,
+}
+
+/// The harness doctor's verdict on one harness, as a picker shows it
+/// (th-51bf88): enough to badge the row and say what to run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessHealth {
+    /// `works` | `degraded` | `not_installed`.
+    pub verdict: String,
+    /// Why it is not `works`: the first failing check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The one command that fixes `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if signature")]
@@ -977,6 +995,7 @@ impl Registry {
                     hidden: prefs.hidden.contains(&m.name),
                     order_index: i,
                     origin: m.origin.label().to_string(),
+                    health: None,
                 }
             })
             .collect()

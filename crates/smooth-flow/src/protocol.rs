@@ -756,6 +756,7 @@ mod tests {
                     order_index: 0,
                     reason: None,
                     origin: "builtin".into(),
+                    health: None,
                 }],
             },
             ServerFrame::Harnesses { harnesses: vec![] },

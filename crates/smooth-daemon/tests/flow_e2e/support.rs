@@ -176,6 +176,8 @@ impl Daemon {
             .env("SMOOTH_ALLOW_SECOND_DAEMON", "1")
             .env("SMOOTH_RELAY", "0")
             .env("SMOOTH_TAILSCALE_SERVE", "0")
+            // th-51bf88: no background `--version` of whatever CLIs the host has.
+            .env("SMOOTH_FLOW_HARNESS_DOCTOR", "0")
             .env("SMOOTH_WORKSPACE", &ws)
             .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
             .env("TERM", "xterm-256color")
