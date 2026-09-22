@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.53.2
+
+### Patch Changes
+
+- 54713ac: The `attest-push-hint` hook parses under macOS's /bin/bash 3.2 again. Bash 3.2 cannot parse a `case` pattern's closing `)` inside `$(…)`, so the hook died with a syntax error and blocked every agent's `git push`. The pattern now uses the leading-paren form `(pat)`, which both 3.2 and 5.x accept.
+- 1fcd85b: SmoothFlow crash cards name the signal and use this OS's numbering (th-7be58a). tmux 3.5 reports a pane's killing signal by name (`bus`, `usr1`), and the engine turned names into numbers with a Linux table, so on macOS a SIGBUS read "killed by signal 7" (macOS's SIGBUS is 10). The table is now per-platform, and the card says "killed by SIGBUS (signal 10)".
+
 ## 0.53.1
 
 ### Patch Changes
