@@ -3622,7 +3622,35 @@ async fn cmd_code(
     // regardless of which command triggered it.
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
 
-    if !daemon_health::probe(daemon_health::DEFAULT_PORT).await.is_up() {
+    // th-8b55de: find Big Smooth the way the rest of th code does —
+    // `$SMOOTH_URL`, then `~/.smooth/daemon.addr`, then :4400 — and export
+    // the answer, because the TUI reads `$SMOOTH_URL` alone. Probing only
+    // :4400 boot-looped every th code pane SmoothFlow launched (its daemon
+    // is on a random port) and missed the Big Smooth app's daemon entirely.
+    let explicit_url = std::env::var("SMOOTH_URL").ok().is_some_and(|u| !u.trim().is_empty());
+    let daemon = smooth_code::headless::daemon_url();
+    let found = daemon_health::probe_url(&format!("{daemon}/health")).await;
+    let plan = daemon_health::leader_plan(explicit_url, found.is_up());
+    if plan == daemon_health::Leader::FailExplicit {
+        anyhow::bail!(
+            "Big Smooth at $SMOOTH_URL={daemon} is not answering ({})\n  Start that daemon, or unset SMOOTH_URL to use the advertised one",
+            match &found {
+                daemon_health::Health::Down { reason } => reason.clone(),
+                daemon_health::Health::Foreign { status } => format!("HTTP {status}"),
+                daemon_health::Health::Up { .. } => "up".into(),
+            }
+        );
+    }
+    std::env::set_var(
+        "SMOOTH_URL",
+        if plan == daemon_health::Leader::Use {
+            daemon
+        } else {
+            format!("http://localhost:{}", daemon_health::DEFAULT_PORT)
+        },
+    );
+
+    if plan == daemon_health::Leader::Boot {
         // Pearl th-7840d8 — animated boot indicator (was a bare
         // `Starting Smooth...`). Daemonization happens in the
         // background via `th up`; the parent polls `/health` and
