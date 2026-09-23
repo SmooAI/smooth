@@ -89,8 +89,12 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
     let engine = Engine::open(smooth_flow::EngineConfig {
         daemon_url,
         harness_doctor: harness_doctor_enabled(std::env::var("SMOOTH_FLOW_HARNESS_DOCTOR").ok().as_deref()),
+        // th-145e6b: the New Session picker searches every checkout in $HOME.
+        repo_root: dirs_next::home_dir(),
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
+    // Index now, so the first New Session dialog has rows to offer.
+    engine.rescan_repos(false);
     drop(spawn_supervisor(engine.clone()));
     Ok((flow_router(engine.clone(), Some(token)), engine))
 }

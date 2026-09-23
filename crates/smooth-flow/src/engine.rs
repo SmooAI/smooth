@@ -87,6 +87,10 @@ pub struct EngineConfig {
     /// `health` to pickers (th-51bf88). Off by default: it runs every
     /// installed CLI's `--version`, which tests and scratch engines must not.
     pub harness_doctor: bool,
+    /// Index every git checkout under this directory for the New Session
+    /// directory picker (th-145e6b). `None` (the default) indexes nothing:
+    /// tests and scratch engines must not walk a real `$HOME`.
+    pub repo_root: Option<PathBuf>,
 }
 
 impl EngineConfig {
@@ -102,6 +106,7 @@ impl EngineConfig {
             home: dirs_next::home_dir().unwrap_or_default(),
             daemon_url: None,
             harness_doctor: false,
+            repo_root: None,
         }
     }
 }
@@ -325,6 +330,33 @@ struct Inner {
     exit_dir: PathBuf,
     /// `Some` when the host asked for the harness doctor (th-51bf88).
     health: Option<Mutex<HealthCache>>,
+    /// `Some` when the host asked for a repo index (th-145e6b).
+    repo_index: Option<Mutex<RepoIndex>>,
+}
+
+/// The repo index's scan state (th-145e6b). The rows live in flow.db, so a
+/// restarted daemon answers from the last scan while a new one runs.
+struct RepoIndex {
+    root: PathBuf,
+    scanning: bool,
+    scanned_at: Option<Instant>,
+}
+
+/// flow.db `config` key: when the repo index last completed a scan.
+const REPO_SCANNED_KEY: &str = "repo_index.scanned_at";
+
+/// How long a repo scan stays fresh. A query after that starts a new one in
+/// the background and answers from the current rows meanwhile.
+const REPO_INDEX_TTL: Duration = Duration::from_secs(600);
+
+/// `GET /api/flow/repos`: the picker's rows plus whether they are complete.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoList {
+    pub repos: Vec<crate::repos::Repo>,
+    /// A scan is running; more rows may appear.
+    pub scanning: bool,
+    /// At least one scan has completed (in this or an earlier daemon run).
+    pub indexed: bool,
 }
 
 /// The harness doctor's last verdicts (th-51bf88). Refreshed off-thread: a
@@ -749,6 +781,13 @@ impl Engine {
                 hook_tokens,
                 exit_dir,
                 health: cfg.harness_doctor.then(|| Mutex::new(HealthCache::default())),
+                repo_index: cfg.repo_root.map(|root| {
+                    Mutex::new(RepoIndex {
+                        root,
+                        scanning: false,
+                        scanned_at: None,
+                    })
+                }),
             }),
         })
     }
