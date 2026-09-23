@@ -2035,6 +2035,7 @@ mod tests {
             home: tmp.path().join("home"),
             daemon_url: None,
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));
@@ -2248,6 +2249,7 @@ mod tests {
             home: tmp.path().join("home"),
             daemon_url: None,
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));

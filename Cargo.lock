@@ -5402,6 +5402,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs-next",
+ "ignore",
  "portable-pty",
  "rand 0.8.5",
  "regex",

@@ -7,7 +7,7 @@
 //! calls the slow ones from `spawn_blocking`. The supervision tick
 //! ([`Engine::supervise_tick`]) is driven by a tokio interval in the host.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -835,6 +835,69 @@ impl Engine {
     /// On a store failure.
     pub fn touch_pairing(&self, device: &str, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
         self.with_store(|st| st.touch_pairing(device, at))
+    }
+
+    /// The directory picker's rows (th-145e6b): every indexed git checkout
+    /// matching `query`, best first, the fleet's own worktrees and projects
+    /// ranked up. Answers from the stored index at once and starts a
+    /// background rescan when the last one is stale. Empty for an engine
+    /// without an index.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn repos(&self, query: &str, limit: usize) -> Result<RepoList> {
+        let Some(index) = &self.inner.repo_index else {
+            return Ok(RepoList {
+                repos: Vec::new(),
+                scanning: false,
+                indexed: false,
+            });
+        };
+        self.rescan_repos(false);
+        let all = self.with_store(FlowStore::repos)?;
+        let preferred: HashSet<String> = self.list()?.into_iter().flat_map(|s| [s.worktree, s.project]).collect();
+        let repos = crate::repos::rank(&all, query, &preferred, limit).into_iter().cloned().collect();
+        let scanning = index.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scanning;
+        let indexed = !all.is_empty() || self.with_store(|st| st.get_config(REPO_SCANNED_KEY))?.is_some();
+        Ok(RepoList { repos, scanning, indexed })
+    }
+
+    /// Start a background repo scan unless one is running, or (without
+    /// `force`) the last is still fresh (th-145e6b). A no-op without an index.
+    pub fn rescan_repos(&self, force: bool) {
+        let Some(index) = &self.inner.repo_index else { return };
+        let root = {
+            let mut ix = index.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if ix.scanning || (!force && ix.scanned_at.is_some_and(|t| t.elapsed() < REPO_INDEX_TTL)) {
+                return;
+            }
+            ix.scanning = true;
+            ix.root.clone()
+        };
+        let engine = self.clone();
+        let spawned = std::thread::Builder::new().name("flow-repo-index".into()).spawn(move || {
+            let started = Instant::now();
+            let found = crate::repos::scan(&root, crate::repos::MAX_DEPTH);
+            let key = root.to_string_lossy().into_owned();
+            let stored = {
+                let mut st = engine.inner.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                st.replace_repos(&key, &found)
+                    .and_then(|()| st.set_config(REPO_SCANNED_KEY, &chrono::Utc::now().to_rfc3339()))
+            };
+            match stored {
+                Ok(()) => tracing::info!(root = %key, repos = found.len(), ms = started.elapsed().as_millis(), "flow: indexed git repos"),
+                Err(e) => tracing::warn!(error = %e, "flow: storing the repo index"),
+            }
+            if let Some(index) = &engine.inner.repo_index {
+                let mut ix = index.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                ix.scanning = false;
+                ix.scanned_at = Some(Instant::now());
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "flow: could not start the repo index");
+            index.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scanning = false;
+        }
     }
 
     /// The harness rows — `all = false` is the `flow.hello` list (hidden
@@ -2767,12 +2830,68 @@ mod tests {
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap()
     }
 
     fn reg() -> Registry {
         Registry::builtin()
+    }
+
+    /// th-145e6b: the directory picker's index — scanned in the background,
+    /// kept in flow.db, ranked per query, the fleet's own checkouts first.
+    #[test]
+    fn repo_index_scans_in_the_background_and_ranks_the_fleet_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        for (dir, branch) in [("dev/smooai/smooth", "main"), ("dev/smooai/smooai", "main"), ("dev/refs/cmux", "main")] {
+            std::fs::create_dir_all(home.join(dir).join(".git")).unwrap();
+            std::fs::write(home.join(dir).join(".git/HEAD"), format!("ref: refs/heads/{branch}\n")).unwrap();
+        }
+        let mut cfg = EngineConfig::new(tmp.path().to_path_buf());
+        cfg.db_path = tmp.path().join("flow.db");
+        cfg.home = home.clone();
+        cfg.repo_root = Some(home.clone());
+        let e = Engine::open(cfg).unwrap();
+        let first = e.repos("", 20).unwrap();
+        assert!(
+            !first.indexed || first.scanning || !first.repos.is_empty(),
+            "the first query starts a scan: {first:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let done = loop {
+            let r = e.repos("", 20).unwrap();
+            if !r.scanning && r.indexed {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "repo scan never finished");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(done.repos.len(), 3);
+        assert_eq!(e.repos("cmux", 20).unwrap().repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["cmux"]);
+
+        // A session working in smooai ranks it first on an empty query.
+        e.with_store(|st| {
+            st.create(NewSession {
+                kind: Some(SessionKind::Shell),
+                project: home.join("dev/smooai/smooai").to_string_lossy().into(),
+                worktree: home.join("dev/smooai/smooai").to_string_lossy().into(),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(e.repos("", 20).unwrap().repos[0].name, "smooai");
+
+        // Stored: a second engine on the same db answers before any scan.
+        let mut cfg = EngineConfig::new(tmp.path().to_path_buf());
+        cfg.db_path = tmp.path().join("flow.db");
+        cfg.repo_root = Some(home.join("nowhere"));
+        let again = Engine::open(cfg).unwrap().repos("smooth", 20).unwrap();
+        assert!(again.indexed && again.repos.iter().any(|r| r.name == "smooth"), "{again:?}");
+
+        let none = engine(tmp.path()).repos("smooth", 20).unwrap();
+        assert!(none.repos.is_empty() && !none.indexed && !none.scanning, "no index configured, nothing walked");
     }
 
     fn health(verdict: &str, fix: Option<&str>) -> crate::harness::HarnessHealth {
