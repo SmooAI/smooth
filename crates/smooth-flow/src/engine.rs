@@ -894,7 +894,14 @@ impl Engine {
         };
         self.rescan_repos(false);
         let all = self.with_store(FlowStore::repos)?;
-        let preferred: HashSet<String> = self.list()?.into_iter().flat_map(|s| [s.worktree, s.project]).collect();
+        // Normalised through `components()` so a session path spelled with
+        // other separators (or a trailing slash) still matches the scanned one.
+        let preferred: HashSet<String> = self
+            .list()?
+            .into_iter()
+            .flat_map(|s| [s.worktree, s.project])
+            .map(|p| Path::new(&p).components().collect::<PathBuf>().to_string_lossy().into_owned())
+            .collect();
         let repos = crate::repos::rank(&all, query, &preferred, limit).into_iter().cloned().collect();
         let scanning = index.lock().unwrap_or_else(std::sync::PoisonError::into_inner).scanning;
         let indexed = !all.is_empty() || self.with_store(|st| st.get_config(REPO_SCANNED_KEY))?.is_some();
