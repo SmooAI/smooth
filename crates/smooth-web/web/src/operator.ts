@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { historyImages, historyText, type HistoryMessage } from './history';
-import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
+import { DEFAULT_MIGRATION_KEY, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { normalizeTodos, type TodoItem } from './todos';
 
 /** The agent's live presence — what the face reflects. */
@@ -268,7 +268,14 @@ export function useOperator(): OperatorApi {
     const [turnActive, setTurnActive] = useState(false);
     const [streaming, setStreaming] = useState(false);
     const [status, setStatus] = useState<Status>({ connected: false, since: Date.now() });
-    const [modeId, setModeId] = useState<string>(() => localStorage.getItem('smooth.mode') ?? DEFAULT_MODE_ID);
+    const [modeId, setModeId] = useState<string>(() => {
+        const { id, markMigrated } = initialModeId(localStorage.getItem('smooth.mode'), localStorage.getItem(DEFAULT_MIGRATION_KEY) !== null);
+        if (markMigrated) {
+            localStorage.setItem('smooth.mode', id);
+            localStorage.setItem(DEFAULT_MIGRATION_KEY, '1');
+        }
+        return id;
+    });
     const [sessionCostUsd, setSessionCostUsd] = useState(0);
     const [modelCosts, setModelCosts] = useState<ModelCosts>({});
     const [conversations, setConversations] = useState<ConversationSummary[]>([]);

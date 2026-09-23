@@ -63,7 +63,9 @@ function RowBody({ row, active, glyph }: { row: ModelRow; active: boolean; glyph
                 ))}
             </span>
             <span className={`min-w-0 flex-1 truncate font-mono text-xs ${active ? 'text-(--color-th-teal)' : ''}`}>{row.model}</span>
-            <span className="shrink-0 tabular-nums text-xs text-(--color-muted-foreground)">{row.passRatePct.toFixed(1)}%</span>
+            <span className="shrink-0 tabular-nums text-xs text-(--color-muted-foreground)">
+                {row.passRatePct === null ? 'not yet benched' : `${row.passRatePct.toFixed(1)}%`}
+            </span>
             <span className="flex shrink-0 items-center gap-1 tabular-nums text-xs text-(--color-muted-foreground)">
                 {glyph && <span aria-hidden>{glyph}</span>}
                 {fmtPerPass(row.costPerPassUsd)}

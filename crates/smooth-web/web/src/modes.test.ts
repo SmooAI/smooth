@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { bestValueModel, badgesFor, costPerPass, deriveRows, fetchModelRows, topScorePct, type ModelScore } from './modes.ts';
+import {
+    DEFAULT_MODEL,
+    MODEL_ROWS,
+    bestValueModel,
+    badgesFor,
+    costPerPass,
+    deriveRows,
+    ensureDefaultRow,
+    fetchModelRows,
+    initialModeId,
+    modeById,
+    topScorePct,
+    type ModelScore,
+} from './modes.ts';
 
 // A trimmed fixture mirroring the real bench: two tied leaders, a cheap-but-not-top
 // value winner, a clean-safety model, a premium model with an inconclusive-driven
@@ -155,12 +168,49 @@ test('fetchModelRows derives ordered rows from the daemon catalog', async () => 
         () => fetchModelRows(),
     );
     assert.ok(rows);
-    // Same derivation as the bundled path — best-first.
-    assert.equal(rows![0].model, 'gpt-5.6-luna');
+    // Same derivation as the bundled path — best-first, behind the default when
+    // the catalog has not benched it yet (the fixture has no gpt-6-luna).
+    assert.equal(rows![0].model, DEFAULT_MODEL);
+    assert.equal(rows![0].passRatePct, null);
     assert.deepEqual(
-        rows!.map((r) => r.model),
+        rows!.slice(1).map((r) => r.model),
         deriveRows(fixture).map((r) => r.model),
     );
+});
+
+test('ensureDefaultRow puts an unbenched default first with no invented numbers', () => {
+    const rows = ensureDefaultRow(deriveRows(fixture), 'brand-new-default');
+    assert.equal(rows[0].model, 'brand-new-default');
+    assert.equal(rows[0].passRatePct, null, 'an unbenched model has no score, not 0%');
+    assert.equal(rows[0].costPerPassUsd, null, 'and no cost, not $0');
+    assert.deepEqual(rows[0].badges, []);
+    assert.equal(rows.length, fixture.length + 1);
+});
+
+test('ensureDefaultRow leaves a benched default where the bench put it', () => {
+    const derived = deriveRows(fixture);
+    assert.deepEqual(ensureDefaultRow(derived, 'gpt-5.6-luna'), derived);
+});
+
+test('the bundled rows always contain the default, so modeById can fall back to it', () => {
+    assert.ok(MODEL_ROWS.some((r) => r.model === DEFAULT_MODEL));
+    assert.equal(modeById('some-retired-model').id, DEFAULT_MODEL);
+});
+
+test('initialModeId: no saved choice starts on the default', () => {
+    assert.deepEqual(initialModeId(null, false, 'gpt-6-luna'), { id: 'gpt-6-luna', markMigrated: false });
+});
+
+test('initialModeId: a leftover previous default follows the new default once', () => {
+    assert.deepEqual(initialModeId('gpt-5.6-luna', false, 'gpt-6-luna'), { id: 'gpt-6-luna', markMigrated: true });
+});
+
+test('initialModeId: after the migration, re-picking the old default sticks', () => {
+    assert.deepEqual(initialModeId('gpt-5.6-luna', true, 'gpt-6-luna'), { id: 'gpt-5.6-luna', markMigrated: false });
+});
+
+test('initialModeId: a deliberate non-default choice is never touched', () => {
+    assert.deepEqual(initialModeId('deepseek-v4-pro', false, 'gpt-6-luna'), { id: 'deepseek-v4-pro', markMigrated: false });
 });
 
 test('fetchModelRows returns null on a non-ok response (caller falls back to bundled)', async () => {
