@@ -926,6 +926,74 @@ Things worth knowing before you use it:
   `start`/`complete`, releases planned → released via `release` — `state` in an
   update body is rejected by the API, so the CLI doesn't offer it.
 
+### Workflows (`smoo workflows`, alias `smoo workflow`)
+
+"When X happens, do Y" automations — SmooAI ADR-127, pearl th-b1068f. CLI
+twin of the canvas at `/apps/workflows` and the hosted MCP `workflow_*`
+tools, over the same api-prime routes (`/organizations/{orgId}/workflows…`).
+Accepts a user session or an org M2M key; the org needs the `workflows`
+product feature, and verbs are gated by `workflow.read` / `.write` /
+`.publish` / `.run`. `smoo workflows` is the canonical spelling;
+`smoo api workflows` is the same module mirrored under the API namespace.
+
+```bash
+smoo workflows list [--status draft|active|paused|archived] [--limit 50 --offset 0] [--json]
+smoo workflows show <id>                  # alias get: triggers in words, steps, draft validation, permissions
+smoo workflows versions <id>
+smoo workflows event-types                # what a trigger can listen for, with fields
+smoo workflows step-types                 # the step palette + the permission each needs to publish
+smoo workflows templates                  # built-in starters (same ids as the canvas)
+
+# Config as code — the definition JSON round-trips
+smoo workflows create --name "VIP welcome" --file def.json [--description …] [--concurrency allow|skip_if_active]
+smoo workflows create --name "VIP welcome" --from-template tag-added-send-email
+smoo workflows export <id> > def.json     # the draft (--published for the live version)
+smoo workflows update <id> --file def.json [--name …] [--description … | --clear-description]
+smoo workflows validate <id>              # the server's verdict on the draft; exits 1 when publish would refuse
+
+smoo workflows publish <id> [--enable]    # 422 → one line per issue, pinned to its node id; 403 → the missing permission
+smoo workflows enable <id> | pause <id>
+smoo workflows rm <id> [--dry-run | --yes]   # alias delete; cascades versions + run history
+
+smoo workflows run <id> [--contact <uuid> | --deal <uuid> | --entity type:id] [--input k=v …]
+                                          # PREVIEW — add --confirm to start it, --wait to follow it
+smoo workflows runs <id> [--status failed] [--event-id …]
+smoo workflows run-show <id> <runId> [--full]   # alias run-get: step timeline with resolved input/output/error
+smoo workflows cancel <id> <runId> [--yes]
+```
+
+Things worth knowing:
+
+- **Drafts may be invalid; only publish validates.** `create` / `update`
+  store any JSON object and print the server's live `validation` block, so a
+  half-built draft saves. `show` / `validate` report exactly what publish
+  would say — `validate` exits non-zero on problems, so it gates a script.
+  There is no client-side validator: the server's `workflow_def` is the one
+  judge (the same function the canvas and Smooth Operator use).
+- **`update --file` accepts a bare definition or a `show --json` dump** (its
+  `draftDefinition` is used). There is no `$EDITOR` verb on purpose (§1a) —
+  `export` → edit → `update --file` is the round-trip.
+- **Publishing does not change status.** A first publish leaves the workflow
+  `draft`; `enable` (or `publish --enable`) turns its triggers on. Moving
+  canvas nodes never mints a version — the version hash ignores `layout`, and
+  `show` compares draft vs published the same way.
+- **Permissions to publish** = `workflow.publish` + every permission the
+  steps exercise (`communications.email.send` for `send_email`, …). An M2M
+  key must pass `--on-behalf-of <userId>`; that member's grants are checked.
+- **`run` is preview-first** (CLI-Spec §3): it prints the published steps
+  that would execute and the request body. `--confirm` publishes the
+  `workflow.run_requested` event (202) — the run is pinned to the PUBLISHED
+  version, never the draft. `--wait` polls `runs?eventId=` until the run is
+  terminal (default 120 s; a `wait` step can hold a run for days) and prints
+  the timeline. `--contact` / `--deal` map to the catalog entity types
+  `crm_contact` / `crm_deal`, which is what "the triggering contact" defaults
+  resolve against. `--input k=v` values parse as JSON when they can. A
+  preview of a never-published workflow exits non-zero.
+- **Filters read the event catalog's field names.** `event-types` lists them:
+  a tag event carries `after.tagName` / `after.tagId`, and a deal's name is
+  `title` (`{{entity.title}}`). The CLI's starter templates use those names;
+  a filter on a field the event doesn't carry is `null` and never matches.
+
 ### Profile / products
 
 ```bash
