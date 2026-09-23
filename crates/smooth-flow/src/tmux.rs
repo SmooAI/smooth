@@ -368,32 +368,76 @@ pub fn parse_pane_dead(raw: &str) -> Option<PaneDeath> {
     })
 }
 
-/// A signal as tmux prints it (`9`, or `kill` / `SIGKILL`) as its number,
-/// `0` when it is not one of the common ones.
+/// The common signals as `(name, number)` on THIS platform. The numbers are
+/// not portable: `bus`, `usr1` and `usr2` are 7/10/12 on Linux but 10/30/31
+/// on macOS and the BSDs, so a Linux-only table made a macOS crash card read
+/// "signal 7" for a SIGBUS (th-7be58a). `iot` aliases `abrt` and is listed
+/// after it, so a number maps back to the usual name.
+#[cfg(target_os = "linux")]
+const SIGNALS: &[(&str, i32)] = &[
+    ("hup", 1),
+    ("int", 2),
+    ("quit", 3),
+    ("ill", 4),
+    ("trap", 5),
+    ("abrt", 6),
+    ("iot", 6),
+    ("bus", 7),
+    ("fpe", 8),
+    ("kill", 9),
+    ("usr1", 10),
+    ("segv", 11),
+    ("usr2", 12),
+    ("pipe", 13),
+    ("alrm", 14),
+    ("term", 15),
+    ("xcpu", 24),
+    ("xfsz", 25),
+];
+
+/// See the Linux table. macOS and the BSDs share this numbering.
+#[cfg(not(target_os = "linux"))]
+const SIGNALS: &[(&str, i32)] = &[
+    ("hup", 1),
+    ("int", 2),
+    ("quit", 3),
+    ("ill", 4),
+    ("trap", 5),
+    ("abrt", 6),
+    ("iot", 6),
+    ("fpe", 8),
+    ("kill", 9),
+    ("bus", 10),
+    ("segv", 11),
+    ("sys", 12),
+    ("pipe", 13),
+    ("alrm", 14),
+    ("term", 15),
+    ("xcpu", 24),
+    ("xfsz", 25),
+    ("usr1", 30),
+    ("usr2", 31),
+];
+
+/// A signal as tmux prints it (`9`, or `kill` / `SIGKILL`) as its number on
+/// this platform, `0` when it is not one of the common ones.
 #[must_use]
 pub fn signal_number(sig: &str) -> i32 {
     if let Ok(n) = sig.parse() {
         return n;
     }
     let name = sig.trim().to_ascii_lowercase();
-    match name.strip_prefix("sig").unwrap_or(&name) {
-        "hup" => 1,
-        "int" => 2,
-        "quit" => 3,
-        "ill" => 4,
-        "trap" => 5,
-        "abrt" | "iot" => 6,
-        "bus" => 7,
-        "fpe" => 8,
-        "kill" => 9,
-        "usr1" => 10,
-        "segv" => 11,
-        "usr2" => 12,
-        "pipe" => 13,
-        "alrm" => 14,
-        "term" => 15,
-        _ => 0,
-    }
+    let name = name.strip_prefix("sig").unwrap_or(&name);
+    SIGNALS.iter().find(|(n, _)| *n == name).map_or(0, |(_, num)| *num)
+}
+
+/// This platform's name for signal `n` (`SIGBUS`), when it is a common one.
+#[must_use]
+pub fn signal_name(n: i32) -> Option<String> {
+    SIGNALS
+        .iter()
+        .find(|(_, num)| *num == n)
+        .map(|(name, _)| format!("SIG{}", name.to_ascii_uppercase()))
 }
 
 /// `(cols, rows)` of the pane.
@@ -561,13 +605,39 @@ mod tests {
         assert_eq!(parse_pane_dead("1||kill"), Some(PaneDeath::Signal(9)));
         assert_eq!(parse_pane_dead("1||term"), Some(PaneDeath::Signal(15)));
         assert_eq!(parse_pane_dead("1||SIGHUP"), Some(PaneDeath::Signal(1)));
-        assert_eq!(parse_pane_dead("1||xcpu"), Some(PaneDeath::Signal(0)), "unknown name: still a signal death");
+        assert_eq!(parse_pane_dead("1||nosuch"), Some(PaneDeath::Signal(0)), "unknown name: still a signal death");
         assert_eq!(parse_pane_dead(""), None);
         // What a tab-joined format came back as under `LANG` unset.
         assert_eq!(parse_pane_dead("1_2"), None, "the old format read as alive — the bug");
         assert_eq!(parse_pane_size("120|40"), (120, 40));
         assert_eq!(parse_pane_size("garbage"), (80, 24));
         assert_eq!(parse_pane_size("100|"), (100, 24));
+    }
+
+    /// th-7be58a: tmux 3.5 prints signal NAMES, and the number behind a name
+    /// is platform-specific. A macOS SIGBUS is 10, not Linux's 7.
+    #[test]
+    fn signal_names_use_this_platforms_numbers() {
+        assert_eq!(signal_number("kill"), 9);
+        assert_eq!(signal_number("SIGTERM"), 15);
+        assert_eq!(signal_number(" iot "), 6);
+        assert_eq!(signal_number("11"), 11, "a number is taken as printed");
+        assert_eq!(signal_number("nosuch"), 0);
+        let (bus, usr1, usr2) = if cfg!(target_os = "linux") { (7, 10, 12) } else { (10, 30, 31) };
+        assert_eq!(signal_number("bus"), bus);
+        assert_eq!(signal_number("usr1"), usr1);
+        assert_eq!(signal_number("usr2"), usr2);
+        assert_eq!(signal_name(bus).as_deref(), Some("SIGBUS"));
+        assert_eq!(signal_name(6).as_deref(), Some("SIGABRT"), "abrt, not its iot alias");
+        assert_eq!(signal_name(9).as_deref(), Some("SIGKILL"));
+        assert_eq!(signal_name(64), None);
+        for (name, _) in SIGNALS {
+            assert_eq!(
+                signal_number(&signal_name(signal_number(name)).unwrap()),
+                signal_number(name),
+                "{name} round-trips"
+            );
+        }
     }
 
     #[test]

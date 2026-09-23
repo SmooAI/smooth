@@ -26,6 +26,29 @@ struct HarnessPicker: View {
     }
 }
 
+/// The doctor's one fix command under a harness picker, copyable (th-51bf88).
+/// SmoothFlow never runs it: installing, signing in or trusting hooks is the
+/// user's call.
+struct HarnessFixLine: View {
+    let fix: String
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(fix).font(Theme.mono(.caption)).textSelection(.enabled).lineLimit(2).truncationMode(.middle)
+            Button(copied ? "Copied" : "Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(fix, forType: .string)
+                copied = true
+            }
+            .buttonStyle(.link).font(.caption)
+            .accessibilityIdentifier("harness-fix-copy")
+        }
+        .accessibilityIdentifier("harness-fix")
+        .onChange(of: fix) { _, _ in copied = false }
+    }
+}
+
 /// ⌘N — `flow.new`. Zero friction (th-c103c1): pick a kind, hit Start.
 /// The pearl, Jira key, worktree and title are INFERRED from where the work
 /// already is — shown, not demanded — and every one of them is overridable
@@ -50,6 +73,11 @@ struct NewSessionSheet: View {
             HarnessPicker(store: app.store, kind: $kind)
             if let h = selected, !h.installed {
                 Text(h.reason ?? "not installed").font(.caption).foregroundStyle(Color(Theme.muted))
+                if let fix = h.health?.fix { HarnessFixLine(fix: fix) }
+            } else if let h = selected, h.isDegraded, let health = h.health {
+                // th-51bf88: still startable, but say what will be missing and how to fix it.
+                Text(health.reason ?? "needs setup").font(.caption).foregroundStyle(Color(Theme.amber))
+                if let fix = health.fix { HarnessFixLine(fix: fix) }
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }

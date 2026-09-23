@@ -2034,6 +2034,7 @@ mod tests {
             machine_label: "m".into(),
             home: tmp.path().join("home"),
             daemon_url: None,
+            harness_doctor: false,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));
@@ -2246,6 +2247,7 @@ mod tests {
             machine_label: "m".into(),
             home: tmp.path().join("home"),
             daemon_url: None,
+            harness_doctor: false,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));

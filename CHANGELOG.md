@@ -1,5 +1,25 @@
 # @smooai/smooth
 
+## 0.53.4
+
+### Patch Changes
+
+- 80591b3: SmoothFlow pickers flag a harness that launches but won't fully work (th-51bf88). The daemon now runs the `th harness doctor` checks itself, in the background, and adds `health: {verdict, reason?, fix?}` to every row of `flow.hello` / `flow.harnesses`. When a verdict changes it broadcasts the list again. On macOS the New Session sheet labels such a harness "needs setup" and shows why: Codex's untrusted hooks, a stale smooth-agent plugin without the flow hook, a missing login. It also gives the one fix command to copy. The harness stays startable. The doctor's checks moved from `smooth-cli` into `smooth_flow::doctor` so the CLI and the daemon share one implementation. `th harness doctor` prints exactly what it did before. `SMOOTH_FLOW_HARNESS_DOCTOR=0` turns the daemon's pass off.
+- c0b4ae6: SmoothFlow 0.2.6. The New Session picker flags a harness that launches but won't fully work: Codex with untrusted hooks, a stale plugin without the SmoothFlow hook, a missing login. It labels it "needs setup", explains why, and gives the fix command to copy (th-51bf88). Crash cards name the signal with macOS numbering (th-7be58a). A daemon that is merely slow no longer loses the hook address to a second daemon (th-4af55f).
+
+## 0.53.3
+
+### Patch Changes
+
+- a98ccdb: A daemon that is slow to answer is no longer treated as dead (th-4af55f). The `/health` probe used to count any error, including a 750 ms timeout, as "nobody's there". So a SmoothFlow daemon slow under load lost `~/.smooth/flow.addr` to a second daemon, and the single-instance check could start a daemon next to a slow older one. Now only a refused connection, or a non-2xx answer from whatever is listening, counts as dead immediately. A timeout triggers a second probe a second later with a 3 s timeout, and only a second failure counts as death.
+
+## 0.53.2
+
+### Patch Changes
+
+- 54713ac: The `attest-push-hint` hook parses under macOS's /bin/bash 3.2 again. Bash 3.2 cannot parse a `case` pattern's closing `)` inside `$(…)`, so the hook died with a syntax error and blocked every agent's `git push`. The pattern now uses the leading-paren form `(pat)`, which both 3.2 and 5.x accept.
+- 1fcd85b: SmoothFlow crash cards name the signal and use this OS's numbering (th-7be58a). tmux 3.5 reports a pane's killing signal by name (`bus`, `usr1`), and the engine turned names into numbers with a Linux table, so on macOS a SIGBUS read "killed by signal 7" (macOS's SIGBUS is 10). The table is now per-platform, and the card says "killed by SIGBUS (signal 10)".
+
 ## 0.53.1
 
 ### Patch Changes

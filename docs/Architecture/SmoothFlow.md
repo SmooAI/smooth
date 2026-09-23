@@ -374,14 +374,28 @@ pattern may name a `reset` capture for the resume time.
 ### Harness list + prefs
 
 `flow.hello` carries `harnesses: [{name, display_name, kind, installed,
-binary_path, state_source, order_index, reason?, origin}]` — the pickers'
-list, in the user's order, hidden ones dropped — and `flow.harnesses
+binary_path, state_source, order_index, reason?, origin, health?}]` — the
+pickers' list, in the user's order, hidden ones dropped — and `flow.harnesses
 {harnesses}` is broadcast when it changes. `GET /api/flow/harnesses` returns
 every manifest (hidden flagged); `PUT /api/flow/harnesses/prefs {order?,
 hidden?}` persists `{order, hidden}` in flow.db's `config` table and
 broadcasts. Every picker (macOS New-session sheet, fan-out candidates, the
 phones) renders exactly this list: an uninstalled harness is disabled with
 `reason`, never hidden, so the user learns what to install.
+
+**Degraded harnesses (th-51bf88).** `health: {verdict, reason?, fix?}` is the
+`th harness doctor` verdict (`works` | `degraded` | `not_installed`), computed
+by the daemon itself (`smooth_flow::doctor`, the same core the CLI prints).
+The daemon checks its OWN `PATH`, which is the app's when the app launched
+it, so nothing is simulated. A pass runs each installed CLI's `--version`, so
+it runs off-thread. The first pass starts with the first request for the list,
+so the first `flow.hello` has no `health`. When verdicts change,
+`flow.harnesses` is broadcast again, and a list requested more than two
+minutes after the last pass starts a new one. A picker badges a degraded
+harness ("needs setup"), shows `reason`, and offers `fix` to copy. The harness
+stays startable, because degraded means part of a session will be missing
+(hook-fed state, a login), not that it cannot run. SmoothFlow never runs the
+fix. `SMOOTH_FLOW_HARNESS_DOCTOR=0` turns the doctor off (test rigs).
 
 ## Hooks — state comes from hooks, scraping is the fallback
 

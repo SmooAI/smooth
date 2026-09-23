@@ -146,6 +146,17 @@ struct FanOut: Codable, Equatable, Identifiable {
 /// One harness the engine can launch (th-0f6126) — a row of
 /// `flow.hello.harnesses` / `flow.harnesses` / `GET /api/flow/harnesses`.
 /// Pickers never invent a kind: they render exactly this list.
+/// The harness doctor's verdict on one harness, as the daemon reports it
+/// (th-51bf88). Absent until the daemon's first pass has finished.
+struct HarnessHealth: Codable, Equatable {
+    /// `works` | `degraded` | `not_installed`
+    var verdict: String
+    /// Why it is not `works`: the first failing check.
+    var reason: String?
+    /// The one command that fixes `reason`.
+    var fix: String?
+}
+
 struct HarnessInfo: Codable, Equatable, Identifiable {
     var name: String
     var displayName: String
@@ -159,18 +170,20 @@ struct HarnessInfo: Codable, Equatable, Identifiable {
     /// Why `installed` is false.
     var reason: String?
     var origin: String
+    var health: HarnessHealth?
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
-        case name, kind, installed, hidden, reason, origin
+        case name, kind, installed, hidden, reason, origin, health
         case displayName = "display_name", binaryPath = "binary_path", stateSource = "state_source", orderIndex = "order_index"
     }
 
     init(name: String, displayName: String? = nil, kind: String? = nil, installed: Bool = true, binaryPath: String? = nil,
-         stateSource: String = "hooks", hidden: Bool = false, orderIndex: Int = 0, reason: String? = nil, origin: String = "builtin") {
+         stateSource: String = "hooks", hidden: Bool = false, orderIndex: Int = 0, reason: String? = nil, origin: String = "builtin",
+         health: HarnessHealth? = nil) {
         self.name = name; self.displayName = displayName ?? name; self.kind = kind ?? name; self.installed = installed
         self.binaryPath = binaryPath; self.stateSource = stateSource; self.hidden = hidden; self.orderIndex = orderIndex
-        self.reason = reason; self.origin = origin
+        self.reason = reason; self.origin = origin; self.health = health
     }
 
     init(from decoder: Decoder) throws {
@@ -185,10 +198,19 @@ struct HarnessInfo: Codable, Equatable, Identifiable {
         orderIndex = try c.decodeIfPresent(Int.self, forKey: .orderIndex) ?? 0
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         origin = try c.decodeIfPresent(String.self, forKey: .origin) ?? ""
+        health = try c.decodeIfPresent(HarnessHealth.self, forKey: .health)
     }
 
-    /// The picker label: the display name, and why it is greyed out when it is.
-    var pickerLabel: String { installed ? displayName : "\(displayName) — \(reason ?? "not installed")" }
+    /// Launchable, but the doctor found something that breaks part of a
+    /// session: no hook state, a login missing, an untrusted hook (th-51bf88).
+    var isDegraded: Bool { installed && health?.verdict == "degraded" }
+
+    /// The picker label: the display name, and why it is greyed out or
+    /// flagged when it is.
+    var pickerLabel: String {
+        if !installed { return "\(displayName) — \(reason ?? "not installed")" }
+        return isDegraded ? "\(displayName) — needs setup" : displayName
+    }
 }
 
 /// Pure helpers behind the Settings ▸ Harnesses pane (XCTested without UI).

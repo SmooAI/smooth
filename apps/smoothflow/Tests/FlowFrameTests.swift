@@ -34,6 +34,23 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertFalse(list[0].installed, "installed defaults to false")
     }
 
+    /// th-51bf88: the doctor's verdict rides each row once the daemon has
+    /// looked; a degraded harness stays launchable but is flagged.
+    func testHarnessHealth() throws {
+        let f = try decode(#"{"type":"flow.harnesses","harnesses":[{"name":"codex","display_name":"Codex","installed":true,"health":{"verdict":"degraded","reason":"2 of 5 SmoothFlow hooks are not trusted","fix":"codex"}},{"name":"claude","display_name":"Claude Code","installed":true,"health":{"verdict":"works"}},{"name":"aider","installed":false,"reason":"`aider` not found on PATH","health":{"verdict":"not_installed","fix":"uv tool install aider-chat"}},{"name":"pi","installed":true}]}"#)
+        guard case let .harnesses(h) = f else { return XCTFail("\(f)") }
+        XCTAssertTrue(h[0].isDegraded)
+        XCTAssertEqual(h[0].pickerLabel, "Codex — needs setup")
+        XCTAssertEqual(h[0].health?.fix, "codex")
+        XCTAssertFalse(h[1].isDegraded)
+        XCTAssertEqual(h[1].pickerLabel, "Claude Code")
+        XCTAssertFalse(h[2].isDegraded, "not installed is its own state, not degraded")
+        XCTAssertEqual(h[2].pickerLabel, "aider — `aider` not found on PATH")
+        XCTAssertEqual(h[2].health?.fix, "uv tool install aider-chat")
+        XCTAssertNil(h[3].health, "no verdict until the daemon's first pass")
+        XCTAssertFalse(h[3].isDegraded)
+    }
+
     func testSessionWithAttentionAndArgvAsJsonText() throws {
         let f = try decode(#"{"type":"flow.session","session":{"id":"fs-2","state":"needs_you","argv":"[\"claude\",\"--resume\",\"x\"]","attention":{"reason":"permission","detail":{"command":"git push"},"request_id":42,"resume_at":null}}}"#)
         guard case let .session(s) = f else { return XCTFail("\(f)") }

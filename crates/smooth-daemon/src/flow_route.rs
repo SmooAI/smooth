@@ -86,10 +86,18 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
 pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<(Router, Engine)> {
     let engine = Engine::open(smooth_flow::EngineConfig {
         daemon_url,
+        harness_doctor: harness_doctor_enabled(std::env::var("SMOOTH_FLOW_HARNESS_DOCTOR").ok().as_deref()),
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
     drop(spawn_supervisor(engine.clone()));
     Ok((flow_router(engine.clone(), Some(token)), engine))
+}
+
+/// Whether the daemon runs the harness doctor for the pickers' degraded
+/// badges (th-51bf88): on unless `SMOOTH_FLOW_HARNESS_DOCTOR` is `0`/`false`
+/// (a test rig that must not run real CLIs' `--version`).
+fn harness_doctor_enabled(env: Option<&str>) -> bool {
+    !env.map(str::trim).is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
 }
 
 /// Spawn the supervision tick for `engine` (rules 2–5 run here).
@@ -723,6 +731,7 @@ mod tests {
             machine_label: "m".into(),
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
+            harness_doctor: false,
         })
         .unwrap()
     }
@@ -806,6 +815,16 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn the_harness_doctor_is_on_unless_turned_off() {
+        assert!(harness_doctor_enabled(None));
+        assert!(harness_doctor_enabled(Some("1")));
+        assert!(harness_doctor_enabled(Some("")));
+        assert!(!harness_doctor_enabled(Some("0")));
+        assert!(!harness_doctor_enabled(Some(" false ")));
+        assert!(!harness_doctor_enabled(Some("FALSE")));
     }
 
     #[test]
