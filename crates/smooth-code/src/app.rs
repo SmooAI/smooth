@@ -677,7 +677,7 @@ fn toggle_session_sidebar(state: &mut AppState, state_arc: &Arc<Mutex<AppState>>
     // anyway, but the user can still eyeball old local transcripts).
     let arc = Arc::clone(state_arc);
     tokio::spawn(async move {
-        let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+        let url = crate::headless::daemon_url();
         let rows = match crate::client::list_remote_conversations(&url).await {
             Ok(convs) => convs
                 .into_iter()
@@ -746,7 +746,7 @@ fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState, state_
                         state.add_message(ChatMessage::system(format!("Resuming conversation: {title}…")));
                         let arc = Arc::clone(state_arc);
                         tokio::spawn(async move {
-                            let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+                            let url = crate::headless::daemon_url();
                             let fetched = crate::client::fetch_conversation_history(&url, &id).await;
                             let mut s = arc.lock().unwrap_or_else(|e| e.into_inner());
                             // Only hydrate if the user is still on this conversation.
@@ -909,7 +909,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
 /// `GET {SMOOTH_URL}/api/skills?cwd=…` → the daemon's skill catalog, or
 /// `None` on any failure so callers keep the local-discover fallback.
 async fn fetch_remote_skills() -> Option<Vec<smooth_cast::skills::Skill>> {
-    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let base = crate::headless::daemon_url();
     let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
     let resp = client
@@ -926,7 +926,7 @@ async fn fetch_remote_skills() -> Option<Vec<smooth_cast::skills::Skill>> {
 /// with, or `None` on any failure (daemon down, no credentials resolved) so
 /// the status bar keeps its honest "unknown" (pearl th-7630a7).
 async fn fetch_daemon_mode() -> Option<String> {
-    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let base = crate::headless::daemon_url();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
     let resp = client.get(format!("{}/api/mode", base.trim_end_matches('/'))).send().await.ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
@@ -948,7 +948,7 @@ async fn set_session_mode(conversation_id: Option<String>, mode: ExecMode) {
     let Some(conv) = conversation_id.filter(|c| !c.trim().is_empty()) else {
         return;
     };
-    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let base = crate::headless::daemon_url();
     let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() else {
         return;
     };
@@ -969,7 +969,7 @@ fn session_mode_body(session: &str, mode: ExecMode) -> serde_json::Value {
 /// failure (daemon down, timeout, off-contract JSON) so the caller keeps the
 /// locally-computed results. The route is ungated by design — no token.
 async fn fetch_remote_mentions(query: &str, cwd: &str) -> Option<Vec<crate::autocomplete::AutocompleteResult>> {
-    let base = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let base = crate::headless::daemon_url();
     let client = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build().ok()?;
     let resp = client
         .get(format!("{}/search", base.trim_end_matches('/')))
@@ -1515,19 +1515,26 @@ fn handle_normal_mode(key: event::KeyEvent, state: &mut AppState) {
 /// Run startup health checks and return the status plus any warning messages.
 ///
 /// Checks:
-/// 1. Big Smooth API reachability (`http://localhost:4400/health`)
+/// 1. Big Smooth reachability, at the daemon th code actually talks to
+///    ([`crate::headless::daemon_url`]: `$SMOOTH_URL`, then
+///    `~/.smooth/daemon.addr`, then :4400). This probed a hard-wired :4400
+///    and warned "not running" inside every SmoothFlow pane, whose daemon
+///    is on another port (th-8b55de).
 /// 2. LLM providers config (`~/.smooth/providers.json`)
-/// 3. Database existence (`~/.smooth/smooth.db`)
+///
+/// (A third check warned when the legacy `~/.smooth/smooth.db` was missing.
+/// Nothing reads that file any more, so the warning only ever misled.)
 async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
 
-    // 1. Check Big Smooth API
+    // 1. Check Big Smooth
     let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().ok();
 
     if let Some(client) = &client {
-        match client.get("http://localhost:4400/health").send().await {
+        let base = crate::headless::daemon_url();
+        match client.get(format!("{base}/health")).send().await {
             Ok(r) if r.status().is_success() => {}
-            _ => warnings.push("Big Smooth API not running. Starting...".into()),
+            _ => warnings.push(format!("Big Smooth is not answering at {base} — start it with `th up`")),
         }
     }
 
@@ -1535,12 +1542,6 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
     if providers_path.as_ref().is_none_or(|p| !p.exists()) {
         warnings.push("No LLM providers configured. Run: /model to select one, or th model login <provider>".into());
-    }
-
-    // 3. Check database
-    let db_path = dirs_next::home_dir().map(|h| h.join(".smooth/smooth.db"));
-    if db_path.as_ref().is_none_or(|p| !p.exists()) {
-        warnings.push("Database not found. Will be created on first use.".into());
     }
 
     let status = if warnings.is_empty() {
@@ -1681,7 +1682,7 @@ async fn run_agent_streaming(
     use crate::client::{BigSmoothClient, ServerEvent};
     use crate::state::{ChatRole, ToolCallState, ToolStatus};
 
-    let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let url = crate::headless::daemon_url();
     let mut client = BigSmoothClient::new(&url);
     // Resume this TUI session's conversation. A client is built per turn, so
     // without this the daemon opens a fresh conversation every message and the
