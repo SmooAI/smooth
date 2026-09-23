@@ -1,5 +1,31 @@
 # @smooai/smooth
 
+## 0.53.7
+
+### Patch Changes
+
+- 940b6f0: Operator chat works again: `smoo api smooth-operator chat` and the MCP `ask_business` tool send `agentId` on `create_conversation_session`. Both failed on every org with `VALIDATION_ERROR: missing 'agentId'` before the turn started.
+
+  `agentId` is required by the SEP Request schema. `smooth-operator-server` used to make one up when it was missing, and th-68897a moved that check to the boundary, so `handle_create_session` now rejects an absent or blank id. This hand-rolled WS client relied on the old behaviour; the dashboard never did, which is why the UI kept working.
+
+  The frame now carries a fresh uuid, the same thing the dashboard sends (`agentId: agentSlug ?? crypto.randomUUID()`). It is a correlation id, not an `agents.id`: copilot-ws, the pod behind `smooth-operator.smoo.ai`, builds its storage with `with_builtin_session_agent()`, which binds every session to the org's built-in "Smooth Operator" row whatever uuid arrives. The token endpoint returns no agent id, and none is needed. Frame construction moved into a pure `create_frame` so the regression is covered by unit tests.
+
+## 0.53.6
+
+### Patch Changes
+
+- 39ab528: Stop now stops Big Smooth, and you can steer a running turn (th-74ba1f). The web and desktop clients sent `{action:'interrupt'}`, which the engine never supported, so Stop was always a no-op: the turn ran to completion and, on 2026-09-23, sent a second iMessage after Stop was pressed. The SPA also treated the engine's `UNSUPPORTED_ACTION` reply as the end of the turn, so the UI and the server disagreed about whether anything was running. The clients now send the engine's `cancel`, treat its `cancelled` event as terminal, only end a turn on events that carry that turn's `requestId`, and fall back to ending it locally after 10s if no reply comes. Phones already installed keep working over Smoo Relay because the daemon's relay bridge rewrites their `interrupt` to `cancel`. A message typed mid-turn now offers a choice. **Queue** sends it after the turn, as before. **Steer** (the button, ⌘/Ctrl+Enter, or "Steer now" on a queued chip) cancels the running turn, waits for it to actually end, and sends the message right away so it redirects the work.
+
+  iMessage no longer double-sends (th-646c22). A send that timed out or failed ambiguously used to report failure even when Messages had delivered it, so the model retried. Those sends are now checked against chat.db (read-only) and reported truthfully as sent, not sent, or unknown. An identical text to the same chat within 2 minutes is refused unless the call passes `allow_duplicate: true`.
+
+  The daemon now logs every tool call at INFO (th-5d48ca): name, call id, argument key names, duration and outcome. It never logs argument values or results.
+
+## 0.53.5
+
+### Patch Changes
+
+- 3f81367: gpt-6-luna is the default model (th-3030cd). It landed on llm.smoo.ai on 2026-09-22 at under half gpt-5.6-luna's price ($0.11/$0.57 vs $0.23/$1.38 per M tokens) and passes the tool-calling and temperature-0 probe. The `smooth-coding`/`smooth-default` aliases, `th operator serve`, and the web model picker now default to it, and gpt-6-astra joins the premium tier. The picker always lists the default model, even before its first bench run: such a row reads "not yet benched" instead of carrying an invented score or cost. A saved choice of the previous default (gpt-5.6-luna) follows the new default once; re-picking gpt-5.6-luna after that sticks.
+
 ## 0.53.4
 
 ### Patch Changes
