@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { dequeue, enqueue, queuedLabel, removeAt, submitAction, type QueuedMessage } from './message-queue.ts';
+import { dequeue, enqueue, queuedLabel, removeAt, submitAction, takeAt, type QueuedMessage } from './message-queue.ts';
 
 const msg = (id: string, text = 'hi'): QueuedMessage => ({ id, text, attachments: [] });
 
@@ -71,4 +71,23 @@ test('queuedLabel falls back to an attachment count for text-only sends', () => 
         }),
         '2 attachments',
     );
+});
+
+test('Steer mid-turn with content steers instead of queueing (th-74ba1f)', () => {
+    assert.equal(submitAction(true, true, true), 'steer');
+});
+
+test('Steer when idle is just a send, and an empty Steer is a noop', () => {
+    assert.equal(submitAction(false, true, true), 'send');
+    assert.equal(submitAction(true, false, true), 'noop');
+});
+
+test('takeAt pulls one queued message for "Steer now", keeping the rest in order', () => {
+    const got = takeAt([msg('a'), msg('b'), msg('c')], 1);
+    assert.equal(got?.item.id, 'b');
+    assert.deepEqual(
+        got?.rest.map((m) => m.id),
+        ['a', 'c'],
+    );
+    assert.equal(takeAt([msg('a')], 5), null);
 });

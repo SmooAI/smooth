@@ -11,7 +11,7 @@
 //!
 //! Uniform env contract passed through to every engine (inherited from the
 //! current process): `SMOOAI_GATEWAY_URL`, `SMOOAI_GATEWAY_KEY`,
-//! `SMOOTH_PERSONA`, `SMOOAI_MODEL` (default `gpt-5.6-luna`). The launcher
+//! `SMOOTH_PERSONA`, `SMOOAI_MODEL` (default `gpt-6-luna`). The launcher
 //! sets the right per-engine bind var from `--port`.
 
 use std::path::PathBuf;
@@ -40,8 +40,9 @@ pub enum Lang {
 /// Default agent model when `SMOOAI_MODEL` is unset.
 // th-170c67: was deepseek-v4-flash. Tracks the `smooth-coding` alias and
 // the Settings picker's Flash slot — 89.3% vs 75.0% on the 3-trial agentic
-// bench, at about half the cost per passing scenario.
-const DEFAULT_MODEL: &str = "gpt-5.6-luna";
+// bench, at about half the cost per passing scenario. th-3030cd: now
+// gpt-6-luna, following the alias (same tier, under half gpt-5.6-luna's price).
+const DEFAULT_MODEL: &str = "gpt-6-luna";
 /// Default bind port (matches `scripts/operator-serve.sh`).
 const DEFAULT_PORT: u16 = 8799;
 /// Python's upstream-hardcoded bind port.
