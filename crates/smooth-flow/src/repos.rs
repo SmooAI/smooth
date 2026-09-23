@@ -291,15 +291,17 @@ mod tests {
         git_repo(home, "dotfiles");
 
         let repos = scan(home, MAX_DEPTH);
-        let found: Vec<&str> = repos.iter().map(|r| r.path.strip_prefix(&*home.to_string_lossy()).unwrap()).collect();
-        assert_eq!(
-            found,
-            vec!["/dev/detached", "/dev/smooai/smooai", "/dev/smooai/smooth", "/dev/smooai/smooth-th-1-fix"]
-        );
+        // Compared as paths, not strings: Windows spells them with `\\`.
+        let found: Vec<PathBuf> = repos.iter().map(|r| PathBuf::from(&r.path)).collect();
+        let want: Vec<PathBuf> = ["dev/detached", "dev/smooai/smooai", "dev/smooai/smooth", "dev/smooai/smooth-th-1-fix"]
+            .iter()
+            .map(|rel| home.join(rel))
+            .collect();
+        assert_eq!(found, want);
 
         let wt = repos.iter().find(|r| r.name == "smooth-th-1-fix").unwrap();
         assert_eq!(wt.branch.as_deref(), Some("th-1-fix"));
-        assert_eq!(wt.main.as_deref(), Some(&*home.join("dev/smooai/smooth").to_string_lossy()));
+        assert_eq!(wt.main.as_deref().map(Path::new), Some(home.join("dev/smooai/smooth").as_path()));
         let main = repos.iter().find(|r| r.name == "smooth").unwrap();
         assert_eq!((main.branch.as_deref(), main.main.as_deref()), (Some("main"), None));
         assert_eq!(repos.iter().find(|r| r.name == "detached").unwrap().branch, None);
