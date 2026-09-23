@@ -28,6 +28,10 @@
 //!   statement is a fixed `SELECT` with bound parameters.
 //! - **still Narc-visible** — a normal tool call, so the daemon's permission gate
 //!   and the Narc hook (secret redaction on results) see it like any other.
+//! - **no double-sends** (pearl th-646c22) — a send that times out or fails
+//!   ambiguously is settled against chat.db (did an outgoing copy appear?) before
+//!   it is reported, and an identical text to the same chat inside
+//!   [`DUPLICATE_WINDOW`] is refused unless the call passes `allow_duplicate`.
 //!
 //! ## Privacy posture — read this before widening anything
 //!
@@ -211,7 +215,7 @@ impl Tool for IMessageTool {
         ToolSchema {
             name: "imessage".into(),
             description: format!(
-                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text a person OR a group. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first — each row includes a `chat` GUID you send a GROUP with). Send to ONE person: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email; a name will NOT resolve, so use the `contacts` tool to turn a name into a number first. Send to a GROUP: {{\"command\":\"send\",\"chat\":\"<the group's `chat` GUID from conversations>\",\"text\":\"hi all\"}} — NEVER pass a group's NAME as `contact` (that silently sends nowhere); run `conversations` to get the group's GUID and pass it as `chat`. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
+                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text a person OR a group. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first — each row includes a `chat` GUID you send a GROUP with). Send to ONE person: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email; a name will NOT resolve, so use the `contacts` tool to turn a name into a number first. Send to a GROUP: {{\"command\":\"send\",\"chat\":\"<the group's `chat` GUID from conversations>\",\"text\":\"hi all\"}} — NEVER pass a group's NAME as `contact` (that silently sends nowhere); run `conversations` to get the group's GUID and pass it as `chat`. A send's result is the truth: if it says `sent: true` (even after a timeout, `confirmed_by: chat.db`) do NOT send again, and an identical text to the same chat within 2 minutes is refused unless `allow_duplicate` is true. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
                 COMMANDS.join(", ")
             ),
             parameters: json!({
@@ -241,6 +245,10 @@ impl Tool for IMessageTool {
                     "limit": {
                         "type": "integer",
                         "description": format!("How many rows to return (default {DEFAULT_LIMIT}, max {MAX_LIMIT}).")
+                    },
+                    "allow_duplicate": {
+                        "type": "boolean",
+                        "description": "For `send`: an identical text to the same chat within the last 2 minutes is refused as a duplicate (it already went). Set true ONLY when the user explicitly wants the same message sent again."
                     }
                 },
                 "required": ["command"]
@@ -258,10 +266,9 @@ impl Tool for IMessageTool {
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let command = command_of(&arguments)?;
         if command == "send" {
-            return match send_args(&arguments)? {
-                SendTarget::Contact(contact, text) => send_message(&contact, &text).await,
-                SendTarget::Group(guid, text) => send_group_message(&guid, &text).await,
-            };
+            let target = send_args(&arguments)?;
+            let allow_duplicate = arguments.get("allow_duplicate").and_then(Value::as_bool).unwrap_or(false);
+            return guarded_send(target, allow_duplicate).await;
         }
 
         let Some(path) = chat_db_path() else {
@@ -569,7 +576,7 @@ pub fn extract_attributed_body(blob: &[u8]) -> Option<String> {
 }
 
 /// Where a `send` goes: one person by handle, or a group by chat GUID.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendTarget {
     /// A 1:1 send to a phone number or email.
     Contact(String, String),
@@ -634,47 +641,75 @@ fn optional_str(arguments: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// How an `osascript` send ended, before chat.db has had a say.
+#[derive(Debug)]
+enum SendOutcome {
+    /// Messages.app accepted it — the JSON reply for the model.
+    Sent(String),
+    /// Definitely NOT sent (automation denied, no such group) — the reply as-is.
+    Refused(String),
+    /// Unknown: a timeout or an unrecognised osascript failure. On 2026-09-23 two
+    /// of five sends "timed out" AFTER Messages had delivered them, the model
+    /// retried, and the group got every message twice (pearl th-646c22). An
+    /// ambiguous send is never reported as failed until chat.db says so.
+    Ambiguous(String),
+}
+
 /// Send to an existing group chat by GUID, **outside** the kernel sandbox.
 ///
 /// Unlike [`send_message`], this **cannot create a new conversation** — the
 /// script errors when no existing chat matches, so a bad GUID fails loudly
 /// instead of vanishing. On success it echoes the resolved chat's name and
 /// participant count, so the model reports the real target it hit.
-async fn send_group_message(guid: &str, text: &str) -> anyhow::Result<String> {
-    let output = run_osascript(SEND_GROUP_SCRIPT, guid, text).await?;
+async fn send_group_message(guid: &str, text: &str) -> anyhow::Result<SendOutcome> {
+    let output = match run_osascript(SEND_GROUP_SCRIPT, guid, text).await? {
+        Attempt::Done(output) => output,
+        Attempt::TimedOut => return Ok(SendOutcome::Ambiguous(timeout_reason())),
+    };
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let (name, participants) = stdout.trim().split_once('|').unwrap_or_else(|| (stdout.trim(), ""));
         let group = if name.is_empty() { format!("group {guid}") } else { name.to_owned() };
-        return Ok(json!({
-            "sent": true,
-            "chat": guid,
-            "group": group,
-            "participants": participants.trim().parse::<u32>().ok(),
-            "text": text,
-        })
-        .to_string());
+        return Ok(SendOutcome::Sent(
+            json!({
+                "sent": true,
+                "chat": guid,
+                "group": group,
+                "participants": participants.trim().parse::<u32>().ok(),
+                "text": text,
+            })
+            .to_string(),
+        ));
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if stderr.contains("no existing chat matches") {
-        return Ok(format!(
+        return Ok(SendOutcome::Refused(format!(
             "No existing group chat matches `{guid}`, so nothing was sent. Run `conversations` and copy the group's `chat` GUID exactly — don't guess it."
-        ));
+        )));
     }
     if looks_like_automation_denial(&stderr) {
         let next_step = initiate(Grant::MessagesAutomation).unwrap_or(SETUP_HINT);
-        return Ok(format!(
+        return Ok(SendOutcome::Refused(format!(
             "Big Smooth isn't allowed to control Messages.app. {next_step}\n\n--- osascript said ---\n{}",
             truncate(&stderr)
-        ));
+        )));
     }
-    Ok(format!("Sending to group {guid} failed.\n{}", truncate(&stderr)))
+    Ok(SendOutcome::Ambiguous(format!("osascript failed: {}", truncate(stderr.trim()))))
+}
+
+/// How a bounded `osascript` run ended.
+#[derive(Debug)]
+enum Attempt {
+    Done(std::process::Output),
+    /// [`SEND_TIMEOUT`] elapsed. The child is killed — but the Apple Event it
+    /// already sent may still be delivered, so this is NOT "not sent".
+    TimedOut,
 }
 
 /// Spawn `osascript` with a fixed script and two `argv` data arguments, bounded
 /// by [`SEND_TIMEOUT`]. Shared by the 1:1 and group send paths.
-async fn run_osascript(script: &str, arg1: &str, arg2: &str) -> anyhow::Result<std::process::Output> {
+async fn run_osascript(script: &str, arg1: &str, arg2: &str) -> anyhow::Result<Attempt> {
     let mut cmd = tokio::process::Command::new("/usr/bin/osascript");
     cmd.arg("-e")
         .arg(script)
@@ -686,22 +721,29 @@ async fn run_osascript(script: &str, arg1: &str, arg2: &str) -> anyhow::Result<s
         .kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| anyhow::anyhow!("failed to spawn `osascript`: {e}"))?;
     match tokio::time::timeout(SEND_TIMEOUT, child.wait_with_output()).await {
-        Ok(r) => r.map_err(|e| anyhow::anyhow!("`osascript` error: {e}")),
-        Err(_) => anyhow::bail!(
-            "sending timed out after {}s — Messages.app may be waiting on a permission prompt. {SETUP_HINT}",
-            SEND_TIMEOUT.as_secs()
-        ),
+        Ok(r) => r.map(Attempt::Done).map_err(|e| anyhow::anyhow!("`osascript` error: {e}")),
+        Err(_) => Ok(Attempt::TimedOut),
     }
+}
+
+fn timeout_reason() -> String {
+    format!(
+        "osascript timed out after {}s (Messages.app may be waiting on a permission prompt)",
+        SEND_TIMEOUT.as_secs()
+    )
 }
 
 /// Send via Messages.app, **outside** the kernel sandbox (see the module docs).
 ///
 /// The recipient and body go over as `argv`, so no caller-supplied byte is ever
 /// parsed as AppleScript.
-async fn send_message(contact: &str, text: &str) -> anyhow::Result<String> {
-    let output = run_osascript(SEND_SCRIPT, contact, text).await?;
+async fn send_message(contact: &str, text: &str) -> anyhow::Result<SendOutcome> {
+    let output = match run_osascript(SEND_SCRIPT, contact, text).await? {
+        Attempt::Done(output) => output,
+        Attempt::TimedOut => return Ok(SendOutcome::Ambiguous(timeout_reason())),
+    };
     if output.status.success() {
-        return Ok(json!({"sent": true, "to": contact, "text": text}).to_string());
+        return Ok(SendOutcome::Sent(json!({"sent": true, "to": contact, "text": text}).to_string()));
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -709,12 +751,294 @@ async fn send_message(contact: &str, text: &str) -> anyhow::Result<String> {
         // Re-fire the Apple Event as a no-op probe: on a never-answered grant
         // that's what makes the prompt appear (pearl th-ba764e).
         let next_step = initiate(Grant::MessagesAutomation).unwrap_or(SETUP_HINT);
-        return Ok(format!(
+        return Ok(SendOutcome::Refused(format!(
             "Big Smooth isn't allowed to control Messages.app. {next_step}\n\n--- osascript said ---\n{}",
             truncate(&stderr)
-        ));
+        )));
     }
-    Ok(format!("Sending to {contact} failed.\n{}", truncate(&stderr)))
+    Ok(SendOutcome::Ambiguous(format!("osascript failed: {}", truncate(stderr.trim()))))
+}
+
+// ---- no double-sends (pearl th-646c22) -------------------------------------
+
+/// An identical text to the same chat inside this window is refused unless the
+/// call says `allow_duplicate: true`. Long enough to cover a retry after a
+/// 30s timeout plus the model's think time; short enough that a deliberate
+/// "say it again" a few minutes later just works.
+const DUPLICATE_WINDOW: Duration = Duration::from_secs(120);
+
+/// How long to watch chat.db for an ambiguous send to show up, and how often.
+/// Messages writes the outgoing row as it hands the message off, usually well
+/// inside a second; the budget covers a busy Mac.
+const CONFIRM_ATTEMPTS: u32 = 10;
+const CONFIRM_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Clock-skew allowance when stamping "the send began" — chat.db dates come
+/// from Messages' clock, the start stamp from ours.
+const SEND_START_SLACK_NS: i64 = 5_000_000_000;
+
+/// Oldest-first cap on outgoing rows a match scan reads. Recent outgoing
+/// messages only, so this is generous.
+const OUTGOING_SCAN_LIMIT: i64 = 200;
+
+/// Now, as an Apple/Core Data nanosecond timestamp (chat.db's `message.date`).
+fn apple_ns_now() -> i64 {
+    let unix_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
+    unix_ns - APPLE_EPOCH_OFFSET * 1_000_000_000
+}
+
+fn duration_ns(d: Duration) -> i64 {
+    i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
+}
+
+impl SendTarget {
+    fn text(&self) -> &str {
+        match self {
+            Self::Contact(_, t) | Self::Group(_, t) => t,
+        }
+    }
+
+    /// Who it goes to, in the words the model used.
+    fn label(&self) -> &str {
+        match self {
+            Self::Contact(c, _) => c,
+            Self::Group(g, _) => g,
+        }
+    }
+
+    /// A stable key for the in-process send ledger.
+    fn key(&self) -> String {
+        match self {
+            Self::Contact(c, _) => format!("contact:{}", normalize_handle(c)),
+            Self::Group(g, _) => format!("chat:{g}"),
+        }
+    }
+
+    /// Does a chat.db row (its handle, chat identifier, chat GUID) belong to this target?
+    fn matches_row(&self, handle: Option<&str>, chat_identifier: Option<&str>, guid: Option<&str>) -> bool {
+        match self {
+            Self::Group(g, _) => guid == Some(g.as_str()),
+            Self::Contact(c, _) => [handle, chat_identifier].into_iter().flatten().any(|h| same_handle(c, h)),
+        }
+    }
+}
+
+/// A handle reduced to what identifies it: an email lower-cased, a phone number
+/// to its last 10 digits (so `+1 (555) 123-4567` and `5551234567` agree).
+fn normalize_handle(h: &str) -> String {
+    let h = h.trim();
+    if h.contains('@') {
+        return h.to_ascii_lowercase();
+    }
+    let digits: String = h.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() >= MIN_HANDLE_DIGITS {
+        digits[digits.len().saturating_sub(10)..].to_owned()
+    } else {
+        h.to_ascii_lowercase()
+    }
+}
+
+fn same_handle(a: &str, b: &str) -> bool {
+    normalize_handle(a) == normalize_handle(b)
+}
+
+/// Bodies compare trimmed — Messages keeps what was sent, but a model resending
+/// "the same" text often differs only in trailing whitespace.
+fn same_body(a: &str, b: &str) -> bool {
+    a.trim() == b.trim()
+}
+
+/// An outgoing chat.db row that matches a send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutgoingHit {
+    rowid: i64,
+    /// Apple nanoseconds.
+    date: i64,
+}
+
+/// The newest outgoing message to `target` whose body is `target`'s text and
+/// whose date is at or after `since` (Apple ns). Read-only, bound parameters.
+fn find_outgoing(path: &Path, target: &SendTarget, since: i64) -> anyhow::Result<Option<OutgoingHit>> {
+    let conn = open_read_only(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT m.ROWID, m.date, m.text, m.attributedBody, h.id, c.chat_identifier, c.guid
+         FROM message m
+         LEFT JOIN handle h ON m.handle_id = h.ROWID
+         LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+         LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+         WHERE m.is_from_me = 1 AND m.date >= ?1
+         ORDER BY m.date DESC LIMIT ?2",
+    )?;
+    let mut rows = stmt.query(rusqlite::params![since, OUTGOING_SCAN_LIMIT])?;
+    while let Some(row) = rows.next()? {
+        let handle: Option<String> = row.get(4).unwrap_or(None);
+        let chat_identifier: Option<String> = row.get(5).unwrap_or(None);
+        let guid: Option<String> = row.get(6).unwrap_or(None);
+        if !target.matches_row(handle.as_deref(), chat_identifier.as_deref(), guid.as_deref()) {
+            continue;
+        }
+        let text: Option<String> = row.get(2).unwrap_or(None);
+        let blob: Option<Vec<u8>> = row.get(3).unwrap_or(None);
+        let body = text.filter(|t| !t.is_empty()).or_else(|| blob.as_deref().and_then(extract_attributed_body));
+        if body.is_some_and(|b| same_body(&b, target.text())) {
+            return Ok(Some(OutgoingHit {
+                rowid: row.get(0)?,
+                date: row.get(1).unwrap_or(0),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Sends this process made (or may have made) recently: `(target key, text, when)`.
+/// The second line of defence when chat.db can't be read — no Full Disk Access,
+/// or a WAL not yet visible to a read-only open.
+static SEND_LEDGER: std::sync::Mutex<Vec<(String, String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+fn ledger_record(target: &SendTarget) {
+    let mut ledger = SEND_LEDGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    ledger.retain(|(_, _, at)| now.duration_since(*at) < DUPLICATE_WINDOW);
+    ledger.push((target.key(), target.text().trim().to_owned(), now));
+}
+
+/// Seconds since this process last sent `target`'s exact text, inside the window.
+fn ledger_seconds_since(target: &SendTarget) -> Option<u64> {
+    let ledger = SEND_LEDGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = target.key();
+    let now = std::time::Instant::now();
+    ledger
+        .iter()
+        .rev()
+        .find(|(k, t, at)| *k == key && same_body(t, target.text()) && now.duration_since(*at) < DUPLICATE_WINDOW)
+        .map(|(_, _, at)| now.duration_since(*at).as_secs())
+}
+
+/// The refusal a duplicate send gets. Worded for the model: it already went, do
+/// not retry, and how to override when a repeat is really wanted.
+fn duplicate_refusal(target: &SendTarget, seconds_ago: u64, source: &str) -> String {
+    json!({
+        "sent": false,
+        "duplicate": true,
+        "to": target.label(),
+        "seconds_ago": seconds_ago,
+        "message": format!(
+            "NOT sent again: this exact text already went to {} {seconds_ago}s ago ({source}). The earlier send succeeded — do not retry it. Only if the user explicitly wants it sent a second time, call send again with \"allow_duplicate\": true.",
+            target.label()
+        ),
+    })
+    .to_string()
+}
+
+/// Is this an identical text to the same chat inside [`DUPLICATE_WINDOW`]?
+/// chat.db first (it sees sends from every surface, the phone included), then
+/// this process's own ledger.
+fn duplicate_check(chat_db: Option<&Path>, target: &SendTarget, now_apple_ns: i64) -> Option<String> {
+    if let Some(path) = chat_db.filter(|p| probe(p).is_ok()) {
+        if let Ok(Some(hit)) = find_outgoing(path, target, now_apple_ns - duration_ns(DUPLICATE_WINDOW)) {
+            let secs = u64::try_from((now_apple_ns - hit.date).max(0) / 1_000_000_000).unwrap_or(0);
+            return Some(duplicate_refusal(target, secs, "found in Messages' history"));
+        }
+    }
+    ledger_seconds_since(target).map(|secs| duplicate_refusal(target, secs, "sent by Big Smooth"))
+}
+
+/// What an ambiguous send turned out to be, once chat.db has been consulted.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// chat.db has the outgoing row: it went out.
+    Delivered(OutgoingHit),
+    /// chat.db was readable and never showed it: it did not go out.
+    NotSent,
+    /// chat.db could not be read: nobody knows.
+    Unknown,
+}
+
+/// Watch chat.db for the outgoing row of a send that began at `since`.
+async fn confirm_sent(chat_db: Option<PathBuf>, target: &SendTarget, since: i64, attempts: u32, interval: Duration) -> Verdict {
+    let Some(path) = chat_db.filter(|p| probe(p).is_ok()) else {
+        return Verdict::Unknown;
+    };
+    let mut readable = false;
+    for attempt in 0..attempts.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(interval).await;
+        }
+        let (p, t) = (path.clone(), target.clone());
+        match tokio::task::spawn_blocking(move || find_outgoing(&p, &t, since)).await {
+            Ok(Ok(Some(hit))) => return Verdict::Delivered(hit),
+            Ok(Ok(None)) => readable = true,
+            _ => {}
+        }
+    }
+    if readable {
+        Verdict::NotSent
+    } else {
+        Verdict::Unknown
+    }
+}
+
+/// The model-facing reply for an ambiguous send, by verdict.
+fn ambiguous_reply(target: &SendTarget, reason: &str, verdict: &Verdict) -> String {
+    match verdict {
+        Verdict::Delivered(hit) => json!({
+            "sent": true,
+            "to": target.label(),
+            "text": target.text(),
+            "confirmed_by": "chat.db",
+            "message_id": hit.rowid,
+            "note": format!("{reason}, but Messages' history shows the message went out. It WAS sent — do not send it again."),
+        })
+        .to_string(),
+        Verdict::NotSent => json!({
+            "sent": false,
+            "to": target.label(),
+            "message": format!("NOT sent: {reason}, and Messages' history shows no outgoing copy. {SETUP_HINT}"),
+        })
+        .to_string(),
+        Verdict::Unknown => json!({
+            "sent": "unknown",
+            "to": target.label(),
+            "message": format!("{reason}, and Messages' history can't be read to confirm, so it MAY have gone out. Do not resend blindly — read the thread first, or ask the user."),
+        })
+        .to_string(),
+    }
+}
+
+/// The whole guarded send: refuse a duplicate, send, and settle an ambiguous
+/// outcome against chat.db instead of reporting a failure that wasn't one.
+async fn guarded_send(target: SendTarget, allow_duplicate: bool) -> anyhow::Result<String> {
+    let chat_db = chat_db_path();
+    if !allow_duplicate {
+        if let Some(refusal) = duplicate_check(chat_db.as_deref(), &target, apple_ns_now()) {
+            tracing::info!(to = %target.key(), "imessage: refused an identical send inside the duplicate window");
+            return Ok(refusal);
+        }
+    }
+    let started = apple_ns_now() - SEND_START_SLACK_NS;
+    let outcome = match &target {
+        SendTarget::Contact(contact, text) => send_message(contact, text).await?,
+        SendTarget::Group(guid, text) => send_group_message(guid, text).await?,
+    };
+    Ok(match outcome {
+        SendOutcome::Sent(reply) => {
+            ledger_record(&target);
+            reply
+        }
+        SendOutcome::Refused(reply) => reply,
+        SendOutcome::Ambiguous(reason) => {
+            let verdict = confirm_sent(chat_db, &target, started, CONFIRM_ATTEMPTS, CONFIRM_INTERVAL).await;
+            tracing::info!(to = %target.key(), ?verdict, %reason, "imessage: ambiguous send settled against chat.db");
+            // Anything but a confirmed NOT-sent may be out there: remember it, so a
+            // retry inside the window is refused rather than doubled.
+            if verdict != Verdict::NotSent {
+                ledger_record(&target);
+            }
+            ambiguous_reply(&target, &reason, &verdict)
+        }
+    })
 }
 
 /// Whether `text` reads like a TCC Automation denial (or a recipient Messages
@@ -1310,5 +1634,176 @@ mod tests {
         let text = rows[0]["text"].as_str().unwrap();
         assert!(text.ends_with("… [truncated]"), "a huge message must not flood the turn");
         assert!(text.chars().count() < TEXT_CAP + 20);
+    }
+
+    // ---- no double-sends (pearl th-646c22) ---------------------------------
+
+    /// Apple-ns stamp of the outgoing rows [`outgoing_fixture`] adds.
+    const SENT_AT: i64 = 694_224_600_000_000_000;
+
+    /// The base fixture plus two outgoing messages: a 1:1 to the phone handle
+    /// (plain `text`) and a group message stored only as an attributedBody —
+    /// the shape Messages actually writes for a send from this Mac.
+    fn outgoing_fixture(dir: &Path) -> PathBuf {
+        let db = fixture_db(dir);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO message (ROWID, date, is_from_me, text, attributedBody, cache_has_attachments, service, handle_id)
+             VALUES (10, ?1, 1, 'on my way', NULL, 0, 'iMessage', 1)",
+            rusqlite::params![SENT_AT],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO chat_message_join VALUES (1, 10)", []).unwrap();
+        conn.execute(
+            "INSERT INTO message (ROWID, date, is_from_me, text, attributedBody, cache_has_attachments, service, handle_id)
+             VALUES (11, ?1, 1, NULL, ?2, 0, 'iMessage', 0)",
+            rusqlite::params![SENT_AT + 1_000_000_000, attributed("pipeline is a fishy $134k", &[16])],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO chat_message_join VALUES (2, 11)", []).unwrap();
+        db
+    }
+
+    fn contact(to: &str, text: &str) -> SendTarget {
+        SendTarget::Contact(to.into(), text.into())
+    }
+
+    fn group(guid: &str, text: &str) -> SendTarget {
+        SendTarget::Group(guid.into(), text.into())
+    }
+
+    #[test]
+    fn handles_normalize_so_formatting_differences_still_match() {
+        assert!(same_handle("+1 (555) 123-4567", "5551234567"));
+        assert!(same_handle("+15551234567", "+15551234567"));
+        assert!(same_handle("Friend@Example.com", "friend@example.com"));
+        assert!(!same_handle("+15551234567", "+15559999999"));
+        assert!(!same_handle("friend@example.com", "other@example.com"));
+    }
+
+    #[test]
+    fn a_target_matches_only_its_own_chat() {
+        let g = group("iMessage;+;chat99", "x");
+        assert!(g.matches_row(None, Some("chat99"), Some("iMessage;+;chat99")));
+        assert!(!g.matches_row(None, Some("chat98"), Some("iMessage;+;chat98")));
+        let c = contact("+15551234567", "x");
+        assert!(c.matches_row(Some("+15551234567"), None, None));
+        assert!(c.matches_row(None, Some("5551234567"), None), "a 1:1 is also reachable by its chat identifier");
+        assert!(!c.matches_row(Some("friend@example.com"), Some("chat99"), Some("iMessage;+;chat99")));
+    }
+
+    #[test]
+    fn find_outgoing_sees_a_sent_1to1_and_a_sent_group_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        let hit = find_outgoing(&db, &contact("+15551234567", "on my way"), SENT_AT - 1).unwrap();
+        assert_eq!(hit.map(|h| h.rowid), Some(10));
+        // Trailing whitespace from the model is not a different message.
+        assert!(find_outgoing(&db, &contact("5551234567", "on my way  "), SENT_AT - 1).unwrap().is_some());
+        // The group copy lives only in the attributedBody blob.
+        let g = find_outgoing(&db, &group("iMessage;+;chat99", "pipeline is a fishy $134k"), SENT_AT - 1).unwrap();
+        assert_eq!(g.map(|h| h.rowid), Some(11));
+    }
+
+    #[test]
+    fn find_outgoing_ignores_other_text_other_chats_older_rows_and_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        // Different text.
+        assert!(find_outgoing(&db, &contact("+15551234567", "on my way home"), SENT_AT - 1).unwrap().is_none());
+        // Same text, different chat.
+        assert!(find_outgoing(&db, &group("iMessage;+;chat99", "on my way"), SENT_AT - 1).unwrap().is_none());
+        // Before the window.
+        assert!(find_outgoing(&db, &contact("+15551234567", "on my way"), SENT_AT + 1).unwrap().is_none());
+        // An INCOMING message with matching text is not a send of ours.
+        assert!(find_outgoing(&db, &contact("+15551234567", "hey are we still on for dinner"), 0)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn an_identical_send_inside_the_window_is_refused_with_how_to_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        let now = SENT_AT + 45 * 1_000_000_000;
+        let refusal = duplicate_check(Some(&db), &contact("+15551234567", "on my way"), now).expect("must refuse");
+        let v: Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(v["sent"], false);
+        assert_eq!(v["duplicate"], true);
+        assert_eq!(v["seconds_ago"], 45);
+        assert!(v["message"].as_str().unwrap().contains("allow_duplicate"), "{refusal}");
+    }
+
+    #[test]
+    fn a_repeat_after_the_window_or_with_new_text_goes_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        let later = SENT_AT + duration_ns(DUPLICATE_WINDOW) + 1_000_000_000;
+        assert!(duplicate_check(Some(&db), &contact("+15551234567", "on my way"), later).is_none());
+        let now = SENT_AT + 10 * 1_000_000_000;
+        assert!(duplicate_check(Some(&db), &contact("+15551234567", "running 5 late"), now).is_none());
+    }
+
+    #[test]
+    fn the_ledger_catches_a_repeat_when_chat_db_cannot_be_read() {
+        // A unique handle so this test owns its ledger rows.
+        let t = contact("+15550001111", "ledger-only text");
+        let unreadable = std::env::temp_dir().join("th-imessage-ledger-missing.db");
+        assert!(duplicate_check(Some(&unreadable), &t, apple_ns_now()).is_none());
+        ledger_record(&t);
+        let refusal = duplicate_check(Some(&unreadable), &t, apple_ns_now()).expect("ledger must refuse");
+        assert!(refusal.contains("sent by Big Smooth"), "{refusal}");
+        assert!(duplicate_check(None, &contact("+1 555 000 1111", "ledger-only text"), apple_ns_now()).is_some());
+        assert!(duplicate_check(None, &contact("+15550001111", "something else"), apple_ns_now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_send_that_landed_is_reported_sent_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        let t = group("iMessage;+;chat99", "pipeline is a fishy $134k");
+        let verdict = confirm_sent(Some(db), &t, SENT_AT - 1, 1, Duration::ZERO).await;
+        assert!(matches!(verdict, Verdict::Delivered(OutgoingHit { rowid: 11, .. })), "{verdict:?}");
+        let reply: Value = serde_json::from_str(&ambiguous_reply(&t, "osascript timed out after 30s", &verdict)).unwrap();
+        assert_eq!(reply["sent"], true);
+        assert_eq!(reply["confirmed_by"], "chat.db");
+        assert!(reply["note"].as_str().unwrap().contains("do not send it again"));
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_send_absent_from_chat_db_is_reported_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = outgoing_fixture(dir.path());
+        let t = contact("+15551234567", "never went");
+        let verdict = confirm_sent(Some(db), &t, SENT_AT - 1, 2, Duration::ZERO).await;
+        assert_eq!(verdict, Verdict::NotSent);
+        let reply: Value = serde_json::from_str(&ambiguous_reply(&t, "osascript timed out after 30s", &verdict)).unwrap();
+        assert_eq!(reply["sent"], false);
+        assert!(reply["message"].as_str().unwrap().starts_with("NOT sent"));
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_send_with_no_readable_chat_db_is_unknown_never_failed() {
+        let t = contact("+15551234567", "who knows");
+        let missing = std::env::temp_dir().join("th-imessage-confirm-missing.db");
+        let verdict = confirm_sent(Some(missing), &t, 0, 1, Duration::ZERO).await;
+        assert_eq!(verdict, Verdict::Unknown);
+        assert_eq!(confirm_sent(None, &t, 0, 1, Duration::ZERO).await, Verdict::Unknown);
+        let reply: Value = serde_json::from_str(&ambiguous_reply(&t, "osascript failed", &verdict)).unwrap();
+        assert_eq!(reply["sent"], "unknown");
+        assert!(reply["message"].as_str().unwrap().contains("Do not resend blindly"));
+    }
+
+    #[test]
+    fn the_schema_offers_allow_duplicate() {
+        let schema = IMessageTool.schema();
+        assert_eq!(schema.parameters["properties"]["allow_duplicate"]["type"], "boolean");
+        assert!(schema.description.contains("allow_duplicate"));
+    }
+
+    #[test]
+    fn apple_now_is_after_2020_and_before_2100() {
+        let now = apple_ns_now();
+        assert!(now > 600_000_000 * 1_000_000_000 && now < 3_100_000_000 * 1_000_000_000, "{now}");
     }
 }

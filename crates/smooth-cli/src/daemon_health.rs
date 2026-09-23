@@ -81,11 +81,17 @@ impl Health {
 /// Probe the daemon. Never errors — an unreachable daemon is a result, not a
 /// failure, and it is the single most likely thing the user is asking about.
 pub async fn probe(port: u16) -> Health {
+    probe_url(&health_url(port)).await
+}
+
+/// [`probe`] a full `/health` URL — for a daemon found through `$SMOOTH_URL`
+/// or `~/.smooth/daemon.addr` rather than on the default port (th-8b55de).
+pub async fn probe_url(url: &str) -> Health {
     let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => return Health::Down { reason: e.to_string() },
     };
-    match client.get(health_url(port)).send().await {
+    match client.get(url).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
             // A body we can't read is still a 200 — treat it as plain text.
@@ -93,6 +99,30 @@ pub async fn probe(port: u16) -> Health {
             Health::classify(status, &body)
         }
         Err(e) => Health::Down { reason: down_reason(&e) },
+    }
+}
+
+/// What `th code` does about Big Smooth at startup (th-8b55de).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leader {
+    /// The discovered daemon is healthy: talk to it.
+    Use,
+    /// `$SMOOTH_URL` names a daemon that is not answering. Booting one on the
+    /// default port would not be the daemon the caller asked for (SmoothFlow
+    /// sets it to its own), so say so and stop.
+    FailExplicit,
+    /// Nothing is advertised, or the advertised daemon is gone: boot one the
+    /// way `th up` does.
+    Boot,
+}
+
+/// The startup decision, pure over the facts.
+#[must_use]
+pub const fn leader_plan(explicit_url: bool, up: bool) -> Leader {
+    match (up, explicit_url) {
+        (true, _) => Leader::Use,
+        (false, true) => Leader::FailExplicit,
+        (false, false) => Leader::Boot,
     }
 }
 
@@ -111,6 +141,31 @@ fn down_reason(e: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// th-8b55de: a healthy daemon anywhere is used; an explicit URL that is
+    /// down is an error, never a reason to boot a different daemon on :4400.
+    #[test]
+    fn leader_plan_uses_what_is_found_and_boots_only_when_nothing_was_named() {
+        assert_eq!(leader_plan(true, true), Leader::Use);
+        assert_eq!(leader_plan(false, true), Leader::Use);
+        assert_eq!(leader_plan(true, false), Leader::FailExplicit);
+        assert_eq!(leader_plan(false, false), Leader::Boot);
+    }
+
+    #[tokio::test]
+    async fn probe_url_reads_a_daemon_on_any_port() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok").await;
+        });
+        assert!(probe_url(&format!("http://{addr}/health")).await.is_up());
+        assert!(!probe_url("http://127.0.0.1:1/health").await.is_up());
+    }
 
     #[test]
     fn plain_text_ok_is_up_with_no_details() {

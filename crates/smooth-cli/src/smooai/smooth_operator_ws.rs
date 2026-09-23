@@ -57,6 +57,33 @@ fn request_id() -> String {
     format!("th-{}-{}", std::process::id(), RID.fetch_add(1, Ordering::Relaxed))
 }
 
+/// The `create_conversation_session` frame.
+///
+/// `agentId` is REQUIRED by the SEP Request schema — smooth-operator-server
+/// rejects an absent/blank one with `VALIDATION_ERROR: missing 'agentId'`
+/// (`handle_create_session`). It used to fabricate a UUID server-side, which is
+/// why this client got away with omitting it until th-68897a moved the check to
+/// the boundary; every `th api smooth-operator chat` and MCP `ask_business` turn
+/// then failed on EVERY org.
+///
+/// The uuid is a CORRELATION id, not an `agents.id`: copilot-ws (the pod behind
+/// smooth-operator.smoo.ai) runs its storage adapter with
+/// `with_builtin_session_agent()`, which ignores the caller's agent id and binds
+/// the session to the org's built-in "Smooth Operator" row. We send exactly what
+/// the working dashboard client sends (`agentId: agentSlug ?? crypto.randomUUID()`
+/// in `smooth-operator-chat.tsx`) — byte-identical to the path that already works.
+fn create_frame(request_id: &str, conversation_id: Option<&str>) -> Value {
+    let mut create = json!({
+        "action": "create_conversation_session",
+        "requestId": request_id,
+        "agentId": uuid::Uuid::new_v4().to_string(),
+    });
+    if let Some(cid) = conversation_id {
+        create["conversationId"] = json!(cid);
+    }
+    create
+}
+
 /// Run one buffered turn of the org Smooth Operator over the SEP WebSocket.
 ///
 /// `approve` gates destructive tools: when the operator pauses on one
@@ -85,12 +112,8 @@ pub async fn operator_turn(org: &str, message: &str, conversation_id: Option<&st
         .await
         .context("connect smooth-operator websocket")?;
 
-    // 3. Create or resume the conversation session.
-    let mut create = json!({ "action": "create_conversation_session", "requestId": request_id() });
-    if let Some(cid) = conversation_id {
-        create["conversationId"] = json!(cid);
-    }
-    send(&mut ws, &create).await?;
+    // 3. Create or resume the conversation session (see `create_frame`).
+    send(&mut ws, &create_frame(&request_id(), conversation_id)).await?;
     let created = recv_until(&mut ws, "immediate_response").await?;
     let session_id = created
         .pointer("/data/sessionId")
@@ -236,6 +259,38 @@ pub fn render_operator_turn(turn: &OperatorTurn) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression: the create frame MUST carry a non-blank `agentId`.
+    /// Omitting it made smooth-operator-server reject every turn with
+    /// `VALIDATION_ERROR: missing 'agentId'` — on every org.
+    #[test]
+    fn create_frame_always_carries_a_nonblank_agent_id() {
+        let f = create_frame("th-1", None);
+        let agent = f.get("agentId").and_then(Value::as_str).expect("agentId present");
+        assert!(!agent.trim().is_empty(), "agentId must not be blank");
+        // The server trims before checking, so whitespace would not save us.
+        assert_eq!(f["action"], "create_conversation_session");
+        assert_eq!(f["requestId"], "th-1");
+    }
+
+    /// It must parse as a uuid: the dashboard sends `crypto.randomUUID()`, and a
+    /// non-copilot pod (chat-ws, no `builtin_session_agent`) parses it strictly.
+    #[test]
+    fn create_frame_agent_id_is_a_uuid_and_fresh_each_call() {
+        let a = create_frame("th-1", None)["agentId"].as_str().unwrap().to_string();
+        let b = create_frame("th-2", None)["agentId"].as_str().unwrap().to_string();
+        assert!(uuid::Uuid::parse_str(&a).is_ok(), "agentId must parse as a uuid: {a}");
+        assert_ne!(a, b, "each session gets its own correlation id");
+    }
+
+    /// Resume still threads the conversation id through, and still sends agentId.
+    #[test]
+    fn create_frame_resume_keeps_conversation_and_agent_id() {
+        let f = create_frame("th-3", Some("conv-7"));
+        assert_eq!(f["conversationId"], "conv-7");
+        assert!(f.get("agentId").and_then(Value::as_str).is_some_and(|a| !a.trim().is_empty()));
+        assert!(create_frame("th-3", None).get("conversationId").is_none());
+    }
 
     #[test]
     fn extract_reply_from_response_parts() {
