@@ -55,6 +55,16 @@
 //! same machine that resolves the SAME id logs an error and stays off the
 //! relay until the first lets go, instead of racing it.
 //!
+//! **Other computers (th-a49e21).** The same socket answers the local Big
+//! Smooth window's "which of my computers are online?" — a `list_peers` control
+//! frame whose `peers` answer [`RelayDirectory`] hands to `GET /api/relay/peers`
+//! — and serves the narrow REST surface a window driving THIS daemon from
+//! another computer needs (`"channel":"http"` frames, see
+//! [`crate::relay_http`]). The window's own traffic to a remote daemon rides
+//! separate per-window sockets ([`crate::relay_tunnel`]), never this one, so a
+//! frame arriving here is always a request to this daemon and never a reply
+//! meant for a window — two daemons driving each other cannot loop.
+//!
 //! Config: `SMOOTH_RELAY=0` disables; `SMOOTH_RELAY_URL` overrides the default
 //! relay endpoint; `SMOOTH_RELAY_DEVICE_ID` / `SMOOTH_RELAY_LABEL` pin the
 //! identity and `SMOOTH_RELAY_KIND` (`daemon` | `flow`) the presence kind (the
@@ -70,7 +80,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::flow_e2e::{self, E2eSession, Inbound, PairingState, PENDING_OUT_MAX};
@@ -106,7 +116,7 @@ const CRED_POLL: Duration = Duration::from_secs(5);
 /// How long an open socket may wait for the relay's `{"type":"connected"}`
 /// auth ack before we call it what it is — connected but NOT a peer — and
 /// re-dial with a refreshed token (th-37c286).
-const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a connected socket may go without a single inbound frame before
 /// we treat it as dead and re-dial. The relay pings every 30s
 /// (`rust/relay-ws` `HEARTBEAT_INTERVAL`), so silence this long means the pings
@@ -114,7 +124,7 @@ const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// daemon only ever WRITES in reply to a ping, so without this watchdog such a
 /// socket never errors and the daemon sits "connected" while the relay has
 /// long since dropped it as a peer — phones see it offline for days (th-6c500f).
-const RELAY_SILENCE_TIMEOUT: Duration = Duration::from_secs(75);
+pub(crate) const RELAY_SILENCE_TIMEOUT: Duration = Duration::from_secs(75);
 /// How often a daemon whose device id another local process holds re-checks
 /// the lock (the other daemon may have quit).
 const IDENTITY_RECHECK: Duration = Duration::from_secs(30);
@@ -345,19 +355,173 @@ fn host_name() -> Option<String> {
 /// presence list this connection belongs on (SMOODEV-2834; `flow` since
 /// SMOODEV-3142).
 fn connect_url(relay_url: &str, token: &str, device: &str, label: &str, kind: RelayKind) -> String {
+    connect_url_as(relay_url, token, device, label, kind.as_str())
+}
+
+/// [`connect_url`] with a raw `kind` — the per-window tunnels of
+/// [`crate::relay_tunnel`] dial as clients (`phone`), never as a daemon.
+pub(crate) fn connect_url_as(relay_url: &str, token: &str, device: &str, label: &str, kind: &str) -> String {
     format!(
         "{relay_url}?token={}&device={}&label={}&kind={}",
         urlencode(token),
         urlencode(device),
         urlencode(label),
-        kind.as_str()
+        urlencode(kind)
     )
+}
+
+/// The relay's device-id grammar (`rust/relay-ws` `valid_device`): 1..=64
+/// chars of `[A-Za-z0-9._-]`. Anything else can't be addressed — and must not
+/// be put in a `to` or a URL.
+#[must_use]
+pub fn valid_device(device: &str) -> bool {
+    !device.is_empty() && device.len() <= 64 && device.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// One other device on this Smoo account's relay, from the relay's
+/// `{"type":"peers"}` answer (SMOODEV-2834). The relay lists only the SAME
+/// user's devices, seen in the last 90s, and never the asking socket itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelayPeer {
+    pub device: String,
+    pub label: String,
+    pub kind: String,
+}
+
+impl RelayPeer {
+    /// A Big Smooth daemon — the only kind a window can drive. `flow` is the
+    /// SmoothFlow app's child daemon and `phone` a client.
+    #[must_use]
+    pub fn is_daemon(&self) -> bool {
+        self.kind == RelayKind::Daemon.as_str()
+    }
+}
+
+/// Peers out of a `{"type":"peers"}` frame. Rows without an addressable
+/// device are dropped; a missing label reads as the device id (what the relay
+/// itself falls back to); labels are re-sanitised because they end up in a UI.
+fn parse_peers(v: &Value) -> Vec<RelayPeer> {
+    v.get("peers")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let device = row.get("device").and_then(Value::as_str).filter(|d| valid_device(d))?.to_string();
+                    let label = row
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(sanitize_label)
+                        .filter(|l| !l.is_empty())
+                        .unwrap_or_else(|| device.clone());
+                    let kind = row.get("kind").and_then(Value::as_str).unwrap_or("phone").to_string();
+                    Some(RelayPeer { device, label, kind })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One pending "who is online?" question for the live relay socket.
+pub type PeerRequest = oneshot::Sender<Vec<RelayPeer>>;
+
+/// Why [`RelayDirectory::peers`] has no list to give.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryError {
+    /// This daemon is not on the relay right now (signed out, offline, …) —
+    /// the relay status says why.
+    NotOnline,
+    /// The relay did not answer in time.
+    Timeout,
+}
+
+/// The local daemon's view of the user's other devices on the relay: asks the
+/// live relay socket (`list_peers`) and caches the last answer briefly, so a
+/// window reconnecting every second and a half does not turn into a
+/// `list_peers` storm.
+#[derive(Clone)]
+pub struct RelayDirectory {
+    requests: mpsc::UnboundedSender<PeerRequest>,
+    status: RelayStatusHandle,
+    cache: Arc<std::sync::Mutex<Option<(std::time::Instant, Vec<RelayPeer>)>>>,
+}
+
+/// How long [`RelayDirectory::peers`] waits for the relay's answer.
+const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(4);
+
+impl RelayDirectory {
+    /// A directory plus the receiving end the relay supervisor drains.
+    #[must_use]
+    pub fn new(status: RelayStatusHandle) -> (Self, mpsc::UnboundedReceiver<PeerRequest>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                requests: tx,
+                status,
+                cache: Arc::new(std::sync::Mutex::new(None)),
+            },
+            rx,
+        )
+    }
+
+    /// The live relay link's status.
+    #[must_use]
+    pub fn status(&self) -> RelayStatusHandle {
+        self.status.clone()
+    }
+
+    /// The user's other devices, fresh from the relay.
+    ///
+    /// # Errors
+    /// [`DirectoryError::NotOnline`] when this daemon is not a relay peer right
+    /// now, [`DirectoryError::Timeout`] when the relay did not answer.
+    pub async fn peers(&self) -> Result<Vec<RelayPeer>, DirectoryError> {
+        self.peers_within(DIRECTORY_TIMEOUT).await
+    }
+
+    async fn peers_within(&self, timeout: Duration) -> Result<Vec<RelayPeer>, DirectoryError> {
+        if !self.status.get().state.reachable() {
+            return Err(DirectoryError::NotOnline);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.requests.send(tx).map_err(|_| DirectoryError::NotOnline)?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(peers)) => {
+                if let Ok(mut c) = self.cache.lock() {
+                    *c = Some((std::time::Instant::now(), peers.clone()));
+                }
+                Ok(peers)
+            }
+            // The socket dropped with our question pending.
+            Ok(Err(_)) => Err(DirectoryError::NotOnline),
+            Err(_) => Err(DirectoryError::Timeout),
+        }
+    }
+
+    /// Like [`Self::peers`], but a list no older than `max_age` is served from
+    /// the cache.
+    ///
+    /// # Errors
+    /// As [`Self::peers`].
+    pub async fn peers_cached(&self, max_age: Duration) -> Result<Vec<RelayPeer>, DirectoryError> {
+        if !self.status.get().state.reachable() {
+            return Err(DirectoryError::NotOnline);
+        }
+        let cached = self
+            .cache
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().filter(|(at, _)| at.elapsed() <= max_age).map(|(_, p)| p.clone()));
+        match cached {
+            Some(p) => Ok(p),
+            None => self.peers().await,
+        }
+    }
 }
 
 /// One inbound relay message, classified. Pure parse so the protocol rules are
 /// unit-testable without sockets.
 #[derive(Debug, PartialEq)]
-enum RelayMsg {
+pub(crate) enum RelayMsg {
     /// Relay heartbeat — answer with `{"type":"pong"}`.
     Ping,
     /// `{"type":"connected"}` — the relay verified our token and registered
@@ -372,16 +536,21 @@ enum RelayMsg {
     Frame(String, String),
     /// A relayed envelope for the flow channel (`"channel":"flow"` in the frame).
     FlowFrame(String, String),
+    /// A relayed HTTP-over-relay request (`"channel":"http"`, th-a49e21).
+    HttpFrame(String, Value),
+    /// The relay's answer to `list_peers`.
+    Peers(Vec<RelayPeer>),
 }
 
 /// Classify one relay text frame.
-fn classify_relay_msg(text: &str) -> RelayMsg {
+pub(crate) fn classify_relay_msg(text: &str) -> RelayMsg {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return RelayMsg::Ignore;
     };
     match v.get("type").and_then(Value::as_str) {
         Some("ping") => return RelayMsg::Ping,
         Some("connected") => return RelayMsg::Connected,
+        Some("peers") if v.get("frame").is_none() => return RelayMsg::Peers(parse_peers(&v)),
         Some("peer_offline") => {
             return v
                 .get("to")
@@ -396,6 +565,7 @@ fn classify_relay_msg(text: &str) -> RelayMsg {
         None => {}
     }
     match (v.get("from").and_then(Value::as_str), v.get("frame")) {
+        (Some(from), Some(frame)) if crate::relay_http::is_http_frame(frame) => RelayMsg::HttpFrame(from.to_string(), frame.clone()),
         (Some(from), Some(frame)) if smooth_flow::protocol::is_flow_frame(frame) => RelayMsg::FlowFrame(from.to_string(), frame.to_string()),
         (Some(from), Some(frame)) => RelayMsg::Frame(from.to_string(), frame.to_string()),
         _ => RelayMsg::Ignore,
@@ -467,7 +637,7 @@ impl OutputCoalescer {
 /// Wrap an operator frame (raw text from the loopback WS) into a relay envelope
 /// addressed to `to`. Non-JSON operator output is dropped (`None`) — the
 /// canonical protocol is JSON-only, so anything else is line noise.
-fn wrap_out(to: &str, operator_text: &str) -> Option<String> {
+pub(crate) fn wrap_out(to: &str, operator_text: &str) -> Option<String> {
     let frame: Value = serde_json::from_str(operator_text).ok()?;
     Some(json!({ "to": to, "frame": frame }).to_string())
 }
@@ -802,7 +972,7 @@ fn needs_refresh(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool 
 
 /// What the supervisor can dial with right now.
 #[derive(Debug)]
-enum TokenOutcome {
+pub(crate) enum TokenOutcome {
     /// A token to put on the wire, and the user it belongs to.
     Dial { token: String, user: Option<String> },
     /// Nothing usable — signed out, or expired beyond renewal. Carries the view
@@ -831,7 +1001,7 @@ fn token_outcome(creds: Option<Credentials>, now: DateTime<Utc>) -> TokenOutcome
 /// the credentials to change. Best-effort: a failed refresh of a token that
 /// still has runway returns the existing token so the connect is attempted,
 /// never crashing the daemon (th-c6a542).
-async fn fresh_access_token(http: &reqwest::Client, force: bool) -> TokenOutcome {
+pub(crate) async fn fresh_access_token(http: &reqwest::Client, force: bool) -> TokenOutcome {
     let Some(store) = CredentialsStore::default_user().ok() else {
         return TokenOutcome::NoSession(CredView::SignedOut);
     };
@@ -980,6 +1150,8 @@ fn report_failed_end(status: &RelayStatusHandle, end: &ConnEnd) -> bool {
 /// must be identical across reconnects (or the relay sees a new device every
 /// backoff cycle) and identical to what the pairing QR advertises. `pairing`
 /// is the shared end-to-end pairing authority for the flow bridges.
+/// `peer_requests` is the [`RelayDirectory`]'s receiving end: questions queue
+/// there until a socket is online to ask the relay.
 pub fn spawn_relay(
     relay_url: String,
     local_port: u16,
@@ -987,9 +1159,11 @@ pub fn spawn_relay(
     identity: RelayIdentity,
     pairing: Arc<PairingState>,
     status: RelayStatusHandle,
+    mut peer_requests: mpsc::UnboundedReceiver<PeerRequest>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let http = reqwest::Client::default();
+        let http_server = crate::relay_http::Server::new(format!("http://127.0.0.1:{local_port}"), local_token.clone());
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
         let flow_ws_url = flow_ws_url(local_port, &local_token);
         let RelayIdentity { device, label, kind } = identity;
@@ -1074,8 +1248,9 @@ pub fn spawn_relay(
                         kind,
                         ack_timeout: AUTH_ACK_TIMEOUT,
                         silence_timeout: RELAY_SILENCE_TIMEOUT,
+                        http: &http_server,
                     };
-                    run_connection(stream, &ctx, &mut creds_rx).await
+                    run_connection(stream, &ctx, &mut creds_rx, &mut peer_requests).await
                 }
                 Err(e) if is_auth_handshake_error(&e) => {
                     tracing::warn!(error = %e, relay = %relay_url, "relay: handshake rejected (401) — refreshing the Smoo session and reconnecting");
@@ -1140,7 +1315,7 @@ enum ConnEnd {
 }
 
 /// What a live connection needs from the supervisor.
-struct ConnCtx<'a> {
+pub(crate) struct ConnCtx<'a> {
     local_ws_url: &'a str,
     flow_ws_url: &'a str,
     pairing: &'a Arc<PairingState>,
@@ -1154,6 +1329,8 @@ struct ConnCtx<'a> {
     /// How long the socket may be silent before it counts as dead
     /// ([`RELAY_SILENCE_TIMEOUT`]).
     silence_timeout: Duration,
+    /// Answers `"channel":"http"` requests against this daemon's own loopback.
+    http: &'a crate::relay_http::Server,
 }
 
 /// One live relay connection: pump relay ⇄ bridges until the socket ends, the
@@ -1167,6 +1344,7 @@ async fn run_connection(
     stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     ctx: &ConnCtx<'_>,
     creds: &mut watch::Receiver<CredView>,
+    peer_requests: &mut mpsc::UnboundedReceiver<PeerRequest>,
 ) -> ConnEnd {
     let ConnCtx {
         local_ws_url,
@@ -1178,8 +1356,14 @@ async fn run_connection(
         kind,
         ack_timeout,
         silence_timeout,
+        http,
     } = *ctx;
     let (mut sink, mut source) = stream.split();
+    // "Who is online?" questions waiting on the relay's `peers` answer. The
+    // relay's answer carries no correlation id, so one answer settles them all.
+    let mut peer_waiters: Vec<PeerRequest> = Vec::new();
+    // False once every directory handle is gone, so a closed channel can't spin the loop.
+    let mut peer_requests_open = true;
     // All bridges push outbound envelopes through one channel — the single
     // writer to the relay socket.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
@@ -1229,6 +1413,23 @@ async fn run_connection(
                     }
                 }
             }
+            request = peer_requests.recv(), if link == Link::Online && peer_requests_open => {
+                // `None` only when every directory handle is gone — nothing will ask again.
+                let Some(request) = request else {
+                    peer_requests_open = false;
+                    continue;
+                };
+                // A question whose asker already gave up (it waited out a
+                // reconnect) is not worth a round trip.
+                if request.is_closed() {
+                    continue;
+                }
+                peer_waiters.retain(|w| !w.is_closed());
+                peer_waiters.push(request);
+                if sink.send(Message::Text(r#"{"type":"list_peers"}"#.into())).await.is_err() {
+                    break;
+                }
+            }
             envelope = out_rx.recv() => match envelope {
                 // Bridges hold clones of out_tx, so recv() only ever yields
                 // None when… it can't (we hold out_tx too). Guard anyway.
@@ -1274,6 +1475,22 @@ async fn run_connection(
                         }
                     }
                     RelayMsg::Ignore => {}
+                    RelayMsg::Peers(peers) => {
+                        for waiter in peer_waiters.drain(..) {
+                            let _ = waiter.send(peers.clone());
+                        }
+                    }
+                    RelayMsg::HttpFrame(from, frame) => {
+                        // A window on another of this user's computers reading
+                        // this daemon's REST surface (th-a49e21). Answered off
+                        // the socket loop: the loopback call may take a moment.
+                        let http = http.clone();
+                        let out = out_tx.clone();
+                        tokio::spawn(async move {
+                            let reply = http.answer(&frame).await;
+                            let _ = out.send(json!({ "to": from, "frame": reply }).to_string());
+                        });
+                    }
                     RelayMsg::PeerOffline(device) => {
                         // The phone we last wrote to is gone — reap its bridges so a
                         // reconnecting phone gets fresh sessions.
@@ -1318,6 +1535,47 @@ async fn run_connection(
         let _ = sink.send(Message::Close(None)).await;
     }
     end
+}
+
+/// Lets other modules' tests run a real relay connection loop (th-a49e21's
+/// end-to-end window → remote daemon test drives the remote side with it).
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::{ConnCtx, CredView, PairingState, PeerRequest, RelayKind, RelayStatusHandle};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, watch};
+
+    pub(crate) fn ctx<'a>(
+        local_ws_url: &'a str,
+        pairing: &'a Arc<PairingState>,
+        dialled: &'a CredView,
+        status: &'a RelayStatusHandle,
+        device: &'a str,
+        http: &'a crate::relay_http::Server,
+    ) -> ConnCtx<'a> {
+        ConnCtx {
+            local_ws_url,
+            flow_ws_url: "ws://127.0.0.1:1/api/flow/ws",
+            pairing,
+            dialled,
+            status,
+            device,
+            kind: RelayKind::Daemon,
+            ack_timeout: Duration::from_secs(5),
+            silence_timeout: Duration::from_secs(60),
+            http,
+        }
+    }
+
+    pub(crate) async fn run(
+        stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ctx: &ConnCtx<'_>,
+        creds: &mut watch::Receiver<CredView>,
+        peers: &mut mpsc::UnboundedReceiver<PeerRequest>,
+    ) {
+        let _ = super::run_connection(stream, ctx, creds, peers).await;
+    }
 }
 
 #[cfg(test)]
@@ -1553,10 +1811,14 @@ mod tests {
         assert_eq!(classify_relay_msg(r#"{"type":"connected"}"#), RelayMsg::Connected);
         assert_eq!(classify_relay_msg(r#"{"type":"pong"}"#), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"type":"error","message":"x"}"#), RelayMsg::Ignore);
-        // Presence control frames (SMOODEV-2834) are the phone's business, not ours.
+        // Presence answers (SMOODEV-2834) feed the window's computer switcher (th-a49e21).
         assert_eq!(
             classify_relay_msg(r#"{"type":"peers","peers":[{"device":"daemon-abc","label":"smoo-hub","kind":"daemon"}]}"#),
-            RelayMsg::Ignore
+            RelayMsg::Peers(vec![RelayPeer {
+                device: "daemon-abc".into(),
+                label: "smoo-hub".into(),
+                kind: "daemon".into()
+            }])
         );
         assert_eq!(classify_relay_msg("not json"), RelayMsg::Ignore);
         assert_eq!(classify_relay_msg(r#"{"unrelated":true}"#), RelayMsg::Ignore);
@@ -1800,17 +2062,29 @@ mod tests {
         creds_rx: watch::Receiver<CredView>,
         dialled: CredView,
         pairing: Arc<PairingState>,
+        http: crate::relay_http::Server,
+        directory: RelayDirectory,
+        peer_rx: mpsc::UnboundedReceiver<PeerRequest>,
     }
 
     fn harness() -> Harness {
+        harness_with_loopback("http://127.0.0.1:1")
+    }
+
+    fn harness_with_loopback(base: &str) -> Harness {
         let dialled = CredView::dialled(Some("a@x".into()), "t1");
         let (creds_tx, creds_rx) = watch::channel(dialled.clone());
+        let status = RelayStatusHandle::new(RelayPhase::Authenticating, "");
+        let (directory, peer_rx) = RelayDirectory::new(status.clone());
         Harness {
-            status: RelayStatusHandle::new(RelayPhase::Authenticating, ""),
+            status,
             creds_tx,
             creds_rx,
             dialled,
             pairing: Arc::new(crate::flow_e2e::tests::state()),
+            http: crate::relay_http::Server::new(base, "remote-token"),
+            directory,
+            peer_rx,
         }
     }
 
@@ -1830,8 +2104,9 @@ mod tests {
             kind: RelayKind::Flow,
             ack_timeout,
             silence_timeout,
+            http: &h.http,
         };
-        tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx))
+        tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx, &mut h.peer_rx))
             .await
             .expect("the connection must end on its own")
     }
@@ -1968,6 +2243,223 @@ mod tests {
         });
         let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
         assert_eq!(end, ConnEnd::CredsChanged);
+    }
+
+    // ── th-a49e21: the computer switcher's peer list + HTTP over the relay ────
+
+    #[test]
+    fn classify_peers_answer_keeps_addressable_rows_only() {
+        let msg = classify_relay_msg(
+            r#"{"type":"peers","peers":[
+                {"device":"daemon-hub","label":"smoo-hub","kind":"daemon"},
+                {"device":"phone-1","kind":"phone"},
+                {"device":"bad:id","label":"x","kind":"daemon"},
+                {"label":"no device","kind":"daemon"},
+                {"device":"daemon-ctl","label":"evil\u0007name","kind":"daemon"}
+            ]}"#,
+        );
+        assert_eq!(
+            msg,
+            RelayMsg::Peers(vec![
+                RelayPeer {
+                    device: "daemon-hub".into(),
+                    label: "smoo-hub".into(),
+                    kind: "daemon".into()
+                },
+                RelayPeer {
+                    device: "phone-1".into(),
+                    label: "phone-1".into(),
+                    kind: "phone".into()
+                },
+                RelayPeer {
+                    device: "daemon-ctl".into(),
+                    label: "evilname".into(),
+                    kind: "daemon".into()
+                },
+            ])
+        );
+        assert_eq!(classify_relay_msg(r#"{"type":"peers"}"#), RelayMsg::Peers(vec![]));
+        assert_eq!(classify_relay_msg(r#"{"type":"peers","peers":"nope"}"#), RelayMsg::Peers(vec![]));
+    }
+
+    #[test]
+    fn a_relayed_frame_that_merely_says_peers_is_still_a_frame() {
+        // A wrapped event with an inner `type` must never be mistaken for the
+        // relay's own peers answer.
+        let msg = classify_relay_msg(r#"{"from":"phone-1","frame":{"type":"peers","peers":[]}}"#);
+        assert!(matches!(msg, RelayMsg::Frame(from, _) if from == "phone-1"));
+        let spoof = classify_relay_msg(r#"{"type":"peers","frame":{},"peers":[{"device":"daemon-x","kind":"daemon"}]}"#);
+        assert_eq!(spoof, RelayMsg::Ignore, "a frame-carrying message is not the relay's answer");
+    }
+
+    #[test]
+    fn classify_routes_http_channel_frames_separately() {
+        let msg = classify_relay_msg(r#"{"from":"daemon-local-w0","frame":{"channel":"http","type":"http.request","id":"a"}}"#);
+        assert!(matches!(msg, RelayMsg::HttpFrame(from, frame) if from == "daemon-local-w0" && frame["id"] == "a"));
+    }
+
+    #[test]
+    fn valid_device_matches_the_relay_grammar() {
+        for ok in ["daemon-abc", "phone-1.2_3", &"x".repeat(64)] {
+            assert!(valid_device(ok), "{ok}");
+        }
+        for bad in ["", "a:b", "a b", "a/b", "a*", "é", &"x".repeat(65), "a\n"] {
+            assert!(!valid_device(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn peer_kinds() {
+        let p = |kind: &str| RelayPeer {
+            device: "d".into(),
+            label: "l".into(),
+            kind: kind.into(),
+        };
+        assert!(p("daemon").is_daemon());
+        assert!(!p("flow").is_daemon());
+        assert!(!p("phone").is_daemon());
+    }
+
+    #[tokio::test]
+    async fn the_directory_refuses_while_the_link_is_not_online() {
+        let (dir, _rx) = RelayDirectory::new(RelayStatusHandle::new(RelayPhase::SignedOut, "signed out"));
+        assert_eq!(dir.peers().await, Err(DirectoryError::NotOnline));
+        assert_eq!(dir.peers_cached(Duration::from_secs(10)).await, Err(DirectoryError::NotOnline));
+    }
+
+    #[tokio::test]
+    async fn the_directory_times_out_when_nobody_answers() {
+        let (dir, _rx) = RelayDirectory::new(RelayStatusHandle::new(RelayPhase::Online, ""));
+        assert_eq!(dir.peers_within(Duration::from_millis(50)).await, Err(DirectoryError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn the_directory_caches_briefly() {
+        let (dir, mut rx) = RelayDirectory::new(RelayStatusHandle::new(RelayPhase::Online, ""));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked_in = asked.clone();
+        tokio::spawn(async move {
+            while let Some(w) = rx.recv().await {
+                asked_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = w.send(vec![]);
+            }
+        });
+        dir.peers_cached(Duration::from_secs(10)).await.unwrap();
+        dir.peers_cached(Duration::from_secs(10)).await.unwrap();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "the second call is served from the cache");
+        dir.peers_cached(Duration::ZERO).await.unwrap();
+        dir.peers().await.unwrap();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 3, "a fresh list always asks");
+    }
+
+    /// The daemon's real relay loop answers the directory from the relay's
+    /// `list_peers` — the same user's devices only.
+    #[tokio::test]
+    async fn a_live_link_answers_who_is_online() {
+        use crate::relay_tunnel::tests::FakeRelay;
+        let addr = FakeRelay::default().serve().await;
+        let _hub = FakeRelay::connect(addr, "u1", "daemon-hub", "daemon").await;
+        let _stranger = FakeRelay::connect(addr, "u2", "daemon-stranger", "daemon").await;
+
+        let mut h = harness();
+        h.status = RelayStatusHandle::new(RelayPhase::Online, "");
+        let dir = RelayDirectory {
+            requests: h.directory.requests.clone(),
+            status: h.status.clone(),
+            cache: Arc::default(),
+        };
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token=u1&device=daemon-local&kind=daemon"))
+            .await
+            .unwrap();
+        let status = h.status.clone();
+        let run = tokio::spawn(async move {
+            let ctx = ConnCtx {
+                local_ws_url: "ws://127.0.0.1:1/ws",
+                flow_ws_url: "ws://127.0.0.1:1/api/flow/ws",
+                pairing: &h.pairing,
+                dialled: &h.dialled,
+                status: &status,
+                device: "daemon-local",
+                kind: RelayKind::Daemon,
+                ack_timeout: Duration::from_secs(5),
+                silence_timeout: Duration::from_secs(30),
+                http: &h.http,
+            };
+            run_connection(stream, &ctx, &mut h.creds_rx, &mut h.peer_rx).await
+        });
+        let peers = dir.peers().await.unwrap();
+        assert_eq!(
+            peers,
+            vec![RelayPeer {
+                device: "daemon-hub".into(),
+                label: "daemon-hub".into(),
+                kind: "daemon".into()
+            }],
+            "another user's daemon is never listed"
+        );
+        run.abort();
+    }
+
+    /// A peer's `channel:http` request is answered from this daemon's own
+    /// loopback — and a request for a route off the allowlist is refused
+    /// without ever touching it.
+    #[tokio::test]
+    async fn a_live_link_serves_http_frames_from_its_own_loopback() {
+        use crate::relay_tunnel::tests::FakeRelay;
+        use axum::routing::get;
+
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_in = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/stats",
+            get(move || {
+                hits_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { axum::Json(json!({"spend": {"turns": 7}})) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let loopback = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let addr = FakeRelay::default().serve().await;
+        let mut h = harness_with_loopback(&format!("http://{loopback}"));
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?token=u1&device=daemon-hub&kind=daemon"))
+            .await
+            .unwrap();
+        let run = tokio::spawn(async move {
+            let ctx = ConnCtx {
+                local_ws_url: "ws://127.0.0.1:1/ws",
+                flow_ws_url: "ws://127.0.0.1:1/api/flow/ws",
+                pairing: &h.pairing,
+                dialled: &h.dialled,
+                status: &h.status,
+                device: "daemon-hub",
+                kind: RelayKind::Daemon,
+                ack_timeout: Duration::from_secs(5),
+                silence_timeout: Duration::from_secs(30),
+                http: &h.http,
+            };
+            run_connection(stream, &ctx, &mut h.creds_rx, &mut h.peer_rx).await
+        });
+        let mut window = FakeRelay::connect(addr, "u1", "daemon-local-w0", "phone").await;
+        // Give the hub's socket a moment to register on the relay.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        window
+            .send(json!({"to":"daemon-hub","frame": crate::relay_http::request_frame("r1", "GET", "/api/stats", None)}))
+            .await;
+        let got = window.recv().await;
+        assert_eq!(got["from"], "daemon-hub");
+        let (id, resp) = crate::relay_http::parse_response(&got["frame"]).unwrap();
+        assert_eq!((id.as_str(), resp.status), ("r1", 200));
+        assert_eq!(serde_json::from_str::<Value>(&resp.body).unwrap()["spend"]["turns"], 7);
+
+        window
+            .send(json!({"to":"daemon-hub","frame": crate::relay_http::request_frame("r2", "GET", "/api/flow/sessions", None)}))
+            .await;
+        let got = window.recv().await;
+        assert_eq!(crate::relay_http::parse_response(&got["frame"]).unwrap().1.status, 403);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        run.abort();
     }
 
     #[test]

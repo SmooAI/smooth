@@ -1250,6 +1250,25 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     } else {
         crate::relay_status::RelayStatusHandle::disabled()
     };
+    // The window's computer switcher (th-a49e21): the relay supervisor answers
+    // "which of my computers are online?" through this directory, and the
+    // dialer tunnels a window's traffic to the one it picks.
+    let (relay_directory, relay_peer_requests) = crate::relay::RelayDirectory::new(relay_status.clone());
+    let relay_dialer = relay_url.as_ref().map(|url| {
+        crate::relay_tunnel::Dialer::new(
+            url.clone(),
+            &relay_identity.device,
+            &relay_identity.label,
+            crate::relay_tunnel::session_token_source(),
+        )
+    });
+    let relay_peers = crate::relay_peers_route::PeersRouteState::new(
+        relay_directory,
+        &relay_identity.device,
+        &relay_identity.label,
+        relay_dialer,
+        Some(token.clone()),
+    );
     let pairing = Arc::new(crate::flow_e2e::PairingState::new(
         flow_engine,
         relay_identity.device.clone(),
@@ -1328,6 +1347,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // frames (th-d98fde): the QR the macOS app / `th flow pair` show,
                 // the pairing list, revoke. Shares the flow engine's store.
                 .merge(crate::flow_pair_route::pair_router(pairing.clone(), Some(token.clone()), relay_status.clone()))
+                // /api/relay/peers* — the window's computer switcher (th-a49e21):
+                // this computer + the user's other Big Smooth daemons on the Smoo
+                // Relay, and the tunnel that lets this window drive one of them.
+                // Token-gated; only the signed-in user's listed daemons.
+                .merge(crate::relay_peers_route::peers_router(relay_peers))
                 // GET /api/skills — the one skill catalog every face renders
                 // (the web SPA has no disk access; th code prefers this over
                 // its local discover). Pearl th-a5952d.
@@ -1417,7 +1441,15 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // like tailscale above: signed-out or unreachable just waits and retries.
     let _relay = relay_url.map(|relay_url| {
         tracing::info!(relay = %relay_url, "Smoo Relay armed — phones can reach Big Smooth without tailscale");
-        crate::relay::spawn_relay(relay_url, server.addr().port(), token.clone(), relay_identity, pairing, relay_status)
+        crate::relay::spawn_relay(
+            relay_url,
+            server.addr().port(),
+            token.clone(),
+            relay_identity,
+            pairing,
+            relay_status,
+            relay_peer_requests,
+        )
     });
 
     // Proactivity: the always-on agent fires due schedules into its *own*

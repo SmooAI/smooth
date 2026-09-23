@@ -36,6 +36,8 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
+import { activeComputer } from './computers';
+import { ComputerSwitcher } from './ComputerSwitcher';
 import { dequeue, enqueue, queuedLabel, removeAt, submitAction, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
 import { costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
@@ -478,6 +480,9 @@ function Sidebar({
                     </a>
                     <span className="text-sm font-semibold text-foreground/80">Conversations</span>
                 </div>
+                {/* Which computer this window drives (th-a49e21) — the list below is
+                    that computer's conversations. */}
+                <ComputerSwitcher />
                 <button
                     onClick={onNew}
                     className="mx-3 mb-2 flex items-center justify-center gap-2 rounded-xl bg-coral px-4 py-2 text-sm font-semibold text-(--color-coral-ink) transition hover:brightness-110"
@@ -598,10 +603,13 @@ function FaceStage({ state, size, strong }: { state: FaceState; size: number; st
 
 function StatusLine({ state, status, center }: { state: AgentState; status: Status; center?: boolean }) {
     const dot = !status.connected ? 'bg-(--color-muted-foreground)' : state === 'awaiting' ? 'bg-amber' : 'bg-(--color-online)';
+    // Driving another computer is never ambiguous: say where he's running.
+    const computer = activeComputer();
     return (
         <div className={`flex items-center gap-2 text-sm text-(--color-muted-foreground) ${center ? 'justify-center' : ''}`}>
             <span className={`size-1.5 rounded-full ${dot}`} />
             <span className={state === 'awaiting' ? 'font-semibold text-amber' : ''}>{STATUS_CAPTION[state]}</span>
+            {computer.kind === 'remote' && <span className="text-(--color-th-teal)">on {computer.label}</span>}
             {(state === 'thinking' || state === 'speaking') && (
                 <span aria-hidden>
                     <span className="bs-dot">.</span>

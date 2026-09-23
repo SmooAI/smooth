@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { activeComputer, apiBase } from './computers';
 import { historyImages, historyText, type HistoryMessage } from './history';
 import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { normalizeTodos, type TodoItem } from './todos';
@@ -174,18 +175,28 @@ declare global {
     }
 }
 
-/** Resolve the operator's HTTP base + auth token. When the daemon serves this
- * SPA same-origin it injects `window.__SMOOTH_TOKEN__` (highest priority), so the
- * endpoint is simply `http://127.0.0.1:8787/`. In dev (Vite at :3100) pass them
- * as `?api=http://127.0.0.1:8787&token=…` (persisted to localStorage thereafter);
- * the API base otherwise defaults to the page origin. */
-export function resolveTarget(): { http: string; token: string } {
+/** Resolve THIS computer's daemon: its HTTP base + auth token. When the daemon
+ * serves this SPA same-origin it injects `window.__SMOOTH_TOKEN__` (highest
+ * priority), so the endpoint is simply `http://127.0.0.1:8787/`. In dev (Vite at
+ * :3100) pass them as `?api=http://127.0.0.1:8787&token=…` (persisted to
+ * localStorage thereafter); the API base otherwise defaults to the page origin. */
+export function resolveLocalTarget(): { http: string; token: string } {
     const params = new URLSearchParams(window.location.search);
     const api = window.__SMOOTH_API__ ?? params.get('api') ?? localStorage.getItem('smooth.api') ?? window.location.origin;
     const token = window.__SMOOTH_TOKEN__ ?? params.get('token') ?? localStorage.getItem('smooth.token') ?? '';
     if (params.get('api')) localStorage.setItem('smooth.api', api);
     if (params.get('token')) localStorage.setItem('smooth.token', token);
     return { http: api.replace(/\/$/, ''), token };
+}
+
+/** Resolve the operator the window DRIVES: this computer's daemon, or — when
+ * the computer switcher picked another of your computers (th-a49e21) — this
+ * daemon's Smoo Relay tunnel to it. Everything built on `${http}` (the `/ws`
+ * socket, `/cd`, Plan/Auto, Stats, `@`-search) follows the pick. The token
+ * stays this daemon's; the tunnel strips it before anything leaves the machine. */
+export function resolveTarget(): { http: string; token: string } {
+    const local = resolveLocalTarget();
+    return { http: apiBase(local.http, activeComputer()), token: local.token };
 }
 
 let msgSeq = 0;

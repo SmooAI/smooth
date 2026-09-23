@@ -73,6 +73,7 @@
 - [[Data-Storage]] — pearls.db, sessions, `~/.smooth/`
 - [[Extension-System]] — SEP, the planned extension protocol
 - [[Daemon-Direction]] — where Big Smooth is headed (epic `th-c89c2a`)
+- [[Relay-Computer-Switcher]] — driving another of your computers' Big Smooth over the Smoo Relay (`th-a49e21`)
 
 ## Related
 

@@ -96,3 +96,8 @@ The tailnet perimeter is gone for relay traffic; what replaces it:
   connect directly for stats until a REST-over-relay follow-up.
 - Multi-daemon (two Macs, one user) needs a device-id scheme + picker later;
   v1 pins `daemon`.
+- **Update (th-764b57, th-a49e21):** daemons now register per-machine ids
+  (`daemon-<hex>`) with a `label`, and the Big Smooth window has a computer
+  switcher that drives another daemon through its own daemon's relay tunnel,
+  REST included (`"channel":"http"` frames). See
+  [[../Architecture/Relay-Computer-Switcher]].
