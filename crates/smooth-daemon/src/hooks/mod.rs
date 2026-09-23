@@ -21,10 +21,16 @@
 //!   detected secrets out of tool results** via the mutable `post_call` seam.
 //!   Installed SECOND (after the permission gate).
 //!
+//! - [`ToolLogHook`] — **observability** (th-5d48ca). One INFO line when a call
+//!   starts and one when it finishes (name, duration, outcome; never argument
+//!   values or results). Installed ahead of both so a call the gate blocks still
+//!   leaves its start line.
+//!
 //! Wiring order in [`crate::operator::serve_local_flavor`] is
-//! `vec![Arc::new(permission_hook()), Arc::new(narc)]` — permission gate, then
-//! narc.
+//! `vec![tool_log, permission gate, narc]`.
 
 pub mod narc;
+pub mod tool_log;
 
 pub use narc::NarcHook;
+pub use tool_log::ToolLogHook;
