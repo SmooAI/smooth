@@ -1016,7 +1016,7 @@ pub fn spawn_relay(
     status: RelayStatusHandle,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let http = reqwest::Client::default();
+        let http = crate::auth_login::bounded_http_client();
         let local_ws_url = format!("ws://127.0.0.1:{local_port}/ws?token={}", urlencode(&local_token));
         let flow_ws_url = flow_ws_url(local_port, &local_token);
         let RelayIdentity { device, label, kind } = identity;

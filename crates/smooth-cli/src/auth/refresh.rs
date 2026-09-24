@@ -25,7 +25,35 @@ use smooai_client_shared::auth::refresh::refresh_session;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 
 use crate::auth::{supabase_url, PROD_SUPABASE_ANON_KEY};
-use smooth_api_client::credential_lock;
+
+/// An HTTP client for session work with connect + whole-request timeouts, so a
+/// dead socket fails fast instead of holding the credential lock (th-2d2c15).
+pub(crate) fn bounded_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Take the credential lock for an interactive command (login, org switch):
+/// wait quietly for a moment, then tell the user who is holding it before
+/// waiting out the full bound, so a stuck daemon is visible instead of the
+/// terminal just sitting there (th-2d2c15).
+///
+/// # Errors
+/// The lock can't be taken within [`smooth_api_client::DEFAULT_LOCK_WAIT`];
+/// the error names the holding process.
+pub(crate) fn interactive_credential_lock(path: &std::path::Path) -> Result<smooth_api_client::CredentialLock> {
+    match credential_lock_within(path, std::time::Duration::from_secs(2)) {
+        Ok(lock) => Ok(lock),
+        Err(_) => {
+            eprintln!("  waiting for the Smoo credentials lock ({})…", smooth_api_client::credential_lock_holder(path));
+            smooth_api_client::credential_lock(path).context("lock the credentials file")
+        }
+    }
+}
+use smooth_api_client::{credential_lock_async, credential_lock_within, LOCKED_SECTION_TIMEOUT};
 
 /// What a loaded session needs before it can be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,16 +122,33 @@ pub async fn fresh_credentials_from(http: &reqwest::Client, store: &CredentialsS
 /// No session on disk (worded by `missing_hint`), no refresh material,
 /// the grant itself failing, or the rotated token failing to persist.
 pub(crate) async fn refresh_locked(http: &reqwest::Client, store: &CredentialsStore, missing_hint: &str) -> Result<Credentials> {
-    let _lock = credential_lock(store.path()).context("lock the credentials file for refresh")?;
+    // Bounded wait on a blocking-pool thread, never forever (th-2d2c15).
+    let _lock = credential_lock_async(store.path()).await.context("lock the credentials file for refresh")?;
     let creds = store.load().context("load session")?.ok_or_else(|| anyhow::anyhow!("{missing_hint}"))?;
-    let refreshed = match decide(&creds)? {
-        // Another process refreshed while we waited — its token is the
-        // live one.
-        Refresh::NotNeeded => return Ok(creds),
-        Refresh::M2m => refresh_m2m_session(http, &creds).await.context("auto-refresh M2M client_credentials grant")?,
-        Refresh::User => refresh_user_session(http, &creds)
-            .await
-            .context("silent session refresh failed — run `th auth login` again")?,
+    let exchange = async {
+        match decide(&creds)? {
+            // Another process refreshed while we waited — its token is the
+            // live one.
+            Refresh::NotNeeded => Ok(None),
+            Refresh::M2m => refresh_m2m_session(http, &creds)
+                .await
+                .context("auto-refresh M2M client_credentials grant")
+                .map(Some),
+            Refresh::User => refresh_user_session(http, &creds)
+                .await
+                .context("silent session refresh failed — run `th auth login` again")
+                .map(Some),
+        }
+    };
+    // The network call happens while we hold the lock every other `th` and
+    // daemon waits on, so it is time-boxed: a hung request releases the lock
+    // instead of wedging the machine (th-2d2c15).
+    let refreshed = match tokio::time::timeout(LOCKED_SECTION_TIMEOUT, exchange)
+        .await
+        .map_err(|_| anyhow::anyhow!("session refresh timed out after {}s", LOCKED_SECTION_TIMEOUT.as_secs()))??
+    {
+        None => return Ok(creds),
+        Some(refreshed) => refreshed,
     };
     // Not best-effort. The exchange already revoked the old refresh
     // token server-side, so dropping this write leaves the *next* run
@@ -140,7 +185,7 @@ pub async fn fresh_user_credentials_from(http: &reqwest::Client, store: &Credent
 /// No session on disk, an expired session with no refresh material, or the
 /// grant itself failing — each already carries a `th auth login` hint.
 pub async fn cmd_refresh(m2m: bool) -> Result<()> {
-    let http = reqwest::Client::new();
+    let http = bounded_http_client();
     let (store, hint, kind) = if m2m {
         (
             CredentialsStore::default_m2m().context("locate the M2M credentials store")?,

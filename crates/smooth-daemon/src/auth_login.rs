@@ -151,7 +151,7 @@ impl Default for AuthState {
     fn default() -> Self {
         Self {
             pending_logins: PendingLogins::default(),
-            http: reqwest::Client::default(),
+            http: bounded_http_client(),
             device_slots: Arc::new(Semaphore::new(MAX_PENDING_DEVICE_LOGINS)),
         }
     }
@@ -917,7 +917,22 @@ pub(crate) async fn refresh_user_session_locked(
     anon_key: &str,
     only_if_due: bool,
 ) -> anyhow::Result<Credentials> {
-    let _lock = smooth_api_client::credential_lock(store.path())?;
+    refresh_user_session_locked_within(http, store, supabase_url, anon_key, only_if_due, smooth_api_client::LOCKED_SECTION_TIMEOUT).await
+}
+
+/// [`refresh_user_session_locked`] with an explicit bound on the network call
+/// made under the lock (tests use a short one).
+async fn refresh_user_session_locked_within(
+    http: &reqwest::Client,
+    store: &CredentialsStore,
+    supabase_url: &str,
+    anon_key: &str,
+    only_if_due: bool,
+    limit: std::time::Duration,
+) -> anyhow::Result<Credentials> {
+    // Waits on the blocking pool (never a runtime worker) and gives up with the
+    // holder's name instead of hanging (th-2d2c15).
+    let _lock = smooth_api_client::credential_lock_async(store.path()).await?;
     // Re-read UNDER the lock — the winner of the race just wrote the fresh token.
     let current = store.load()?.ok_or_else(|| anyhow::anyhow!("no Smoo session on disk"))?;
     if only_if_due && !refresh::should_refresh(&current) {
@@ -926,11 +941,27 @@ pub(crate) async fn refresh_user_session_locked(
     if current.refresh_token.is_none() {
         anyhow::bail!("Smoo session has no refresh token — sign in again (`th auth login`)");
     }
-    let renewed = refresh::refresh_session(http, supabase_url, anon_key, &current).await?;
+    // Time-box the network call made UNDER the lock. An unbounded refresh on a
+    // dead socket held this lock for hours and hung every `th` on the machine
+    // (th-2d2c15); on timeout the guard drops and the lock is released.
+    let renewed = tokio::time::timeout(limit, refresh::refresh_session(http, supabase_url, anon_key, &current))
+        .await
+        .map_err(|_| anyhow::anyhow!("Smoo session refresh timed out after {limit:?}"))??;
     // Rotation persist is mandatory: skip it and the next exchange presents a
     // revoked token.
     store.save(&renewed)?;
     Ok(renewed)
+}
+
+/// An HTTP client for session work: connect + whole-request timeouts, so a dead
+/// socket (the Mac slept, the network changed) fails fast instead of hanging
+/// the heartbeat — and with it the credential lock — forever (th-2d2c15).
+pub(crate) fn bounded_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_default()
 }
 
 /// Spawn the background credential heartbeat: every [`HEARTBEAT_INTERVAL`],
@@ -942,7 +973,7 @@ pub(crate) async fn refresh_user_session_locked(
 /// (`expired: true`) — a heartbeat that fails quietly is worse than none.
 pub fn spawn_credential_heartbeat() {
     tokio::spawn(async move {
-        let http = reqwest::Client::default();
+        let http = crate::auth_login::bounded_http_client();
         // Only log on a change of state, so a long-idle daemon doesn't
         // emit the same line every minute for hours.
         let mut last: Option<HeartbeatAction> = None;
@@ -1592,6 +1623,31 @@ mod tests {
             .await
             .expect("a not-due session short-circuits before any network call");
         assert_eq!(creds.access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn a_hung_supabase_releases_the_lock_instead_of_wedging_the_machine() {
+        // th-2d2c15: the refresh endpoint accepts the connection and never
+        // answers (a dead socket after sleep looks the same). The locked
+        // section must end on its own, and the lock must be free afterwards —
+        // before the fix every `th` and daemon waited on it forever.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hung = format!("http://{}", listener.local_addr().unwrap());
+        let _keep_open = std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().take(4).collect();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(held);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(-30, Some("rtok"))));
+        let started = std::time::Instant::now();
+        let err = refresh_user_session_locked_within(&reqwest::Client::default(), &store, &hung, "anon", true, std::time::Duration::from_millis(300))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+        smooth_api_client::credential_lock_within(store.path(), std::time::Duration::from_millis(200)).expect("the lock is released once the refresh gives up");
     }
 
     #[tokio::test]
