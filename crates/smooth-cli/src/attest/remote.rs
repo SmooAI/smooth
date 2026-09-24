@@ -20,9 +20,9 @@ use serde::Deserialize;
 
 use super::env::{remote_path_prelude, Sys, EXIT_PRECONDITION};
 
-/// Below this the remote's system volume is close enough to full that a cargo
-/// build will die on ENOSPC and report it as a compile error. That is a fact
-/// about the box, so it is a 97, never a verdict.
+/// Below this the remote's BUILD volume ([`Remote::build_volume`]) is close
+/// enough to full that a cargo build will die on ENOSPC and report it as a
+/// compile error. That is a fact about the box, so it is a 97, never a verdict.
 const DEFAULT_MIN_FREE_GIB: u64 = 5;
 
 const fn default_min_free_gib() -> u64 {
@@ -78,14 +78,39 @@ fn parse_df_available_kb(out: &str) -> Option<u64> {
     out.lines().filter(|l| !l.trim().is_empty()).nth(1)?.split_whitespace().nth(3)?.parse().ok()
 }
 
-/// Free space on the remote's system volume, in GiB. `None` means the probe
-/// itself did not answer, which is treated the same as a failing guard.
-pub fn free_gib(sys: &Sys, host: &str) -> Option<u64> {
+impl Remote {
+    /// The directory whose volume the check fills: the cargo target when one is
+    /// configured (tens of GiB of artifacts), else the worktree.
+    ///
+    /// th-279151: the guard used to probe `/`. On smoo-hub that is the internal
+    /// disk — a family Mac's system volume, ~760MB free and not ours to clean —
+    /// while the build lives on `/Volumes/smoo-ext` with 5.9TB free. So EVERY
+    /// remote attest was refused as infrastructure and fell back to a local build.
+    /// The question the guard asks is "will this build hit ENOSPC", and the answer
+    /// lives on the volume the build writes to.
+    pub fn build_volume(&self) -> &str {
+        self.target_dir.as_deref().unwrap_or(&self.worktree)
+    }
+
+    /// Scratch space for the check, a sibling of the worktree (so the in-lock
+    /// `git clean` never touches it) on the same volume the guard measured.
+    /// Without it, rustc/linker/pnpm temp files land in the system volume's
+    /// `/var/folders` — the full disk the guard no longer looks at.
+    fn tmp_dir(&self) -> String {
+        format!("{}.attest-tmp", self.worktree)
+    }
+}
+
+/// Free space on the volume holding `path` on `host`, in GiB. `None` means the
+/// probe itself did not answer (or the path does not exist there), which is
+/// treated the same as a failing guard.
+pub fn free_gib(sys: &Sys, host: &str, path: &str) -> Option<u64> {
+    let probe = format!("df -Pk {}", shell_quote(path));
     let out = Command::new(&sys.ssh)
         // ConnectTimeout so an UNREACHABLE box fails in seconds — without it, ssh
         // waits out the full TCP handshake timeout, and the caller falls back to a
         // local run (or CI) only after a long, silent stall.
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "df -Pk /"])
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, &probe])
         .stdin(Stdio::null())
         .output()
         .ok()?;
@@ -142,9 +167,14 @@ pub fn remote_script(cfg: &Remote, check: &str, origin: &str, sha: &str) -> Stri
          git fetch --force --quiet {origin} '+{r}:{r}' || exit {EXIT_PRECONDITION}\n\
          git checkout --detach --force {sha} >/dev/null 2>&1 || exit {EXIT_PRECONDITION}\n\
          git clean -ffd --quiet || exit {EXIT_PRECONDITION}\n\
+         rm -rf {tmp}; mkdir -p {tmp} || exit {EXIT_PRECONDITION}\n\
+         export TMPDIR={tmp}\n\
          {target}{extra}bash {script}\n",
         path = remote_path_prelude(),
         worktree = shell_quote(&cfg.worktree),
+        // th-279151: fresh per run (we hold the lock, so no peer is using it) and on
+        // the build volume, never the system disk's /var/folders.
+        tmp = shell_quote(&cfg.tmp_dir()),
         origin = shell_quote(origin),
         stale = LOCK_STALE_MIN,
         wait = LOCK_WAIT_SECS,
@@ -171,12 +201,18 @@ fn shell_quote(s: &str) -> String {
 /// `Err(reason)` is an infrastructure problem — unreachable host, auth failure,
 /// no disk — which is never a verdict on the commit.
 pub fn execute(sys: &Sys, cfg: &Remote, check: &str, origin: &str, sha: &str) -> Result<i32, String> {
-    match free_gib(sys, &cfg.host) {
+    let volume = cfg.build_volume();
+    match free_gib(sys, &cfg.host, volume) {
         Some(gib) if gib < cfg.min_free_gib => {
-            return Err(format!("{} has only {gib}GiB free on / (needs {}GiB)", cfg.host, cfg.min_free_gib));
+            return Err(format!("{} has only {gib}GiB free on {volume} (needs {}GiB)", cfg.host, cfg.min_free_gib));
         }
         Some(_) => {}
-        None => return Err(format!("could not read free space on {} — treating the host as unusable", cfg.host)),
+        None => {
+            return Err(format!(
+                "could not read free space for {volume} on {} — treating the host as unusable",
+                cfg.host
+            ))
+        }
     }
 
     let mut child = Command::new(&sys.ssh)
@@ -397,9 +433,64 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
     #[test]
     fn every_host_side_failure_in_the_script_is_a_precondition() {
         let s = remote_script(&cfg(), "rust", "origin", "abc123");
-        // Five ways the BOX can be wrong, none a statement about the code: the lock
-        // wait timing out (th-983292), then cd, fetch, checkout and clean.
-        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 5);
+        // Six ways the BOX can be wrong, none a statement about the code: the lock
+        // wait timing out (th-983292), then cd, fetch, checkout, clean, and making
+        // the scratch dir (th-279151).
+        assert_eq!(s.matches(&format!("exit {EXIT_PRECONDITION}")).count(), 6);
+    }
+
+    /// th-279151: temp files belong on the build volume, not the system disk the
+    /// guard no longer measures — fresh each run, set before the check starts, and
+    /// outside the worktree so `git clean` never races it.
+    #[test]
+    fn the_check_gets_a_fresh_tmpdir_on_the_build_volume() {
+        let s = remote_script(&cfg(), "rust", "origin", "abc");
+        assert!(s.contains("export TMPDIR='/Volumes/smoo-ext/ci-attest/smooai.attest-tmp'"), "{s}");
+        assert!(
+            s.contains("rm -rf '/Volumes/smoo-ext/ci-attest/smooai.attest-tmp'"),
+            "a stale tmp from a crashed run is cleared"
+        );
+        assert!(
+            s.find("mkdir \"$lock\"").unwrap() < s.find("rm -rf").unwrap(),
+            "only the lock holder may clear it"
+        );
+        assert!(s.find("export TMPDIR").unwrap() < s.find("bash 'scripts/ci/rust.sh'").unwrap());
+    }
+
+    #[test]
+    fn the_build_volume_is_the_target_dir_else_the_worktree() {
+        assert_eq!(cfg().build_volume(), "/Volumes/smoo-ext/ci-attest/target");
+        let mut c = cfg();
+        c.target_dir = None;
+        assert_eq!(c.build_volume(), "/Volumes/smoo-ext/ci-attest/smooai");
+    }
+
+    /// th-279151: the regression itself. smoo-hub's `/` had 760MB free while the
+    /// build volume had terabytes; probing `/` refused every remote attest.
+    #[test]
+    fn the_disk_guard_probes_the_build_volume_not_the_system_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("argv");
+        let ssh = test_script(
+            tmp.path(),
+            "ssh",
+            &format!(
+                r#"
+echo "$*" >> '{log}'
+case "$*" in
+  *"df -Pk"*) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/disk5s1 100 1 {free} 1%% /Volumes/smoo-ext\n'; exit 0 ;;
+esac
+cat >/dev/null
+exit 0
+"#,
+                log = log.display(),
+                free = 50u64 * 1024 * 1024
+            ),
+        );
+        assert_eq!(execute(&sys_with_ssh(ssh), &cfg(), "rust", "origin", "abc"), Ok(0));
+        let argv = std::fs::read_to_string(&log).unwrap();
+        let probe = argv.lines().find(|l| l.contains("df -Pk")).unwrap();
+        assert!(probe.ends_with("df -Pk '/Volumes/smoo-ext/ci-attest/target'"), "probed: {probe}");
     }
 
     #[test]
@@ -464,7 +555,7 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         // 1GiB free, guard wants 5.
         let sys = sys_with_ssh(ssh_stub(tmp.path(), 1024 * 1024, 0));
         let err = execute(&sys, &cfg(), "rust", "origin", "abc").unwrap_err();
-        assert!(err.contains("1GiB free"), "{err}");
+        assert!(err.contains("1GiB free on /Volumes/smoo-ext/ci-attest/target"), "{err}");
     }
 
     #[test]
