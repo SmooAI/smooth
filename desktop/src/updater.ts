@@ -38,6 +38,7 @@ import electronUpdater from 'electron-updater';
 
 import { loadConfig, saveConfig } from './config.js';
 import { stopDaemon } from './daemon.js';
+import { markQuitting } from './quitState.js';
 import { addSkippedVersion, decideAvailableAction, decideUpdateAction, recordAttempt, shouldClearState, type UpdateState } from './updateDecision.js';
 
 const { autoUpdater } = electronUpdater;
@@ -46,6 +47,9 @@ const { autoUpdater } = electronUpdater;
 // build could sit unseen for most of a day (th-updater-fix). Unpackaged/dev runs
 // have no feed, so we skip entirely.
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+/** How long after quitAndInstall() the app may linger before it exits on its
+ * own so ShipIt can swap the bundle (th-6b5d5c). */
+const QUIT_FOR_INSTALL_GRACE_MS = 15_000;
 
 /** Where update activity is logged. Same file the daemon spawn diagnostics use,
  * so "why didn't it update?" is answerable — the console is lost under `open`. */
@@ -313,7 +317,19 @@ export function startAutoUpdates(): void {
                 logLine('info', 'stopping daemon before install…');
                 await stopDaemon();
                 logLine('info', 'daemon stopped; quitAndInstall');
+                // th-6b5d5c: quitAndInstall closes the windows BEFORE before-quit
+                // fires. Mark the exit first, or the window's close-to-tray
+                // handler cancels those closes, the app never exits, and
+                // ShipIt aborts with "App Still Running Error".
+                markQuitting();
                 autoUpdater.quitAndInstall();
+                // Belt and braces: ShipIt only swaps the bundle once this process
+                // is gone. If anything still holds the app open, leave anyway —
+                // the daemon is already stopped and the new version relaunches.
+                setTimeout(() => {
+                    logLine('warn', 'still running 15s after quitAndInstall; exiting so the update can install');
+                    app.exit(0);
+                }, QUIT_FOR_INSTALL_GRACE_MS).unref();
             });
     });
     autoUpdater.on('error', (err) => logLine('error', err));

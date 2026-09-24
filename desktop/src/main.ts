@@ -35,12 +35,12 @@ import { linkThOnPath } from './installth.js';
 import { firstRunLoginItem, trayModeLabel } from './loginitem.js';
 import { isNewChatChord } from './newchat.js';
 import { buildNotification, type NotifyPayload } from './notify.js';
+import { markQuitting, shouldHideOnClose } from './quitState.js';
 import { aboutDaemonDetail, type SupervisorState, trayDaemonClickable, trayDaemonLabel } from './supervisor.js';
 import { checkForUpdatesInteractive, startAutoUpdates } from './updater.js';
 
 let win: BrowserWindow | undefined;
 let tray: Tray | undefined;
-let quitting = false;
 let spawnedDaemon = false;
 let lastDaemons: RemoteDaemon[] = [];
 /** The daemon phase the tray last painted — so a respawn that comes back
@@ -195,7 +195,9 @@ function showWindow(): void {
     win.loadURL(`${baseUrl()}/`);
     // Closing the window parks the app in the tray; only Quit exits.
     win.on('close', (e) => {
-        if (quitting) return;
+        // Let the close through during a real exit — including an update
+        // install, whose windows close BEFORE before-quit fires (th-6b5d5c).
+        if (!shouldHideOnClose()) return;
         e.preventDefault();
         win?.hide();
     });
@@ -460,7 +462,7 @@ function asset(name: string): string {
 }
 
 app.on('before-quit', () => {
-    quitting = true;
+    markQuitting();
     // Normal quit: fire-and-forget is fine (the app is going away anyway). The
     // OTA path awaits stopDaemon() itself before quitAndInstall so the bundle is
     // free for the Squirrel swap (th-79416c).
