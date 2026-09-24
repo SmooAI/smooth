@@ -322,6 +322,47 @@ pub struct OrgOnlyArgs {
     pub org: Option<String>,
 }
 
+/// Arguments for `email_check_domain`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmailCheckArgs {
+    /// The domain to grade, e.g. `smoo.ai`. Any domain works, not only your own.
+    pub domain: String,
+    /// Act on a specific org id. Defaults to your active org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
+/// Arguments for the email report tools (`email_dmarc_summary`, `email_tls_summary`).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmailWindowArgs {
+    /// Limit to one monitored domain. Omit for all of the org's domains.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Reporting window in days (default 30).
+    #[serde(default)]
+    pub days: Option<u32>,
+    /// Act on a specific org id. Defaults to your active org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
+/// Arguments for `email_sending_sources`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmailSourcesArgs {
+    /// Limit to one monitored domain. Omit for all of the org's domains.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Reporting window in days (default 30).
+    #[serde(default)]
+    pub days: Option<u32>,
+    /// How many sources to list (default 20). The counts always cover all of them.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Act on a specific org id. Defaults to your active org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
 /// Arguments for `observability_audit_search`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuditSearchArgs {
@@ -944,6 +985,108 @@ impl SmoothMcp {
         Ok(obs::render_incidents(&resp))
     }
 
+    /// Grade a domain's mail authentication records (SMOODEV-3272).
+    ///
+    /// # Errors
+    /// MCP error if not signed in, no active org, or the request fails.
+    #[tool(
+        name = "email_check_domain",
+        description = "Grade a domain's email authentication: MX, SPF (including the 10-DNS-lookup limit that silently breaks SPF), DKIM, DMARC, \
+            blocklists (Spamhaus and others), MTA-STS and BIMI. Each check comes back PASS/WARN/FAIL/INFO with the record found and what to change. \
+            Works on ANY domain — yours, a vendor's, a prospect's. Use for \"why is our mail going to spam\" or \"is this domain set up right\". \
+            Needs Sign in with Smoo (`smoo auth login`).",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    pub async fn email_check_domain(&self, params: Parameters<EmailCheckArgs>) -> Result<String, ErrorData> {
+        use crate::smooai::email;
+        let a = params.0;
+        let (client, org) = obs_client(a.org).await?;
+        let resp = email::check_domain(&client, &org, &a.domain).await.map_err(|e| obs_err("domain checks", &e))?;
+        Ok(email::render_check(&resp))
+    }
+
+    /// DMARC aggregate-report summary for the org's domains.
+    ///
+    /// # Errors
+    /// MCP error if not signed in, no active org, or the request fails.
+    #[tool(
+        name = "email_dmarc_summary",
+        description = "Summarize the DMARC aggregate reports Gmail, Outlook, Yahoo and others sent about your Smoo org's domains: pass rate, message \
+            counts, and every source IP that is NOT aligned (with DKIM/SPF pass counts and the disposition receivers applied). Default window \
+            30 days. Zero messages is reported as a setup problem, never as a clean domain. Needs Sign in with Smoo (`smoo auth login`).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn email_dmarc_summary(&self, params: Parameters<EmailWindowArgs>) -> Result<String, ErrorData> {
+        use crate::smooai::email;
+        let a = params.0;
+        let (client, org) = obs_client(a.org).await?;
+        let resp = email::dmarc_summary(&client, &org, a.domain.as_deref(), a.days.unwrap_or(email::DEFAULT_DAYS))
+            .await
+            .map_err(|e| obs_err("DMARC reports", &e))?;
+        Ok(email::render_dmarc(&resp))
+    }
+
+    /// Every service sending mail as the org's domains.
+    ///
+    /// # Errors
+    /// MCP error if not signed in, no active org, or the request fails.
+    #[tool(
+        name = "email_sending_sources",
+        description = "List every system sending email AS your Smoo org's domains, built from DMARC reports: the vendor (identified from the DKIM \
+            signature, then the envelope sender), message and pass counts, and flags for UNIDENTIFIED, failing, new (first seen in the last 14 \
+            days) and forwarder sources. Problem sources are listed first. Use to find shadow senders or an SPF include nobody uses any more. \
+            Needs Sign in with Smoo (`smoo auth login`).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn email_sending_sources(&self, params: Parameters<EmailSourcesArgs>) -> Result<String, ErrorData> {
+        use crate::smooai::email;
+        let a = params.0;
+        let (client, org) = obs_client(a.org).await?;
+        let resp = email::sending_sources(&client, &org, a.domain.as_deref(), a.days.unwrap_or(email::DEFAULT_DAYS))
+            .await
+            .map_err(|e| obs_err("sending sources", &e))?;
+        Ok(email::render_sources(&resp, a.limit.unwrap_or(20)))
+    }
+
+    /// SMTP TLS report summary (RFC 8460).
+    ///
+    /// # Errors
+    /// MCP error if not signed in, no active org, or the request fails.
+    #[tool(
+        name = "email_tls_summary",
+        description = "Summarize SMTP TLS reports (RFC 8460) for your Smoo org's domains: what share of mail sent TO you arrived over trusted TLS, \
+            and each failure type in plain language with the MX hosts involved (e.g. an expired certificate). Default window 30 days. No reports \
+            is called out as a setup question. Needs Sign in with Smoo (`smoo auth login`).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn email_tls_summary(&self, params: Parameters<EmailWindowArgs>) -> Result<String, ErrorData> {
+        use crate::smooai::email;
+        let a = params.0;
+        let (client, org) = obs_client(a.org).await?;
+        let resp = email::tls_summary(&client, &org, a.domain.as_deref(), a.days.unwrap_or(email::DEFAULT_DAYS))
+            .await
+            .map_err(|e| obs_err("TLS reports", &e))?;
+        Ok(email::render_tls(&resp))
+    }
+
+    /// Managed email signature status.
+    ///
+    /// # Errors
+    /// MCP error if not signed in, no active org, or the request fails.
+    #[tool(
+        name = "email_signature_status",
+        description = "Show your Smoo org's managed email signatures: each signing domain, whether it is active or a draft, when it was last \
+            rendered, and which senders currently get a signature. Use for \"is the signature live\" or \"why doesn't X have a signature\" \
+            (anyone not listed sends unsigned mail). Needs Sign in with Smoo (`smoo auth login`).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn email_signature_status(&self, params: Parameters<OrgOnlyArgs>) -> Result<String, ErrorData> {
+        use crate::smooai::email;
+        let (client, org) = obs_client(params.0.org).await?;
+        let resp = email::signature_status(&client, &org).await.map_err(|e| obs_err("email signatures", &e))?;
+        Ok(email::render_signatures(&resp))
+    }
+
     /// The platform audit trail — who did what in the org.
     ///
     /// # Errors
@@ -1194,6 +1337,10 @@ impl ServerHandler for SmoothMcp {
                  pipe makes a broken ingest look like calm. Second, these tools report their own truncation and their own \
                  unknowns — \"there may be more\" means you have not seen everything, and \"cost not measured\" means unknown \
                  spend, not free.\n\n\
+                 EMAIL — signed in, read-only. `email_check_domain` grades any domain's SPF/DKIM/DMARC/MX/blocklist/MTA-STS/BIMI \
+                 records with what to change; `email_dmarc_summary`, `email_sending_sources` and `email_tls_summary` read the \
+                 reports mailbox providers send about the org's own domains; `email_signature_status` shows who gets the managed \
+                 signature. No reports is a setup problem (a wrong or missing `rua=`), never a clean domain — say so.\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -1265,8 +1412,26 @@ mod tests {
             "observability_llm_turns_search",
             "observability_llm_tool_failures",
             "observability_llm_cost_breakdown",
+            "email_check_domain",
+            "email_dmarc_summary",
+            "email_sending_sources",
+            "email_tls_summary",
+            "email_signature_status",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
+        }
+
+        // The email tools only read (SMOODEV-3272) — a client should never
+        // prompt for confirmation before running them.
+        for name in [
+            "email_check_domain",
+            "email_dmarc_summary",
+            "email_sending_sources",
+            "email_tls_summary",
+            "email_signature_status",
+        ] {
+            let t = tools.tools.iter().find(|t| t.name == name).expect("email tool present");
+            assert_eq!(t.annotations.as_ref().and_then(|a| a.read_only_hint), Some(true), "{name} should be read-only");
         }
 
         // The mail tools' descriptions are the only place the coordination
