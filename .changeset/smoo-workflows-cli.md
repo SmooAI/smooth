@@ -1,5 +1,0 @@
----
-'@smooai/smooth': minor
----
-
-New `smoo workflows` command group (alias `smoo workflow`, mirrored as `smoo api workflows`) for Smoo AI Workflows, the "when X happens, do Y" automations from ADR-127 (th-b1068f). It covers list, show, versions, create (`--file` or `--from-template`), update, export, validate, publish (`--enable`), enable, pause, rm, run, runs, run-show, cancel, event-types, step-types and templates, over the same api-prime routes the canvas uses. A workflow's definition round-trips as code: `export <id> > def.json`, edit, `update <id> --file def.json`. `show` puts triggers in words and pins the draft's validation issues to node ids. A refused publish lists every 422 issue on its own line with its node, and a 403 names the missing permission. `run` only previews unless you pass `--confirm`, because its steps send email and write CRM records. `--wait` follows the run and prints the step timeline. `rm` and `cancel` use the shared `--yes` / `--dry-run` gate. The starter templates filter a tag event on `after.tagName` and name a deal by `{{entity.title}}`, which are the field names the live event catalog carries.
