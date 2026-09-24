@@ -472,6 +472,33 @@ fn wrap_out(to: &str, operator_text: &str) -> Option<String> {
     Some(json!({ "to": to, "frame": frame }).to_string())
 }
 
+/// Rewrite a phone's legacy Stop onto the engine's action (th-74ba1f).
+///
+/// Every Big Smooth client shipped sending `{"action":"interrupt"}`, which the
+/// engine does not know: it answered `UNSUPPORTED_ACTION` and the turn kept
+/// running, so Stop never worked. Current clients send `cancel`. Phones already
+/// installed still send `interrupt`, and every phone frame over Smoo Relay passes
+/// through this bridge, so here it becomes `cancel` and their Stop actually
+/// stops the turn. (A phone on the direct `/ws` path talks to the engine without
+/// this bridge; that path needs the engine-side alias or an app update.)
+///
+/// Only the `action` changes. Every other frame passes through byte-identical.
+fn alias_legacy_interrupt(frame: String) -> String {
+    // Cheap prefilter: nearly every frame is something else.
+    if !frame.contains("interrupt") {
+        return frame;
+    }
+    let Ok(mut v) = serde_json::from_str::<Value>(&frame) else {
+        return frame;
+    };
+    if v.get("action").and_then(Value::as_str) != Some("interrupt") {
+        return frame;
+    }
+    v["action"] = json!("cancel");
+    tracing::info!("relay: aliased a phone's legacy `interrupt` to the engine's `cancel` (th-74ba1f)");
+    v.to_string()
+}
+
 /// The daemon's own flow WS, for the per-phone flow bridge.
 fn flow_ws_url(local_port: u16, token: &str) -> String {
     format!("ws://127.0.0.1:{local_port}/api/flow/ws?token={}", urlencode(token))
@@ -728,7 +755,7 @@ fn spawn_bridge_with(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let actions_for = |flow: &mut Option<FlowGuard>, f: String| match flow.as_mut() {
             Some(guard) => guard.inbound(&f),
-            None => vec![Action::ToEngine(f)],
+            None => vec![Action::ToEngine(alias_legacy_interrupt(f))],
         };
         // The frame that opened this bridge (a phone's `flow.pair` / `flow.e2e.open`
         // / nudge) is already queued: process it BEFORE reading the engine, so its
@@ -1328,6 +1355,28 @@ mod tests {
     use super::*;
 
     // ── config resolution ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_legacy_interrupt_becomes_the_engines_cancel() {
+        let out = alias_legacy_interrupt(r#"{"action":"interrupt","requestId":"int-7","sessionId":"s1"}"#.to_owned());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["action"], "cancel");
+        assert_eq!(v["requestId"], "int-7", "everything but the action is kept");
+        assert_eq!(v["sessionId"], "s1");
+    }
+
+    #[test]
+    fn every_other_frame_passes_through_byte_identical() {
+        for frame in [
+            r#"{"action":"send_message","requestId":"t1","message":"please interrupt me later"}"#,
+            r#"{"action":"cancel","requestId":"t1"}"#,
+            r#"{"action":"confirm_tool_action","requestId":"t1","approved":true}"#,
+            "not json but mentions interrupt",
+            r#"{"type":"interrupt"}"#,
+        ] {
+            assert_eq!(alias_legacy_interrupt(frame.to_owned()), frame);
+        }
+    }
 
     #[test]
     fn relay_enabled_by_default_at_the_production_url() {
@@ -2035,6 +2084,7 @@ mod tests {
             home: tmp.path().join("home"),
             daemon_url: None,
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));
@@ -2248,6 +2298,7 @@ mod tests {
             home: tmp.path().join("home"),
             daemon_url: None,
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));

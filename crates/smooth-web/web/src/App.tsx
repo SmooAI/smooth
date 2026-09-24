@@ -30,13 +30,14 @@ import {
     ClipboardList,
     Zap,
     ListChecks,
+    CornerDownRight,
 } from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
-import { dequeue, enqueue, queuedLabel, removeAt, submitAction, type QueuedMessage } from './message-queue';
+import { dequeue, enqueue, queuedLabel, removeAt, submitAction, takeAt, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
 import { costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
 import { replyToNotify } from './notify-relay';
@@ -192,6 +193,9 @@ export default function App() {
         respond,
         turnActive,
         interrupt,
+        steer,
+        stopping,
+        pendingSteer,
         mode,
         setMode,
         sessionCostUsd,
@@ -397,6 +401,9 @@ export default function App() {
                                 disabled={state === 'connecting' || state === 'offline'}
                                 turnActive={turnActive}
                                 onStop={interrupt}
+                                onSteer={steer}
+                                stopping={stopping}
+                                pendingSteer={pendingSteer}
                                 mode={mode}
                                 setMode={guardedSetMode}
                                 modelCosts={modelCosts}
@@ -1020,6 +1027,9 @@ function Composer({
     disabled,
     turnActive,
     onStop,
+    onSteer,
+    stopping,
+    pendingSteer,
     mode,
     setMode,
     modelCosts,
@@ -1031,8 +1041,14 @@ function Composer({
     disabled: boolean;
     /** A turn is in flight — swaps Send for Stop. */
     turnActive: boolean;
-    /** Interrupt the running turn. */
+    /** Stop the running turn. */
     onStop: () => void;
+    /** Steer: stop the running turn, then send this the moment it has ended (th-74ba1f). */
+    onSteer: (t: string, attachments: Attachment[]) => void;
+    /** A Stop/Steer is in flight and the turn has not ended yet. */
+    stopping: boolean;
+    /** The Steer waiting on that stop, shown so the user sees it was taken. */
+    pendingSteer: { text: string; attachments: Attachment[] } | null;
     mode: SmoothMode;
     setMode: (id: string) => void;
     modelCosts: ModelCosts;
@@ -1216,20 +1232,32 @@ function Composer({
         onSend(next.head.text, next.head.attachments);
     }, [turnActive, disabled, queue, onSend]);
 
-    const submit = () => {
+    // `steerNow` = the Steer button or ⌘/Ctrl+Enter: mid-turn, stop the running
+    // turn and send this as soon as it has ended, instead of queueing behind it.
+    const submit = (steerNow = false) => {
         if (menu && selItem) {
             applyItem(selItem);
             return;
         }
-        const action = submitAction(turnActive, canDispatch);
+        const action = submitAction(turnActive, canDispatch, steerNow);
         if (action === 'noop') return;
         if (action === 'enqueue') {
             setQueue((q) => enqueue(q, { id: crypto.randomUUID(), text, attachments }));
+        } else if (action === 'steer') {
+            onSteer(text, attachments);
         } else {
             onSend(text, attachments);
         }
         setAttachments([]);
         update('');
+    };
+
+    // A queued chip's "Steer now": pull it out of the queue and steer with it.
+    const steerQueued = (i: number) => {
+        const taken = takeAt(queue, i);
+        if (!taken) return;
+        setQueue(taken.rest);
+        onSteer(taken.item.text, taken.item.attachments);
     };
 
     return (
@@ -1324,6 +1352,18 @@ function Composer({
                 send order. Each drains automatically after the current turn's
                 reply lands. "Clear queued" empties them WITHOUT stopping the
                 running turn — distinct from Stop, which interrupts the turn. */}
+            {pendingSteer && (
+                <div
+                    className="mb-2 flex items-center gap-2 rounded-xl border border-(--color-th-teal)/40 bg-(--color-th-teal)/5 py-1.5 pl-3 pr-2 text-sm"
+                    role="status"
+                >
+                    <CornerDownRight size={13} className="shrink-0 text-(--color-th-teal)" />
+                    <span className="min-w-0 flex-1 truncate text-foreground/80">
+                        <span className="text-(--color-muted-foreground)">Steering · stopping this turn, then sending: </span>
+                        {pendingSteer.text.trim() || `${pendingSteer.attachments.length} attachment${pendingSteer.attachments.length === 1 ? '' : 's'}`}
+                    </span>
+                </div>
+            )}
             {queue.length > 0 && (
                 <div className="mb-2 flex flex-col gap-1 px-1">
                     <div className="flex items-center justify-between px-1 pb-0.5">
@@ -1336,6 +1376,17 @@ function Composer({
                         <div key={q.id} className="flex items-center gap-2 rounded-xl border border-border bg-panel-2/60 py-1 pl-3 pr-1.5 text-sm">
                             {q.attachments.length > 0 && <Paperclip size={13} className="shrink-0 text-(--color-th-teal)" />}
                             <span className="min-w-0 flex-1 truncate text-foreground/80">{queuedLabel(q)}</span>
+                            {turnActive && (
+                                <button
+                                    type="button"
+                                    onClick={() => steerQueued(i)}
+                                    title="Stop the running turn and send this now"
+                                    className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-(--color-th-teal) transition hover:bg-(--color-th-teal)/10"
+                                >
+                                    <CornerDownRight size={12} />
+                                    Steer now
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => setQueue((prev) => removeAt(prev, i))}
@@ -1447,7 +1498,8 @@ function Composer({
                             }
                             if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
-                                submit();
+                                // ⌘/Ctrl+Enter mid-turn steers; plain Enter queues.
+                                submit(e.metaKey || e.ctrlKey);
                             }
                         }}
                         rows={1}
@@ -1455,7 +1507,7 @@ function Composer({
                             disabled
                                 ? 'Waiting for your operator…'
                                 : turnActive
-                                  ? 'Big Smooth is working — Enter to queue your next message'
+                                  ? 'Big Smooth is working — Enter to queue · ⌘/Ctrl+Enter to steer'
                                   : 'Talk to Big Smooth…  (/ for commands · @ to mention)'
                         }
                         disabled={disabled}
@@ -1475,22 +1527,39 @@ function Composer({
                         <button
                             type="button"
                             onClick={onStop}
-                            className="grid size-9 shrink-0 place-items-center rounded-xl bg-foreground/10 text-foreground transition hover:bg-foreground/20"
-                            aria-label="Stop"
-                            title="Stop the running turn"
+                            disabled={stopping}
+                            className="grid size-9 shrink-0 place-items-center rounded-xl bg-foreground/10 text-foreground transition enabled:hover:bg-foreground/20 disabled:opacity-50"
+                            aria-label={stopping ? 'Stopping' : 'Stop'}
+                            title={stopping ? 'Stopping…' : 'Stop the running turn'}
                         >
                             <Square size={14} fill="currentColor" />
                         </button>
                     )}
+                    {/* Mid-turn with a draft, you choose (th-74ba1f): Steer stops the
+                        running turn and sends this the moment it has ended, so it
+                        redirects the work; Queue holds it until the turn finishes. */}
+                    {turnActive && canDispatch && (
+                        <button
+                            type="button"
+                            onClick={() => submit(true)}
+                            className="flex h-9 shrink-0 items-center gap-1 rounded-xl border border-(--color-th-teal)/50 px-2.5 text-sm font-medium text-(--color-th-teal) transition hover:bg-(--color-th-teal)/10"
+                            aria-label="Steer"
+                            title="Steer — stop this turn and send now (⌘/Ctrl+Enter)"
+                        >
+                            <CornerDownRight size={15} />
+                            Steer
+                        </button>
+                    )}
                     {(!turnActive || canDispatch) && (
                         <button
-                            onClick={submit}
+                            onClick={() => submit()}
                             disabled={!canDispatch}
-                            className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
-                            aria-label={turnActive ? 'Queue message' : 'Send'}
-                            title={turnActive ? 'Queue — sends after this turn' : undefined}
+                            className={`flex h-9 shrink-0 items-center justify-center gap-1 rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40 ${turnActive ? 'px-2.5 text-sm font-medium' : 'w-9'}`}
+                            aria-label={turnActive ? 'Queue' : 'Send'}
+                            title={turnActive ? 'Queue — sends after this turn (Enter)' : undefined}
                         >
-                            <ArrowUp size={18} />
+                            <ArrowUp size={turnActive ? 15 : 18} />
+                            {turnActive && 'Queue'}
                         </button>
                     )}
                 </div>

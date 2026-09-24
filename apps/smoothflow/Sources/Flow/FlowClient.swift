@@ -69,6 +69,29 @@ final class FlowClient {
         return try JSONDecoder().decode(InferredContext.self, from: data)
     }
 
+    /// `GET /api/flow/repos?q=` (th-145e6b) — git checkouts under `$HOME`
+    /// matching `query`, best first.
+    func repos(query: String, limit: Int = 12) async throws -> RepoList {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var comps = URLComponents(url: address.httpBase.appendingPathComponent("api/flow/repos"), resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = comps?.url else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse) }
+        return try JSONDecoder().decode(RepoList.self, from: data)
+    }
+
+    /// `POST /api/flow/repos/rescan` — re-walk `$HOME` in the background.
+    func rescanRepos() async throws {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var req = URLRequest(url: address.httpBase.appendingPathComponent("api/flow/repos/rescan"))
+        req.httpMethod = "POST"
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        _ = try await session.data(for: req)
+    }
+
     /// `GET /api/flow/harnesses` — every manifest, hidden ones flagged (Settings).
     func allHarnesses() async throws -> [HarnessInfo] {
         try await harnessCall(method: "GET", path: "api/flow/harnesses", body: nil)

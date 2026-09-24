@@ -1293,7 +1293,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // of the engine's DenyPolicy-backed hook. The builder installs these
         // ahead of the per-agent auth + confirmation hooks, so they get first say
         // on every call. narc degrades to regex-only when no gateway key is set.
+        //
+        // Ahead of both: the INFO tool-call log (th-5d48ca) — name, duration,
+        // outcome, never argument values. First, so a blocked call still logs.
         .tool_hooks(vec![
+            Arc::new(crate::hooks::ToolLogHook::new()) as Arc<dyn smooth_operator::tool::ToolHook>,
             Arc::new(permission_gate) as Arc<dyn smooth_operator::tool::ToolHook>,
             Arc::new(crate::hooks::NarcHook::with_settings(narc_judge_config(), judge_settings.clone())),
         ])

@@ -498,6 +498,52 @@ struct InferredContext: Codable, Equatable {
     }
 }
 
+/// One git checkout the New Session directory picker offers (th-145e6b):
+/// a row of `GET /api/flow/repos`.
+struct RepoEntry: Codable, Equatable, Identifiable {
+    var path: String
+    var name: String
+    var branch: String?
+    /// For a linked worktree: its main checkout.
+    var main: String?
+    var touched: Int = 0
+    var id: String { path }
+
+    /// `path` with `$HOME` shown as `~`.
+    var shortPath: String { DirectoryPicking.abbreviate(path) }
+}
+
+/// `GET /api/flow/repos` — the rows plus whether the index is complete.
+struct RepoList: Codable, Equatable {
+    var repos: [RepoEntry] = []
+    var scanning: Bool = false
+    var indexed: Bool = false
+}
+
+/// Pure helpers behind the directory field (XCTested without UI).
+enum DirectoryPicking {
+    /// `/Users/me/dev/x` → `~/dev/x`.
+    static func abbreviate(_ path: String, home: String = NSHomeDirectory()) -> String {
+        if path == home { return "~" }
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
+    /// What typing a path means: `~/x` → `/Users/me/x`; a relative or empty
+    /// query is not a path (it is a search).
+    static func expandedPath(_ typed: String, home: String = NSHomeDirectory()) -> String? {
+        let t = typed.trimmingCharacters(in: .whitespaces)
+        if t == "~" { return home }
+        if t.hasPrefix("~/") { return home + t.dropFirst(1) }
+        return t.hasPrefix("/") ? t : nil
+    }
+
+    /// The highlighted row after an arrow key, clamped to the list.
+    static func moved(_ index: Int, by delta: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return min(max(index + delta, 0), count - 1)
+    }
+}
+
 struct NewSession: Equatable {
     var kind: String = "claude"
     var worktree: String?

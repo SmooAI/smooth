@@ -260,4 +260,23 @@ final class FlowFrameIntegrationTests: XCTestCase {
         XCTAssertEqual(s.argv, ["zsh", "-l"])
         XCTAssertNotNil(ISO8601DateFormatter.flexible.date(from: s.createdAt), "nanosecond timestamps parse")
     }
+
+    /// th-145e6b: the directory picker's rows and its pure helpers.
+    func testRepoListAndDirectoryPicking() throws {
+        let json = #"{"repos":[{"path":"/Users/me/dev/smooai/smooth-th-1","name":"smooth-th-1","branch":"th-1","main":"/Users/me/dev/smooai/smooth","touched":5},{"path":"/Users/me/dev/refs/cmux","name":"cmux","touched":1}],"scanning":true,"indexed":false}"#
+        let list = try JSONDecoder().decode(RepoList.self, from: Data(json.utf8))
+        XCTAssertEqual(list.repos.map(\.name), ["smooth-th-1", "cmux"])
+        XCTAssertEqual(list.repos[0].main, "/Users/me/dev/smooai/smooth")
+        XCTAssertNil(list.repos[1].branch)
+        XCTAssertTrue(list.scanning)
+        XCTAssertEqual(DirectoryPicking.abbreviate("/Users/me/dev/x", home: "/Users/me"), "~/dev/x")
+        XCTAssertEqual(DirectoryPicking.abbreviate("/Users/me", home: "/Users/me"), "~")
+        XCTAssertEqual(DirectoryPicking.abbreviate("/Users/meta/x", home: "/Users/me"), "/Users/meta/x", "a prefix that is not a path boundary")
+        XCTAssertEqual(DirectoryPicking.expandedPath("~/dev", home: "/Users/me"), "/Users/me/dev")
+        XCTAssertEqual(DirectoryPicking.expandedPath(" /tmp/x ", home: "/Users/me"), "/tmp/x")
+        XCTAssertNil(DirectoryPicking.expandedPath("smooth", home: "/Users/me"), "a word is a search, not a path")
+        XCTAssertEqual(DirectoryPicking.moved(0, by: -1, count: 3), 0)
+        XCTAssertEqual(DirectoryPicking.moved(2, by: 1, count: 3), 2)
+        XCTAssertEqual(DirectoryPicking.moved(0, by: 1, count: 0), 0)
+    }
 }

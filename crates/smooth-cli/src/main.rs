@@ -1008,6 +1008,18 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::work::Cmd,
     },
+    /// Smoo AI workflows — "when X happens, do Y" automations (ADR-127).
+    ///
+    /// List / show / author drafts as JSON (`export` → edit → `update
+    /// --file`), validate, publish + enable / pause, run by hand (previews
+    /// unless `--confirm`), and read each run's step timeline. The org needs
+    /// the `workflows` product feature; verbs are gated by `workflow.read` /
+    /// `.write` / `.publish` / `.run`.
+    #[command(visible_alias = "workflow")]
+    Workflows {
+        #[command(subcommand)]
+        cmd: smooai::workflows::Cmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1215,6 +1227,13 @@ enum ApiCommands {
     Dashboard {
         #[command(subcommand)]
         cmd: smooai::dashboard::Cmd,
+    },
+    /// Smoo AI workflows — mirror of `smoo workflows` (the canonical
+    /// spelling); same verbs, same module.
+    #[command(visible_alias = "workflow")]
+    Workflows {
+        #[command(subcommand)]
+        cmd: smooai::workflows::Cmd,
     },
     /// Smoo AI org integrations (SendGrid email).
     #[command(visible_alias = "integration")]
@@ -1803,6 +1822,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
             ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
+            ApiCommands::Workflows { cmd } => smooai::workflows::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
             ApiCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
@@ -1821,6 +1841,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
         SmooCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
         SmooCommands::Work { cmd } => smooai::work::cmd(cmd).await,
+        SmooCommands::Workflows { cmd } => smooai::workflows::cmd(cmd).await,
         SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
         SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
         SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
@@ -3622,7 +3643,35 @@ async fn cmd_code(
     // regardless of which command triggered it.
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
 
-    if !daemon_health::probe(daemon_health::DEFAULT_PORT).await.is_up() {
+    // th-8b55de: find Big Smooth the way the rest of th code does —
+    // `$SMOOTH_URL`, then `~/.smooth/daemon.addr`, then :4400 — and export
+    // the answer, because the TUI reads `$SMOOTH_URL` alone. Probing only
+    // :4400 boot-looped every th code pane SmoothFlow launched (its daemon
+    // is on a random port) and missed the Big Smooth app's daemon entirely.
+    let explicit_url = std::env::var("SMOOTH_URL").ok().is_some_and(|u| !u.trim().is_empty());
+    let daemon = smooth_code::headless::daemon_url();
+    let found = daemon_health::probe_url(&format!("{daemon}/health")).await;
+    let plan = daemon_health::leader_plan(explicit_url, found.is_up());
+    if plan == daemon_health::Leader::FailExplicit {
+        anyhow::bail!(
+            "Big Smooth at $SMOOTH_URL={daemon} is not answering ({})\n  Start that daemon, or unset SMOOTH_URL to use the advertised one",
+            match &found {
+                daemon_health::Health::Down { reason } => reason.clone(),
+                daemon_health::Health::Foreign { status } => format!("HTTP {status}"),
+                daemon_health::Health::Up { .. } => "up".into(),
+            }
+        );
+    }
+    std::env::set_var(
+        "SMOOTH_URL",
+        if plan == daemon_health::Leader::Use {
+            daemon
+        } else {
+            format!("http://localhost:{}", daemon_health::DEFAULT_PORT)
+        },
+    );
+
+    if plan == daemon_health::Leader::Boot {
         // Pearl th-7840d8 — animated boot indicator (was a bare
         // `Starting Smooth...`). Daemonization happens in the
         // background via `th up`; the parent polls `/health` and
@@ -7682,6 +7731,30 @@ mod org_cli_tests {
             Some(Commands::Smoo {
                 cmd: SmooCommands::Api {
                     cmd: ApiCommands::Agents { .. }
+                }
+            })
+        ));
+        // th-b1068f: `smoo workflows` is canonical; `smoo workflow` and
+        // `smoo api workflows` reach the same module.
+        for argv in [["th", "smoo", "workflows", "list"], ["th", "smoo", "workflow", "list"]] {
+            assert!(matches!(
+                Cli::try_parse_from(argv).expect("th smoo workflows list").command,
+                Some(Commands::Smoo {
+                    cmd: SmooCommands::Workflows {
+                        cmd: smooai::workflows::Cmd::List { .. }
+                    }
+                })
+            ));
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["th", "smoo", "api", "workflows", "run-get", "w", "r"])
+                .expect("th smoo api workflows run-get")
+                .command,
+            Some(Commands::Smoo {
+                cmd: SmooCommands::Api {
+                    cmd: ApiCommands::Workflows {
+                        cmd: smooai::workflows::Cmd::RunShow { .. }
+                    }
                 }
             })
         ));

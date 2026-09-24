@@ -3,7 +3,7 @@
 // th-3a5d22: the fixed preset chips (Flash/Code/UI/Plan/…) are gone. The composer
 // now offers a searchable list of EVERY benchmarked model, each carrying capability
 // badges mapped straight from `docs/model-scores.json` (copied to `./model-scores.json`
-// for bundling). Default = gpt-5.6-luna. The `SmoothMode` shape is kept so the rest
+// for bundling). Default = gpt-6-luna. The `SmoothMode` shape is kept so the rest
 // of the app (operator send path, CostBar, persistence) is unchanged — one model IS
 // one "mode" now, its `id`/`model` both the model string.
 
@@ -54,10 +54,10 @@ export const BADGE_PREMIUM: Badge = { emoji: '💎', label: 'Premium' };
 
 /** The premium tier is a curated set, not a cost threshold — gpt-5.5/gpt-5.4 are
  * expensive too but aren't "premium" here. From th-3a5d22. */
-export const PREMIUM_MODELS = new Set(['claude-fable-5', 'gpt-5.6-sol-high']);
+export const PREMIUM_MODELS = new Set(['claude-fable-5', 'gpt-5.6-sol-high', 'gpt-6-astra']);
 
 /** The model a fresh session lands on. */
-export const DEFAULT_MODEL = 'gpt-5.6-luna';
+export const DEFAULT_MODEL = 'gpt-6-luna';
 
 // ── Pure derivation (unit-tested; takes data, imports nothing) ────────────────
 
@@ -98,7 +98,9 @@ export function badgesFor(m: ModelScore, topPct: number, bestValue: string | nul
  * over 25, NOT passed/28 — never recompute it here). */
 export interface ModelRow {
     model: string;
-    passRatePct: number;
+    /** null = the default model before its first bench run (rendered "not yet
+     * benched", never as 0%). Every bench-derived row has a number. */
+    passRatePct: number | null;
     /** null renders as "unknown", never $0. */
     costPerPassUsd: number | null;
     badges: Badge[];
@@ -118,7 +120,32 @@ export function deriveRows(models: ModelScore[]): ModelRow[] {
             badges: badgesFor(m, topPct, bestValue),
             premium: PREMIUM_MODELS.has(m.model),
         }))
-        .sort((a, b) => b.passRatePct - a.passRatePct || (a.costPerPassUsd ?? Infinity) - (b.costPerPassUsd ?? Infinity));
+        .sort((a, b) => (b.passRatePct ?? 0) - (a.passRatePct ?? 0) || (a.costPerPassUsd ?? Infinity) - (b.costPerPassUsd ?? Infinity));
+}
+
+/** Guarantee the default model is selectable. The picker lists only benched
+ * models, so a new default that has not been benched yet (gpt-6-luna when it
+ * landed, th-3030cd) would be missing from it, and `modeById` would have
+ * nothing to fall back to. Such a default goes FIRST with no score or cost —
+ * never an invented number. Once the bench scores it, its real row is used. */
+export function ensureDefaultRow(rows: ModelRow[], defaultModel: string = DEFAULT_MODEL): ModelRow[] {
+    if (rows.some((r) => r.model === defaultModel)) return rows;
+    const premium = PREMIUM_MODELS.has(defaultModel);
+    return [{ model: defaultModel, passRatePct: null, costPerPassUsd: null, badges: premium ? [BADGE_PREMIUM] : [], premium }, ...rows];
+}
+
+/** Defaults a saved choice may be left over from. A session whose saved model
+ * is one of these most likely never picked it, so it follows the new default
+ * once; the flag stops that from overriding a deliberate re-pick later. */
+export const PREVIOUS_DEFAULTS = new Set(['gpt-5.6-luna']);
+export const DEFAULT_MIGRATION_KEY = `smooth.mode.default-migrated.${DEFAULT_MODEL}`;
+
+/** The model a session should start on, given what localStorage holds. Pure:
+ * returns the id plus whether to record that the one-time migration ran. */
+export function initialModeId(saved: string | null, migrated: boolean, defaultModel: string = DEFAULT_MODEL): { id: string; markMigrated: boolean } {
+    if (!saved) return { id: defaultModel, markMigrated: false };
+    if (!migrated && PREVIOUS_DEFAULTS.has(saved) && saved !== defaultModel) return { id: defaultModel, markMigrated: true };
+    return { id: saved, markMigrated: false };
 }
 
 // ── Live catalog fetch (single source of truth) ───────────────────────────────
@@ -135,7 +162,7 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
         if (!res.ok) return null;
         const data = (await res.json()) as Partial<BenchFile>;
         if (!data || !Array.isArray(data.models) || data.models.length === 0) return null;
-        return deriveRows(data.models);
+        return ensureDefaultRow(deriveRows(data.models));
     } catch {
         return null;
     }
@@ -143,7 +170,7 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
 
 // ── Bound to the bundled data (synchronous default + offline fallback) ─────────
 
-export const MODEL_ROWS: ModelRow[] = deriveRows(BENCH.models);
+export const MODEL_ROWS: ModelRow[] = ensureDefaultRow(deriveRows(BENCH.models));
 export const BENCH_SUITE = BENCH.suite;
 export const BENCH_TRIALS = BENCH.trials;
 export const BENCH_SCENARIOS = BENCH.scenario_count;

@@ -9,8 +9,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { historyImages, historyText, type HistoryMessage } from './history';
-import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
+import { DEFAULT_MIGRATION_KEY, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { normalizeTodos, type TodoItem } from './todos';
+import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control';
 
 /** The agent's live presence — what the face reflects. */
 export type AgentState = 'connecting' | 'offline' | 'awake' | 'thinking' | 'speaking' | 'awaiting';
@@ -131,8 +132,16 @@ interface OperatorApi {
     respond: (requestId: string, approved: boolean) => void;
     /** True while a turn is in flight — what the composer's Stop button shows on. */
     turnActive: boolean;
-    /** Stop the running turn (the `interrupt` action). No-op with no session. */
+    /** Stop the running turn: sends the engine's `cancel` and ends the turn on its
+     * `cancelled` (or locally after a fallback). No-op when nothing is running. */
     interrupt: () => void;
+    /** Steer: stop the running turn, wait until it has really ended, then send
+     * this message so it redirects the work (th-74ba1f). Sends at once when idle. */
+    steer: (text: string, attachments?: Attachment[]) => void;
+    /** A Stop (or Steer) has been sent and the turn has not ended yet. */
+    stopping: boolean;
+    /** The message waiting to go out once the running turn stops, if any. */
+    pendingSteer: { text: string; attachments: Attachment[] } | null;
     /** Recent conversations for the sidebar (most-recent first), from `list_conversations`. */
     conversations: ConversationSummary[];
     /** The conversation currently loaded, for highlighting the active sidebar row. */
@@ -268,13 +277,33 @@ export function useOperator(): OperatorApi {
     const [turnActive, setTurnActive] = useState(false);
     const [streaming, setStreaming] = useState(false);
     const [status, setStatus] = useState<Status>({ connected: false, since: Date.now() });
-    const [modeId, setModeId] = useState<string>(() => localStorage.getItem('smooth.mode') ?? DEFAULT_MODE_ID);
+    const [modeId, setModeId] = useState<string>(() => {
+        const { id, markMigrated } = initialModeId(localStorage.getItem('smooth.mode'), localStorage.getItem(DEFAULT_MIGRATION_KEY) !== null);
+        if (markMigrated) {
+            localStorage.setItem('smooth.mode', id);
+            localStorage.setItem(DEFAULT_MIGRATION_KEY, '1');
+        }
+        return id;
+    });
     const [sessionCostUsd, setSessionCostUsd] = useState(0);
     const [modelCosts, setModelCosts] = useState<ModelCosts>({});
     const [conversations, setConversations] = useState<ConversationSummary[]>([]);
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const [sessionMode, setSessionModeState] = useState<SessionMode>('auto');
     const [todos, setTodos] = useState<TodoItem[]>([]);
+    const [stopping, setStopping] = useState(false);
+    const [pendingSteer, setPendingSteer] = useState<{ text: string; attachments: Attachment[] } | null>(null);
+    // Turn control (th-74ba1f). Refs, not state, because the WS handler must read
+    // the live values: which turn is running, whether a Stop is in flight, the
+    // turn we cancelled (its stragglers are ignored), and a Steer waiting to go.
+    const turnReqRef = useRef<string | null>(null);
+    const turnActiveRef = useRef(false);
+    const stoppingRef = useRef(false);
+    const cancelledReqRef = useRef<string | null>(null);
+    const cancelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingSteerRef = useRef<{ text: string; attachments: Attachment[] } | null>(null);
+    // `sendMessage` is defined below `handle`; the handler reaches it through this.
+    const sendMessageRef = useRef<(text: string, attachments?: Attachment[]) => void>(() => {});
     // When set, the create_conversation_session reply should trigger a history
     // load for this conversationId (resume can't fetch messages until it has a
     // sessionId from the create reply).
@@ -325,8 +354,48 @@ export function useOperator(): OperatorApi {
         wsRef.current?.readyState === WebSocket.OPEN && wsRef.current.send(JSON.stringify(obj));
     }, []);
 
+    // Send a waiting Steer, but only onto a live socket with a bound session: a
+    // Steer that outlives a dropped connection goes out after the reconnect's
+    // session bind instead (see the create-session reply), never into the void.
+    const flushSteer = useCallback(() => {
+        const steerMsg = pendingSteerRef.current;
+        if (!steerMsg || turnActiveRef.current || !sessionRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+        pendingSteerRef.current = null;
+        setPendingSteer(null);
+        sendMessageRef.current(steerMsg.text, steerMsg.attachments);
+    }, []);
+
+    // The ONE place a turn ends: its terminal event, the cancel fallback, or a
+    // dropped socket (the engine aborts a disconnected connection's turn). A
+    // waiting Steer is sent right here, in the same handler tick, so React
+    // batches `turnActive` false→true and the composer's queue drain never sees
+    // the gap and jumps ahead of the Steer.
+    const finishTurn = useCallback(
+        (note?: string) => {
+            if (cancelTimerRef.current) {
+                clearTimeout(cancelTimerRef.current);
+                cancelTimerRef.current = null;
+            }
+            turnActiveRef.current = false;
+            turnReqRef.current = null;
+            stoppingRef.current = false;
+            setTurnActive(false);
+            setStreaming(false);
+            setStopping(false);
+            patchStreaming((m) => ({ ...m, streaming: false }));
+            if (note) {
+                setMessages((prev) => [...prev, { id: nextId('sys'), role: 'system', content: note, reasoning: '', tools: [], blocks: [], streaming: false }]);
+            }
+            flushSteer();
+        },
+        [patchStreaming, flushSteer],
+    );
+
     const handle = useCallback(
         (v: any) => {
+            // A straggler from a turn we already cancelled: never let it open a
+            // new streaming bubble or end the NEXT turn.
+            if (isStaleFrame(v ?? {}, cancelledReqRef.current)) return;
             switch (v?.type) {
                 case 'immediate_response': {
                     const d = v?.data ?? {};
@@ -359,6 +428,8 @@ export function useOperator(): OperatorApi {
                             pendingResumeRef.current = null;
                             send({ action: 'get_conversation_messages', requestId: nextId('gm'), sessionId: d.sessionId, conversationId: resume });
                         }
+                        // A Steer stranded by a dropped socket goes out on the new session.
+                        flushSteer();
                     }
                     break;
                 }
@@ -437,9 +508,8 @@ export function useOperator(): OperatorApi {
                     break;
                 }
                 case 'eventual_response': {
-                    setTurnActive(false);
-                    setStreaming(false);
-                    patchStreaming((m) => ({ ...m, streaming: false }));
+                    // Only THIS turn's reply ends it (th-74ba1f).
+                    if (!endsTurn(v, turnReqRef.current)) break;
                     // Usage rides the eventual_response — read defensively since the
                     // exact path may shift slightly at integration (th-2a6330).
                     const usage = v?.data?.data?.usage ?? v?.data?.usage ?? v?.usage ?? {};
@@ -472,30 +542,38 @@ export function useOperator(): OperatorApi {
                     }
                     // The turn just landed — refresh the sidebar so this chat appears/updates.
                     send({ action: 'list_conversations', requestId: nextId('lc') });
+                    finishTurn();
                     break;
                 }
-                case 'error':
-                    setTurnActive(false);
-                    setStreaming(false);
-                    patchStreaming((m) => ({ ...m, streaming: false }));
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            id: nextId('e'),
-                            role: 'system',
-                            content: v.message ?? v?.data?.message ?? 'operator error',
-                            reasoning: '',
-                            tools: [],
-                            blocks: [],
-                            streaming: false,
-                        },
-                    ]);
+                case 'cancelled': {
+                    // The engine's terminal event for a stopped turn. It replaces the
+                    // `eventual_response`; the partial reply was never persisted.
+                    if (!endsTurn(v, turnReqRef.current)) break;
+                    cancelledReqRef.current = v.requestId ?? turnReqRef.current;
+                    finishTurn(pendingSteerRef.current ? 'Stopped to steer.' : 'Stopped.');
                     break;
+                }
+                case 'error': {
+                    // An error ends the turn only when it is ABOUT the turn. An error for
+                    // some other request (the old `interrupt`'s UNSUPPORTED_ACTION, a
+                    // rejected send) leaves the running turn running — ending it here
+                    // is how the UI lost a turn that kept sending iMessages.
+                    const text = errorText(v);
+                    if (endsTurn(v, turnReqRef.current) && turnActiveRef.current) {
+                        finishTurn(text);
+                    } else {
+                        setMessages((prev) => [
+                            ...prev,
+                            { id: nextId('e'), role: 'system', content: text, reasoning: '', tools: [], blocks: [], streaming: false },
+                        ]);
+                    }
+                    break;
+                }
                 default:
                     break;
             }
         },
-        [ensureStreamingMessage, patchStreaming, send],
+        [ensureStreamingMessage, patchStreaming, send, finishTurn, flushSteer],
     );
 
     useEffect(() => {
@@ -534,6 +612,13 @@ export function useOperator(): OperatorApi {
             ws.onclose = () => {
                 setConnected(false);
                 setStatus((s) => ({ ...s, connected: false }));
+                // The engine aborts a disconnected connection's turn, so nothing will
+                // ever end it for us. End it here, or the composer stays in
+                // "working" and every message queues forever.
+                if (turnActiveRef.current) {
+                    cancelledReqRef.current = turnReqRef.current;
+                    finishTurn('Connection dropped — the running turn was stopped.');
+                }
                 if (!closed) reconnectRef.current = setTimeout(connect, 1500);
             };
             ws.onerror = () => ws.close();
@@ -544,7 +629,7 @@ export function useOperator(): OperatorApi {
             if (reconnectRef.current) clearTimeout(reconnectRef.current);
             wsRef.current?.close();
         };
-    }, [handle, send]);
+    }, [handle, send, finishTurn]);
 
     // Push a local system line into the transcript (never sent to the LLM).
     const pushSystem = useCallback((content: string) => {
@@ -648,12 +733,15 @@ export function useOperator(): OperatorApi {
                     attachments: attachments.length ? attachments : undefined,
                 },
             ]);
+            const requestId = nextId('turn');
+            turnReqRef.current = requestId;
+            turnActiveRef.current = true;
             setTurnActive(true);
             // The backend accepts an optional `images` array of full data-URL strings;
             // omit it entirely for text-only sends so nothing changes there.
             const frame: Record<string, unknown> = {
                 action: 'send_message',
-                requestId: nextId('turn'),
+                requestId,
                 sessionId: sessionRef.current,
                 message: body,
                 model: modeRef.current.model,
@@ -666,6 +754,7 @@ export function useOperator(): OperatorApi {
         },
         [send, cwdCommand],
     );
+    sendMessageRef.current = sendMessage;
 
     const respond = useCallback(
         (requestId: string, approved: boolean) => {
@@ -675,14 +764,42 @@ export function useOperator(): OperatorApi {
         [send],
     );
 
-    // Stop the running turn (th-3a912a). The daemon cancels it at its next await
-    // point and closes it out with a normal `eventual_response` on the TURN's
-    // requestId — so the transcript and `turnActive` unwind through the existing
-    // handler, and there is nothing to clear optimistically here.
+    // Stop the running turn (th-3a912a, fixed th-74ba1f). The engine's action is
+    // `cancel` — `interrupt` never existed there, so Stop was a no-op for its whole
+    // life. The engine answers with `cancelled` on the TURN's requestId, which
+    // `handle` treats as terminal. A cancel that finds no running turn gets no
+    // reply at all, so a fallback ends the turn locally rather than hanging.
     const interrupt = useCallback(() => {
-        if (!sessionRef.current) return;
-        send({ action: 'interrupt', requestId: nextId('int'), sessionId: sessionRef.current });
-    }, [send]);
+        if (!turnActiveRef.current || stoppingRef.current) return;
+        stoppingRef.current = true;
+        setStopping(true);
+        send(cancelFrame(turnReqRef.current, sessionRef.current));
+        cancelTimerRef.current = setTimeout(() => {
+            cancelTimerRef.current = null;
+            if (!turnActiveRef.current) return;
+            cancelledReqRef.current = turnReqRef.current;
+            finishTurn(pendingSteerRef.current ? 'Stopped to steer.' : 'Stopped.');
+        }, CANCEL_FALLBACK_MS);
+    }, [send, finishTurn]);
+
+    // Steer (th-74ba1f): redirect the running turn instead of queueing behind it.
+    // Stop it, and send this the moment it has really ended — never before, or
+    // the engine rejects it TURN_IN_PROGRESS. A second Steer while the first
+    // waits folds into it, so nothing typed is lost.
+    const steer = useCallback(
+        (text: string, attachments: Attachment[] = []) => {
+            if (!text.trim() && attachments.length === 0) return;
+            if (!turnActiveRef.current) {
+                sendMessage(text, attachments);
+                return;
+            }
+            const next = mergeSteer(pendingSteerRef.current, { text, attachments });
+            pendingSteerRef.current = next;
+            setPendingSteer(next);
+            interrupt();
+        },
+        [sendMessage, interrupt],
+    );
 
     const refreshConversations = useCallback(() => {
         send({ action: 'list_conversations', requestId: nextId('lc') });
@@ -746,6 +863,9 @@ export function useOperator(): OperatorApi {
         respond,
         turnActive,
         interrupt,
+        steer,
+        stopping,
+        pendingSteer,
         mode,
         setMode,
         sessionCostUsd,
