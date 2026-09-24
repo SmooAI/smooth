@@ -49,6 +49,115 @@ struct HarnessFixLine: View {
     }
 }
 
+/// Where the session runs (th-145e6b): type to search every git checkout
+/// under `~` (the daemon's index, `GET /api/flow/repos`), type or paste a
+/// path, or Browse… for any folder. ↑/↓ move through the matches, Return
+/// picks. Picking re-infers the pearl, branch and title for that directory.
+struct DirectoryField: View {
+    @ObservedObject var app: AppController
+    @Binding var chosen: String
+    /// The directory in effect before anything is picked (the inferred one).
+    var current: String
+    var onPick: (String) -> Void
+
+    @State private var query = ""
+    @State private var results = RepoList()
+    @State private var highlighted = 0
+    @FocusState private var focused: Bool
+
+    private var effective: String { chosen.isEmpty ? current : chosen }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "folder").foregroundStyle(Color(Theme.muted))
+                TextField(effective.isEmpty ? "Directory — type to search your repos" : DirectoryPicking.abbreviate(effective), text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Theme.mono(.body))
+                    .focused($focused)
+                    .onSubmit(pickHighlighted)
+                    .onKeyPress(.downArrow) { highlighted = DirectoryPicking.moved(highlighted, by: 1, count: results.repos.count); return .handled }
+                    .onKeyPress(.upArrow) { highlighted = DirectoryPicking.moved(highlighted, by: -1, count: results.repos.count); return .handled }
+                    .onKeyPress(.escape) {
+                        guard !query.isEmpty else { return .ignored }
+                        query = ""
+                        return .handled
+                    }
+                    .accessibilityIdentifier("newsession.directory")
+                Button("Browse…", action: browse).accessibilityIdentifier("newsession.directory.browse")
+            }
+            if focused || !query.isEmpty { matches }
+        }
+        .task(id: query) {
+            // A short debounce: the index answers in milliseconds, typing is faster.
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled else { return }
+            results = await app.searchRepos(query)
+            highlighted = 0
+        }
+    }
+
+    @ViewBuilder private var matches: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(results.repos.prefix(8).enumerated()), id: \.element.id) { i, repo in
+                Button { pick(repo.path) } label: {
+                    HStack(spacing: 8) {
+                        Text(repo.name).font(.body.weight(.medium))
+                        if let b = repo.branch { Text(b).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.muted)) }
+                        Spacer()
+                        Text(repo.shortPath).font(Theme.mono(.caption)).foregroundStyle(Color(Theme.faint)).lineLimit(1).truncationMode(.head)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(i == highlighted ? Color.accentColor.opacity(0.18) : .clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("newsession.directory.match.\(repo.name)")
+            }
+            if results.repos.isEmpty {
+                Text(emptyNote).font(.caption).foregroundStyle(Color(Theme.faint)).padding(.horizontal, 8).padding(.vertical, 4)
+            } else if results.scanning {
+                Text("indexing ~ — more may appear").font(.caption2).foregroundStyle(Color(Theme.faint)).padding(.horizontal, 8)
+            }
+        }
+        .padding(4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+    }
+
+    private var emptyNote: String {
+        if DirectoryPicking.expandedPath(query) != nil { return "Return to use this path" }
+        if results.scanning || !results.indexed { return "indexing your repos under ~…" }
+        return "no repo matches — Browse… for any folder"
+    }
+
+    private func pickHighlighted() {
+        if let path = DirectoryPicking.expandedPath(query) {
+            pick(path)
+        } else if results.repos.indices.contains(highlighted) {
+            pick(results.repos[highlighted].path)
+        }
+    }
+
+    private func pick(_ path: String) {
+        chosen = path
+        query = ""
+        focused = false
+        onPick(path)
+    }
+
+    private func browse() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Use Folder"
+        if !effective.isEmpty { panel.directoryURL = URL(fileURLWithPath: effective) }
+        if panel.runModal() == .OK, let url = panel.url { pick(url.path) }
+    }
+}
+
 /// ⌘N — `flow.new`. Zero friction (th-c103c1): pick a kind, hit Start.
 /// The pearl, Jira key, worktree and title are INFERRED from where the work
 /// already is — shown, not demanded — and every one of them is overridable
@@ -58,7 +167,8 @@ struct NewSessionSheet: View {
     @State private var kind = ""
     @State private var prompt = ""
     @State private var showOverrides = false
-    @State private var worktree = ""
+    /// The directory the user picked (th-145e6b); empty means "the inferred one".
+    @State private var directory = ""
     @State private var pearlId = ""
     @State private var title = ""
     var dismiss: () -> Void = {}
@@ -81,12 +191,14 @@ struct NewSessionSheet: View {
             } else if let h = selected, h.stateSource == "native" {
                 Text("native state — \(h.displayName) reports its own turns to the engine").font(.caption2).foregroundStyle(Color(Theme.faint))
             }
+            DirectoryField(app: app, chosen: $directory, current: context?.worktree ?? "") { path in
+                Task { await app.loadInference(cwd: path) }
+            }
             inferredContext
             TextField("Prompt (optional)", text: $prompt, axis: .vertical).lineLimit(3...6)
             DisclosureGroup("Override context", isExpanded: $showOverrides) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Pearl id (th-xxxxxx) — with no worktree, the engine creates one", text: $pearlId).font(Theme.mono(.body))
-                    TextField("Worktree path", text: $worktree).font(Theme.mono(.body))
                     TextField("Title", text: $title)
                 }.padding(.top, 6)
             }
@@ -129,7 +241,7 @@ struct NewSessionSheet: View {
         let c = context
         app.newSession(NewSession(
             kind: kind,
-            worktree: worktree.nilIfEmpty ?? (pearlId.nilIfEmpty == nil ? c?.worktree.nilIfEmpty : nil),
+            worktree: directory.nilIfEmpty ?? (pearlId.nilIfEmpty == nil ? c?.worktree.nilIfEmpty : nil),
             project: c?.project.nilIfEmpty,
             pearlId: pearlId.nilIfEmpty ?? c?.pearlId,
             prompt: prompt.nilIfEmpty,

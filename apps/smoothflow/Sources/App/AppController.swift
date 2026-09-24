@@ -322,6 +322,13 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     func loadInference(cwd: String?) async {
         inferred = try? await client.infer(cwd: cwd)
     }
+
+    /// The directory picker's matches (th-145e6b). A failure is an empty list.
+    func searchRepos(_ query: String) async -> RepoList {
+        (try? await client.repos(query: query)) ?? RepoList()
+    }
+
+    func rescanRepos() async { try? await client.rescanRepos() }
     func fanoutNew(prompt: String, pearlId: String?, candidates: [FanOutCandidate]) {
         client.send(.fanoutNew(prompt: prompt, pearlId: pearlId, candidates: candidates))
     }

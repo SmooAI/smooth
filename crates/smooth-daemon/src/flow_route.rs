@@ -73,6 +73,8 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/harnesses/prefs", put(put_harness_prefs))
         // th-c103c1: the zero-friction New Session dialog + its opt-in.
         .route("/api/flow/infer", get(infer_context))
+        .route("/api/flow/repos", get(list_repos))
+        .route("/api/flow/repos/rescan", post(rescan_repos))
         .route("/api/flow/settings", get(get_settings).put(put_settings))
         .with_state(state)
 }
@@ -87,8 +89,12 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
     let engine = Engine::open(smooth_flow::EngineConfig {
         daemon_url,
         harness_doctor: harness_doctor_enabled(std::env::var("SMOOTH_FLOW_HARNESS_DOCTOR").ok().as_deref()),
+        // th-145e6b: the New Session picker searches every checkout in $HOME.
+        repo_root: dirs_next::home_dir(),
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
+    // Index now, so the first New Session dialog has rows to offer.
+    engine.rescan_repos(false);
     drop(spawn_supervisor(engine.clone()));
     Ok((flow_router(engine.clone(), Some(token)), engine))
 }
@@ -406,6 +412,26 @@ async fn put_harness_prefs(
     let e = st.engine.clone();
     let harnesses = blocking(move || e.set_harness_prefs(body.order, body.hidden)).await?;
     Ok(Json(json!({ "harnesses": harnesses })))
+}
+
+/// `GET /api/flow/repos?q=…&limit=…` (th-145e6b) — the New Session
+/// directory picker: git checkouts under `$HOME` matching `q`, best first.
+/// `{repos: [{path, name, branch?, main?, touched}], scanning, indexed}`.
+async fn list_repos(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let query = q.get("q").cloned().unwrap_or_default();
+    let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20).clamp(1, 200);
+    let e = st.engine.clone();
+    let list = blocking(move || e.repos(&query, limit)).await?;
+    Ok(Json(json!(list)))
+}
+
+/// `POST /api/flow/repos/rescan` — re-walk `$HOME` now (a repo cloned a
+/// minute ago). Returns at once; the scan runs in the background.
+async fn rescan_repos(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    st.engine.rescan_repos(true);
+    Ok(Json(json!({ "scanning": true })))
 }
 
 /// `GET /api/flow/infer?cwd=…` (th-c103c1) — the session context of `cwd`.
@@ -732,6 +758,7 @@ mod tests {
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
+            repo_root: None,
         })
         .unwrap()
     }

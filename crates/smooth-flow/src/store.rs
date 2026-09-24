@@ -422,6 +422,14 @@ impl FlowStore {
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS repos (
+                 path    TEXT PRIMARY KEY,
+                 name    TEXT NOT NULL,
+                 branch  TEXT,
+                 main    TEXT,
+                 touched INTEGER NOT NULL DEFAULT 0,
+                 root    TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS pairings (
                  device       TEXT PRIMARY KEY,
                  label        TEXT NOT NULL DEFAULT '',
@@ -481,6 +489,41 @@ impl FlowStore {
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
+    }
+
+    /// Replace the repo index for `root` with `repos` (th-145e6b): rows under
+    /// that root that a scan no longer finds are gone, in one transaction.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn replace_repos(&mut self, root: &str, repos: &[crate::repos::Repo]) -> Result<()> {
+        let tx = self.conn.transaction().context("begin repos")?;
+        tx.execute("DELETE FROM repos WHERE root = ?1", params![root]).context("clear repos")?;
+        {
+            let mut ins = tx.prepare("INSERT OR REPLACE INTO repos (path, name, branch, main, touched, root) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+            for r in repos {
+                ins.execute(params![r.path, r.name, r.branch, r.main, r.touched, root]).context("insert repo")?;
+            }
+        }
+        tx.commit().context("commit repos")
+    }
+
+    /// Every indexed repo (th-145e6b).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn repos(&self) -> Result<Vec<crate::repos::Repo>> {
+        let mut st = self.conn.prepare("SELECT path, name, branch, main, touched FROM repos ORDER BY path")?;
+        let rows = st.query_map([], |r| {
+            Ok(crate::repos::Repo {
+                path: r.get(0)?,
+                name: r.get(1)?,
+                branch: r.get(2)?,
+                main: r.get(3)?,
+                touched: r.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("read repos")
     }
 
     /// In-memory store (tests).
