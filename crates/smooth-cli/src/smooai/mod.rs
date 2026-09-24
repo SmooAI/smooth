@@ -20,6 +20,7 @@ pub mod crawl;
 pub mod crm;
 pub mod dashboard;
 pub mod drip;
+pub mod email;
 pub mod files;
 pub mod forms;
 pub mod gbp;

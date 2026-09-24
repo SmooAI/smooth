@@ -818,6 +818,24 @@ smoo testing deployments|cases|environments <sub>
 This replaces the old `npx @smooai/testing runs report` + `junit-to-ctrf`
 combo — one `th` invocation, authed the same way every other `th` command is.
 
+### Email deliverability + signatures (`smoo email`)
+
+The same routes as the web app's **Email Diagnostics** and **Workforce → Signatures**
+screens, called as you (SMOODEV-3272). Every verb takes `--json` and `--org-id`;
+the report verbs take `--domain` (omit for all of the org's domains) and `--days`
+(default 30). Each is also a `th mcp serve` tool, named in the comment.
+
+```bash
+smoo email check smoo.ai                       # email_check_domain — any domain, graded with fixes
+smoo email dmarc --domain smoo.ai              # email_dmarc_summary — pass rate + unaligned sources
+smoo email sources --domain smoo.ai --limit 50 # email_sending_sources — who sends as you, problems first
+smoo email tls --domain smoo.ai                # email_tls_summary — RFC 8460 TLS reports
+smoo email signatures                          # email_signature_status — signing domains + signed senders
+```
+
+No DMARC or TLS reports is printed as a setup question — mailbox providers send
+nothing when the reporting record is wrong — never as a clean domain.
+
 ### White-label branding (`smoo branding`, alias `smoo brand`)
 
 Top-level, like `smoo crm` — SMOODEV-2820. Wraps the org's white-label row
