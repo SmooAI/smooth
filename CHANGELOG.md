@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.54.0
+
+### Minor Changes
+
+- 5a7115b: New `smoo workflows` command group (alias `smoo workflow`, mirrored as `smoo api workflows`) for Smoo AI Workflows, the "when X happens, do Y" automations from ADR-127 (th-b1068f). It covers list, show, versions, create (`--file` or `--from-template`), update, export, validate, publish (`--enable`), enable, pause, rm, run, runs, run-show, cancel, event-types, step-types and templates, over the same api-prime routes the canvas uses. A workflow's definition round-trips as code: `export <id> > def.json`, edit, `update <id> --file def.json`. `show` puts triggers in words and pins the draft's validation issues to node ids. A refused publish lists every 422 issue on its own line with its node, and a 403 names the missing permission. `run` only previews unless you pass `--confirm`, because its steps send email and write CRM records. `--wait` follows the run and prints the step timeline. `rm` and `cancel` use the shared `--yes` / `--dry-run` gate. The starter templates filter a tag event on `after.tagName` and name a deal by `{{entity.title}}`, which are the field names the live event catalog carries.
+
+### Patch Changes
+
+- 9d8ed0d: SmoothFlow's New Session sheet has a real **Directory** field (th-145e6b). Before, the directory came from the focused session, and the only way to change it was a free-text path hidden under "Override context". Now you can type to search every git repo and worktree under `~` (↑/↓ and Return to pick), type or paste a path, or use **Browse…** to open a folder panel. Picking re-infers the pearl, branch and title for that directory. The daemon builds the index with the `ignore` crate's parallel walker (the engine inside `fd`), and stores it in flow.db's new `repos` table. The walk stops at repo roots and skips hidden folders, `node_modules`/`target`, `~/Library` and cloud-synced folders. The index refreshes in the background and is served by `GET /api/flow/repos?q=`, with the fleet's own checkouts ranked first.
+- 64a6de7: SmoothFlow 0.2.7. New Session has a real **Directory** field (th-145e6b). You can type to search every git repo and worktree under `~`, paste a path, or use **Browse…**. The pearl, branch and title follow whatever you pick. The daemon indexes `~` with fd's parallel walker and keeps the result in SQLite.
+- 98f8d83: `th code`'s startup health check asks the daemon it actually talks to (th-8b55de follow-up). Inside a SmoothFlow pane the TUI loaded fine but showed "Big Smooth API not running. Starting..." It probed a hard-coded `localhost:4400`, while its daemon was elsewhere, and it started nothing. The check now uses the same discovery as the rest of th code (`$SMOOTH_URL`, then `~/.smooth/daemon.addr`, then :4400) and names the URL when a daemon really is down. The TUI's other daemon calls (skills, mode, search) use that discovery too. The stale "Database not found" warning about the legacy `~/.smooth/smooth.db`, which nothing reads, is gone.
+
 ## 0.53.8
 
 ### Patch Changes
