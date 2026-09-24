@@ -23,7 +23,6 @@
 //! Same primitive and same sidecar reasoning as
 //! `smooth_pearls::registry::auto_register_at`.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -50,14 +49,17 @@ pub const LOCKED_SECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Held for the duration of a credential read-modify-write. Releases the
 /// OS lock on drop.
-pub struct CredentialLock(std::fs::File);
+pub struct CredentialLock {
+    file: std::fs::File,
+    holder_path: PathBuf,
+}
 
 impl Drop for CredentialLock {
     fn drop(&mut self) {
         // Clear the holder note first so a reader never blames a process that
         // already let go.
-        let _ = self.0.set_len(0);
-        let _ = FileExt::unlock(&self.0);
+        let _ = std::fs::remove_file(&self.holder_path);
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -94,7 +96,7 @@ pub fn credential_lock_within(cred_path: &Path, wait: Duration) -> Result<Creden
     if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -111,10 +113,9 @@ pub fn credential_lock_within(cred_path: &Path, wait: Duration) -> Result<Creden
         let now = Instant::now();
         if now >= deadline {
             anyhow::bail!(
-                "gave up waiting {}s for the Smoo credentials lock ({}): {}. That process is stuck mid-refresh; restart it (quit and reopen the app, or `kill` the pid) and try again.",
-                wait.as_secs(),
+                "gave up waiting {wait:?} for the Smoo credentials lock ({}): {}. That process is stuck mid-refresh; restart it (quit and reopen the app, or `kill` the pid) and try again.",
                 lock_path.display(),
-                describe_holder(&lock_path)
+                describe_holder(&holder_file(cred_path))
             );
         }
         std::thread::sleep(pause.min(deadline - now));
@@ -122,13 +123,12 @@ pub fn credential_lock_within(cred_path: &Path, wait: Duration) -> Result<Creden
     }
 
     // Record who holds it, for the next waiter's error message. Best-effort:
-    // the lock itself is the flock, not this text.
-    let note = holder_note();
-    let _ = file
-        .set_len(0)
-        .and_then(|()| file.seek(SeekFrom::Start(0)))
-        .and_then(|_| file.write_all(note.as_bytes()));
-    Ok(CredentialLock(file))
+    // the lock itself is the flock, not this text. The note lives in its OWN
+    // file, not the lock file: on Windows `LockFileEx` is mandatory, so no
+    // other handle could even read a note written inside the locked file.
+    let holder_path = holder_file(cred_path);
+    let _ = std::fs::write(&holder_path, holder_note());
+    Ok(CredentialLock { file, holder_path })
 }
 
 /// Async [`credential_lock`]: waits on the blocking pool so a contended lock
@@ -148,11 +148,16 @@ pub async fn credential_lock_async(cred_path: &Path) -> Result<CredentialLock> {
 /// smooth-daemon (pid 8907) since …"), from the note the holder wrote.
 #[must_use]
 pub fn credential_lock_holder(cred_path: &Path) -> String {
-    describe_holder(&sidecar(cred_path))
+    describe_holder(&holder_file(cred_path))
 }
 
 fn sidecar(cred_path: &Path) -> PathBuf {
     cred_path.with_extension("lock")
+}
+
+/// Where the current holder records itself, beside the lock file.
+fn holder_file(cred_path: &Path) -> PathBuf {
+    cred_path.with_extension("lock-holder")
 }
 
 /// `pid=… exe=… since=…` for whoever takes the lock now.
@@ -165,9 +170,8 @@ fn holder_note() -> String {
 }
 
 /// Human description of the current holder, from the note it wrote.
-fn describe_holder(lock_path: &Path) -> String {
-    let mut text = String::new();
-    let _ = std::fs::File::open(lock_path).and_then(|mut f| f.read_to_string(&mut text));
+fn describe_holder(holder_path: &Path) -> String {
+    let text = std::fs::read_to_string(holder_path).unwrap_or_default();
     let field = |key: &str| {
         text.split_whitespace()
             .find_map(|kv| kv.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
@@ -271,12 +275,10 @@ mod tests {
     fn releasing_clears_the_holder_note() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("smooai.json");
-        drop(credential_lock(&path).expect("lock"));
-        assert_eq!(
-            std::fs::read_to_string(sidecar(&path)).expect("read"),
-            "",
-            "a released lock must not blame anyone"
-        );
+        let held = credential_lock(&path).expect("lock");
+        assert!(holder_file(&path).exists(), "the holder records itself while it holds the lock");
+        drop(held);
+        assert!(!holder_file(&path).exists(), "a released lock must not blame anyone");
     }
 
     #[test]
