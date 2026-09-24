@@ -1,0 +1,861 @@
+{
+    "WorkflowListResponseSchema": [
+        {
+            "items": [
+                {
+                    "id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Welcome VIPs",
+                    "description": "Tag → email",
+                    "status": "draft",
+                    "concurrencyPolicy": "skip_if_active",
+                    "publishedVersion": null,
+                    "triggerEventTypes": ["crm_contact.tagged"],
+                    "lastRunAt": null,
+                    "createdAt": "2026-09-22T12:00:00Z",
+                    "updatedAt": "2026-09-22T12:01:00Z"
+                }
+            ],
+            "total": 1
+        }
+    ],
+    "WorkflowSchema": [
+        {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "Welcome VIPs",
+            "description": null,
+            "status": "active",
+            "concurrencyPolicy": "allow",
+            "publishedVersion": 3,
+            "triggerEventTypes": ["crm_contact.tagged"],
+            "lastRunAt": "2026-09-22T12:03:00Z",
+            "createdAt": "2026-09-22T12:00:00Z",
+            "updatedAt": "2026-09-22T12:01:00Z",
+            "draftDefinition": {
+                "schemaVersion": 1,
+                "triggers": [
+                    {
+                        "id": "t1",
+                        "eventType": "crm_contact.tagged"
+                    }
+                ],
+                "startStepId": "email",
+                "steps": {
+                    "email": {
+                        "type": "send_email",
+                        "config": {
+                            "to": "{{entity.email}}",
+                            "subject": "Hi",
+                            "body": "Hello"
+                        }
+                    }
+                },
+                "layout": {
+                    "nodes": {
+                        "email": {
+                            "x": 0,
+                            "y": 0
+                        }
+                    }
+                }
+            },
+            "published": {
+                "versionId": "00000000-0000-4000-8000-000000000004",
+                "version": 3,
+                "definition": {
+                    "schemaVersion": 1,
+                    "triggers": [
+                        {
+                            "id": "t1",
+                            "eventType": "crm_contact.tagged"
+                        }
+                    ],
+                    "startStepId": "email",
+                    "steps": {
+                        "email": {
+                            "type": "send_email",
+                            "config": {
+                                "to": "{{entity.email}}",
+                                "subject": "Hi",
+                                "body": "Hello"
+                            }
+                        }
+                    },
+                    "layout": {
+                        "nodes": {
+                            "email": {
+                                "x": 0,
+                                "y": 0
+                            }
+                        }
+                    }
+                },
+                "publishedBy": "00000000-0000-4000-8000-000000000003",
+                "publishedAt": "2026-09-22T12:02:00Z",
+                "requiredPermissions": ["communications.email.send"]
+            },
+            "validation": {
+                "shapeError": null,
+                "graphIssues": [],
+                "requiredPermissions": ["communications.email.send"]
+            }
+        },
+        {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "name": "Welcome VIPs",
+            "description": null,
+            "status": "active",
+            "concurrencyPolicy": "allow",
+            "publishedVersion": null,
+            "triggerEventTypes": [],
+            "lastRunAt": null,
+            "createdAt": "2026-09-22T12:00:00Z",
+            "updatedAt": "2026-09-22T12:01:00Z",
+            "draftDefinition": {
+                "schemaVersion": 1,
+                "steps": {}
+            },
+            "published": null,
+            "validation": {
+                "shapeError": "$.triggers: is required",
+                "graphIssues": [],
+                "requiredPermissions": []
+            }
+        }
+    ],
+    "PublishWorkflowResponseSchema": [
+        {
+            "versionId": "00000000-0000-4000-8000-000000000004",
+            "version": 3,
+            "unchanged": true
+        }
+    ],
+    "InvalidWorkflowErrorSchema": [
+        {
+            "error": "invalid_workflow",
+            "shapeError": null,
+            "graphIssues": [
+                {
+                    "code": "unknown_next",
+                    "message": "Step \"a\" points to \"b\", which does not exist.",
+                    "nodeId": "a"
+                },
+                {
+                    "code": "unknown_event_type",
+                    "message": "Trigger \"t\" listens for \"nope.nope\", which is not a known event type.",
+                    "nodeId": "t"
+                }
+            ]
+        }
+    ],
+    "WorkflowForbiddenErrorSchema": [
+        {
+            "error": "Forbidden",
+            "missingPermission": "communications.email.send",
+            "reason": "publishing this workflow requires permissions its steps exercise"
+        }
+    ],
+    "WorkflowVersionListResponseSchema": [
+        {
+            "items": [
+                {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "version": 3,
+                    "publishedBy": "00000000-0000-4000-8000-000000000003",
+                    "publishedAt": "2026-09-22T12:02:00Z"
+                }
+            ]
+        }
+    ],
+    "WorkflowRunListResponseSchema": [
+        {
+            "items": [
+                {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "workflowId": "00000000-0000-4000-8000-000000000001",
+                    "versionId": "00000000-0000-4000-8000-000000000004",
+                    "status": "failed",
+                    "statusDetail": "send_email failed",
+                    "triggerEventType": "crm_contact.tagged",
+                    "triggerEventId": "evt-1",
+                    "entityType": "crm_contact",
+                    "entityId": "c-1",
+                    "currentStepId": "email",
+                    "startedAt": "2026-09-22T12:03:00Z",
+                    "completedAt": "2026-09-22T12:04:00Z",
+                    "error": {
+                        "code": "NO_SENDGRID_INTEGRATION"
+                    }
+                }
+            ],
+            "total": 1
+        }
+    ],
+    "WorkflowRunSchema": [
+        {
+            "id": "00000000-0000-4000-8000-000000000005",
+            "workflowId": "00000000-0000-4000-8000-000000000001",
+            "versionId": "00000000-0000-4000-8000-000000000004",
+            "status": "failed",
+            "statusDetail": "send_email failed",
+            "triggerEventType": "crm_contact.tagged",
+            "triggerEventId": "evt-1",
+            "entityType": "crm_contact",
+            "entityId": "c-1",
+            "currentStepId": "email",
+            "startedAt": "2026-09-22T12:03:00Z",
+            "completedAt": "2026-09-22T12:04:00Z",
+            "error": {
+                "code": "NO_SENDGRID_INTEGRATION"
+            }
+        }
+    ],
+    "WorkflowRunDetailSchema": [
+        {
+            "id": "00000000-0000-4000-8000-000000000005",
+            "workflowId": "00000000-0000-4000-8000-000000000001",
+            "versionId": "00000000-0000-4000-8000-000000000004",
+            "status": "failed",
+            "statusDetail": "send_email failed",
+            "triggerEventType": "crm_contact.tagged",
+            "triggerEventId": "evt-1",
+            "entityType": "crm_contact",
+            "entityId": "c-1",
+            "currentStepId": "email",
+            "startedAt": "2026-09-22T12:03:00Z",
+            "completedAt": "2026-09-22T12:04:00Z",
+            "error": {
+                "code": "NO_SENDGRID_INTEGRATION"
+            },
+            "definition": {
+                "schemaVersion": 1,
+                "triggers": [
+                    {
+                        "id": "t1",
+                        "eventType": "crm_contact.tagged"
+                    }
+                ],
+                "startStepId": "email",
+                "steps": {
+                    "email": {
+                        "type": "send_email",
+                        "config": {
+                            "to": "{{entity.email}}",
+                            "subject": "Hi",
+                            "body": "Hello"
+                        }
+                    }
+                },
+                "layout": {
+                    "nodes": {
+                        "email": {
+                            "x": 0,
+                            "y": 0
+                        }
+                    }
+                }
+            },
+            "steps": [
+                {
+                    "id": "00000000-0000-4000-8000-000000000006",
+                    "stepId": "email",
+                    "stepType": "send_email",
+                    "sequence": 1,
+                    "status": "failed",
+                    "input": {
+                        "to": "a@b.co"
+                    },
+                    "output": null,
+                    "error": {
+                        "code": "NO_SENDGRID_INTEGRATION"
+                    },
+                    "startedAt": "2026-09-22T12:03:00Z",
+                    "completedAt": "2026-09-22T12:04:00Z"
+                }
+            ]
+        }
+    ],
+    "RunWorkflowResponseSchema": [
+        {
+            "eventId": "0199a0b0-0000-7000-8000-000000000001",
+            "temporalWorkflowId": "wf:00000000-0000-4000-8000-000000000001:0199a0b0-0000-7000-8000-000000000001"
+        }
+    ],
+    "WorkflowEventTypeListResponseSchema": [
+        {
+            "items": [
+                {
+                    "eventType": "crm_contact.created",
+                    "label": "Contact created",
+                    "entityType": "crm_contact",
+                    "description": "A CRM contact was created. `after` is the full contact projection.",
+                    "fields": [
+                        {
+                            "name": "firstName",
+                            "type": "string",
+                            "description": "First name"
+                        },
+                        {
+                            "name": "lastName",
+                            "type": "string",
+                            "description": "Last name"
+                        },
+                        {
+                            "name": "email",
+                            "type": "string",
+                            "description": "Email address"
+                        },
+                        {
+                            "name": "phone",
+                            "type": "string",
+                            "description": "Phone number as stored"
+                        },
+                        {
+                            "name": "jobTitle",
+                            "type": "string",
+                            "description": "Job title"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Primary company id (uuid)"
+                        },
+                        {
+                            "name": "ownerUserId",
+                            "type": "string",
+                            "description": "Owning user id (uuid)"
+                        },
+                        {
+                            "name": "source",
+                            "type": "string",
+                            "description": "Where the contact came from"
+                        },
+                        {
+                            "name": "lifecycleStage",
+                            "type": "string",
+                            "description": "Lifecycle stage"
+                        },
+                        {
+                            "name": "emailOptIn",
+                            "type": "boolean",
+                            "description": "Email marketing consent; never null"
+                        },
+                        {
+                            "name": "smsOptIn",
+                            "type": "boolean",
+                            "description": "SMS marketing consent; never null"
+                        },
+                        {
+                            "name": "consentSource",
+                            "type": "string",
+                            "description": "Where marketing consent was captured"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_contact.updated",
+                    "label": "Contact updated",
+                    "entityType": "crm_contact",
+                    "description": "A CRM contact changed. `before` and `after` carry only the fields that changed.",
+                    "fields": [
+                        {
+                            "name": "firstName",
+                            "type": "string",
+                            "description": "First name"
+                        },
+                        {
+                            "name": "lastName",
+                            "type": "string",
+                            "description": "Last name"
+                        },
+                        {
+                            "name": "email",
+                            "type": "string",
+                            "description": "Email address"
+                        },
+                        {
+                            "name": "phone",
+                            "type": "string",
+                            "description": "Phone number as stored"
+                        },
+                        {
+                            "name": "jobTitle",
+                            "type": "string",
+                            "description": "Job title"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Primary company id (uuid)"
+                        },
+                        {
+                            "name": "ownerUserId",
+                            "type": "string",
+                            "description": "Owning user id (uuid)"
+                        },
+                        {
+                            "name": "source",
+                            "type": "string",
+                            "description": "Where the contact came from"
+                        },
+                        {
+                            "name": "lifecycleStage",
+                            "type": "string",
+                            "description": "Lifecycle stage"
+                        },
+                        {
+                            "name": "emailOptIn",
+                            "type": "boolean",
+                            "description": "Email marketing consent; never null"
+                        },
+                        {
+                            "name": "smsOptIn",
+                            "type": "boolean",
+                            "description": "SMS marketing consent; never null"
+                        },
+                        {
+                            "name": "consentSource",
+                            "type": "string",
+                            "description": "Where marketing consent was captured"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_contact.deleted",
+                    "label": "Contact deleted",
+                    "entityType": "crm_contact",
+                    "description": "A CRM contact was deleted. `before` is the last contact projection; `after` is empty.",
+                    "fields": [
+                        {
+                            "name": "firstName",
+                            "type": "string",
+                            "description": "First name"
+                        },
+                        {
+                            "name": "lastName",
+                            "type": "string",
+                            "description": "Last name"
+                        },
+                        {
+                            "name": "email",
+                            "type": "string",
+                            "description": "Email address"
+                        },
+                        {
+                            "name": "phone",
+                            "type": "string",
+                            "description": "Phone number as stored"
+                        },
+                        {
+                            "name": "jobTitle",
+                            "type": "string",
+                            "description": "Job title"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Primary company id (uuid)"
+                        },
+                        {
+                            "name": "ownerUserId",
+                            "type": "string",
+                            "description": "Owning user id (uuid)"
+                        },
+                        {
+                            "name": "source",
+                            "type": "string",
+                            "description": "Where the contact came from"
+                        },
+                        {
+                            "name": "lifecycleStage",
+                            "type": "string",
+                            "description": "Lifecycle stage"
+                        },
+                        {
+                            "name": "emailOptIn",
+                            "type": "boolean",
+                            "description": "Email marketing consent; never null"
+                        },
+                        {
+                            "name": "smsOptIn",
+                            "type": "boolean",
+                            "description": "SMS marketing consent; never null"
+                        },
+                        {
+                            "name": "consentSource",
+                            "type": "string",
+                            "description": "Where marketing consent was captured"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_contact.tagged",
+                    "label": "Tag added to contact",
+                    "entityType": "crm_contact",
+                    "description": "A tag was added to a contact. `after` names the tag. Not emitted when the contact already had it.",
+                    "fields": [
+                        {
+                            "name": "tagId",
+                            "type": "string",
+                            "description": "Tag id (uuid); never null"
+                        },
+                        {
+                            "name": "tagName",
+                            "type": "string",
+                            "description": "Tag name; never null"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_contact.untagged",
+                    "label": "Tag removed from contact",
+                    "entityType": "crm_contact",
+                    "description": "A tag was removed from a contact. `after` names the tag that was removed.",
+                    "fields": [
+                        {
+                            "name": "tagId",
+                            "type": "string",
+                            "description": "Tag id (uuid); never null"
+                        },
+                        {
+                            "name": "tagName",
+                            "type": "string",
+                            "description": "Tag name; never null"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_deal.created",
+                    "label": "Deal created",
+                    "entityType": "crm_deal",
+                    "description": "A CRM deal was created. `after` is the full deal projection.",
+                    "fields": [
+                        {
+                            "name": "title",
+                            "type": "string",
+                            "description": "Deal title; never null"
+                        },
+                        {
+                            "name": "value",
+                            "type": "string",
+                            "description": "Deal value as a decimal string"
+                        },
+                        {
+                            "name": "currency",
+                            "type": "string",
+                            "description": "ISO currency code; never null"
+                        },
+                        {
+                            "name": "implementationCost",
+                            "type": "string",
+                            "description": "One-time implementation cost as a decimal string"
+                        },
+                        {
+                            "name": "mrr",
+                            "type": "string",
+                            "description": "Monthly recurring revenue as a decimal string"
+                        },
+                        {
+                            "name": "stage",
+                            "type": "string",
+                            "description": "Pipeline stage name"
+                        },
+                        {
+                            "name": "probability",
+                            "type": "integer",
+                            "description": "Win probability, 0-100"
+                        },
+                        {
+                            "name": "source",
+                            "type": "string",
+                            "description": "Where the deal came from"
+                        },
+                        {
+                            "name": "funnelId",
+                            "type": "string",
+                            "description": "Funnel id (uuid)"
+                        },
+                        {
+                            "name": "closedAt",
+                            "type": "string",
+                            "description": "RFC3339 close time; set on won/lost"
+                        },
+                        {
+                            "name": "contactId",
+                            "type": "string",
+                            "description": "Linked contact id (uuid)"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Linked company id (uuid)"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_deal.updated",
+                    "label": "Deal updated",
+                    "entityType": "crm_deal",
+                    "description": "A CRM deal changed. `before` and `after` carry only the fields that changed. A stage move emits this AND `crm_deal.stage_changed`.",
+                    "fields": [
+                        {
+                            "name": "title",
+                            "type": "string",
+                            "description": "Deal title; never null"
+                        },
+                        {
+                            "name": "value",
+                            "type": "string",
+                            "description": "Deal value as a decimal string"
+                        },
+                        {
+                            "name": "currency",
+                            "type": "string",
+                            "description": "ISO currency code; never null"
+                        },
+                        {
+                            "name": "implementationCost",
+                            "type": "string",
+                            "description": "One-time implementation cost as a decimal string"
+                        },
+                        {
+                            "name": "mrr",
+                            "type": "string",
+                            "description": "Monthly recurring revenue as a decimal string"
+                        },
+                        {
+                            "name": "stage",
+                            "type": "string",
+                            "description": "Pipeline stage name"
+                        },
+                        {
+                            "name": "probability",
+                            "type": "integer",
+                            "description": "Win probability, 0-100"
+                        },
+                        {
+                            "name": "source",
+                            "type": "string",
+                            "description": "Where the deal came from"
+                        },
+                        {
+                            "name": "funnelId",
+                            "type": "string",
+                            "description": "Funnel id (uuid)"
+                        },
+                        {
+                            "name": "closedAt",
+                            "type": "string",
+                            "description": "RFC3339 close time; set on won/lost"
+                        },
+                        {
+                            "name": "contactId",
+                            "type": "string",
+                            "description": "Linked contact id (uuid)"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Linked company id (uuid)"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_deal.stage_changed",
+                    "label": "Deal stage changed",
+                    "entityType": "crm_deal",
+                    "description": "A deal moved to a different pipeline stage. `before.stage` is the old stage, `after.stage` the new one.",
+                    "fields": [
+                        {
+                            "name": "stage",
+                            "type": "string",
+                            "description": "Pipeline stage name"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_task.created",
+                    "label": "Task created",
+                    "entityType": "crm_task",
+                    "description": "A CRM task was created. `after` is the full task projection.",
+                    "fields": [
+                        {
+                            "name": "title",
+                            "type": "string",
+                            "description": "Task title; never null"
+                        },
+                        {
+                            "name": "description",
+                            "type": "string",
+                            "description": "Task description"
+                        },
+                        {
+                            "name": "dueAt",
+                            "type": "string",
+                            "description": "RFC3339 due time"
+                        },
+                        {
+                            "name": "completedAt",
+                            "type": "string",
+                            "description": "RFC3339 completion time; null while open"
+                        },
+                        {
+                            "name": "dealId",
+                            "type": "string",
+                            "description": "Linked deal id (uuid)"
+                        },
+                        {
+                            "name": "contactId",
+                            "type": "string",
+                            "description": "Linked contact id (uuid)"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Linked company id (uuid)"
+                        },
+                        {
+                            "name": "assigneeUserId",
+                            "type": "string",
+                            "description": "Assigned user id (uuid)"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "crm_task.completed",
+                    "label": "Task completed",
+                    "entityType": "crm_task",
+                    "description": "A CRM task was completed. `after` is the full task projection; `before.completedAt` is the prior value (null for a first completion).",
+                    "fields": [
+                        {
+                            "name": "title",
+                            "type": "string",
+                            "description": "Task title; never null"
+                        },
+                        {
+                            "name": "description",
+                            "type": "string",
+                            "description": "Task description"
+                        },
+                        {
+                            "name": "dueAt",
+                            "type": "string",
+                            "description": "RFC3339 due time"
+                        },
+                        {
+                            "name": "completedAt",
+                            "type": "string",
+                            "description": "RFC3339 completion time; null while open"
+                        },
+                        {
+                            "name": "dealId",
+                            "type": "string",
+                            "description": "Linked deal id (uuid)"
+                        },
+                        {
+                            "name": "contactId",
+                            "type": "string",
+                            "description": "Linked contact id (uuid)"
+                        },
+                        {
+                            "name": "companyId",
+                            "type": "string",
+                            "description": "Linked company id (uuid)"
+                        },
+                        {
+                            "name": "assigneeUserId",
+                            "type": "string",
+                            "description": "Assigned user id (uuid)"
+                        }
+                    ]
+                },
+                {
+                    "eventType": "workflow.run_requested",
+                    "label": "Workflow run requested",
+                    "entityType": "workflow",
+                    "description": "A manual or tool-driven \"Run now\". Goes through the same trigger consumer as every other event so it gets the same dedup, audit and loop guard.",
+                    "fields": [
+                        {
+                            "name": "workflowId",
+                            "type": "string",
+                            "description": "Workflow to run (uuid); never null"
+                        },
+                        {
+                            "name": "versionId",
+                            "type": "string",
+                            "description": "Published version the requester saw (uuid); never null. The run uses the version published when it starts"
+                        },
+                        {
+                            "name": "entityType",
+                            "type": "string",
+                            "description": "Entity type the run is about"
+                        },
+                        {
+                            "name": "entityId",
+                            "type": "string",
+                            "description": "Entity id the run is about"
+                        },
+                        {
+                            "name": "input",
+                            "type": "object",
+                            "description": "Caller-supplied run input"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "WorkflowStepTypeListResponseSchema": [
+        {
+            "items": [
+                {
+                    "type": "send_email",
+                    "label": "Send email",
+                    "description": "Send an email through the org's SendGrid integration. `to`, `subject` and the Markdown `body` accept {{templates}}.",
+                    "requiredPermission": "communications.email.send"
+                },
+                {
+                    "type": "wait",
+                    "label": "Wait",
+                    "description": "Pause the run for an ISO-8601 duration (PT15M, P3D). The only step a loop may pass through.",
+                    "requiredPermission": null
+                },
+                {
+                    "type": "branch",
+                    "label": "Branch",
+                    "description": "Choose the next step by JsonLogic conditions; the first matching branch wins, otherwise `defaultNext`.",
+                    "requiredPermission": null
+                },
+                {
+                    "type": "crm_update",
+                    "label": "Update CRM record",
+                    "description": "Set fields on a contact or deal (the triggering one by default). Needs crm.contacts.write for a contact, crm.deals.write for a deal.",
+                    "requiredPermission": null
+                },
+                {
+                    "type": "add_tag",
+                    "label": "Add tag",
+                    "description": "Tag a contact (the triggering contact by default).",
+                    "requiredPermission": "crm.contacts.write"
+                },
+                {
+                    "type": "create_task",
+                    "label": "Create task",
+                    "description": "Create a CRM task, optionally assigned and linked to a contact or deal, due N days out.",
+                    "requiredPermission": "crm.tasks.write"
+                },
+                {
+                    "type": "notify",
+                    "label": "Notify",
+                    "description": "Send an in-app notification to the org admins or to named users.",
+                    "requiredPermission": null
+                },
+                {
+                    "type": "webhook_out",
+                    "label": "Call webhook",
+                    "description": "POST/PUT/PATCH a JSON body to an https URL. The body defaults to the triggering event.",
+                    "requiredPermission": null
+                }
+            ]
+        }
+    ]
+}

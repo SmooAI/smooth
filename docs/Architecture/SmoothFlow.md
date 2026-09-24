@@ -526,6 +526,39 @@ still that pearl's worktree, the title is just unknown.
 without sending them. An explicit value always wins. `th flow new` with no
 arguments starts a session in the CURRENT directory.
 
+### Where the session runs — the repo index (th-145e6b)
+
+The New Session sheet's **Directory** field searches every git checkout
+under `$HOME`. The field starts on the inferred worktree. You can type to
+search, type or paste a path (`~/…` or `/…`), or use **Browse…** to open a
+folder panel. Picking a directory re-runs inference for it, so the pearl,
+branch and title follow.
+
+`smooth_flow::repos` walks `$HOME` with the `ignore` crate's parallel
+walker, the engine inside `fd`. It stops at each repo root and never
+descends into:
+
+- hidden directories;
+- dependency and build trees (`node_modules`, `target`, `vendor`, …);
+- top-level `~/Library`, media folders, and cloud-synced folders (Google
+  Drive, iCloud, OneDrive, Dropbox), where walking would make macOS download
+  files.
+
+A linked worktree (`.git` is a file) is listed as its own row, with the main
+checkout it belongs to. The branch is read from `HEAD`; `git` is never run.
+Rows live in flow.db's `repos` table. The daemon scans in the background at
+start and again when a query finds the last scan more than 10 minutes old, so
+a restarted daemon answers from the last scan at once.
+
+`GET /api/flow/repos?q=&limit=` returns `{repos: [{path, name, branch?,
+main?, touched}], scanning, indexed}`. Every whitespace-separated token must
+match, case-insensitively. Rows rank by exact name, then name prefix, name
+substring, path substring, branch, and finally a fuzzy match on the path.
+Checkouts the fleet already works in rank first, then the most recently
+touched. `POST /api/flow/repos/rescan` re-walks now, for a repo cloned a
+minute ago. `EngineConfig::repo_root` is `None` by default, so tests and
+scratch engines never walk a real home.
+
 ### Adoption — plain `claude` / `codex` sessions join the fleet
 
 The hook overlay `th pkg` installs into every harness already posts

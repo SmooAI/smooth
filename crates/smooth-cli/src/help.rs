@@ -163,6 +163,18 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "smoo workflows",
+        &[
+            "smoo workflows list",
+            "smoo workflows show <id>                       # triggers in words, steps, validation, permissions",
+            "smoo workflows export <id> > def.json          # config as code; edit, then:",
+            "smoo workflows update <id> --file def.json",
+            "smoo workflows publish <id> --enable",
+            "smoo workflows run <id> --contact <uuid>       # preview; add --confirm --wait to run + follow it",
+            "smoo workflows run-show <id> <runId>           # step timeline",
+        ],
+    ),
+    (
         "pearls",
         &[
             "th pearls ready",
