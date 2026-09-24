@@ -964,6 +964,12 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::sheets::Cmd,
     },
+    /// Smoo AI email — deliverability (SPF/DKIM/DMARC checks, DMARC and TLS
+    /// reports, sending sources) and managed signature status (SMOODEV-3272).
+    Email {
+        #[command(subcommand)]
+        cmd: smooai::email::Cmd,
+    },
     /// Smoo AI workforce — the org's AI + human workforce directory.
     Workforce {
         #[command(subcommand)]
@@ -1850,6 +1856,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Gbp { cmd } => smooai::gbp::cmd(cmd).await,
         SmooCommands::SearchConsole { cmd } => smooai::search_console::cmd(cmd).await,
         SmooCommands::Sheets { cmd } => smooai::sheets::cmd(cmd).await,
+        SmooCommands::Email { cmd } => smooai::email::cmd(cmd).await,
         SmooCommands::Workforce { cmd } => {
             // Bare `smoo workforce` reads as "show me the directory".
             smooai::workforce::cmd(cmd.unwrap_or(smooai::workforce::Cmd::Directory {
