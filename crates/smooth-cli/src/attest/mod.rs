@@ -952,6 +952,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             target_dir: None,
             env: std::collections::BTreeMap::new(),
             min_free_gib: 5,
+            max_target_deps: 60_000,
         };
         // `passing` is `exit 0`; a fall-back LOCAL run of it must pass and report
         // that it ran locally — not block and leave the row to CI.
@@ -981,6 +982,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             target_dir: None,
             env: std::collections::BTreeMap::new(),
             min_free_gib: 5,
+            max_target_deps: 60_000,
         };
         let r = run_remote(&sys, &f.root, &cfg, "marked", "origin", "abc");
         assert_eq!(r.outcome, Outcome::Blocked, "an overloaded fallback is left to CI");

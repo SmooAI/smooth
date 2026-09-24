@@ -50,6 +50,19 @@ pub struct Remote {
     pub env: BTreeMap<String, String>,
     #[serde(default = "default_min_free_gib")]
     pub min_free_gib: u64,
+    /// Above this many entries in `<target_dir>/debug/deps` the target is moved
+    /// aside and rebuilt before the check (th-86de4d, [`prune_script`]).
+    #[serde(default = "default_max_target_deps")]
+    pub max_target_deps: u64,
+}
+
+/// A bound on unbounded growth, not a tuned number: well above what one workspace
+/// build leaves behind, far below the smoo-hub target that took over 110s to list.
+/// Override per repo with `max_target_deps` in `.smooth/attest.toml`.
+const DEFAULT_MAX_TARGET_DEPS: u64 = 60_000;
+
+const fn default_max_target_deps() -> u64 {
+    DEFAULT_MAX_TARGET_DEPS
 }
 
 pub fn config_path(root: &Path) -> std::path::PathBuf {
@@ -151,36 +164,106 @@ pub fn remote_script(cfg: &Remote, check: &str, origin: &str, sha: &str) -> Stri
     // from an abandoned branch) that cargo would compile into a FALSE red. No `-x`:
     // the cargo cache is an external CARGO_TARGET_DIR, cheap to keep. Every failure
     // here is the BOX being wrong, not the commit, so each exits as a precondition.
-    format!(
-        "set -u\n\
-         {path}\n\
-         lock={lock}\n\
-         waited=0\n\
-         while ! mkdir \"$lock\" 2>/dev/null; do\n\
-         \x20 if [ -n \"$(find \"$lock\" -maxdepth 0 -mmin +{stale} 2>/dev/null)\" ]; then rmdir \"$lock\" 2>/dev/null; continue; fi\n\
-         \x20 waited=$((waited + 2))\n\
-         \x20 if [ \"$waited\" -ge {wait} ]; then echo \"attest: {worktree} locked by another run for >{wait}s — box busy, not a verdict\" >&2; exit {EXIT_PRECONDITION}; fi\n\
-         \x20 sleep 2\n\
-         done\n\
-         trap 'rmdir \"$lock\" 2>/dev/null' EXIT INT TERM\n\
-         cd {worktree} || exit {EXIT_PRECONDITION}\n\
-         git fetch --force --quiet {origin} '+{r}:{r}' || exit {EXIT_PRECONDITION}\n\
-         git checkout --detach --force {sha} >/dev/null 2>&1 || exit {EXIT_PRECONDITION}\n\
-         git clean -ffd --quiet || exit {EXIT_PRECONDITION}\n\
-         rm -rf {tmp}; mkdir -p {tmp} || exit {EXIT_PRECONDITION}\n\
-         export TMPDIR={tmp}\n\
-         {target}{extra}bash {script}\n",
-        path = remote_path_prelude(),
-        worktree = shell_quote(&cfg.worktree),
+    //
+    // th-86de4d — the lock must never outlive, or be outlived by, the build:
+    //  * The old `trap 'rmdir lock' EXIT INT TERM` REPLACED the default action of
+    //    INT/TERM. A killed run (watchdog, ctrl-c) released the lock and kept
+    //    building — found on smoo-hub as a 50-minute `bash -s` under PID 1 while the
+    //    next run took the "free" lock and built into the same target dir. Now each
+    //    signal trap EXITS, and the EXIT trap kills the check's whole process group.
+    //  * The check runs as a background job under `set -m`, so it is its own process
+    //    group (cargo's rustc children included) and `wait` returns the moment a
+    //    signal lands instead of after the build. stdin is /dev/null: this shell is
+    //    reading its own script from stdin, which the check must not consume.
+    //  * The lock records the holder's pid and the check's process group. A waiter
+    //    breaks it only when that holder is dead (and kills its orphaned group
+    //    first); the age rule is kept for a lock with no recorded holder.
+    let template = r#"set -u
+@PATH@
+lock=@LOCK@
+child=
+cleanup() {
+  if [ -n "$child" ] && kill -0 -- "-$child" 2>/dev/null; then
+    kill -TERM -- "-$child" 2>/dev/null; sleep 2; kill -KILL -- "-$child" 2>/dev/null
+  fi
+  rm -rf "$lock"
+}
+waited=0
+while ! mkdir "$lock" 2>/dev/null; do
+  holder=$(cat "$lock/pid" 2>/dev/null)
+  if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } || { [ -z "$holder" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +@STALE@ 2>/dev/null)" ]; }; then
+    pg=$(cat "$lock/pgid" 2>/dev/null)
+    if [ -n "$pg" ]; then kill -TERM -- "-$pg" 2>/dev/null; fi
+    rm -rf "$lock"; continue
+  fi
+  waited=$((waited + 2))
+  if [ "$waited" -ge @WAIT@ ]; then echo "attest: @WORKTREE_Q@ locked by another run for >@WAIT@s — box busy, not a verdict" >&2; exit @PRE@; fi
+  sleep 2
+done
+echo $$ > "$lock/pid"
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cd @WORKTREE@ || exit @PRE@
+git fetch --force --quiet @ORIGIN@ '+@REF@:@REF@' || exit @PRE@
+git checkout --detach --force @SHA@ >/dev/null 2>&1 || exit @PRE@
+git clean -ffd --quiet || exit @PRE@
+rm -rf @TMP@; mkdir -p @TMP@ || exit @PRE@
+export TMPDIR=@TMP@
+@TARGET@@PRUNE@@EXTRA@set -m
+bash @SCRIPT@ </dev/null &
+child=$!
+set +m
+echo "$child" > "$lock/pgid"
+wait "$child"
+rc=$?
+child=
+exit "$rc"
+"#;
+    template
+        .replace("@PATH@", &remote_path_prelude())
+        .replace("@LOCK@", &lock)
+        .replace("@STALE@", &LOCK_STALE_MIN.to_string())
+        .replace("@WAIT@", &LOCK_WAIT_SECS.to_string())
+        .replace("@PRE@", &EXIT_PRECONDITION.to_string())
+        .replace("@WORKTREE_Q@", &shell_quote(&cfg.worktree))
+        .replace("@WORKTREE@", &shell_quote(&cfg.worktree))
+        .replace("@ORIGIN@", &shell_quote(origin))
+        .replace("@REF@", &r)
+        .replace("@SHA@", sha)
         // th-279151: fresh per run (we hold the lock, so no peer is using it) and on
         // the build volume, never the system disk's /var/folders.
-        tmp = shell_quote(&cfg.tmp_dir()),
-        origin = shell_quote(origin),
-        stale = LOCK_STALE_MIN,
-        wait = LOCK_WAIT_SECS,
+        .replace("@TMP@", &shell_quote(&cfg.tmp_dir()))
+        .replace("@TARGET@", &target)
+        .replace("@PRUNE@", &prune_script(cfg))
+        .replace("@EXTRA@", &extra)
         // Quoted like every other interpolation. A check name comes from a file
         // name in the repo, and a file name can hold shell metacharacters.
-        script = shell_quote(&format!("scripts/ci/{check}.sh")),
+        .replace("@SCRIPT@", &shell_quote(&format!("scripts/ci/{check}.sh")))
+}
+
+/// th-86de4d: cap the cargo target before building. Nothing ever pruned it —
+/// smoo-hub's grew to 302GB — and rustc lists `target/debug/deps` on EVERY
+/// invocation (`SearchPath::new`, sampled); at that size one listing took over
+/// 110s, so a workspace clippy could not finish inside the deadline and every
+/// rust attest timed out. Past `max_target_deps` entries the target is moved
+/// aside (a rename: instant) and deleted in the background, so this run starts
+/// cold instead of stalled. Only for a configured `target_dir` — never a default
+/// target inside the worktree.
+fn prune_script(cfg: &Remote) -> String {
+    let Some(dir) = cfg.target_dir.as_deref() else {
+        return String::new();
+    };
+    let t = shell_quote(dir);
+    format!(
+        "deps={t}/debug/deps\n\
+         if [ -d \"$deps\" ] && [ \"$(ls -f \"$deps\" | wc -l)\" -gt {max} ]; then\n\
+         \x20 echo \"attest: $deps holds over {max} entries — every rustc lists it at startup, so the target is moved aside and rebuilt (th-86de4d)\" >&2\n\
+         \x20 trash={t}.trash-$$\n\
+         \x20 mv {t} \"$trash\" && (nohup rm -rf \"$trash\" >/dev/null 2>&1 &)\n\
+         fi\n",
+        max = cfg.max_target_deps
     )
 }
 
@@ -329,6 +412,7 @@ mod tests {
             target_dir: Some("/Volumes/smoo-ext/ci-attest/target".into()),
             env: BTreeMap::new(),
             min_free_gib: DEFAULT_MIN_FREE_GIB,
+            max_target_deps: DEFAULT_MAX_TARGET_DEPS,
         }
     }
 
@@ -420,7 +504,10 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
         // worktree, and it MUST be taken before the checkout that would clobber a
         // peer's tree. Not `exec`, or the release trap never fires.
         assert!(s.contains("mkdir \"$lock\""), "concurrent runs serialize on a mkdir lock");
-        assert!(s.contains("trap 'rmdir \"$lock\"") && s.contains("EXIT"), "the lock is released on exit");
+        assert!(
+            s.contains("trap cleanup EXIT") && s.contains("rm -rf \"$lock\""),
+            "the lock is released on exit"
+        );
         assert!(
             s.find("mkdir \"$lock\"").unwrap() < s.find("git checkout").unwrap(),
             "the lock is held before the checkout it protects"
@@ -451,7 +538,7 @@ target_dir = "/Volumes/smoo-ext/ci-attest/target"
             "a stale tmp from a crashed run is cleared"
         );
         assert!(
-            s.find("mkdir \"$lock\"").unwrap() < s.find("rm -rf").unwrap(),
+            s.find("while ! mkdir \"$lock\"").unwrap() < s.find("rm -rf '/Volumes/smoo-ext/ci-attest/smooai.attest-tmp'").unwrap(),
             "only the lock holder may clear it"
         );
         assert!(s.find("export TMPDIR").unwrap() < s.find("bash 'scripts/ci/rust.sh'").unwrap());
@@ -509,6 +596,135 @@ exit 0
         // in-lock `git clean -ffd` would delete the lock the run is holding.
         assert!(s.contains(".attest-lock"));
         assert!(!s.contains("smooai/.attest-lock"), "the lock lives beside the worktree, not within it");
+    }
+
+    /// th-86de4d: a signal trap that only releases the lock REPLACES the default
+    /// action — the shell kept running (and building) with the lock gone. Each
+    /// signal trap must exit, and the exit path must take the check's whole
+    /// process group down before it frees the lock.
+    #[test]
+    fn signals_end_the_run_and_take_the_check_down_before_the_lock_is_freed() {
+        let s = remote_script(&cfg(), "rust", "origin", "abc");
+        assert!(!s.contains("trap 'rmdir"), "the old release-only trap is gone:\n{s}");
+        for sig in ["trap 'exit 129' HUP", "trap 'exit 130' INT", "trap 'exit 143' TERM", "trap cleanup EXIT"] {
+            assert!(s.contains(sig), "missing `{sig}`");
+        }
+        let cleanup = &s[s.find("cleanup() {").unwrap()..s.find("\n}\n").unwrap()];
+        assert!(
+            cleanup.find("kill -TERM -- \"-$child\"").unwrap() < cleanup.find("rm -rf \"$lock\"").unwrap(),
+            "the group dies BEFORE the lock is released:\n{cleanup}"
+        );
+        assert!(
+            s.contains("set -m\nbash 'scripts/ci/rust.sh' </dev/null &"),
+            "the check is its own process group, and never reads this shell's script from stdin"
+        );
+        assert!(s.contains("wait \"$child\""));
+    }
+
+    /// th-86de4d: the waiter trusts a LIVE holder however long it runs, breaks a
+    /// dead holder's lock at once, and kills that holder's orphaned build first.
+    #[test]
+    fn a_dead_holders_lock_is_broken_and_its_orphans_killed() {
+        let s = remote_script(&cfg(), "rust", "origin", "abc");
+        assert!(s.contains("echo $$ > \"$lock/pid\""), "the holder records itself");
+        assert!(s.contains("echo \"$child\" > \"$lock/pgid\""), "and the check's process group");
+        assert!(s.contains("! kill -0 \"$holder\""), "a waiter checks the holder is alive");
+        let wait_loop = &s[s.find("while ! mkdir").unwrap()..s.find("\ndone\n").unwrap()];
+        assert!(
+            wait_loop.find("kill -TERM -- \"-$pg\"").unwrap() < wait_loop.find("rm -rf \"$lock\"").unwrap(),
+            "orphans die before the lock is taken over:\n{wait_loop}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_target_is_moved_aside_before_the_check() {
+        let s = remote_script(&cfg(), "rust", "origin", "abc");
+        assert!(s.contains(&format!("-gt {DEFAULT_MAX_TARGET_DEPS} ]")), "{s}");
+        assert!(s.contains("deps='/Volumes/smoo-ext/ci-attest/target'/debug/deps"));
+        assert!(
+            s.contains("mv '/Volumes/smoo-ext/ci-attest/target' \"$trash\""),
+            "a rename — instant — not an inline rm"
+        );
+        assert!(s.find("mv '/Volumes").unwrap() < s.find("bash 'scripts/ci/rust.sh'").unwrap());
+        let mut c = cfg();
+        c.target_dir = None;
+        assert!(
+            !remote_script(&c, "rust", "origin", "abc").contains("debug/deps"),
+            "never prunes a target it does not own"
+        );
+    }
+
+    /// th-86de4d, end to end: run the REAL generated script against a real git
+    /// origin, SIGTERM the shell mid-check (what a killed ssh session delivers),
+    /// and prove the check process is gone and the lock released.
+    #[test]
+    fn a_terminated_run_leaves_no_orphaned_check_and_no_lock() {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let origin = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare"]);
+        std::fs::create_dir_all(work.join("scripts/ci")).unwrap();
+        git(&work, &["init", "-q"]);
+        let pidfile = tmp.path().join("check.pid");
+        std::fs::write(work.join("scripts/ci/slow.sh"), format!("echo $$ > '{}'\nsleep 60\n", pidfile.display())).unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "slow"]);
+        let sha = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&work).output().unwrap().stdout).unwrap();
+        let sha = sha.trim();
+        git(&work, &["push", "-q", origin.to_str().unwrap(), &format!("HEAD:refs/attest/{sha}")]);
+
+        let c = Remote {
+            host: "local".into(),
+            checks: vec!["slow".into()],
+            worktree: work.to_string_lossy().into_owned(),
+            target_dir: None,
+            env: BTreeMap::new(),
+            min_free_gib: 0,
+            max_target_deps: DEFAULT_MAX_TARGET_DEPS,
+        };
+        let script = remote_script(&c, "slow", origin.to_str().unwrap(), sha);
+        let mut shell = Command::new("bash")
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        shell.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+
+        let began = std::time::Instant::now();
+        while !pidfile.exists() {
+            assert!(began.elapsed().as_secs() < 20, "the check never started");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let check_pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let lock = format!("{}.attest-lock", c.worktree);
+        assert!(Path::new(&lock).exists(), "the run holds the lock while the check runs");
+
+        let _ = Command::new("kill").args(["-TERM", &shell.id().to_string()]).status();
+        let _ = shell.wait();
+
+        let alive = || Command::new("kill").args(["-0", &check_pid]).stderr(Stdio::null()).status().unwrap().success();
+        let deadline = std::time::Instant::now();
+        while alive() && deadline.elapsed().as_secs() < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!alive(), "the check outlived its killed shell — the orphan th-86de4d found on smoo-hub");
+        assert!(!Path::new(&lock).exists(), "the lock is released once the run is gone");
     }
 
     /// The lock logic is hand-rolled shell; a stray token would break every remote

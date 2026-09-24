@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+`th attest`'s remote runs no longer outlive being killed, and no longer stall on their own build cache (th-86de4d). The remote script trapped INT/TERM only to release its lock, and a trap replaces the default action. So a timed-out or cancelled run freed the lock but kept building. On smoo-hub that left a `bash -s` under PID 1 for 50 minutes, and the next run took the "free" lock and built into the same target. Every signal now ends the run, and the exit path kills the check's whole process group (it runs as its own job, reading stdin from `/dev/null`) before releasing the lock. The lock records its holder, so a waiter breaks a dead holder's lock at once, killing its orphans first, and never breaks a live one. Separately, the cargo target was never pruned: smoo-hub's grew to 302GB, and rustc lists `target/debug/deps` on every invocation. That listing took over 110s, so a workspace clippy could not finish before the deadline. Past `max_target_deps` entries (default 60,000, configurable in `.smooth/attest.toml`), the target is renamed aside, deleted in the background, and rebuilt.
