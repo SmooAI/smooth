@@ -30,9 +30,16 @@ export function submitAction(turnActive: boolean, hasContent: boolean, steer = f
     return steer ? 'steer' : 'enqueue';
 }
 
-/** Append to the tail — messages send in the order they were queued. */
+/** Hold a follow-up for after the running turn. Everything sent mid-turn folds
+ * into ONE held message (text joined by a blank line, attachments kept in order),
+ * so the next turn sees all the follow-ups at once instead of a string of separate
+ * turns. This matches the iOS and Android apps' held-message card (th-74ba1f
+ * parity): every Big Smooth client queues, steers and sends the same way. */
 export function enqueue(queue: QueuedMessage[], item: QueuedMessage): QueuedMessage[] {
-    return [...queue, item];
+    const held = queue[0];
+    if (!held) return [item];
+    const text = [held.text, item.text].filter((t) => t.trim().length > 0).join('\n\n');
+    return [{ ...held, text, attachments: [...held.attachments, ...item.attachments] }];
 }
 
 /** Pull the head off for sending on turn completion; `null` when empty. */
