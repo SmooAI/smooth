@@ -18,12 +18,20 @@ test('an empty draft is a noop whether idle or mid-turn', () => {
     assert.equal(submitAction(true, false), 'noop');
 });
 
-test('enqueue appends in send order', () => {
-    const q = enqueue(enqueue([], msg('a')), msg('b'));
-    assert.deepEqual(
-        q.map((m) => m.id),
-        ['a', 'b'],
-    );
+test('follow-ups sent mid-turn fold into one held message, like iOS/Android (th-74ba1f)', () => {
+    const q = enqueue(enqueue([], msg('a', 'first')), msg('b', 'second'));
+    assert.equal(q.length, 1, 'one held message, not a string of turns');
+    assert.equal(q[0].id, 'a', "keeps the first message's identity");
+    assert.equal(q[0].text, 'first\n\nsecond', 'joined in order by a blank line');
+});
+
+test('folding keeps every attachment and skips empty text', () => {
+    const img = (name: string) => ({ name }) as unknown as QueuedMessage['attachments'][number];
+    const a: QueuedMessage = { id: 'a', text: '', attachments: [img('one')] };
+    const b: QueuedMessage = { id: 'b', text: 'look at these', attachments: [img('two')] };
+    const q = enqueue(enqueue([], a), b);
+    assert.equal(q[0].text, 'look at these');
+    assert.equal(q[0].attachments.length, 2);
 });
 
 test('dequeue-and-send: pulls the head, keeps the rest in order', () => {
