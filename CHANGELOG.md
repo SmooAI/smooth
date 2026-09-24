@@ -1,5 +1,20 @@
 # @smooai/smooth
 
+## 0.54.1
+
+### Patch Changes
+
+- 65c74fd: `th attest` stops refusing its build box over the wrong disk (th-279151). The remote disk guard checked the host's `/`. On smoo-hub that is a family Mac's system volume, under 1GiB free, while the build lives on `/Volumes/smoo-ext` with terabytes free. So every delegated `rust` attest was refused and quietly re-ran locally on an overloaded laptop: `ci-attest/rust` was credited on 0% of smooai PRs in September. The guard now measures the build volume (`target_dir`, else `worktree`). The check's `TMPDIR` is a fresh `<worktree>.attest-tmp` on that same volume, cleared by the lock holder each run. When the box really is unusable and this machine is above twice its core count, attest no longer starts a near-hour local build whose failures it would distrust anyway: it reports the check as blocked and leaves the row to CI.
+- c652769: `th attest`'s remote runs no longer outlive being killed, and no longer stall on their own build cache (th-86de4d). The remote script trapped INT/TERM only to release its lock, and a trap replaces the default action. So a timed-out or cancelled run freed the lock but kept building. On smoo-hub that left a `bash -s` under PID 1 for 50 minutes, and the next run took the "free" lock and built into the same target. Every signal now ends the run, and the exit path kills the check's whole process group (it runs as its own job, reading stdin from `/dev/null`) before releasing the lock. The lock records its holder, so a waiter breaks a dead holder's lock at once, killing its orphans first, and never breaks a live one. Separately, the cargo target was never pruned: smoo-hub's grew to 302GB, and rustc lists `target/debug/deps` on every invocation. That listing took over 110s, so a workspace clippy could not finish before the deadline. Past `max_target_deps` entries (default 60,000, configurable in `.smooth/attest.toml`), the target is renamed aside, deleted in the background, and rebuilt.
+- e3921d4: A stuck process can no longer hang every `th` and daemon on the machine behind the Smoo credentials lock (th-2d2c15). The lock used to wait forever, and the daemons refreshed the session under it with an HTTP client that had no timeout. When SmoothFlow's daemon hung on a dead socket after sleep, `th auth login` sat in `flock()` indefinitely, and so did Big Smooth's heartbeat. Now:
+
+  - waits for the lock are bounded (45s), and the timeout error names the holder (program, pid, since when); the holder records itself in the lock file;
+  - the network call made while holding the lock is time-boxed (30s), and the session HTTP clients have connect and request timeouts, so a hung request releases the lock;
+  - async callers wait for the lock on the blocking pool instead of stalling a runtime worker;
+  - `th auth login` and the other interactive commands say who they're waiting on after 2 seconds instead of silently hanging.
+
+- cbddb98: Big Smooth knows how to use `th` before it starts (th-cf34d9). The `th` tool's description pointed at old spellings (`api <resource>`, the removed `api whoami`) and said nothing about the CRM, so a question like "what are my biggest deals" cost a turn of `--help` probing. The description now leads with verified recipes for the `smoo` namespace (pipeline, deals, contacts, tasks, reminders, invoices, analytics, campaigns, account, pearls, agent mail), tells the model to run `<area> ai` once for a full guide instead of walking `--help`, to use `--json` when computing, and to hand a sign-in error to the user rather than retry. The persona gains a short "user's business" section, and a test parses every concrete example in the description against the real CLI so the recipes can't go stale.
+
 ## 0.54.0
 
 ### Minor Changes
