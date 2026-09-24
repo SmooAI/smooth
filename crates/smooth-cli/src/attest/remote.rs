@@ -56,10 +56,14 @@ pub struct Remote {
     pub max_target_deps: u64,
 }
 
-/// A bound on unbounded growth, not a tuned number: well above what one workspace
-/// build leaves behind, far below the smoo-hub target that took over 110s to list.
-/// Override per repo with `max_target_deps` in `.smooth/attest.toml`.
-const DEFAULT_MAX_TARGET_DEPS: u64 = 60_000;
+/// A bound on unbounded growth. Measured on smoo-hub (2026-09-24): ONE cold smooai
+/// `rust.sh` build leaves 62,283 entries in `debug/deps`, listed in ~2s — so the
+/// first default (60k) sat BELOW a single build and would have wiped the target
+/// before every run, making every attest a 61-minute cold build. 250k is about
+/// four builds' worth, still lists in seconds, and is far below the millions of
+/// entries that took over 110s. Override per repo with `max_target_deps` in
+/// `.smooth/attest.toml`.
+const DEFAULT_MAX_TARGET_DEPS: u64 = 250_000;
 
 const fn default_max_target_deps() -> u64 {
     DEFAULT_MAX_TARGET_DEPS
