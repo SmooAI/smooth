@@ -472,8 +472,26 @@ fn run_remote(sys: &Sys, root: &Path, cfg: &remote::Remote, check: &str, origin:
         // the box, and the developer should know why their attest just got long.
         // `ConnectTimeout` (remote.rs) makes an unreachable host surface in seconds,
         // so this is a fast fall-through, not a long stall. Result reads as local.
+        //
+        // th-279151: EXCEPT on an oversubscribed machine. The fallback was written
+        // for a quiet laptop; on one at 2x its cores (30 agents is normal here) a
+        // cold build of the row the box exists for runs for most of an hour, and
+        // `classify` would then distrust any failure anyway. Measured: 0% of
+        // `rust` rows attested in a month, every run of it having quietly become
+        // this. Blocking hands the row to CI promptly, which is the better trade.
         Err(reason) => {
             eprintln!("\n⚠ {}: {reason}", cfg.host);
+            if env::overloaded(sys) {
+                let load = env::load_summary(sys);
+                eprintln!("  → NOT running {check} here: this machine is at {load}. CI will run the row.");
+                return CheckResult {
+                    name: check.to_string(),
+                    outcome: Outcome::Blocked,
+                    secs: began.elapsed().as_secs(),
+                    location: "locally".into(),
+                    note: Some(format!("{} unusable ({reason}) and this machine is at {load} — left to CI", cfg.host)),
+                };
+            }
             eprintln!("  → running {check} locally instead — slower, no warm cache on this machine.");
             run_local(sys, root, check)
         }
@@ -940,6 +958,34 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let r = run_remote(&sys, &f.root, &cfg, "passing", "origin", "abc");
         assert_eq!(r.location, "locally", "an unreachable box falls back to a LOCAL run");
         assert_eq!(r.outcome, Outcome::Pass, "the local run of a passing check passes");
+    }
+
+    /// th-279151: on an oversubscribed machine the fallback would be a cold,
+    /// near-hour build whose failures `classify` distrusts anyway — block and let
+    /// CI run the row, and never start the check here.
+    #[test]
+    fn an_unusable_remote_on_an_overloaded_machine_blocks_instead_of_building_locally() {
+        let f = fixture();
+        let stubdir = f.root.join("stubbin");
+        std::fs::create_dir_all(&stubdir).unwrap();
+        let ran = f.root.join("ran");
+        check(&f.root, "marked", &format!("touch '{}'", ran.display()));
+        let mut sys = f.sys.clone();
+        sys.ssh = test_script(&stubdir, "ssh", "exit 255").into_os_string();
+        sys.uptime = test_script(&stubdir, "uptime", "echo 'load averages: 999.00 1 1'").into_os_string();
+        sys.cores = 4;
+        let cfg = remote::Remote {
+            host: "smoo-hub".into(),
+            checks: vec!["marked".into()],
+            worktree: "/nonexistent".into(),
+            target_dir: None,
+            env: std::collections::BTreeMap::new(),
+            min_free_gib: 5,
+        };
+        let r = run_remote(&sys, &f.root, &cfg, "marked", "origin", "abc");
+        assert_eq!(r.outcome, Outcome::Blocked, "an overloaded fallback is left to CI");
+        assert!(r.note.as_deref().unwrap_or_default().contains("left to CI"), "{:?}", r.note);
+        assert!(!ran.exists(), "the check must not start on the overloaded machine");
     }
 
     // ── dirty working tree (the "passed everything, credited nothing" hole) ──
