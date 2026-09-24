@@ -44,7 +44,9 @@ pub mod pb {
 
 pub use client::SmoothApiClient;
 pub use credentials::{Credentials, CredentialsStore};
-pub use lock::{credential_lock, CredentialLock};
+pub use lock::{
+    credential_lock, credential_lock_async, credential_lock_holder, credential_lock_within, CredentialLock, DEFAULT_LOCK_WAIT, LOCKED_SECTION_TIMEOUT,
+};
 
 /// Default production base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.smoo.ai";

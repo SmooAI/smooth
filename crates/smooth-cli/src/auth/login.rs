@@ -102,13 +102,13 @@ pub async fn cmd_login_user(email: Option<String>, password: Option<String>, bro
     };
 
     println!("{} Signing in to Smoo AI ({})...", "→".cyan().bold(), url.dimmed());
-    let http = reqwest::Client::new();
+    let http = crate::auth::refresh::bounded_http_client();
     let creds = password_grant(&http, &url, &key, &email, &password).await.context("Supabase password grant")?;
 
     let store = CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?;
     // A background `th` may be refreshing the very session we are about
     // to replace; without the lock the two writes race (th-5c0189).
-    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
+    let lock = crate::auth::refresh::interactive_credential_lock(store.path())?;
     store.save(&creds).context("persist user credentials")?;
     drop(lock);
 
@@ -137,7 +137,7 @@ async fn cmd_login_user_browser() -> Result<()> {
     let authorize_base = cli_login_url();
     let tok = cli_token_url();
     println!("{} Signing in to Smoo AI via browser...", "→".cyan().bold());
-    let http = reqwest::Client::new();
+    let http = crate::auth::refresh::bounded_http_client();
     let outcome = browser_login::run_browser_login(&http, &authorize_base, &tok)
         .await
         .context("browser login flow")?;
@@ -168,7 +168,7 @@ async fn cmd_login_user_browser() -> Result<()> {
     let store = CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?;
     // A background `th` may be refreshing the very session we are about
     // to replace; without the lock the two writes race (th-5c0189).
-    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
+    let lock = crate::auth::refresh::interactive_credential_lock(store.path())?;
     store.save(&creds).context("persist user credentials")?;
     drop(lock);
 
@@ -226,13 +226,13 @@ pub async fn cmd_login_m2m(client_id: Option<String>, client_secret: Option<Stri
     };
 
     println!("{} Exchanging service-account credentials at auth.smoo.ai...", "→".cyan().bold());
-    let http = reqwest::Client::new();
+    let http = crate::auth::refresh::bounded_http_client();
     let creds = client_credentials_grant(&http, &client_id, &client_secret)
         .await
         .context("client_credentials grant")?;
 
     let store = CredentialsStore::default_m2m().context("locate ~/.smooth/auth/smooai.json")?;
-    let lock = smooth_api_client::credential_lock(store.path()).context("lock the credentials file")?;
+    let lock = crate::auth::refresh::interactive_credential_lock(store.path())?;
     store.save(&creds).context("persist M2M credentials")?;
     drop(lock);
 
