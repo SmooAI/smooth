@@ -1008,6 +1008,18 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::work::Cmd,
     },
+    /// Smoo AI workflows — "when X happens, do Y" automations (ADR-127).
+    ///
+    /// List / show / author drafts as JSON (`export` → edit → `update
+    /// --file`), validate, publish + enable / pause, run by hand (previews
+    /// unless `--confirm`), and read each run's step timeline. The org needs
+    /// the `workflows` product feature; verbs are gated by `workflow.read` /
+    /// `.write` / `.publish` / `.run`.
+    #[command(visible_alias = "workflow")]
+    Workflows {
+        #[command(subcommand)]
+        cmd: smooai::workflows::Cmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1215,6 +1227,13 @@ enum ApiCommands {
     Dashboard {
         #[command(subcommand)]
         cmd: smooai::dashboard::Cmd,
+    },
+    /// Smoo AI workflows — mirror of `smoo workflows` (the canonical
+    /// spelling); same verbs, same module.
+    #[command(visible_alias = "workflow")]
+    Workflows {
+        #[command(subcommand)]
+        cmd: smooai::workflows::Cmd,
     },
     /// Smoo AI org integrations (SendGrid email).
     #[command(visible_alias = "integration")]
@@ -1803,6 +1822,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
             ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
+            ApiCommands::Workflows { cmd } => smooai::workflows::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
             ApiCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
@@ -1821,6 +1841,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
         SmooCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
         SmooCommands::Work { cmd } => smooai::work::cmd(cmd).await,
+        SmooCommands::Workflows { cmd } => smooai::workflows::cmd(cmd).await,
         SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
         SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
         SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
@@ -7659,6 +7680,30 @@ mod org_cli_tests {
             Some(Commands::Smoo {
                 cmd: SmooCommands::Api {
                     cmd: ApiCommands::Agents { .. }
+                }
+            })
+        ));
+        // th-b1068f: `smoo workflows` is canonical; `smoo workflow` and
+        // `smoo api workflows` reach the same module.
+        for argv in [["th", "smoo", "workflows", "list"], ["th", "smoo", "workflow", "list"]] {
+            assert!(matches!(
+                Cli::try_parse_from(argv).expect("th smoo workflows list").command,
+                Some(Commands::Smoo {
+                    cmd: SmooCommands::Workflows {
+                        cmd: smooai::workflows::Cmd::List { .. }
+                    }
+                })
+            ));
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["th", "smoo", "api", "workflows", "run-get", "w", "r"])
+                .expect("th smoo api workflows run-get")
+                .command,
+            Some(Commands::Smoo {
+                cmd: SmooCommands::Api {
+                    cmd: ApiCommands::Workflows {
+                        cmd: smooai::workflows::Cmd::RunShow { .. }
+                    }
                 }
             })
         ));
