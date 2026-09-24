@@ -7337,6 +7337,57 @@ mod org_cli_tests {
         Cli::command().debug_assert();
     }
 
+    /// th-cf34d9: every concrete argv example in Big Smooth's `th` tool
+    /// description must parse against the real CLI, so the recipes the model is
+    /// told to run can't rot into dead spellings (the old text pointed at the
+    /// removed `api whoami`). Examples with alternatives (`a|b`) or elisions
+    /// (`…`) aren't literal commands and are skipped, as are templates whose
+    /// placeholder names a subcommand; value placeholders like `<id>` become a
+    /// dummy value.
+    #[test]
+    fn th_tool_description_examples_all_parse() {
+        use smooth_operator::Tool;
+        let desc = smooth_tools::ThTool {
+            workspace: std::path::PathBuf::from("/tmp"),
+        }
+        .schema()
+        .description;
+        let mut checked = 0;
+        let mut rest = desc.as_str();
+        while let Some(open) = rest.find('[') {
+            let Some(len) = rest[open..].find(']') else { break };
+            let candidate = &rest[open..=open + len];
+            rest = &rest[open + len + 1..];
+            let Ok(args) = serde_json::from_str::<Vec<String>>(candidate) else { continue };
+            if args.is_empty() || args.iter().any(|a| a.contains('|') || a.contains('…')) {
+                continue;
+            }
+            // A placeholder followed by a literal word stands for a SUBCOMMAND
+            // (`["smoo", "<area>", "ai"]`), so it's a template, not a command.
+            if args
+                .windows(2)
+                .any(|w| w[0].starts_with('<') && !w[1].starts_with('<') && !w[1].starts_with('-'))
+            {
+                continue;
+            }
+            let argv: Vec<String> = std::iter::once("th".to_string())
+                .chain(args.iter().map(|a| if a.starts_with('<') { "x".to_string() } else { a.clone() }))
+                .collect();
+            match Cli::try_parse_from(&argv) {
+                Ok(_) => {}
+                // `[<cmd>, "ai"]`-style and bare-group examples print help: still a real path.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                    ) => {}
+                Err(e) => panic!("th tool description example {candidate} does not parse: {e}"),
+            }
+            checked += 1;
+        }
+        assert!(checked >= 15, "expected the description to carry concrete recipes, only checked {checked}");
+    }
+
     /// `th org` is the top-level alias for `th api orgs` — list / show /
     /// switch must all parse into the same OrgsCommands as the api path.
     #[test]
