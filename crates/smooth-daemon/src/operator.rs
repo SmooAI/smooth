@@ -542,12 +542,28 @@ pub fn local_tool_provider_full(
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
-/// `SMOOTH_WORKSPACE` if set, else the daemon's current directory.
+/// `SMOOTH_WORKSPACE` if set, else the daemon's current directory — unless
+/// that is the filesystem root, which is what every app launched from Finder
+/// or the Dock inherits (th-96fcb7). SmoothFlow then inferred `/` as the
+/// default directory for new sessions (tabs titled "/"). The root is never a
+/// workspace anyone meant, so it means `$HOME`.
 fn workspace_dir() -> PathBuf {
-    std::env::var_os("SMOOTH_WORKSPACE")
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+    pick_workspace(
+        std::env::var_os("SMOOTH_WORKSPACE").map(PathBuf::from),
+        std::env::current_dir().ok(),
+        dirs_next::home_dir(),
+    )
+}
+
+/// [`workspace_dir`], pure over its inputs.
+fn pick_workspace(env: Option<PathBuf>, cwd: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(w) = env.filter(|w| !w.as_os_str().is_empty()) {
+        return w;
+    }
+    match cwd {
+        Some(c) if c.parent().is_some() => c,
+        _ => home.unwrap_or_else(|| PathBuf::from(".")),
+    }
 }
 
 /// Char budget for the skills index injected into the persona. Names +
@@ -1515,6 +1531,30 @@ fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
+
+    /// th-96fcb7: a GUI-launched daemon's cwd is `/`; that is never a workspace.
+    #[test]
+    fn the_filesystem_root_is_not_a_workspace() {
+        let home = Some(PathBuf::from("/Users/me"));
+        assert_eq!(pick_workspace(None, Some(PathBuf::from("/")), home.clone()), PathBuf::from("/Users/me"));
+        assert_eq!(
+            pick_workspace(None, Some(PathBuf::from("/Users/me/dev/x")), home.clone()),
+            PathBuf::from("/Users/me/dev/x")
+        );
+        assert_eq!(
+            pick_workspace(Some(PathBuf::from("/w")), Some(PathBuf::from("/")), home.clone()),
+            PathBuf::from("/w"),
+            "SMOOTH_WORKSPACE wins"
+        );
+        assert_eq!(
+            pick_workspace(Some(PathBuf::new()), Some(PathBuf::from("/")), home.clone()),
+            PathBuf::from("/Users/me"),
+            "empty env is unset"
+        );
+        assert_eq!(pick_workspace(None, None, home), PathBuf::from("/Users/me"));
+        assert_eq!(pick_workspace(None, None, None), PathBuf::from("."));
+    }
+
     use super::*;
 
     #[test]

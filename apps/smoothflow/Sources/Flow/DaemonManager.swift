@@ -148,6 +148,10 @@ final class DaemonManager: ObservableObject {
         // daemon through the TERM trap.
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", Self.childSupervisor, binary, "operator", "--addr", ep.description]
+        // A Finder/Dock launch hands the app `/` as its cwd, and the daemon's
+        // default workspace is its cwd: every new session defaulted to `/`
+        // (th-96fcb7). Start it where people work.
+        p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         var env = ProcessInfo.processInfo.environment
         env["SMOOTHFLOW_PARENT"] = Bundle.main.bundleIdentifier ?? "ai.smoo.smoothflow"
         // The supervisor records the daemon's pid here so a bounded quit can

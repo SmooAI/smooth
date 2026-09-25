@@ -203,7 +203,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 pane.showEmpty()
             }
         }
-        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.pearlId ?? self.app.store.sessions[$0]?.title } }, active: activeTabIndex)
+        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle } }, active: activeTabIndex)
         refreshHeaders()
         if let sid = t.sessions[t.focused], app.store.focusedId != sid { app.store.focusedId = sid }
     }
@@ -280,14 +280,16 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     }
 
     /// ⌘W. Terminal semantics: the focused pane goes, and the container
-    /// collapses when it empties — last pane closes the tab, last tab closes
-    /// the window. A pane holding a live session asks first, and the alert is
+    /// collapses when it empties — last pane closes the tab. The last pane of
+    /// the last tab empties instead of closing the window (th-96fcb7): this is
+    /// a single-window fleet console, and ⌘W taking the window was never the
+    /// ask. A pane holding a live session asks first, and the alert is
     /// where the two honest answers live: close the view (the session keeps
     /// running in the fleet) or end the session (it does not). See
     /// `PaneClose.decide`.
     func closeFocusedPane() {
         guard let t = activeTab else { return }
-        let scope: PaneCloseScope = t.panes.count > 1 ? .pane : (surfaceTabs.count > 1 ? .tab : .window)
+        let scope: PaneCloseScope = t.panes.count > 1 ? .pane : (surfaceTabs.count > 1 ? .tab : .last)
         let sid = t.sessions[t.focused]
         let session = sid.flatMap { app.store.sessions[$0] }
         let decision = PaneClose.decide(session: session,
@@ -355,8 +357,13 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             replaceActiveTab(t)
         case .tab:
             closeTab()
-        case .window:
-            view.window?.performClose(nil)
+        case .last:
+            // The fleet console has one window and no reason to lose it
+            // (th-96fcb7): the last pane empties instead. The session keeps
+            // running in the fleet; pick it in the sidebar to see it again.
+            guard var t = activeTab else { return }
+            t.sessions[t.focused] = nil
+            replaceActiveTab(t)
         }
     }
 
