@@ -39,7 +39,7 @@ use owo_colors::OwoColorize;
 /// gets them by adding one line rather than six.
 #[derive(Debug, Clone, Copy, Default, clap::Args)]
 pub struct Confirm {
-    /// Print the target and exit without deleting.
+    /// Print the target and exit without changing anything.
     #[arg(long)]
     pub dry_run: bool,
     /// Skip the interactive confirmation. Required in scripts/CI.

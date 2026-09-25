@@ -332,6 +332,16 @@ smoo api crm remind contact:jane@acme.com --at tomorrow --note "follow up"
 smoo api crm reminders list --mine                   # your pending, soonest first
 smoo api crm reminders list --entity deal:"Acme renewal"
 smoo api crm remind cancel <reminder-id>             # soft-cancel (also `reminders cancel`)
+# Super-admin org membership (SMOODEV-3291) — any org, no invitation. Needs the
+# super_admin role (403 "requires the super_admin role" otherwise) and the
+# internal `admin` build (`pnpm install:th`). --org-id is REQUIRED: these verbs
+# never fall back to the active org. --email resolves to ONE exact match.
+smoo admin members list   --org-id <org> [--json]
+smoo admin members add    --org-id <org> --email jane@acme.com [--role admin] [--yes|--dry-run]
+smoo admin members add    --org-id <org> --user-id <uuid> --role member
+smoo admin members remove --org-id <org> --email jane@acme.com [--yes|--dry-run]
+# add/remove print org + user + role + host, confirm on a TTY, and refuse off a
+# TTY without --yes. `add` is idempotent: an existing member → "already a member".
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 smoo admin org link-child <child-org-id>             # link under active org

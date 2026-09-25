@@ -3,9 +3,9 @@
 //! Two kinds of operations live here:
 //!
 //! 1. **Super-admin** verbs that hit `/admin/*` on api.smoo.ai (gated
-//!    server-side by `requireSuperAdmin`). `user`, `org` subtrees fall
+//!    server-side by `requireSuperAdmin`). `user`, `org`, `members` subtrees fall
 //!    in this bucket. Without the role, every call returns 403 and the
-//!    client prints "your user lacks the requireSuperAdmin role".
+//!    client prints "this command requires the super_admin role".
 //!
 //! 2. **Per-org platform-admin** verbs that hit `/organizations/{id}/…`
 //!    but represent infrequent admin work (creating schemas, deleting
@@ -26,6 +26,7 @@ use clap::Subcommand;
 
 pub mod client;
 pub mod config;
+pub mod members;
 pub mod org;
 pub mod render;
 pub mod user;
@@ -44,6 +45,14 @@ pub enum AdminCommands {
         #[command(subcommand)]
         cmd: org::OrgCommands,
     },
+    /// Org membership, super-admin only: add / list / remove a user in ANY
+    /// org, by email or user id, without an invitation (SMOODEV-3291).
+    /// Writes confirm on a TTY and need `--yes` in scripts.
+    #[command(visible_alias = "member")]
+    Members {
+        #[command(subcommand)]
+        cmd: members::MembersCommands,
+    },
     /// Platform-admin config operations: schemas + environments CRUD,
     /// bulk-set values, delete value records. Single-key reads/writes
     /// belong under `th config`; this is the infrequent admin
@@ -58,6 +67,7 @@ pub async fn dispatch(cmd: AdminCommands) -> Result<()> {
     match cmd {
         AdminCommands::User { cmd } => user::dispatch(cmd).await,
         AdminCommands::Org { cmd } => org::dispatch(cmd).await,
+        AdminCommands::Members { cmd } => members::dispatch(cmd).await,
         AdminCommands::Config { cmd } => config::dispatch(cmd).await,
     }
 }

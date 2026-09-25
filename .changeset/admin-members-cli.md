@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+`th smoo admin members add | list | remove` (SMOODEV-3291): super-admin org membership without raw SQL. `add` takes `--email` or `--user-id` (exactly one). An email resolves client-side to one exact, case-insensitive match, so a typo errors instead of adding whoever a substring search returned first. `--org-id` is required, because these verbs act across tenants and the persisted active org is the wrong default. Writes print the org, user, role and host, then ask on a terminal. Without a terminal they refuse unless given `--yes`, and `--dry-run` previews. `add` is idempotent: an existing member, a 409, or `alreadyMember: true` all report "already a member". A 403 on any `/admin/*` call now says the command requires the super_admin role. `th smoo admin config values delete` now goes through the same `--dry-run`/`--yes` gate as the other remote deletes; it was the last ungated one. PR checks now build and test the `admin` feature, which CI had never compiled.
