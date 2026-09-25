@@ -181,11 +181,14 @@ pub enum ValuesCmd {
     },
     /// Delete a value record by id. Removes the row entirely — for
     /// "clear the key for one env" use `th config set` with a null
-    /// value through the API.
+    /// value through the API. Prints the target (org + host) and confirms
+    /// before acting; refuses when not attached to a terminal.
     Delete {
         value_id: String,
         #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -369,14 +372,18 @@ async fn dispatch_values(cmd: ValuesCmd, client: &smooth_api_client::SmoothApiCl
                     .context("PUT values bulk")?,
             );
         }
-        ValuesCmd::Delete { value_id, org } => {
+        ValuesCmd::Delete { value_id, org, confirm } => {
             let o = require_active_org(client, org)?;
-            print_json(
-                &client
-                    .delete(&format!("/organizations/{o}/config/values/{value_id}"))
-                    .await
-                    .context("DELETE value")?,
-            );
+            // SMOODEV-3291: this was the one ungated remote delete left in the
+            // tree — invisible because CI never built the `admin` feature.
+            if crate::destructive::confirm_delete("config value", &value_id, &o, confirm)? {
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/values/{value_id}"))
+                        .await
+                        .context("DELETE value")?,
+                );
+            }
         }
     }
     Ok(())
