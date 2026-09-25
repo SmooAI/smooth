@@ -7,14 +7,15 @@ enum PaneCloseScope: String, Equatable, Sendable {
     case pane
     /// The last pane in a tab that is not the last tab.
     case tab
-    /// The last pane of the last tab — the window goes.
-    case window
+    /// The last pane of the last tab: it empties, and the window stays
+    /// (th-96fcb7). The session still runs in the fleet.
+    case last
 
     var noun: String {
         switch self {
         case .pane: "Pane"
         case .tab: "Tab"
-        case .window: "Window"
+        case .last: "Pane"
         }
     }
 }
@@ -71,7 +72,7 @@ enum PaneClose {
         switch scope {
         case .pane: title = "Close this pane?"
         case .tab: title = "Close this tab?"
-        case .window: title = "Close this window?"
+        case .last: title = "Close this pane?"
         }
         let message: String
         if session.kind == "shell" {

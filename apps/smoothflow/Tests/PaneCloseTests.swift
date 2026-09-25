@@ -88,13 +88,13 @@ final class PaneCloseTests: XCTestCase {
     }
 
     /// ⌘W takes the container with it when the pane was the last one, and the
-    /// prompt has to say which — "Close Pane" on the sheet that is about to
-    /// close your window would be a lie.
+    /// prompt has to say which. The very last pane empties rather than taking
+    /// the window (th-96fcb7), so it is a "pane" again.
     func testScopeChangesTheTitleAndTheButton() throws {
         let expected: [(PaneCloseScope, String, String)] = [
             (.pane, "Close this pane?", "Close Pane"),
             (.tab, "Close this tab?", "Close Tab"),
-            (.window, "Close this window?", "Close Window"),
+            (.last, "Close this pane?", "Close Pane"),
         ]
         for (scope, title, button) in expected {
             let prompt = try XCTUnwrap(PaneClose.decide(session: session("claude", .working), harnessLabel: "Claude Code", scope: scope).prompt)
@@ -151,5 +151,16 @@ final class PaneCloseKeymapTests: XCTestCase {
         """)
         XCTAssertEqual(map.chord(for: .closePane), KeyChord("w", shift: true, control: true))
         XCTAssertEqual(map.chord(for: .closeTab), FlowAction.closeTab.defaultChord)
+    }
+
+    /// th-96fcb7: a tab never reads "/" or a whole path.
+    func testTabTitleNamesTheSessionNotItsPath() {
+        XCTAssertEqual(Session(id: "a", kind: "claude", title: "fix the parser", pearlId: "th-1", state: .idle).tabTitle, "th-1", "the pearl wins")
+        XCTAssertEqual(Session(id: "b", kind: "claude", title: "fix the parser", pearlId: " ", state: .idle).tabTitle, "fix the parser", "a blank pearl is none")
+        XCTAssertEqual(Session(id: "c", kind: "shell", title: "~/dev/smooai/smooai", pearlId: nil, state: .idle).tabTitle, "smooai", "a path title → its folder")
+        XCTAssertEqual(Session(id: "d", kind: "shell", title: "/", pearlId: nil, state: .idle).tabTitle, "/")
+        XCTAssertEqual(Session.folderName("/Users/me", home: "/Users/me"), "~")
+        XCTAssertEqual(Session.folderName("/Users/me/dev/x/", home: "/Users/me"), "x")
+        XCTAssertNil(Session.folderName("  ", home: "/Users/me"))
     }
 }

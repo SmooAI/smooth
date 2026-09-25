@@ -31,9 +31,11 @@ tab 1                      tab 2
   browser tab, and it is the right model here: the sessions outlive the window
   (they are tmux sessions the engine owns), so a tab that owned one would be
   lying.
-- **⌘W closes the pane, and the container collapses when it empties** — last
-  pane closes the tab, last tab closes the window. That is what Ghostty, iTerm2
-  and Terminal.app do. ⌘⇧W still closes the whole tab, splits and all. See
+- **⌘W closes the pane, and the container collapses when it empties.** The
+  last pane closes the tab, as in Ghostty, iTerm2 and Terminal.app. The last
+  pane of the last tab **empties** rather than closing the window (th-96fcb7).
+  SmoothFlow is a single-window fleet console, so losing the window to ⌘W is
+  never what you meant. The session keeps running; pick it in the sidebar. ⌘⇧W still closes the whole tab, splits and all. See
   [Closing a pane](#closing-a-pane) for the confirmation, which is the
   interesting half.
 - **A split shows what it was split from.** ⌘D on a pane running `claude` gives
@@ -62,11 +64,11 @@ Because a pane is a view over a session the engine owns, ⌘W has **two honest
 answers** when a live session is on screen, and the alert offers both rather
 than guessing:
 
-| Button                                            |                                                                                  |
-| ------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Close Pane** / **Close Tab** / **Close Window** | the view goes; the session keeps running and stays in the sidebar                |
-| **End Session** (destructive)                     | kills the process too                                                            |
-| **Cancel**                                        | **the default button** — a stray Return over this sheet must never kill an agent |
+| Button                         |                                                                                  |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| **Close Pane** / **Close Tab** | the view goes; the session keeps running and stays in the sidebar                |
+| **End Session** (destructive)  | kills the process too                                                            |
+| **Cancel**                     | **the default button** — a stray Return over this sheet must never kill an agent |
 
 `PaneClose.decide` is a pure function of the pane's session and returns the
 prompt, or `nil` for "just close it". It asks only when there is something to

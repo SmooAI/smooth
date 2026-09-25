@@ -124,6 +124,29 @@ struct Session: Codable, Equatable, Identifiable {
     /// Sidebar label: pearl id when there is one, else the title.
     var label: String { pearlId.map { "\($0) \(title)" } ?? title }
     var projectName: String { (project as NSString).lastPathComponent.isEmpty ? project : (project as NSString).lastPathComponent }
+
+    /// What a surface tab calls this session (th-96fcb7): the pearl, else the
+    /// title, else the directory. A title that is only a path (inference
+    /// titles a session by its directory) is shortened to its last folder, so
+    /// a tab never reads "/" or a whole path.
+    var tabTitle: String {
+        if let p = pearlId?.trimmingCharacters(in: .whitespaces), !p.isEmpty { return p }
+        let t = title.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty, !Session.looksLikePath(t) { return t }
+        let dir = !t.isEmpty ? t : (worktree.isEmpty ? project : worktree)
+        return Session.folderName(dir) ?? kind
+    }
+
+    static func looksLikePath(_ s: String) -> Bool { s.hasPrefix("/") || s.hasPrefix("~") }
+
+    /// `/a/b/c` → `c`, `~` or `$HOME` → `~`, `/` → `/`; nil for "".
+    static func folderName(_ path: String, home: String = NSHomeDirectory()) -> String? {
+        let p = path.trimmingCharacters(in: .whitespaces)
+        if p.isEmpty { return nil }
+        if p == "~" || p == home || p == home + "/" { return "~" }
+        let last = (p as NSString).lastPathComponent
+        return last.isEmpty ? p : last
+    }
     var needsYou: Bool { state == .needsYou || state == .limited || attention?.reason == .held }
     /// Has (or will have) a PTY to attach to. `done`/`dead` rows keep their
     /// surface scrollback but must not be attached — the engine refuses.
