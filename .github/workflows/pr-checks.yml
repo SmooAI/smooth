@@ -190,6 +190,19 @@ jobs:
                   report-format: junit
               continue-on-error: true
 
+            # SMOODEV-3291: the `admin` cargo feature (`th smoo admin …`, the
+            # super-admin surface) is off by default so the public binary
+            # excludes it — which meant CI never compiled it, let alone ran its
+            # tests, and it rotted (an unused import, plus an ungated prod
+            # delete the delete-gate audit test would have flagged). Linux only,
+            # default nextest profile so the ci profile's junit.xml above stays
+            # this lane's report.
+            - name: Test (admin feature)
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
+              run: cargo nextest run -p smooai-smooth-cli --features admin
+              env:
+                  RUST_MIN_STACK: 8388608
+
             - name: Build
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               run: cargo build --release -p smooai-smooth-cli

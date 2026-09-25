@@ -16,7 +16,6 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use smooai_client_shared::auth::storage::CredentialsStore;
 
 /// Decode the `sub` (user id) claim out of a JWT without verifying the
 /// signature — we already trust the locally-stored session. SMOODEV-1937:
@@ -64,6 +63,17 @@ impl AdminClient {
             bearer: creds.access_token,
             http,
         })
+    }
+
+    /// Point at an arbitrary base URL with a fixed bearer — the seam the
+    /// unit tests use to drive a local fake api.smoo.ai.
+    #[cfg(test)]
+    pub fn with_base(base: impl Into<String>, bearer: impl Into<String>) -> Self {
+        Self {
+            base: base.into(),
+            bearer: bearer.into(),
+            http: reqwest::Client::new(),
+        }
     }
 
     /// The caller's user id (`sub`) from the loaded session JWT. Used where
@@ -135,13 +145,13 @@ impl AdminClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            if status.as_u16() == 401 {
-                anyhow::bail!("{method} {url} returned 401 — run `th auth login` to refresh your session");
+            return Err(AdminApiError {
+                method: method.to_string(),
+                url: url.to_string(),
+                status: status.as_u16(),
+                body: text,
             }
-            if status.as_u16() == 403 {
-                anyhow::bail!("{method} {url} returned 403 — your user lacks the requireSuperAdmin role");
-            }
-            anyhow::bail!("{method} {url} returned HTTP {status}: {text}");
+            .into());
         }
         if text.trim().is_empty() {
             return Ok(serde_json::Value::Null);
@@ -149,6 +159,50 @@ impl AdminClient {
         serde_json::from_str(&text).with_context(|| format!("parse response from {method} {url}: {text}"))
     }
 }
+
+/// A non-2xx answer from api.smoo.ai, kept typed (SMOODEV-3291) so a caller
+/// can branch on the status — `th smoo admin members add` treats 409
+/// "already a member" as success — via `err.downcast_ref::<AdminApiError>()`.
+/// `Display` is the operator-facing message, so every other caller's `?`
+/// prints exactly what it did before, with the 403 wording sharpened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminApiError {
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    /// The raw response body (typically `{"error": "..."}` / `{"message": "..."}`).
+    pub body: String,
+}
+
+impl AdminApiError {
+    /// The request hit the super-admin-gated `/admin/*` tree (as opposed to a
+    /// user-JWT `/organizations/…` route this client also fronts, where a 403
+    /// means "not an admin of THAT org", not "not a super admin").
+    fn is_admin_route(&self) -> bool {
+        url::Url::parse(&self.url).map_or_else(|_| self.url.contains("/admin/"), |u| u.path().starts_with("/admin/"))
+    }
+}
+
+impl std::fmt::Display for AdminApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { method, url, status, body } = self;
+        match status {
+            401 => write!(f, "{method} {url} returned 401 — run `smoo auth login` to refresh your session"),
+            403 if self.is_admin_route() => write!(
+                f,
+                "{method} {url} returned 403 — this command requires the super_admin role, and the signed-in user does not have it \
+                 (check `smoo auth whoami` → Admin roles)"
+            ),
+            403 => write!(
+                f,
+                "{method} {url} returned 403 — the signed-in user is not authorized for this organization: {body}"
+            ),
+            _ => write!(f, "{method} {url} returned HTTP {status}: {body}"),
+        }
+    }
+}
+
+impl std::error::Error for AdminApiError {}
 
 /// Print a one-line status hint when an operation succeeded.
 pub fn print_ok(msg: impl AsRef<str>) {
