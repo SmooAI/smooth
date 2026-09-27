@@ -704,6 +704,14 @@ impl SmoothMcp {
                 None
             }
         };
+        // SMOODEV-3356: point the SessionStart hook's state file at the new
+        // name too, exactly as `th agent claim` does. Without this an MCP rename
+        // left `th agent whoami` (and every bare `th msg`, and the mail
+        // watcher) resolving to the OLD, now-unregistered handle — a session
+        // silently watching a mailbox nobody writes to.
+        if let Some(prev) = previous.as_deref().filter(|p| *p != name) {
+            crate::mail::rewrite_session_handles(prev, name);
+        }
         Ok(match carried {
             Some(prev) => format!("You are now `{name}` (was `{prev}` — mail carried over)."),
             None => format!("You are now `{name}`. Publish presence with agent_status, and check mail_inbox at natural breakpoints."),
@@ -1533,6 +1541,12 @@ mod tests {
         let _lock = crate::mail::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("SMOOTH_MAIL_DB", tmp.path().join("mail.db"));
+        // Hermetic session-state dir: a rename rewrites these files.
+        let sessions = tmp.path().join("agent-sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::write(sessions.join("sess-bob"), "bob").expect("session file");
+        std::fs::write(sessions.join("sess-other"), "carol").expect("other session file");
+        std::env::set_var("SMOOTH_AGENT_SESSIONS_DIR", &sessions);
 
         let (server_t, client_t) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
@@ -1596,10 +1610,18 @@ mod tests {
         call("agent_identity", json!({ "agent_id": "bob", "name": "reviewer", "continue_from": "bob" })).await;
         let moved = call("mail_inbox", json!({ "agent_id": "reviewer" })).await;
         assert!(moved.contains("second") && moved.contains("please review"), "rename must carry mail: {moved}");
+        // SMOODEV-3356: and the session that was `bob` now resolves to `reviewer`.
+        assert_eq!(std::fs::read_to_string(sessions.join("sess-bob")).expect("read"), "reviewer");
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("sess-other")).expect("read"),
+            "carol",
+            "other sessions untouched"
+        );
 
         client.cancel().await.expect("client shutdown");
         server.abort();
         std::env::remove_var("SMOOTH_MAIL_DB");
+        std::env::remove_var("SMOOTH_AGENT_SESSIONS_DIR");
     }
 
     /// Identity resolution refuses to guess. Getting this wrong writes to a
