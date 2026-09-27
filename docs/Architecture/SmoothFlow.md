@@ -12,6 +12,10 @@ alive across crashes and usage limits. The engine — the `smooth-flow` crate,
 hosted inside `smooth-daemon` — is the **only state holder**. Every shell is a
 dumb view.
 
+> **Clients:** every SmoothFlow client (Mac, the Linux/Windows desktop app, iOS, Android) is built from
+> [SmoothFlow-Client-Spec.md](SmoothFlow-Client-Spec.md): layout, surfaces, keymap, terminal requirements
+> and the conformance vectors that keep them identical.
+
 ## Where the pieces live
 
 | Piece                                                    | Path                                                         |
