@@ -13,6 +13,7 @@
 //! | codex | `~/.codex/config.toml` | `[mcp_servers.smooth]` |
 //! | opencode | `~/.config/opencode/opencode.json` | `mcp.smooth = {type:"local", command:[…]}` |
 //! | cursor | `~/.cursor/mcp.json` | same shape as claude-code (`mcpServers.smooth`) |
+//! | claude-desktop | `claude_desktop_config.json` (per OS, see [`claude_desktop_config`]) | `mcpServers.smooth = {command, args}`, command absolute |
 //!
 //! Every writer is **idempotent and preserving**: an existing `smooth` entry
 //! with the right command is left alone, an entry pointing somewhere else is
@@ -187,6 +188,78 @@ pub fn install_server_into(harness: Harness, home: &Path, server: &McpServer, dr
             std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         std::fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(outcome)
+}
+
+// ── Claude Desktop (th-1efb59) ─────────────────────────────────────────────
+//
+// Not a [`Harness`]: that enum is the coding agents `th pkg` and `th harness
+// enable` render plugins, rules and skills for. Claude Desktop only takes MCP
+// servers, so it gets its own installer for `th mcp install --harness
+// claude-desktop`.
+
+/// Claude Desktop's config file under `home`, for this OS: macOS
+/// `~/Library/Application Support/Claude`, Windows `%APPDATA%\Claude`
+/// (`~/AppData/Roaming` when unset), else `~/.config/Claude`.
+#[must_use]
+pub fn claude_desktop_config(home: &Path) -> PathBuf {
+    claude_desktop_dir(home).join("claude_desktop_config.json")
+}
+
+fn claude_desktop_dir(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support").join("Claude")
+    } else if cfg!(windows) {
+        std::env::var_os("APPDATA")
+            .filter(|a| !a.is_empty())
+            .map_or_else(|| home.join("AppData").join("Roaming"), PathBuf::from)
+            .join("Claude")
+    } else {
+        home.join(".config").join("Claude")
+    }
+}
+
+/// `th mcp serve` as Claude Desktop must launch it. The app is started from
+/// Finder / the Start menu with a minimal `PATH`, so a bare `th` would not
+/// resolve: name the binary running this install.
+#[must_use]
+pub fn smooth_for_claude_desktop() -> McpServer {
+    let mut server = McpServer::smooth();
+    if let Ok(exe) = std::env::current_exe() {
+        server.command = exe.to_string_lossy().into_owned();
+    }
+    server
+}
+
+/// Register `server` in Claude Desktop, preserving everything else in the
+/// file. [`Outcome::NotInstalled`] when Claude Desktop's config directory is
+/// missing.
+///
+/// # Errors
+/// When the config exists but can't be parsed, or the write fails.
+pub fn install_claude_desktop(home: &Path, server: &McpServer, dry_run: bool) -> Result<Outcome> {
+    if !claude_desktop_dir(home).is_dir() {
+        return Ok(Outcome::NotInstalled);
+    }
+    let path = claude_desktop_config(home);
+    let mut doc = load_json(&path)?;
+    let mut entry = serde_json::json!({ "command": server.command, "args": server.args });
+    if let Some(env) = server.env_json() {
+        entry["env"] = env;
+    }
+    let root = doc.as_object_mut().ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("`mcpServers` in {} is not an object", path.display()))?;
+    let outcome = classify(servers.get(&server.name), &entry);
+    if outcome.wrote() {
+        merge_entry(servers, &server.name, entry);
+        if !dry_run {
+            std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&doc)?)).with_context(|| format!("write {}", path.display()))?;
+        }
     }
     Ok(outcome)
 }
@@ -404,6 +477,43 @@ pub fn harness_home() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// th-1efb59: Claude Desktop gets `th mcp serve` by absolute path, and
+    /// the rest of its config survives.
+    #[test]
+    fn claude_desktop_install_is_preserving_and_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = McpServer {
+            command: "/opt/th/bin/th".to_string(),
+            ..McpServer::smooth()
+        };
+        assert_eq!(
+            install_claude_desktop(tmp.path(), &server, false).unwrap(),
+            Outcome::NotInstalled,
+            "no Claude Desktop here"
+        );
+
+        let path = claude_desktop_config(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"globalShortcut":"Alt+Space","mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        assert_eq!(install_claude_desktop(tmp.path(), &server, true).unwrap(), Outcome::Added);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("smooth"), "a dry run writes nothing");
+
+        assert_eq!(install_claude_desktop(tmp.path(), &server, false).unwrap(), Outcome::Added);
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["smooth"]["command"], "/opt/th/bin/th");
+        assert_eq!(doc["mcpServers"]["smooth"]["args"], serde_json::json!(["mcp", "serve"]));
+        assert!(doc["mcpServers"]["smooth"].get("type").is_none(), "Desktop's schema has no type");
+        assert_eq!(doc["mcpServers"]["other"]["command"], "x");
+        assert_eq!(doc["globalShortcut"], "Alt+Space");
+        assert_eq!(install_claude_desktop(tmp.path(), &server, false).unwrap(), Outcome::AlreadyPresent);
+        let moved = McpServer {
+            command: "/new/th".to_string(),
+            ..McpServer::smooth()
+        };
+        assert_eq!(install_claude_desktop(tmp.path(), &moved, false).unwrap(), Outcome::Updated);
+    }
+
     use super::*;
     use tempfile::TempDir;
 
