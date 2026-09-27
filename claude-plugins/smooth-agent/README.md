@@ -17,6 +17,10 @@ Code worker sessions in tmux, coordinate them over
   it.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
+- **`smoothflow`** skill — teaches an agent to run _other_ agents through
+  SmoothFlow: start Claude Code/Codex/OpenCode in a repo or pearl worktree,
+  prompt and wait, relay approvals to the user, fan out, close out. Uses the
+  `flow_*` MCP tools or `th flow`; `th flow skill` prints it for any harness.
 - **`smooth-operator`** skill — drives the org's dashboard agent from the CLI
   (`th api smooth-operator chat|confirm|history`) for org actions (email, CRM,
   analytics, knowledge) rather than code changes. Needs a `th auth login` user
