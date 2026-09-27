@@ -38,7 +38,7 @@ Timestamps: UTC RFC3339 text, compared with Rust `Utc::now()` literals, never SQ
 
 ## Frames, engine → clients (broadcast to every flow WS)
 
-- `flow.hello` `{daemon:{version, machine_label}, sessions:[Session]}` — on connect; `Session` = the row above minus pid_start, plus `unread:bool`.
+- `flow.hello` `{daemon:{version, machine_label, home?}, sessions:[Session]}` — on connect; `Session` = the row above minus pid_start, plus `unread:bool`.
 - `flow.session` `{session: Session}` — any change (state, attention, title, branch, pearl).
 - `flow.session.removed` `{id}`
 - `flow.output` `{id, seq:u64, data_b64}` — raw PTY bytes; **only sent to clients that `flow.attach`ed** that id. Desktop feeds it straight into the ghostty surface. Phones get it only while attached, throttled to 30 fps and ≤16 KiB/frame.

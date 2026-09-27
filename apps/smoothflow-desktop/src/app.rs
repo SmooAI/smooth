@@ -97,8 +97,13 @@ impl Workspace {
                 // A reconnect must attach again.
                 self.attached = None;
             }
-            Event::Frame(Inbound::Hello { machine, sessions }) => {
+            Event::Frame(Inbound::Hello { machine, home, sessions }) => {
                 self.machine = machine;
+                // The daemon may be another machine (WSL, a remote host):
+                // titles abbreviate against its home, not this one's.
+                if let Some(home) = home {
+                    self.home = home;
+                }
                 self.order = sessions.iter().map(|s| s.id.clone()).collect();
                 self.sessions = sessions.into_iter().map(|s| (s.id.clone(), s)).collect();
                 if self.focused.as_ref().is_none_or(|f| !self.sessions.contains_key(f)) {

@@ -55,6 +55,13 @@ final class FlowStore: ObservableObject {
     var ordered: [Session] { order.compactMap { sessions[$0] } }
     var focused: Session? { focusedId.flatMap { sessions[$0] } }
 
+    /// The home tab titles abbreviate against: the daemon's (it may be another
+    /// machine's), else this Mac's (th-89eb13).
+    var home: String {
+        if case let .connected(d) = connection, let h = d.home, !h.isEmpty { return h }
+        return NSHomeDirectory()
+    }
+
     /// Sidebar groups, by project (in first-seen order), plain shells last.
     var grouped: [(project: String, sessions: [Session])] { Self.grouped(ordered) }
 
