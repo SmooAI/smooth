@@ -131,8 +131,9 @@ pub struct RunArgs {
     #[arg(long = "lock", value_name = "NAME")]
     pub locks: Vec<String>,
 
-    /// Priority: `background` (default; macOS background QoS), `nice`, or
-    /// `normal`. A job with a `--lock` is capped at `nice`.
+    /// Priority: `nice` (the default: `nice -n 10`), `background` (macOS
+    /// background QoS — opt-in; under contention it can starve a job so it
+    /// never finishes), or `normal`. A job with a `--lock` is capped at `nice`.
     #[arg(long, value_enum)]
     pub qos: Option<config::Qos>,
 

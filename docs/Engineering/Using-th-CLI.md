@@ -1642,9 +1642,15 @@ Linux's idle I/O class gets the disk only when nobody else wants it.
 On 2026-09-26, at load ~270, a `cargo test` running under `taskpolicy -b` sat
 at 0% CPU for 35+ minutes. It held the shared target's `.cargo-lock` the whole
 time, so every other Rust build on the machine queued behind it: a priority
-inversion. So `--qos background`, the default, is capped at `nice` for any job
-that holds a lock. Background QoS stays for lock-free work such as a
-typecheck.
+inversion. So a job that holds a lock is capped at `nice`, even with
+`--qos background`.
+
+**The default QoS is `nice`, and `background` is an explicit opt-in.** Under
+contention, background QoS starves even lock-free work. The same night, a
+pre-commit turbo typecheck, which holds no lock, ran 40+ minutes under
+`taskpolicy -b` at load ~180 without finishing, and it happened twice. A job
+that never finishes is worse than one that competes politely, so use
+`--qos background` only for work you're content never to see finish.
 
 **Capacity budget.** Slots are a hard ceiling. Within them, a job is admitted
 only while the machine has room for its **estimate**, so several jobs can run
@@ -1719,7 +1725,7 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
-qos = "background"   # or "nice" / "normal"; capped at nice for a job with a --lock
+qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
 poll_ms = 1000       # how often a waiter re-checks

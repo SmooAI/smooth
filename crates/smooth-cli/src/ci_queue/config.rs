@@ -182,7 +182,7 @@ impl Default for Run {
     fn default() -> Self {
         Self {
             max_wait_secs: 1800,
-            qos: Qos::Background,
+            qos: Qos::Nice,
             kill_grace_secs: 10,
             history_keep: 500,
             poll_ms: 1000,
@@ -200,8 +200,14 @@ impl Default for Run {
 /// at load ~270 sat at 0% CPU for 35+ minutes while holding the shared cargo
 /// target's `.cargo-lock`, and every other Rust build on the machine queued
 /// behind it — priority inversion. So a job with any `--lock` is capped at
-/// `Nice` (see [`Qos::effective`]); `Background` stays for lock-free work
-/// such as a typecheck.
+/// `Nice` (see [`Qos::effective`]).
+///
+/// **The default is `Nice`, and `Background` is an explicit opt-in.** Under
+/// contention, background QoS starves even lock-free work: the same night a
+/// pre-commit turbo typecheck (no lock) ran 40+ minutes under `taskpolicy -b`
+/// at load ~180 without finishing, twice. A job that never finishes is worse
+/// than one that competes politely, so background is only for work you are
+/// content never to see complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Qos {
@@ -307,6 +313,7 @@ mod tests {
 
     #[test]
     fn a_job_holding_a_shared_lock_never_runs_at_background_qos() {
+        assert_eq!(Config::default().run.qos, Qos::Nice, "background must be opt-in: it can starve a job forever");
         assert_eq!(Qos::Background.effective(true), Qos::Nice);
         assert_eq!(Qos::Background.effective(false), Qos::Background);
         assert_eq!(Qos::Nice.effective(true), Qos::Nice);
