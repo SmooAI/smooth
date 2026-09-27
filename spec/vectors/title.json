@@ -1,0 +1,151 @@
+{
+  "spec": "SmoothFlow-Client-Spec §5 tab titles",
+  "cases": [
+    {
+      "name": "the pearl wins",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "fix the parser",
+          "project": "",
+          "worktree": "/w/x",
+          "pearl_id": "th-1",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "th-1"
+      }
+    },
+    {
+      "name": "a blank pearl is none",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "fix the parser",
+          "project": "",
+          "worktree": "/w/x",
+          "pearl_id": "  ",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "fix the parser"
+      }
+    },
+    {
+      "name": "a path title becomes its folder",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "~/dev/smooai/smooai",
+          "project": "",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "smooai"
+      }
+    },
+    {
+      "name": "the root stays the root",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "/",
+          "project": "",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "/"
+      }
+    },
+    {
+      "name": "no title: the worktree's folder",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "/Users/me/dev/x/",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "x"
+      }
+    },
+    {
+      "name": "home is ~",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "/Users/me",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "~"
+      }
+    },
+    {
+      "name": "no worktree: the project's folder",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "/w/smooai",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "smooai"
+      }
+    },
+    {
+      "name": "nothing at all: the kind",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "claude"
+      }
+    }
+  ]
+}

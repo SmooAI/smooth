@@ -1,0 +1,211 @@
+{
+  "spec": "SmoothFlow-Client-Spec §5 close semantics",
+  "cases": [
+    {
+      "name": "empty pane closes silently",
+      "input": {
+        "session": null,
+        "panes": 2,
+        "tabs": 1,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "pane",
+        "prompt": null
+      }
+    },
+    {
+      "name": "working agent in a split asks",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "working",
+          "unread": false
+        },
+        "panes": 2,
+        "tabs": 1,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "pane",
+        "prompt": {
+          "title": "Close this pane?",
+          "close_title": "Close Pane",
+          "kill_title": "End Session"
+        }
+      }
+    },
+    {
+      "name": "idle agent still asks (it holds context)",
+      "input": {
+        "session": {
+          "id": "fs-2",
+          "kind": "codex",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "panes": 1,
+        "tabs": 2,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "tab",
+        "prompt": {
+          "title": "Close this tab?",
+          "close_title": "Close Tab",
+          "kill_title": "End Session"
+        }
+      }
+    },
+    {
+      "name": "idle shell at a prompt closes silently",
+      "input": {
+        "session": {
+          "id": "fs-3",
+          "kind": "shell",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "idle",
+          "unread": false
+        },
+        "panes": 1,
+        "tabs": 2,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "tab",
+        "prompt": null
+      }
+    },
+    {
+      "name": "busy shell asks",
+      "input": {
+        "session": {
+          "id": "fs-4",
+          "kind": "shell",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "working",
+          "unread": false
+        },
+        "panes": 1,
+        "tabs": 2,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "tab",
+        "prompt": {
+          "title": "Close this tab?",
+          "close_title": "Close Tab",
+          "kill_title": "End Session"
+        }
+      }
+    },
+    {
+      "name": "finished session closes silently",
+      "input": {
+        "session": {
+          "id": "fs-5",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "done",
+          "unread": false
+        },
+        "panes": 2,
+        "tabs": 1,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "pane",
+        "prompt": null
+      }
+    },
+    {
+      "name": "a second view of the session closes silently",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "working",
+          "unread": false
+        },
+        "panes": 2,
+        "tabs": 1,
+        "shown_elsewhere": true,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "pane",
+        "prompt": null
+      }
+    },
+    {
+      "name": "confirmation off never asks",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "working",
+          "unread": false
+        },
+        "panes": 2,
+        "tabs": 1,
+        "shown_elsewhere": false,
+        "confirm_enabled": false
+      },
+      "expected": {
+        "scope": "pane",
+        "prompt": null
+      }
+    },
+    {
+      "name": "last pane of the last tab empties, asking as a pane",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "",
+          "project": "",
+          "worktree": "",
+          "state": "working",
+          "unread": false
+        },
+        "panes": 1,
+        "tabs": 1,
+        "shown_elsewhere": false,
+        "confirm_enabled": true
+      },
+      "expected": {
+        "scope": "last",
+        "prompt": {
+          "title": "Close this pane?",
+          "close_title": "Close Pane",
+          "kill_title": "End Session"
+        }
+      }
+    }
+  ]
+}

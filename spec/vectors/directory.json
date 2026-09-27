@@ -1,0 +1,145 @@
+{
+  "spec": "SmoothFlow-Client-Spec §6 Directory field",
+  "cases": [
+    {
+      "name": "abbreviate",
+      "input": {
+        "fn": "abbreviate",
+        "path": "/Users/me/dev/x",
+        "home": "/Users/me"
+      },
+      "expected": "~/dev/x"
+    },
+    {
+      "name": "abbreviate",
+      "input": {
+        "fn": "abbreviate",
+        "path": "/Users/me",
+        "home": "/Users/me"
+      },
+      "expected": "~"
+    },
+    {
+      "name": "abbreviate",
+      "input": {
+        "fn": "abbreviate",
+        "path": "/Users/meta/x",
+        "home": "/Users/me"
+      },
+      "expected": "/Users/meta/x"
+    },
+    {
+      "name": "abbreviate",
+      "input": {
+        "fn": "abbreviate",
+        "path": "/tmp",
+        "home": "/Users/me"
+      },
+      "expected": "/tmp"
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": "~",
+        "home": "/Users/me"
+      },
+      "expected": "/Users/me"
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": "~/dev",
+        "home": "/Users/me"
+      },
+      "expected": "/Users/me/dev"
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": " /tmp/x ",
+        "home": "/Users/me"
+      },
+      "expected": "/tmp/x"
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": "smooth",
+        "home": "/Users/me"
+      },
+      "expected": null
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": "dev/x",
+        "home": "/Users/me"
+      },
+      "expected": null
+    },
+    {
+      "name": "expanded_path",
+      "input": {
+        "fn": "expanded_path",
+        "typed": "",
+        "home": "/Users/me"
+      },
+      "expected": null
+    },
+    {
+      "name": "moved",
+      "input": {
+        "fn": "moved",
+        "index": 0,
+        "delta": -1,
+        "count": 3
+      },
+      "expected": 0
+    },
+    {
+      "name": "moved",
+      "input": {
+        "fn": "moved",
+        "index": 2,
+        "delta": 1,
+        "count": 3
+      },
+      "expected": 2
+    },
+    {
+      "name": "moved",
+      "input": {
+        "fn": "moved",
+        "index": 1,
+        "delta": 1,
+        "count": 3
+      },
+      "expected": 2
+    },
+    {
+      "name": "moved",
+      "input": {
+        "fn": "moved",
+        "index": 0,
+        "delta": 1,
+        "count": 0
+      },
+      "expected": 0
+    },
+    {
+      "name": "moved",
+      "input": {
+        "fn": "moved",
+        "index": 5,
+        "delta": -2,
+        "count": 3
+      },
+      "expected": 2
+    }
+  ]
+}
