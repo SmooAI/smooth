@@ -148,6 +148,11 @@ pub enum FlowCommands {
     },
     /// The pearl-rail handoff block for a session.
     Handoff { id: String },
+    /// Print the SmoothFlow agent skill (SKILL.md): how an agent starts,
+    /// drives, approves and closes other agents. The smooth-agent plugin
+    /// installs it as a skill; this prints it for any other harness, e.g.
+    /// `th flow skill > ~/.claude/skills/smoothflow/SKILL.md`.
+    Skill,
     /// Pair a phone for end-to-end encrypted relay frames: shows a one-time
     /// link (and `--qr` a scannable QR) and waits for the scan. Subcommands
     /// list and revoke pairings.
@@ -206,6 +211,10 @@ pub enum FanoutCommands {
         json: bool,
     },
 }
+
+/// The SmoothFlow skill, shipped in the smooth-agent plugin and printed by
+/// `th flow skill`, so one file serves every harness.
+const SKILL: &str = include_str!("../../../claude-plugins/smooth-agent/skills/smoothflow/SKILL.md");
 
 // ── daemon discovery ──────────────────────────────────────────────────────────
 
@@ -561,6 +570,10 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
         FlowCommands::Handoff { id } => {
             let v = call(reqwest::Method::GET, &format!("/api/flow/sessions/{id}/handoff"), None).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
+        FlowCommands::Skill => {
+            print!("{SKILL}");
             Ok(())
         }
         FlowCommands::Fanout { cmd } => cmd_fanout(cmd).await,
@@ -1010,6 +1023,20 @@ async fn attach_session(id: &str) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
+
+    /// th-1efb59: the skill is a real skill (frontmatter an agent's loader
+    /// accepts) and names every flow MCP tool, so a new tool can't ship
+    /// without the agents being told about it.
+    #[test]
+    fn skill_is_loadable_and_names_every_flow_tool() {
+        assert!(super::SKILL.starts_with("---\nname: smoothflow\ndescription: "), "frontmatter first");
+        let router = crate::mcp_serve::SmoothMcp::flow_tool_router();
+        let tools = router.list_all();
+        assert!(!tools.is_empty());
+        for t in tools {
+            assert!(super::SKILL.contains(t.name.as_ref()), "SKILL.md never mentions {}", t.name);
+        }
+    }
 
     /// th-1efb59: the SmoothFlow app's daemon advertises only flow.addr.
     #[test]
