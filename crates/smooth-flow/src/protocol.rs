@@ -282,6 +282,11 @@ pub enum ServerFrame {
 pub struct DaemonInfo {
     pub version: String,
     pub machine_label: String,
+    /// The daemon's `$HOME`, so a client on another machine (a phone) can
+    /// title a session in it `~` (Client Spec §5, th-89eb13). Absent from
+    /// older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 impl ServerFrame {
@@ -736,6 +741,23 @@ mod tests {
         assert_eq!(f, ClientFrame::Kill { id: "x".into(), resume: false });
     }
 
+    /// th-89eb13: `home` rides on the hello when known, is omitted when not,
+    /// and a hello from an older daemon (no `home`) still parses.
+    #[test]
+    fn daemon_home_is_optional_on_the_wire() {
+        let with = DaemonInfo {
+            version: "1".into(),
+            machine_label: "m".into(),
+            home: Some("/Users/me".into()),
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["home"], "/Users/me");
+        let without = DaemonInfo { home: None, ..with };
+        assert!(serde_json::to_value(&without).unwrap().get("home").is_none());
+        let old: DaemonInfo = serde_json::from_str(r#"{"version":"0.44.0","machine_label":"smoo-hub"}"#).unwrap();
+        assert_eq!(old.home, None);
+    }
+
     #[test]
     fn server_frames_carry_channel_and_round_trip() {
         let frames = vec![
@@ -743,6 +765,7 @@ mod tests {
                 daemon: DaemonInfo {
                     version: "1".into(),
                     machine_label: "m".into(),
+                    home: None,
                 },
                 sessions: vec![session()],
                 harnesses: vec![HarnessInfo {

@@ -518,7 +518,7 @@ server.on('upgrade', (req, socket) => {
     socket.on('data', (d) => parseFrames(c, d));
     socket.on('close', () => clients.delete(c));
     socket.on('error', () => clients.delete(c));
-    send(c, { type: 'flow.hello', daemon: { version: 'mock-0.1', machine_label: 'mock' }, sessions: [...sessions.values()] });
+    send(c, { type: 'flow.hello', daemon: { version: 'mock-0.1', machine_label: 'mock', home: '/Users/mock' }, sessions: [...sessions.values()] });
     for (const [fid, f] of fanOuts)
         send(c, { type: 'flow.fanout', fan_out: f, candidates: (fanOutCandidates.get(fid) || []).map((id) => sessions.get(id)).filter(Boolean) });
 });

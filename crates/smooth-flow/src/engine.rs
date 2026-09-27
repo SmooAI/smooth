@@ -783,6 +783,7 @@ impl Engine {
                 info: DaemonInfo {
                     version: cfg.version,
                     machine_label: cfg.machine_label,
+                    home: Some(cfg.home.to_string_lossy().into_owned()).filter(|h| !h.is_empty()),
                 },
                 default_project: cfg.default_project,
                 home: cfg.home,
@@ -4956,6 +4957,17 @@ quiet_ms = 300
         let e = engine(tmp.path());
         let err = e.send_key("fs-nope", "Enter").unwrap_err().to_string();
         assert!(err.contains("no such session"), "{err}");
+    }
+
+    /// th-89eb13: the hello tells clients the daemon's home.
+    #[test]
+    fn hello_reports_the_daemon_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        match e.hello().unwrap() {
+            ServerFrame::Hello { daemon, .. } => assert_eq!(daemon.home.as_deref(), Some(tmp.path().join("home").to_string_lossy().as_ref())),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

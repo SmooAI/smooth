@@ -8,7 +8,8 @@ use smooth_flow_client::Session;
 /// What the engine told us.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inbound {
-    Hello { machine: String, sessions: Vec<Session> },
+    /// `home` is the daemon's `$HOME` when it says (th-89eb13).
+    Hello { machine: String, home: Option<String>, sessions: Vec<Session> },
     Session(Session),
     Removed(String),
     Output { id: String, seq: u64, bytes: Vec<u8> },
@@ -23,6 +24,7 @@ pub fn parse(text: &str) -> Option<Inbound> {
     match v.get("type")?.as_str()? {
         "flow.hello" => Some(Inbound::Hello {
             machine: v.pointer("/daemon/machine_label").and_then(Value::as_str).unwrap_or("").to_string(),
+            home: v.pointer("/daemon/home").and_then(Value::as_str).filter(|h| !h.is_empty()).map(str::to_string),
             sessions: v
                 .get("sessions")
                 .and_then(Value::as_array)
@@ -79,8 +81,12 @@ mod tests {
     #[test]
     fn reads_what_it_uses_and_ignores_the_rest() {
         let hello = r#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"marvin"},"sessions":[{"id":"fs-1","kind":"claude","state":"working","title":"t","argv":["claude"]}],"harnesses":[]}"#;
-        let Some(Inbound::Hello { machine, sessions }) = parse(hello) else { panic!("hello") };
+        let Some(Inbound::Hello { machine, home, sessions }) = parse(hello) else { panic!("hello") };
         assert_eq!(machine, "marvin");
+        assert_eq!(home, None, "an older daemon says no home");
+        let with_home = r#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"m","home":"/home/me"},"sessions":[]}"#;
+        let Some(Inbound::Hello { home, .. }) = parse(with_home) else { panic!("hello") };
+        assert_eq!(home.as_deref(), Some("/home/me"));
         assert_eq!(sessions[0].state, SessionState::Working);
         let out = r#"{"type":"flow.output","id":"fs-1","seq":7,"data_b64":"aGk="}"#;
         assert_eq!(parse(out), Some(Inbound::Output { id: "fs-1".into(), seq: 7, bytes: b"hi".to_vec() }));

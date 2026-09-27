@@ -95,7 +95,9 @@ Normative words: **must**, **should**, **may**.
 - **New tab** opens on the focused session. **New Shell Here** opens a tab
   holding a new shell in the focused session's worktree.
 - **Tab titles** come from `Session.tabTitle`: the pearl id, else the title,
-  else the worktree's folder name (`~` for home). A path-shaped title is
+  else the worktree's folder name (`~` for home). "Home" is the daemon's:
+  `flow.hello`'s `daemon.home` when present, else the client's own. A phone or
+  a client of a remote daemon has no other way to know it (th-89eb13). A path-shaped title is
   shortened to its last component, so a tab is never titled with a whole path
   or a bare `/`. The tab strip shows only when there are two or more tabs.
 - **Splits.** Right, down, left and up split the focused pane. The new pane
@@ -251,3 +253,5 @@ control.
   (th-51bf88), the `$HOME` default workspace, and the Linux/Windows keymap.
 - 2026-09-27: the shells group sits last in every client, as §4 always said.
   The first cut placed it where a shell first appeared (th-a14327).
+- 2026-09-27: `flow.hello`'s `daemon` carries `home`, and tab titles abbreviate
+  against the daemon's home (th-89eb13).
