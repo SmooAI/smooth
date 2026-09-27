@@ -1645,6 +1645,48 @@ inversion. So `--qos background`, the default, is capped at `nice` for any job
 that holds a lock. Background QoS stays for lock-free work such as a
 typecheck.
 
+**Capacity budget.** Slots are a hard ceiling. Within them, a job is admitted
+only while the machine has room for its **estimate**, so several jobs can run
+in parallel when they fit, and fewer when they don't.
+
+- **Estimate:** the p90 of the label's measured peak memory and its mean cores
+  (CPU time ÷ wall time), over its last `window` runs.
+    - With no history, the class default applies: heavy 4 GB and 4 cores, light
+      0.5 GB and 1 core.
+    - Memory is the peak of the **sum** of RSS across the job's process group,
+      sampled every `sample_ms`. `ru_maxrss` only sees the largest single
+      process, which undercounts parallel `rustc`s. Both numbers are recorded.
+    - CPU time comes from `getrusage`.
+- **Memory:** the job fits while `estimate + Σ running (estimate − current use)`
+  stays within `(available − mem_reserve_gb) × scale`. The memory side never
+  goes above `mem_scale_max`, which is 1.0 by default.
+- **CPU:** the job fits while `estimate + Σ running estimates ≤ cores ×
+cpu_factor × scale`.
+- **AIMD scale:** starts at 1.0. It grows by `aimd_step` after
+  `aimd_clean_samples` calm pressure samples in a row, and halves on any gate
+  signal, at most once every 10 s. It stays within [`aimd_min`, `aimd_max`], so
+  estimates that turn out wrong correct themselves.
+- **Never deadlock:** with nothing running, the head job is admitted whatever
+  its estimate.
+- **Bounded passing:** smaller jobs may pass an earlier waiter that doesn't
+  fit, but only `max_passes` times, 3 by default. After that the big job holds
+  a reservation. Nobody passes it, and it runs once the running set drains
+  enough.
+
+Finished jobs go to `~/.smooth/ci-queue/history.db`. It is SQLite in WAL mode,
+rolling, and keeps `history_keep` rows. Each row records:
+
+- label, class, cwd, repo, cmd hash;
+- wait and run time, exit;
+- peak group RSS, max single RSS, CPU time;
+- the estimate it was admitted on;
+- the pressure readings at admission.
+
+A history that can't be read degrades estimates to the class defaults; it never
+blocks a job. `th ci-queue status` has a Budget section, and each running job
+shows its live memory against its estimate. The `--json` output is
+`schema: 2`.
+
 **Execution.**
 
 - The job runs in its own process group at its QoS:
@@ -1681,6 +1723,23 @@ kill_grace_secs = 10
 history_keep = 500
 poll_ms = 1000       # how often a waiter re-checks
 note_every_secs = 30 # how often it prints its waiting line
+
+[budget]
+enabled = true
+cpu_factor = 1.5
+mem_reserve_gb = 6       # kept free for the UI, browsers and agent sessions
+heavy_rss_gb = 4         # estimates for a label with no history yet
+heavy_cores = 4
+light_rss_gb = 0.5
+light_cores = 1
+window = 20              # runs an estimate is drawn from
+max_passes = 3           # passes before a big waiter gets a reservation
+aimd_step = 0.1
+aimd_clean_samples = 5
+aimd_min = 0.25
+aimd_max = 2.0
+mem_scale_max = 1.0      # memory never overcommits past (available − reserve)
+sample_ms = 2000         # process-group memory sample interval
 ```
 
 **Unix only.** The queue relies on `flock(2)` semantics: the locks are
@@ -1690,8 +1749,8 @@ read a held file. On Windows, `run` therefore executes the job directly,
 unqueued, and says so on stderr. `status` also says so.
 
 `SMOOTH_CI_QUEUE_DIR` and `SMOOTH_CI_QUEUE_CONFIG` relocate the queue and its
-config, which is useful for tests. History is `~/.smooth/ci-queue/history.jsonl`,
-one line per finished job with its wait and run durations.
+config, which is useful for tests. A pre-SQLite `history.jsonl` is imported
+into `history.db` once, then renamed to `history.jsonl.imported`.
 
 ### Audit
 

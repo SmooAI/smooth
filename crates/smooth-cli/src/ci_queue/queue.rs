@@ -7,7 +7,9 @@
 //! <dir>/tickets/<n>.json    one per waiting job; the waiter holds its flock
 //! <dir>/slots/<class>-<i>.slot   one per slot; the running job holds its flock
 //! <dir>/locks/<hash>.lock   one per named shared resource (`--lock`)
-//! <dir>/history.jsonl       finished jobs, trimmed to `run.history_keep`
+//! <dir>/tickets/<n>.passes  how many times smaller jobs have passed waiter n
+//! <dir>/budget.json         the AIMD scale on the capacity budget
+//! <dir>/history.db          finished jobs (SQLite, rolling; see `history`)
 //! ```
 //!
 //! **Liveness is the lock, never the file.** A job is waiting iff someone holds
@@ -33,6 +35,12 @@
 //! is probed too, so a build started outside the queue also holds the job. A
 //! waiter blocked only on a named lock does not hold up the waiters behind it
 //! that don't need that lock.
+//!
+//! **Capacity.** Within the slot ceiling a job is admitted only while its
+//! estimate fits the machine's budget (see `budget`). An earlier waiter that
+//! does not fit may be passed by smaller jobs — at most `budget.max_passes`
+//! times. Then it holds a reservation: nobody passes it, and it is admitted as
+//! running jobs drain (with nothing running, anything is admitted).
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -43,8 +51,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::budget::{self, Aimd, Estimate, Running};
 use super::config::{self, Config};
-use super::exec::Ended;
+use super::exec::{Ended, Usage};
+use super::history::History;
+pub use super::history::HistoryEntry;
 use super::pressure::{self, Probe, Readings, SystemProbe};
 
 /// Set in every admitted job's environment. A nested `th ci-queue run` (or
@@ -67,6 +78,14 @@ impl Class {
         match self {
             Self::Heavy => "heavy",
             Self::Light => "light",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "heavy" => Some(Self::Heavy),
+            "light" => Some(Self::Light),
+            _ => None,
         }
     }
 
@@ -108,21 +127,13 @@ pub struct JobInfo {
     /// When a named lock holds it: the ticket of the job holding that lock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by_ticket: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryEntry {
-    pub label: String,
-    pub class: Class,
-    pub cwd: PathBuf,
-    pub ticket: u64,
-    pub queued_at_ms: u64,
-    pub wait_ms: u64,
-    pub run_ms: u64,
-    /// `exit`, `signal`, `timeout`, `spawn-failed`, or `wait-timeout`.
-    pub outcome: String,
-    /// The code `th ci-queue run` exited with.
-    pub exit: i32,
+    /// What admission expects it to need (from its label's history, or the
+    /// class default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est: Option<Estimate>,
+    /// While running: its process group's memory at the last sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_now_kb: Option<u64>,
 }
 
 pub struct Request {
@@ -132,6 +143,23 @@ pub struct Request {
     pub max_wait: Duration,
     /// Already resolved with [`Queue::resolve_lock`].
     pub locks: Vec<String>,
+    /// sha256 (first 16 hex) of the argv, for history.
+    pub cmd_hash: Option<String>,
+}
+
+/// sha256 of an argv, first 16 hex chars.
+pub fn cmd_hash(argv: &[std::ffi::OsString]) -> String {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    for a in argv {
+        h.update(a.as_encoded_bytes());
+        h.update([0]);
+    }
+    h.finalize().iter().take(8).fold(String::new(), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 #[derive(Debug)]
@@ -256,15 +284,63 @@ impl Queue {
         self.dir.join("locks")
     }
 
-    fn history_path(&self) -> PathBuf {
-        self.dir.join("history.jsonl")
+    fn store(&self) -> History {
+        History::new(&self.dir, self.config.run.history_keep)
     }
 
     fn ensure_dirs(&self) -> Result<()> {
         for d in [self.tickets_dir(), self.slots_dir(), self.locks_dir()] {
             fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
         }
+        // One-time move of the pre-SQLite history into history.db.
+        let old = self.dir.join("history.jsonl");
+        if old.exists() {
+            if let Err(e) = self.store().import_jsonl(&old) {
+                eprintln!("th ci-queue: could not import {} ({e:#})", old.display());
+            }
+        }
         Ok(())
+    }
+
+    /// What a job with this label and class is expected to need. History
+    /// problems degrade to the class default; they never fail admission.
+    fn estimate_for(&self, label: &str, class: Class) -> Estimate {
+        let samples = self.store().samples(label, self.config.budget.window).unwrap_or_else(|e| {
+            eprintln!("th ci-queue: history unreadable, using class defaults ({e:#})");
+            Vec::new()
+        });
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        budget::estimate(&samples, class, &self.config.budget, cores)
+    }
+
+    fn aimd_path(&self) -> PathBuf {
+        self.dir.join("budget.json")
+    }
+
+    /// Under the mutex.
+    fn load_aimd(&self) -> Aimd {
+        fs::read_to_string(self.aimd_path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// Under the mutex.
+    fn save_aimd(&self, a: &Aimd) {
+        if let Ok(bytes) = serde_json::to_vec(a) {
+            let _ = write_atomic(&self.aimd_path(), &bytes);
+        }
+    }
+
+    fn passes_path(&self, ticket: u64) -> PathBuf {
+        self.tickets_dir().join(format!("{ticket:020}.passes"))
+    }
+
+    fn passes(&self, ticket: u64) -> u32 {
+        fs::read_to_string(self.passes_path(ticket))
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0)
     }
 
     /// The queue-wide mutex. Held for milliseconds; released on drop, or by the
@@ -297,6 +373,7 @@ impl Queue {
         self.ensure_dirs()?;
         let started = Instant::now();
         let queued_at_ms = now_ms();
+        let est = self.estimate_for(&req.label, req.class);
         let mut me = JobInfo {
             class: req.class,
             ticket: 0,
@@ -311,6 +388,8 @@ impl Queue {
             waiting_on: None,
             waiting_on_since_ms: None,
             blocked_by_ticket: None,
+            est: Some(est),
+            rss_now_kb: None,
         };
         let (ticket_path, mut ticket_file) = self.take_ticket(&mut me)?;
         let poll = Duration::from_millis(self.config.run.poll_ms);
@@ -320,7 +399,7 @@ impl Queue {
 
         loop {
             let reason = match self.try_admit(&me, &ticket_path)? {
-                Attempt::Admitted { slot, file, locks } => {
+                Attempt::Admitted { slot, file, locks, readings } => {
                     drop(ticket_file);
                     let waited = started.elapsed();
                     if held {
@@ -337,6 +416,8 @@ impl Queue {
                         info: me,
                         waited,
                         queue: Some(self.clone()),
+                        cmd_hash: req.cmd_hash.clone(),
+                        pressure: readings.map(|r| *r),
                     });
                 }
                 Attempt::Wait { reason, by_ticket } => {
@@ -360,14 +441,19 @@ impl Queue {
                 drop(ticket_file);
                 self.record(&HistoryEntry {
                     label: req.label.clone(),
-                    class: req.class,
+                    class: Some(req.class),
                     cwd: req.cwd.clone(),
+                    repo: repo_root(&req.cwd),
+                    cmd_hash: req.cmd_hash.clone(),
                     ticket: me.ticket,
                     queued_at_ms,
+                    finished_at_ms: now_ms(),
                     wait_ms: millis(waited),
-                    run_ms: 0,
                     outcome: "wait-timeout".into(),
                     exit: super::EXIT_WAIT_TIMEOUT,
+                    est_rss_kb: Some(est.rss_kb),
+                    est_millicores: Some(est.millicores),
+                    ..HistoryEntry::default()
                 });
                 return Err(AdmitError::WaitTimeout { waited, reason });
             }
@@ -407,6 +493,7 @@ impl Queue {
 
     fn remove_ticket(&self, path: &Path) -> Result<()> {
         let _m = self.mutex()?;
+        let _ = fs::remove_file(path.with_extension("passes"));
         match fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e).with_context(|| format!("removing {}", path.display())),
             _ => Ok(()),
@@ -442,6 +529,7 @@ impl Queue {
             };
             match f.try_lock() {
                 Ok(()) => {
+                    let _ = fs::remove_file(path.with_extension("passes"));
                     let _ = fs::remove_file(&path);
                 }
                 Err(TryLockError::WouldBlock) => {
@@ -496,7 +584,7 @@ impl Queue {
                     let _ = f.read_to_string(&mut s);
                     let mut info: JobInfo = serde_json::from_str(&s).unwrap_or_else(|_| unknown_job(0));
                     info.slot = Some(i);
-                    out.push(SlotState::Busy(info));
+                    out.push(SlotState::Busy(Box::new(info)));
                 }
                 Err(TryLockError::Error(e)) => return Err(e).with_context(|| format!("probing {}", path.display())),
             }
@@ -504,30 +592,70 @@ impl Queue {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_lines, reason = "one admission decision, in the order it is made")]
     fn try_admit(&self, me: &JobInfo, ticket_path: &Path) -> Result<Attempt> {
         let _m = self.mutex()?;
         let class = me.class;
-        // An earlier waiter blocked only on a named lock could not use a free
-        // slot anyway, so it does not hold up the line behind it.
-        let mut ahead = 0;
-        for w in self.live_tickets()?.iter().filter(|w| w.class == class && w.ticket < me.ticket) {
-            if w.locks.is_empty() || self.acquire_locks(&w.locks)?.is_ok() {
-                ahead += 1;
-            }
-        }
+
+        // Everything running, both classes: the budget is machine-wide.
         let mut slots = self.scan_slots(class)?;
+        let other = self.scan_slots(match class {
+            Class::Heavy => Class::Light,
+            Class::Light => Class::Heavy,
+        })?;
+        let running: Vec<Running> = slots
+            .iter()
+            .chain(other.iter())
+            .filter_map(|s| match s {
+                SlotState::Busy(i) => Some(Running {
+                    est: i.est.unwrap_or_else(|| self.estimate_for(&i.label, i.class)),
+                    rss_now_kb: i.rss_now_kb,
+                }),
+                SlotState::Free { .. } => None,
+            })
+            .collect();
+        drop(other);
         let busy: Vec<&JobInfo> = slots
             .iter()
             .filter_map(|s| match s {
-                SlotState::Busy(i) => Some(i),
+                SlotState::Busy(i) => Some(&**i),
                 SlotState::Free { .. } => None,
             })
             .collect();
         let busy_note = busy_summary(class, &busy);
+        let any_busy = !busy.is_empty();
+
+        // One pressure sample per attempt while anything runs. It drives the
+        // gate, the budget's memory side, and the AIMD scale.
+        let readings = (!running.is_empty()).then(|| self.probe.read(&self.disk_paths(&me.cwd)));
+        let mut aimd = self.load_aimd();
+        let holds = readings.as_ref().map(|r| pressure::holds(r, &self.config.gate)).unwrap_or_default();
+        if readings.is_some() {
+            aimd.observe(!holds.is_empty(), now_ms(), &self.config.budget);
+            self.save_aimd(&aimd);
+        }
+        let empty = Readings::default();
+        let r = readings.as_ref().unwrap_or(&empty);
+        let fits = |e: Option<Estimate>| e.map_or(Ok(()), |e| budget::fits(e, &running, r, &self.config.budget, aimd.scale));
+
+        // FIFO, with two bounded exceptions: an earlier waiter blocked only on
+        // a named lock, or one that does not fit the budget and has been passed
+        // fewer than `max_passes` times, does not hold up the line.
+        let mut ahead = 0;
+        let mut would_pass = Vec::new();
+        for w in self.live_tickets()?.iter().filter(|w| w.class == class && w.ticket < me.ticket) {
+            if !w.locks.is_empty() && self.acquire_locks(&w.locks)?.is_err() {
+                continue;
+            }
+            if fits(w.est).is_err() && self.passes(w.ticket) < self.config.budget.max_passes {
+                would_pass.push(w.ticket);
+                continue;
+            }
+            ahead += 1;
+        }
         if ahead > 0 {
             return Ok(Attempt::wait(format!("{ahead} ahead in the {} queue / {busy_note}", class.name())));
         }
-        let any_busy = !busy.is_empty();
         let Some(pos) = slots.iter().position(|s| matches!(s, SlotState::Free { .. })) else {
             return Ok(Attempt::wait(busy_note));
         };
@@ -544,12 +672,11 @@ impl Queue {
         // else heavy is running. Then waiting cannot relieve anything we
         // control, and holding would stall every commit on the machine forever
         // on a box that is merely busy with work outside the queue.
-        if class == Class::Heavy && any_busy && !self.config.gate.disabled() {
-            let readings = self.probe.read(&self.disk_paths(&me.cwd));
-            let why = pressure::holds(&readings, &self.config.gate);
-            if !why.is_empty() {
-                return Ok(Attempt::wait(format!("{} / {busy_note}", why.join(" / "))));
-            }
+        if class == Class::Heavy && any_busy && !self.config.gate.disabled() && !holds.is_empty() {
+            return Ok(Attempt::wait(format!("{} / {busy_note}", holds.join(" / "))));
+        }
+        if let Err(why) = fits(me.est) {
+            return Ok(Attempt::wait(format!("{why} (scale {:.2}) / {busy_note}", aimd.scale)));
         }
         let SlotState::Free { index, mut file } = slots.swap_remove(pos) else {
             return Ok(Attempt::wait(busy_note));
@@ -567,11 +694,21 @@ impl Queue {
         for l in &mut locks {
             rewrite(l, &info)?;
         }
+        // Only now that we are really admitted does passing count against them.
+        for t in would_pass {
+            let _ = write_atomic(&self.passes_path(t), format!("{}\n", self.passes(t) + 1).as_bytes());
+        }
+        let _ = fs::remove_file(ticket_path.with_extension("passes"));
         match fs::remove_file(ticket_path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {}", ticket_path.display())),
             _ => {}
         }
-        Ok(Attempt::Admitted { slot: index, file, locks })
+        Ok(Attempt::Admitted {
+            slot: index,
+            file,
+            locks,
+            readings: readings.map(Box::new),
+        })
     }
 
     fn lock_path(&self, name: &str) -> PathBuf {
@@ -629,34 +766,16 @@ impl Queue {
     }
 
     fn record(&self, e: &HistoryEntry) {
-        if let Err(err) = self.try_record(e) {
+        if let Err(err) = self.store().record(e) {
             eprintln!("th ci-queue: could not write history ({err:#})");
         }
     }
 
-    fn try_record(&self, e: &HistoryEntry) -> Result<()> {
-        let _m = self.mutex()?;
-        let path = self.history_path();
-        let mut line = serde_json::to_vec(e)?;
-        line.push(b'\n');
-        OpenOptions::new().create(true).append(true).open(&path)?.write_all(&line)?;
-        // Trim once the file is well past the cap, not on every append.
-        let keep = self.config.run.history_keep.max(1);
-        if fs::metadata(&path).map_or(0, |m| m.len()) > (keep as u64) * 600 {
-            let text = fs::read_to_string(&path)?;
-            let lines: Vec<&str> = text.lines().collect();
-            let tail = lines[lines.len().saturating_sub(keep)..].join("\n") + "\n";
-            write_atomic(&path, tail.as_bytes())?;
-        }
-        Ok(())
-    }
-
     pub fn history(&self, n: usize) -> Vec<HistoryEntry> {
-        let text = fs::read_to_string(self.history_path()).unwrap_or_default();
-        let mut all: Vec<HistoryEntry> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let cut = all.len().saturating_sub(n);
-        all.drain(..cut);
-        all
+        self.store().recent(n).unwrap_or_else(|e| {
+            eprintln!("th ci-queue: could not read history ({e:#})");
+            Vec::new()
+        })
     }
 
     /// Everything `th ci-queue status` shows.
@@ -668,7 +787,7 @@ impl Queue {
             for class in [Class::Heavy, Class::Light] {
                 for s in self.scan_slots(class)? {
                     if let SlotState::Busy(i) = s {
-                        running.push(i);
+                        running.push(*i);
                     }
                 }
             }
@@ -676,8 +795,21 @@ impl Queue {
         };
         let readings = self.probe.read(&self.disk_paths(cwd));
         let holds = pressure::holds(&readings, &self.config.gate);
+        let aimd = {
+            let _m = self.mutex()?;
+            self.load_aimd()
+        };
+        let budget_running: Vec<Running> = running
+            .iter()
+            .map(|i| Running {
+                est: i.est.unwrap_or_else(|| self.estimate_for(&i.label, i.class)),
+                rss_now_kb: i.rss_now_kb,
+            })
+            .collect();
+        let budget = budget::view(&budget_running, &readings, &self.config.budget, aimd.scale);
         Ok(Snapshot {
             schema: SNAPSHOT_SCHEMA,
+            budget,
             dir: self.dir.clone(),
             config: self.config.clone(),
             now_ms: now_ms(),
@@ -700,23 +832,36 @@ impl Attempt {
 }
 
 enum Attempt {
-    Admitted { slot: usize, file: File, locks: Vec<File> },
-    Wait { reason: String, by_ticket: Option<u64> },
+    Admitted {
+        slot: usize,
+        file: File,
+        locks: Vec<File>,
+        readings: Option<Box<Readings>>,
+    },
+    Wait {
+        reason: String,
+        by_ticket: Option<u64>,
+    },
 }
 
 enum SlotState {
     Free { index: usize, file: File },
-    Busy(JobInfo),
+    Busy(Box<JobInfo>),
 }
 
 /// The shape of [`Snapshot`] as JSON. Bump on any breaking change, so a
 /// consumer (`th ci-queue top`, the daemon's web panel) can refuse a shape it
 /// does not understand instead of rendering garbage.
-pub const SNAPSHOT_SCHEMA: u32 = 1;
+///
+/// 2: history from SQLite with measured memory/CPU; `JobInfo.est` and
+/// `rss_now_kb`; the `budget` view.
+pub const SNAPSHOT_SCHEMA: u32 = 2;
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     pub schema: u32,
+    /// Where the capacity budget stands right now.
+    pub budget: budget::View,
     pub dir: PathBuf,
     pub config: Config,
     pub now_ms: u64,
@@ -738,6 +883,9 @@ pub struct Admission {
     info: JobInfo,
     waited: Duration,
     queue: Option<Queue>,
+    cmd_hash: Option<String>,
+    /// Machine pressure when admitted, for history.
+    pressure: Option<Readings>,
 }
 
 impl Admission {
@@ -759,9 +907,13 @@ impl Admission {
                 waiting_on: None,
                 waiting_on_since_ms: None,
                 blocked_by_ticket: None,
+                est: None,
+                rss_now_kb: None,
             },
             waited: Duration::ZERO,
             queue: None,
+            cmd_hash: None,
+            pressure: None,
         }
     }
 
@@ -788,19 +940,46 @@ impl Admission {
         }
     }
 
+    /// A callback that publishes the job's live memory into its slot (for
+    /// `status` and the budget), for the sampler thread. It writes through its
+    /// own dup of the slot fd — same open file, same lock, still close-on-exec —
+    /// and only under the queue mutex. Dropping it never releases the slot:
+    /// the original fd, held here, keeps the flock.
+    pub fn progress(&self) -> Option<impl FnMut(u64) + Send + 'static> {
+        let file = self.lock.as_ref()?.try_clone().ok()?;
+        let q = self.queue.clone()?;
+        let mut info = self.info.clone();
+        let mut file = file;
+        Some(move |kb: u64| {
+            info.rss_now_kb = Some(kb);
+            if let Ok(_m) = q.mutex() {
+                let _ = rewrite(&mut file, &info);
+            }
+        })
+    }
+
     /// Record the finished job in the history and release the slot.
-    pub fn finish(self, ended: Ended, ran: Duration) {
+    pub fn finish(self, ended: Ended, ran: Duration, usage: Usage) {
         if let Some(q) = &self.queue {
             q.record(&HistoryEntry {
                 label: self.info.label.clone(),
-                class: self.info.class,
+                class: Some(self.info.class),
                 cwd: self.info.cwd.clone(),
+                repo: repo_root(&self.info.cwd),
+                cmd_hash: self.cmd_hash.clone(),
                 ticket: self.info.ticket,
                 queued_at_ms: self.info.queued_at_ms,
+                finished_at_ms: now_ms(),
                 wait_ms: millis(self.waited),
                 run_ms: millis(ran),
                 outcome: ended.outcome().into(),
                 exit: ended.exit_code(),
+                peak_group_rss_kb: usage.peak_group_rss_kb,
+                max_single_rss_kb: usage.max_single_rss_kb,
+                cpu_ms: usage.cpu_ms,
+                est_rss_kb: self.info.est.map(|e| e.rss_kb),
+                est_millicores: self.info.est.map(|e| e.millicores),
+                pressure: self.pressure.clone(),
             });
         }
         drop(self.held_locks);
@@ -842,7 +1021,14 @@ fn unknown_job(ticket: u64) -> JobInfo {
         waiting_on: None,
         waiting_on_since_ms: None,
         blocked_by_ticket: None,
+        est: None,
+        rss_now_kb: None,
     }
+}
+
+/// The nearest ancestor of `cwd` holding a `.git` (dir, or file in a worktree).
+fn repo_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf)
 }
 
 /// A cargo build holding `<target>/<profile>/.cargo-lock` right now, queued or
@@ -962,6 +1148,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             max_wait: Duration::from_millis(max_wait_ms),
             locks: Vec::new(),
+            cmd_hash: None,
         }
     }
 
@@ -994,7 +1181,7 @@ mod tests {
         let a = admit(&f.q, Class::Heavy, "a");
         let b = admit_async(&f.q, Class::Heavy, "b");
         assert!(b.recv_timeout(Duration::from_millis(300)).is_err(), "b ran while a held the only slot");
-        a.finish(Ended::Exited(0), Duration::ZERO);
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
         b.recv_timeout(Duration::from_secs(5)).expect("b admitted once a finished");
     }
 
@@ -1029,12 +1216,12 @@ mod tests {
                 let a = q.admit(&req(Class::Heavy, &format!("w{i}"), 20_000)).unwrap();
                 order.lock().unwrap().push(i);
                 std::thread::sleep(Duration::from_millis(15));
-                a.finish(Ended::Exited(0), Duration::ZERO);
+                a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
             }));
             // Stagger so tickets are drawn in order 0..6.
             wait_for(|| f.q.ticket_files().unwrap().len() == i + 1);
         }
-        holder.finish(Ended::Exited(0), Duration::ZERO);
+        holder.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
         for h in handles {
             h.join().unwrap();
         }
@@ -1149,15 +1336,13 @@ mod tests {
     fn history_records_and_trims() {
         let mut f = fx(1);
         f.q.config.run.history_keep = 3;
-        for i in 0..40 {
-            admit(&f.q, Class::Light, &format!("j{i}")).finish(Ended::Exited(i % 2), Duration::from_millis(5));
+        for i in 0..10 {
+            admit(&f.q, Class::Light, &format!("j{i}")).finish(Ended::Exited(i % 2), Duration::from_millis(5), Usage::default());
         }
         let h = f.q.history(100);
-        assert!(h.len() <= 40 && h.len() >= 3);
-        assert_eq!(h.last().unwrap().label, "j39");
+        let labels: Vec<&str> = h.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["j7", "j8", "j9"]);
         assert_eq!(h.last().unwrap().exit, 1);
-        let lines = fs::read_to_string(f.q.history_path()).unwrap().lines().count();
-        assert!(lines < 40, "history was never trimmed ({lines} lines)");
     }
 
     #[test]
@@ -1198,7 +1383,7 @@ mod tests {
         assert!(reason.starts_with("lock cargo:/t held by a"), "{reason}");
         // A different resource is not excluded.
         assert!(f.q.admit(&locked(Class::Light, "c", 100, "cargo:/other")).is_ok());
-        a.finish(Ended::Exited(0), Duration::ZERO);
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
         assert!(f.q.admit(&locked(Class::Light, "b", 1_000, "cargo:/t")).is_ok());
     }
 
@@ -1254,6 +1439,163 @@ mod tests {
         assert_eq!(w.blocked_by_ticket, Some(snap.running[0].ticket));
         assert!(w.waiting_on_since_ms.is_some());
         drop(holder);
+    }
+
+    // ── capacity budget (phase 1.5) ──────────────────────────────────────
+
+    const GB: u64 = 1024 * 1024; // in KiB
+
+    /// Give `label` a history: `runs` measured exits peaking at `gb`.
+    fn seed(q: &Queue, label: &str, gb: u64, runs: usize) {
+        for _ in 0..runs {
+            q.store()
+                .record(&HistoryEntry {
+                    label: label.into(),
+                    class: Some(Class::Heavy),
+                    outcome: "exit".into(),
+                    run_ms: 1000,
+                    cpu_ms: Some(100),
+                    peak_group_rss_kb: Some(gb * GB),
+                    ..HistoryEntry::default()
+                })
+                .unwrap();
+        }
+    }
+
+    /// calm(): 26 GB available − 6 GB reserve = a 20 GB pool; 12 cores.
+    fn budget_fx() -> Fx {
+        let mut f = fx(6); // slots are not the limit here
+        f.q.config.budget.aimd_max = 1.0; // keep the pool fixed while calm
+        seed(&f.q, "big", 15, 3);
+        seed(&f.q, "small", 1, 3);
+        f
+    }
+
+    #[test]
+    fn estimates_come_from_the_labels_history() {
+        let f = budget_fx();
+        let _a = admit(&f.q, Class::Heavy, "big");
+        let _b = admit(&f.q, Class::Heavy, "unknown");
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        let est = |l: &str| snap.running.iter().find(|j| j.label == l).and_then(|j| j.est).unwrap();
+        assert_eq!((est("big").rss_kb, est("big").from_runs), (15 * GB, 3));
+        assert_eq!((est("unknown").rss_kb, est("unknown").from_runs), (4 * GB, 0), "no history: the heavy default");
+        assert_eq!(snap.schema, 2);
+        assert_eq!(snap.budget.mem_pool_kb, Some(20 * GB));
+    }
+
+    #[test]
+    fn a_job_that_does_not_fit_waits_until_the_running_set_drains() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "big");
+        let Err(AdmitError::WaitTimeout { reason, .. }) = f.q.admit(&req(Class::Heavy, "big", 150)) else {
+            panic!("a second 15 GB job was admitted into a 20 GB pool");
+        };
+        assert!(reason.starts_with("memory budget: needs 15.0 GB + 15.0 GB committed > 20.0 GB"), "{reason}");
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
+        assert!(f.q.admit(&req(Class::Heavy, "big", 1_000)).is_ok());
+    }
+
+    /// Invariant: at least one job is always admissible. Nothing running →
+    /// admitted, whatever its estimate. Mutation-checked: without the
+    /// `running.is_empty()` early return in `budget::fits`, this job (every
+    /// core on the machine, 500 GB) waits forever.
+    #[test]
+    fn an_oversized_job_is_admitted_when_nothing_runs() {
+        let f = budget_fx();
+        for _ in 0..3 {
+            f.q.store()
+                .record(&HistoryEntry {
+                    label: "enormous".into(),
+                    outcome: "exit".into(),
+                    run_ms: 1000,
+                    cpu_ms: Some(1_000_000),
+                    peak_group_rss_kb: Some(500 * GB),
+                    ..HistoryEntry::default()
+                })
+                .unwrap();
+        }
+        assert!(f.q.admit(&req(Class::Heavy, "enormous", 200)).is_ok());
+    }
+
+    /// Mutation-checked: without the `max_passes` bound, the fourth small job
+    /// also passes and the big one can starve.
+    #[test]
+    fn smaller_jobs_pass_a_big_waiter_at_most_max_passes_times() {
+        let f = budget_fx(); // max_passes = 3
+        let a = admit(&f.q, Class::Heavy, "big");
+        let h = admit_async(&f.q, Class::Heavy, "big");
+        wait_for(|| f.q.ticket_files().unwrap().len() == 1);
+        let mut small = Vec::new();
+        for i in 0..3 {
+            let s = f.q.admit(&req(Class::Heavy, "small", 500));
+            small.push(s.unwrap_or_else(|e| panic!("small job {i} did not pass the big waiter: {e:?}")));
+        }
+        let Err(AdmitError::WaitTimeout { reason, .. }) = f.q.admit(&req(Class::Heavy, "small", 300)) else {
+            panic!("a fourth small job passed a waiter that had been passed max_passes times");
+        };
+        assert!(reason.starts_with("1 ahead in the heavy queue"), "{reason}");
+        // The reservation holds until the running set drains, then the big one runs.
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
+        for s in small {
+            s.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
+        }
+        h.recv_timeout(Duration::from_secs(10))
+            .expect("the big waiter was admitted once the running set drained");
+    }
+
+    #[test]
+    fn pressure_halves_the_budget_scale_and_status_shows_it() {
+        let mut f = budget_fx();
+        f.q.config.budget.aimd_max = 2.0;
+        let _a = admit(&f.q, Class::Heavy, "small");
+        *f.probe.0.lock().unwrap() = swapping();
+        let _ = f.q.admit(&req(Class::Heavy, "small", 50)); // one sample under pressure
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert!((snap.budget.scale - 0.5).abs() < 1e-9, "scale {}", snap.budget.scale);
+    }
+
+    #[test]
+    fn a_running_job_publishes_its_live_memory() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "big");
+        let mut publish = a.progress().expect("a queued job can publish progress");
+        publish(3 * GB);
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert_eq!(snap.running[0].rss_now_kb, Some(3 * GB));
+        assert_eq!(snap.budget.mem_committed_kb, 12 * GB, "15 GB estimate − 3 GB already in use");
+        drop(publish);
+        // The progress writer is a dup of the slot fd: dropping it must not
+        // release the slot while the admission still holds it.
+        assert!(matches!(f.q.admit(&req(Class::Heavy, "big", 100)), Err(AdmitError::WaitTimeout { .. })));
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
+    }
+
+    #[test]
+    fn finish_records_what_the_job_used() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "measured");
+        a.finish(
+            Ended::Exited(0),
+            Duration::from_millis(2000),
+            Usage {
+                peak_group_rss_kb: Some(5 * GB),
+                max_single_rss_kb: Some(GB),
+                cpu_ms: Some(3000),
+            },
+        );
+        let h = f.q.history(1);
+        assert_eq!(
+            (h[0].peak_group_rss_kb, h[0].max_single_rss_kb, h[0].cpu_ms),
+            (Some(5 * GB), Some(GB), Some(3000))
+        );
+        assert_eq!(h[0].est_rss_kb, Some(4 * GB), "the estimate it was admitted on");
+        // …and the next admission of that label estimates from it.
+        let b = admit(&f.q, Class::Heavy, "measured");
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        let est = snap.running[0].est.unwrap();
+        assert_eq!((est.rss_kb, est.millicores, est.from_runs), (5 * GB, 1500, 1));
+        b.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
     }
 
     #[test]

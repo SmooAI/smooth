@@ -11,13 +11,13 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::config::Gate;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Readings {
     pub mem_total_bytes: Option<u64>,
     pub mem_available_bytes: Option<u64>,
@@ -30,7 +30,7 @@ pub struct Readings {
     pub disks: Vec<Disk>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Disk {
     pub path: PathBuf,
     pub free_bytes: Option<u64>,
