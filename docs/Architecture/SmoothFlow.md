@@ -21,6 +21,7 @@ dumb view.
 | Piece                                                    | Path                                                         |
 | -------------------------------------------------------- | ------------------------------------------------------------ |
 | Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                        |
+| Session host seam (`SessionHost`, `TmuxHost`)            | `crates/smooth-flow/src/host.rs` — see [host](#session-host) |
 | Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                     |
 | Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                          |
 | End-to-end encryption + phone pairing (th-d98fde)        | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs` |
@@ -97,6 +98,44 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   the signal: a plain last-client detach could end the user's shell. The writer
   is held by the reader thread and released only after `child.wait()`, when
   there is no client left to forward the bytes.
+
+### The session host seam (th-64d4ab) {#session-host}
+
+The engine never calls tmux itself. It holds an `Arc<dyn SessionHost>`
+(`crates/smooth-flow/src/host.rs`) and asks it for everything a session
+needs:
+
+- launch, with the exit-code wrapper;
+- liveness, pid and pane meta;
+- exit status, and the wrapper's recorded code;
+- size, capture, paste, send text and send key;
+- kill the session or the whole server;
+- the attach stream;
+- process liveness and tree kill.
+
+A session is addressed by a `SessionRef { socket, name }`: the namespace the row was
+launched in plus the flow session id. The host's `default_socket()` is also
+the ownership identity supervision filters on (th-4f7866).
+
+`TmuxHost` is the default, set by `EngineConfig::new`. Every method delegates
+unchanged to `tmux.rs`, `pty.rs` and `proc.rs`, so everything above in this
+section still describes what runs. Two things stay in the engine as plain
+helpers rather than host calls, because they are data rather than host
+operations: `PaneExit::describe`'s `tmux::signal_name` (this platform's
+signal table) and the `PaneDeath` / `PaneMeta` types, which now live in
+`host.rs`.
+
+The seam has two uses:
+
+- **A native host.** A future `PtyHost` (portable-pty + ConPTY +
+  libghostty-vt) can run sessions on Windows without tmux, and supervision
+  won't change. It isn't built yet.
+- **Engine tests without tmux.** `host::fake::FakeHost` (test-only) keeps
+  sessions in memory and records every call. With it, tests cover the
+  supervisor against states a real pane only produces by timing: a pane
+  dead but unreaped, a wrapper record winning over tmux's silence, and a
+  vanished agent resumed with its manifest's resume argv. These ran as
+  live-tmux tests, Linux-only for the unreaped case, or not at all.
 
 ## Transport
 
