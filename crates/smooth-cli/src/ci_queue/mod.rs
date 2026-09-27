@@ -23,10 +23,13 @@
 //! | 75   | no slot within `--max-wait` (EX_TEMPFAIL) — nothing ran   |
 //! | 71   | the queue itself is unusable (EX_OSERR) — nothing ran     |
 
+pub mod budget;
 pub mod config;
 pub mod exec;
+pub mod history;
 pub mod pressure;
 pub mod queue;
+pub mod sampler;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -147,6 +150,7 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         cwd: cwd.clone(),
         max_wait,
         locks,
+        cmd_hash: Some(queue::cmd_hash(&a.cmd)),
     };
     let mut admission = match q.admit(&req) {
         Ok(adm) => adm,
@@ -167,7 +171,8 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
     };
     let timeout = a.timeout.filter(|t| *t > 0).map(Duration::from_secs);
     let began = Instant::now();
-    let ended = exec::run(
+    let progress = admission.progress();
+    let (ended, usage) = exec::run_measured(
         &exec::Spec {
             argv: &a.cmd,
             cwd: &cwd,
@@ -176,8 +181,10 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
             qos,
             kill_grace: Duration::from_secs(q.config.run.kill_grace_secs),
             null_stdin: false,
+            sample_every: Some(Duration::from_millis(q.config.budget.sample_ms)),
         },
         |pid| admission.set_child(pid),
+        progress,
     );
     if ended == exec::Ended::TimedOut {
         eprintln!(
@@ -185,7 +192,7 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
             timeout.map_or(0, |t| t.as_secs())
         );
     }
-    admission.finish(ended, began.elapsed());
+    admission.finish(ended, began.elapsed(), usage);
     ended.exit_code()
 }
 
@@ -238,6 +245,11 @@ fn status(q: &Queue, a: &StatusArgs) -> Result<i32> {
     Ok(0)
 }
 
+#[allow(clippy::cast_precision_loss, reason = "display")]
+fn gb(kb: u64) -> String {
+    format!("{:.1} GB", kb as f64 / 1_048_576.0)
+}
+
 fn secs_since(now_ms: u64, then_ms: u64) -> u64 {
     now_ms.saturating_sub(then_ms) / 1000
 }
@@ -282,11 +294,13 @@ fn render(s: &queue::Snapshot) -> String {
     for j in &s.running {
         let _ = writeln!(
             o,
-            "  ● {:<8} {:<32} pid {:<7} {:>7}  {}",
+            "  ● {:<8} {:<32} pid {:<7} {:>7}  mem {:>8} / est {:>8}  {}",
             format!("{}-{}", j.class.name(), j.slot.unwrap_or(0)),
             with_locks(j),
             j.child_pid.unwrap_or(j.pid),
             dur(j.admitted_at_ms.map_or(0, |t| secs_since(s.now_ms, t))),
+            j.rss_now_kb.map_or_else(|| "-".to_string(), gb),
+            j.est.map_or_else(|| "-".to_string(), |e| gb(e.rss_kb)),
             j.cwd.display()
         );
     }
@@ -368,6 +382,25 @@ fn render(s: &queue::Snapshot) -> String {
         }
     );
 
+    let bv = &s.budget;
+    let _ = writeln!(o, "\nBudget (scale {:.2}{})", bv.scale, if s.config.budget.enabled { "" } else { ", DISABLED" });
+    let _ = writeln!(
+        o,
+        "  memory  {} committed of {} pool (available − {} GB reserve)",
+        gb(bv.mem_committed_kb),
+        bv.mem_pool_kb.map_or_else(|| "unknown".to_string(), gb),
+        s.config.budget.mem_reserve_gb
+    );
+    #[allow(clippy::cast_precision_loss, reason = "display")]
+    let cores = |m: u64| m as f64 / 1000.0;
+    let _ = writeln!(
+        o,
+        "  cpu     {:.1} of {:.1} cores (cores × {} × scale)",
+        cores(bv.cpu_used_millicores),
+        cores(bv.cpu_budget_millicores),
+        s.config.budget.cpu_factor
+    );
+
     let _ = writeln!(o, "\nRecent");
     if s.history.is_empty() {
         let _ = writeln!(o, "  (no finished jobs yet)");
@@ -378,11 +411,13 @@ fn render(s: &queue::Snapshot) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             o,
-            "  {when}  {:<5} {:<32} waited {:>7}  ran {:>7}  {} {}",
-            h.class.name(),
+            "  {when}  {:<5} {:<32} waited {:>7}  ran {:>7}  peak {:>8}  cpu {:>7}  {} {}",
+            h.class.map_or("?", Class::name),
             h.label,
             dur(h.wait_ms / 1000),
             dur(h.run_ms / 1000),
+            h.peak_group_rss_kb.map_or_else(|| "-".to_string(), gb),
+            h.cpu_ms.map_or_else(|| "-".to_string(), |ms| dur(ms / 1000)),
             h.outcome,
             h.exit
         );
