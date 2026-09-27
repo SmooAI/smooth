@@ -56,7 +56,10 @@ final class FlowStore: ObservableObject {
     var focused: Session? { focusedId.flatMap { sessions[$0] } }
 
     /// Sidebar groups, by project (in first-seen order), plain shells last.
-    var grouped: [(project: String, sessions: [Session])] {
+    var grouped: [(project: String, sessions: [Session])] { Self.grouped(ordered) }
+
+    /// Client Spec §4, pure (the conformance vectors call it).
+    static func grouped(_ ordered: [Session]) -> [(project: String, sessions: [Session])] {
         var groups: [(String, [Session])] = []
         for s in ordered {
             let key = s.kind == "shell" ? "shells" : s.projectName
@@ -65,8 +68,9 @@ final class FlowStore: ObservableObject {
         return groups.map { (project: $0.0, sessions: $0.1) }
     }
 
-    var counts: (working: Int, needsYou: Int, done: Int, idle: Int) {
-        let all = ordered
+    var counts: (working: Int, needsYou: Int, done: Int, idle: Int) { Self.counts(ordered) }
+
+    static func counts(_ all: [Session]) -> (working: Int, needsYou: Int, done: Int, idle: Int) {
         return (all.filter { $0.state == .working || $0.state == .starting }.count,
                 all.filter(\.needsYou).count,
                 all.filter { $0.state == .done }.count,
