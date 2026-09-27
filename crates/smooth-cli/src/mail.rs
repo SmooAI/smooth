@@ -343,7 +343,7 @@ fn default_harness() -> String {
 /// Point every session-state file that still names `old` at `new`, so the
 /// SessionStart-hook handle and the store agree after a rename/claim. Returns
 /// how many files were rewritten; a missing directory is simply zero.
-fn rewrite_session_handles(old: &str, new: &str) -> usize {
+pub(crate) fn rewrite_session_handles(old: &str, new: &str) -> usize {
     if old == new {
         return 0;
     }
