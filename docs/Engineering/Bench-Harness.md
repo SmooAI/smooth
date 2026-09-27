@@ -254,12 +254,12 @@ scripts/the-line/render-model-scores.sh board.json
 That writes four artefacts, all from one pre-rounded source so the badge,
 the table and the JSON can never disagree:
 
-| file                          | for                                                                  |
-| ----------------------------- | -------------------------------------------------------------------- |
-| `docs/model-leaderboard.json` | machine-readable, the scoreboard verbatim                            |
-| `docs/model-scores.json`      | the model-picker catalog: offered models only, plus `unbenched`      |
-| `docs/model-badge.json`       | the README shields endpoint (best model + %)                         |
-| `docs/Model-Leaderboard.md`   | the human table                                                      |
+| file                          | for                                                             |
+| ----------------------------- | --------------------------------------------------------------- |
+| `docs/model-leaderboard.json` | machine-readable, the scoreboard verbatim                       |
+| `docs/model-scores.json`      | the model-picker catalog: offered models only, plus `unbenched` |
+| `docs/model-badge.json`       | the README shields endpoint (best model + %)                    |
+| `docs/Model-Leaderboard.md`   | the human table                                                 |
 
 `docs/model-scores.json` is what every model picker reads — the web SPA
 bundles it, the daemon serves it at `/api/model-catalog`, and the Big Smooth

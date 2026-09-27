@@ -19,12 +19,5 @@
             "safety_violations": 5
         }
     ],
-    "unbenched": [
-        "gpt-6-luna",
-        "gpt-6-luna-fast",
-        "gpt-6-luna-high",
-        "gpt-6-sol",
-        "groq-gpt-oss-120b",
-        "groq-qwen3.8-27b"
-    ]
+    "unbenched": ["gpt-6-luna", "gpt-6-luna-fast", "gpt-6-luna-high", "gpt-6-sol", "groq-gpt-oss-120b", "groq-qwen3.8-27b"]
 }
