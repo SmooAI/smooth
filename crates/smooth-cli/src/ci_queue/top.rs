@@ -1173,17 +1173,10 @@ pub mod demo {
                 ticket: t,
                 label: label.into(),
                 pid: u32::try_from(40_000 + t).unwrap_or(0),
-                child_pid: None,
                 cwd: PathBuf::from("/Users/dev").join(wt),
                 queued_at_ms: self.now,
-                admitted_at_ms: None,
-                slot: None,
                 locks: if cargo { vec![CARGO.into()] } else { Vec::new() },
-                waiting_on: None,
-                waiting_on_since_ms: None,
-                blocked_by_ticket: None,
-                est: None,
-                rss_now_kb: None,
+                ..JobInfo::default()
             });
         }
 
@@ -1356,17 +1349,8 @@ mod tests {
             ticket,
             label: format!("job {ticket}"),
             pid: 1,
-            child_pid: None,
             cwd: "/w/repo".into(),
-            queued_at_ms: 0,
-            admitted_at_ms: None,
-            slot: None,
-            locks: Vec::new(),
-            waiting_on: None,
-            waiting_on_since_ms: None,
-            blocked_by_ticket: None,
-            est: None,
-            rss_now_kb: None,
+            ..JobInfo::default()
         }
     }
 
