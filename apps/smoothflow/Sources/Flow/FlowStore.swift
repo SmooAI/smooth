@@ -58,13 +58,17 @@ final class FlowStore: ObservableObject {
     /// Sidebar groups, by project (in first-seen order), plain shells last.
     var grouped: [(project: String, sessions: [Session])] { Self.grouped(ordered) }
 
-    /// Client Spec §4, pure (the conformance vectors call it).
+    /// Client Spec §4, pure (the conformance vectors call it). Shells go last,
+    /// so one never splits the project groups (th-a14327).
     static func grouped(_ ordered: [Session]) -> [(project: String, sessions: [Session])] {
         var groups: [(String, [Session])] = []
+        var shells: [Session] = []
         for s in ordered {
-            let key = s.kind == "shell" ? "shells" : s.projectName
+            if s.kind == "shell" { shells.append(s); continue }
+            let key = s.projectName
             if let i = groups.firstIndex(where: { $0.0 == key }) { groups[i].1.append(s) } else { groups.append((key, [s])) }
         }
+        if !shells.isEmpty { groups.append(("shells", shells)) }
         return groups.map { (project: $0.0, sessions: $0.1) }
     }
 
