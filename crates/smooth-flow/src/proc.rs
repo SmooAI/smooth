@@ -36,6 +36,7 @@ pub fn parse_stat_lstart(s: &str) -> Option<i64> {
 /// A zombie counts as gone in every way that matters here: a kill that left
 /// one succeeded, and it owns no harness session (th-b00115 found the
 /// conformance suite waiting on `<defunct>` fakes tmux had yet to reap).
+#[cfg(unix)]
 #[must_use]
 pub fn start_time(pid: u32) -> Option<i64> {
     let out = Command::new("ps").args(["-o", "stat=,lstart=", "-p", &pid.to_string()]).output().ok()?;
@@ -59,6 +60,7 @@ pub fn is_alive(pid: u32, recorded_start: Option<i64>) -> bool {
 
 /// SIGTERM the process group of `pid`, wait up to `grace`, then SIGKILL
 /// whatever is left. Best effort — never errors.
+#[cfg(unix)]
 pub fn kill_tree(pid: u32, grace: Duration) {
     let group = format!("-{pid}");
     let _ = Command::new("kill")
@@ -89,6 +91,56 @@ pub fn kill_tree(pid: u32, grace: Duration) {
         .stderr(Stdio::null())
         .status();
 }
+
+/// The start time (epoch seconds) of `pid`, or `None` when it is gone.
+///
+/// Windows has no `ps` (th-64d4ab): shelling out to it failed, so every
+/// agent read as dead and supervision resumed the whole fleet. `sysinfo`
+/// reads the process table directly; its start time is epoch seconds, the
+/// same unit the Unix path records.
+#[cfg(windows)]
+#[must_use]
+pub fn start_time(pid: u32) -> Option<i64> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing());
+    sys.process(pid).and_then(|p| i64::try_from(p.start_time()).ok())
+}
+
+/// End `pid` and its descendants: `taskkill /T` asks, then after `grace`
+/// `taskkill /T /F` forces whatever is left. Best effort — never errors.
+#[cfg(windows)]
+pub fn kill_tree(pid: u32, grace: Duration) {
+    let taskkill = |force: bool| {
+        let mut c = Command::new("taskkill");
+        c.args(["/T", "/PID", &pid.to_string()]);
+        if force {
+            c.arg("/F");
+        }
+        let _ = c.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    };
+    taskkill(false);
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        if start_time(pid).is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    taskkill(true);
+}
+
+/// Neither Unix nor Windows: nothing to ask, so nothing is alive.
+#[cfg(not(any(unix, windows)))]
+#[must_use]
+pub fn start_time(_pid: u32) -> Option<i64> {
+    None
+}
+
+/// See [`start_time`]'s fallback.
+#[cfg(not(any(unix, windows)))]
+pub fn kill_tree(_pid: u32, _grace: Duration) {}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
@@ -152,5 +204,16 @@ mod tests {
         let mut child = child;
         let _ = child.wait();
         assert!(start_time(pid).is_none() || !is_alive(pid, None));
+    }
+
+    /// th-64d4ab: on Windows the old `ps` path read every process as dead.
+    #[test]
+    fn this_process_is_alive_and_a_bogus_pid_is_not() {
+        let me = std::process::id();
+        let started = start_time(me).expect("our own start time");
+        assert!(is_alive(me, Some(started)));
+        assert!(is_alive(me, None));
+        assert!(!is_alive(me, Some(started - 3600)), "a recycled pid (different start) is not the same process");
+        assert!(start_time(u32::MAX - 7).is_none());
     }
 }
