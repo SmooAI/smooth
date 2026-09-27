@@ -1,5 +1,39 @@
 # @smooai/smooth
 
+## 0.58.0
+
+### Minor Changes
+
+- e6fe846: `th ci-queue` now admits jobs by capacity, not just by slot count (SMOODEV-3355). Within the per-class slot ceiling, a job is admitted only while its estimate fits the machine. The estimate is the p90 of its label's measured peak process-group memory and its mean cores, or the class default until there is history. The memory budget is available memory minus a reserve for the UI and sessions. The CPU budget is cores × `cpu_factor`. An AIMD scale adjusts both: it grows while pressure stays calm and halves on a spike. With nothing running, the head job is always admitted. Smaller jobs may pass a big waiter at most `max_passes` times, and then it holds a reservation. History moves to SQLite at `~/.smooth/ci-queue/history.db`, which records peak group RSS, max single RSS, CPU time, the estimate, and the pressure at admission. `status` shows a Budget section and each running job's live memory. The `--json` schema is now 2.
+- 7e2e002: `th ci-queue shim install | uninstall | status` writes PATH shims for `cargo`, `xcodebuild` and `gradle` (SMOODEV-3355). They go into `~/.local/bin` by default, ahead of the real tools, so heavy runs from any caller go through the machine-wide queue, agents included. A shim runs the tool directly in four cases: inside an already-queued job (the recursion guard, so cargo calling cargo never deadlocks on its own parent), with `CI_QUEUE=off`, when `th` is missing, and for light commands (`cargo --version`, `metadata`, `fmt`, any `--help`, …). Install is idempotent and never overwrites a file it did not write unless you pass `--force`. Uninstall restores exactly the prior state. No shell rc file is edited. `th ci-queue run -- cargo <light command>` no longer takes the cargo lock, so `cargo --version` stops waiting behind someone else's build. The default `run.qos` is now `nice` rather than `background`. Darwin background QoS starved even lock-free typechecks under load until they never finished, so `--qos background` is now an explicit opt-in.
+- 0edf07e: The machine-wide check queue can now be watched live (SMOODEV-3371).
+
+  `th ci-queue web --open` always gets you the page. If Big Smooth is running and has the Queue tab, it opens that. Otherwise, or with `--serve`, `th` serves the page itself and streams the queue to it over Server-Sent Events, from one sampler that only reads the queue while someone is watching. The particle layer is capped (360 particles, 30 fps, pauses while hidden), falls back to Canvas 2D without a real GPU, and is off under reduced motion. What the page shows:
+
+  - Jobs flow from the FIFO line through a gate into the heavy and light slot lanes, as a three.js stream of work. While the pressure gate holds heavy jobs the stream piles up at the gate, and a locked lane runs gold.
+  - Every waiter shows what the queue says holds it.
+  - Running jobs show elapsed time against their usual run.
+  - The page glows teal → gold → coral with the machine's pressure.
+  - Panels show pressure gauges (every threshold on one gate line, plus ten-minute sparklines), the schema-2 admission budget (memory committed against the pool, CPU against its budget, each job's memory now against its estimate, and the AIMD scale's sawtooth), lock holders, per-check cost profiles (peak memory across the process group against the largest single process), and recent jobs.
+
+  `--demo` (or `?demo`) replays the 2026-09-26 night (35 agents, load climbing toward 1,000, memory exhausted, the gate holding, then the drain), so the page can be shown on an idle machine.
+
+  Big Smooth gets a Queue tab with the same view, fed by a new `GET /api/ci-queue/status`, and the menu bar gets a Check Queue item.
+
+  `th ci-queue top` draws the same picture in a terminal: it works over ssh, falls back from truecolor to 256 colours or no colour, and drops sections as the window shrinks.
+
+## 0.57.0
+
+### Minor Changes
+
+- 00376f4: A `smoothflow` skill (th-1efb59) teaches an agent to run other agents through SmoothFlow. It covers starting one in a repo or pearl worktree, prompting it and waiting for the turn, relaying approvals to the user rather than answering them itself, fanning out, and closing out. It uses the `flow_*` MCP tools or `th flow`. The smooth-agent plugin installs it, and `th flow skill` prints it for any other harness. A test fails if a flow MCP tool ships without the skill naming it.
+
+### Patch Changes
+
+- a701ea5: SmoothFlow for Mac replays the Client Spec conformance vectors (th-3e6020), and it fixes directional focus. In a layout with a tall pane beside a stack, moving focus down from the top of the stack jumped sideways to the tall pane. Now only a pane beyond the focused pane's edge counts, and an exact tie always goes to the same pane instead of whichever one the dictionary happened to list first.
+- 1edf6aa: New `smooai-smooth-flow-client` crate (th-3e6020): the SmoothFlow client rules written once, with conformance vectors. It covers the pane tree, close decisions, tab titles, center-tab gating, the Directory field helpers, and fleet grouping. The Linux/Windows desktop app uses it directly, and the Mac, iOS and Android apps replay its JSON vectors (`spec/vectors/*.json`) so none of them can drift from the Client Spec. Writing it down fixed a focus bug: moving focus down from the top of a stacked split jumped sideways to a tall neighbouring pane, because a pane only had to have its centre in the right direction. Now only a pane beyond the focused pane's edge counts, and an exact tie goes to the lower pane id.
+- a701ea5: The SmoothFlow fleet puts the shells group last, as Client Spec §4 says (th-a14327). It used to appear wherever a shell first did, splitting the project groups. The rule was fixed once in `smooth-flow-client`, the vectors re-blessed, and the Mac app matches; the phones follow in smooai.
+
 ## 0.56.0
 
 ### Minor Changes

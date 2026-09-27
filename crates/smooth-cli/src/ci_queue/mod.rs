@@ -23,10 +23,16 @@
 //! | 75   | no slot within `--max-wait` (EX_TEMPFAIL) — nothing ran   |
 //! | 71   | the queue itself is unusable (EX_OSERR) — nothing ran     |
 
+pub mod budget;
 pub mod config;
 pub mod exec;
+pub mod history;
 pub mod pressure;
 pub mod queue;
+pub mod sampler;
+pub mod shim;
+pub mod top;
+pub mod web;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -58,6 +64,61 @@ pub enum CiQueueCmd {
     Run(RunArgs),
     /// Running jobs, the queue, current pressure vs thresholds, and recent history.
     Status(StatusArgs),
+    /// PATH shims that send heavy cargo / xcodebuild / gradle runs through the
+    /// queue for every caller, agents included.
+    ///
+    /// A shim in a directory ahead of the real tool on PATH (`~/.local/bin`)
+    /// runs `th ci-queue run --class heavy [--lock cargo] -- <real tool> …`.
+    /// It runs the tool directly inside a queued job (`SMOOTH_CI_QUEUE_SLOT`,
+    /// the recursion guard), with `CI_QUEUE=off`, when `th` is missing, and for
+    /// light commands (`cargo --version`, `cargo metadata`, `cargo fmt`, any
+    /// `--help`, …). No shell rc file is edited.
+    Shim {
+        #[command(subcommand)]
+        cmd: ShimCmd,
+    },
+    /// Watch the queue live in the terminal.
+    ///
+    /// Slot lanes with each job's elapsed time against its usual run, the line
+    /// and why each waiter waits, lock holders, pressure gauges against their
+    /// thresholds with ten minutes of history, and recent jobs. Keys: q quit,
+    /// ↑↓ select, enter details, p pause.
+    Top(top::TopArgs),
+    /// Serve the queue as a live web page and stream it to the browser.
+    ///
+    /// Jobs flow from the line through the gate into their slot lanes; locks
+    /// glow while held; every waiter says why it waits; pressure is the page's
+    /// colour, with gauges, sparklines and history. Served by this `th` (no
+    /// daemon needed) on loopback. `--open` opens it; `--demo` replays a busy
+    /// night for showing it off on an idle machine.
+    Web(web::WebArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ShimCmd {
+    /// Write shims (idempotent). Never overwrites a file it did not write
+    /// unless --force, which sets it aside for uninstall to restore.
+    Install(ShimInstallArgs),
+    /// Remove exactly the shims install recorded, restoring anything set aside.
+    Uninstall,
+    /// What is shimmed, the real tool each resolves to, and whether callers get it.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ShimInstallArgs {
+    /// Directory for the shims. Must come before the real tools on PATH.
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+    /// Tools to shim (default: cargo, xcodebuild, gradle). Also: gradlew, turbo, tsgo, tsc.
+    #[arg(long, value_delimiter = ',', value_name = "TOOL,…")]
+    pub tools: Vec<String>,
+    /// Set aside (and later restore) a same-named file that is not a th shim.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -87,8 +148,9 @@ pub struct RunArgs {
     #[arg(long = "lock", value_name = "NAME")]
     pub locks: Vec<String>,
 
-    /// Priority: `background` (default; macOS background QoS), `nice`, or
-    /// `normal`. A job with a `--lock` is capped at `nice`.
+    /// Priority: `nice` (the default: `nice -n 10`), `background` (macOS
+    /// background QoS — opt-in; under contention it can starve a job so it
+    /// never finishes), or `normal`. A job with a `--lock` is capped at `nice`.
     #[arg(long, value_enum)]
     pub qos: Option<config::Qos>,
 
@@ -117,6 +179,9 @@ pub fn cmd(cmd: Option<CiQueueCmd>) -> Result<()> {
     let code = match cmd {
         Some(CiQueueCmd::Run(a)) => run(&q, &a),
         Some(CiQueueCmd::Status(a)) => status(&q, &a)?,
+        Some(CiQueueCmd::Shim { cmd }) => shim_cmd(&q, &cmd)?,
+        Some(CiQueueCmd::Top(a)) => top::run(&q, &a)?,
+        Some(CiQueueCmd::Web(a)) => web::run(q, &a)?,
         None => status(&q, &StatusArgs::default())?,
     };
     if code != 0 {
@@ -147,6 +212,7 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         cwd: cwd.clone(),
         max_wait,
         locks,
+        cmd_hash: Some(queue::cmd_hash(&a.cmd)),
     };
     let mut admission = match q.admit(&req) {
         Ok(adm) => adm,
@@ -167,7 +233,8 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
     };
     let timeout = a.timeout.filter(|t| *t > 0).map(Duration::from_secs);
     let began = Instant::now();
-    let ended = exec::run(
+    let progress = admission.progress();
+    let (ended, usage) = exec::run_measured(
         &exec::Spec {
             argv: &a.cmd,
             cwd: &cwd,
@@ -176,8 +243,10 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
             qos,
             kill_grace: Duration::from_secs(q.config.run.kill_grace_secs),
             null_stdin: false,
+            sample_every: Some(Duration::from_millis(q.config.budget.sample_ms)),
         },
         |pid| admission.set_child(pid),
+        progress,
     );
     if ended == exec::Ended::TimedOut {
         eprintln!(
@@ -185,14 +254,18 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
             timeout.map_or(0, |t| t.as_secs())
         );
     }
-    admission.finish(ended, began.elapsed());
+    admission.finish(ended, began.elapsed(), usage);
     ended.exit_code()
 }
 
 /// The resolved `--lock`s, plus `cargo` when the command is cargo itself.
 fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<String> {
     let mut wanted: Vec<&str> = named.iter().map(String::as_str).collect();
-    let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo");
+    // A light cargo command (`--version`, `metadata`, `fmt`, …) takes no lock:
+    // it would only wait out someone else's build for nothing. Seen on the
+    // released binary: `run -- cargo --version` sat 91s behind an outside build.
+    let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo")
+        && !shim::is_light("cargo", &cmd[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
     if runs_cargo && !wanted.contains(&"cargo") {
         wanted.push("cargo");
     }
@@ -200,6 +273,82 @@ fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<S
     out.sort();
     out.dedup();
     out
+}
+
+fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
+    let state = q.dir().join("shims.json");
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    match cmd {
+        ShimCmd::Install(a) => {
+            let dir = a
+                .dir
+                .clone()
+                .or_else(|| dirs_next::home_dir().map(|h| h.join(".local").join("bin")))
+                .ok_or_else(|| anyhow::anyhow!("no home directory; pass --dir"))?;
+            let tools: Vec<String> = if a.tools.is_empty() {
+                shim::DEFAULT_TOOLS.iter().map(ToString::to_string).collect()
+            } else {
+                a.tools.clone()
+            };
+            for (tool, what) in shim::install(&dir, &tools, &path_var, a.force, &state)? {
+                match what {
+                    shim::Installed::Wrote { path, real } => println!("✓ {tool}: {} → {}", path.display(), real.display()),
+                    shim::Installed::Unchanged { path } => println!("· {tool}: {} already current", path.display()),
+                    shim::Installed::NotFound => println!("○ {tool}: not on PATH — skipped"),
+                }
+            }
+            let rows = shim::status(&state, &path_var)?;
+            for r in rows.iter().filter(|r| !r.active) {
+                eprintln!(
+                    "⚠ {}: callers still get {} first — put {} ahead of it on PATH",
+                    r.tool,
+                    r.first_on_path.as_ref().map_or_else(|| "nothing".into(), |p| p.display().to_string()),
+                    dir.display()
+                );
+            }
+            Ok(0)
+        }
+        ShimCmd::Uninstall => {
+            let notes = shim::uninstall(&state)?;
+            if notes.is_empty() {
+                println!("No shims were installed. This is a confirmed read of {}, not a failure.", state.display());
+            }
+            for n in notes {
+                println!("{n}");
+            }
+            Ok(0)
+        }
+        ShimCmd::Status { json } => {
+            let rows = shim::status(&state, &path_var)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(0);
+            }
+            if rows.is_empty() {
+                println!("No shims installed. `th ci-queue shim install` adds cargo, xcodebuild and gradle.");
+            }
+            for r in rows {
+                let glyph = if r.active { "●" } else { "○" };
+                let why = if !r.present {
+                    "missing (removed or replaced)".to_string()
+                } else if r.active {
+                    "active".to_string()
+                } else {
+                    format!(
+                        "installed, but callers get {} first",
+                        r.first_on_path.as_ref().map_or_else(|| "nothing".into(), |p| p.display().to_string())
+                    )
+                };
+                println!(
+                    "  {glyph} {:<11} {:<40} → {:<40} {why}",
+                    r.tool,
+                    r.path.display().to_string(),
+                    r.real_now.as_ref().map_or_else(|| "(no real tool on PATH)".into(), |p| p.display().to_string())
+                );
+            }
+            Ok(0)
+        }
+    }
 }
 
 /// `pnpm turbo typecheck …` — the command, trimmed for a one-line display.
@@ -236,6 +385,11 @@ fn status(q: &Queue, a: &StatusArgs) -> Result<i32> {
     }
     print!("{}", render(&snap));
     Ok(0)
+}
+
+#[allow(clippy::cast_precision_loss, reason = "display")]
+fn gb(kb: u64) -> String {
+    format!("{:.1} GB", kb as f64 / 1_048_576.0)
 }
 
 fn secs_since(now_ms: u64, then_ms: u64) -> u64 {
@@ -282,11 +436,13 @@ fn render(s: &queue::Snapshot) -> String {
     for j in &s.running {
         let _ = writeln!(
             o,
-            "  ● {:<8} {:<32} pid {:<7} {:>7}  {}",
+            "  ● {:<8} {:<32} pid {:<7} {:>7}  mem {:>8} / est {:>8}  {}",
             format!("{}-{}", j.class.name(), j.slot.unwrap_or(0)),
             with_locks(j),
             j.child_pid.unwrap_or(j.pid),
             dur(j.admitted_at_ms.map_or(0, |t| secs_since(s.now_ms, t))),
+            j.rss_now_kb.map_or_else(|| "-".to_string(), gb),
+            j.est.map_or_else(|| "-".to_string(), |e| gb(e.rss_kb)),
             j.cwd.display()
         );
     }
@@ -368,6 +524,25 @@ fn render(s: &queue::Snapshot) -> String {
         }
     );
 
+    let bv = &s.budget;
+    let _ = writeln!(o, "\nBudget (scale {:.2}{})", bv.scale, if s.config.budget.enabled { "" } else { ", DISABLED" });
+    let _ = writeln!(
+        o,
+        "  memory  {} committed of {} pool (available − {} GB reserve)",
+        gb(bv.mem_committed_kb),
+        bv.mem_pool_kb.map_or_else(|| "unknown".to_string(), gb),
+        s.config.budget.mem_reserve_gb
+    );
+    #[allow(clippy::cast_precision_loss, reason = "display")]
+    let cores = |m: u64| m as f64 / 1000.0;
+    let _ = writeln!(
+        o,
+        "  cpu     {:.1} of {:.1} cores (cores × {} × scale)",
+        cores(bv.cpu_used_millicores),
+        cores(bv.cpu_budget_millicores),
+        s.config.budget.cpu_factor
+    );
+
     let _ = writeln!(o, "\nRecent");
     if s.history.is_empty() {
         let _ = writeln!(o, "  (no finished jobs yet)");
@@ -378,11 +553,13 @@ fn render(s: &queue::Snapshot) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             o,
-            "  {when}  {:<5} {:<32} waited {:>7}  ran {:>7}  {} {}",
-            h.class.name(),
+            "  {when}  {:<5} {:<32} waited {:>7}  ran {:>7}  peak {:>8}  cpu {:>7}  {} {}",
+            h.class.map_or("?", Class::name),
             h.label,
             dur(h.wait_ms / 1000),
             dur(h.run_ms / 1000),
+            h.peak_group_rss_kb.map_or_else(|| "-".to_string(), gb),
+            h.cpu_ms.map_or_else(|| "-".to_string(), |ms| dur(ms / 1000)),
             h.outcome,
             h.exit
         );
@@ -413,6 +590,13 @@ mod tests {
         let locks = job_locks(&q, &[], &cmd, Path::new("/repo"));
         assert_eq!(locks, vec!["cargo:/t".to_string()]);
         assert_eq!(job_locks(&q, &["cargo".into()], &cmd, Path::new("/repo")), locks, "named twice is one lock");
+        let light: Vec<OsString> = ["cargo", "--version"].iter().map(Into::into).collect();
+        assert!(job_locks(&q, &[], &light, Path::new("/repo")).is_empty(), "a light cargo command takes no lock");
+        assert_eq!(
+            job_locks(&q, &["cargo".into()], &light, Path::new("/repo")),
+            locks,
+            "an explicit --lock still applies"
+        );
         let tsc: Vec<OsString> = ["pnpm", "typecheck"].iter().map(Into::into).collect();
         assert!(job_locks(&q, &[], &tsc, Path::new("/repo")).is_empty());
         assert_eq!(job_locks(&q, &["docker".into()], &tsc, Path::new("/repo")), vec!["docker".to_string()]);

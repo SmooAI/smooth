@@ -451,6 +451,7 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
         cwd: root.to_path_buf(),
         max_wait: Duration::from_secs(sys.queue.config.run.max_wait_secs),
         locks,
+        cmd_hash: None,
     };
     let mut admission = match sys.queue.admit(&request) {
         Ok(a) => a,
@@ -473,7 +474,8 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
     let was_overloaded = env::overloaded(sys);
     let began = Instant::now();
     let argv = [OsString::from("bash"), script.into_os_string()];
-    let ended = ci_queue::exec::run(
+    let progress = admission.progress();
+    let (ended, usage) = ci_queue::exec::run_measured(
         &ci_queue::exec::Spec {
             argv: &argv,
             cwd: root,
@@ -485,11 +487,13 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
             qos,
             kill_grace: Duration::from_secs(sys.queue.config.run.kill_grace_secs),
             null_stdin: true,
+            sample_every: Some(Duration::from_millis(sys.queue.config.budget.sample_ms)),
         },
         |pid| admission.set_child(pid),
+        progress,
     );
     let ran = began.elapsed();
-    admission.finish(ended, ran);
+    admission.finish(ended, ran, usage);
     let secs = ran.as_secs();
     let code = match ended {
         ci_queue::exec::Ended::Exited(c) => Some(c),
@@ -749,6 +753,8 @@ mod tests {
         c.run.max_wait_secs = 1;
         c.run.note_every_secs = 3600;
         c.run.qos = ci_queue::config::Qos::Normal;
+        // These cases are about slots and locks, not capacity.
+        c.budget.enabled = false;
         ci_queue::Queue::at(dir.join("ci-queue"), c, Arc::new(NoPressure)).with_cargo_target(dir.join("cargo-target"))
     }
 
@@ -929,7 +935,10 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         assert_eq!(f.attest(&["passing"]), 0);
         let h = f.sys.queue.history(10);
         assert_eq!(h.len(), 1, "{h:?}");
-        assert_eq!((h[0].label.as_str(), h[0].class, h[0].exit), ("attest passing", ci_queue::Class::Heavy, 0));
+        assert_eq!(
+            (h[0].label.as_str(), h[0].class, h[0].exit),
+            ("attest passing", Some(ci_queue::Class::Heavy), 0)
+        );
     }
 
     /// A check whose script drives cargo takes the queue's cargo lock: with
@@ -948,6 +957,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
                 cwd: f.root.clone(),
                 max_wait: Duration::from_secs(1),
                 locks: vec![f.sys.queue.resolve_lock("cargo", &f.root)],
+                cmd_hash: None,
             })
             .unwrap();
         assert_eq!(f.attest(&["passing"]), 0, "a lock-free check must not wait on the cargo lock");
@@ -970,6 +980,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
                         cwd: f.root.clone(),
                         max_wait: Duration::from_secs(1),
                         locks: Vec::new(),
+                        cmd_hash: None,
                     })
                     .unwrap()
             })

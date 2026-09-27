@@ -1365,6 +1365,7 @@ th flow kill <id> [--resume]                             # kill the tree; --resu
 th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
+th flow skill                                            # print the SmoothFlow agent skill (SKILL.md) for any harness
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
 th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
@@ -1641,9 +1642,57 @@ Linux's idle I/O class gets the disk only when nobody else wants it.
 On 2026-09-26, at load ~270, a `cargo test` running under `taskpolicy -b` sat
 at 0% CPU for 35+ minutes. It held the shared target's `.cargo-lock` the whole
 time, so every other Rust build on the machine queued behind it: a priority
-inversion. So `--qos background`, the default, is capped at `nice` for any job
-that holds a lock. Background QoS stays for lock-free work such as a
-typecheck.
+inversion. So a job that holds a lock is capped at `nice`, even with
+`--qos background`.
+
+**The default QoS is `nice`, and `background` is an explicit opt-in.** Under
+contention, background QoS starves even lock-free work. The same night, a
+pre-commit turbo typecheck, which holds no lock, ran 40+ minutes under
+`taskpolicy -b` at load ~180 without finishing, and it happened twice. A job
+that never finishes is worse than one that competes politely, so use
+`--qos background` only for work you're content never to see finish.
+
+**Capacity budget.** Slots are a hard ceiling. Within them, a job is admitted
+only while the machine has room for its **estimate**, so several jobs can run
+in parallel when they fit, and fewer when they don't.
+
+- **Estimate:** the p90 of the label's measured peak memory and its mean cores
+  (CPU time ÷ wall time), over its last `window` runs.
+    - With no history, the class default applies: heavy 4 GB and 4 cores, light
+      0.5 GB and 1 core.
+    - Memory is the peak of the **sum** of RSS across the job's process group,
+      sampled every `sample_ms`. `ru_maxrss` only sees the largest single
+      process, which undercounts parallel `rustc`s. Both numbers are recorded.
+    - CPU time comes from `getrusage`.
+- **Memory:** the job fits while `estimate + Σ running (estimate − current use)`
+  stays within `(available − mem_reserve_gb) × scale`. The memory side never
+  goes above `mem_scale_max`, which is 1.0 by default.
+- **CPU:** the job fits while `estimate + Σ running estimates ≤ cores ×
+cpu_factor × scale`.
+- **AIMD scale:** starts at 1.0. It grows by `aimd_step` after
+  `aimd_clean_samples` calm pressure samples in a row, and halves on any gate
+  signal, at most once every 10 s. It stays within [`aimd_min`, `aimd_max`], so
+  estimates that turn out wrong correct themselves.
+- **Never deadlock:** with nothing running, the head job is admitted whatever
+  its estimate.
+- **Bounded passing:** smaller jobs may pass an earlier waiter that doesn't
+  fit, but only `max_passes` times, 3 by default. After that the big job holds
+  a reservation. Nobody passes it, and it runs once the running set drains
+  enough.
+
+Finished jobs go to `~/.smooth/ci-queue/history.db`. It is SQLite in WAL mode,
+rolling, and keeps `history_keep` rows. Each row records:
+
+- label, class, cwd, repo, cmd hash;
+- wait and run time, exit;
+- peak group RSS, max single RSS, CPU time;
+- the estimate it was admitted on;
+- the pressure readings at admission.
+
+A history that can't be read degrades estimates to the class defaults; it never
+blocks a job. `th ci-queue status` has a Budget section, and each running job
+shows its live memory against its estimate. The `--json` output is
+`schema: 2`.
 
 **Execution.**
 
@@ -1676,12 +1725,69 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
-qos = "background"   # or "nice" / "normal"; capped at nice for a job with a --lock
+qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
 poll_ms = 1000       # how often a waiter re-checks
 note_every_secs = 30 # how often it prints its waiting line
+
+[budget]
+enabled = true
+cpu_factor = 1.5
+mem_reserve_gb = 6       # kept free for the UI, browsers and agent sessions
+heavy_rss_gb = 4         # estimates for a label with no history yet
+heavy_cores = 4
+light_rss_gb = 0.5
+light_cores = 1
+window = 20              # runs an estimate is drawn from
+max_passes = 3           # passes before a big waiter gets a reservation
+aimd_step = 0.1
+aimd_clean_samples = 5
+aimd_min = 0.25
+aimd_max = 2.0
+mem_scale_max = 1.0      # memory never overcommits past (available − reserve)
+sample_ms = 2000         # process-group memory sample interval
 ```
+
+**PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
+`cargo`, `xcodebuild` and `gradle` runs for every caller on the machine,
+including agents that don't know the queue exists. `install` writes a small sh
+shim per tool into `~/.local/bin`, or `--dir DIR`. Each shim runs
+`th ci-queue run --class heavy [--lock cargo] -- <real tool> "$@"`. There are
+four exceptions:
+
+- **Inside a queued job** (`SMOOTH_CI_QUEUE_SLOT` is set), it runs the tool
+  directly. This is the recursion guard: a cargo build script that calls cargo,
+  or turbo calling tsgo, never queues behind its own parent's slot or lock.
+  `th ci-queue run` has the same guard, so there are two layers, and each is
+  tested separately.
+- **`CI_QUEUE=off`** (also `0`, `false` or `no`) runs the tool directly.
+- **No `th` on PATH:** the tool runs directly.
+- **Light commands** never queue. For cargo that means `--version`,
+  `metadata`, `fmt`, `tree`, `clean`, `new` and similar. For xcodebuild it
+  means `-version`, `-list`, `-showBuildSettings` and similar. For gradle it
+  means `--version`, `--stop` and `--status`. `--help` never queues for any
+  tool. The allowlist lives in `shim.rs` and is table-tested against the
+  generated sh, so the two can't drift apart. `th ci-queue run -- cargo …`
+  applies the same rule: a light cargo command takes no cargo lock.
+
+A shim finds the real tool by walking PATH and skipping any file that carries
+the shim marker, so it can never resolve to itself. `install` is idempotent,
+and it refuses to overwrite a file it didn't write. `--force` sets such a file
+aside, and `uninstall` puts it back. `uninstall` removes exactly what was
+recorded in `~/.smooth/ci-queue/shims.json`. `status` lists each shim, the real
+tool it resolves to, and whether callers actually get it first on PATH.
+
+No shell rc file is edited. On the reference Mac, `~/.local/bin` is already
+early on PATH, in both interactive and non-interactive shells. It comes ahead
+of `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/bin`, so the shims take
+effect as soon as they are written.
+
+**turbo and tsgo are not shimmed by default.** pnpm runs them from
+`node_modules/.bin`, which it puts ahead of everything on PATH, so a shim in
+`~/.local/bin` never sees them. They go through the queue via the monorepo
+pre-commit instead. `--tools turbo,tsgo` exists for callers that invoke them
+from PATH directly.
 
 **Unix only.** The queue relies on `flock(2)` semantics: the locks are
 advisory, and a held file can still be read. It also relies on process
@@ -1690,8 +1796,129 @@ read a held file. On Windows, `run` therefore executes the job directly,
 unqueued, and says so on stderr. `status` also says so.
 
 `SMOOTH_CI_QUEUE_DIR` and `SMOOTH_CI_QUEUE_CONFIG` relocate the queue and its
-config, which is useful for tests. History is `~/.smooth/ci-queue/history.jsonl`,
-one line per finished job with its wait and run durations.
+config, which is useful for tests. A pre-SQLite `history.jsonl` is imported
+into `history.db` once, then renamed to `history.jsonl.imported`.
+
+#### Watching it — `th ci-queue web`, the Queue tab, and `th ci-queue top` (SMOODEV-3371)
+
+```bash
+th ci-queue web --open          # Big Smooth's Queue tab if it's up, else the page served by this th
+th ci-queue web --serve --open  # always serve from this th, even when Big Smooth is running
+th ci-queue web --demo --open   # replay the 2026-09-26 night (35 agents, load ~1,000)
+th ci-queue web --port 4380 --host 0.0.0.0   # opt-in: share it on the network (prints a warning)
+th ci-queue top                 # the same picture in the terminal; q ↑↓ enter p
+```
+
+![th ci-queue web replaying the night the queue was built for: the gate holds, then opens](assets/ci-queue/ci-queue-web-demo.gif)
+
+**The page** (`th ci-queue web`) shows the machine:
+
+- **The line, the gate and the lanes.** Waiters are listed in FIFO order,
+  each labelled with what the queue says holds it. The label is the first
+  segment of `waiting_on`, and it is coloured by kind: a neighbour's lock is
+  gold, the budget is orange, the pressure gate is coral, and plain queueing
+  is muted.
+- **The gate** sits between the line and the lanes. It is a solid rail while
+  jobs are being admitted, and turns into a dashed bar that glows coral while
+  the pressure gate holds heavy jobs.
+- **Particles** (three.js) stream from the line into the running lanes. While
+  the gate is held they pile up at it instead, and a lane whose job holds a
+  shared lock runs gold. Held locks also glow gold in their lane and in the
+  Locks panel.
+- **Running jobs** show their elapsed time against that label's usual (p50)
+  run on this machine.
+- **The page colour** follows the machine's heat on the Aurora spectrum (teal
+  → gold → coral). It is tied to the gate's own `holds`: it is never hotter
+  than gold while nothing is held, and never cooler than orange while
+  something is.
+
+Below the machine, the page has these panels:
+
+- **Pressure gauges.** Every threshold is drawn at the same x, so together
+  they form one gate line. Each gauge has a ten-minute sparkline.
+- **Admission budget** (schema 2). Each running job gets an estimated slice,
+  outlined, with its actual use as the fill. A line marks the effective
+  budget, and a chart shows the AIMD scale's sawtooth over time.
+- **Locks**, with who is waiting on each one.
+- **Cost profiles**: a scatter of typical run time against peak memory, with
+  dot size showing the cores used.
+- **Recent jobs.**
+
+The budget and cost panels only appear when the snapshot carries their
+fields. Unknown fields are ignored, and any schema of 1 or higher renders.
+
+**One command, whether or not Big Smooth is running.** If
+`~/.smooth/daemon.addr` names a daemon whose `/api/ci-queue/status` returns a
+queue snapshot, `th ci-queue web` prints and opens that daemon's `/#queue`
+tab and exits. Otherwise, or with `--serve`, or with a non-loopback `--host`,
+it serves the page itself. That covers a daemon that isn't running, one too
+old to have the tab, and one whose `th` has no queue.
+
+**`--host` is opt-in exposure.** The page shows every queued job's command
+label and worktree path, plus the machine's load. Binding anything other than
+loopback prints a warning and always serves from this `th`.
+
+**How it's served.** The server binds loopback on 4380, and falls back to any
+free port if 4380 is taken. It serves `queue.html` from the embedded
+smooth-web bundle, which is a second Vite entry next to Big Smooth's
+`index.html`. Its routes:
+
+- `GET /api/events`: a Server-Sent Events stream of `snapshot` events, one a
+  second. The first event carries the whole ten-minute sample window, and
+  later events carry only new samples.
+- `GET /api/status`, or the daemon's own `GET /api/ci-queue/status` with
+  `?since_ms=`: the same payload once.
+
+One sampler serves every viewer. It reads the queue only while someone is
+connected: an idle server used 0.00 s of CPU in 30 s. Ctrl-C stops it.
+
+**It stays cheap on the machine it watches.** The particle layer:
+
+- caps particles at 360 and draws at most 30 frames a second;
+- stops when the tab is hidden or the view is scrolled away;
+- uses three.js only on a real GPU (`failIfMajorPerformanceCaveat`), falling
+  back to a Canvas 2D painter otherwise (140 particles at 20 fps);
+- is off entirely under `prefers-reduced-motion`.
+
+Every looping CSS animation touches only opacity or transform, and bars move
+with `scaleX`, never `width`.
+
+Measured in headless Chromium, where compositing runs in software, so the
+GPU-process column is an upper bound. Figures are % of one core, and the page
+column is the page's renderer process:
+
+| Case                                          | Page | GPU process | Browser total |
+| --------------------------------------------- | ---- | ----------- | ------------- |
+| Live queue, three.js on                       | 5.5% | 9.3%        | 14.8%         |
+| Storm replay, three.js on                     | 9.5% | 13.6%       | 23.2%         |
+| Storm replay, reduced motion                  | 3.9% | 9.5%        | 13.6%         |
+| Live queue, reduced motion                    | 2.1% | 5.6%        | 7.8%          |
+| Storm replay, full motion, before the tuning  | —    | —           | 58.6%         |
+| The `th` server with one viewer (debug build) |      |             | ~0.9%         |
+| The `th` server with no viewer                |      |             | 0             |
+
+`?demo` runs the night replay in the browser; `?demo=<seconds>` opens at a
+given point (`?demo=250` catches the gate opening). The replay is seeded, so
+it plays the same night every time. It uses the real snapshot shape, and
+mocks the schema-2 budget, estimate and rusage fields so those panels can be
+shown before the queue ships them.
+
+**Big Smooth's Queue tab** (sidebar → Queue, or `/#queue`) is the same
+component, fed by polling smooth-daemon's `GET /api/ci-queue/status`. That
+route runs `th ci-queue status --json --history 200` at most once a second,
+and only when a client asks. Both hosts share the relay types in
+`smooth_web::queue`. The snapshot passes through as opaque JSON, so newer
+schema fields reach the page without the relay being rebuilt. The menu bar
+has a **Check Queue** item that opens the tab.
+
+**The TUI** (`th ci-queue top`) draws the same picture over ssh:
+
+- colours fall back from truecolor to 256 colours to none (`NO_COLOR`);
+- sections drop away as the window shrinks (recent jobs, then locks, then
+  sparklines, then the gauges become one line);
+- `--demo` (hidden) runs a seeded busy machine.
+
+![th ci-queue top on a machine at load 276, holding heavy jobs](assets/ci-queue/tui-live.jpg)
 
 ### Audit
 

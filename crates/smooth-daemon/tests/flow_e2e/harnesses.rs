@@ -38,11 +38,7 @@ async fn harness_matrix_state_source_per_manifest() {
         let h = by_name(rows, name);
         assert_eq!(h["state_source"], source, "{h}");
         assert_eq!(h["origin"], "builtin");
-        assert_eq!(
-            h["installed"].is_boolean() && (h["installed"] == true) == h["binary_path"].is_string(),
-            true,
-            "{h}"
-        );
+        assert!(h["installed"].is_boolean() && (h["installed"] == true) == h["binary_path"].is_string(), "{h}");
         if h["installed"] == false {
             assert!(h["reason"].as_str().unwrap().contains("not found on PATH"), "{h}");
         }

@@ -64,13 +64,32 @@ pub struct Spec<'a> {
     /// Always give the job an empty stdin. Otherwise it gets ours, unless ours
     /// is a terminal.
     pub null_stdin: bool,
+    /// Sample the job's process-group memory this often (see `sampler`).
+    pub sample_every: Option<Duration>,
+}
+
+/// What a job used, for history and future estimates. Each field is `None`
+/// when it could not be measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub peak_group_rss_kb: Option<u64>,
+    pub max_single_rss_kb: Option<u64>,
+    pub cpu_ms: Option<u64>,
 }
 
 /// Run `spec` to completion. `on_spawn` gets the job's pid (== its process
 /// group id on Unix) as soon as it exists.
+#[cfg(test)]
 pub fn run(spec: &Spec<'_>, on_spawn: impl FnOnce(u32)) -> Ended {
+    run_measured(spec, on_spawn, None::<fn(u64)>).0
+}
+
+/// [`run`], and measure the job: its process group's peak total memory
+/// (sampled every `spec.sample_every`, each total also handed to `on_sample`)
+/// and its CPU time.
+pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: impl FnOnce(u32), on_sample: Option<S>) -> (Ended, Usage) {
     let Some((program, args)) = spec.argv.split_first() else {
-        return Ended::SpawnFailed;
+        return (Ended::SpawnFailed, Usage::default());
     };
     let prefix = qos_prefix(spec.qos);
     let mut cmd = if let Some((wrapper, wrapper_args)) = prefix.split_first() {
@@ -94,17 +113,26 @@ pub fn run(spec: &Spec<'_>, on_spawn: impl FnOnce(u32)) -> Ended {
 
     #[cfg(unix)]
     signals::install();
+    let before = super::sampler::children_usage();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("th ci-queue: cannot start {}: {e}", program.to_string_lossy());
-            return Ended::SpawnFailed;
+            return (Ended::SpawnFailed, Usage::default());
         }
     };
     let pid = child.id();
     #[cfg(unix)]
     signals::forward_to(pid);
     on_spawn(pid);
+    let sampler = spec.sample_every.filter(|_| cfg!(unix)).map(|tick| {
+        let mut on_sample = on_sample;
+        super::sampler::Sampler::start(pid, tick, move |kb| {
+            if let Some(f) = on_sample.as_mut() {
+                f(kb);
+            }
+        })
+    });
 
     let (tx, rx) = mpsc::channel::<std::io::Result<ExitStatus>>();
     let waiter = std::thread::spawn(move || {
@@ -137,14 +165,42 @@ pub fn run(spec: &Spec<'_>, on_spawn: impl FnOnce(u32)) -> Ended {
         kill_group(pid, true);
     }
     let _ = waiter.join();
+    let peak = sampler.map(super::sampler::Sampler::stop);
+    let after = super::sampler::children_usage();
+    // RUSAGE_CHILDREN is cumulative over this process's lifetime (th attest
+    // runs several jobs), so CPU is a difference, and ru_maxrss — a running
+    // max — only says something about this job when it grew. It also counts
+    // any OTHER child this process reaped meanwhile: none for `ci-queue run`;
+    // for `th attest`, the ssh of a concurrent remote check (negligible CPU).
+    let (cpu_ms, rusage_single) = match (before, after) {
+        (Some((c0, m0)), Some((c1, m1))) => (Some(c1.saturating_sub(c0)), (m1 > m0).then_some(m1)),
+        _ => (None, None),
+    };
+    let max_single_rss_kb = match (peak.map(|p| p.largest_kb).filter(|kb| *kb > 0), rusage_single) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    // A job shorter than one tick is sampled only at spawn, before it has
+    // allocated anything. The group was never smaller than its largest
+    // process, so that is the floor.
+    let peak_group_rss_kb = match (peak.map(|p| p.total_kb).filter(|kb| *kb > 0), max_single_rss_kb) {
+        (Some(g), Some(m)) => Some(g.max(m)),
+        (g, m) => g.or(m),
+    };
+    let usage = Usage {
+        peak_group_rss_kb,
+        max_single_rss_kb,
+        cpu_ms,
+    };
 
     if timed_out {
-        return Ended::TimedOut;
+        return (Ended::TimedOut, usage);
     }
-    match status {
+    let ended = match status {
         Some(Ok(s)) => classify(s),
         _ => Ended::SpawnFailed,
-    }
+    };
+    (ended, usage)
 }
 
 fn classify(s: ExitStatus) -> Ended {
@@ -284,6 +340,7 @@ mod tests {
             qos: Qos::Normal,
             kill_grace: Duration::from_millis(500),
             null_stdin: true,
+            sample_every: None,
         }
     }
 
@@ -364,6 +421,83 @@ mod tests {
         assert!(qos_prefix(Qos::Normal).is_empty());
         #[cfg(target_os = "macos")]
         assert_eq!(qos_prefix(Qos::Background), vec![OsString::from("/usr/sbin/taskpolicy"), "-b".into()]);
+    }
+
+    /// The whole point of sampling the GROUP: two parallel memory hogs peak at
+    /// about twice the largest single one together. `ru_maxrss` alone would
+    /// report one hog.
+    #[test]
+    fn measures_the_group_total_not_just_the_largest_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hog = "perl -e '$x = q(a) x (100*1024*1024); sleep 2'";
+        let argv = sh(&format!("{hog} & {hog} & wait"));
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let seen2 = seen.clone();
+        let s = Spec {
+            sample_every: Some(Duration::from_millis(200)),
+            ..spec(&argv, tmp.path(), None)
+        };
+        let (ended, u) = run_measured(
+            &s,
+            |_| {},
+            Some(move |kb: u64| {
+                seen2.fetch_max(kb, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(ended, Ended::Exited(0));
+        let (group, single) = (u.peak_group_rss_kb.unwrap_or(0), u.max_single_rss_kb.unwrap_or(0));
+        assert!(single >= 100 * 1024, "largest single {single} KiB: {u:?}");
+        // Two hogs at once: the group peak is near 2x the largest one.
+        assert!(group * 10 >= single * 17, "group {group} KiB is not ~2x single {single} KiB: {u:?}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), group, "on_sample never saw the peak");
+        assert!(u.cpu_ms.is_some());
+    }
+
+    /// Lower bound only: RUSAGE_CHILDREN is per PROCESS, and this test binary
+    /// runs other tests' children in parallel, so an upper bound here would
+    /// measure the neighbours. (`th ci-queue run` has exactly one job.)
+    #[test]
+    fn cpu_time_is_measured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("perl -e '$t = time; 1 while time - $t < 2'");
+        let (_, u) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>);
+        let cpu = u.cpu_ms.unwrap();
+        assert!(cpu >= 500, "a ~2s busy loop reported {cpu} ms of CPU");
+    }
+
+    /// A sampler must never keep `th` (or the job's slot) waiting: `run`
+    /// returns promptly after the job exits, however long the tick.
+    #[test]
+    fn a_long_sample_tick_does_not_delay_the_return() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("sleep 0.3");
+        let s = Spec {
+            sample_every: Some(Duration::from_secs(60)),
+            ..spec(&argv, tmp.path(), None)
+        };
+        let t = Instant::now();
+        let (ended, u) = run_measured(&s, |_| {}, None::<fn(u64)>);
+        assert_eq!(ended, Ended::Exited(0));
+        assert!(t.elapsed() < Duration::from_secs(10), "run waited {:?} on the sampler", t.elapsed());
+        assert!(u.peak_group_rss_kb.is_some(), "the first sample is taken at once");
+    }
+
+    /// Found by running the real binary: a 1s job with a 2s tick was sampled
+    /// only at spawn and recorded a 1 MB peak for a 100 MB process. The
+    /// sampler's ramp-up (100 ms, 200 ms, …) catches it now, independently of
+    /// `ru_maxrss` — which in this multi-test process may already be higher
+    /// from another test, and so not "grow".
+    #[test]
+    fn a_job_shorter_than_a_tick_still_records_its_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("perl -e '$x = q(a) x (50*1024*1024); sleep 1'");
+        let s = Spec {
+            sample_every: Some(Duration::from_secs(30)),
+            ..spec(&argv, tmp.path(), None)
+        };
+        let (_, u) = run_measured(&s, |_| {}, None::<fn(u64)>);
+        assert!(u.peak_group_rss_kb.unwrap_or(0) >= 50 * 1024, "{u:?}");
+        assert!(u.peak_group_rss_kb >= u.max_single_rss_kb, "{u:?}");
     }
 
     #[test]

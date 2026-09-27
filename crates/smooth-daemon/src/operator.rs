@@ -1395,7 +1395,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // POST /api/usage + GET /api/stats — the Stats page: activity from
                 // this durable store, spend from ~/.smooth/usage.jsonl (the client
                 // POSTs each turn's streamed usage, which the engine doesn't persist).
-                .merge(crate::usage_route::stats_router(crate::usage_route::usage_log_path(), storage_for_stats)),
+                .merge(crate::usage_route::stats_router(crate::usage_route::usage_log_path(), storage_for_stats))
+                // GET /api/ci-queue/status — the Queue tab: `th ci-queue status
+                // --json` relayed, at most one read a second, plus the pressure
+                // samples its sparklines draw (SMOODEV-3371).
+                .merge(crate::ci_queue_route::ci_queue_router(crate::ci_queue_route::CiQueueState::from_th())),
         )
         .spawn()
         .await

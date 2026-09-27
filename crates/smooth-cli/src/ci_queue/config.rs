@@ -24,6 +24,70 @@ pub struct Config {
     pub slots: Slots,
     pub gate: Gate,
     pub run: Run,
+    pub budget: Budget,
+}
+
+/// Capacity-aware admission. The per-class slot count stays the hard ceiling;
+/// within it, a job is admitted only while the machine has room for it by its
+/// ESTIMATE — the p90 of its label's measured peak memory and its average
+/// cores, or the class default until there is history. A scale that adapts to
+/// live pressure (AIMD: grow slowly while calm, halve on a spike) corrects
+/// estimates that turn out wrong.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Budget {
+    /// Off = slots and the pressure gate only.
+    pub enabled: bool,
+    /// CPU budget = cores × this × scale. Above 1 because CI jobs spend much of
+    /// their time on I/O.
+    pub cpu_factor: f64,
+    /// Memory held back for the UI, browsers and agent sessions: jobs are
+    /// admitted into (available − reserve) × scale.
+    pub mem_reserve_gb: f64,
+    /// Estimates for a label with no history yet. Deliberately generous.
+    pub heavy_rss_gb: f64,
+    pub heavy_cores: f64,
+    pub light_rss_gb: f64,
+    pub light_cores: f64,
+    /// How many of a label's recent runs its estimate is drawn from.
+    pub window: usize,
+    /// How many times smaller jobs may pass an earlier waiter that does not
+    /// fit, before it gets a reservation and nobody passes it.
+    pub max_passes: u32,
+    /// AIMD on the scale: +`aimd_step` after `aimd_clean_samples` calm pressure
+    /// samples in a row, ×0.5 on any gate signal (at most every 10s), clamped to
+    /// [`aimd_min`, `aimd_max`].
+    pub aimd_step: f64,
+    pub aimd_clean_samples: u32,
+    pub aimd_min: f64,
+    pub aimd_max: f64,
+    /// The memory side never overcommits past this multiple of (available −
+    /// reserve), however high the scale climbs (the CPU side can).
+    pub mem_scale_max: f64,
+    /// How often a running job's process-group memory is sampled.
+    pub sample_ms: u64,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cpu_factor: 1.5,
+            mem_reserve_gb: 6.0,
+            heavy_rss_gb: 4.0,
+            heavy_cores: 4.0,
+            light_rss_gb: 0.5,
+            light_cores: 1.0,
+            window: 20,
+            max_passes: 3,
+            aimd_step: 0.1,
+            aimd_clean_samples: 5,
+            aimd_min: 0.25,
+            aimd_max: 2.0,
+            mem_scale_max: 1.0,
+            sample_ms: 2000,
+        }
+    }
 }
 
 /// How many jobs of each class may run at once, machine-wide.
@@ -118,7 +182,7 @@ impl Default for Run {
     fn default() -> Self {
         Self {
             max_wait_secs: 1800,
-            qos: Qos::Background,
+            qos: Qos::Nice,
             kill_grace_secs: 10,
             history_keep: 500,
             poll_ms: 1000,
@@ -136,8 +200,14 @@ impl Default for Run {
 /// at load ~270 sat at 0% CPU for 35+ minutes while holding the shared cargo
 /// target's `.cargo-lock`, and every other Rust build on the machine queued
 /// behind it — priority inversion. So a job with any `--lock` is capped at
-/// `Nice` (see [`Qos::effective`]); `Background` stays for lock-free work
-/// such as a typecheck.
+/// `Nice` (see [`Qos::effective`]).
+///
+/// **The default is `Nice`, and `Background` is an explicit opt-in.** Under
+/// contention, background QoS starves even lock-free work: the same night a
+/// pre-commit turbo typecheck (no lock) ran 40+ minutes under `taskpolicy -b`
+/// at load ~180 without finishing, twice. A job that never finishes is worse
+/// than one that competes politely, so background is only for work you are
+/// content never to see complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Qos {
@@ -190,6 +260,9 @@ impl Config {
         c.slots.heavy = c.slots.heavy.max(1);
         c.slots.light = c.slots.light.max(1);
         c.run.poll_ms = c.run.poll_ms.max(10);
+        c.budget.sample_ms = c.budget.sample_ms.max(100);
+        c.budget.aimd_min = c.budget.aimd_min.clamp(0.01, 1.0);
+        c.budget.aimd_max = c.budget.aimd_max.max(c.budget.aimd_min);
         Ok(c)
     }
 }
@@ -240,6 +313,7 @@ mod tests {
 
     #[test]
     fn a_job_holding_a_shared_lock_never_runs_at_background_qos() {
+        assert_eq!(Config::default().run.qos, Qos::Nice, "background must be opt-in: it can starve a job forever");
         assert_eq!(Qos::Background.effective(true), Qos::Nice);
         assert_eq!(Qos::Background.effective(false), Qos::Background);
         assert_eq!(Qos::Nice.effective(true), Qos::Nice);

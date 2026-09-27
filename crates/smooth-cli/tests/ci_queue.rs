@@ -15,6 +15,29 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// A private copy of the `th` under test. `CARGO_BIN_EXE_th` lives in the
+/// cargo target dir, and on a machine whose worktrees share one target
+/// (`~/.cargo/shared-target`), another worktree's build can overwrite it
+/// mid-run — seen here: every holder "never started" because the binary was
+/// swapped for another branch's. Copying once, up front, pins what every case
+/// runs; it cannot un-race a build that lands before the copy (for that, run
+/// the suite on an isolated target via `disk-cleanup.sh cargo -- …`).
+fn th_bin() -> &'static Path {
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("th-ci-queue-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join("th");
+        let _ = std::fs::remove_file(&to);
+        // A hard link costs no disk and keeps the inode this build produced:
+        // cargo replaces the uplifted binary by unlink + link, never in place.
+        if std::fs::hard_link(env!("CARGO_BIN_EXE_th"), &to).is_err() {
+            std::fs::copy(env!("CARGO_BIN_EXE_th"), &to).unwrap();
+        }
+        to
+    })
+}
+
 struct Q {
     tmp: tempfile::TempDir,
 }
@@ -39,7 +62,7 @@ impl Q {
     }
 
     fn th(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_th"));
+        let mut c = Command::new(th_bin());
         c.arg("ci-queue")
             .args(args)
             .current_dir(self.tmp.path())
@@ -255,4 +278,80 @@ fn jobs_naming_one_lock_never_overlap() {
             .code(),
         Some(0)
     );
+}
+
+/// Phase 2: a PATH shim in front of cargo. A build script (here: the fake real
+/// cargo itself) that calls `cargo` again must run through the shim WITHOUT
+/// queueing — with one heavy slot and the cargo lock held by its own parent,
+/// queueing would deadlock until --max-wait.
+///
+/// Two layers guard this: the shim execs the tool directly when
+/// `SMOOTH_CI_QUEUE_SLOT` is set, and `th ci-queue run` itself runs a nested
+/// job without queueing. Mutation-checked: deleting the shim's guard line
+/// sends the inner call through `th` (`slot=nested` in the log), and this
+/// fails — the shim's layer is pinned on its own.
+#[test]
+fn a_shimmed_cargo_calling_cargo_never_deadlocks_on_its_own_parent() {
+    let q = Q::new();
+    // A short wait cap, so the mutant fails in seconds rather than 30 minutes.
+    let cfg = std::fs::read_to_string(q.path("ci-queue.toml")).unwrap();
+    std::fs::write(q.path("ci-queue.toml"), cfg.replace("[run]\n", "[run]\nmax_wait_secs = 6\n")).unwrap();
+    let shims = q.path("shims");
+    let real = q.path("realbin");
+    std::fs::create_dir_all(&real).unwrap();
+    let log = q.path("cargo.log");
+    let fake = real.join("cargo");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho \"$1 slot=${{SMOOTH_CI_QUEUE_SLOT:-}}\" >> '{log}'\nif [ \"$1\" = build ]; then cargo check-inner || exit 9; fi\n",
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let th_dir = th_bin().parent().unwrap().to_path_buf();
+    let path = format!("{}:{}:{}:/usr/bin:/bin", shims.display(), real.display(), th_dir.display());
+
+    let out = q
+        .th(&["shim", "install", "--dir", shims.to_str().unwrap(), "--tools", "cargo"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let began = Instant::now();
+    let st = Command::new("cargo")
+        .arg("build")
+        .current_dir(q.tmp.path())
+        .env("PATH", &path)
+        .env("SMOOTH_CI_QUEUE_DIR", q.path("q"))
+        .env("SMOOTH_CI_QUEUE_CONFIG", q.path("ci-queue.toml"))
+        // The cargo lock resolves to this target, not the machine's shared one.
+        .env("CARGO_TARGET_DIR", q.path("target"))
+        .env_remove("SMOOTH_CI_QUEUE_SLOT")
+        .env_remove("CI_QUEUE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = read(&log);
+    assert_eq!(
+        st.status.code(),
+        Some(0),
+        "outer build failed: {}\nlog: {text}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    assert!(began.elapsed() < Duration::from_secs(5), "the nested call waited: {:?}", began.elapsed());
+    assert!(text.contains("build slot=heavy-1"), "the outer build did not go through the queue: {text}");
+    assert!(
+        text.contains("check-inner slot=heavy-1"),
+        "the inner call did not run inside the parent's slot: {text}"
+    );
+
+    let out = q.th(&["shim", "uninstall"]).env("PATH", &path).output().unwrap();
+    assert!(out.status.success());
+    assert!(!shims.join("cargo").exists(), "uninstall left the shim behind");
 }

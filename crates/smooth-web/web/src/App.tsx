@@ -31,11 +31,13 @@ import {
     Zap,
     ListChecks,
     CornerDownRight,
+    Gauge,
 } from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import CiQueuePage from './CiQueuePage';
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { dequeue, enqueue, queuedLabel, removeAt, submitAction, takeAt, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
@@ -214,9 +216,17 @@ export default function App() {
     // registers its textarea-focus fn here on mount.
     const composerFocus = useRef<(() => void) | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
-    // Top-level surface: the chat, or the Stats / Settings tabs. No router — the
-    // app has exactly these three views, so a state switch is lighter than one.
-    const [view, setView] = useState<'chat' | 'stats' | 'settings'>('chat');
+    // Top-level surface: the chat, or the Stats / Queue / Settings tabs. No router
+    // — the app has exactly these views, so a state switch is lighter than one.
+    // `#queue` opens the Queue tab directly (the menu bar links there).
+    const [view, setView] = useState<View>(() => (window.location.hash === '#queue' ? 'queue' : 'chat'));
+    useEffect(() => {
+        const onHash = () => {
+            if (window.location.hash === '#queue') setView('queue');
+        };
+        window.addEventListener('hashchange', onHash);
+        return () => window.removeEventListener('hashchange', onHash);
+    }, []);
     const faceState: FaceState = state === 'connecting' || state === 'offline' ? 'idle' : (state as FaceState);
     const inConversation = messages.length > 0 || approvals.length > 0;
 
@@ -240,7 +250,7 @@ export default function App() {
         requestAnimationFrame(() => composerFocus.current?.());
     };
     // Sidebar tab pick → switch surface; on mobile the drawer dismisses like a resume.
-    const onNavigate = (v: 'chat' | 'stats' | 'settings') => {
+    const onNavigate = (v: View) => {
         setView(v);
         closeOnMobile();
     };
@@ -362,9 +372,11 @@ export default function App() {
                 </div>
             )}
             <div className={`h-dvh transition-[padding] duration-200 ${sidebarOpen ? 'lg:pl-72' : ''}`}>
-                <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden px-5">
+                <div className={`mx-auto flex h-dvh flex-col overflow-hidden px-5 ${view === 'queue' ? 'max-w-6xl' : 'max-w-3xl'}`}>
                     {view === 'stats' ? (
                         <StatsPage />
+                    ) : view === 'queue' ? (
+                        <CiQueuePage />
                     ) : view === 'settings' ? (
                         <SettingsPage mode={mode} setMode={guardedSetMode} modelCosts={modelCosts} status={status} push={push} />
                     ) : (
@@ -419,7 +431,10 @@ export default function App() {
     );
 }
 
-/** A sidebar tab row (Chat / Stats / Settings). Active gets the teal treatment
+/** The app's top-level surfaces. */
+type View = 'chat' | 'stats' | 'queue' | 'settings';
+
+/** A sidebar tab row (Chat / Stats / Queue / Settings). Active gets the teal treatment
  * the active conversation uses, so "where am I" reads the same everywhere. */
 function NavRow({ icon, label, active, onClick }: { icon: ReactNode; label: string; active: boolean; onClick: () => void }) {
     return (
@@ -449,8 +464,8 @@ function Sidebar({
     onClose,
 }: {
     open: boolean;
-    view: 'chat' | 'stats' | 'settings';
-    onNavigate: (v: 'chat' | 'stats' | 'settings') => void;
+    view: View;
+    onNavigate: (v: View) => void;
     conversations: ConversationSummary[];
     activeId: string | null;
     onResume: (id: string) => void;
@@ -496,6 +511,7 @@ function Sidebar({
                 <div className="mx-2 mb-2 space-y-0.5">
                     <NavRow icon={<MessagesSquare size={16} />} label="Chat" active={view === 'chat'} onClick={() => onNavigate('chat')} />
                     <NavRow icon={<BarChart3 size={16} />} label="Stats" active={view === 'stats'} onClick={() => onNavigate('stats')} />
+                    <NavRow icon={<Gauge size={16} />} label="Queue" active={view === 'queue'} onClick={() => onNavigate('queue')} />
                     <NavRow icon={<Settings size={16} />} label="Settings" active={view === 'settings'} onClick={() => onNavigate('settings')} />
                 </div>
                 <div className="mx-3 mb-1 text-xs uppercase tracking-wide text-(--color-muted-foreground)">Conversations</div>
