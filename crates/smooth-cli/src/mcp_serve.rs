@@ -61,7 +61,8 @@ pub struct SmoothMcp {
 
 impl SmoothMcp {
     fn new() -> Self {
-        let mut tool_router = Self::tool_router();
+        // th-1efb59: SmoothFlow's tools live in `mcp_flow`.
+        let mut tool_router = Self::tool_router() + Self::flow_tool_router();
         Self::apply_write_gate(&mut tool_router, mcp_writes_allowed());
         Self { tool_router }
     }
@@ -1341,6 +1342,8 @@ impl ServerHandler for SmoothMcp {
                  records with what to change; `email_dmarc_summary`, `email_sending_sources` and `email_tls_summary` read the \
                  reports mailbox providers send about the org's own domains; `email_signature_status` shows who gets the managed \
                  signature. No reports is a setup problem (a wrong or missing `rua=`), never a clean domain — say so.\n\n\
+                 SMOOTHFLOW — free, local, no sign-in. The `flow_*` tools drive SmoothFlow, the fleet of coding                  agents (Claude Code, Codex, OpenCode, Gemini, th code, shells) running on this machine. `flow_list` is                  the fleet; `flow_repos` finds a directory by name; `flow_new` starts an agent there (optionally with a                  prompt and a pearl); `flow_prompt_wait` sends a prompt and waits for the turn, `flow_send` does not wait;                  `flow_snapshot` shows the agent's screen. `flow_approve` answers an agent's permission request — ONLY                  with the user's explicit consent: show them what the agent wants to run and let them decide. `flow_kill`,                  `flow_close` and `flow_fanout_pick` end or merge work; confirm with the user first.
+
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -1417,6 +1420,21 @@ mod tests {
             "email_sending_sources",
             "email_tls_summary",
             "email_signature_status",
+            // th-1efb59: SmoothFlow.
+            "flow_list",
+            "flow_snapshot",
+            "flow_handoff",
+            "flow_harnesses",
+            "flow_repos",
+            "flow_infer",
+            "flow_new",
+            "flow_send",
+            "flow_prompt_wait",
+            "flow_approve",
+            "flow_kill",
+            "flow_close",
+            "flow_fanout_new",
+            "flow_fanout_pick",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
@@ -1618,7 +1636,7 @@ mod tests {
     /// calls to disabled routes), and unannotated tools fail closed.
     #[test]
     fn write_kill_switch_hides_every_mutating_tool() {
-        let mut router = SmoothMcp::tool_router();
+        let mut router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
         let full = router.list_all().len();
         SmoothMcp::apply_write_gate(&mut router, false);
         let gated = router.list_all();
@@ -1642,15 +1660,35 @@ mod tests {
             "agent_identity",
             "agent_status",
             "operator_tools_set",
+            "flow_new",
+            "flow_send",
+            "flow_prompt_wait",
+            "flow_approve",
+            "flow_kill",
+            "flow_close",
+            "flow_fanout_new",
+            "flow_fanout_pick",
         ] {
             assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
         }
-        for read_tool in ["pearls_ready", "recall", "mail_inbox", "agent_list", "operator_tools"] {
+        for read_tool in [
+            "pearls_ready",
+            "recall",
+            "mail_inbox",
+            "agent_list",
+            "operator_tools",
+            "flow_list",
+            "flow_snapshot",
+            "flow_handoff",
+            "flow_harnesses",
+            "flow_repos",
+            "flow_infer",
+        ] {
             assert!(names.contains(&read_tool), "{read_tool} is read-only and must survive");
         }
 
         // allow_writes = true is a no-op.
-        let mut untouched = SmoothMcp::tool_router();
+        let mut untouched = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
         SmoothMcp::apply_write_gate(&mut untouched, true);
         assert_eq!(untouched.list_all().len(), full);
     }

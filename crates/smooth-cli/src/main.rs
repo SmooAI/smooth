@@ -38,6 +38,7 @@ mod help;
 /// SQLite mail store (ADR-010), separate from the pearl store.
 mod mail;
 mod mail_backend;
+mod mcp_flow;
 mod mcp_install;
 mod mcp_serve;
 mod operator_serve;
@@ -6818,7 +6819,15 @@ fn cmd_mcp_install_harness(spec: &str, dry_run: bool) -> Result<()> {
     use mcp_install::{harness_home, install_into, Harness, Outcome};
 
     let all = spec.trim().eq_ignore_ascii_case("all");
-    let targets: Vec<Harness> = if all { Harness::ALL.to_vec() } else { vec![Harness::parse(spec)?] };
+    // th-1efb59: Claude Desktop is an MCP host, not a coding harness.
+    let desktop = all || matches!(spec.trim().to_ascii_lowercase().as_str(), "claude-desktop" | "desktop");
+    let targets: Vec<Harness> = if all {
+        Harness::ALL.to_vec()
+    } else if desktop {
+        Vec::new()
+    } else {
+        vec![Harness::parse(spec)?]
+    };
     let home = harness_home()?;
 
     println!();
@@ -6844,6 +6853,31 @@ fn cmd_mcp_install_harness(spec: &str, dry_run: bool) -> Result<()> {
             ),
         };
         println!("{line}");
+        if !matches!(outcome, Outcome::NotInstalled) {
+            println!("    {}", path.display().to_string().dimmed());
+        }
+        if outcome.wrote() {
+            wrote += 1;
+        }
+    }
+    if desktop {
+        let path = mcp_install::claude_desktop_config(&home);
+        let outcome = mcp_install::install_claude_desktop(&home, &mcp_install::smooth_for_claude_desktop(), dry_run)?;
+        let name = "claude-desktop".bold();
+        match &outcome {
+            Outcome::Added => println!(
+                "  {} {name} — registered `th mcp serve` (SmoothFlow, pearls, mail, your business)",
+                "✓".green().bold()
+            ),
+            Outcome::Updated => println!("  {} {name} — repointed at this `th`", "✓".green().bold()),
+            Outcome::AlreadyPresent => println!("  {} {name} — already registered", "·".dimmed()),
+            Outcome::NotInstalled if all => println!("  {} {} — not installed here, skipped", "○".dimmed(), "claude-desktop".dimmed()),
+            Outcome::NotInstalled => println!(
+                "  {} Claude Desktop is not installed here (no {}) — get it from claude.ai/download",
+                "!".yellow().bold(),
+                path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+            ),
+        }
         if !matches!(outcome, Outcome::NotInstalled) {
             println!("    {}", path.display().to_string().dimmed());
         }

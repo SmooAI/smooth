@@ -67,6 +67,9 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/sessions/{id}/send", post(send_text))
         .route("/api/flow/sessions/{id}/snapshot", get(snapshot))
         .route("/api/flow/sessions/{id}/handoff", get(handoff))
+        // th-1efb59: fan-out over HTTP, so MCP and agent tools need no WS.
+        .route("/api/flow/fanout", post(fanout_new))
+        .route("/api/flow/fanout/{id}/pick", post(fanout_pick))
         .route("/api/flow/hooks", post(hooks))
         // th-0f6126: the harness manifests + the user's sort/hide prefs.
         .route("/api/flow/harnesses", get(list_harnesses))
@@ -358,6 +361,50 @@ async fn send_text(
     let e = st.engine.clone();
     blocking(move || e.send(&id, &body.text)).await?;
     Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct FanoutBody {
+    prompt: String,
+    pearl_id: String,
+    candidates: Vec<CandidateSpec>,
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// `POST /api/flow/fanout {prompt, pearl_id, candidates, project?}` — the HTTP
+/// twin of the `flow.fanout.new` WS frame (th-1efb59). Returns the fan-out
+/// and its candidate sessions.
+async fn fanout_new(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<FanoutBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let (fan_out, candidates) = blocking(move || e.fanout_new(&body.prompt, &body.pearl_id, &body.candidates, body.project.as_deref())).await?;
+    Ok(Json(json!({ "fan_out": fan_out, "candidates": candidates })))
+}
+
+#[derive(Deserialize)]
+struct PickBody {
+    winner_session_id: String,
+}
+
+/// `POST /api/flow/fanout/{id}/pick {winner_session_id}` — merge the winner,
+/// GC the losers (the `flow.fanout.pick` frame over HTTP).
+async fn fanout_pick(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    Json(body): Json<PickBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let (fan_out, candidates) = blocking(move || e.fanout_pick(&id, &body.winner_session_id)).await?;
+    Ok(Json(json!({ "fan_out": fan_out, "candidates": candidates })))
 }
 
 async fn snapshot(
@@ -765,6 +812,36 @@ mod tests {
 
     /// th-0f6126: the harness list + prefs over HTTP, and the hello carries
     /// the visible list.
+    /// th-1efb59: fan-out over HTTP is gated like every route and reaches the
+    /// engine (which refuses an empty race with a readable error).
+    #[tokio::test]
+    async fn fanout_routes_are_gated_and_reach_the_engine() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = flow_router(engine(tmp.path()), Some("tok".into()));
+        let post = |path: &str, token: Option<&str>, body: Value| {
+            let mut b = Request::builder().method("POST").uri(path).header("content-type", "application/json");
+            if let Some(t) = token {
+                b = b.header("x-smooth-token", t);
+            }
+            b.body(Body::from(body.to_string())).unwrap()
+        };
+        let race = json!({ "prompt": "p", "pearl_id": "th-1", "candidates": [] });
+        let resp = app.clone().oneshot(post("/api/flow/fanout", None, race.clone())).await.unwrap();
+        assert_eq!(resp.status(), 401, "no token, no fan-out");
+        let resp = app.clone().oneshot(post("/api/flow/fanout", Some("tok"), race)).await.unwrap();
+        assert!(resp.status().is_client_error() || resp.status().is_server_error(), "{}", resp.status());
+        assert!(body_json(resp).await.to_string().contains("at least one candidate"));
+        let resp = app
+            .clone()
+            .oneshot(post("/api/flow/fanout/fo-nope/pick", Some("tok"), json!({ "winner_session_id": "fs-x" })))
+            .await
+            .unwrap();
+        assert!(!resp.status().is_success());
+        assert!(body_json(resp).await.to_string().contains("no such fan-out"));
+    }
+
     #[tokio::test]
     async fn harness_routes_list_and_prefs() {
         use axum::body::Body;

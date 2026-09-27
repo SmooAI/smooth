@@ -209,15 +209,29 @@ pub enum FanoutCommands {
 
 // ── daemon discovery ──────────────────────────────────────────────────────────
 
-/// `host:port` of the running daemon from `~/.smooth/daemon.addr`.
+/// `host:port` of the daemon hosting the flow engine. Same chain the harness
+/// hooks use (th-1efb59): `$SMOOTH_FLOW_ADDR`, then `~/.smooth/flow.addr` —
+/// claimed by whichever daemon runs the live flow engine, which is how the
+/// SmoothFlow app's own daemon is found (it does not write `daemon.addr`) —
+/// then `~/.smooth/daemon.addr`.
 pub(crate) fn daemon_addr() -> Result<String> {
-    let path = dirs_next::home_dir().context("no home dir")?.join(".smooth").join("daemon.addr");
-    let addr = std::fs::read_to_string(&path)
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("no daemon advertised in {} — start Big Smooth (th up) first", path.display()))?;
-    Ok(addr)
+    let dir = dirs_next::home_dir().context("no home dir")?.join(".smooth");
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+    pick_flow_addr(std::env::var("SMOOTH_FLOW_ADDR").ok(), read("flow.addr"), read("daemon.addr")).ok_or_else(|| {
+        anyhow!(
+            "no flow engine advertised in {} (flow.addr / daemon.addr) — open SmoothFlow or start Big Smooth (th up) first",
+            dir.display()
+        )
+    })
+}
+
+/// The first non-blank of the env override, `flow.addr`, `daemon.addr`, with
+/// any `http://` prefix and trailing `/` removed. Pure, for tests.
+fn pick_flow_addr(env: Option<String>, flow_addr: Option<String>, daemon_addr: Option<String>) -> Option<String> {
+    [env, flow_addr, daemon_addr].into_iter().flatten().find_map(|a| {
+        let a = a.trim().trim_start_matches("http://").trim_end_matches('/').to_string();
+        (!a.is_empty()).then_some(a)
+    })
 }
 
 /// `SMOOTH_LOCAL_TOKEN` → `~/.smooth/operator-token`.
@@ -996,6 +1010,26 @@ async fn attach_session(id: &str) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
+
+    /// th-1efb59: the SmoothFlow app's daemon advertises only flow.addr.
+    #[test]
+    fn flow_addr_wins_over_daemon_addr_and_env_wins_over_both() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(pick_flow_addr(None, s("127.0.0.1:5\n"), s("127.0.0.1:9")).as_deref(), Some("127.0.0.1:5"));
+        assert_eq!(
+            pick_flow_addr(None, s("  "), s("127.0.0.1:9")).as_deref(),
+            Some("127.0.0.1:9"),
+            "blank flow.addr falls through"
+        );
+        assert_eq!(pick_flow_addr(s("http://h:1/"), s("127.0.0.1:5"), None).as_deref(), Some("h:1"));
+        assert_eq!(
+            pick_flow_addr(Some(String::new()), None, s("x:2")).as_deref(),
+            Some("x:2"),
+            "an empty env is unset"
+        );
+        assert_eq!(pick_flow_addr(None, None, None), None);
+    }
+
     use super::*;
 
     #[test]
