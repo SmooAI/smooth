@@ -33,13 +33,15 @@ mod env;
 mod gh;
 mod remote;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
+use crate::ci_queue;
 use env::{Sys, EXIT_PRECONDITION};
 use gh::Gh;
 
@@ -421,24 +423,78 @@ fn route(args: &AttestArgs, root: &Path, requested: &[String]) -> Result<Plan> {
 }
 
 fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
+    // SMOODEV-3355: every local check takes a heavy slot in the machine-wide
+    // `th ci-queue` first, so thirty agents attesting at once run two at a time
+    // instead of thirty. Inside an already-queued job this admits instantly.
+    let blocked = |secs: u64, note: String| CheckResult {
+        name: check.to_string(),
+        outcome: Outcome::Blocked,
+        secs,
+        location: "locally".into(),
+        note: Some(note),
+    };
+    let script = root.join(format!("scripts/ci/{check}.sh"));
+    // A check that drives cargo holds the shared target's lock, so it takes
+    // the queue's `cargo` lock — and must not run at background QoS, where it
+    // would stall every other Rust build behind that lock (priority inversion,
+    // SMOODEV-3355). The script text is the only signal: attest knows nothing
+    // about a repo's checks.
+    let locks = if std::fs::read_to_string(&script).is_ok_and(|t| t.contains("cargo")) {
+        vec![sys.queue.resolve_lock("cargo", root)]
+    } else {
+        Vec::new()
+    };
+    let qos = sys.queue.config.run.qos.effective(!locks.is_empty());
+    let request = ci_queue::Request {
+        class: ci_queue::Class::Heavy,
+        label: format!("attest {check}"),
+        cwd: root.to_path_buf(),
+        max_wait: Duration::from_secs(sys.queue.config.run.max_wait_secs),
+        locks,
+    };
+    let mut admission = match sys.queue.admit(&request) {
+        Ok(a) => a,
+        // Waiting out a busy machine is not a verdict on the commit: nothing
+        // is posted and CI runs the row.
+        Err(ci_queue::AdmitError::WaitTimeout { waited, reason }) => {
+            return blocked(waited.as_secs(), format!("no heavy ci-queue slot freed in {}s ({reason})", waited.as_secs()))
+        }
+        Err(ci_queue::AdmitError::Queue(e)) => return blocked(0, format!("the ci-queue is unusable ({e:#})")),
+    };
+
     // th-b27ed0: sampled BEFORE the check, not after. "After" was right for a
     // laptop, where the load is eighteen other agents and the check merely ran
     // through it — but it is exactly backwards on a machine dedicated to
     // attesting, where the check IS the load: cargo on 10 cores takes smoo-hub to
     // 62, so every genuine failure would be swallowed as "machine too busy".
     // Ambient load at the start is what the check will actually contend with, and
-    // it reads correctly on both machines.
+    // it reads correctly on both machines. (Start = admission: the queue wait is
+    // not what the check contends with.)
     let was_overloaded = env::overloaded(sys);
     let began = Instant::now();
-    let code = Command::new("bash")
-        .arg(root.join(format!("scripts/ci/{check}.sh")))
-        .current_dir(root)
-        .env("CI_REPO_ROOT", root)
-        .stdin(Stdio::null())
-        .status()
-        .ok()
-        .and_then(|s| s.code());
-    let secs = began.elapsed().as_secs();
+    let argv = [OsString::from("bash"), script.into_os_string()];
+    let ended = ci_queue::exec::run(
+        &ci_queue::exec::Spec {
+            argv: &argv,
+            cwd: root,
+            env: vec![
+                ("CI_REPO_ROOT".into(), root.as_os_str().to_owned()),
+                (ci_queue::queue::NESTED_ENV.into(), admission.slot_name().into()),
+            ],
+            timeout: None,
+            qos,
+            kill_grace: Duration::from_secs(sys.queue.config.run.kill_grace_secs),
+            null_stdin: true,
+        },
+        |pid| admission.set_child(pid),
+    );
+    let ran = began.elapsed();
+    admission.finish(ended, ran);
+    let secs = ran.as_secs();
+    let code = match ended {
+        ci_queue::exec::Ended::Exited(c) => Some(c),
+        _ => None,
+    };
 
     let (outcome, note) = classify(code, was_overloaded, || env::load_summary(sys));
     CheckResult {
@@ -676,6 +732,25 @@ mod tests {
     use super::env::test_script;
     use super::*;
     use std::fs;
+    use std::sync::Arc;
+
+    /// Never reports pressure, so only slots decide admission here.
+    struct NoPressure;
+    impl ci_queue::pressure::Probe for NoPressure {
+        fn read(&self, _: &[PathBuf]) -> ci_queue::pressure::Readings {
+            ci_queue::pressure::Readings::default()
+        }
+    }
+
+    /// A private ci-queue per fixture: never the machine's, never slow.
+    fn test_queue(dir: &Path) -> ci_queue::Queue {
+        let mut c = ci_queue::config::Config::default();
+        c.run.poll_ms = 10;
+        c.run.max_wait_secs = 1;
+        c.run.note_every_secs = 3600;
+        c.run.qos = ci_queue::config::Qos::Normal;
+        ci_queue::Queue::at(dir.join("ci-queue"), c, Arc::new(NoPressure)).with_cargo_target(dir.join("cargo-target"))
+    }
 
     struct Fixture {
         _tmp: tempfile::TempDir,
@@ -760,6 +835,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             docker: tmp.path().join("no-docker").into(),
             cores: 12,
             normalize_path: false,
+            queue: test_queue(tmp.path()),
             ..Sys::default()
         };
 
@@ -843,6 +919,65 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let code = f.attest(&["blocked"]);
         assert_eq!(f.posted_for("blocked"), 0, "nothing was checked, so nothing may be claimed");
         assert_eq!(code, EXIT_PRECONDITION);
+    }
+
+    // ── SMOODEV-3355: local checks go through the machine-wide ci-queue ─────
+
+    #[test]
+    fn a_local_check_runs_in_a_heavy_queue_slot() {
+        let f = fixture();
+        assert_eq!(f.attest(&["passing"]), 0);
+        let h = f.sys.queue.history(10);
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!((h[0].label.as_str(), h[0].class, h[0].exit), ("attest passing", ci_queue::Class::Heavy, 0));
+    }
+
+    /// A check whose script drives cargo takes the queue's cargo lock: with
+    /// another job holding it, that check waits (here, out to the 1s cap) while
+    /// a lock-free check runs.
+    #[test]
+    fn a_cargo_check_takes_the_cargo_lock() {
+        let f = fixture();
+        check(&f.root, "rusty", "cargo --version >/dev/null 2>&1 || true\nexit 0");
+        let holder = f
+            .sys
+            .queue
+            .admit(&ci_queue::Request {
+                class: ci_queue::Class::Light,
+                label: "someone else's cargo build".into(),
+                cwd: f.root.clone(),
+                max_wait: Duration::from_secs(1),
+                locks: vec![f.sys.queue.resolve_lock("cargo", &f.root)],
+            })
+            .unwrap();
+        assert_eq!(f.attest(&["passing"]), 0, "a lock-free check must not wait on the cargo lock");
+        assert_eq!(f.attest(&["rusty"]), EXIT_PRECONDITION, "the cargo check ran while the cargo lock was held");
+        assert_eq!(f.posted_for("rusty"), 0);
+        drop(holder);
+        assert_eq!(f.attest(&["rusty"]), 0);
+    }
+
+    #[test]
+    fn a_check_that_never_gets_a_slot_is_blocked_not_failed() {
+        let f = fixture();
+        let hogs: Vec<_> = (0..f.sys.queue.config.slots.heavy)
+            .map(|i| {
+                f.sys
+                    .queue
+                    .admit(&ci_queue::Request {
+                        class: ci_queue::Class::Heavy,
+                        label: format!("hog{i}"),
+                        cwd: f.root.clone(),
+                        max_wait: Duration::from_secs(1),
+                        locks: Vec::new(),
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let code = f.attest(&["failing"]);
+        assert_eq!(f.posted_for("failing"), 0, "a check that never ran may not post a verdict");
+        assert_eq!(code, EXIT_PRECONDITION);
+        drop(hogs);
     }
 
     #[test]

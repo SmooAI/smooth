@@ -1,0 +1,154 @@
+{
+  "spec": "SmoothFlow-Client-Spec §4 fleet sidebar",
+  "cases": [
+    {
+      "name": "groups by project in first-seen order, shells last; counts",
+      "input": {
+        "sessions": [
+          {
+            "id": "a",
+            "kind": "claude",
+            "title": "",
+            "project": "/w/smooth",
+            "worktree": "",
+            "state": "working",
+            "unread": false
+          },
+          {
+            "id": "b",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/smooth",
+            "worktree": "",
+            "state": "idle",
+            "unread": false
+          },
+          {
+            "id": "c",
+            "kind": "codex",
+            "title": "",
+            "project": "/w/smooai",
+            "worktree": "",
+            "state": "needs_you",
+            "unread": false
+          },
+          {
+            "id": "d",
+            "kind": "claude",
+            "title": "",
+            "project": "/w/smooth",
+            "worktree": "",
+            "state": "done",
+            "unread": false
+          },
+          {
+            "id": "e",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/smooai",
+            "worktree": "",
+            "state": "limited",
+            "unread": false
+          },
+          {
+            "id": "f",
+            "kind": "gemini",
+            "title": "",
+            "project": "/w/refs",
+            "worktree": "",
+            "state": "starting",
+            "unread": false
+          },
+          {
+            "id": "g",
+            "kind": "claude",
+            "title": "",
+            "project": "/w/refs",
+            "worktree": "",
+            "state": "dead",
+            "unread": false
+          }
+        ]
+      },
+      "expected": {
+        "groups": [
+          {
+            "project": "smooth",
+            "sessions": [
+              "a",
+              "d"
+            ]
+          },
+          {
+            "project": "smooai",
+            "sessions": [
+              "c"
+            ]
+          },
+          {
+            "project": "refs",
+            "sessions": [
+              "f",
+              "g"
+            ]
+          },
+          {
+            "project": "shells",
+            "sessions": [
+              "b",
+              "e"
+            ]
+          }
+        ],
+        "counts": {
+          "working": 2,
+          "needs_you": 2,
+          "done": 1,
+          "idle": 1
+        }
+      }
+    },
+    {
+      "name": "only shells is one shells group",
+      "input": {
+        "sessions": [
+          {
+            "id": "x",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/a",
+            "worktree": "",
+            "state": "idle",
+            "unread": false
+          },
+          {
+            "id": "y",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/b",
+            "worktree": "",
+            "state": "working",
+            "unread": false
+          }
+        ]
+      },
+      "expected": {
+        "groups": [
+          {
+            "project": "shells",
+            "sessions": [
+              "x",
+              "y"
+            ]
+          }
+        ],
+        "counts": {
+          "working": 1,
+          "needs_you": 0,
+          "done": 0,
+          "idle": 1
+        }
+      }
+    }
+  ]
+}

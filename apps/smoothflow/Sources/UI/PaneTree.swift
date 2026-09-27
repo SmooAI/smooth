@@ -164,10 +164,15 @@ func paneInDirection(_ direction: SplitDirection, from: PaneID, frames: [PaneID:
             primary = origin.minY - r.maxY
             secondary = abs(r.midX - origin.midX)
         }
-        // Panes that overlap the origin on the primary axis (nested splits)
-        // give a small negative distance; that is fine, they are still "that
-        // way", and a nearer edge still wins.
-        if let b = best, (b.primary, b.secondary) <= (primary, secondary) { continue }
+        // Only a pane beyond the origin's edge is "that way" (Client Spec §5,
+        // th-3e6020). A pane overlapping the origin on the primary axis — the
+        // tall pane beside a stack — has its centre that way but isn't; it
+        // used to win with a negative distance, so ↓ from the top of a stack
+        // jumped sideways.
+        if primary < -0.5 { continue }
+        // An exact tie goes to the lower pane id: `frames` is a dictionary,
+        // and its iteration order must not decide where focus lands.
+        if let b = best, (b.primary, b.secondary, b.id.value) <= (primary, secondary, id.value) { continue }
         best = (id: id, primary: primary, secondary: secondary)
     }
     return best?.id
@@ -198,7 +203,12 @@ struct SurfaceTab: Identifiable, Equatable, Sendable {
     }
 
     mutating func split(_ direction: SplitDirection) -> PaneID {
-        let fresh = PaneID.next()
+        split(direction, newID: PaneID.next())
+    }
+
+    /// `split(_:)` with the new pane's id given — the conformance vectors name it.
+    @discardableResult
+    mutating func split(_ direction: SplitDirection, newID fresh: PaneID) -> PaneID {
         root = root.splitting(focused, direction: direction, newID: fresh)
         // A new pane starts on the session the pane it came from was showing,
         // which is what "split this" means everywhere else.

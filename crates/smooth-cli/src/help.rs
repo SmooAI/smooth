@@ -70,6 +70,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("db", "this repo's pearl store: status / backup / path"),
             ("jira", "sync pearls with Jira"),
             ("attest", "run CI checks locally and credit the passes"),
+            ("ci-queue", "run heavy checks through the machine-wide queue"),
             ("worktree", "git worktree management"),
             ("hooks", "git hook management"),
             ("prime", "print the workflow-rules context block"),
@@ -186,6 +187,10 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ("msg", &["th msg send <agent|all> \"body\"", "th msg inbox", "th msg watch --once --json"]),
     ("agent", &["th agent whoami", "th agent claim my-task-name", "th agent list"]),
     ("attest", &["th attest --all", "th attest rust --remote smoo-hub", "th attest --status"]),
+    (
+        "ci-queue",
+        &["th ci-queue run --class heavy --label typecheck -- pnpm typecheck", "th ci-queue status"],
+    ),
     ("harness", &["th harness enable all", "th harness doctor", "th harness status"]),
     ("pkg", &["th pkg install owner/repo --harness all", "th pkg status", "th pkg rm <name>"]),
 ];
