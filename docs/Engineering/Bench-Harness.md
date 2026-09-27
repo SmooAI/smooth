@@ -251,14 +251,24 @@ smooth-bench convo --model deepseek-v4-flash --model gpt-5.5 \
 scripts/the-line/render-model-scores.sh board.json
 ```
 
-That writes three artefacts, all from one pre-rounded source so the badge,
+That writes four artefacts, all from one pre-rounded source so the badge,
 the table and the JSON can never disagree:
 
-| file                        | for                                          |
-| --------------------------- | -------------------------------------------- |
-| `docs/model-scores.json`    | machine-readable, the scoreboard verbatim    |
-| `docs/model-badge.json`     | the README shields endpoint (best model + %) |
-| `docs/Model-Leaderboard.md` | the human table                              |
+| file                          | for                                                                  |
+| ----------------------------- | -------------------------------------------------------------------- |
+| `docs/model-leaderboard.json` | machine-readable, the scoreboard verbatim                            |
+| `docs/model-scores.json`      | the model-picker catalog: offered models only, plus `unbenched`      |
+| `docs/model-badge.json`       | the README shields endpoint (best model + %)                         |
+| `docs/Model-Leaderboard.md`   | the human table                                                      |
+
+`docs/model-scores.json` is what every model picker reads — the web SPA
+bundles it, the daemon serves it at `/api/model-catalog`, and the Big Smooth
+phone apps fetch it from `main` at runtime. Since SMOODEV-3342 it carries only
+the offered set (the `gpt-6-luna` family, Groq, and `gpt-6-sol`), listed in
+`render-model-scores.sh`. Offered models the run did not score go in
+`unbenched`, which clients render as "not yet benched". The renderer refuses to
+write a catalog with no benched rows: shipped phone apps treat an empty
+`models` array as a failed fetch and fall back to their bundled list.
 
 Tests: `bash scripts/the-line/test-model-scores.sh`.
 
