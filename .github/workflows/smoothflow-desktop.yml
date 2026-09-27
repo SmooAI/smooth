@@ -1,0 +1,70 @@
+name: SmoothFlow Desktop
+
+# SmoothFlow for Linux and Windows (th-3e6020): the GPUI app in
+# apps/smoothflow-desktop, its own Cargo workspace so GPUI's build and its
+# Linux system libraries stay out of every `th` PR. Not a required check yet.
+
+on:
+    pull_request:
+        paths:
+            - 'apps/smoothflow-desktop/**'
+            - 'crates/smooth-flow-client/**'
+            - 'spec/vectors/**'
+            - '.github/workflows/smoothflow-desktop.yml'
+    push:
+        branches: [main]
+        paths:
+            - 'apps/smoothflow-desktop/**'
+            - 'crates/smooth-flow-client/**'
+            - 'spec/vectors/**'
+            - '.github/workflows/smoothflow-desktop.yml'
+    workflow_dispatch:
+
+concurrency:
+    group: smoothflow-desktop-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build:
+        name: ${{ matrix.os }}
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+        defaults:
+            run:
+                working-directory: apps/smoothflow-desktop
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: apps/smoothflow-desktop
+            # GPUI on Linux: wgpu (Vulkan), X11 + Wayland windowing, xkbcommon,
+            # fontconfig, D-Bus (portals, notifications) and PipeWire (screen
+            # capture), the last needing clang for its bindings.
+            - name: Linux system libraries
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                    pkg-config clang libclang-dev cmake \
+                    libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+                    libx11-xcb-dev libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev \
+                    libvulkan-dev libfontconfig-dev libfreetype-dev \
+                    libdbus-1-dev libssl-dev libzstd-dev \
+                    libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libdrm-dev
+            - name: Test
+              run: cargo test --locked
+            - name: Build (release)
+              run: cargo build --release --locked
+            - name: Upload the binary
+              uses: actions/upload-artifact@v4
+              with:
+                  name: smoothflow-${{ runner.os }}
+                  path: |
+                      apps/smoothflow-desktop/target/release/smoothflow
+                      apps/smoothflow-desktop/target/release/smoothflow.exe
+                  if-no-files-found: warn
+                  retention-days: 14
