@@ -2625,12 +2625,12 @@ fn provider_catalog() -> Vec<(&'static str, String, Vec<&'static str>, bool)> {
             // SMOODEV-1793. `smooth_policy::smooth_alias`
             // holds the canonical mapping; see also the
             // catalog in smooth-code/src/model_picker.rs.
+            // SMOODEV-3342 model policy: the gpt-6-luna family + Groq.
             vec![
-                "deepseek-v4-flash",     // coding + default
-                "deepseek-v4-pro",       // reasoning
-                "minimax-m2.7-direct",   // reviewing
-                "gemini-2.5-flash",      // judge + summarize
-                "gemini-2.5-flash-lite", // fast
+                "gpt-6-luna",        // coding + default + reviewing + summarize
+                "gpt-6-luna-high",   // reasoning
+                "gpt-6-luna-fast",   // fast
+                "groq-gpt-oss-120b", // judge
             ],
             true,
         ),

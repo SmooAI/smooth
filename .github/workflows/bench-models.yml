@@ -21,10 +21,13 @@ on:
         - cron: '0 6 * * 0'
     workflow_dispatch:
         inputs:
+            # SMOODEV-3342: the offered set (see scripts/the-line/render-model-scores.sh).
+            # Only offered models reach the picker catalog, so scoring anything
+            # else on the schedule is spend nobody can pick.
             models:
                 description: 'Space-separated models to score'
                 required: false
-                default: 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5'
+                default: 'gpt-6-luna gpt-6-luna-fast gpt-6-luna-high gpt-6-sol groq-gpt-oss-120b groq-qwen3.8-27b'
             trials:
                 description: 'Trials per scenario (1 is an anecdote, not a rate)'
                 required: false
@@ -94,7 +97,7 @@ jobs:
               env:
                   # SMOOAI_GATEWAY_KEY comes from the config step above, via $GITHUB_ENV.
                   SMOOAI_GATEWAY_URL: https://llm.smoo.ai/v1
-                  MODELS: ${{ inputs.models || 'gpt-5.6-luna deepseek-v4-pro gemini-3.6-flash gemini-3.5-flash qwen-3.7-max-direct claude-sonnet-5' }}
+                  MODELS: ${{ inputs.models || 'gpt-6-luna gpt-6-luna-fast gpt-6-luna-high gpt-6-sol groq-gpt-oss-120b groq-qwen3.8-27b' }}
                   TRIALS: ${{ inputs.trials || '3' }}
               run: |
                   args=()

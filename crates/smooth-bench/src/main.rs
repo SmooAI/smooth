@@ -107,16 +107,16 @@ struct ConvoArgs {
     /// Model(s) the spawned daemon runs under. Repeatable — each one
     /// gets its own daemon and the suite prints a leaderboard across
     /// them. Ignored with `--url` (that daemon owns its own routing);
-    /// still recorded in the results. Default: deepseek-v4-flash.
+    /// still recorded in the results. Default: gpt-6-luna.
     #[arg(long = "model")]
     models: Vec<String>,
 
     /// Model that plays the user.
-    #[arg(long, default_value = "deepseek-v4-flash")]
+    #[arg(long, default_value = "gpt-6-luna")]
     driver_model: String,
 
     /// Model that grades the conversation.
-    #[arg(long, default_value = "deepseek-v4-flash")]
+    #[arg(long, default_value = "gpt-6-luna")]
     judge_model: String,
 
     /// Scenario TOML to run instead of the embedded suite.
@@ -161,7 +161,7 @@ struct AgenticArgs {
 
     /// Model(s) the agent runs under. Repeatable — pass it more than
     /// once and the suite runs per model and prints a leaderboard plus a
-    /// scenario × model grid. Default: deepseek-v4-flash.
+    /// scenario × model grid. Default: gpt-6-luna.
     #[arg(long = "model")]
     models: Vec<String>,
 
@@ -179,7 +179,7 @@ struct AgenticArgs {
     surface: Surface,
 
     /// Cheap model used to grade `kind = "judge"` scenarios.
-    #[arg(long, default_value = "deepseek-v4-flash")]
+    #[arg(long, default_value = "gpt-6-luna")]
     judge_model: String,
 
     /// Scenario TOML to run instead of the embedded suite.
@@ -225,7 +225,7 @@ struct ScoreArgs {
     engines: Vec<Engine>,
 
     /// Which model(s) to run each engine under. Repeatable. Default:
-    /// deepseek-v4-flash.
+    /// gpt-6-luna.
     #[arg(long = "model")]
     models: Vec<String>,
 
@@ -352,7 +352,7 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
     }
 
     let models = if args.models.is_empty() {
-        vec!["deepseek-v4-flash".to_string()]
+        vec!["gpt-6-luna".to_string()]
     } else {
         args.models.clone()
     };
@@ -601,7 +601,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     let gateway_key = env.gateway_key.clone();
 
     let models = if args.models.is_empty() {
-        vec!["deepseek-v4-flash".to_string()]
+        vec!["gpt-6-luna".to_string()]
     } else {
         args.models.clone()
     };
@@ -810,7 +810,7 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
         args.engines.clone()
     };
     let models = if args.models.is_empty() {
-        vec!["deepseek-v4-flash".to_string()]
+        vec!["gpt-6-luna".to_string()]
     } else {
         args.models.clone()
     };

@@ -790,11 +790,46 @@ fn catalog_lookup(model: &str) -> Option<&'static ModelInfo> {
 /// they can be edited without a Smooth release.
 ///
 /// Updated 2026-06: covers each slot default plus a few overrides.
+/// SMOODEV-3342: the slot defaults are now the gpt-6-luna family + Groq, so
+/// those lead; the older entries stay as explicit picks.
 #[allow(clippy::unreadable_literal)]
 pub fn fallback_catalog() -> &'static [(&'static str, ModelInfo)] {
     static CATALOG: OnceLock<Vec<(&'static str, ModelInfo)>> = OnceLock::new();
     CATALOG.get_or_init(|| {
         vec![
+            (
+                "gpt-6-luna",
+                ModelInfo {
+                    use_cases: svec(&["coding", "reviewing", "summarize", "agentic"]),
+                    tier: Tier::Workhorse,
+                    description: "GPT-6 Luna — the default for coding, review and summaries.".into(),
+                    input_cost_per_token: 0.000000115,
+                    output_cost_per_token: 0.000000575,
+                    benchmarks: Benchmarks::default(),
+                },
+            ),
+            (
+                "gpt-6-luna-high",
+                ModelInfo {
+                    use_cases: svec(&["reasoning", "planning", "agentic"]),
+                    tier: Tier::Workhorse,
+                    description: "GPT-6 Luna at high reasoning effort — the reasoning default.".into(),
+                    input_cost_per_token: 0.000000115,
+                    output_cost_per_token: 0.000000575,
+                    benchmarks: Benchmarks::default(),
+                },
+            ),
+            (
+                "gpt-6-luna-fast",
+                ModelInfo {
+                    use_cases: svec(&["fast", "utility"]),
+                    tier: Tier::Fast,
+                    description: "GPT-6 Luna at low reasoning effort — titles, routing, autocomplete.".into(),
+                    input_cost_per_token: 0.000000115,
+                    output_cost_per_token: 0.000000575,
+                    benchmarks: Benchmarks::default(),
+                },
+            ),
             (
                 "deepseek-v4-flash",
                 ModelInfo {
@@ -1252,16 +1287,16 @@ mod tests {
             api_url: "https://llm.smoo.ai/v1".into(),
             api_key: "test".into(),
             api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
-            default_model: "deepseek-v4-flash".into(),
+            default_model: "gpt-6-luna".into(),
         });
         r = r.with_routing(ModelRouting {
-            coding: ModelSlot::new("smooth", "deepseek-v4-flash"),
-            reasoning: Some(ModelSlot::new("smooth", "deepseek-v4-pro")),
-            reviewing: ModelSlot::new("smooth", "minimax-m2.7-direct"),
-            judge: ModelSlot::new("smooth", "gemini-2.5-flash"),
-            summarize: ModelSlot::new("smooth", "gemini-2.5-flash"),
-            default: ModelSlot::new("smooth", "deepseek-v4-flash"),
-            fast: Some(ModelSlot::new("smooth", "gemini-2.5-flash-lite")),
+            coding: ModelSlot::new("smooth", "gpt-6-luna"),
+            reasoning: Some(ModelSlot::new("smooth", "gpt-6-luna-high")),
+            reviewing: ModelSlot::new("smooth", "gpt-6-luna"),
+            judge: ModelSlot::new("smooth", "groq-gpt-oss-120b"),
+            summarize: ModelSlot::new("smooth", "gpt-6-luna"),
+            default: ModelSlot::new("smooth", "gpt-6-luna"),
+            fast: Some(ModelSlot::new("smooth", "gpt-6-luna-fast")),
             planning: None,
         });
         r
@@ -1281,11 +1316,11 @@ mod tests {
         p.load_from_registry(&test_registry());
         assert_eq!(p.slots.len(), ALL_SLOTS.len());
         assert_eq!(p.slots[0].slot, PickerSlot::Coding);
-        assert_eq!(p.slots[0].current_model, "deepseek-v4-flash");
+        assert_eq!(p.slots[0].current_model, "gpt-6-luna");
         let fast = p.slots.iter().find(|s| s.slot == PickerSlot::Fast).expect("fast slot");
-        assert_eq!(fast.current_model, "gemini-2.5-flash-lite");
+        assert_eq!(fast.current_model, "gpt-6-luna-fast");
         let reasoning = p.slots.iter().find(|s| s.slot == PickerSlot::Reasoning).expect("reasoning slot");
-        assert_eq!(reasoning.current_model, "deepseek-v4-pro");
+        assert_eq!(reasoning.current_model, "gpt-6-luna-high");
     }
 
     #[test]
@@ -1324,12 +1359,12 @@ mod tests {
         let mut p = ModelPickerState::new();
         p.load_from_registry(&test_registry());
         // Drill into Reasoning — its current model is the concrete
-        // post-cutover default (`deepseek-v4-pro`).
+        // default (`gpt-6-luna-high`).
         let idx = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Reasoning).expect("reasoning slot");
         p.selected = idx;
         p.open_models_for_selected();
         let chosen = &p.models[p.selected];
-        assert_eq!(chosen.model, "deepseek-v4-pro");
+        assert_eq!(chosen.model, "gpt-6-luna-high");
     }
 
     #[test]
@@ -1342,8 +1377,8 @@ mod tests {
         p.providers_path = Some(path.clone());
         p.reload_slots();
 
-        // Drill into Coding; pick the reasoning model (deepseek-v4-pro)
-        // instead of the coding default (deepseek-v4-flash).
+        // Drill into Coding; explicitly pick a catalog model other than the
+        // coding default (gpt-6-luna). The pick must persist.
         let coding_idx = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Coding).expect("coding slot");
         p.selected = coding_idx;
         p.open_models_for_selected();
@@ -1351,7 +1386,7 @@ mod tests {
             .models
             .iter()
             .position(|m| m.model == "deepseek-v4-pro")
-            .expect("deepseek-v4-pro is always a candidate (reasoning slot's default)");
+            .expect("deepseek-v4-pro is a catalog coding model");
         p.selected = idx;
         assert!(p.apply_selected_model());
 
@@ -1774,13 +1809,13 @@ mod tests {
         let coding = p.slots.iter().find(|s| s.slot == PickerSlot::Coding).expect("coding");
         assert_eq!(coding.current_model, "gpt-6-luna", "coding slot post-migration");
         let fast = p.slots.iter().find(|s| s.slot == PickerSlot::Fast).expect("fast");
-        assert_eq!(fast.current_model, "gemini-3.5-flash", "fast slot post-migration");
+        assert_eq!(fast.current_model, "gpt-6-luna-fast", "fast slot post-migration");
 
         // The on-disk file must also be rewritten so the migration
         // only runs once per user.
         let reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(reloaded.routing.coding.model, "gpt-6-luna");
-        assert_eq!(reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
+        assert_eq!(reloaded.routing.reasoning.as_ref().unwrap().model, "gpt-6-luna-high");
     }
 
     #[test]
@@ -1789,6 +1824,10 @@ mod tests {
         // be findable in the offline catalog so the picker is usable
         // without a gateway round-trip.
         let names: Vec<_> = fallback_catalog().iter().map(|(n, _)| *n).collect();
+        for slot in smooth_policy::smooth_alias::ALL_SLOTS {
+            let default = slot.concrete_default();
+            assert!(names.contains(&default), "fallback catalog missing the {slot:?} default {default}");
+        }
         for required in [
             "deepseek-v4-flash",
             "deepseek-v4-pro",

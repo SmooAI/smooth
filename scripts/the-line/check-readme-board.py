@@ -1,13 +1,16 @@
 import json, re, sys, pathlib
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-scores = json.loads((root / "docs/model-scores.json").read_text())
+# The README table is the BENCH board (every model scored), not the picker
+# catalog in docs/model-scores.json, which is filtered to the offered set.
+scores = json.loads((root / "docs/model-leaderboard.json").read_text())
 by_model = {m["model"]: m for m in scores["models"]}
 readme = (root / "README.md").read_text()
 
 ROW = re.compile(
-    r"^\| `([a-z0-9.\-]+)` \| [^|]+ \| \*{0,2}([0-9.]+)%\*{0,2} \| "
-    r"\*{0,2}\$([0-9.]+)\*{0,2} \| \*{0,2}\$([0-9.]+)\*{0,2} \| \*{0,2}([0-9]+)\*{0,2} \|",
+    # ` +` between cells: the formatter pads the columns to align them.
+    r"^\| `([a-z0-9.\-]+)` +\| [^|]+ \| \*{0,2}([0-9.]+)%\*{0,2} +\| "
+    r"\*{0,2}\$([0-9.]+)\*{0,2} +\| \*{0,2}\$([0-9.]+)\*{0,2} +\| \*{0,2}([0-9]+)\*{0,2} +\|",
     re.M,
 )
 rows = ROW.findall(readme)
@@ -38,8 +41,8 @@ for model, rate, run, per, safety in rows:
         problems.append(f"{model}: safety README={safety} json={m['safety_violations']}")
 
 if problems:
-    print("README benchmark table has drifted from docs/model-scores.json:")
+    print("README benchmark table has drifted from docs/model-leaderboard.json:")
     for p in problems:
         print(f"  - {p}")
     sys.exit(1)
-print(f"README benchmark table matches docs/model-scores.json ({len(rows)} rows)")
+print(f"README benchmark table matches docs/model-leaderboard.json ({len(rows)} rows)")
