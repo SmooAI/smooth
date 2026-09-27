@@ -123,6 +123,8 @@ signal-hook = "0.3"
 smooth-menubar.workspace = true
 
 [dev-dependencies]
+# SMOODEV-3371: drive `th ci-queue web`'s router in-process.
+tower = { workspace = true, features = ["util"] }
 # Pearl th-abc4e2: admin::tests verify the baked-in Supabase anon
 # key really IS the anon key (not service_role) by base64-decoding
 # its JWT payload and checking the role claim. (Lifted to a

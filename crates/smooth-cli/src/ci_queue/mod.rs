@@ -31,6 +31,8 @@ pub mod pressure;
 pub mod queue;
 pub mod sampler;
 pub mod shim;
+pub mod top;
+pub mod web;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -75,6 +77,21 @@ pub enum CiQueueCmd {
         #[command(subcommand)]
         cmd: ShimCmd,
     },
+    /// Watch the queue live in the terminal.
+    ///
+    /// Slot lanes with each job's elapsed time against its usual run, the line
+    /// and why each waiter waits, lock holders, pressure gauges against their
+    /// thresholds with ten minutes of history, and recent jobs. Keys: q quit,
+    /// ↑↓ select, enter details, p pause.
+    Top(top::TopArgs),
+    /// Serve the queue as a live web page and stream it to the browser.
+    ///
+    /// Jobs flow from the line through the gate into their slot lanes; locks
+    /// glow while held; every waiter says why it waits; pressure is the page's
+    /// colour, with gauges, sparklines and history. Served by this `th` (no
+    /// daemon needed) on loopback. `--open` opens it; `--demo` replays a busy
+    /// night for showing it off on an idle machine.
+    Web(web::WebArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,6 +180,8 @@ pub fn cmd(cmd: Option<CiQueueCmd>) -> Result<()> {
         Some(CiQueueCmd::Run(a)) => run(&q, &a),
         Some(CiQueueCmd::Status(a)) => status(&q, &a)?,
         Some(CiQueueCmd::Shim { cmd }) => shim_cmd(&q, &cmd)?,
+        Some(CiQueueCmd::Top(a)) => top::run(&q, &a)?,
+        Some(CiQueueCmd::Web(a)) => web::run(q, &a)?,
         None => status(&q, &StatusArgs::default())?,
     };
     if code != 0 {

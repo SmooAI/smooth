@@ -33,7 +33,10 @@ fn th_exe_name() -> String {
 /// Locate the `th` binary. Resolution order (mirrors `daemon_launcher`'s shape):
 /// `SMOOTH_TH_BIN` env → next to the running executable → `~/.cargo/bin/th` →
 /// `PATH`.
-fn resolve_th() -> Option<PathBuf> {
+///
+/// Public so smooth-daemon's routes that relay a `th` command
+/// (`ci_queue_route`) find the same binary this tool runs.
+pub fn resolve_th() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("SMOOTH_TH_BIN") {
         let p = PathBuf::from(p);
         if p.is_file() {

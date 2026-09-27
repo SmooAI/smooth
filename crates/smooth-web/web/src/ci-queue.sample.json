@@ -1,0 +1,150 @@
+{
+    "schema": 2,
+    "budget": {
+        "scale": 1.0,
+        "mem_pool_kb": 12459216,
+        "mem_committed_kb": 4129344,
+        "cpu_budget_millicores": 18000,
+        "cpu_used_millicores": 4000
+    },
+    "dir": "/Users/dev/ciq-3355/sample/q",
+    "config": {
+        "slots": {
+            "heavy": 2,
+            "light": 6
+        },
+        "gate": {
+            "min_available_memory_pct": 5.0,
+            "max_memory_pressure_level": 1,
+            "max_swap_used_pct": 90.0,
+            "max_load_per_core": 4.0,
+            "min_free_disk_gb": 20.0,
+            "disk_paths": []
+        },
+        "run": {
+            "max_wait_secs": 1800,
+            "qos": "background",
+            "kill_grace_secs": 10,
+            "history_keep": 500,
+            "poll_ms": 1000,
+            "note_every_secs": 30
+        },
+        "budget": {
+            "enabled": true,
+            "cpu_factor": 1.5,
+            "mem_reserve_gb": 6.0,
+            "heavy_rss_gb": 4.0,
+            "heavy_cores": 4.0,
+            "light_rss_gb": 0.5,
+            "light_cores": 1.0,
+            "window": 20,
+            "max_passes": 3,
+            "aimd_step": 0.1,
+            "aimd_clean_samples": 5,
+            "aimd_min": 0.25,
+            "aimd_max": 2.0,
+            "mem_scale_max": 1.0,
+            "sample_ms": 2000
+        }
+    },
+    "now_ms": 1790487088509,
+    "running": [
+        {
+            "class": "heavy",
+            "ticket": 3,
+            "label": "clippy",
+            "pid": 93987,
+            "child_pid": 93994,
+            "cwd": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "queued_at_ms": 1790487085468,
+            "admitted_at_ms": 1790487085471,
+            "slot": 1,
+            "locks": ["docker"],
+            "est": {
+                "rss_kb": 4194304,
+                "millicores": 4000,
+                "from_runs": 0
+            },
+            "rss_now_kb": 64960
+        }
+    ],
+    "waiting": [
+        {
+            "class": "heavy",
+            "ticket": 4,
+            "label": "waiter",
+            "pid": 94212,
+            "cwd": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "queued_at_ms": 1790487086973,
+            "locks": ["docker"],
+            "waiting_on": "lock docker held by clippy (#3) / 1 heavy busy: clippy (pid 93994, 2s, smooth-SMOODEV-3355-ci-queue-budget)",
+            "waiting_on_since_ms": 1790487088043,
+            "blocked_by_ticket": 3,
+            "est": {
+                "rss_kb": 4194304,
+                "millicores": 4000,
+                "from_runs": 0
+            }
+        }
+    ],
+    "readings": {
+        "mem_total_bytes": 68719476736,
+        "mem_available_bytes": 19200688128,
+        "memory_pressure_level": 1,
+        "swap_total_bytes": 28991029248,
+        "swap_used_bytes": 27258655866,
+        "load1": 44.36,
+        "cores": 12,
+        "disks": [
+            {
+                "path": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+                "free_bytes": 44381319168
+            },
+            {
+                "path": "/Users/dev/.cargo/shared-target",
+                "free_bytes": 44381319168
+            }
+        ]
+    },
+    "holds": [],
+    "history": [
+        {
+            "label": "cargo test -p x",
+            "class": "heavy",
+            "cwd": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "repo": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "cmd_hash": "db1906f1c3162cd6",
+            "ticket": 1,
+            "queued_at_ms": 1790487083938,
+            "finished_at_ms": 1790487085246,
+            "wait_ms": 3,
+            "run_ms": 1304,
+            "outcome": "exit",
+            "exit": 0,
+            "peak_group_rss_kb": 85456,
+            "max_single_rss_kb": 85456,
+            "cpu_ms": 146,
+            "est_rss_kb": 4194304,
+            "est_millicores": 4000
+        },
+        {
+            "label": "typecheck",
+            "class": "heavy",
+            "cwd": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "repo": "/Users/dev/dev/smooai/smooth-SMOODEV-3355-ci-queue-budget",
+            "cmd_hash": "debc2f07db78d52d",
+            "ticket": 2,
+            "queued_at_ms": 1790487085269,
+            "finished_at_ms": 1790487085447,
+            "wait_ms": 2,
+            "run_ms": 175,
+            "outcome": "exit",
+            "exit": 0,
+            "peak_group_rss_kb": 3424,
+            "max_single_rss_kb": 3424,
+            "cpu_ms": 66,
+            "est_rss_kb": 4194304,
+            "est_millicores": 4000
+        }
+    ]
+}

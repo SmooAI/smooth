@@ -266,3 +266,180 @@ body {
 .tool-chip[open] .tool-chevron {
     transform: rotate(90deg);
 }
+
+/* ── The Queue tab (SMOODEV-3371) ─────────────────────────────────────────────
+ * `th ci-queue` as a machine room. This one surface uses the Aurora midnight
+ * world rather than the warm presence ink, because its colour carries a
+ * reading: `--ciq-heat` is the machine's heat on the Aurora spectrum (teal →
+ * gold → coral), set by CiQueuePage from the pressure gate. It is registered
+ * so it can transition, and the ambient field + the gate ride it. */
+@property --ciq-heat {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #00a6a6;
+}
+
+.ciq {
+    --ciq-text: #f4f7fb;
+    --ciq-muted: #93a2bd;
+    --ciq-faint: #5f6f8c;
+    --ciq-border: #1e2942;
+    --ciq-card: #0e1526;
+    --ciq-gate: var(--ciq-heat);
+    transition: --ciq-heat 1.6s ease;
+}
+
+.ciq-chamber {
+    background: linear-gradient(180deg, #0a0f1e, #020618);
+    box-shadow:
+        0 0 0 1px color-mix(in oklch, var(--ciq-heat) 18%, transparent) inset,
+        0 30px 80px -40px color-mix(in oklch, var(--ciq-heat) 45%, transparent);
+}
+
+/* The ambient field: two slow blurred auroras in the machine's heat. */
+.ciq-ambient {
+    position: absolute;
+    inset: -30%;
+    pointer-events: none;
+    background:
+        radial-gradient(40% 35% at 30% 20%, color-mix(in oklch, var(--ciq-heat) 22%, transparent), transparent 70%),
+        radial-gradient(35% 30% at 75% 85%, color-mix(in oklch, var(--ciq-heat) 14%, transparent), transparent 70%);
+    /* No filter: the gradients are already soft, and a blurred full-bleed
+       layer re-rasterises on every repaint of the view it sits behind. */
+    will-change: transform;
+    animation: ciq-drift 28s ease-in-out infinite alternate;
+}
+@keyframes ciq-drift {
+    to {
+        transform: translate3d(6%, -4%, 0) rotate(8deg);
+    }
+}
+
+/* The gate between the line and the lanes. Open: a luminous rail. Held: it
+ * closes into a coral dashed bar. On narrow screens it lies horizontal. */
+.ciq-gate {
+    width: 100%;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--ciq-heat);
+    box-shadow: 0 0 18px 2px color-mix(in oklch, var(--ciq-heat) 70%, transparent);
+}
+@media (min-width: 768px) {
+    .ciq-gate {
+        width: 3px;
+        height: auto;
+    }
+}
+.ciq-gate--held {
+    background: repeating-linear-gradient(90deg, var(--ciq-heat) 0 10px, transparent 10px 16px);
+    animation: ciq-held 2.4s ease-in-out infinite;
+}
+@media (min-width: 768px) {
+    .ciq-gate--held {
+        background: repeating-linear-gradient(180deg, var(--ciq-heat) 0 10px, transparent 10px 16px);
+    }
+}
+/* Every loop below animates only opacity or transform: the compositor runs
+ * those without repainting, so the page stays cheap on the machine it watches. */
+@keyframes ciq-held {
+    50% {
+        opacity: 0.55;
+    }
+}
+.ciq-flow-chev {
+    top: 0;
+    color: var(--ciq-heat);
+    animation: ciq-flow 3.2s linear infinite;
+    opacity: 0;
+}
+@keyframes ciq-flow {
+    from {
+        transform: translate(-50%, 0);
+    }
+    10% {
+        opacity: 0.9;
+    }
+    90% {
+        opacity: 0.9;
+    }
+    to {
+        transform: translate(-50%, var(--ciq-rail, 28rem));
+        opacity: 0;
+    }
+}
+.ciq-gate-tick {
+    background: var(--ciq-gate);
+    box-shadow: 0 0 8px color-mix(in oklch, var(--ciq-gate) 70%, transparent);
+    opacity: 0.85;
+}
+
+/* A running job with no history here yet: a slow shimmer, not a fake bar. */
+.ciq-indeterminate {
+    width: 40%;
+    background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--ciq-heat) 22%, transparent), transparent);
+    animation: ciq-shimmer 2.2s ease-in-out infinite;
+}
+@keyframes ciq-shimmer {
+    from {
+        transform: translateX(-100%);
+    }
+    to {
+        transform: translateX(250%);
+    }
+}
+
+/* A held lock glows gold, slowly, for as long as it is held: a fixed glow
+ * on a layer whose opacity breathes. */
+.ciq-lock-held {
+    position: relative;
+    box-shadow: 0 0 0 1px color-mix(in oklch, #f49f0a 45%, transparent) inset;
+}
+.ciq-lock-held::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+        0 0 0 1px color-mix(in oklch, #f49f0a 80%, transparent) inset,
+        0 0 22px -2px color-mix(in oklch, #f49f0a 60%, transparent) inset;
+    animation: ciq-lock 2.8s ease-in-out infinite;
+}
+@keyframes ciq-lock {
+    50% {
+        opacity: 0.25;
+    }
+}
+
+/* Jobs move between line, lane and history as view transitions keyed by
+ * ticket (CiQueuePage `withTransition`). */
+::view-transition-group(*) {
+    animation-duration: 650ms;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ciq {
+        transition: none;
+    }
+    .ciq-ambient,
+    .ciq-lock-held::after,
+    .ciq-gate--held,
+    .ciq-flow-chev,
+    .ciq-indeterminate {
+        animation: none;
+    }
+    .ciq-indeterminate {
+        transform: translateX(75%);
+    }
+    .ciq-flow-chev {
+        display: none;
+    }
+}
+
+/* `th ci-queue web` — the page is the whole window, on the midnight ground. */
+body.ciq-standalone {
+    background:
+        radial-gradient(1200px 700px at 80% -10%, color-mix(in oklch, #00a6a6 10%, transparent), transparent 60%),
+        radial-gradient(900px 600px at 10% 110%, color-mix(in oklch, #ff6b6c 7%, transparent), transparent 62%), #020618;
+}

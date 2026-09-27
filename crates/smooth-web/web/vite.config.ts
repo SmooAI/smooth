@@ -56,6 +56,9 @@ export default defineConfig({
     server: {
         port: 3100,
         proxy: {
+            // `th ci-queue web --port 4380` serves /api/events for queue.html in dev.
+            '/api/events': 'http://localhost:4380',
+            '/api/status': 'http://localhost:4380',
             '/api': 'http://localhost:4400',
             '/health': 'http://localhost:4400',
             '/ws': {
@@ -67,5 +70,10 @@ export default defineConfig({
     build: {
         outDir: 'dist',
         emptyOutDir: true,
+        rollupOptions: {
+            // `queue.html` is `th ci-queue web`'s page (SMOODEV-3371): the same
+            // embedded bundle, served by `th` itself, no daemon.
+            input: { main: 'index.html', queue: 'queue.html' },
+        },
     },
 });
