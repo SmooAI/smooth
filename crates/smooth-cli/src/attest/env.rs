@@ -38,6 +38,9 @@ pub struct Sys {
     /// Whether to append the well-known tool dirs to the process `PATH`. Off in
     /// tests so parallel cases don't race on a process-global.
     pub normalize_path: bool,
+    /// The machine-wide `th ci-queue` every local check runs through
+    /// (SMOODEV-3355). Tests point it at a temp dir.
+    pub queue: crate::ci_queue::Queue,
 }
 
 impl Default for Sys {
@@ -55,6 +58,7 @@ impl Default for Sys {
             no_docker_start: env_flag("NO_DOCKER_START"),
             no_install: env_flag("NO_INSTALL"),
             normalize_path: true,
+            queue: crate::ci_queue::Queue::from_env(),
         }
     }
 }

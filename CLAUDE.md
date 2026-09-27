@@ -126,6 +126,14 @@ th pearls create / ready / list / show / update / close / push / pull
 # because a status is a claim about the COMMIT, not about your laptop.
 th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 
+# Run a heavy check (typecheck, clippy, a test suite) through the machine-wide
+# queue: N kernel-flock slots per class, FIFO, held while memory/swap/load/disk
+# are under pressure, background QoS. Exit 75 = no slot within --max-wait.
+# `--lock cargo` = one job per cargo target dir (auto for a bare `cargo …`);
+# a job holding a lock never runs at background QoS (priority inversion).
+# `th attest`'s local checks already go through it (SMOODEV-3355).
+th ci-queue run [--class heavy|light] [--lock NAME] [--qos Q] [--label L] [--timeout S] [--max-wait S] -- <cmd…> / status [--json]
+
 # Coding harnesses. The manifests SmoothFlow launches (built-in claude /
 # opencode / codex / th-code + ~/.smooth/harnesses + th pkg packages;
 # docs/Engineering/Harness-Manifests.md) — list/show/add, and sort/hide
