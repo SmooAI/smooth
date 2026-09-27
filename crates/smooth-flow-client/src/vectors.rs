@@ -318,7 +318,10 @@ mod tests {
                 std::fs::write(&path, &rendered).unwrap();
                 continue;
             }
-            let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing — run with SMOOTH_FLOW_CLIENT_BLESS=1", path.display()));
+            let committed = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("{} is missing — run with SMOOTH_FLOW_CLIENT_BLESS=1", path.display()))
+                // A Windows checkout may still hand us CRLF; the vectors are the same.
+                .replace("\r\n", "\n");
             assert_eq!(
                 committed, rendered,
                 "{name} is stale — rerun with SMOOTH_FLOW_CLIENT_BLESS=1 and update every client"
