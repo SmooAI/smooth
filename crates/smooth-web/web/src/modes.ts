@@ -30,7 +30,11 @@ interface BenchFile {
     suite: string;
     trials: number;
     scenario_count: number;
+    /** Benched models, filtered to the offered set (SMOODEV-3342 model policy). */
     models: ModelScore[];
+    /** Offered models the bench has not scored yet — listed with no score
+     * ("not yet benched"), never an invented number. Absent in older catalogs. */
+    unbenched?: string[];
 }
 
 const BENCH = scores as BenchFile;
@@ -52,9 +56,10 @@ export const BADGE_VALUE: Badge = { emoji: '💚', label: 'Best value' };
 export const BADGE_SAFE: Badge = { emoji: '🛡️', label: 'Safest' };
 export const BADGE_PREMIUM: Badge = { emoji: '💎', label: 'Premium' };
 
-/** The premium tier is a curated set, not a cost threshold — gpt-5.5/gpt-5.4 are
- * expensive too but aren't "premium" here. From th-3a5d22. */
-export const PREMIUM_MODELS = new Set(['claude-fable-5', 'gpt-5.6-sol-high', 'gpt-6-astra']);
+/** The premium tier is a curated set, not a cost threshold. From th-3a5d22.
+ * SMOODEV-3342: the offered set is the gpt-6-luna family + Groq, with gpt-6-sol
+ * as the one explicit high-quality choice — so it is the whole premium tier. */
+export const PREMIUM_MODELS = new Set(['gpt-6-sol']);
 
 /** The model a fresh session lands on. */
 export const DEFAULT_MODEL = 'gpt-6-luna';
@@ -134,6 +139,27 @@ export function ensureDefaultRow(rows: ModelRow[], defaultModel: string = DEFAUL
     return [{ model: defaultModel, passRatePct: null, costPerPassUsd: null, badges: premium ? [BADGE_PREMIUM] : [], premium }, ...rows];
 }
 
+/** Append the catalog's offered-but-unbenched models after the benched rows,
+ * with no score or cost (rendered "not yet benched" / "unknown"). A model that
+ * already has a row keeps it. */
+export function appendUnbenched(rows: ModelRow[], unbenched: readonly string[] | undefined): ModelRow[] {
+    const seen = new Set(rows.map((r) => r.model));
+    const extra: ModelRow[] = [];
+    for (const model of unbenched ?? []) {
+        if (seen.has(model)) continue;
+        seen.add(model);
+        const premium = PREMIUM_MODELS.has(model);
+        extra.push({ model, passRatePct: null, costPerPassUsd: null, badges: premium ? [BADGE_PREMIUM] : [], premium });
+    }
+    return [...rows, ...extra];
+}
+
+/** The picker rows for a catalog: benched rows best-first, the default guaranteed
+ * (first when unbenched), then the offered models the bench has not scored. */
+export function catalogRows(bench: Pick<BenchFile, 'models' | 'unbenched'>): ModelRow[] {
+    return appendUnbenched(ensureDefaultRow(deriveRows(bench.models)), bench.unbenched);
+}
+
 /** Defaults a saved choice may be left over from. A session whose saved model
  * is one of these most likely never picked it, so it follows the new default
  * once; the flag stops that from overriding a deliberate re-pick later. */
@@ -162,7 +188,7 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
         if (!res.ok) return null;
         const data = (await res.json()) as Partial<BenchFile>;
         if (!data || !Array.isArray(data.models) || data.models.length === 0) return null;
-        return ensureDefaultRow(deriveRows(data.models));
+        return catalogRows({ models: data.models, unbenched: Array.isArray(data.unbenched) ? data.unbenched : undefined });
     } catch {
         return null;
     }
@@ -170,7 +196,7 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
 
 // ── Bound to the bundled data (synchronous default + offline fallback) ─────────
 
-export const MODEL_ROWS: ModelRow[] = ensureDefaultRow(deriveRows(BENCH.models));
+export const MODEL_ROWS: ModelRow[] = catalogRows(BENCH);
 export const BENCH_SUITE = BENCH.suite;
 export const BENCH_TRIALS = BENCH.trials;
 export const BENCH_SCENARIOS = BENCH.scenario_count;

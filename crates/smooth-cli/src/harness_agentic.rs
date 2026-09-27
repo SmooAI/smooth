@@ -250,8 +250,9 @@ pub fn save_smoo_provider(path: &std::path::Path, key: &str) -> Result<()> {
 }
 
 /// The gateway's coding default (concrete: the legacy `smooth-*` aliases are
-/// gone at the gateway, SMOODEV-1793).
-pub const SMOO_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+/// gone at the gateway, SMOODEV-1793). Tracks the coding slot so it can't drift
+/// again (it sat on deepseek-v4-flash after the slot moved; SMOODEV-3342).
+pub const SMOO_DEFAULT_MODEL: &str = smooth_policy::smooth_alias::SmoothSlot::Coding.concrete_default();
 
 fn setup_byo() -> Result<()> {
     eprintln!("{} th model login (pick a provider, paste its key)…", paint("●", |g| g.bold().to_string()));
