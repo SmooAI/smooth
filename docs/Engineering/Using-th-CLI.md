@@ -1802,7 +1802,8 @@ into `history.db` once, then renamed to `history.jsonl.imported`.
 #### Watching it — `th ci-queue web`, the Queue tab, and `th ci-queue top` (SMOODEV-3371)
 
 ```bash
-th ci-queue web --open          # the live page, served by this th; no daemon needed
+th ci-queue web --open          # Big Smooth's Queue tab if it's up, else the page served by this th
+th ci-queue web --serve --open  # always serve from this th, even when Big Smooth is running
 th ci-queue web --demo --open   # replay the 2026-09-26 night (35 agents, load ~1,000)
 th ci-queue web --port 4380 --host 0.0.0.0   # share it (a TV); shows paths and job labels
 th ci-queue top                 # the same picture in the terminal; q ↑↓ enter p
@@ -1846,18 +1847,47 @@ Below the machine, the page has these panels:
 The budget and cost panels only appear when the snapshot carries their
 fields. Unknown fields are ignored, and any schema of 1 or higher renders.
 
-**How it's served.** `th ci-queue web` binds loopback on 4380 and falls back
-to any free port if 4380 is taken. It serves `queue.html` from the embedded
+**One command, whether or not Big Smooth is running.** If
+`~/.smooth/daemon.addr` names a daemon whose `/api/ci-queue/status` returns a
+queue snapshot, `th ci-queue web` prints and opens that daemon's `/#queue`
+tab and exits. Otherwise, or with `--serve`, or with a non-loopback `--host`,
+it serves the page itself. That covers a daemon that isn't running, one too
+old to have the tab, and one whose `th` has no queue.
+
+**How it's served.** The server binds loopback on 4380, and falls back to any
+free port if 4380 is taken. It serves `queue.html` from the embedded
 smooth-web bundle, which is a second Vite entry next to Big Smooth's
-`index.html`, and has two routes:
+`index.html`. Its routes:
 
-- `GET /api/events` is a Server-Sent Events stream of `snapshot` events, one
-  a second. The first event carries the whole ten-minute sample window; later
-  ones carry only new samples.
-- `GET /api/status` returns the same payload once.
+- `GET /api/events`: a Server-Sent Events stream of `snapshot` events, one a
+  second. The first event carries the whole ten-minute sample window, and
+  later events carry only new samples.
+- `GET /api/status`, or the daemon's own `GET /api/ci-queue/status` with
+  `?since_ms=`: the same payload once.
 
-One sampler serves every viewer, and it reads the queue only while someone is
-connected. Ctrl-C stops the server.
+One sampler serves every viewer. It reads the queue only while someone is
+connected: an idle server used 0.00 s of CPU in 30 s. Ctrl-C stops it.
+
+**It stays cheap on the machine it watches.** The particle layer:
+
+- caps particles at 360 and draws at most 30 frames a second;
+- stops when the tab is hidden or the view is scrolled away;
+- uses three.js only on a real GPU (`failIfMajorPerformanceCaveat`), falling
+  back to a Canvas 2D painter otherwise (140 particles at 20 fps);
+- is off entirely under `prefers-reduced-motion`.
+
+Every looping CSS animation touches only opacity or transform, and bars move
+with `scaleX`, never `width`.
+
+Measured in headless Chromium, where compositing runs in software, with the
+storm replay:
+
+| Case                                          | CPU (one core) |
+| --------------------------------------------- | -------------- |
+| Full motion (before the tuning: 59%)          | 20%            |
+| Reduced motion                                | 11%            |
+| Live, quiet queue                             | 13%            |
+| The `th` server with one viewer (debug build) | ~0.9%          |
 
 `?demo` runs the night replay in the browser; `?demo=<seconds>` opens at a
 given point (`?demo=250` catches the gate opening). The replay is seeded, so

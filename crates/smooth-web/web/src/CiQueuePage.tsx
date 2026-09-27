@@ -70,7 +70,7 @@ function Waiter({ job, snap, selected, onSelect, moves }: { job: JobInfo; snap: 
                 type="button"
                 onClick={onSelect}
                 aria-pressed={selected}
-                className={`relative w-full rounded-xl border px-3 py-2 text-left backdrop-blur-[2px] transition ${selected ? 'border-(--ciq-heat)/60 bg-white/6' : 'border-(--ciq-border) bg-[#0a0f1e]/70 hover:border-white/15'}`}
+                className={`relative w-full rounded-xl border px-3 py-2 text-left transition-colors ${selected ? 'border-(--ciq-heat)/60 bg-white/6' : 'border-(--ciq-border) bg-[#0a0f1e]/70 hover:border-white/15'}`}
             >
                 <div className="flex items-baseline gap-2">
                     <span className="font-mono text-[11px] text-(--ciq-faint) tabular-nums">#{job.ticket}</span>
@@ -120,17 +120,17 @@ function RunningJob({
         >
             {/* elapsed ÷ this label's p50 here; indeterminate when it has never finished */}
             {p.frac == null ? (
-                <span className="ciq-indeterminate absolute inset-y-0 left-0 w-full" aria-hidden />
+                <span className="ciq-indeterminate absolute inset-y-0 left-0" aria-hidden />
             ) : (
                 <span
-                    className="absolute inset-y-0 left-0 transition-[width] duration-1000 ease-linear"
-                    style={{ width: `${p.frac * 100}%`, background: `linear-gradient(90deg, transparent, color-mix(in oklch, ${fill} 30%, transparent))` }}
+                    className="absolute inset-0 origin-left transition-transform duration-1000 ease-linear"
+                    style={{ transform: `scaleX(${p.frac})`, background: `linear-gradient(90deg, transparent, color-mix(in oklch, ${fill} 30%, transparent))` }}
                     aria-hidden
                 />
             )}
             <span
-                className="absolute bottom-0 left-0 h-[2px] transition-[width] duration-1000 ease-linear"
-                style={{ width: `${(p.frac ?? 0) * 100}%`, background: fill, opacity: p.frac == null ? 0 : 0.9 }}
+                className="absolute inset-x-0 bottom-0 h-[2px] origin-left transition-transform duration-1000 ease-linear"
+                style={{ transform: `scaleX(${p.frac ?? 0})`, background: fill, opacity: p.frac == null ? 0 : 0.9 }}
                 aria-hidden
             />
             <span className={`relative flex items-center gap-2 ${compact ? 'px-2.5 py-1.5' : 'px-3 py-2.5'}`}>
@@ -166,7 +166,7 @@ function Gate({ holding }: { holding: boolean }) {
             <div className={`ciq-gate ${holding ? 'ciq-gate--held' : ''}`} data-ciq-gate />
             {!holding && (
                 <div className="pointer-events-none absolute inset-0 hidden md:block">
-                    <ChevronRight className="ciq-flow-chev absolute left-1/2 size-4 -translate-x-1/2" />
+                    <ChevronRight className="ciq-flow-chev absolute left-1/2 size-4" />
                 </div>
             )}
         </div>
@@ -189,13 +189,18 @@ function Detail({ job, snap, p50s }: { job: JobInfo; snap: Snapshot; p50s: Map<s
     if (running) {
         const p50 = p50s.get(job.label);
         rows.push(['Running', `${duration(snap.now_ms - (job.admitted_at_ms ?? 0))} (usually ${p50 ? duration(p50) : 'unknown — first run here'})`]);
-        if (job.est_rss_kb != null) {
+        if (job.est) {
             rows.push([
                 'Budgeted',
-                `${gb(job.est_rss_kb)}${job.est_cores != null ? ` · ${job.est_cores.toFixed(1)} cores` : ''}${job.rss_kb != null ? ` — using ${gb(job.rss_kb)}` : ''}`,
+                `${gb(job.est.rss_kb)} · ${(job.est.millicores / 1000).toFixed(1)} cores${job.rss_now_kb != null ? ` — using ${gb(job.rss_now_kb)} now` : ''} (${job.est.from_runs ? `from ${job.est.from_runs} runs` : 'class default'})`,
             ]);
         }
     } else {
+        if (job.est)
+            rows.push([
+                'Needs',
+                `${gb(job.est.rss_kb)} · ${(job.est.millicores / 1000).toFixed(1)} cores (${job.est.from_runs ? `from ${job.est.from_runs} runs` : 'class default'})`,
+            ]);
         const reason = waitReason(job, snap);
         rows.push([
             'Waiting on',
@@ -274,7 +279,10 @@ function Gauge({ s, series }: { s: Signal; series: Array<number | null> }) {
                 </div>
             </div>
             <div className="relative h-2.5 rounded-full bg-white/6" title={`${s.limit}${s.note ? ` (${s.note})` : ''}`}>
-                <div className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-700" style={{ width: `${fill * 100}%`, background: heat }} />
+                <div
+                    className="absolute inset-0 origin-left rounded-full transition-transform duration-700"
+                    style={{ transform: `scaleX(${fill})`, background: heat }}
+                />
                 {/* the gate line: every gauge's threshold sits at the same x */}
                 <div className="ciq-gate-tick absolute -inset-y-1.5 w-[2px] rounded-full" style={{ left: `calc(${GATE_X * 100}% - 1px)` }} />
                 <div className="absolute top-3.5 text-[10.5px] whitespace-nowrap text-(--ciq-faint)" style={{ right: `${(1 - GATE_X) * 100}%` }}>
@@ -289,9 +297,10 @@ function Gauge({ s, series }: { s: Signal; series: Array<number | null> }) {
     );
 }
 
-/** One budget meter: each job's estimated slice as an outline, what it is
- * actually using as the fill inside it (coral past its estimate), the
- * effective budget as the heat line and the unscaled base as a dashed one. */
+/** One budget meter: each running job's slice (memory it may still grow
+ * into, or CPU it was admitted with), the effective budget as the heat line
+ * and the unscaled base as a dashed one. Memory reads "committed of the
+ * pool": the pool is what jobs may be admitted into, already scaled. */
 function BudgetMeter({
     title,
     used,
@@ -299,8 +308,10 @@ function BudgetMeter({
     base,
     slices,
     fmt,
+    unit,
 }: {
     title: string;
+    unit: string;
     used: number;
     budget: number;
     base: number;
@@ -315,7 +326,7 @@ function BudgetMeter({
             <div className="mb-1.5 flex items-baseline justify-between gap-3 text-[12.5px]">
                 <span className="text-(--ciq-text)">{title}</span>
                 <span className="text-(--ciq-muted) tabular-nums">
-                    <span style={{ color: over ? HEAT[5] : 'var(--ciq-text)' }}>{fmt(used)}</span> of {fmt(budget)} budgeted
+                    <span style={{ color: over ? HEAT[5] : 'var(--ciq-text)' }}>{fmt(used)}</span> of {fmt(budget)} {unit}
                 </span>
             </div>
             <div className="relative h-6 rounded-md bg-white/5">
@@ -331,7 +342,7 @@ function BudgetMeter({
                                 title={`${s.label} — budgeted ${fmt(s.est)}${s.actual != null ? `, using ${fmt(s.actual)}` : ''}`}
                             >
                                 <div
-                                    className="absolute inset-y-0 left-0 rounded-[3px] transition-[width] duration-700"
+                                    className="absolute inset-y-0 left-0 rounded-[3px]"
                                     style={{ width: `${inner * 100}%`, background: past ? HEAT[5] : 'color-mix(in oklch, var(--ciq-heat) 55%, transparent)' }}
                                 />
                             </div>
@@ -343,10 +354,7 @@ function BudgetMeter({
                     style={{ left: pct(base) }}
                     title={`base budget ${fmt(base)}`}
                 />
-                <div
-                    className="ciq-gate-tick absolute -inset-y-1.5 w-[2px] rounded-full transition-[left] duration-700"
-                    style={{ left: `calc(${pct(budget)} - 1px)` }}
-                />
+                <div className="ciq-gate-tick absolute -inset-y-1.5 w-[2px] rounded-full" style={{ left: `calc(${pct(budget)} - 1px)` }} />
             </div>
         </div>
     );
@@ -354,12 +362,12 @@ function BudgetMeter({
 
 /** The AIMD budget scale over the sample window: it climbs a step at a time
  * while pressure stays low and halves on a spike — the sawtooth. */
-function ScaleChart({ samples, current }: { samples: Sample[]; current: Budget }) {
+function ScaleChart({ samples, current, top: scaleMax }: { samples: Sample[]; current: Budget; top: number }) {
     const [hover, setHover] = useState<number | null>(null);
     const pts = samples.filter((s) => s.budget).map((s) => ({ t: s.t_ms, v: s.budget?.scale ?? 0 }));
     const w = 420;
     const h = 96;
-    const top = Math.max(current.scale_max ?? 1.25, ...pts.map((p) => p.v)) * 1.05;
+    const top = Math.max(scaleMax, ...pts.map((p) => p.v)) * 1.05;
     const x = (i: number) => (i / Math.max(1, pts.length - 1)) * w;
     const y = (v: number) => h - (v / top) * h;
     const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
@@ -399,30 +407,79 @@ function ScaleChart({ samples, current }: { samples: Sample[]; current: Budget }
     );
 }
 
+/** Running jobs' memory now against what admission reserved for each: the
+ * outline is the estimate, the fill what the process group holds now (coral
+ * once it has outgrown the estimate). */
+function EstimateRows({ slices }: { slices: ReturnType<typeof budgetSlices> }) {
+    if (!slices.length) return null;
+    const max = Math.max(...slices.map((s) => Math.max(s.estKb, s.nowKb ?? 0)), 1);
+    return (
+        <div className="mt-3">
+            <div className="mb-1.5 text-[12.5px] text-(--ciq-text)">Each job: memory now vs its estimate</div>
+            <ul className="flex flex-col gap-1.5">
+                {slices.map((s) => {
+                    const over = s.nowKb != null && s.nowKb > s.estKb;
+                    return (
+                        <li key={s.job.ticket} className="grid grid-cols-[minmax(0,9rem)_minmax(0,1fr)_5.5rem] items-center gap-3 text-[11.5px]">
+                            <span className="truncate text-(--ciq-muted)" title={s.job.label}>
+                                {s.job.label}
+                            </span>
+                            <span className="relative h-2.5">
+                                <span
+                                    className="absolute inset-y-0 left-0 rounded-[4px] border border-(--ciq-heat)/55"
+                                    style={{ width: `${(s.estKb / max) * 100}%` }}
+                                />
+                                <span
+                                    className="absolute inset-y-[2px] left-[2px] rounded-[3px]"
+                                    style={{
+                                        width: `calc(${((s.nowKb ?? 0) / max) * 100}% - 4px)`,
+                                        background: over ? HEAT[5] : 'color-mix(in oklch, var(--ciq-heat) 60%, transparent)',
+                                    }}
+                                />
+                            </span>
+                            <span className="text-right text-(--ciq-muted) tabular-nums">
+                                <span style={{ color: over ? HEAT[5] : 'var(--ciq-text)' }}>{s.nowKb == null ? '—' : gb(s.nowKb)}</span> / {gb(s.estKb)}
+                            </span>
+                        </li>
+                    );
+                })}
+            </ul>
+        </div>
+    );
+}
+
 function BudgetPanel({ snap, samples }: { snap: Snapshot; samples: Sample[] }) {
     const b = snap.budget;
     if (!b) return null;
     const slices = budgetSlices(snap);
     const scale = b.scale > 0 ? b.scale : 1;
+    const memScale = Math.min(scale, snap.config.budget?.mem_scale_max ?? scale);
     return (
-        <Panel icon={<Cpu className="size-4" />} title="Admission budget" aside={`×${b.scale.toFixed(2)} of base`}>
-            <BudgetMeter
-                title="Memory"
-                used={b.mem_used_kb}
-                budget={b.mem_kb}
-                base={b.mem_kb / scale}
-                fmt={gb}
-                slices={slices.map((s) => ({ key: s.job.ticket, label: s.job.label, est: s.estKb, actual: s.actualKb }))}
-            />
+        <Panel icon={<Cpu className="size-4" />} title="Admission budget" aside={`scale ×${b.scale.toFixed(2)}`}>
+            {b.mem_pool_kb == null ? (
+                <p className="py-2 text-[12.5px] text-(--ciq-faint)">Memory budget: available memory is unreadable, so memory does not hold jobs.</p>
+            ) : (
+                <BudgetMeter
+                    title="Memory committed"
+                    used={b.mem_committed_kb}
+                    budget={b.mem_pool_kb}
+                    base={b.mem_pool_kb / memScale}
+                    fmt={gb}
+                    unit={b.mem_pool_kb === 0 ? 'pool (empty: free memory is under the reserve)' : 'pool'}
+                    slices={slices.filter((s) => s.committedKb > 0).map((s) => ({ key: s.job.ticket, label: s.job.label, est: s.committedKb, actual: null }))}
+                />
+            )}
             <BudgetMeter
                 title="CPU"
-                used={b.cores_used}
-                budget={b.cores}
-                base={b.cores / scale}
+                used={b.cpu_used_millicores / 1000}
+                budget={b.cpu_budget_millicores / 1000}
+                base={b.cpu_budget_millicores / 1000 / scale}
                 fmt={(n) => `${n.toFixed(1)} cores`}
-                slices={slices.map((s) => ({ key: s.job.ticket, label: s.job.label, est: s.estCores, actual: s.actualCores }))}
+                unit="budgeted"
+                slices={slices.map((s) => ({ key: s.job.ticket, label: s.job.label, est: s.millicores / 1000, actual: null }))}
             />
-            <ScaleChart samples={samples} current={b} />
+            <EstimateRows slices={slices} />
+            <ScaleChart samples={samples} current={b} top={snap.config.budget?.aimd_max ?? 1.5} />
         </Panel>
     );
 }
@@ -472,9 +529,18 @@ function CostScatter({ costs }: { costs: LabelCost[] }) {
                     {duration(v)}
                 </text>
             ))}
+            {/* the whisker down to the largest single process: the gap is how parallel it ran */}
+            {placed.map((p) =>
+                p.c.p50SingleKb == null ? null : (
+                    <g key={`s${p.c.label}`} stroke="var(--ciq-heat)" strokeOpacity="0.5">
+                        <line x1={p.cx} x2={p.cx} y1={p.cy} y2={Y(p.c.p50SingleKb)} strokeDasharray="2 2" />
+                        <line x1={p.cx - 4} x2={p.cx + 4} y1={Y(p.c.p50SingleKb)} y2={Y(p.c.p50SingleKb)} />
+                    </g>
+                ),
+            )}
             {placed.map((p) => (
                 <circle key={`d${p.c.label}`} cx={p.cx} cy={p.cy} r={p.r} fill="var(--ciq-heat)" fillOpacity="0.55" stroke="#0e1526" strokeWidth="2">
-                    <title>{`${p.c.label}: ${duration(p.c.p50RunMs)} typical, peak ${gb(p.c.p50PeakKb)}, ${p.c.cores.toFixed(1)} cores busy, ${p.c.runs} runs`}</title>
+                    <title>{`${p.c.label}: ${duration(p.c.p50RunMs)} typical, peak ${gb(p.c.p50PeakKb)} across the process group${p.c.p50SingleKb != null ? ` (largest single process ${gb(p.c.p50SingleKb)})` : ''}, ${p.c.cores.toFixed(1)} cores busy, ${p.c.runs} runs`}</title>
                 </circle>
             ))}
             {placed.map((p) => (
@@ -741,8 +807,11 @@ export default function CiQueuePage({ source = 'daemon', standalone = false }: {
                     )}
                 </Panel>
                 {costs.length > 0 && (
-                    <Panel icon={<ScatterChart className="size-4" />} title="What each check costs" aside="typical run time × peak memory · dot = cores busy">
+                    <Panel icon={<ScatterChart className="size-4" />} title="What each check costs" aside="typical run time × peak memory">
                         <CostScatter costs={costs} />
+                        <p className="mt-1 text-[11px] text-(--ciq-faint)">
+                            Dot size is cores kept busy; the whisker drops to the largest single process, so a long whisker means a parallel job.
+                        </p>
                     </Panel>
                 )}
                 <Panel icon={<History className="size-4" />} title="Recent" className={costs.length ? 'lg:col-span-2 2xl:col-span-1' : ''}>

@@ -304,7 +304,9 @@ body {
     background:
         radial-gradient(40% 35% at 30% 20%, color-mix(in oklch, var(--ciq-heat) 22%, transparent), transparent 70%),
         radial-gradient(35% 30% at 75% 85%, color-mix(in oklch, var(--ciq-heat) 14%, transparent), transparent 70%);
-    filter: blur(24px);
+    /* No filter: the gradients are already soft, and a blurred full-bleed
+       layer re-rasterises on every repaint of the view it sits behind. */
+    will-change: transform;
     animation: ciq-drift 28s ease-in-out infinite alternate;
 }
 @keyframes ciq-drift {
@@ -337,9 +339,11 @@ body {
         background: repeating-linear-gradient(180deg, var(--ciq-heat) 0 10px, transparent 10px 16px);
     }
 }
+/* Every loop below animates only opacity or transform: the compositor runs
+ * those without repainting, so the page stays cheap on the machine it watches. */
 @keyframes ciq-held {
     50% {
-        box-shadow: 0 0 28px 6px color-mix(in oklch, var(--ciq-heat) 80%, transparent);
+        opacity: 0.55;
     }
 }
 .ciq-flow-chev {
@@ -349,6 +353,9 @@ body {
     opacity: 0;
 }
 @keyframes ciq-flow {
+    from {
+        transform: translate(-50%, 0);
+    }
     10% {
         opacity: 0.9;
     }
@@ -356,7 +363,7 @@ body {
         opacity: 0.9;
     }
     to {
-        top: calc(100% - 1rem);
+        transform: translate(-50%, var(--ciq-rail, 28rem));
         opacity: 0;
     }
 }
@@ -368,32 +375,39 @@ body {
 
 /* A running job with no history here yet: a slow shimmer, not a fake bar. */
 .ciq-indeterminate {
+    width: 40%;
     background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--ciq-heat) 22%, transparent), transparent);
-    background-size: 40% 100%;
-    background-repeat: no-repeat;
     animation: ciq-shimmer 2.2s ease-in-out infinite;
 }
 @keyframes ciq-shimmer {
     from {
-        background-position: -40% 0;
+        transform: translateX(-100%);
     }
     to {
-        background-position: 140% 0;
+        transform: translateX(250%);
     }
 }
 
-/* A held lock glows gold, slowly, for as long as it is held. */
+/* A held lock glows gold, slowly, for as long as it is held: a fixed glow
+ * on a layer whose opacity breathes. */
 .ciq-lock-held {
+    position: relative;
+    box-shadow: 0 0 0 1px color-mix(in oklch, #f49f0a 45%, transparent) inset;
+}
+.ciq-lock-held::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
     box-shadow:
-        0 0 0 1px color-mix(in oklch, #f49f0a 45%, transparent) inset,
-        0 0 18px -4px color-mix(in oklch, #f49f0a 55%, transparent);
+        0 0 0 1px color-mix(in oklch, #f49f0a 80%, transparent) inset,
+        0 0 22px -2px color-mix(in oklch, #f49f0a 60%, transparent) inset;
     animation: ciq-lock 2.8s ease-in-out infinite;
 }
 @keyframes ciq-lock {
     50% {
-        box-shadow:
-            0 0 0 1px color-mix(in oklch, #f49f0a 75%, transparent) inset,
-            0 0 28px -2px color-mix(in oklch, #f49f0a 70%, transparent);
+        opacity: 0.25;
     }
 }
 
@@ -409,14 +423,14 @@ body {
         transition: none;
     }
     .ciq-ambient,
-    .ciq-lock-held,
+    .ciq-lock-held::after,
     .ciq-gate--held,
     .ciq-flow-chev,
     .ciq-indeterminate {
         animation: none;
     }
     .ciq-indeterminate {
-        background-position: 50% 0;
+        transform: translateX(75%);
     }
     .ciq-flow-chev {
         display: none;

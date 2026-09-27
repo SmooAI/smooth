@@ -30,17 +30,24 @@ export interface JobInfo {
     waiting_on_since_ms?: number;
     /** When `waiting_on` is a named lock: the ticket holding it. */
     blocked_by_ticket?: number;
-    // Schema 2 (capacity-aware admission): what admission budgeted for this
-    // job, and — when the queue samples it — what it is using now.
-    est_rss_kb?: number;
-    est_cores?: number;
-    rss_kb?: number;
-    cores_now?: number;
+    // Schema 2 (capacity-aware admission): what admission expects the job
+    // to need, and — while it runs — its process group's memory right now.
+    est?: Estimate;
+    rss_now_kb?: number;
+}
+
+/** Schema 2: admission's estimate for a job (from its label's history, or the
+ * class default when `from_runs` is 0). CPU is in millicores. */
+export interface Estimate {
+    rss_kb: number;
+    millicores: number;
+    from_runs: number;
 }
 
 export interface HistoryEntry {
     label: string;
-    class: JobClass;
+    /** Null for rows older than the class column (schema 2 reads SQLite). */
+    class: JobClass | null;
     cwd: string;
     ticket: number;
     queued_at_ms: number;
@@ -49,10 +56,19 @@ export interface HistoryEntry {
     /** `exit`, `signal`, `timeout`, `spawn-failed`, or `wait-timeout`. */
     outcome: string;
     exit: number;
-    // Schema 2: what the job actually cost (rusage of its process group).
+    // Schema 2: what the job actually cost. `peak_group_rss_kb` is the sum
+    // across its process group at its peak; `max_single_rss_kb` the largest
+    // one process — the gap between them is how parallel the job ran.
     peak_group_rss_kb?: number;
     max_single_rss_kb?: number;
     cpu_ms?: number;
+    est_rss_kb?: number;
+    est_millicores?: number;
+    repo?: string;
+    cmd_hash?: string;
+    finished_at_ms?: number;
+    /** The machine's readings when it was admitted. */
+    pressure?: Readings;
 }
 
 export interface Disk {
@@ -79,17 +95,28 @@ export interface Gate {
     min_free_disk_gb: number;
 }
 
-/** Schema 2: the machine budget admission packs jobs into. The effective
- * budget is `mem_kb` / `cores`; `scale` is the AIMD multiplier that grows while
- * pressure stays low and halves on a spike. */
+/** Schema 2: where the capacity budget stands. `scale` is the AIMD
+ * multiplier (+step while calm, ×0.5 on a gate signal).
+ * - `mem_pool_kb`: memory jobs may be admitted into, (available − reserve) ×
+ *   min(scale, mem_scale_max). Already effective; null when unreadable.
+ * - `mem_committed_kb`: what running jobs may still grow into, Σ(est − now).
+ * - `cpu_budget_millicores` (already scaled) and `cpu_used_millicores`: Σ est. */
 export interface Budget {
-    mem_kb: number;
-    mem_used_kb: number;
-    cores: number;
-    cores_used: number;
     scale: number;
-    scale_min?: number;
-    scale_max?: number;
+    mem_pool_kb: number | null;
+    mem_committed_kb: number;
+    cpu_budget_millicores: number;
+    cpu_used_millicores: number;
+}
+
+/** Schema 2: `config.budget` — only what this page reads. */
+export interface BudgetConfig {
+    enabled?: boolean;
+    cpu_factor?: number;
+    mem_reserve_gb?: number;
+    aimd_min?: number;
+    aimd_max?: number;
+    mem_scale_max?: number;
 }
 
 export interface Snapshot {
@@ -98,7 +125,7 @@ export interface Snapshot {
     /** Set when the OS has no queue (Windows): `{schema, unsupported}`. */
     unsupported?: string;
     dir: string;
-    config: { slots: { heavy: number; light: number }; gate: Gate };
+    config: { slots: { heavy: number; light: number }; gate: Gate; budget?: BudgetConfig };
     now_ms: number;
     running: JobInfo[];
     waiting: JobInfo[];
@@ -366,7 +393,7 @@ export function reasonHead(reason: string): string {
 export function reasonKind(reason: string): ReasonKind {
     const head = reasonHead(reason);
     if (/^lock |held by|building outside the queue/.test(head)) return 'lock';
-    if (/^budget/.test(head)) return 'budget';
+    if (/^(memory|cpu) budget/.test(head)) return 'budget';
     if (/busy|ahead|next in line/.test(head)) return 'line';
     return 'gate';
 }
@@ -436,24 +463,24 @@ export function appendSamples(prev: Sample[], add: Sample[], windowMs: number): 
 
 export interface BudgetSlice {
     job: JobInfo;
+    /** What admission reserved for it. */
     estKb: number;
-    /** Live usage when the queue samples it; otherwise the estimate. */
-    actualKb: number | null;
-    estCores: number;
-    actualCores: number | null;
+    /** Its process group's memory now; null until the first sample. */
+    nowKb: number | null;
+    /** What it may still grow into: est − now (never negative). */
+    committedKb: number;
+    millicores: number;
 }
 
-/** Each running job's slice of the memory and CPU budget, biggest first. */
+/** Each running job's slice of the budget, biggest estimate first. */
 export function budgetSlices(snap: Snapshot): BudgetSlice[] {
     return snap.running
-        .filter((j) => j.est_rss_kb != null || j.rss_kb != null)
-        .map((j) => ({
-            job: j,
-            estKb: j.est_rss_kb ?? j.rss_kb ?? 0,
-            actualKb: j.rss_kb ?? null,
-            estCores: j.est_cores ?? 0,
-            actualCores: j.cores_now ?? null,
-        }))
+        .filter((j) => j.est != null)
+        .map((j) => {
+            const estKb = j.est?.rss_kb ?? 0;
+            const nowKb = j.rss_now_kb ?? null;
+            return { job: j, estKb, nowKb, committedKb: Math.max(0, estKb - (nowKb ?? 0)), millicores: j.est?.millicores ?? 0 };
+        })
         .sort((a, b) => b.estKb - a.estKb);
 }
 
@@ -467,6 +494,8 @@ export interface LabelCost {
     runs: number;
     p50RunMs: number;
     p50PeakKb: number;
+    /** The largest single process, when known: the gap to the peak is parallelism. */
+    p50SingleKb: number | null;
     p50CpuMs: number;
     /** cpu time ÷ wall time: how many cores it keeps busy. */
     cores: number;
@@ -491,11 +520,13 @@ export function labelCosts(history: HistoryEntry[]): LabelCost[] {
         .map(([label, hs]) => {
             const p50RunMs = median(hs.map((h) => h.run_ms));
             const p50CpuMs = median(hs.map((h) => h.cpu_ms ?? 0));
+            const singles = hs.map((h) => h.max_single_rss_kb).filter((v): v is number => v != null);
             return {
                 label,
                 runs: hs.length,
                 p50RunMs,
                 p50PeakKb: median(hs.map((h) => h.peak_group_rss_kb ?? 0)),
+                p50SingleKb: singles.length ? median(singles) : null,
                 p50CpuMs,
                 cores: p50RunMs > 0 ? p50CpuMs / p50RunMs : 0,
             };

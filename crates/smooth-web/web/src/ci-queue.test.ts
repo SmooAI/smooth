@@ -252,11 +252,11 @@ test('reasons lead with the part that matters and say what kind of block it is',
     assert.equal(reasonKind('memory pressure critical / swap 91% / load 52.1 on 12 cores / 1/2 heavy busy'), 'gate');
 });
 
-test('budget slices come biggest first and fall back to the estimate', () => {
+test('budget slices come biggest first; committed is what a job may still grow into', () => {
     const s = snap({
         running: [
-            job(1, { slot: 1, est_rss_kb: 1_000, rss_kb: 1_200, est_cores: 2 }),
-            job(2, { slot: 2, est_rss_kb: 3_000, est_cores: 4 }),
+            job(1, { slot: 1, est: { rss_kb: 1_000, millicores: 2_000, from_runs: 5 }, rss_now_kb: 1_200 }),
+            job(2, { slot: 2, est: { rss_kb: 3_000, millicores: 4_000, from_runs: 0 }, rss_now_kb: 1_000 }),
             job(3, { class: 'light', slot: 1 }),
         ],
     });
@@ -266,15 +266,22 @@ test('budget slices come biggest first and fall back to the estimate', () => {
         [2, 1],
         'a job with no estimate has no slice',
     );
-    assert.equal(b[0].actualKb, null);
-    assert.equal(b[1].actualKb, 1_200);
+    assert.equal(b[0].committedKb, 2_000);
+    assert.equal(b[1].committedKb, 0, 'a job past its estimate commits nothing more');
+    assert.equal(b[1].nowKb, 1_200);
+    assert.equal(b[0].millicores, 4_000);
+});
+
+test("the queue's budget reasons read as budget", () => {
+    assert.equal(reasonKind('memory budget: needs 3.4 GB + 2.0 GB committed > 4.1 GB (scale 0.50) / 1/2 heavy busy'), 'budget');
+    assert.equal(reasonKind('cpu budget: needs 5.5 + 4.2 cores busy > 9.0 (scale 0.50) / 1/2 heavy busy'), 'budget');
 });
 
 test('cost profiles take medians over jobs that carry rusage', () => {
     const c = labelCosts([
-        hist('clippy', 10_000, { peak_group_rss_kb: 100, cpu_ms: 40_000 }),
-        hist('clippy', 30_000, { peak_group_rss_kb: 300, cpu_ms: 60_000 }),
-        hist('clippy', 20_000, { peak_group_rss_kb: 200, cpu_ms: 50_000 }),
+        hist('clippy', 10_000, { peak_group_rss_kb: 100, max_single_rss_kb: 40, cpu_ms: 40_000 }),
+        hist('clippy', 30_000, { peak_group_rss_kb: 300, max_single_rss_kb: 60, cpu_ms: 60_000 }),
+        hist('clippy', 20_000, { peak_group_rss_kb: 200, max_single_rss_kb: 50, cpu_ms: 50_000 }),
         hist('tsc', 5_000, { peak_group_rss_kb: 50, cpu_ms: 5_000 }),
         hist('old', 5_000),
     ]);
@@ -285,6 +292,8 @@ test('cost profiles take medians over jobs that carry rusage', () => {
     assert.equal(c[0].p50PeakKb, 200);
     assert.equal(c[0].p50RunMs, 20_000);
     assert.equal(c[0].cores, 2.5);
+    assert.equal(c[0].p50SingleKb, 50, 'the parallelism gap: 200 across the group, 50 in one process');
+    assert.equal(c[1].p50SingleKb, null);
 });
 
 test('the night has a calm, a storm and a drain', () => {
@@ -315,6 +324,8 @@ test('the night replay is deterministic, respects slots and locks, and holds in 
         peakLoad = Math.max(peakLoad, sa.readings.load1 ?? 0);
         held ||= sa.holds.length > 0;
         minScale = Math.min(minScale, sa.budget?.scale ?? 1);
+        for (const j of sa.running) assert.ok(j.est && j.est.millicores > 0, 'running jobs carry their estimate');
+        assert.ok((sa.budget?.mem_committed_kb ?? -1) >= 0);
     }
     assert.ok(peakLoad > 700, `load peaked at ${peakLoad}`);
     assert.ok(held, 'the gate held during the storm');

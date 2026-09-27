@@ -89,7 +89,8 @@ export class NightReplay {
     private ticket = 400;
     private start: number;
     private now: number;
-    private running: Array<JobInfo & { due: number; kind: Kind }> = [];
+    /** `cores` is how busy the job is right now; the snapshot does not carry it. */
+    private running: Array<JobInfo & { due: number; kind: Kind; cores: number }> = [];
     private waiting: Array<JobInfo & { kind: Kind }> = [];
     private history: HistoryEntry[] = [];
     private load = 24;
@@ -199,8 +200,11 @@ export class NightReplay {
         return `${n} ${cls} busy: ${parts.join('; ')}`;
     }
 
-    private budgetBase(): { memKb: number; cores: number } {
-        return { memKb: 16 * GB_KB, cores: 10 };
+    /** `config.budget` for the replay: the queue's defaults on this Mac. */
+    private static readonly BUDGET_CFG = { enabled: true, cpu_factor: 1.5, mem_reserve_gb: 4, aimd_min: 0.25, aimd_max: 1.5, mem_scale_max: 1 };
+
+    private est(k: Kind) {
+        return { rss_kb: Math.round(k.rssGb * GB_KB), millicores: Math.round(k.cores * 1000), from_runs: 20 };
     }
 
     private admit(): void {
@@ -226,16 +230,16 @@ export class NightReplay {
                 } else if (cls === 'heavy' && holds.length > 0 && busy.length > 0) {
                     reason = `${holds.join(' / ')} / ${summary}`;
                 } else if (cls === 'heavy' && this.running.some((r) => r.class === 'heavy')) {
-                    // Capacity-aware admission: a heavy job must fit the
-                    // budget, unless no other heavy job is running.
+                    // Capacity-aware admission, in the queue's words: a heavy
+                    // job must fit the budget unless no other heavy job runs.
                     const b = this.budget();
-                    const needKb = w.kind.rssGb * GB_KB;
-                    const freeKb = b.mem_kb - b.mem_used_kb;
-                    const freeCores = b.cores - b.cores_used;
-                    if (needKb > freeKb)
-                        reason = `budget: needs ${(needKb / GB_KB).toFixed(1)} GB, ${(Math.max(0, freeKb) / GB_KB).toFixed(1)} GB free / ${summary}`;
-                    else if (w.kind.cores > freeCores + 0.5)
-                        reason = `budget: needs ${w.kind.cores.toFixed(1)} cores, ${Math.max(0, freeCores).toFixed(1)} free / ${summary}`;
+                    const e = this.est(w.kind);
+                    const pool = b.mem_pool_kb ?? Infinity;
+                    const g = (kb: number) => (kb / GB_KB).toFixed(1);
+                    if (e.rss_kb + b.mem_committed_kb > pool)
+                        reason = `memory budget: needs ${g(e.rss_kb)} GB + ${g(b.mem_committed_kb)} GB committed > ${g(pool)} GB (scale ${b.scale.toFixed(2)}) / ${summary}`;
+                    else if (e.millicores + b.cpu_used_millicores > b.cpu_budget_millicores)
+                        reason = `cpu budget: needs ${(e.millicores / 1000).toFixed(1)} + ${(b.cpu_used_millicores / 1000).toFixed(1)} cores busy > ${(b.cpu_budget_millicores / 1000).toFixed(1)} (scale ${b.scale.toFixed(2)}) / ${summary}`;
                 }
                 if (reason) {
                     if (w.waiting_on?.split(' / ')[0] !== reason.split(' / ')[0]) w.waiting_on_since_ms = this.now;
@@ -258,10 +262,9 @@ export class NightReplay {
                     waiting_on: undefined,
                     waiting_on_since_ms: undefined,
                     blocked_by_ticket: undefined,
-                    est_rss_kb: Math.round(k.rssGb * GB_KB),
-                    est_cores: k.cores,
-                    rss_kb: Math.round(k.rssGb * GB_KB * 0.3),
-                    cores_now: k.cores * 0.5,
+                    est: this.est(k),
+                    rss_now_kb: Math.round(k.rssGb * GB_KB * 0.3),
+                    cores: k.cores * 0.5,
                     due: this.now + Math.round(k.ms * (0.6 + this.rand() * 0.9) * Math.min(1.8, 1 + Math.max(0, this.load / CORES - 4) * 0.05)),
                 });
             }
@@ -291,6 +294,9 @@ export class NightReplay {
                 peak_group_rss_kb: Math.round(peak),
                 max_single_rss_kb: Math.round(peak * (0.45 + this.rand() * 0.3)),
                 cpu_ms: Math.round(run * j.kind.cores * (0.8 + this.rand() * 0.4)),
+                est_rss_kb: j.est?.rss_kb,
+                est_millicores: j.est?.millicores,
+                finished_at_ms: this.now,
             });
         }
         if (this.history.length > 300) this.history.splice(0, this.history.length - 300);
@@ -298,45 +304,46 @@ export class NightReplay {
         if (this.rand() < p.arrivals * (ms / 1000)) this.arrive();
         // Running jobs ramp up to their working set.
         for (const r of this.running) {
-            r.rss_kb = Math.round((r.rss_kb ?? 0) + ((r.est_rss_kb ?? 0) * (0.8 + this.rand() * 0.5) - (r.rss_kb ?? 0)) * 0.12);
-            r.cores_now = (r.cores_now ?? 0) + ((r.est_cores ?? 0) * (0.7 + this.rand() * 0.5) - (r.cores_now ?? 0)) * 0.2;
+            const estKb = r.est?.rss_kb ?? 0;
+            r.rss_now_kb = Math.round((r.rss_now_kb ?? 0) + (estKb * (0.75 + this.rand() * 0.5) - (r.rss_now_kb ?? 0)) * 0.12);
+            r.cores += (r.kind.cores * (0.7 + this.rand() * 0.5) - r.cores) * 0.2;
         }
         // The machine: queued work plus everything outside the queue.
-        const inQueue = this.running.reduce((a, r) => a + (r.cores_now ?? 0), 0);
+        const inQueue = this.running.reduce((a, r) => a + r.cores, 0);
         const targetLoad = p.outsideLoad + inQueue * 1.4 + this.rand() * 6;
         this.load += (targetLoad - this.load) * 0.1;
-        const usedGb = this.running.reduce((a, r) => a + (r.rss_kb ?? 0) / GB_KB, 0);
+        const usedGb = this.running.reduce((a, r) => a + (r.rss_now_kb ?? 0) / GB_KB, 0);
         const targetAvail = Math.max(1.5, 42 - p.memPressure * 40 - usedGb * 1.2);
         this.memAvailPct += (targetAvail - this.memAvailPct) * 0.08;
         this.swapGb = Math.min(22.4, Math.max(8, this.swapGb + (this.memAvailPct < 10 ? 0.12 : -0.02) * (ms / 1000)));
         // AIMD: grow the budget while calm, halve it on a spike.
         const spike = this.holds().length > 0;
         if (spike && this.now - this.lastBackoff > 15_000) {
-            this.scale = Math.max(0.35, this.scale * 0.5);
+            this.scale = Math.max(NightReplay.BUDGET_CFG.aimd_min, this.scale * 0.5);
             this.lastBackoff = this.now;
         } else if (!spike && this.now % 5000 < ms) {
-            this.scale = Math.min(1.25, this.scale + 0.1);
+            this.scale = Math.min(NightReplay.BUDGET_CFG.aimd_max, this.scale + 0.1);
         }
         this.admit();
         return this.snapshot();
     }
 
+    /** The budget as the queue computes it (`budget::view`). */
     budget(): Budget {
-        const base = this.budgetBase();
+        const cfg = NightReplay.BUDGET_CFG;
+        const availKb = (RAM_GB * GB_KB * this.memAvailPct) / 100;
         return {
-            mem_kb: Math.round(base.memKb * this.scale),
-            mem_used_kb: this.running.reduce((a, r) => a + (r.est_rss_kb ?? 0), 0),
-            cores: +(base.cores * this.scale).toFixed(2),
-            cores_used: +this.running.reduce((a, r) => a + (r.est_cores ?? 0), 0).toFixed(2),
             scale: +this.scale.toFixed(3),
-            scale_min: 0.35,
-            scale_max: 1.25,
+            mem_pool_kb: Math.round(Math.max(0, availKb - cfg.mem_reserve_gb * GB_KB) * Math.min(this.scale, cfg.mem_scale_max)),
+            mem_committed_kb: this.running.reduce((a, r) => a + Math.max(0, (r.est?.rss_kb ?? 0) - (r.rss_now_kb ?? 0)), 0),
+            cpu_budget_millicores: Math.round(CORES * cfg.cpu_factor * this.scale * 1000),
+            cpu_used_millicores: this.running.reduce((a, r) => a + (r.est?.millicores ?? 0), 0),
         };
     }
 
     snapshot(): Snapshot {
-        const strip = (j: JobInfo & { kind: Kind; due?: number }): JobInfo => {
-            const { kind: _k, due: _d, ...rest } = j;
+        const strip = (j: JobInfo & { kind: Kind; due?: number; cores?: number }): JobInfo => {
+            const { kind: _k, due: _d, cores: _c, ...rest } = j;
             return rest;
         };
         return {
@@ -345,6 +352,7 @@ export class NightReplay {
             config: {
                 slots: { heavy: 2, light: 6 },
                 gate: { min_available_memory_pct: 5, max_memory_pressure_level: 1, max_swap_used_pct: 90, max_load_per_core: 4, min_free_disk_gb: 20 },
+                budget: NightReplay.BUDGET_CFG,
             },
             now_ms: this.now,
             running: this.running.map(strip),

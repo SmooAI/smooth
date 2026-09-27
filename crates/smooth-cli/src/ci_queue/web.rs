@@ -1,15 +1,18 @@
 //! `th ci-queue web` — the check queue as a live web page (SMOODEV-3371).
 //!
-//! Serves the queue page (`queue.html`, embedded in `th` through smooth-web)
-//! and streams the queue to it as Server-Sent Events, straight from this
-//! process: no Big Smooth daemon needed. Put it on a screen.
+//! One command that always works. When Big Smooth is running and serves the
+//! Queue tab, this opens that (`http://<daemon>/#queue`). Otherwise — or with
+//! `--serve` — it serves the same page itself (`queue.html`, embedded in `th`
+//! through smooth-web) and streams the queue to it as Server-Sent Events. Put
+//! it on a screen.
 //!
 //! - `GET /api/events`: an SSE stream of `snapshot` events, one a second.
 //!   The first carries the whole ten-minute sample window; later ones carry
 //!   only the sample taken since, if any. The payload is the same
 //!   `{snapshot, samples, error?}` smooth-daemon's `/api/ci-queue/status`
 //!   returns (`smooth_web::queue`).
-//! - `GET /api/status`: the same payload once, for scripts and curl.
+//! - `GET /api/status` and `GET /api/ci-queue/status` (the daemon's route, same
+//!   contract, `?since_ms=`): the same payload once, for polling and curl.
 //!
 //! One sampler serves every viewer, and it only reads the queue while
 //! someone is connected: an open tab costs one `snapshot` a second, however
@@ -55,6 +58,10 @@ pub struct WebArgs {
     /// the live queue. Nice when the machine is idle and you want to show it.
     #[arg(long)]
     pub demo: bool,
+
+    /// Serve the page from this `th` even when Big Smooth is running.
+    #[arg(long)]
+    pub serve: bool,
 }
 
 /// How often the sampler reads the queue while someone is watching.
@@ -95,6 +102,7 @@ struct Latest {
     snapshot: Option<serde_json::Value>,
     error: Option<String>,
     samples: Samples,
+    read_at: Option<std::time::Instant>,
 }
 
 /// Shared between the sampler and every connection.
@@ -128,6 +136,7 @@ impl Hub {
             .unwrap_or_else(|e| Err(format!("the queue reader crashed: {e}")));
         let payload = {
             let mut l = self.lock();
+            l.read_at = Some(std::time::Instant::now());
             let fresh = match read {
                 Ok(snap) => {
                     let sample = l.samples.record(&snap);
@@ -185,16 +194,30 @@ pub fn router(hub: Hub) -> Router {
     Router::new()
         .route("/api/events", get(events))
         .route("/api/status", get(status))
+        .route("/api/ci-queue/status", get(status))
         .with_state(hub)
         .merge(smooth_web::queue::queue_router())
 }
 
-async fn status(State(hub): State<Hub>) -> Json<serde_json::Value> {
-    if hub.full().is_none() {
+#[derive(Debug, serde::Deserialize)]
+struct StatusQuery {
+    #[serde(default)]
+    since_ms: u64,
+}
+
+/// One read, for polling and curl. A snapshot younger than a sampler tick is
+/// reused, so pollers share the sampler's reads like SSE viewers do.
+async fn status(State(hub): State<Hub>, axum::extract::Query(q): axum::extract::Query<StatusQuery>) -> Json<StatusResponse> {
+    let stale = hub.lock().read_at.is_none_or(|t| t.elapsed() >= EVERY);
+    if stale {
         hub.tick().await;
     }
-    let body = hub.full().unwrap_or_default();
-    Json(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
+    let l = hub.lock();
+    Json(StatusResponse {
+        snapshot: l.snapshot.clone(),
+        samples: l.samples.since(q.since_ms),
+        error: l.error.clone(),
+    })
 }
 
 async fn events(State(hub): State<Hub>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -249,17 +272,67 @@ pub fn page_url(addr: SocketAddr, demo: bool) -> String {
     }
 }
 
-/// Serve until Ctrl-C.
+/// The daemon Big Smooth advertises in `~/.smooth/daemon.addr`, if any.
+fn advertised_daemon() -> Option<String> {
+    let addr = std::fs::read_to_string(dirs_next::home_dir()?.join(".smooth").join("daemon.addr")).ok()?;
+    Some(addr.trim().to_string()).filter(|a| !a.is_empty())
+}
+
+/// Does the daemon at `addr` serve the Queue tab with a live queue? A daemon
+/// older than the tab (404), one whose `th` has no queue (no snapshot), or no
+/// daemon at all (refused, or slower than a second) means "serve it here".
+pub async fn daemon_serves_queue(addr: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() else {
+        return false;
+    };
+    let Ok(res) = client.get(format!("http://{addr}/api/ci-queue/status")).send().await else {
+        return false;
+    };
+    if !res.status().is_success() {
+        return false;
+    }
+    res.json::<serde_json::Value>()
+        .await
+        .is_ok_and(|v| v.get("snapshot").is_some_and(smooth_web::queue::is_snapshot))
+}
+
+/// Big Smooth's Queue tab on the daemon at `addr`.
+#[must_use]
+pub fn daemon_queue_url(addr: &str, demo: bool) -> String {
+    format!("http://{addr}/{}#queue", if demo { "?demo" } else { "" })
+}
+
+fn open_in_browser(url: &str) {
+    if let Err(e) = open::that(url) {
+        eprintln!("  could not open a browser ({e}); open the URL above.");
+    }
+}
+
+/// Open Big Smooth's Queue tab if it is up, else serve until Ctrl-C.
 ///
 /// # Errors
 /// When the address cannot be bound.
 pub fn run(queue: Queue, a: &WebArgs) -> Result<i32> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let hub = Hub::new(Arc::new(QueueSource { queue, cwd }));
-    let (host, port, open, demo) = (a.host, a.port, a.open, a.demo);
+    let (host, port, open, demo, serve) = (a.host, a.port, a.open, a.demo, a.serve);
     // `th`'s main is already async; the server runs on that runtime.
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async move {
+            // Sharing on the network is a serving decision, so --host serves too.
+            if !serve && host.is_loopback() {
+                if let Some(daemon) = advertised_daemon() {
+                    if daemon_serves_queue(&daemon).await {
+                        let url = daemon_queue_url(&daemon, demo);
+                        eprintln!("th ci-queue web: Big Smooth is running — {url}");
+                        eprintln!("  (`--serve` serves the page from this th instead)");
+                        if open {
+                            open_in_browser(&url);
+                        }
+                        return Ok(0);
+                    }
+                }
+            }
             let listener = bind(host, port).await?;
             let addr = listener.local_addr()?;
             let url = page_url(addr, demo);
@@ -268,9 +341,7 @@ pub fn run(queue: Queue, a: &WebArgs) -> Result<i32> {
                 eprintln!("  listening on {host}: anyone who can reach this machine can see the queue's paths and job labels.");
             }
             if open {
-                if let Err(e) = open::that(&url) {
-                    eprintln!("  could not open a browser ({e}); open the URL above.");
-                }
+                open_in_browser(&url);
             }
             tokio::spawn(hub.clone().run_sampler());
             // Open SSE connections never end on their own, so a graceful
@@ -392,6 +463,53 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_300)).await;
         assert!(fake.reads.load(Ordering::SeqCst) >= 1);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_daemons_route_answers_here_too_with_since_ms() {
+        let (hub, fake) = hub(false);
+        let json = get_json(router(hub.clone()), "/api/ci-queue/status").await;
+        assert_eq!(json["snapshot"]["schema"], 2);
+        assert_eq!(json["samples"].as_array().unwrap().len(), 1);
+        let t = json["samples"][0]["t_ms"].as_u64().unwrap();
+        let again = get_json(router(hub), &format!("/api/ci-queue/status?since_ms={t}")).await;
+        assert!(again["samples"].as_array().unwrap().is_empty(), "nothing newer than since_ms");
+        assert_eq!(fake.reads.load(Ordering::SeqCst), 1, "a poll inside a tick reuses the read");
+    }
+
+    /// A stand-in daemon on a free port answering `/api/ci-queue/status`.
+    async fn fake_daemon(status: StatusCode, body: serde_json::Value) -> String {
+        let app = Router::new().route(
+            "/api/ci-queue/status",
+            get(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_daemon_with_a_live_queue_tab_is_used() {
+        let addr = fake_daemon(StatusCode::OK, serde_json::json!({ "snapshot": { "running": [] }, "samples": [] })).await;
+        assert!(daemon_serves_queue(&addr).await);
+        assert_eq!(daemon_queue_url("127.0.0.1:8787", false), "http://127.0.0.1:8787/#queue");
+        assert_eq!(daemon_queue_url("127.0.0.1:8787", true), "http://127.0.0.1:8787/?demo#queue");
+    }
+
+    #[tokio::test]
+    async fn an_old_daemon_a_daemon_without_a_queue_or_no_daemon_means_serve_here() {
+        let old = fake_daemon(StatusCode::NOT_FOUND, serde_json::json!({})).await;
+        assert!(!daemon_serves_queue(&old).await, "older than the Queue tab");
+        let no_queue = fake_daemon(StatusCode::OK, serde_json::json!({ "snapshot": null, "samples": [], "error": "no ci-queue" })).await;
+        assert!(!daemon_serves_queue(&no_queue).await, "its th has no queue");
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone = free.local_addr().unwrap().to_string();
+        drop(free);
+        assert!(!daemon_serves_queue(&gone).await, "nothing listening");
     }
 
     #[tokio::test]
