@@ -13,6 +13,7 @@ mod boot_ui;
 /// macOS calendar setup driven by `th doctor --setup-calendar` (pearl th-94cc4a).
 #[cfg(target_os = "macos")]
 mod calendar_setup;
+mod ci_queue;
 mod claude;
 mod config;
 mod daemon_health;
@@ -114,6 +115,18 @@ enum Commands {
     /// that could not START posts nothing at all — that is not the same as a
     /// check that failed (pearl th-b27ed0).
     Attest(attest::AttestArgs),
+    /// Run a heavy check through the machine-wide, capacity-aware queue.
+    ///
+    /// Every heavy job on the machine (pre-commit typecheck, clippy, `th
+    /// attest`) takes one of N kernel-flock slots, waits its turn FIFO, waits
+    /// longer while memory, swap, load or disk is under pressure, and runs at
+    /// background QoS. `th ci-queue status` shows who is running and waiting
+    /// (SMOODEV-3355).
+    #[command(name = "ci-queue")]
+    CiQueue {
+        #[command(subcommand)]
+        cmd: Option<ci_queue::CiQueueCmd>,
+    },
     /// Smoo AI platform — everything that talks to smoo.ai lives here.
     ///
     /// `th smoo <resource> <verb>`, or just `smoo <resource> <verb>` — a
@@ -2127,6 +2140,7 @@ async fn main() -> Result<()> {
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Attest(args)) => attest::cmd(&args),
+        Some(Commands::CiQueue { cmd }) => ci_queue::cmd(cmd),
         Some(Commands::Harness { cmd }) => harness::cmd(cmd).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pkg { cmd }) => pkg::cmd(cmd),

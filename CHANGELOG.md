@@ -1,5 +1,43 @@
 # @smooai/smooth
 
+## 0.56.0
+
+### Minor Changes
+
+- 4ff6751: New `th ci-queue` command (SMOODEV-3355). It runs git-hook and CI checks through one queue shared by every session on the machine. Each class has kernel-flock slots, 2 for `heavy` and 6 for `light`, and waiters are served FIFO. New heavy jobs are held while memory, memory pressure, swap, load or free disk is over its threshold, except that the gate never holds when no other heavy job is running. Jobs run at background QoS in their own process group, and INT/TERM/HUP are forwarded to that group. A `--timeout` starts at admission and kills the whole group (exit 124). A `--max-wait` expiry exits 75, and nothing runs. `--lock NAME` (`cargo` resolves to the cargo target dir, and is added automatically for a bare `cargo` command) admits one job per shared resource and also defers to a cargo build started outside the queue. A job holding a lock runs at `nice`, never at background QoS, because Darwin background QoS can starve a lock holder and stall every job waiting on it. `th ci-queue status [--json]` shows running and waiting jobs, the pressure readings against their thresholds, and recent history. `th attest` now runs its local checks through the heavy queue. Config lives in `~/.smooth/ci-queue.toml`.
+
+## 0.55.0
+
+### Minor Changes
+
+- 2ad61d8: `th smoo admin members add | list | remove` (SMOODEV-3291): super-admin org membership without raw SQL. `add` takes `--email` or `--user-id` (exactly one). An email resolves client-side to one exact, case-insensitive match, so a typo errors instead of adding whoever a substring search returned first. `--org-id` is required, because these verbs act across tenants and the persisted active org is the wrong default. Writes print the org, user, role and host, then ask on a terminal. Without a terminal they refuse unless given `--yes`, and `--dry-run` previews. `add` is idempotent: an existing member, a 409, or `alreadyMember: true` all report "already a member". A 403 on any `/admin/*` call now says the command requires the super_admin role. `th smoo admin config values delete` now goes through the same `--dry-run`/`--yes` gate as the other remote deletes; it was the last ungated one. PR checks now build and test the `admin` feature, which CI had never compiled.
+- f65442b: SmoothFlow is now an MCP server (th-1efb59). `th mcp serve` gains `flow_*` tools, so Claude Desktop, Claude Code, Codex or Cursor can list the fleet, start a Claude Code, Codex or shell session in any repo, send a prompt and wait for the turn, answer approvals (with your consent), fan out, and close work out. `th mcp install --harness claude-desktop` registers the server with Claude Desktop on macOS, Windows or Linux. The config entry uses the absolute path to `th`, because Claude Desktop starts with a minimal PATH. The daemon gains HTTP fan-out routes (`POST /api/flow/fanout`, `/fanout/{id}/pick`). `th flow` and the new tools now find the flow engine the way the hooks do, via `flow.addr` first, so they see the same fleet the SmoothFlow app shows.
+- 4000a34: smooth-agent plugin: every Claude Code session now listens for agent mail by default (SMOODEV-3356). SessionStart tells the session to arm the `th msg watch --once` background watcher, which wakes it even while idle; a new `mail-guard.sh` hook surfaces unread mail on each prompt and, before the session goes idle, blocks once to handle unread mail or re-arm a lapsed watcher (loop-guarded, skipped for `claude -p`/SDK sessions, opt out with `SMOOTH_MAIL_WATCH=0`). Also fixes the MCP `agent_identity` rename leaving the session's recorded handle stale, which made `th agent whoami`, bare `th msg`, and the watcher resolve to the old, unregistered handle.
+- 0bbdf58: Big Smooth, `th` and every model picker now run on the `gpt-6-luna` family or Groq (SMOODEV-3342 model policy):
+
+  - **Slot defaults:** reasoning `deepseek-v4-pro` → `gpt-6-luna-high`, reviewing `minimax-m2.7-direct` → `gpt-6-luna`, summarize `gemini-2.5-flash` → `gpt-6-luna`, fast `gemini-3.5-flash` → `gpt-6-luna-fast`. Coding/default stay `gpt-6-luna`; the judge stays `groq-gpt-oss-120b`.
+  - **Pinned configs move too.** A `providers.json` slot on the Smoo gateway that still holds a retired default (`gpt-5.6-luna`, `deepseek-v4-flash`, `deepseek-v4-pro`, `minimax-m2.7-direct`, `gemini-2.5-flash`, `gemini-3.5-flash`, `gemini-2.5-flash-lite`) is rewritten on load and saved back. Changing the default did not reach these configs before, which is why `th` kept sending `gpt-5.6-luna` after the switch to `gpt-6-luna`. Slots on other providers are left alone. Big Smooth now runs this migration at startup; before, it read `providers.json` raw.
+  - **The model picker offers only** `gpt-6-luna`, `gpt-6-luna-fast`, `gpt-6-luna-high`, `gpt-6-sol` (the one premium, explicit high-quality choice), `groq-gpt-oss-120b`, `groq-gpt-oss-20b` and `groq-qwen3.8-27b`. `docs/model-scores.json` is filtered to that set. Offered models without a bench score are listed as "not yet benched", never with an invented number. The full bench board moves to `docs/model-leaderboard.json`.
+  - `th model login`'s gateway catalog, `th`'s agentic-harness default and the `smooth-bench` defaults (model, driver, judge) move from `deepseek-v4-flash` to `gpt-6-luna`. The weekly leaderboard now scores the offered set. The daemon's last-resort model is `gpt-6-luna` instead of `claude-haiku-4-5`.
+
+- d18a738: New `smoo email` commands and matching `th mcp serve` tools for email deliverability and signatures (SMOODEV-3272): `check` grades any domain's SPF, DKIM, DMARC, MX, blocklist, MTA-STS and BIMI records with what to change; `dmarc`, `sources` and `tls` read the DMARC and TLS reports for your org's domains; `signatures` shows which domains sign and who is signed. They call the same API as the web app, as you.
+
+### Patch Changes
+
+- 72b0400: `th attest`'s remote target cap is raised from 60,000 to 250,000 `debug/deps` entries (th-86de4d follow-up). Measured on smoo-hub: one cold smooai rust build leaves about 62,000 entries, which was already over the old cap. So every run would have wiped the target and rebuilt cold, taking about 61 minutes. The new cap allows about four builds' worth and still lists in seconds, far below the millions of entries that stalled rustc.
+- bcebc73: SmoothFlow tabs, ⌘W and the default directory (th-96fcb7):
+
+  - **⌘W on the last pane no longer closes the window.** It empties the view, and the session keeps running in the fleet.
+  - **Tabs have real titles:** the pearl, else the session title, else the folder name. They no longer read `/`.
+  - **New sessions default to your home folder, not `/`.** An app launched from Finder or the Dock inherits `/` as its working directory, and the daemon used it as the workspace. A daemon whose working directory is `/` now uses `$HOME`, and SmoothFlow starts its daemon in `$HOME`.
+
+- 4075e64: SmoothFlow's engine can tell whether a process is alive on Windows (th-64d4ab, the first step of the cross-platform plan). Process liveness called `ps`, which Windows doesn't have, so every agent read as dead and supervision would have kept resuming the whole fleet. On Windows the engine now reads the process table with `sysinfo`, still matching the start time so a recycled pid never passes for the agent that died, and ends a process tree with `taskkill /T`, then `/F` after the grace period. macOS and Linux are unchanged.
+- f35591a: SmoothFlow 0.2.8:
+
+  - ⌘W on the last pane empties the view instead of closing the window.
+  - Tabs have real names instead of `/`.
+  - New sessions start in your home folder when SmoothFlow is launched from Finder or the Dock (th-96fcb7).
+
 ## 0.54.2
 
 ### Patch Changes
