@@ -2,7 +2,7 @@
   "spec": "SmoothFlow-Client-Spec §4 fleet sidebar",
   "cases": [
     {
-      "name": "groups by project in first-seen order, shells together; counts",
+      "name": "groups by project in first-seen order, shells last; counts",
       "input": {
         "sessions": [
           {
@@ -80,13 +80,6 @@
             ]
           },
           {
-            "project": "shells",
-            "sessions": [
-              "b",
-              "e"
-            ]
-          },
-          {
             "project": "smooai",
             "sessions": [
               "c"
@@ -98,12 +91,61 @@
               "f",
               "g"
             ]
+          },
+          {
+            "project": "shells",
+            "sessions": [
+              "b",
+              "e"
+            ]
           }
         ],
         "counts": {
           "working": 2,
           "needs_you": 2,
           "done": 1,
+          "idle": 1
+        }
+      }
+    },
+    {
+      "name": "only shells is one shells group",
+      "input": {
+        "sessions": [
+          {
+            "id": "x",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/a",
+            "worktree": "",
+            "state": "idle",
+            "unread": false
+          },
+          {
+            "id": "y",
+            "kind": "shell",
+            "title": "",
+            "project": "/w/b",
+            "worktree": "",
+            "state": "working",
+            "unread": false
+          }
+        ]
+      },
+      "expected": {
+        "groups": [
+          {
+            "project": "shells",
+            "sessions": [
+              "x",
+              "y"
+            ]
+          }
+        ],
+        "counts": {
+          "working": 1,
+          "needs_you": 0,
+          "done": 0,
           "idle": 1
         }
       }

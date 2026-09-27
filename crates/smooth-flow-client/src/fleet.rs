@@ -11,14 +11,22 @@ pub struct Group {
     pub sessions: Vec<String>,
 }
 
+/// The name of the group plain shells are gathered under.
+pub const SHELLS: &str = "shells";
+
 /// Sessions grouped by project name, in first-seen order, with plain shells
-/// gathered under "shells" wherever they first appear. `ordered` is the
-/// fleet's order.
+/// gathered under [`SHELLS`] **last**, so a shell never splits the project
+/// groups (th-a14327). `ordered` is the fleet's order.
 #[must_use]
 pub fn grouped(ordered: &[Session]) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
+    let mut shells: Vec<String> = Vec::new();
     for s in ordered {
-        let key = if s.kind == "shell" { "shells".to_string() } else { s.project_name() };
+        if s.kind == "shell" {
+            shells.push(s.id.clone());
+            continue;
+        }
+        let key = s.project_name();
         match groups.iter_mut().find(|g| g.project == key) {
             Some(g) => g.sessions.push(s.id.clone()),
             None => groups.push(Group {
@@ -26,6 +34,12 @@ pub fn grouped(ordered: &[Session]) -> Vec<Group> {
                 sessions: vec![s.id.clone()],
             }),
         }
+    }
+    if !shells.is_empty() {
+        groups.push(Group {
+            project: SHELLS.to_string(),
+            sessions: shells,
+        });
     }
     groups
 }
@@ -68,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_by_project_in_first_seen_order_with_shells_together() {
+    fn groups_by_project_in_first_seen_order_with_shells_last() {
         let fleet = [
             s("a", "claude", "/w/smooth", SessionState::Working),
             s("b", "shell", "/w/smooth", SessionState::Idle),
@@ -81,7 +95,7 @@ mod tests {
             .iter()
             .map(|g| (g.project.as_str(), g.sessions.iter().map(String::as_str).collect()))
             .collect();
-        assert_eq!(shape, vec![("smooth", vec!["a", "d"]), ("shells", vec!["b", "e"]), ("smooai", vec!["c"])]);
+        assert_eq!(shape, vec![("smooth", vec!["a", "d"]), ("smooai", vec!["c"]), ("shells", vec!["b", "e"])]);
         assert_eq!(
             counts(&fleet),
             Counts {
@@ -91,5 +105,14 @@ mod tests {
                 idle: 1
             }
         );
+    }
+
+    #[test]
+    fn no_shells_no_shells_group_and_only_shells_is_one_group() {
+        assert!(grouped(&[s("a", "claude", "/w/x", SessionState::Idle)]).iter().all(|g| g.project != SHELLS));
+        let g = grouped(&[s("a", "shell", "/w/x", SessionState::Idle), s("b", "shell", "/w/y", SessionState::Idle)]);
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].project.as_str(), g[0].sessions.len()), (SHELLS, 2));
+        assert!(grouped(&[]).is_empty());
     }
 }
