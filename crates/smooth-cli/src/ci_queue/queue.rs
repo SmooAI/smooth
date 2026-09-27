@@ -192,7 +192,7 @@ impl Queue {
     }
 
     /// A queue at `dir` with explicit config and probe, ignoring `NESTED_ENV`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn at(dir: PathBuf, config: Config, probe: Arc<dyn Probe>) -> Self {
         Self {
             dir,
@@ -204,7 +204,7 @@ impl Queue {
     }
 
     /// Pin the cargo target dir instead of resolving the machine's.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     #[must_use]
     pub fn with_cargo_target(mut self, dir: PathBuf) -> Self {
         self.cargo_target = Some(dir);
@@ -277,6 +277,12 @@ impl Queue {
             if let Some(outer) = std::env::var(NESTED_ENV).ok().filter(|v| !v.is_empty()) {
                 return Ok(Admission::nested(req, outer));
             }
+        }
+        // Unix only: the queue leans on flock(2) semantics (advisory, readable
+        // while held) and process groups. Windows' LockFileEx is mandatory — a
+        // held ticket cannot even be read — so there the job runs unqueued.
+        if !cfg!(unix) {
+            return Ok(Admission::nested(req, String::new()));
         }
         self.ensure_dirs()?;
         let started = Instant::now();
@@ -833,7 +839,7 @@ pub fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;

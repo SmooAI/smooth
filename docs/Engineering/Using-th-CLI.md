@@ -1680,6 +1680,12 @@ poll_ms = 1000       # how often a waiter re-checks
 note_every_secs = 30 # how often it prints its waiting line
 ```
 
+**Unix only.** The queue relies on `flock(2)` semantics: the locks are
+advisory, and a held file can still be read. It also relies on process
+groups. Windows' `LockFileEx` is mandatory, so another process cannot even
+read a held file. On Windows, `run` therefore executes the job directly,
+unqueued, and says so on stderr. `status` also says so.
+
 `SMOOTH_CI_QUEUE_DIR` and `SMOOTH_CI_QUEUE_CONFIG` relocate the queue and its
 config, which is useful for tests. History is `~/.smooth/ci-queue/history.jsonl`,
 one line per finished job with its wait and run durations.

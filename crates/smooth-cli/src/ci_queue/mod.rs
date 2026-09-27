@@ -9,7 +9,8 @@
 //! waits longer while the machine is under memory, swap, load or disk
 //! pressure, and then runs at background QoS.
 //!
-//! There is no daemon. Coordination is kernel `flock`s on files under
+//! Unix only: on Windows `run` executes the job directly, unqueued, and says
+//! so. There is no daemon. Coordination is kernel `flock`s on files under
 //! `~/.smooth/ci-queue/` (see `queue`), so a crashed or `kill -9`'d job
 //! releases its slot the instant it dies.
 //!
@@ -134,6 +135,9 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         }
     };
     let label = a.label.clone().unwrap_or_else(|| default_label(&a.cmd));
+    if !cfg!(unix) {
+        eprintln!("th ci-queue: the queue is Unix-only (it relies on flock and process groups) — running {label} directly, unqueued");
+    }
     let max_wait = Duration::from_secs(a.max_wait.unwrap_or(q.config.run.max_wait_secs));
     let locks = job_locks(q, &a.locks, &a.cmd, &cwd);
     let qos = a.qos.unwrap_or(q.config.run.qos).effective(!locks.is_empty());
@@ -215,6 +219,10 @@ fn default_label(cmd: &[OsString]) -> String {
 }
 
 fn status(q: &Queue, a: &StatusArgs) -> Result<i32> {
+    if !cfg!(unix) {
+        println!("th ci-queue is Unix-only (it relies on flock and process groups). On this OS `run` executes jobs directly and nothing is queued.");
+        return Ok(0);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let snap = q.snapshot(a.history, &cwd)?;
     if a.json {
@@ -376,7 +384,7 @@ fn render(s: &queue::Snapshot) -> String {
     o
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
