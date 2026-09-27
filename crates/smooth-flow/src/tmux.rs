@@ -19,6 +19,10 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, Context, Result};
 use smooth_tmux::TmuxDriver;
 
+// The host-neutral pane types live with the host seam (th-64d4ab); tmux
+// produces them.
+pub use crate::host::{PaneDeath, PaneMeta};
+
 /// The tmux socket name every flow session lives on.
 pub const FLOW_SOCKET: &str = "smooth-flow";
 
@@ -268,15 +272,6 @@ pub fn pane_pid(socket: &str, session: &str) -> Result<u32> {
     s.trim().parse::<u32>().with_context(|| format!("pane_pid `{s}`"))
 }
 
-/// Terminal state a scrape rule may read (th-e77603): the OSC 0/2 title, the
-/// alternate screen and the cursor row.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PaneMeta {
-    pub title: String,
-    pub alternate_on: bool,
-    pub cursor_y: Option<usize>,
-}
-
 /// The format [`pane_meta`] asks for. The title goes LAST so a `|` inside it
 /// survives the split; no TAB (tmux turns one into `_` without a UTF-8 locale).
 const META_FORMAT: &str = "#{alternate_on}|#{cursor_y}|#{pane_title}";
@@ -297,19 +292,6 @@ pub fn parse_pane_meta(line: &str) -> PaneMeta {
 /// When the session is gone or tmux fails.
 pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
     Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
-}
-
-/// How a dead pane's process ended, as tmux reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneDeath {
-    /// Exited with this status.
-    Code(i32),
-    /// Killed by this signal. `0` when tmux names one this table doesn't
-    /// know. tmux 3.3 prints a number, 3.5 a name (`term`, `kill`).
-    Signal(i32),
-    /// The pty is closed but tmux has no status or signal for the process
-    /// yet: it has not reaped it (th-7ff336). This is NOT an exit. Ask again.
-    Unreaped,
 }
 
 const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";

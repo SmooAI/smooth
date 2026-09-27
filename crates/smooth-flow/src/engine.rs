@@ -3,7 +3,7 @@
 //! One `Engine` per daemon (cheaply cloneable — `Arc` inside). Every state
 //! change is written to the store and then broadcast as a [`ServerFrame`]
 //! to every subscriber (the daemon's WS handler fans it out per client).
-//! Methods are synchronous and may shell out (tmux, git, `th`); the daemon
+//! Methods are synchronous and may shell out (the session host, git, `th`); the daemon
 //! calls the slow ones from `spawn_blocking`. The supervision tick
 //! ([`Engine::supervise_tick`]) is driven by a tokio interval in the host.
 
@@ -22,13 +22,14 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::harness::{FlowEventName, HarnessInfo, Manifest, Prefs, PromptAs, Registry, ResumeMode, ScrapeRules, SessionIdMode, StateSource, Vars};
 use crate::hook_auth::HookCaller;
+use crate::host::{AttachStream, Launch, PaneDeath, SessionHost, SessionRef};
 use crate::protocol::{
     hook_event_text, map_hook_event, permission_detail, permission_reply, CandidateSpec, CloseOutcome, DaemonInfo, Decision, EventKind, FlowEvent, HookEvent,
     HookOutcome, ServerFrame,
 };
-use crate::pty::{OnOutput, PtyAttach};
+use crate::pty::OnOutput;
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
-use crate::{limit, proc, tmux};
+use crate::{limit, tmux};
 
 /// Between the keys of a multi-key approval (`Down`, `Down`, `Enter`): a TUI
 /// redraws its selection between presses. The gap the live runs against the
@@ -91,6 +92,9 @@ pub struct EngineConfig {
     /// directory picker (th-145e6b). `None` (the default) indexes nothing:
     /// tests and scratch engines must not walk a real `$HOME`.
     pub repo_root: Option<PathBuf>,
+    /// What runs the sessions (th-64d4ab). [`crate::host::TmuxHost`] by
+    /// default; tests inject an in-memory host.
+    pub host: Arc<dyn SessionHost>,
 }
 
 impl EngineConfig {
@@ -107,6 +111,7 @@ impl EngineConfig {
             daemon_url: None,
             harness_doctor: false,
             repo_root: None,
+            host: crate::host::default_host(),
         }
     }
 }
@@ -123,7 +128,8 @@ pub struct NewRequest {
     pub title: Option<String>,
     pub model: Option<String>,
     pub fan_out_id: Option<String>,
-    /// The tmux socket to create the session on (default: [`tmux::socket_name`]).
+    /// The tmux socket to create the session on (default: the host's
+    /// [`SessionHost::default_socket`]).
     pub tmux_socket: Option<String>,
 }
 
@@ -256,18 +262,18 @@ impl PaneExit {
 }
 
 /// Settle a dead pane's exit: tmux's status or signal, else the code the pane
-/// wrapper recorded ([`tmux::wrapped_command_env`]), else, once
+/// wrapper recorded ([`SessionHost::recorded_exit`]), else, once
 /// [`EXIT_STATUS_WAIT`] has passed, [`PaneExit::Unknown`]. Never `-1`.
 ///
 /// `None` means "not yet": the pane is marked in `pending` and re-checked on
 /// the next supervision tick. Nothing here waits, so one pane whose status
 /// is late never holds up another session's supervision.
-fn settle_exit(pending: &mut HashMap<String, Instant>, id: &str, tmux: tmux::PaneDeath, recorded: Option<i32>, now: Instant) -> Option<PaneExit> {
-    let settled = match (tmux, recorded) {
-        (tmux::PaneDeath::Code(c), _) | (_, Some(c)) => Some(PaneExit::from_code(c)),
+fn settle_exit(pending: &mut HashMap<String, Instant>, id: &str, death: PaneDeath, recorded: Option<i32>, now: Instant) -> Option<PaneExit> {
+    let settled = match (death, recorded) {
+        (PaneDeath::Code(c), _) | (_, Some(c)) => Some(PaneExit::from_code(c)),
         // The wrapper itself was killed, so it wrote nothing: a signal death.
-        (tmux::PaneDeath::Signal(signal), None) => Some(PaneExit::Signal { signal, code: None }),
-        (tmux::PaneDeath::Unreaped, None) => None,
+        (PaneDeath::Signal(signal), None) => Some(PaneExit::Signal { signal, code: None }),
+        (PaneDeath::Unreaped, None) => None,
     };
     if let Some(exit) = settled {
         pending.remove(id);
@@ -308,6 +314,8 @@ struct Inner {
     ptys: Mutex<HashMap<String, Bridge>>,
     /// Generation for the next bridge, so an EOF only evicts its own entry.
     pty_gen: std::sync::atomic::AtomicU64,
+    /// What runs the sessions (th-64d4ab).
+    host: Arc<dyn SessionHost>,
     /// Test seam: runs in `pty_for` between the unlocked miss and the locked
     /// re-check — exactly where two attaches used to both decide to spawn.
     #[cfg(test)]
@@ -377,7 +385,7 @@ const HEALTH_TTL: Duration = Duration::from_secs(120);
 /// A live PTY bridge and the generation it was created under.
 struct Bridge {
     generation: u64,
-    pty: Arc<PtyAttach>,
+    pty: Arc<dyn AttachStream>,
 }
 
 /// The SmoothFlow engine handle.
@@ -435,9 +443,10 @@ fn th(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// The tmux socket a session lives on. Rows from before th-d33afa carry no
-/// socket and fall back to the daemon's default.
-fn socket_of(s: &Session) -> String {
-    s.tmux_socket.clone().unwrap_or_else(tmux::socket_name)
+/// socket and fall back to the daemon's default (`default_socket`, the
+/// host's [`SessionHost::default_socket`]).
+fn socket_of(s: &Session, default_socket: &str) -> String {
+    s.tmux_socket.clone().unwrap_or_else(|| default_socket.to_string())
 }
 
 /// Whether this daemon owns (supervises) `s` — th-4f7866. A row is owned by
@@ -447,12 +456,12 @@ fn socket_of(s: &Session) -> String {
 /// (the default `th up` daemon + the SmoothFlow app's child, or an orphaned
 /// instance) otherwise each declare the other's live panes "process vanished"
 /// and race to relaunch them.
-fn owned_here(s: &Session) -> bool {
-    s.owner.clone().unwrap_or_else(|| socket_of(s)) == tmux::socket_name()
+fn owned_here(s: &Session, default_socket: &str) -> bool {
+    s.owner.clone().unwrap_or_else(|| socket_of(s, default_socket)) == default_socket
 }
 
-/// `(socket, tmux session)` of a launched session.
-fn pane(s: &Session) -> Result<(String, String)> {
+/// The host session of a launched session.
+fn pane(s: &Session, default_socket: &str) -> Result<SessionRef> {
     if s.adopted {
         bail!(
             "session {} was adopted from a plain terminal (th-c103c1) — SmoothFlow never spawned its PTY, so there is no pane to attach; drive it where it is running",
@@ -460,7 +469,7 @@ fn pane(s: &Session) -> Result<(String, String)> {
         );
     }
     let t = s.tmux_session.clone().ok_or_else(|| anyhow!("session {} has no tmux session", s.id))?;
-    Ok((socket_of(s), t))
+    Ok(SessionRef::new(socket_of(s, default_socket), t))
 }
 
 /// The main checkout for `dir` (git-common-dir's parent — the pearls rule),
@@ -765,6 +774,7 @@ impl Engine {
                 tx,
                 ptys: Mutex::new(HashMap::new()),
                 pty_gen: std::sync::atomic::AtomicU64::new(0),
+                host: cfg.host,
                 #[cfg(test)]
                 pty_race_hook: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
@@ -798,6 +808,22 @@ impl Engine {
     /// to a real CLI on the machine.
     pub fn set_resolve_env(&self, home: PathBuf, path: std::ffi::OsString) {
         *self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((home, path));
+    }
+
+    /// The session host (th-64d4ab).
+    fn host(&self) -> &dyn SessionHost {
+        self.inner.host.as_ref()
+    }
+
+    /// The host namespace new sessions go in, and the identity this engine
+    /// supervises under ([`owned_here`]).
+    fn default_socket(&self) -> String {
+        self.host().default_socket()
+    }
+
+    /// The host session of a launched session (see [`pane`]).
+    fn pane(&self, s: &Session) -> Result<SessionRef> {
+        pane(s, &self.default_socket())
     }
 
     /// `m`'s executable: [`Manifest::resolve_binary`], or against the
@@ -1128,7 +1154,7 @@ impl Engine {
     /// The exit code this launch's wrapper recorded, if any. Keyed by the
     /// row's pane pid, so an earlier launch's file never answers.
     fn recorded_exit(&self, s: &Session) -> Option<i32> {
-        tmux::read_exit_file(&tmux::exit_file(&self.exit_prefix(&s.id), s.pid?))
+        self.host().recorded_exit(&self.exit_prefix(&s.id), s.pid?)
     }
 
     /// Remove every exit-code file (and half-written temp) of session `id`,
@@ -1142,15 +1168,7 @@ impl Engine {
     /// fresh launch, which is exactly when the wait must go.
     fn clear_exit_files(&self, id: &str) {
         self.rt().exit_pending.remove(id);
-        let Ok(entries) = std::fs::read_dir(&self.inner.exit_dir) else { return };
-        let prefix = format!("{id}.");
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(&prefix) && (name.ends_with(".exit") || name.ends_with(".exit.tmp")) {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
+        self.host().clear_recorded_exits(&self.exit_prefix(id));
     }
 
     /// Subscribe to every broadcast frame.
@@ -1344,8 +1362,8 @@ impl Engine {
                 agent_session_id: agent_session_id.clone(),
                 argv: argv.clone(),
                 tmux_session: None,
-                tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(tmux::socket_name)),
-                owner: Some(tmux::socket_name()),
+                tmux_socket: Some(req.tmux_socket.clone().unwrap_or_else(|| self.default_socket())),
+                owner: Some(self.default_socket()),
                 fan_out_id: req.fan_out_id.clone(),
                 adopted: false,
             })
@@ -1381,13 +1399,13 @@ impl Engine {
         Ok(session)
     }
 
-    /// Launch `argv` in the session's tmux session (named after the id),
+    /// Launch `argv` in the session's host session (named after the id),
     /// record pid + start time, broadcast.
     fn launch(&self, session: &Session, argv: &[String], env: &[(String, String)]) -> Result<Session> {
         let tmux_name = session.id.clone();
-        let sock = socket_of(session);
-        if tmux::session_alive(&sock, &tmux_name) {
-            tmux::kill_session(&sock, &tmux_name);
+        let target = SessionRef::new(socket_of(session, &self.default_socket()), tmux_name.clone());
+        if self.host().alive(&target) {
+            self.host().kill_session(&target);
         }
         let mut env = env.to_vec();
         if session.kind.is_agent() {
@@ -1402,8 +1420,16 @@ impl Engine {
         self.clear_exit_files(&session.id);
         let _ = std::fs::create_dir_all(&self.inner.exit_dir);
         let prefix = self.exit_prefix(&session.id);
-        let pid = tmux::launch_with(&sock, &tmux_name, Path::new(&session.worktree), argv, &env, Some(&prefix))?;
-        let start = proc::start_time(pid);
+        let pid = self.host().launch(
+            &target,
+            &Launch {
+                cwd: Path::new(&session.worktree),
+                argv,
+                env: &env,
+                exit_prefix: Some(&prefix),
+            },
+        )?;
+        let start = self.host().process_start(pid);
         self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
         if let Some(agent) = &session.agent_session_id {
             self.rt().claims.insert(agent.clone(), (pid, Instant::now()));
@@ -1426,10 +1452,10 @@ impl Engine {
     /// attach; the checks that shell out to tmux or read the store run
     /// before it is taken. A bridge whose client already exited is replaced
     /// rather than handed out.
-    fn pty_for(&self, id: &str, cols: u16, rows: u16, attaching: bool) -> Result<Arc<PtyAttach>> {
-        let claim = |pty: &Arc<PtyAttach>| {
+    fn pty_for(&self, id: &str, cols: u16, rows: u16, attaching: bool) -> Result<Arc<dyn AttachStream>> {
+        let claim = |pty: &Arc<dyn AttachStream>| {
             if attaching {
-                pty.clients.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                pty.clients().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             pty.clone()
         };
@@ -1437,8 +1463,8 @@ impl Engine {
             return Ok(claim(&b.pty));
         }
         let session = self.require(id)?;
-        let (sock, tmux_name) = pane(&session)?;
-        if !tmux::session_alive(&sock, &tmux_name) {
+        let target = self.pane(&session)?;
+        if !self.host().alive(&target) {
             bail!("session {id} is not running");
         }
         #[cfg(test)]
@@ -1474,7 +1500,7 @@ impl Engine {
                 data_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
             });
         });
-        let pty = PtyAttach::spawn(&tmux::attach_argv(&sock, &tmux_name), cols, rows, on_output)?;
+        let pty = self.host().attach(&target, cols, rows, on_output)?;
         let out = claim(&pty);
         if let Some(stale) = ptys.insert(id.to_string(), Bridge { generation, pty }) {
             // Only a bridge whose client already exited can be here.
@@ -1513,7 +1539,7 @@ impl Engine {
     pub fn detach(&self, id: &str) {
         let mut ptys = self.lock_ptys();
         if let Some(b) = ptys.get(id) {
-            let left = b.pty.clients.fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
+            let left = b.pty.clients().fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
             if left == 0 {
                 if let Some(b) = ptys.remove(id) {
                     b.pty.close();
@@ -1527,10 +1553,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown/not running or the PTY is closed.
     pub fn input(&self, id: &str, data: &[u8]) -> Result<()> {
-        let (cols, rows) = pane(&self.require(id)?)
-            .ok()
-            .and_then(|(k, t)| tmux::pane_size(&k, &t).ok())
-            .unwrap_or((120, 40));
+        let (cols, rows) = self.pane(&self.require(id)?).ok().and_then(|p| self.host().size(&p).ok()).unwrap_or((120, 40));
         self.pty_for(id, cols, rows, false)?.write(data)
     }
 
@@ -1548,19 +1571,19 @@ impl Engine {
     /// When the session is unknown or tmux refuses.
     pub fn send(&self, id: &str, text: &str) -> Result<()> {
         let s = self.require(id)?;
-        let (k, t) = pane(&s)?;
+        let p = self.pane(&s)?;
         // The manifest's [steer] says which key submits and how long to wait
         // after the paste for it (th-b00115); a shell or unknown kind gets the
         // plain paste + Enter.
         match self.registry().get(s.kind.as_str()).map(|m| m.steer.clone()) {
             Some(steer) => {
-                tmux::paste_text(&k, &t, text)?;
+                self.host().paste(&p, text)?;
                 if steer.submit_delay_ms > 0 {
                     std::thread::sleep(Duration::from_millis(steer.submit_delay_ms));
                 }
-                tmux::send_key(&k, &t, &steer.submit_key)?;
+                self.host().send_key(&p, &steer.submit_key)?;
             }
-            None => tmux::send_text(&k, &t, text)?,
+            None => self.host().send_text(&p, text)?,
         }
         self.event(id, EventKind::User, text);
         Ok(())
@@ -1574,8 +1597,7 @@ impl Engine {
     /// When the session is unknown or tmux refuses.
     pub fn send_key(&self, id: &str, key: &str) -> Result<()> {
         let s = self.require(id)?;
-        let (k, t) = pane(&s)?;
-        tmux::send_key(&k, &t, key)
+        self.host().send_key(&self.pane(&s)?, key)
     }
 
     /// `flow.snapshot`: plain-text visible pane.
@@ -1584,13 +1606,13 @@ impl Engine {
     /// When the session is unknown or tmux refuses.
     pub fn snapshot(&self, id: &str) -> Result<ServerFrame> {
         let s = self.require(id)?;
-        let (k, t) = pane(&s)?;
-        let (cols, rows) = tmux::pane_size(&k, &t)?;
+        let p = self.pane(&s)?;
+        let (cols, rows) = self.host().size(&p)?;
         Ok(ServerFrame::Screen {
             id: id.to_string(),
             cols,
             rows,
-            text: tmux::capture_visible(&k, &t)?,
+            text: self.host().capture_visible(&p)?,
         })
     }
 
@@ -1627,13 +1649,13 @@ impl Engine {
             // th-5a2314: a scraped prompt reads the way its harness draws it
             // — `y`+Enter for aider, Enter on goose's selected "Allow" — so
             // the manifest names the keys; Claude Code's menu is the default.
-            let (k, t) = pane(&s)?;
+            let p = self.pane(&s)?;
             let steer = self.registry().get(s.kind.as_str()).map(|m| m.steer.clone()).unwrap_or_default();
             for (i, key) in steer.approval_keys(decision).iter().enumerate() {
                 if i > 0 {
                     std::thread::sleep(APPROVAL_KEY_GAP);
                 }
-                tmux::send_key(&k, &t, key)?;
+                self.host().send_key(&p, key)?;
             }
         }
         self.event(id, EventKind::User, &format!("approve: {}", decision.as_str()));
@@ -1655,23 +1677,23 @@ impl Engine {
                 if resume { "resume" } else { "kill" }
             );
         }
-        let sock = socket_of(&s);
-        let tmux_name = s.tmux_session.clone();
+        let sock = socket_of(&s, &self.default_socket());
+        let target = s.tmux_session.clone().map(|t| SessionRef::new(sock, t));
         if let Some(pid) = s.pid {
-            if proc::is_alive(pid, s.pid_start) {
-                proc::kill_tree(pid, KILL_GRACE);
+            if self.host().process_alive(pid, s.pid_start) {
+                self.host().kill_process_tree(pid, KILL_GRACE);
             }
         }
-        let exit = tmux_name
-            .as_deref()
-            .and_then(|t| tmux::pane_exit_status(&sock, t).ok().flatten())
+        let exit = target
+            .as_ref()
+            .and_then(|t| self.host().exit_status(t).ok().flatten())
             .and_then(|d| match d {
-                tmux::PaneDeath::Code(c) => Some(c),
+                PaneDeath::Code(c) => Some(c),
                 _ => None,
             })
             .or_else(|| self.recorded_exit(&s));
-        if let Some(t) = &tmux_name {
-            tmux::kill_session(&sock, t);
+        if let Some(t) = &target {
+            self.host().kill_session(t);
         }
         self.drop_pty(id);
         self.revoke_hook_token(id);
@@ -1712,7 +1734,7 @@ impl Engine {
             bail!("session {id} is {} — kill it first", s.state);
         }
         if let Some(t) = &s.tmux_session {
-            tmux::kill_session(&socket_of(&s), t);
+            self.host().kill_session(&SessionRef::new(socket_of(&s, &self.default_socket()), t.clone()));
         }
         self.revoke_hook_token(id);
         self.clear_exit_files(id);
@@ -1803,7 +1825,9 @@ impl Engine {
         if let Some(agent) = &s.agent_session_id {
             let holder = {
                 let rt = self.rt();
-                claim_holder(&rt.claims, agent, Instant::now(), |pid| pid != s.pid.unwrap_or(0) && proc::is_alive(pid, None))
+                claim_holder(&rt.claims, agent, Instant::now(), |pid| {
+                    pid != s.pid.unwrap_or(0) && self.host().process_alive(pid, None)
+                })
             };
             // Another row owning the same harness session with a live pid
             // counts too (the claims map is per daemon process).
@@ -1812,7 +1836,7 @@ impl Engine {
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|o| o.id != s.id && o.agent_session_id.as_deref() == Some(agent) && !o.state.is_terminal())
-                    .find_map(|o| o.pid.filter(|p| proc::is_alive(*p, o.pid_start)))
+                    .find_map(|o| o.pid.filter(|p| self.host().process_alive(*p, o.pid_start)))
             });
             if let Some(pid) = holder {
                 // A backoff scheduled by an earlier death would fire into this
@@ -2041,7 +2065,7 @@ impl Engine {
                 argv: Vec::new(),
                 tmux_session: None,
                 tmux_socket: None,
-                owner: Some(tmux::socket_name()),
+                owner: Some(self.default_socket()),
                 fan_out_id: None,
                 adopted: true,
             })?;
@@ -2169,7 +2193,8 @@ impl Engine {
     /// On a store failure (per-session tmux/ps errors are logged, not raised).
     pub fn supervise_tick(&self) -> Result<()> {
         let now = Utc::now();
-        for s in self.with_store(FlowStore::list_live)?.into_iter().filter(owned_here) {
+        let mine = self.default_socket();
+        for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
             if let Err(e) = self.supervise_one(&s, now) {
                 tracing::warn!(session = %s.id, error = %e, "flow supervision");
             }
@@ -2202,7 +2227,8 @@ impl Engine {
         // supervision tick late (SUPERVISE_EVERY, 2 s) — a state dot that
         // lags on one of two running daemons is this, not a lost frame.
         let since = since - chrono::Duration::seconds(REBROADCAST_SLACK_SECS);
-        for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s)) {
+        let mine = self.default_socket();
+        for s in self.with_store(|st| st.changed_since(since))?.iter().filter(|s| !owned_here(s, &mine)) {
             self.emit_session(s);
         }
         Ok(())
@@ -2251,10 +2277,10 @@ impl Engine {
             return Ok(());
         }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
-        let sock = socket_of(s);
-        let alive = tmux::session_alive(&sock, t);
-        let exit = if alive { tmux::pane_exit_status(&sock, t) } else { Ok(None) };
-        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %sock, alive, exit = ?exit, "flow: supervise");
+        let target = SessionRef::new(socket_of(s, &self.default_socket()), t);
+        let alive = self.host().alive(&target);
+        let exit = if alive { self.host().exit_status(&target) } else { Ok(None) };
+        tracing::trace!(session = %s.id, state = %s.state, tmux = %t, socket = %target.socket, alive, exit = ?exit, "flow: supervise");
         if !alive {
             // The wrapper may still have recorded how the harness ended.
             let exit = self.recorded_exit(s).map_or(PaneExit::Vanished, PaneExit::from_code);
@@ -2270,7 +2296,7 @@ impl Engine {
             };
             tracing::info!(session = %s.id, tmux = ?death, recorded = ?recorded, exit = ?exit, "flow: pane exited");
             self.with_store(|st| st.set_exit_code(&s.id, exit.exit_code()))?;
-            tmux::kill_session(&sock, t);
+            self.host().kill_session(&target);
             self.drop_pty(&s.id);
             self.clear_exit_files(&s.id);
             if exit == PaneExit::Code(0) {
@@ -2289,21 +2315,21 @@ impl Engine {
             if due {
                 tracing::info!(session = %s.id, "flow: usage limit window passed — resuming");
                 self.rt().limit_resumed_at.insert(s.id.clone(), Instant::now());
-                tmux::send_key(&sock, t, "Enter")?;
+                self.host().send_key(&target, "Enter")?;
                 self.set_state(&s.id, SessionState::Working, None)?;
             }
             return Ok(());
         }
         // Scrape the visible pane: limits always; approvals when hooks
         // didn't report one; working/idle only when hooks never spoke.
-        let pane = tmux::capture_visible(&sock, t)?;
+        let pane = self.host().capture_visible(&target)?;
         let hooks_seen = s.state_source != "inferred";
         let Some(rules) = self.rules_for(&self.registry(), &s.kind) else {
             return Ok(());
         };
         // Title / alt-screen / cursor are best-effort: a rule that needs one
         // simply does not fire without it.
-        let meta = tmux::pane_meta(&sock, t).ok();
+        let meta = self.host().meta(&target).ok();
         let quiet_for = observe_quiet(&mut self.rt().pane_seen, &s.id, &pane, Instant::now());
         let scrape = rules.detect_observation(&crate::scrape::PaneObservation {
             text: &pane,
@@ -2771,6 +2797,7 @@ pub fn ci_rollup(rollup: Option<&Value>) -> Value {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+    use crate::proc;
 
     #[test]
     fn a_dead_pane_settles_from_tmux_then_the_wrapper_then_unknown() {
@@ -2877,6 +2904,7 @@ mod tests {
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
             repo_root: None,
+            host: crate::host::default_host(),
         })
         .unwrap()
     }
@@ -3565,8 +3593,8 @@ mod tests {
         // A pre-column row on my server.
         let legacy_mine = mk(None, Some(&mine));
 
-        assert!(!owned_here(&theirs) && !owned_here(&legacy_foreign));
-        assert!(owned_here(&mine_parked) && owned_here(&legacy_mine));
+        assert!(!owned_here(&theirs, &mine) && !owned_here(&legacy_foreign, &mine));
+        assert!(owned_here(&mine_parked, &mine) && owned_here(&legacy_mine, &mine));
 
         e.supervise_tick().unwrap();
 
@@ -4543,7 +4571,7 @@ mod tests {
 
         let bridge = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
         assert_eq!(
-            bridge.clients.load(std::sync::atomic::Ordering::Relaxed),
+            bridge.clients().load(std::sync::atomic::Ordering::Relaxed),
             2,
             "both attaches counted on the one bridge"
         );
@@ -5281,5 +5309,221 @@ quiet_ms = 300
         // A flow id contradicting the token is a quiet OK, like an unknown session.
         let r = e.hook(ev("droid", "Stop", "zzz", Some("fs-nope"), json!({})), &td).unwrap();
         assert!(matches!(r, HookReply::Immediate(v) if v == json!({})));
+    }
+
+    // ── the host seam, driven by an in-memory host (th-64d4ab) ────────────
+
+    use crate::host::fake::FakeHost;
+
+    /// An engine whose sessions live in a [`FakeHost`]: nothing runs, every
+    /// host call is recorded, and a test decides how each process ends.
+    fn fake_engine(tmp: &Path) -> (Engine, Arc<FakeHost>) {
+        let host = FakeHost::new();
+        let mut cfg = EngineConfig::new(tmp.to_path_buf());
+        cfg.db_path = tmp.join("flow.db");
+        cfg.home = tmp.join("home");
+        cfg.daemon_url = Some("http://127.0.0.1:1".into());
+        cfg.host = host.clone();
+        (Engine::open(cfg).unwrap(), host)
+    }
+
+    fn fake_shell(e: &Engine, tmp: &Path, argv: &[&str]) -> Session {
+        e.new_session(NewRequest {
+            kind: SessionKind::Shell,
+            worktree: Some(tmp.to_string_lossy().into()),
+            argv: Some(argv.iter().map(|a| (*a).to_string()).collect()),
+            title: Some("t".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn host_ref(s: &Session) -> SessionRef {
+        SessionRef::new(s.tmux_socket.clone().unwrap(), s.tmux_session.clone().unwrap())
+    }
+
+    /// launch → alive → kill → dead, with no tmux anywhere: the engine asks
+    /// the host for everything, including the process kill.
+    #[test]
+    fn fake_host_launch_alive_kill_dead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = fake_shell(&e, tmp.path(), &["sh", "-c", "cat"]);
+        assert_eq!(s.state, SessionState::Idle, "a launched shell is ready");
+        assert_eq!(
+            s.tmux_socket.as_deref(),
+            Some(crate::host::fake::FAKE_SOCKET),
+            "new sessions go in the host's namespace"
+        );
+        assert_eq!(s.owner.as_deref(), Some(crate::host::fake::FAKE_SOCKET), "and this engine owns them");
+        let r = host_ref(&s);
+        assert!(host.alive(&r));
+        let launched = host.session(&r).unwrap();
+        assert_eq!(s.pid, Some(launched.pid), "the row records the host's pid");
+        assert_eq!(launched.argv, ["sh", "-c", "cat"]);
+        assert_eq!(launched.cwd, tmp.path());
+        assert_eq!(
+            launched.exit_prefix.as_deref(),
+            Some(tmp.path().join(EXIT_DIR).join(&s.id).as_path()),
+            "every launch is wrapped for exit-code capture"
+        );
+        assert!(launched.env.is_empty(), "a shell gets no harness env: {:?}", launched.env);
+
+        // A running pane stays put through supervision.
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().state, SessionState::Idle);
+
+        let killed = e.kill(&s.id, false).unwrap();
+        assert_eq!(killed.state, SessionState::Done);
+        assert!(!host.alive(&r), "the host session is gone");
+        let calls = host.calls();
+        let tree = calls.iter().position(|c| *c == format!("kill_process_tree {}", launched.pid));
+        let session = calls.iter().position(|c| *c == format!("kill_session {}", s.id));
+        assert!(
+            tree.is_some() && session.is_some() && tree < session,
+            "process first, then the session: {calls:?}"
+        );
+
+        // A dead row's removal asks the host once more, harmlessly.
+        e.remove(&s.id).unwrap();
+        assert!(e.get(&s.id).unwrap().is_none());
+    }
+
+    /// A dead pane's exit status is what the row records: exit 0 is done,
+    /// anything else is dead with the code, and the pane is cleaned up.
+    #[test]
+    fn fake_host_dead_pane_exit_status_is_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let failed = fake_shell(&e, tmp.path(), &["sh", "-c", "exit 3"]);
+        let clean = fake_shell(&e, tmp.path(), &["true"]);
+        let killed = fake_shell(&e, tmp.path(), &["sleep", "99"]);
+        host.die(&host_ref(&failed), PaneDeath::Code(3));
+        host.die(&host_ref(&clean), PaneDeath::Code(0));
+        host.die(&host_ref(&killed), PaneDeath::Signal(9));
+        e.supervise_tick().unwrap();
+
+        let f = e.get(&failed.id).unwrap().unwrap();
+        assert_eq!((f.state, f.exit_code), (SessionState::Dead, Some(3)), "{f:?}");
+        assert_eq!(f.attention.unwrap().detail.as_deref(), Some("exit 3"));
+        let c = e.get(&clean.id).unwrap().unwrap();
+        assert_eq!((c.state, c.exit_code), (SessionState::Done, Some(0)), "exit 0 is proven: done");
+        let k = e.get(&killed.id).unwrap().unwrap();
+        assert_eq!((k.state, k.exit_code), (SessionState::Dead, None), "a signal death invents no code");
+        assert_eq!(k.attention.unwrap().detail.as_deref(), Some("killed by SIGKILL (signal 9)"));
+        for s in [&failed, &clean, &killed] {
+            assert!(!host.alive(&host_ref(s)), "{}: the dead pane was removed once read", s.id);
+        }
+    }
+
+    /// th-7ff336 without Linux or tmux: a pane dead with no status yet is
+    /// waited out; the wrapper's recorded code settles it, and with neither
+    /// the wait ends as "unknown" — never a guessed -1, never resumed.
+    #[test]
+    fn fake_host_unreaped_pane_settles_from_the_wrapper_or_as_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let a = fake_shell(&e, tmp.path(), &["a"]);
+        let b = fake_shell(&e, tmp.path(), &["b"]);
+        host.die(&host_ref(&a), PaneDeath::Unreaped);
+        host.die(&host_ref(&b), PaneDeath::Unreaped);
+        e.supervise_tick().unwrap();
+        for s in [&a, &b] {
+            let row = e.get(&s.id).unwrap().unwrap();
+            assert_eq!((row.state, row.exit_code), (SessionState::Idle, None), "not guessed: {row:?}");
+            assert!(host.alive(&host_ref(s)), "kept until its status is read");
+            assert!(e.rt().exit_pending.contains_key(&s.id));
+        }
+
+        // `a`'s wrapper recorded 0 — the file wins over tmux's silence.
+        let launched = host.session(&host_ref(&a)).unwrap();
+        host.record_exit(launched.exit_prefix.as_deref().unwrap(), launched.pid, 0);
+        // `b` has waited out EXIT_STATUS_WAIT.
+        e.rt().exit_pending.insert(b.id.clone(), Instant::now().checked_sub(EXIT_STATUS_WAIT).unwrap());
+        e.supervise_tick().unwrap();
+
+        let ra = e.get(&a.id).unwrap().unwrap();
+        assert_eq!((ra.state, ra.exit_code), (SessionState::Done, Some(0)), "{ra:?}");
+        let rb = e.get(&b.id).unwrap().unwrap();
+        assert_eq!((rb.state, rb.exit_code), (SessionState::Dead, None), "{rb:?}");
+        assert!(rb.attention.unwrap().detail.unwrap().contains("exit status unknown"));
+        assert!(e.rt().exit_pending.is_empty());
+        assert!(
+            host.recorded_exit(launched.exit_prefix.as_deref().unwrap(), launched.pid).is_none(),
+            "the settled launch's record is cleared"
+        );
+    }
+
+    /// Rule 2 through the host: an agent whose session vanished is relaunched
+    /// with its resume argv — a second host launch under the same name.
+    #[test]
+    fn fake_host_vanished_agent_is_resumed_through_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = e
+            .new_session(NewRequest {
+                kind: SessionKind::Claude,
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                argv: Some(vec!["/nonexistent/claude".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        let r = host_ref(&s);
+        let launched = host.session(&r).unwrap();
+        let first = launched.pid;
+        assert!(s.agent_session_id.is_some(), "claude pre-assigns its session id");
+        let env: HashMap<_, _> = launched.env.iter().cloned().collect();
+        assert_eq!(env.get(FLOW_ID_ENV), Some(&s.id), "the pane names its row");
+        assert!(env.contains_key(crate::hook_auth::TOKEN_FILE_ENV), "and gets a hook token: {env:?}");
+
+        host.vanish(&r);
+        e.supervise_tick().unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Starting, "{row:?}");
+        assert!(row
+            .attention
+            .as_ref()
+            .and_then(|a| a.detail.as_deref())
+            .unwrap()
+            .starts_with("process vanished; resuming in"));
+
+        // Skip the backoff.
+        e.rt().relaunch_at.insert(s.id.clone(), Instant::now());
+        e.supervise_tick().unwrap();
+        let relaunched = host.session(&r).unwrap();
+        assert_ne!(relaunched.pid, first, "a new process");
+        assert_eq!(relaunched.argv, resume_argv(&row, &reg()), "the manifest's resume argv");
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!((row.state, row.pid), (SessionState::Starting, Some(relaunched.pid)));
+        assert_eq!(host.calls().iter().filter(|c| c.starts_with("launch ")).count(), 2);
+    }
+
+    /// Steering, snapshots and the attach stream are host calls too.
+    #[test]
+    fn fake_host_send_snapshot_and_attach_go_through_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = fake_shell(&e, tmp.path(), &["sh"]);
+        let r = host_ref(&s);
+        host.set_screen(&r, "$ hello");
+        e.send(&s.id, "echo hi").unwrap();
+        e.send_key(&s.id, "C-c").unwrap();
+        assert_eq!(host.session(&r).unwrap().input, ["text:echo hi", "key:C-c"]);
+        let ServerFrame::Screen { cols, rows, text, .. } = e.snapshot(&s.id).unwrap() else {
+            panic!("a screen frame")
+        };
+        assert_eq!((cols, rows, text.as_str()), (120, 40, "$ hello"));
+
+        e.attach(&s.id, 100, 30).unwrap();
+        e.attach(&s.id, 90, 28).unwrap();
+        e.input(&s.id, b"raw").unwrap();
+        assert_eq!(host.calls().iter().filter(|c| c.starts_with("attach ")).count(), 1, "one stream per session");
+        let bridge = e.lock_ptys().get(&s.id).map(|b| b.pty.clone()).unwrap();
+        assert_eq!(bridge.clients().load(std::sync::atomic::Ordering::Relaxed), 2);
+        e.detach(&s.id);
+        e.detach(&s.id);
+        assert!(bridge.is_closed(), "the last detach closes the stream");
+        assert!(e.lock_ptys().get(&s.id).is_none());
+        assert!(host.alive(&r), "and never the session");
     }
 }

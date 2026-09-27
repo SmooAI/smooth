@@ -806,6 +806,7 @@ mod tests {
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
             repo_root: None,
+            host: smooth_flow::host::default_host(),
         })
         .unwrap()
     }

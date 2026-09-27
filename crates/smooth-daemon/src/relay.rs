@@ -2085,6 +2085,7 @@ mod tests {
             daemon_url: None,
             harness_doctor: false,
             repo_root: None,
+            host: smooth_flow::host::default_host(),
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine, Some("tok".into()));
@@ -2299,6 +2300,7 @@ mod tests {
             daemon_url: None,
             harness_doctor: false,
             repo_root: None,
+            host: smooth_flow::host::default_host(),
         })
         .unwrap();
         let app = crate::flow_route::flow_router(engine.clone(), Some("tok".into()));
