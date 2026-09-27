@@ -1,0 +1,39 @@
+# SmoothFlow Desktop — the Linux + Windows SmoothFlow client (th-3e6020).
+#
+# Its own workspace on purpose: GPUI is ~600 crates and needs X11/Wayland/
+# Vulkan system libraries on Linux, which every `th` PR build must not pay
+# for. CI builds it in .github/workflows/smoothflow-desktop.yml. It also runs
+# on macOS for development; the shipping Mac client is apps/smoothflow.
+[package]
+name = "smoothflow-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "SmoothFlow for Linux and Windows: the agent fleet console with GPU-rendered terminals (GPUI)."
+
+[workspace]
+
+[[bin]]
+name = "smoothflow"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI + GPUI Component through the one facade crate that pins a matching set.
+gpui-kit = "0.6.6"
+# Terminal state (VT parsing + grid). Swappable behind terminal::TerminalModel;
+# libghostty-vt is the planned default once its C API ships.
+alacritty_terminal = "0.25"
+smooai-smooth-flow-client = { path = "../../crates/smooth-flow-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-tungstenite = "0.26"
+futures = "0.3"
+url = "2"
+dirs-next = "2"
+urlencoding = "2"
+
+[profile.release]
+lto = "thin"

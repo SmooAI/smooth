@@ -165,6 +165,12 @@ const updates = [
     },
 ];
 
+// SmoothFlow for Linux/Windows (apps/smoothflow-desktop) is its own Cargo
+// workspace with its own lockfile, which path-depends on smooth-flow-client.
+// Its CI builds `--locked`, so the release bump must reach this lock too, or
+// every release breaks that build with "cannot update the lock file" (th-3e6020).
+updates.push({ path: 'apps/smoothflow-desktop/Cargo.lock', apply: updates.find((u) => u.path === 'Cargo.lock').apply });
+
 let touched = 0;
 
 for (const { path, apply } of updates) {
