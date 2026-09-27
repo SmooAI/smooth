@@ -37,6 +37,23 @@ cp "$TH_BIN" "$STAGE/server/th"
 chmod +x "$STAGE/server/th"
 
 # Optional icon: drop a 512x512 icon.png next to this script and it gets bundled.
+# The bundle carries th's version (package.json is the single source of truth).
+VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$SCRIPT_DIR/../../package.json" 2>/dev/null || true)"
+if [ -n "$VERSION" ]; then
+    python3 - "$STAGE/manifest.json" "$VERSION" <<'PY2'
+import json, sys
+p, v = sys.argv[1], sys.argv[2]
+with open(p) as f:
+    m = json.load(f)
+m["version"] = v
+with open(p, "w") as f:
+    json.dump(m, f, indent=4, ensure_ascii=False)
+    f.write("\n")
+PY2
+else
+    echo "warn: could not read the version from package.json — the bundle keeps the manifest's version." >&2
+fi
+
 if [ -f "$SCRIPT_DIR/icon.png" ]; then
     cp "$SCRIPT_DIR/icon.png" "$STAGE/icon.png"
     if command -v python3 >/dev/null 2>&1; then

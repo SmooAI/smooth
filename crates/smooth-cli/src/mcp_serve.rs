@@ -1714,4 +1714,36 @@ mod tests {
         SmoothMcp::apply_write_gate(&mut untouched, true);
         assert_eq!(untouched.list_all().len(), full);
     }
+
+    /// th-1efb59: the Claude Desktop bundle (`packaging/mcpb/manifest.json`)
+    /// lists the tools Claude Desktop shows before install. It sat at six tools
+    /// while the server grew to forty, so it's pinned to the router here.
+    /// Re-bless with `SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest`,
+    /// then `pnpm format`.
+    #[test]
+    fn mcpb_manifest_lists_every_tool() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/mcpb/manifest.json");
+        let text = std::fs::read_to_string(&path).expect("read the mcpb manifest");
+        let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the mcpb manifest is JSON");
+
+        let router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
+        let mut tools = router.list_all();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let expected: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| serde_json::json!({ "name": t.name, "description": t.description.as_deref().unwrap_or("").trim() }))
+            .collect();
+
+        if std::env::var_os("SMOOTH_MCPB_BLESS").is_some() {
+            manifest["tools"] = serde_json::Value::Array(expected);
+            let out = serde_json::to_string_pretty(&manifest).expect("serialize the manifest") + "\n";
+            std::fs::write(&path, out).expect("write the mcpb manifest");
+            return;
+        }
+        assert_eq!(
+            manifest["tools"],
+            serde_json::Value::Array(expected),
+            "packaging/mcpb/manifest.json is out of date: SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest, then pnpm format"
+        );
+    }
 }
