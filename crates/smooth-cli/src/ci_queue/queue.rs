@@ -110,7 +110,7 @@ pub struct JobInfo {
     pub blocked_by_ticket: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub label: String,
     pub class: Class,
@@ -464,14 +464,12 @@ impl Queue {
     /// counts as busy but is never handed out. Call under the mutex.
     fn scan_slots(&self, class: Class) -> Result<Vec<SlotState>> {
         let prefix = format!("{}-", class.name());
-        let on_disk = fs::read_dir(self.slots_dir())
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .filter_map(|e| e.file_name().to_str()?.strip_prefix(&prefix)?.strip_suffix(".slot")?.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
+        let on_disk = fs::read_dir(self.slots_dir()).map_or(0, |rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str()?.strip_prefix(&prefix)?.strip_suffix(".slot")?.parse::<usize>().ok())
+                .max()
+                .unwrap_or(0)
+        });
         let configured = class.slots(&self.config);
         let mut out = Vec::new();
         for i in 1..=configured.max(on_disk) {
@@ -579,13 +577,17 @@ impl Queue {
     fn lock_path(&self, name: &str) -> PathBuf {
         use sha2::Digest as _;
         let digest = sha2::Sha256::digest(name.as_bytes());
-        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest.iter().take(8).fold(String::new(), |mut h, b| {
+            use std::fmt::Write as _;
+            let _ = write!(h, "{b:02x}");
+            h
+        });
         self.locks_dir().join(format!("{hex}.lock"))
     }
 
     /// Take every named lock, or none: `Ok(Err((reason, holder's ticket)))`
     /// names the first one somebody else holds. Call under the mutex.
-    fn acquire_locks(&self, names: &[String]) -> Result<std::result::Result<Vec<File>, (String, Option<u64>)>> {
+    fn acquire_locks(&self, names: &[String]) -> Result<std::result::Result<Vec<File>, Blocked>> {
         let mut held = Vec::new();
         for name in names {
             let path = self.lock_path(name);
@@ -640,7 +642,7 @@ impl Queue {
         OpenOptions::new().create(true).append(true).open(&path)?.write_all(&line)?;
         // Trim once the file is well past the cap, not on every append.
         let keep = self.config.run.history_keep.max(1);
-        if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > (keep as u64) * 600 {
+        if fs::metadata(&path).map_or(0, |m| m.len()) > (keep as u64) * 600 {
             let text = fs::read_to_string(&path)?;
             let lines: Vec<&str> = text.lines().collect();
             let tail = lines[lines.len().saturating_sub(keep)..].join("\n") + "\n";
@@ -687,6 +689,9 @@ impl Queue {
         })
     }
 }
+
+/// Why a named lock is unavailable, and the ticket holding it (if queued).
+type Blocked = (String, Option<u64>);
 
 impl Attempt {
     const fn wait(reason: String) -> Self {
@@ -1116,7 +1121,7 @@ mod tests {
         let f = fx(2);
         let _a = admit(&f.q, Class::Heavy, "a");
         let _b = admit(&f.q, Class::Heavy, "b");
-        let mut small = f.q.clone();
+        let mut small = f.q;
         small.config.slots.heavy = 1;
         let snap = small.snapshot(0, Path::new("/work")).unwrap();
         assert_eq!(snap.running.len(), 2);
@@ -1215,7 +1220,7 @@ mod tests {
     #[test]
     fn cargos_own_lock_outside_the_queue_holds_a_cargo_job() {
         let f = fx(2);
-        let target = f._tmp.path().join("target");
+        let target = f.q.dir().join("target");
         fs::create_dir_all(target.join("debug")).unwrap();
         let outside = File::create(target.join("debug/.cargo-lock")).unwrap();
         outside.lock().unwrap(); // a `cargo build` nobody queued
@@ -1254,9 +1259,9 @@ mod tests {
     #[test]
     fn resolve_lock_expands_cargo_to_its_target_dir() {
         let f = fx(1);
-        let q = f.q.clone().with_cargo_target("/shared/target".into());
-        assert_eq!(q.resolve_lock("cargo", Path::new("/repo")), "cargo:/shared/target");
         let rel = f.q.clone().with_cargo_target("tgt".into());
+        let q = f.q.with_cargo_target("/shared/target".into());
+        assert_eq!(q.resolve_lock("cargo", Path::new("/repo")), "cargo:/shared/target");
         assert_eq!(rel.resolve_lock("cargo", Path::new("/repo")), "cargo:/repo/tgt");
         assert_eq!(q.resolve_lock("docker", Path::new("/repo")), "docker");
     }

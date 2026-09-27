@@ -191,12 +191,12 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
 
 /// The resolved `--lock`s, plus `cargo` when the command is cargo itself.
 fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<String> {
-    let mut names: Vec<&str> = named.iter().map(String::as_str).collect();
+    let mut wanted: Vec<&str> = named.iter().map(String::as_str).collect();
     let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo");
-    if runs_cargo && !names.contains(&"cargo") {
-        names.push("cargo");
+    if runs_cargo && !wanted.contains(&"cargo") {
+        wanted.push("cargo");
     }
-    let mut out: Vec<String> = names.iter().map(|n| q.resolve_lock(n, cwd)).collect();
+    let mut out: Vec<String> = wanted.iter().map(|n| q.resolve_lock(n, cwd)).collect();
     out.sort();
     out.dedup();
     out
@@ -260,6 +260,7 @@ fn with_locks(j: &queue::JobInfo) -> String {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one linear status page; splitting it would only scatter the layout")]
 fn render(s: &queue::Snapshot) -> String {
     use std::fmt::Write as _;
     let mut o = String::new();

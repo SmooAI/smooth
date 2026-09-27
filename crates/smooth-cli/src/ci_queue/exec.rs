@@ -115,22 +115,22 @@ pub fn run(spec: &Spec<'_>, on_spawn: impl FnOnce(u32)) -> Ended {
     });
 
     let mut timed_out = false;
-    let status = match spec.timeout {
-        None => rx.recv().ok(),
-        Some(limit) => match rx.recv_timeout(limit) {
-            Ok(s) => Some(s),
-            Err(_) => {
-                timed_out = true;
-                kill_group(pid, false);
-                match rx.recv_timeout(spec.kill_grace) {
-                    Ok(s) => Some(s),
-                    Err(_) => {
-                        kill_group(pid, true);
-                        rx.recv().ok()
-                    }
-                }
+    #[allow(clippy::option_if_let_else, reason = "each branch also records the timeout and kills the group")]
+    let status = if let Some(limit) = spec.timeout {
+        if let Ok(s) = rx.recv_timeout(limit) {
+            Some(s)
+        } else {
+            timed_out = true;
+            kill_group(pid, false);
+            if let Ok(s) = rx.recv_timeout(spec.kill_grace) {
+                Some(s)
+            } else {
+                kill_group(pid, true);
+                rx.recv().ok()
             }
-        },
+        }
+    } else {
+        rx.recv().ok()
     };
     if timed_out {
         // The leader is gone; anything it left in the group goes too.

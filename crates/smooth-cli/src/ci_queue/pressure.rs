@@ -319,6 +319,7 @@ Pages purgeable:                          15837.
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss, reason = "test tolerance")]
     fn parses_macos_swapusage() {
         let (t, u) = parse_swapusage("total = 19456.00M  used = 18125.12M  free = 1330.88M  (encrypted)").unwrap();
         assert_eq!(t, 19456 * 1024 * 1024);
