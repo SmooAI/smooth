@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.59.0
+
+### Minor Changes
+
+- 2b6f1c8: SmoothFlow for Linux and Windows, first cut (th-3e6020): `apps/smoothflow-desktop` is a Rust GPUI app with GPU-rendered terminals. It follows the SmoothFlow Client Spec through `smooth-flow-client`. It finds the flow engine the way every client does, shows the fleet sidebar (grouped by project, with states and counts), and streams the focused session's terminal live: `alacritty_terminal` for VT state, GPUI's GPU text pipeline for drawing, and xterm keyboard input. It's its own Cargo workspace, with a CI workflow that builds and tests it on Linux, Windows and macOS.
+
+### Patch Changes
+
+- b7658ec: `flow.hello`'s `daemon` block carries the daemon's `home` (th-89eb13). A phone, or a client of a daemon on another machine (WSL, a remote host), can now title a session in that home `~` instead of showing the folder name. The field is optional and older clients ignore it. SmoothFlow for Mac and for Linux/Windows abbreviate against it, and the mock server sends it.
+- 7336dba: The Claude Desktop bundle (`packaging/mcpb`) lists every tool `th mcp serve` exposes. That's 42 tools, the SmoothFlow ones included; it used to list 6. A test pins the list to the server, so a new tool fails CI until the manifest is re-blessed (`SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest`). `build-mcpb.sh` stamps th's version into the bundle instead of the frozen 0.22.0. `th mcp install --help` now names `claude-desktop`.
+- af8bdc4: The SmoothFlow engine no longer calls tmux directly (th-64d4ab). Sessions now go through a `SessionHost` trait: launch, liveness, exit status, capture, send, kill and the attach stream. `TmuxHost`, the default, runs the same tmux code as before, so nothing changes at runtime. The seam makes room for a native host on Windows later, and it lets the engine's supervision be tested against an in-memory host, covering cases a real pane only hits by timing.
+
 ## 0.58.0
 
 ### Minor Changes
