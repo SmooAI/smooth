@@ -1,20 +1,29 @@
 # Smooth `.mcpb` Desktop Extension
 
 One-click-install the Smooth MCP server into Claude Desktop. The bundle wraps the
-compiled `th` binary and runs `th mcp serve` — a stdio MCP server that exposes
-`th`'s work-tracking (pearls) as MCP tools. No env config: the server reads
-`~/.smooth/` for auth and pearl state.
+compiled `th` binary and runs `th mcp serve`, a stdio MCP server that exposes
+`th` as MCP tools. There's no env config: the server reads `~/.smooth/` for
+pearls, mail and SmoothFlow, and `~/.config/smooth/auth/` for Smoo sign-in.
+
+Claude Desktop without the bundle: `th mcp install --harness claude-desktop`
+writes the same server into Claude Desktop's config on macOS, Windows or Linux.
 
 ## Tools
 
-| Tool            | What it does                                                                    |
-| --------------- | ------------------------------------------------------------------------------- |
-| `pearls_ready`  | List work items ready to work on now — open, unblocked, highest priority first. |
-| `pearls_create` | Create a new work item (pearl); returns the new pearl id.                       |
+`manifest.json` lists every tool the server exposes. A test in
+`crates/smooth-cli/src/mcp_serve.rs` (`mcpb_manifest_lists_every_tool`) pins that
+list to the server, so a new tool fails CI until you re-bless it:
+`SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest && pnpm format`.
 
-These act on the pearl store in the **workspace the server is launched in**. The
-org tools — the Smooth Operator agent, CRM, knowledge, and analytics — unlock
-after you run `th auth login` (`th` caches a JWT under `~/.smooth/auth/`).
+| Group             | Tools                                                                                                                                                                                                                              | Needs                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| **SmoothFlow**    | `flow_list`, `flow_snapshot`, `flow_handoff`, `flow_harnesses`, `flow_repos`, `flow_infer` (read)<br>`flow_new`, `flow_send`, `flow_prompt_wait`, `flow_approve`, `flow_kill`, `flow_close`, `flow_fanout_new`, `flow_fanout_pick` | a running flow engine: SmoothFlow open, or `th up` |
+| **Pearls, notes** | `pearls_ready`, `pearls_create`, `remember`, `recall`                                                                                                                                                                              | nothing                                            |
+| **Agent mail**    | `agent_identity`, `agent_status`, `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`                                                                                                                                              | nothing                                            |
+| **Your business** | `ask_business`, `knowledge_search`, `operator_tools`, `operator_tools_set`, `observability_*`, `email_*`                                                                                                                           | `smoo auth login`                                  |
+
+Pearls and notes act on the store of the **workspace the server is launched in**.
+Every write tool is annotated, and `SMOOTH_MCP_ALLOW_WRITE=0` hides them all.
 
 ## Build the bundle
 
@@ -82,4 +91,4 @@ or user `settings.json` under `"mcp"`):
 }
 ```
 
-For all of these, run `th auth login` once to unlock the org tools.
+For all of these, run `smoo auth login` once to unlock the org tools.
