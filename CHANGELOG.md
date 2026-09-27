@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.57.0
+
+### Minor Changes
+
+- 00376f4: A `smoothflow` skill (th-1efb59) teaches an agent to run other agents through SmoothFlow. It covers starting one in a repo or pearl worktree, prompting it and waiting for the turn, relaying approvals to the user rather than answering them itself, fanning out, and closing out. It uses the `flow_*` MCP tools or `th flow`. The smooth-agent plugin installs it, and `th flow skill` prints it for any other harness. A test fails if a flow MCP tool ships without the skill naming it.
+
+### Patch Changes
+
+- a701ea5: SmoothFlow for Mac replays the Client Spec conformance vectors (th-3e6020), and it fixes directional focus. In a layout with a tall pane beside a stack, moving focus down from the top of the stack jumped sideways to the tall pane. Now only a pane beyond the focused pane's edge counts, and an exact tie always goes to the same pane instead of whichever one the dictionary happened to list first.
+- 1edf6aa: New `smooai-smooth-flow-client` crate (th-3e6020): the SmoothFlow client rules written once, with conformance vectors. It covers the pane tree, close decisions, tab titles, center-tab gating, the Directory field helpers, and fleet grouping. The Linux/Windows desktop app uses it directly, and the Mac, iOS and Android apps replay its JSON vectors (`spec/vectors/*.json`) so none of them can drift from the Client Spec. Writing it down fixed a focus bug: moving focus down from the top of a stacked split jumped sideways to a tall neighbouring pane, because a pane only had to have its centre in the right direction. Now only a pane beyond the focused pane's edge counts, and an exact tie goes to the lower pane id.
+- a701ea5: The SmoothFlow fleet puts the shells group last, as Client Spec §4 says (th-a14327). It used to appear wherever a shell first did, splitting the project groups. The rule was fixed once in `smooth-flow-client`, the vectors re-blessed, and the Mac app matches; the phones follow in smooai.
+
 ## 0.56.0
 
 ### Minor Changes
