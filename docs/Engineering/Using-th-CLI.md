@@ -1538,6 +1538,152 @@ This trades verification for speed on purpose. A status says "someone ran this
 and it passed"; it does not prove what ran. That is the intended bargain for a
 team that trusts its own machines, not a supply-chain control.
 
+#### Local checks queue for a heavy slot
+
+Every **local** check runs through `th ci-queue` (next section) in the `heavy` class, labelled `attest <check>`, so thirty agents attesting at
+once run two at a time rather than thirty. The load-average sample above is
+taken at **admission**, not when the queue wait began. A check that gets no
+slot within `run.max_wait_secs` is reported as **could not run (97)** and posts
+nothing, so CI runs that row. Remote checks do not queue here; the build box is
+another machine.
+
+### Machine-wide check queue — `th ci-queue` (SMOODEV-3355)
+
+Runs a git-hook or CI check through a queue that every session on the machine
+shares. The queue caps how many heavy checks run at once and holds new ones
+while the machine is under pressure. It runs them at background QoS.
+
+On 2026-09-26, about 35 agent sessions on one 12-core Mac each ran pre-commit
+checks at full priority, all at once. The checks were a turbo typecheck of
+dependents at concurrency 10 plus a full cargo fmt and clippy. Load average
+reached 1,022, swap filled, and Chrome froze.
+
+```bash
+th ci-queue run --class heavy --label typecheck --timeout 600 -- pnpm turbo typecheck
+th ci-queue run --class light -- oxfmt --check .
+th ci-queue run --lock cargo --label clippy -- pnpm rust:pre-commit   # holds the cargo target; runs at nice, not background
+th ci-queue status             # running, waiting, pressure vs thresholds, recent history
+th ci-queue status --json
+```
+
+| Exit      | Meaning                                                                           |
+| --------- | --------------------------------------------------------------------------------- |
+| _n_       | the job exited _n_                                                                |
+| 128 + _n_ | the job died on signal _n_                                                        |
+| 124       | the job's `--timeout` fired; its whole process group was killed                   |
+| 127       | the job could not be started                                                      |
+| **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.**                 |
+| 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran. |
+
+**Admission.**
+
+- Each class has N machine-wide slots: `heavy` (the default class) gets 2 and
+  `light` gets 6.
+- Waiters in a class are served FIFO, by a ticket drawn under a mutex.
+- The **head** of the heavy queue is also held while any pressure signal is over
+  its threshold. The job's `--timeout` clock starts at admission, and
+  `--max-wait` caps the wait separately.
+- A queued job prints `waiting (Ns, reason: …)` to stderr when it starts
+  waiting and every 30s after that. It prints `admitted after Ns` when it
+  starts.
+
+| Signal (heavy only) | Holds when                                                                                  | Default |
+| ------------------- | ------------------------------------------------------------------------------------------- | ------- |
+| memory available    | below this % of RAM (macOS free + inactive + speculative + purgeable; Linux `MemAvailable`) | 5%      |
+| memory pressure     | macOS `kern.memorystatus_vm_pressure_level` above this (1 normal, 2 warn, 4 critical)       | 1       |
+| swap used           | above this % **and** memory is tight                                                        | 90%     |
+| load (1 min)        | above this many per core                                                                    | 4.0     |
+| free disk           | below this on the job's cwd, the cargo target dir, or `disk_paths`                          | 20 GB   |
+
+Swap only counts alongside tight memory. On macOS, swapped pages stay in swap
+long after the pressure that pushed them out has gone, so a quiet machine
+routinely reads over 90%. An unreadable signal never holds a job.
+
+**The gate cannot deadlock:** it holds nothing when no other heavy job is
+running. Waiting then could not relieve anything the queue controls, so a
+machine that is busy with work outside the queue still makes progress one heavy
+job at a time.
+
+**No daemon, and no pid files.**
+
+- Coordination is kernel `flock`s on files under `~/.smooth/ci-queue/`. As
+  with `mail.db`, there is no server that can die. A job is running if and
+  only if someone holds its slot's lock.
+- The kernel drops a lock when its holder dies, `kill -9` included. So there
+  is nothing stale to reap and no reaping race. A process-list or pid-file
+  check is not a lock. The old disk-cleanup timer corrupted live cargo builds
+  on exactly that race.
+- Lock fds are close-on-exec and are held by the `th` process that forks the
+  job. A daemon the job leaves behind (turbo, sccache) therefore can never pin
+  a slot.
+
+**Shared locks (`--lock NAME`).** A job can name a resource that is shared
+across the machine and that it will hold, such as `--lock cargo`. That name
+resolves to the cargo target dir: `CARGO_TARGET_DIR`, then
+`~/.cargo/config.toml`'s `build.target-dir`, then `<cwd>/target`.
+
+- Two jobs that name the same resource are never admitted together. The second
+  would only sit on a slot behind the first one's lock.
+- For cargo, the queue also probes cargo's own `<target>/<profile>/.cargo-lock`.
+  A build started outside the queue therefore holds a `cargo` job too.
+- A waiter that is blocked only on a lock does not hold up the waiters behind
+  it that don't need that lock.
+- A command that is `cargo` itself gets the lock automatically. `th attest`
+  adds it to any check whose script mentions `cargo`.
+
+**Rule: a job that takes a machine-shared lock never runs at background QoS.**
+Darwin background QoS throttles CPU and I/O almost to zero under contention.
+Linux's idle I/O class gets the disk only when nobody else wants it.
+
+On 2026-09-26, at load ~270, a `cargo test` running under `taskpolicy -b` sat
+at 0% CPU for 35+ minutes. It held the shared target's `.cargo-lock` the whole
+time, so every other Rust build on the machine queued behind it: a priority
+inversion. So `--qos background`, the default, is capped at `nice` for any job
+that holds a lock. Background QoS stays for lock-free work such as a
+typecheck.
+
+**Execution.**
+
+- The job runs in its own process group at its QoS:
+    - `background`: `taskpolicy -b` on macOS, or `ionice -c 3` + `nice -n 10` on
+      Linux;
+    - `nice`: `nice -n 10`;
+    - `normal`: unchanged priority.
+- INT, TERM and HUP sent to `th` are forwarded to that group.
+- A nested `th ci-queue run` or `th attest` inside a queued job runs directly.
+  It sees `SMOOTH_CI_QUEUE_SLOT` and does not queue again, because two outer
+  jobs each waiting on an inner slot would deadlock the class.
+
+**Config** lives in `~/.smooth/ci-queue.toml`. Every key is optional, and 0
+turns a gate signal off. A file that does not parse is warned about and
+ignored, so a typo cannot block every commit on the machine.
+
+```toml
+[slots]
+heavy = 2
+light = 6
+
+[gate]
+min_available_memory_pct = 5
+max_memory_pressure_level = 1
+max_swap_used_pct = 90
+max_load_per_core = 4.0
+min_free_disk_gb = 20
+disk_paths = []
+
+[run]
+max_wait_secs = 1800
+qos = "background"   # or "nice" / "normal"; capped at nice for a job with a --lock
+kill_grace_secs = 10
+history_keep = 500
+poll_ms = 1000       # how often a waiter re-checks
+note_every_secs = 30 # how often it prints its waiting line
+```
+
+`SMOOTH_CI_QUEUE_DIR` and `SMOOTH_CI_QUEUE_CONFIG` relocate the queue and its
+config, which is useful for tests. History is `~/.smooth/ci-queue/history.jsonl`,
+one line per finished job with its wait and run durations.
+
 ### Audit
 
 Local tool/egress audit streams under `~/.smooth/audit/`. Both `<actor>.log`
