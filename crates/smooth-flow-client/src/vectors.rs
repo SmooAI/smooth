@@ -181,11 +181,19 @@ fn fleet_vectors() -> Value {
         s("f", "gemini", "/w/refs", SessionState::Starting),
         s("g", "claude", "/w/refs", SessionState::Dead),
     ];
-    let cases = vec![case(
-        "groups by project in first-seen order, shells together; counts",
-        json!({ "sessions": fleet }),
-        json!({ "groups": fleet::grouped(&fleet), "counts": fleet::counts(&fleet) }),
-    )];
+    let only_shells = vec![s("x", "shell", "/w/a", SessionState::Idle), s("y", "shell", "/w/b", SessionState::Working)];
+    let cases = vec![
+        case(
+            "groups by project in first-seen order, shells last; counts",
+            json!({ "sessions": fleet }),
+            json!({ "groups": fleet::grouped(&fleet), "counts": fleet::counts(&fleet) }),
+        ),
+        case(
+            "only shells is one shells group",
+            json!({ "sessions": only_shells }),
+            json!({ "groups": fleet::grouped(&only_shells), "counts": fleet::counts(&only_shells) }),
+        ),
+    ];
     file("SmoothFlow-Client-Spec §4 fleet sidebar", &cases)
 }
 

@@ -289,7 +289,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     /// `PaneClose.decide`.
     func closeFocusedPane() {
         guard let t = activeTab else { return }
-        let scope: PaneCloseScope = t.panes.count > 1 ? .pane : (surfaceTabs.count > 1 ? .tab : .last)
+        let scope = PaneCloseScope.of(panes: t.panes.count, tabs: surfaceTabs.count)
         let sid = t.sessions[t.focused]
         let session = sid.flatMap { app.store.sessions[$0] }
         let decision = PaneClose.decide(session: session,

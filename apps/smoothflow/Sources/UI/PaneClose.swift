@@ -11,6 +11,12 @@ enum PaneCloseScope: String, Equatable, Sendable {
     /// (th-96fcb7). The session still runs in the fleet.
     case last
 
+    /// Client Spec §5: a pane among several, else the tab, else the last pane
+    /// (which empties; the window never closes).
+    static func of(panes: Int, tabs: Int) -> PaneCloseScope {
+        panes > 1 ? .pane : (tabs > 1 ? .tab : .last)
+    }
+
     var noun: String {
         switch self {
         case .pane: "Pane"
