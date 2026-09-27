@@ -1,19 +1,23 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { NightReplay, PERIOD_S, phase } from './ci-queue-demo.ts';
 import {
     appendSamples,
-    DemoQueue,
+    budgetSlices,
     diff,
     duration,
     gaugeFill,
     GATE_X,
     heatOf,
+    labelCosts,
     labelP50s,
     lanes,
     lockHolders,
     machineHeat,
     progress,
+    reasonHead,
+    reasonKind,
     shortLock,
     signals,
     waitReason,
@@ -166,7 +170,7 @@ test("wait reasons prefer the queue's own words and fall back sensibly", () => {
     assert.equal(waitReason(line.waiting[1], line), '1 ahead in line');
     const lock = 'cargo:/Users/me/.cargo/t';
     const locked = snap({ running: [job(1, { slot: 1, locks: [lock] })], waiting: [job(5, { locks: [lock] })] });
-    assert.equal(waitReason(locked.waiting[0], locked), 'cargo:~/.cargo/t held by #1 job 1', 'an older th without waiting_on still names the lock');
+    assert.equal(waitReason(locked.waiting[0], locked), 'lock cargo:~/.cargo/t held by job 1 (#1)', 'a waiter that has not polled yet still names the lock');
 });
 
 test('lock holders list who holds a lock and who waits on it', () => {
@@ -237,18 +241,82 @@ test('durations read naturally', () => {
     assert.equal(duration((3 * 3600 + 7 * 60) * 1000), '3h07m');
 });
 
-test('the demo is deterministic, respects slots, and never double-books a lock', () => {
-    const a = new DemoQueue(3);
-    const b = new DemoQueue(3);
-    for (let i = 0; i < 300; i++) {
+test('reasons lead with the part that matters and say what kind of block it is', () => {
+    const lock = 'lock cargo:/Users/me/.cargo/shared-target held by clippy (#412) / 2 heavy busy: clippy (pid 1, 40s, repo); tsc (pid 2, 9s, repo)';
+    assert.equal(reasonHead(lock), 'lock cargo:/Users/me/.cargo/shared-target held by clippy (#412)');
+    assert.equal(reasonKind(lock), 'lock');
+    assert.equal(reasonKind('cargo is building outside the queue (/t/debug/.cargo-lock) / 1/2 heavy busy'), 'lock');
+    assert.equal(reasonKind('3 ahead in the heavy queue / 2 heavy busy: a (pid 1, 4s, r)'), 'line');
+    assert.equal(reasonKind('2 heavy busy: a (pid 1, 4s, r); b (pid 2, 9s, r)'), 'line');
+    // a gate reason is 'gate' even though its tail mentions "busy"
+    assert.equal(reasonKind('memory pressure critical / swap 91% / load 52.1 on 12 cores / 1/2 heavy busy'), 'gate');
+});
+
+test('budget slices come biggest first and fall back to the estimate', () => {
+    const s = snap({
+        running: [
+            job(1, { slot: 1, est_rss_kb: 1_000, rss_kb: 1_200, est_cores: 2 }),
+            job(2, { slot: 2, est_rss_kb: 3_000, est_cores: 4 }),
+            job(3, { class: 'light', slot: 1 }),
+        ],
+    });
+    const b = budgetSlices(s);
+    assert.deepEqual(
+        b.map((x) => x.job.ticket),
+        [2, 1],
+        'a job with no estimate has no slice',
+    );
+    assert.equal(b[0].actualKb, null);
+    assert.equal(b[1].actualKb, 1_200);
+});
+
+test('cost profiles take medians over jobs that carry rusage', () => {
+    const c = labelCosts([
+        hist('clippy', 10_000, { peak_group_rss_kb: 100, cpu_ms: 40_000 }),
+        hist('clippy', 30_000, { peak_group_rss_kb: 300, cpu_ms: 60_000 }),
+        hist('clippy', 20_000, { peak_group_rss_kb: 200, cpu_ms: 50_000 }),
+        hist('tsc', 5_000, { peak_group_rss_kb: 50, cpu_ms: 5_000 }),
+        hist('old', 5_000),
+    ]);
+    assert.deepEqual(
+        c.map((x) => x.label),
+        ['clippy', 'tsc'],
+    );
+    assert.equal(c[0].p50PeakKb, 200);
+    assert.equal(c[0].p50RunMs, 20_000);
+    assert.equal(c[0].cores, 2.5);
+});
+
+test('the night has a calm, a storm and a drain', () => {
+    assert.equal(phase(10).name, 'calm');
+    assert.equal(phase(150).name, 'storm');
+    assert.ok(phase(150).outsideLoad > 900, 'the storm drives load toward 1,000');
+    assert.equal(phase(300).name, 'drain');
+    assert.equal(phase(PERIOD_S + 10).name, 'calm', 'it loops');
+});
+
+test('the night replay is deterministic, respects slots and locks, and holds in the storm', () => {
+    const a = new NightReplay(3);
+    const b = new NightReplay(3);
+    let peakLoad = 0;
+    let held = false;
+    let minScale = 1;
+    for (let i = 0; i < PERIOD_S; i++) {
         const sa = a.step();
         const sb = b.step();
         assert.deepEqual(sa, sb);
+        assert.equal(sa.schema, 2);
         assert.ok(sa.running.filter((j) => j.class === 'heavy').length <= 2);
         assert.ok(sa.running.filter((j) => j.class === 'light').length <= 6);
-        const held = sa.running.flatMap((j) => j.locks ?? []);
-        assert.equal(new Set(held).size, held.length, 'a lock held twice');
+        const heldLocks = sa.running.flatMap((j) => j.locks ?? []);
+        assert.equal(new Set(heldLocks).size, heldLocks.length, 'a lock held twice');
         for (const w of sa.waiting) assert.ok(w.waiting_on, `ticket ${w.ticket} has no reason`);
         for (const j of sa.running) assert.ok(j.slot != null && j.slot >= 1, 'slots are numbered from 1, like the queue');
+        peakLoad = Math.max(peakLoad, sa.readings.load1 ?? 0);
+        held ||= sa.holds.length > 0;
+        minScale = Math.min(minScale, sa.budget?.scale ?? 1);
     }
+    assert.ok(peakLoad > 700, `load peaked at ${peakLoad}`);
+    assert.ok(held, 'the gate held during the storm');
+    assert.ok(minScale < 0.6, 'the budget backed off');
 });

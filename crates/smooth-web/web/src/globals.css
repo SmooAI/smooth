@@ -382,6 +382,21 @@ body {
     }
 }
 
+/* A held lock glows gold, slowly, for as long as it is held. */
+.ciq-lock-held {
+    box-shadow:
+        0 0 0 1px color-mix(in oklch, #f49f0a 45%, transparent) inset,
+        0 0 18px -4px color-mix(in oklch, #f49f0a 55%, transparent);
+    animation: ciq-lock 2.8s ease-in-out infinite;
+}
+@keyframes ciq-lock {
+    50% {
+        box-shadow:
+            0 0 0 1px color-mix(in oklch, #f49f0a 75%, transparent) inset,
+            0 0 28px -2px color-mix(in oklch, #f49f0a 70%, transparent);
+    }
+}
+
 /* Jobs move between line, lane and history as view transitions keyed by
  * ticket (CiQueuePage `withTransition`). */
 ::view-transition-group(*) {
@@ -394,6 +409,7 @@ body {
         transition: none;
     }
     .ciq-ambient,
+    .ciq-lock-held,
     .ciq-gate--held,
     .ciq-flow-chev,
     .ciq-indeterminate {
@@ -405,4 +421,11 @@ body {
     .ciq-flow-chev {
         display: none;
     }
+}
+
+/* `th ci-queue web` — the page is the whole window, on the midnight ground. */
+body.ciq-standalone {
+    background:
+        radial-gradient(1200px 700px at 80% -10%, color-mix(in oklch, #00a6a6 10%, transparent), transparent 60%),
+        radial-gradient(900px 600px at 10% 110%, color-mix(in oklch, #ff6b6c 7%, transparent), transparent 62%), #020618;
 }

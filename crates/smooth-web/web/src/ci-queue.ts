@@ -30,6 +30,12 @@ export interface JobInfo {
     waiting_on_since_ms?: number;
     /** When `waiting_on` is a named lock: the ticket holding it. */
     blocked_by_ticket?: number;
+    // Schema 2 (capacity-aware admission): what admission budgeted for this
+    // job, and — when the queue samples it — what it is using now.
+    est_rss_kb?: number;
+    est_cores?: number;
+    rss_kb?: number;
+    cores_now?: number;
 }
 
 export interface HistoryEntry {
@@ -43,6 +49,10 @@ export interface HistoryEntry {
     /** `exit`, `signal`, `timeout`, `spawn-failed`, or `wait-timeout`. */
     outcome: string;
     exit: number;
+    // Schema 2: what the job actually cost (rusage of its process group).
+    peak_group_rss_kb?: number;
+    max_single_rss_kb?: number;
+    cpu_ms?: number;
 }
 
 export interface Disk {
@@ -69,8 +79,24 @@ export interface Gate {
     min_free_disk_gb: number;
 }
 
+/** Schema 2: the machine budget admission packs jobs into. The effective
+ * budget is `mem_kb` / `cores`; `scale` is the AIMD multiplier that grows while
+ * pressure stays low and halves on a spike. */
+export interface Budget {
+    mem_kb: number;
+    mem_used_kb: number;
+    cores: number;
+    cores_used: number;
+    scale: number;
+    scale_min?: number;
+    scale_max?: number;
+}
+
 export interface Snapshot {
     schema?: number;
+    budget?: Budget;
+    /** Set when the OS has no queue (Windows): `{schema, unsupported}`. */
+    unsupported?: string;
     dir: string;
     config: { slots: { heavy: number; light: number }; gate: Gate };
     now_ms: number;
@@ -85,6 +111,8 @@ export interface Snapshot {
 export interface Sample {
     t_ms: number;
     readings: Readings;
+    /** The budget at that moment, when the queue has one (schema 2). */
+    budget?: Budget;
 }
 
 /** `GET /api/ci-queue/status`. */
@@ -95,8 +123,9 @@ export interface StatusResponse {
     error?: string;
 }
 
-/** The schema this client understands. A newer snapshot is shown with a warning. */
-export const SCHEMA = 1;
+/** The newest schema this client knows. Unknown fields are ignored and every
+ * panel checks for its own fields, so a newer snapshot still renders. */
+export const SCHEMA = 2;
 
 /** Where every gauge's threshold sits, as a fraction of the gauge's width. */
 export const GATE_X = 0.8;
@@ -156,8 +185,8 @@ export function minFreeDiskGb(r: Readings): { gb: number; path: string } | null 
     let best: { gb: number; path: string } | null = null;
     for (const d of r.disks) {
         if (d.free_bytes == null) continue;
-        const gb = d.free_bytes / GB;
-        if (!best || gb < best.gb) best = { gb, path: d.path };
+        const free = d.free_bytes / GB;
+        if (!best || free < best.gb) best = { gb: free, path: d.path };
     }
     return best;
 }
@@ -313,7 +342,7 @@ export function waitReason(j: JobInfo, snap: Snapshot): string {
     if (j.waiting_on) return j.waiting_on;
     for (const lock of j.locks ?? []) {
         const holder = snap.running.find((r) => (r.locks ?? []).includes(lock));
-        if (holder) return `${shortLock(lock)} held by #${holder.ticket} ${holder.label}`;
+        if (holder) return `lock ${shortLock(lock)} held by ${holder.label} (#${holder.ticket})`;
     }
     const busy = snap.running.filter((r) => r.class === j.class).length;
     const slots = snap.config.slots[j.class];
@@ -321,6 +350,25 @@ export function waitReason(j: JobInfo, snap: Snapshot): string {
     if (j.class === 'heavy' && snap.holds.length > 0) return snap.holds[0];
     const ahead = snap.waiting.filter((w) => w.class === j.class && w.ticket < j.ticket).length;
     return ahead > 0 ? `${ahead} ahead in line` : 'next in line';
+}
+
+export type ReasonKind = 'lock' | 'line' | 'budget' | 'gate';
+
+/** The queue joins a reason's parts with " / ", most specific first
+ * (`lock cargo:… held by clippy (#412) / 2 heavy busy: …`). The first part is
+ * the one that matters; the rest is context. */
+export function reasonHead(reason: string): string {
+    return reason.split(' / ')[0] ?? reason;
+}
+
+/** What kind of thing holds a waiter back: a neighbour's lock, just the line
+ * (slots busy, others ahead), the admission budget, or the pressure gate. */
+export function reasonKind(reason: string): ReasonKind {
+    const head = reasonHead(reason);
+    if (/^lock |held by|building outside the queue/.test(head)) return 'lock';
+    if (/^budget/.test(head)) return 'budget';
+    if (/busy|ahead|next in line/.test(head)) return 'line';
+    return 'gate';
 }
 
 /** Which named locks are held, and by whom. */
@@ -336,7 +384,7 @@ export function lockHolders(snap: Snapshot): Array<{ lock: string; holder: JobIn
 
 /** `cargo:/Users/x/.cargo/shared-target` → `cargo:~/.cargo/shared-target`. */
 export function shortLock(lock: string): string {
-    return lock.replace(/\/(?:Users|home)\/[^/]+/, '~');
+    return lock.replace(/\/(?:Users|home)\/[^/]+/g, '~');
 }
 
 /** The last path segment of a cwd, which is usually the worktree name. */
@@ -384,189 +432,73 @@ export function appendSamples(prev: Sample[], add: Sample[], windowMs: number): 
     return merged.filter((s) => s.t_ms >= cutoff);
 }
 
-// ── Demo feed ────────────────────────────────────────────────────────────────
+// ── Budget (schema 2) ────────────────────────────────────────────────────────
 
-const DEMO_JOBS: Array<{ label: string; cls: JobClass; cargo?: boolean; ms: number; cwd: string }> = [
-    { label: 'cargo clippy --workspace', cls: 'heavy', cargo: true, ms: 95_000, cwd: '/Users/dev/smooth-SMOODEV-3342-models' },
-    { label: 'pnpm turbo typecheck', cls: 'heavy', ms: 70_000, cwd: '/Users/dev/smooai-SMOODEV-3323-hitl' },
-    { label: 'cargo test -p smooth-cli', cls: 'heavy', cargo: true, ms: 140_000, cwd: '/Users/dev/smooth-SMOODEV-3355-ci-queue' },
-    { label: 'tsgo --noEmit', cls: 'heavy', ms: 38_000, cwd: '/Users/dev/smooai-SMOODEV-3207-ask-smooth' },
-    { label: 'vitest run packages/backend', cls: 'heavy', ms: 55_000, cwd: '/Users/dev/smooai-SMOODEV-3352-o11y' },
-    { label: 'oxfmt --check', cls: 'light', ms: 16_000, cwd: '/Users/dev/smooai-SMOODEV-3323-hitl' },
-    { label: 'cargo fmt --check', cls: 'light', ms: 11_000, cwd: '/Users/dev/smooth-th-1efb59-flow-mcp' },
-    { label: 'oxlint .', cls: 'light', ms: 21_000, cwd: '/Users/dev/smooai-SMOODEV-3207-ask-smooth' },
-    { label: 'lint-staged', cls: 'light', ms: 26_000, cwd: '/Users/dev/smooai-SMOODEV-3352-o11y' },
-];
+export interface BudgetSlice {
+    job: JobInfo;
+    estKb: number;
+    /** Live usage when the queue samples it; otherwise the estimate. */
+    actualKb: number | null;
+    estCores: number;
+    actualCores: number | null;
+}
 
-const CARGO_LOCK = 'cargo:/Users/dev/.cargo/shared-target';
+/** Each running job's slice of the memory and CPU budget, biggest first. */
+export function budgetSlices(snap: Snapshot): BudgetSlice[] {
+    return snap.running
+        .filter((j) => j.est_rss_kb != null || j.rss_kb != null)
+        .map((j) => ({
+            job: j,
+            estKb: j.est_rss_kb ?? j.rss_kb ?? 0,
+            actualKb: j.rss_kb ?? null,
+            estCores: j.est_cores ?? 0,
+            actualCores: j.cores_now ?? null,
+        }))
+        .sort((a, b) => b.estKb - a.estKb);
+}
 
-/** A deterministic, seeded simulation of a busy machine: heavy jobs pile up,
- * pressure rises with them, cargo jobs fight over the shared target. Used by
- * `?demo`, the screenshots, and the tests. */
-export class DemoQueue {
-    private seed: number;
-    private ticket = 400;
-    private now: number;
-    private running: JobInfo[] = [];
-    private waiting: JobInfo[] = [];
-    private history: HistoryEntry[] = [];
-    private due = new Map<number, number>();
-    private load = 38;
-    private swapUsed = 17.5;
-    private memAvail = 14;
+export function gb(kb: number): string {
+    const g = kb / 1_048_576;
+    return g >= 10 ? `${g.toFixed(0)} GB` : `${g.toFixed(1)} GB`;
+}
 
-    constructor(seed = 7, startMs = Date.UTC(2026, 8, 26, 23, 0, 0)) {
-        this.seed = seed;
-        this.now = startMs;
-        // Seed history so p50s exist from the first frame.
-        for (let i = 0; i < 40; i++) {
-            const d = DEMO_JOBS[i % DEMO_JOBS.length];
-            const run = Math.round(d.ms * (0.7 + this.rand() * 0.6));
-            this.history.push({
-                label: d.label,
-                class: d.cls,
-                cwd: d.cwd,
-                ticket: this.ticket++,
-                queued_at_ms: this.now - (40 - i) * 60_000,
-                wait_ms: Math.round(this.rand() * 90_000),
-                run_ms: run,
-                outcome: 'exit',
-                exit: this.rand() < 0.12 ? 1 : 0,
-            });
-        }
-        for (let i = 0; i < 9; i++) this.arrive();
-        this.admit();
+export interface LabelCost {
+    label: string;
+    runs: number;
+    p50RunMs: number;
+    p50PeakKb: number;
+    p50CpuMs: number;
+    /** cpu time ÷ wall time: how many cores it keeps busy. */
+    cores: number;
+}
+
+function median(v: number[]): number {
+    const s = [...v].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/** Per-label cost profiles from history that carries rusage (schema 2). */
+export function labelCosts(history: HistoryEntry[]): LabelCost[] {
+    const by = new Map<string, HistoryEntry[]>();
+    for (const h of history) {
+        if (h.peak_group_rss_kb == null || h.run_ms <= 0) continue;
+        const list = by.get(h.label) ?? [];
+        list.push(h);
+        by.set(h.label, list);
     }
-
-    private rand(): number {
-        // mulberry32
-        let t = (this.seed += 0x6d2b79f5);
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    }
-
-    private arrive(): void {
-        const d = DEMO_JOBS[Math.floor(this.rand() * DEMO_JOBS.length)];
-        const t = this.ticket++;
-        this.waiting.push({
-            class: d.cls,
-            ticket: t,
-            label: d.label,
-            pid: 40_000 + t,
-            cwd: d.cwd,
-            queued_at_ms: this.now,
-            locks: d.cargo ? [CARGO_LOCK] : undefined,
-        });
-    }
-
-    private holds(): string[] {
-        const out: string[] = [];
-        if (this.swapUsed / 23.5 > 0.9 && this.memAvail < 10) out.push(`swap ${Math.round((this.swapUsed * 100) / 23.5)}% > 90% while memory is tight`);
-        if (this.load / 12 > 4) out.push(`load ${(this.load / 12).toFixed(1)}/core > 4/core`);
-        return out;
-    }
-
-    private admit(): void {
-        const holds = this.holds();
-        const heldLocks = new Set(this.running.flatMap((j) => j.locks ?? []));
-        for (const cls of ['heavy', 'light'] as const) {
-            const slots = cls === 'heavy' ? 2 : 6;
-            const line = this.waiting.filter((w) => w.class === cls).sort((a, b) => a.ticket - b.ticket);
-            for (const w of line) {
-                const busy = this.running.filter((r) => r.class === cls);
-                const lock = (w.locks ?? []).find((l) => heldLocks.has(l));
-                if (lock) {
-                    const holder = this.running.find((r) => (r.locks ?? []).includes(lock));
-                    w.waiting_on = `${shortLock(lock)} held by #${holder?.ticket} ${holder?.label}`;
-                    w.blocked_by_ticket = holder?.ticket;
-                    continue; // a lock-blocked waiter does not hold up the line
-                }
-                if (busy.length >= slots) {
-                    w.waiting_on = `${busy.length}/${slots} ${cls} busy`;
-                    w.blocked_by_ticket = undefined;
-                    continue;
-                }
-                if (cls === 'heavy' && holds.length > 0 && busy.length > 0) {
-                    w.waiting_on = holds[0];
-                    w.blocked_by_ticket = undefined;
-                    continue;
-                }
-                const used = new Set(busy.map((b) => b.slot));
-                let slot = 1;
-                while (used.has(slot)) slot++;
-                this.waiting = this.waiting.filter((x) => x.ticket !== w.ticket);
-                const d = DEMO_JOBS.find((x) => x.label === w.label);
-                const job: JobInfo = { ...w, admitted_at_ms: this.now, slot, child_pid: w.pid + 1, waiting_on: undefined, blocked_by_ticket: undefined };
-                this.running.push(job);
-                this.due.set(w.ticket, this.now + Math.round((d?.ms ?? 30_000) * (0.6 + this.rand() * 0.9)));
-                for (const l of job.locks ?? []) heldLocks.add(l);
-            }
-        }
-    }
-
-    /** Advance the simulation and return a snapshot. */
-    step(ms = 1000): Snapshot {
-        this.now += ms;
-        for (const j of [...this.running]) {
-            if ((this.due.get(j.ticket) ?? Infinity) <= this.now) {
-                this.running = this.running.filter((r) => r.ticket !== j.ticket);
-                this.history.push({
-                    label: j.label,
-                    class: j.class,
-                    cwd: j.cwd,
-                    ticket: j.ticket,
-                    queued_at_ms: j.queued_at_ms,
-                    wait_ms: (j.admitted_at_ms ?? j.queued_at_ms) - j.queued_at_ms,
-                    run_ms: this.now - (j.admitted_at_ms ?? this.now),
-                    outcome: 'exit',
-                    exit: this.rand() < 0.15 ? 1 : 0,
-                });
-                if (this.history.length > 200) this.history.shift();
-            }
-        }
-        if (this.rand() < 0.3 * (ms / 1000) && this.waiting.length < 10) this.arrive();
-        const heavy = this.running.filter((r) => r.class === 'heavy').length;
-        const light = this.running.length - heavy;
-        const targetLoad = 16 + heavy * 15 + light * 2.5 + this.rand() * 8;
-        this.load += (targetLoad - this.load) * 0.08;
-        this.memAvail += (18 - heavy * 5 - this.memAvail) * 0.05 + (this.rand() - 0.5);
-        this.memAvail = Math.max(3, Math.min(40, this.memAvail));
-        this.swapUsed += (heavy >= 2 ? 0.03 : -0.06) * (ms / 1000);
-        this.swapUsed = Math.max(12, Math.min(22.6, this.swapUsed));
-        this.admit();
-        return this.snapshot();
-    }
-
-    snapshot(): Snapshot {
-        const total = 24 * GB;
-        return {
-            schema: SCHEMA,
-            dir: '/Users/dev/.smooth/ci-queue',
-            config: {
-                slots: { heavy: 2, light: 6 },
-                gate: { min_available_memory_pct: 5, max_memory_pressure_level: 1, max_swap_used_pct: 90, max_load_per_core: 4, min_free_disk_gb: 20 },
-            },
-            now_ms: this.now,
-            running: this.running.map((j) => ({ ...j })),
-            waiting: this.waiting.map((j) => ({ ...j })).sort((a, b) => a.ticket - b.ticket),
-            readings: {
-                mem_total_bytes: total,
-                mem_available_bytes: Math.round((total * this.memAvail) / 100),
-                memory_pressure_level: this.memAvail < 8 ? 2 : 1,
-                swap_total_bytes: Math.round(23.5 * GB),
-                swap_used_bytes: Math.round(this.swapUsed * GB),
-                load1: this.load,
-                cores: 12,
-                disks: [{ path: '/Users/dev/.cargo/shared-target', free_bytes: 142 * GB }],
-            },
-            holds: this.holds(),
-            history: this.history.slice(-200),
-        };
-    }
-
-    /** `t_ms` + readings, for sparklines. */
-    sample(): Sample {
-        return { t_ms: this.now, readings: this.snapshot().readings };
-    }
+    return [...by.entries()]
+        .map(([label, hs]) => {
+            const p50RunMs = median(hs.map((h) => h.run_ms));
+            const p50CpuMs = median(hs.map((h) => h.cpu_ms ?? 0));
+            return {
+                label,
+                runs: hs.length,
+                p50RunMs,
+                p50PeakKb: median(hs.map((h) => h.peak_group_rss_kb ?? 0)),
+                p50CpuMs,
+                cores: p50RunMs > 0 ? p50CpuMs / p50RunMs : 0,
+            };
+        })
+        .sort((a, b) => b.p50PeakKb - a.p50PeakKb);
 }
