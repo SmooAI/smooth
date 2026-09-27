@@ -60,7 +60,7 @@ final class FlowStore: ObservableObject {
 
     /// Client Spec §4, pure (the conformance vectors call it). Shells go last,
     /// so one never splits the project groups (th-a14327).
-    static func grouped(_ ordered: [Session]) -> [(project: String, sessions: [Session])] {
+    nonisolated static func grouped(_ ordered: [Session]) -> [(project: String, sessions: [Session])] {
         var groups: [(String, [Session])] = []
         var shells: [Session] = []
         for s in ordered {
@@ -74,7 +74,7 @@ final class FlowStore: ObservableObject {
 
     var counts: (working: Int, needsYou: Int, done: Int, idle: Int) { Self.counts(ordered) }
 
-    static func counts(_ all: [Session]) -> (working: Int, needsYou: Int, done: Int, idle: Int) {
+    nonisolated static func counts(_ all: [Session]) -> (working: Int, needsYou: Int, done: Int, idle: Int) {
         return (all.filter { $0.state == .working || $0.state == .starting }.count,
                 all.filter(\.needsYou).count,
                 all.filter { $0.state == .done }.count,
