@@ -1406,13 +1406,14 @@ enum McpCommands {
     /// (idempotent — never touches an existing entry of the same name).
     ///
     /// With `--harness`, runs the OTHER direction instead: registers
-    /// `th mcp serve` (this binary) with a coding harness, so Claude Code,
-    /// Codex and OpenCode all reach the same agent mailbox and pearl store.
+    /// `th mcp serve` (this binary) with a coding harness or Claude Desktop,
+    /// so every one of them reaches the same SmoothFlow fleet, agent mailbox and
+    /// pearl store.
     Install {
         /// Default name (`budget-aware-mcp`, …). Omit to install every default.
         name: Option<String>,
-        /// Register `th mcp serve` with a coding harness instead:
-        /// `claude-code` | `codex` | `opencode` | `all`.
+        /// Register `th mcp serve` with a coding harness or Claude Desktop
+        /// instead: `claude-code` | `codex` | `opencode` | `claude-desktop` | `all`.
         #[arg(long)]
         harness: Option<String>,
         /// Print what would change without writing anything.
