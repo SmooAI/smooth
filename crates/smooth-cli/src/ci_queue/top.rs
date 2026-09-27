@@ -243,9 +243,14 @@ pub fn lanes(s: &Snapshot, class: Class) -> Vec<Option<&JobInfo>> {
     out
 }
 
-/// Why a waiter is waiting, as best the snapshot says.
+/// Why a waiter is waiting: the queue's own words (`waiting_on`, which the
+/// waiter publishes each time its blocker changes), else the best the rest of
+/// the snapshot says — a waiter that has not polled yet has no reason written.
 #[must_use]
 pub fn wait_reason(j: &JobInfo, s: &Snapshot) -> String {
+    if let Some(reason) = &j.waiting_on {
+        return reason.clone();
+    }
     let busy = s.running.iter().filter(|r| r.class == j.class).count();
     let slots = j.class.slots(&s.config);
     if let Some(lock) = j.locks.iter().find(|l| s.running.iter().any(|r| r.locks.contains(l))) {
@@ -643,14 +648,11 @@ pub fn render(f: &mut Frame, app: &App, p: &Palette) {
 fn render_header(f: &mut Frame, area: Rect, app: &App, p: &Palette, heat: Color) {
     let s = &app.snap;
     let busy = |c: Class| s.running.iter().filter(|j| j.class == c).count();
-    let verdict = if let Some(h) = s.holds.first() {
-        format!("HOLDING heavy jobs: {h}")
-    } else if s.running.is_empty() && s.waiting.is_empty() {
-        "Idle. The machine has room.".to_string()
-    } else if busy(Class::Heavy) >= s.config.slots.heavy {
-        "Heavy lanes full. Jobs wait their turn.".to_string()
-    } else {
-        "Admitting jobs as slots free up.".to_string()
+    let verdict = match s.holds.first() {
+        Some(h) => format!("HOLDING heavy jobs: {h}"),
+        None if s.running.is_empty() && s.waiting.is_empty() => "Idle. The machine has room.".to_string(),
+        None if busy(Class::Heavy) >= s.config.slots.heavy => "Heavy lanes full. Jobs wait their turn.".to_string(),
+        None => "Admitting jobs as slots free up.".to_string(),
     };
     let counts = format!(
         "heavy {}/{} · light {}/{} · {} waiting",
@@ -1075,7 +1077,7 @@ pub mod demo {
 
     use super::super::config::Config;
     use super::super::pressure::{self, Disk, Readings};
-    use super::super::queue::{Class, HistoryEntry, JobInfo, Snapshot};
+    use super::super::queue::{Class, HistoryEntry, JobInfo, Snapshot, SNAPSHOT_SCHEMA};
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const CARGO: &str = "cargo:/Users/dev/.cargo/shared-target";
@@ -1175,6 +1177,9 @@ pub mod demo {
                 admitted_at_ms: None,
                 slot: None,
                 locks: if cargo { vec![CARGO.into()] } else { Vec::new() },
+                waiting_on: None,
+                waiting_on_since_ms: None,
+                blocked_by_ticket: None,
             });
         }
 
@@ -1216,7 +1221,7 @@ pub mod demo {
         }
 
         /// Advance `ms` and return the snapshot.
-        #[allow(clippy::cast_precision_loss, reason = "a simulation")]
+        #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops, reason = "a simulation")]
         pub fn step(&mut self, ms: u64) -> Snapshot {
             self.now += ms;
             let now = self.now;
@@ -1275,7 +1280,8 @@ pub mod demo {
         pub fn snapshot(&self) -> Snapshot {
             let mut waiting = self.waiting.clone();
             waiting.sort_by_key(|w| w.ticket);
-            Snapshot {
+            let mut snap = Snapshot {
+                schema: SNAPSHOT_SCHEMA,
                 dir: PathBuf::from("/Users/dev/.smooth/ci-queue"),
                 config: Config::default(),
                 now_ms: self.now,
@@ -1284,7 +1290,13 @@ pub mod demo {
                 readings: self.readings(),
                 holds: self.holds(),
                 history: self.history.clone(),
+            };
+            // Publish each waiter's blocker the way a real waiter does.
+            let reasons: Vec<String> = snap.waiting.iter().map(|w| super::wait_reason(w, &snap)).collect();
+            for (w, r) in snap.waiting.iter_mut().zip(reasons) {
+                w.waiting_on = Some(r);
             }
+            snap
         }
     }
 }
@@ -1318,6 +1330,7 @@ mod tests {
 
     fn snap() -> Snapshot {
         Snapshot {
+            schema: super::super::queue::SNAPSHOT_SCHEMA,
             dir: "/q".into(),
             config: Config::default(),
             now_ms: 100_000,
@@ -1341,6 +1354,9 @@ mod tests {
             admitted_at_ms: None,
             slot: None,
             locks: Vec::new(),
+            waiting_on: None,
+            waiting_on_since_ms: None,
+            blocked_by_ticket: None,
         }
     }
 
@@ -1484,6 +1500,8 @@ mod tests {
         assert_eq!(wait_reason(&s.waiting[1], &s), "swap 93%");
         s.running.push(running(2, Class::Heavy, 2));
         assert_eq!(wait_reason(&s.waiting[1], &s), "2/2 heavy busy");
+        s.waiting[1].waiting_on = Some("swap 96% > 90%".into());
+        assert_eq!(wait_reason(&s.waiting[1], &s), "swap 96% > 90%", "the queue's own words win");
     }
 
     #[test]
@@ -1645,6 +1663,7 @@ mod tests {
             let held: Vec<&String> = sa.running.iter().flat_map(|j| &j.locks).collect();
             let unique: std::collections::HashSet<_> = held.iter().collect();
             assert_eq!(unique.len(), held.len(), "a lock held twice");
+            assert!(sa.waiting.iter().all(|w| w.waiting_on.is_some()), "every demo waiter publishes its blocker");
         }
     }
 
