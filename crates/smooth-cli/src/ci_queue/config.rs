@@ -157,14 +157,6 @@ impl Qos {
             q => q,
         }
     }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Background => "background",
-            Self::Nice => "nice",
-            Self::Normal => "normal",
-        }
-    }
 }
 
 impl Config {

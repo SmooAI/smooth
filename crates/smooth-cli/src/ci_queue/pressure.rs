@@ -445,6 +445,11 @@ Pages purgeable:                          15837.
             max_memory_pressure_level: 0,
             ..Gate::default()
         };
+        // Load and the pressure signal are off. Swap is still on, and it
+        // judges "memory is tight" by the kernel's level whether or not that
+        // level is itself a hold signal — so calm()'s 93% swap now counts.
+        assert_eq!(holds(&r, &g), vec!["swap 93%"]);
+        let g = Gate { max_swap_used_pct: 0.0, ..g };
         assert!(holds(&r, &g).is_empty(), "{:?}", holds(&r, &g));
     }
 

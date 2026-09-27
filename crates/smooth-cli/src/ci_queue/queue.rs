@@ -192,6 +192,7 @@ impl Queue {
     }
 
     /// A queue at `dir` with explicit config and probe, ignoring `NESTED_ENV`.
+    #[cfg(test)]
     pub fn at(dir: PathBuf, config: Config, probe: Arc<dyn Probe>) -> Self {
         Self {
             dir,
@@ -203,6 +204,7 @@ impl Queue {
     }
 
     /// Pin the cargo target dir instead of resolving the machine's.
+    #[cfg(test)]
     #[must_use]
     pub fn with_cargo_target(mut self, dir: PathBuf) -> Self {
         self.cargo_target = Some(dir);
