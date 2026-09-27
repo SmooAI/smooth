@@ -200,8 +200,8 @@ export class NightReplay {
         return `${n} ${cls} busy: ${parts.join('; ')}`;
     }
 
-    /** `config.budget` for the replay: the queue's defaults on this Mac. */
-    private static readonly BUDGET_CFG = { enabled: true, cpu_factor: 1.5, mem_reserve_gb: 4, aimd_min: 0.25, aimd_max: 1.5, mem_scale_max: 1 };
+    /** `config.budget` for the replay: the queue's shipped defaults (#676). */
+    private static readonly BUDGET_CFG = { enabled: true, cpu_factor: 1.5, mem_reserve_gb: 6, aimd_min: 0.25, aimd_max: 2, mem_scale_max: 1 };
 
     private est(k: Kind) {
         return { rss_kb: Math.round(k.rssGb * GB_KB), millicores: Math.round(k.cores * 1000), from_runs: 20 };

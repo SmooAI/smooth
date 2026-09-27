@@ -338,7 +338,7 @@ pub fn run(queue: Queue, a: &WebArgs) -> Result<i32> {
             let url = page_url(addr, demo);
             eprintln!("th ci-queue web: {url}  (Ctrl-C to stop)");
             if !host.is_loopback() {
-                eprintln!("  listening on {host}: anyone who can reach this machine can see the queue's paths and job labels.");
+                eprintln!("  WARNING: listening on {host}. Anyone who can reach this machine can see every queued job's command label and worktree path, and this machine's load. Leave --host off to keep it on loopback.");
             }
             if open {
                 open_in_browser(&url);

@@ -1805,7 +1805,7 @@ into `history.db` once, then renamed to `history.jsonl.imported`.
 th ci-queue web --open          # Big Smooth's Queue tab if it's up, else the page served by this th
 th ci-queue web --serve --open  # always serve from this th, even when Big Smooth is running
 th ci-queue web --demo --open   # replay the 2026-09-26 night (35 agents, load ~1,000)
-th ci-queue web --port 4380 --host 0.0.0.0   # share it (a TV); shows paths and job labels
+th ci-queue web --port 4380 --host 0.0.0.0   # opt-in: share it on the network (prints a warning)
 th ci-queue top                 # the same picture in the terminal; q ↑↓ enter p
 ```
 
@@ -1854,6 +1854,10 @@ tab and exits. Otherwise, or with `--serve`, or with a non-loopback `--host`,
 it serves the page itself. That covers a daemon that isn't running, one too
 old to have the tab, and one whose `th` has no queue.
 
+**`--host` is opt-in exposure.** The page shows every queued job's command
+label and worktree path, plus the machine's load. Binding anything other than
+loopback prints a warning and always serves from this `th`.
+
 **How it's served.** The server binds loopback on 4380, and falls back to any
 free port if 4380 is taken. It serves `queue.html` from the embedded
 smooth-web bundle, which is a second Vite entry next to Big Smooth's
@@ -1879,15 +1883,19 @@ connected: an idle server used 0.00 s of CPU in 30 s. Ctrl-C stops it.
 Every looping CSS animation touches only opacity or transform, and bars move
 with `scaleX`, never `width`.
 
-Measured in headless Chromium, where compositing runs in software, with the
-storm replay:
+Measured in headless Chromium, where compositing runs in software, so the
+GPU-process column is an upper bound. Figures are % of one core, and the page
+column is the page's renderer process:
 
-| Case                                          | CPU (one core) |
-| --------------------------------------------- | -------------- |
-| Full motion (before the tuning: 59%)          | 20%            |
-| Reduced motion                                | 11%            |
-| Live, quiet queue                             | 13%            |
-| The `th` server with one viewer (debug build) | ~0.9%          |
+| Case                                          | Page | GPU process | Browser total |
+| --------------------------------------------- | ---- | ----------- | ------------- |
+| Live queue, three.js on                       | 5.5% | 9.3%        | 14.8%         |
+| Storm replay, three.js on                     | 9.5% | 13.6%       | 23.2%         |
+| Storm replay, reduced motion                  | 3.9% | 9.5%        | 13.6%         |
+| Live queue, reduced motion                    | 2.1% | 5.6%        | 7.8%          |
+| Storm replay, full motion, before the tuning  | —    | —           | 58.6%         |
+| The `th` server with one viewer (debug build) |      |             | ~0.9%         |
+| The `th` server with no viewer                |      |             | 0             |
 
 `?demo` runs the night replay in the browser; `?demo=<seconds>` opens at a
 given point (`?demo=250` catches the gate opening). The replay is seeded, so

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { NightReplay, PERIOD_S, phase } from './ci-queue-demo.ts';
@@ -330,4 +331,30 @@ test('the night replay is deterministic, respects slots and locks, and holds in 
     assert.ok(peakLoad > 700, `load peaked at ${peakLoad}`);
     assert.ok(held, 'the gate held during the storm');
     assert.ok(minScale < 0.6, 'the budget backed off');
+});
+
+// A real `th ci-queue status --json` from the queue's schema-2 build (#676;
+// paths sanitised): one heavy job holding `--lock docker`, one waiter blocked
+// on it, finished jobs with rusage. The page must read it as shipped.
+const REAL = JSON.parse(readFileSync(new URL('./ci-queue.sample.json', import.meta.url), 'utf8')) as Snapshot;
+
+test('the real schema-2 snapshot reads as shipped', () => {
+    assert.equal(REAL.schema, 2);
+    assert.equal(REAL.config.budget?.aimd_max, 2);
+    const [running] = REAL.running;
+    assert.equal(running.slot, 1, 'slots are 1-based');
+    assert.equal(lanes(REAL, 'heavy')[0]?.ticket, running.ticket);
+    // the waiter's reason is the queue's own words, led by the lock
+    const [waiter] = REAL.waiting;
+    assert.equal(reasonKind(waitReason(waiter, REAL)), 'lock');
+    assert.equal(reasonHead(waitReason(waiter, REAL)), `lock docker held by ${running.label} (#${running.ticket})`);
+    assert.equal(waiter.blocked_by_ticket, running.ticket);
+    // budget: one slice, committed = est − now
+    const [slice] = budgetSlices(REAL);
+    assert.equal(slice.estKb, running.est?.rss_kb);
+    assert.equal(slice.committedKb, (running.est?.rss_kb ?? 0) - (running.rss_now_kb ?? 0));
+    assert.equal(REAL.budget?.mem_committed_kb, slice.committedKb, "matches the queue's own sum");
+    // cost profiles from rusage history; optional fields may be absent
+    assert.ok(labelCosts(REAL.history).length > 0);
+    assert.ok(signals(REAL.readings, REAL.config.gate).every((x) => x.value !== 'unknown'));
 });
