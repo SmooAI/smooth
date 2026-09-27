@@ -19,8 +19,16 @@ import { resolveTarget } from './operator';
 
 const WINDOW_MS = 10 * 60_000;
 
-/** Where the replay opens: 150s into the night, as load nears 1,000. */
+/** Where the replay opens: 150s into the night, as load nears 1,000.
+ * `?demo=<seconds>` opens elsewhere (`?demo=230` catches the gate opening). */
 const DEMO_OPEN_S = 150;
+
+function demoOpen(): number | null {
+    const v = new URLSearchParams(window.location.search).get('demo');
+    if (v == null) return null;
+    const n = Number(v);
+    return v !== '' && Number.isFinite(n) && n >= 0 ? n % PERIOD_S : DEMO_OPEN_S;
+}
 
 export type Source = 'stream' | 'daemon';
 
@@ -53,7 +61,8 @@ function withTransition(moved: boolean, apply: () => void): void {
 }
 
 export function useCiQueue(source: Source): Feed {
-    const isDemo = useMemo(() => new URLSearchParams(window.location.search).has('demo'), []);
+    const openAt = useMemo(() => demoOpen(), []);
+    const isDemo = openAt != null;
     const [snap, setSnap] = useState<Snapshot | null>(null);
     const [samples, setSamples] = useState<Sample[]>([]);
     const [error, setError] = useState<string | null>(null);
@@ -87,7 +96,8 @@ export function useCiQueue(source: Source): Feed {
         const warm: Sample[] = [];
         // Open at DEMO_OPEN_S into a loop, with at least ten minutes of
         // history behind it for the sparklines.
-        const steps = Math.ceil((600 - DEMO_OPEN_S) / PERIOD_S) * PERIOD_S + DEMO_OPEN_S;
+        const at = openAt ?? DEMO_OPEN_S;
+        const steps = Math.ceil((600 - at) / PERIOD_S) * PERIOD_S + at;
         for (let i = 0; i < steps; i++) {
             night.step();
             if (i >= steps - 600 && i % 5 === 0) warm.push(night.sample());
@@ -106,7 +116,7 @@ export function useCiQueue(source: Source): Feed {
             window.clearTimeout(first);
             window.clearInterval(id);
         };
-    }, [isDemo, accept]);
+    }, [isDemo, openAt, accept]);
 
     // `th ci-queue web`: Server-Sent Events.
     useEffect(() => {

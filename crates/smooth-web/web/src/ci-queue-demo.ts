@@ -142,8 +142,11 @@ export class NightReplay {
     }
 
     private arrive(): void {
-        // Commits are mostly heavy checks; the light ones ride along.
+        // Commits are mostly heavy checks; the light ones ride along. The line
+        // is capped per class so a storm of heavy checks never starves the
+        // light ones out of the replay.
         const k = this.rand() < 0.55 ? KINDS[Math.floor(this.rand() * 5)] : KINDS[5 + Math.floor(this.rand() * 4)];
+        if (this.waiting.filter((w) => w.class === k.cls).length >= (k.cls === 'heavy' ? 24 : 6)) return;
         const ticket = this.ticket++;
         this.waiting.push({
             class: k.cls,
@@ -259,7 +262,7 @@ export class NightReplay {
                     est_cores: k.cores,
                     rss_kb: Math.round(k.rssGb * GB_KB * 0.3),
                     cores_now: k.cores * 0.5,
-                    due: this.now + Math.round(k.ms * (0.6 + this.rand() * 0.9) * (1 + Math.max(0, this.load / CORES - 4) * 0.05)),
+                    due: this.now + Math.round(k.ms * (0.6 + this.rand() * 0.9) * Math.min(1.8, 1 + Math.max(0, this.load / CORES - 4) * 0.05)),
                 });
             }
         }
@@ -292,7 +295,7 @@ export class NightReplay {
         }
         if (this.history.length > 300) this.history.splice(0, this.history.length - 300);
         // Agents commit.
-        if (this.rand() < p.arrivals * (ms / 1000) && this.waiting.length < 28) this.arrive();
+        if (this.rand() < p.arrivals * (ms / 1000)) this.arrive();
         // Running jobs ramp up to their working set.
         for (const r of this.running) {
             r.rss_kb = Math.round((r.rss_kb ?? 0) + ((r.est_rss_kb ?? 0) * (0.8 + this.rand() * 0.5) - (r.rss_kb ?? 0)) * 0.12);
@@ -312,7 +315,7 @@ export class NightReplay {
             this.scale = Math.max(0.35, this.scale * 0.5);
             this.lastBackoff = this.now;
         } else if (!spike && this.now % 5000 < ms) {
-            this.scale = Math.min(1.25, this.scale + 0.05);
+            this.scale = Math.min(1.25, this.scale + 0.1);
         }
         this.admit();
         return this.snapshot();

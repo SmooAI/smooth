@@ -2,4 +2,18 @@
 '@smooai/smooth': minor
 ---
 
-See the machine-wide check queue live (SMOODEV-3371). `th ci-queue top` is a terminal UI that shows waiters in FIFO order, each with the reason it is still waiting (slots busy, a pressure hold, or which ticket holds the lock it needs). It shows the heavy and light slot lanes, with each running job drawn as a bar of elapsed time against that label's usual (p50) run time. It also shows who holds each shared lock, and one gauge per pressure signal: each gauge draws its threshold at the same column, so the thresholds form a single gate line, and has a ten-minute sparkline beside it. Recent jobs are listed with their exit code, wait time and run time. Keys: q quit, ↑↓ select, enter details, p pause. It falls back to 256 colours, or to no colour under `NO_COLOR`, and drops sections as the window shrinks. Big Smooth gains a Queue tab with the same picture: jobs slide from the line through the gate into their lanes, and the page glows teal → gold → coral with the machine's pressure. The tab is served by the new `GET /api/ci-queue/status`, which relays `th ci-queue status --json` at most once a second and only while a client is asking.
+The machine-wide check queue can now be watched live (SMOODEV-3371).
+
+`th ci-queue web --open` serves a live page from `th` itself, with no daemon needed, and streams the queue to it over Server-Sent Events:
+
+- Jobs flow from the FIFO line through a gate into the heavy and light slot lanes, as a three.js stream of work. While the pressure gate holds heavy jobs the stream piles up at the gate, and a locked lane runs gold.
+- Every waiter shows what the queue says holds it.
+- Running jobs show elapsed time against their usual run.
+- The page glows teal → gold → coral with the machine's pressure.
+- Panels show pressure gauges (every threshold on one gate line, plus ten-minute sparklines), the schema-2 admission budget (each job's estimated vs actual slice, and the AIMD scale's sawtooth), lock holders, per-check cost profiles, and recent jobs.
+
+`--demo` (or `?demo`) replays the 2026-09-26 night (35 agents, load climbing toward 1,000, memory exhausted, the gate holding, then the drain), so the page can be shown on an idle machine.
+
+Big Smooth gets a Queue tab with the same view, fed by a new `GET /api/ci-queue/status`, and the menu bar gets a Check Queue item.
+
+`th ci-queue top` draws the same picture in a terminal: it works over ssh, falls back from truecolor to 256 colours or no colour, and drops sections as the window shrinks.

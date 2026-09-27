@@ -11,6 +11,8 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::Router;
 use rust_embed::Embed;
 
+pub mod queue;
+
 #[derive(Embed)]
 #[folder = "web/dist/"]
 struct WebAssets;
@@ -42,7 +44,7 @@ pub fn web_router_with_token(token: Option<&str>) -> Router {
     Router::new().fallback(serve_web).with_state(index)
 }
 
-async fn serve_web(State(index): State<Option<Arc<String>>>, uri: axum::http::Uri) -> Response {
+pub(crate) async fn serve_web(State(index): State<Option<Arc<String>>>, uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
     // Exact asset match first — but route `index.html` itself through the

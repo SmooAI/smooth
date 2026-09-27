@@ -59,11 +59,13 @@ const transitionName = (ticket: number): CSSProperties => ({ viewTransitionName:
 
 const TONE = { lock: HEAT[3], line: 'var(--ciq-muted)', budget: HEAT[4], gate: HEAT[5] } as const;
 
-function Waiter({ job, snap, selected, onSelect }: { job: JobInfo; snap: Snapshot; selected: boolean; onSelect: () => void }) {
+function Waiter({ job, snap, selected, onSelect, moves }: { job: JobInfo; snap: Snapshot; selected: boolean; onSelect: () => void; moves: boolean }) {
     const reason = waitReason(job, snap);
     const kind = reasonKind(reason);
+    // Only the head of the line animates: a view transition draws above
+    // everything, so a ticket scrolled out of the list would fly across the page.
     return (
-        <li style={transitionName(job.ticket)} data-ciq-wait>
+        <li style={moves ? transitionName(job.ticket) : undefined} data-ciq-wait>
             <button
                 type="button"
                 onClick={onSelect}
@@ -613,14 +615,21 @@ export default function CiQueuePage({ source = 'daemon', standalone = false }: {
                 <div
                     className={`relative z-10 mt-5 grid gap-4 md:grid-cols-[minmax(0,19rem)_auto_minmax(0,1fr)] md:gap-3 ${standalone ? 'lg:grid-cols-[minmax(0,24rem)_auto_minmax(0,1fr)]' : ''}`}
                 >
-                    <div>
+                    <div className="min-w-0">
                         <div className="mb-2 text-[12px] text-(--ciq-muted)">In line, first come first served</div>
                         {snap.waiting.length === 0 ? (
                             <p className="rounded-xl border border-dashed border-white/8 px-3 py-4 text-[12.5px] text-(--ciq-faint)">Nobody waiting.</p>
                         ) : (
                             <ol className={`flex flex-col gap-1.5 overflow-y-auto pr-1 ${standalone ? 'max-h-[30rem]' : 'max-h-[23rem]'}`}>
-                                {snap.waiting.map((j) => (
-                                    <Waiter key={j.ticket} job={j} snap={snap} selected={selected === j.ticket} onSelect={() => toggle(j.ticket)} />
+                                {snap.waiting.map((j, i) => (
+                                    <Waiter
+                                        key={j.ticket}
+                                        job={j}
+                                        snap={snap}
+                                        moves={i < 4}
+                                        selected={selected === j.ticket}
+                                        onSelect={() => toggle(j.ticket)}
+                                    />
                                 ))}
                             </ol>
                         )}

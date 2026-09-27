@@ -1799,58 +1799,88 @@ unqueued, and says so on stderr. `status` also says so.
 config, which is useful for tests. A pre-SQLite `history.jsonl` is imported
 into `history.db` once, then renamed to `history.jsonl.imported`.
 
-#### Watching it — `th ci-queue top` and the Queue tab (SMOODEV-3371)
+#### Watching it — `th ci-queue web`, the Queue tab, and `th ci-queue top` (SMOODEV-3371)
 
 ```bash
-th ci-queue top                 # live TUI; q quit, ↑↓ select, enter details, p pause
-th ci-queue top --interval 2000 # re-read every 2s instead of every 1s
+th ci-queue web --open          # the live page, served by this th; no daemon needed
+th ci-queue web --demo --open   # replay the 2026-09-26 night (35 agents, load ~1,000)
+th ci-queue web --port 4380 --host 0.0.0.0   # share it (a TV); shows paths and job labels
+th ci-queue top                 # the same picture in the terminal; q ↑↓ enter p
 ```
 
+![th ci-queue web replaying the night the queue was built for: the gate holds, then opens](assets/ci-queue/ci-queue-web-demo.gif)
+
+**The page** (`th ci-queue web`) shows the machine:
+
+- **The line, the gate and the lanes.** Waiters are listed in FIFO order,
+  each labelled with what the queue says holds it. The label is the first
+  segment of `waiting_on`, and it is coloured by kind: a neighbour's lock is
+  gold, the budget is orange, the pressure gate is coral, and plain queueing
+  is muted.
+- **The gate** sits between the line and the lanes. It is a solid rail while
+  jobs are being admitted, and turns into a dashed bar that glows coral while
+  the pressure gate holds heavy jobs.
+- **Particles** (three.js) stream from the line into the running lanes. While
+  the gate is held they pile up at it instead, and a lane whose job holds a
+  shared lock runs gold. Held locks also glow gold in their lane and in the
+  Locks panel.
+- **Running jobs** show their elapsed time against that label's usual (p50)
+  run on this machine.
+- **The page colour** follows the machine's heat on the Aurora spectrum (teal
+  → gold → coral). It is tied to the gate's own `holds`: it is never hotter
+  than gold while nothing is held, and never cooler than orange while
+  something is.
+
+Below the machine, the page has these panels:
+
+- **Pressure gauges.** Every threshold is drawn at the same x, so together
+  they form one gate line. Each gauge has a ten-minute sparkline.
+- **Admission budget** (schema 2). Each running job gets an estimated slice,
+  outlined, with its actual use as the fill. A line marks the effective
+  budget, and a chart shows the AIMD scale's sawtooth over time.
+- **Locks**, with who is waiting on each one.
+- **Cost profiles**: a scatter of typical run time against peak memory, with
+  dot size showing the cores used.
+- **Recent jobs.**
+
+The budget and cost panels only appear when the snapshot carries their
+fields. Unknown fields are ignored, and any schema of 1 or higher renders.
+
+**How it's served.** `th ci-queue web` binds loopback on 4380 and falls back
+to any free port if 4380 is taken. It serves `queue.html` from the embedded
+smooth-web bundle, which is a second Vite entry next to Big Smooth's
+`index.html`, and has two routes:
+
+- `GET /api/events` is a Server-Sent Events stream of `snapshot` events, one
+  a second. The first event carries the whole ten-minute sample window; later
+  ones carry only new samples.
+- `GET /api/status` returns the same payload once.
+
+One sampler serves every viewer, and it reads the queue only while someone is
+connected. Ctrl-C stops the server.
+
+`?demo` runs the night replay in the browser; `?demo=<seconds>` opens at a
+given point (`?demo=250` catches the gate opening). The replay is seeded, so
+it plays the same night every time. It uses the real snapshot shape, and
+mocks the schema-2 budget, estimate and rusage fields so those panels can be
+shown before the queue ships them.
+
+**Big Smooth's Queue tab** (sidebar → Queue, or `/#queue`) is the same
+component, fed by polling smooth-daemon's `GET /api/ci-queue/status`. That
+route runs `th ci-queue status --json --history 200` at most once a second,
+and only when a client asks. Both hosts share the relay types in
+`smooth_web::queue`. The snapshot passes through as opaque JSON, so newer
+schema fields reach the page without the relay being rebuilt. The menu bar
+has a **Check Queue** item that opens the tab.
+
+**The TUI** (`th ci-queue top`) draws the same picture over ssh:
+
+- colours fall back from truecolor to 256 colours to none (`NO_COLOR`);
+- sections drop away as the window shrinks (recent jobs, then locks, then
+  sparklines, then the gauges become one line);
+- `--demo` (hidden) runs a seeded busy machine.
+
 ![th ci-queue top on a machine at load 276, holding heavy jobs](assets/ci-queue/tui-live.jpg)
-
-![The Queue tab in Big Smooth, same moment](assets/ci-queue/web-live.jpg)
-
-Both views draw the same picture from the same snapshot (`status --json`):
-
-- **The line → the gate → the lanes.** Waiters are listed in FIFO order,
-  each with why it is still waiting: `2/2 heavy busy`, the pressure hold
-  (`swap 93%`), or `cargo:~/.cargo/shared-target held by #412 clippy`. A gate
-  sits between the line and the lanes. It is a solid rail while jobs are being
-  admitted and dashed while the pressure gate is holding heavy jobs.
-- **Running jobs are progress bars against their usual time.** Each bar is
-  elapsed time over that label's median (p50) run on this machine, taken from
-  `history.jsonl`. It turns gold once the job runs past its usual time. A
-  label that has never finished here is shown as indeterminate, not as a
-  guessed bar.
-- **Pressure gauges share one gate line.** Every signal draws "worse" to the
-  right with its threshold at the same x, 80% of the width. The thresholds
-  therefore line up, and a reading past the line is past its threshold. Each
-  gauge has a ten-minute sparkline next to it.
-- **Colour is heat on the Aurora spectrum,** teal → gold → coral. Each gauge
-  is coloured by how close it is to its threshold. The whole-machine colour
-  (the gate, and the web view's ambient glow) is pinned to the gate's own
-  `holds`: it is never hotter than gold while nothing is held, and never
-  cooler than orange while something is.
-- Also shown: lock holders with who is waiting on each lock, and recent jobs
-  with their exit code, wait time and run time.
-
-**The TUI** works over ssh and in small windows. It uses truecolor when
-`COLORTERM` says so, 256 colours otherwise, and no colour under `NO_COLOR`. As
-the window shrinks it drops the recent-jobs and locks panes first, then the
-sparklines, and finally reduces the gauges to a one-line summary.
-
-**The Queue tab** in Big Smooth (sidebar → Queue, or open `/#queue`) polls
-`GET /api/ci-queue/status` once a second while the tab is visible. The daemon
-cannot link smooth-cli, so it runs `th ci-queue status --json --history 200`.
-Concurrent requests share one read, and a read is at most once a second.
-Nothing runs unless a client asks. The daemon keeps one pressure sample per
-5s for ten minutes, from the reads that clients asked for, and `?since_ms=`
-returns only the samples a poller has not seen yet. A failed read keeps the
-last good snapshot on screen with the reason. A `th` that predates
-`ci-queue` gets an "update th" message rather than a blank page. Jobs move
-from the line into a lane, and from a lane into history, as View Transitions
-keyed by ticket. `prefers-reduced-motion` turns the motion off. Add `?demo` to
-the URL to see a seeded simulation of a busy machine.
 
 ### Audit
 

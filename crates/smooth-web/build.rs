@@ -11,14 +11,23 @@
 use std::fs;
 use std::path::PathBuf;
 
+const PLACEHOLDER_QUEUE: &[u8] = b"<!doctype html><meta charset=utf-8><title>th ci-queue (placeholder)</title>\n<p>This is a build-time placeholder. Run <code>pnpm build:web</code> at the repo root, then rebuild <code>th</code>, to get the queue page.</p>\n";
+
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let dist = PathBuf::from(manifest_dir).join("web").join("dist");
     let index = dist.join("index.html");
 
+    // `queue.html` is `th ci-queue web`'s page (SMOODEV-3371); a placeholder
+    // keeps `smooth_web::queue::queue_router` serving something on a fresh
+    // worktree too.
+    let queue = dist.join("queue.html");
     if index.exists() {
         // Real build artifact present — nothing to do.
         println!("cargo:rerun-if-changed={}", index.display());
+        if !queue.exists() {
+            let _ = fs::write(&queue, PLACEHOLDER_QUEUE);
+        }
         return;
     }
 
@@ -32,6 +41,7 @@ fn main() {
     if let Err(e) = fs::write(&index, placeholder) {
         eprintln!("warning: smooth-web build.rs could not write {}: {e}", index.display());
     }
+    let _ = fs::write(&queue, PLACEHOLDER_QUEUE);
     // No `cargo:rerun-if-changed` for the placeholder — vite will
     // overwrite it, and we want subsequent builds to pick up the
     // real bundle without re-triggering this script.
