@@ -1029,12 +1029,14 @@ mod tests {
     /// without the agents being told about it.
     #[test]
     fn skill_is_loadable_and_names_every_flow_tool() {
-        assert!(super::SKILL.starts_with("---\nname: smoothflow\ndescription: "), "frontmatter first");
+        // Windows checks the file out with CRLF.
+        let skill = super::SKILL.replace("\r\n", "\n");
+        assert!(skill.starts_with("---\nname: smoothflow\ndescription: "), "frontmatter first");
         let router = crate::mcp_serve::SmoothMcp::flow_tool_router();
         let tools = router.list_all();
         assert!(!tools.is_empty());
         for t in tools {
-            assert!(super::SKILL.contains(t.name.as_ref()), "SKILL.md never mentions {}", t.name);
+            assert!(skill.contains(t.name.as_ref()), "SKILL.md never mentions {}", t.name);
         }
     }
 
