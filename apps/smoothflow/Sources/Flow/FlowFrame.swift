@@ -262,13 +262,18 @@ enum HarnessOrdering {
 struct DaemonInfo: Codable, Equatable {
     var version: String
     var machineLabel: String
-    enum CodingKeys: String, CodingKey { case version, machineLabel = "machine_label" }
+    /// The daemon's `$HOME` (th-89eb13); nil from older daemons.
+    var home: String?
+    enum CodingKeys: String, CodingKey { case version, machineLabel = "machine_label", home }
 
-    init(version: String, machineLabel: String) { self.version = version; self.machineLabel = machineLabel }
+    init(version: String, machineLabel: String, home: String? = nil) {
+        self.version = version; self.machineLabel = machineLabel; self.home = home
+    }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(String.self, forKey: .version) ?? "?"
         machineLabel = try c.decodeIfPresent(String.self, forKey: .machineLabel) ?? ""
+        home = try c.decodeIfPresent(String.self, forKey: .home)
     }
 }
 

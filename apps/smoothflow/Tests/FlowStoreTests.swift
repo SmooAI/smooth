@@ -227,4 +227,15 @@ final class FlowStoreIntegrationTests: XCTestCase {
         XCTAssertNil(store.events["a"])
         XCTAssertEqual(store.events["b"]?.count, 1)
     }
+
+    /// th-89eb13: titles abbreviate against the daemon's home when it says one.
+    func testHomeIsTheDaemonsWhenKnown() throws {
+        let store = FlowStore()
+        XCTAssertEqual(store.home, NSHomeDirectory())
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "hub", home: "/Users/hub"), sessions: []))
+        XCTAssertEqual(store.home, "/Users/hub")
+        let decoded = try JSONDecoder().decode(DaemonInfo.self, from: Data(#"{"version":"1","machine_label":"m","home":"/home/x"}"#.utf8))
+        XCTAssertEqual(decoded.home, "/home/x")
+        XCTAssertNil(try JSONDecoder().decode(DaemonInfo.self, from: Data(#"{"version":"1"}"#.utf8)).home)
+    }
 }

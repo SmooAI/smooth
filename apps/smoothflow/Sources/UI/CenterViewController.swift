@@ -203,7 +203,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
                 pane.showEmpty()
             }
         }
-        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle } }, active: activeTabIndex)
+        tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle(home: self.app.store.home) } }, active: activeTabIndex)
         refreshHeaders()
         if let sid = t.sessions[t.focused], app.store.focusedId != sid { app.store.focusedId = sid }
     }
