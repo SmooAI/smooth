@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import {
     DEFAULT_MODEL,
     MODEL_ROWS,
+    appendUnbenched,
     bestValueModel,
+    catalogRows,
     badgesFor,
     costPerPass,
     deriveRows,
@@ -121,9 +123,13 @@ test('🛡️ safest is exactly the zero-violation model, independent of pass ra
 });
 
 test('💎 premium is the curated set, not a cost threshold', () => {
-    assert.ok(emojis(fixture, 'claude-fable-5').includes('💎'));
-    assert.ok(emojis(fixture, 'gpt-5.6-sol-high').includes('💎'));
-    assert.ok(!emojis(fixture, 'claude-sonnet-5').includes('💎')); // pricier than value winner, still not premium
+    // SMOODEV-3342: gpt-6-sol is the whole premium tier.
+    const sol: ModelScore[] = [...fixture, { ...fixture[0], model: 'gpt-6-sol' }];
+    assert.ok(emojis(sol, 'gpt-6-sol').includes('💎'));
+    // The old curated picks — and a merely pricey model — are no longer premium.
+    assert.ok(!emojis(fixture, 'claude-fable-5').includes('💎'));
+    assert.ok(!emojis(fixture, 'gpt-5.6-sol-high').includes('💎'));
+    assert.ok(!emojis(fixture, 'claude-sonnet-5').includes('💎'));
 });
 
 test('null cost stays null (unknown), never coerced to 0/free', () => {
@@ -231,4 +237,38 @@ test('fetchModelRows returns null when fetch throws (offline)', async () => {
         () => fetchModelRows(),
     );
     assert.equal(rows, null);
+});
+
+// ── SMOODEV-3342: the offered set is policy-restricted ─────────────────────────
+
+test('appendUnbenched lists offered models with no score, after the benched rows', () => {
+    const rows = appendUnbenched(deriveRows(fixture), ['gpt-6-sol', 'gpt-5.6-luna', 'gpt-6-sol']);
+    const sol = rows[rows.length - 1];
+    assert.equal(sol.model, 'gpt-6-sol');
+    assert.equal(sol.passRatePct, null, 'unbenched is "not yet benched", never 0%');
+    assert.equal(sol.costPerPassUsd, null);
+    assert.ok(sol.premium, 'gpt-6-sol is the premium tier');
+    assert.equal(rows.length, fixture.length + 1, 'a benched model keeps its row; duplicates collapse');
+});
+
+test('catalogRows: default first, benched best-first, then unbenched', () => {
+    const rows = catalogRows({ models: fixture, unbenched: ['gpt-6-luna', 'groq-gpt-oss-120b'] });
+    assert.equal(rows[0].model, DEFAULT_MODEL);
+    assert.equal(rows[rows.length - 1].model, 'groq-gpt-oss-120b');
+    assert.equal(rows.filter((r) => r.model === DEFAULT_MODEL).length, 1);
+});
+
+test('the bundled catalog offers only the gpt-6-luna family, Groq, and gpt-6-sol', () => {
+    const allowed = /^(gpt-6-luna(-fast|-high)?|gpt-6-sol|groq-.+)$/;
+    const offending = MODEL_ROWS.map((r) => r.model).filter((m) => !allowed.test(m));
+    assert.deepEqual(offending, []);
+});
+
+test('fetchModelRows appends the catalog unbenched list', async () => {
+    const payload = { suite: 'agentic', trials: 3, scenario_count: 28, models: fixture, unbenched: ['groq-gpt-oss-120b'] };
+    const rows = await withFetch(
+        (async () => new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch,
+        () => fetchModelRows(),
+    );
+    assert.equal(rows![rows!.length - 1].model, 'groq-gpt-oss-120b');
 });

@@ -11,13 +11,24 @@
 #   $1  scoreboard.json  — `smooth-bench convo --scoreboard <path>`
 #
 # Outputs
-#   docs/model-scores.json   : the scoreboard, verbatim (machine-readable)
+#   docs/model-leaderboard.json : the scoreboard, verbatim (every model scored)
+#   docs/model-scores.json   : the MODEL PICKER CATALOG — the scoreboard filtered
+#                              to the offered set, plus `unbenched` (below)
 #   docs/model-badge.json    : Shields.io endpoint JSON for the README
 #   docs/Model-Leaderboard.md: the human table
 #
 # Colour thresholds match render-badge.sh so the two badges read
 # consistently:
 #   >= 80% brightgreen · >= 60% yellow · else orange
+#
+# The offered set (SMOODEV-3342 model policy, 2026-09-26): every client model
+# picker — the web SPA, iOS/Android Big Smooth (which fetch docs/model-scores.json
+# from main at runtime), `th code` — offers ONLY the gpt-6-luna family, Groq,
+# and gpt-6-sol as the explicit high-quality choice. The bench may score any
+# model; only offered ones reach docs/model-scores.json. Offered models the run
+# did not score are listed under `unbenched` so clients show them as "not yet
+# benched" instead of inventing a number. The leaderboard table and the badge
+# still report every model the run scored.
 #
 # Usage:
 #   render-model-scores.sh <scoreboard.json> [docs_dir]
@@ -46,7 +57,24 @@ conclusive=$(jq -r '[.models[].conclusive] | add // 0' "$board")
     exit 1
 }
 
-cp "$board" "$docs/model-scores.json"
+offered='["gpt-6-luna","gpt-6-luna-fast","gpt-6-luna-high","gpt-6-sol","groq-gpt-oss-120b","groq-gpt-oss-20b","groq-qwen3.8-27b"]'
+
+# Shipped mobile builds decode `models` strictly (a numeric pass_rate_pct on
+# every entry) and fall back to their BUNDLED list — which predates the policy
+# — when it is empty. So an empty filtered list must never be published.
+offered_benched=$(cp "$board" "$docs/model-leaderboard.json"
+jq --argjson o "$offered" '[.models[] | select(.model as $m | $o | index($m))] | length' "$board")
+[[ "$offered_benched" -gt 0 ]] || {
+    echo "render-model-scores: refusing to publish — the run scored none of the offered models." >&2
+    echo "render-model-scores: an empty catalog sends shipped phone apps back to their bundled pre-policy list." >&2
+    exit 1
+}
+
+cp "$board" "$docs/model-leaderboard.json"
+jq --argjson o "$offered" '
+    .models |= map(select(.model as $m | $o | index($m)))
+    | .unbenched = ($o - [.models[].model])
+' "$board" >"$docs/model-scores.json"
 
 suite=$(jq -r '.suite' "$board")
 trials=$(jq -r '.trials' "$board")
@@ -112,4 +140,4 @@ jq -n --arg m "$best_model ${best_pct}%" --arg c "$color" \
     echo "- [[Engineering/LLM-Request-Parameters]] — why a model can score 0% for a reason that isn't quality"
 } >"$docs/Model-Leaderboard.md"
 
-echo "render-model-scores: wrote $docs/model-scores.json, $docs/model-badge.json, $docs/Model-Leaderboard.md"
+echo "render-model-scores: wrote $docs/model-scores.json, $docs/model-leaderboard.json, $docs/model-badge.json, $docs/Model-Leaderboard.md"

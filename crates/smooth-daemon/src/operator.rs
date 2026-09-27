@@ -763,7 +763,15 @@ fn fast_mode_enabled() -> bool {
 /// model)`; `None` if the file/provider/key is absent. The model is taken from
 /// the given `route` slot (`coding`/`fast`/…), else the provider default.
 fn gateway_from_providers(route: &str) -> Option<(String, String, String)> {
-    gateway_from_providers_at(&dirs_next::home_dir()?.join(".smooth").join("providers.json"), route)
+    let path = dirs_next::home_dir()?.join(".smooth").join("providers.json");
+    // Run the providers.json migration first (and let it save back): a slot
+    // pinned to a legacy `smooth-*` alias or a retired default such as
+    // `gpt-5.6-luna` / `gemini-3.5-flash` moves to the current one
+    // (SMOODEV-3342). Best-effort — a file it can't parse is read raw below.
+    if path.exists() {
+        let _ = smooth_cast::provider_migration::load_providers_with_migration(&path);
+    }
+    gateway_from_providers_at(&path, route)
 }
 
 /// Find the provider entry with the given id.
@@ -797,10 +805,11 @@ pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(Str
     let model = v
         .pointer(&format!("/routing/{route}/model"))
         .and_then(serde_json::Value::as_str)
-        // Fall back to the `coding` slot, then the provider default, then a sane const.
+        // Fall back to the `coding` slot, then the provider default, then the
+        // gateway's default slot model (SMOODEV-3342: was claude-haiku-4-5).
         .or_else(|| v.pointer("/routing/coding/model").and_then(serde_json::Value::as_str))
         .or_else(|| provider.get("default_model").and_then(serde_json::Value::as_str))
-        .unwrap_or("claude-haiku-4-5")
+        .unwrap_or(smooth_policy::smooth_alias::SmoothSlot::Default.concrete_default())
         .to_owned();
     Some((url, key, model))
 }

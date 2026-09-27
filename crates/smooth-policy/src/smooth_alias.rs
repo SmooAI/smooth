@@ -13,16 +13,18 @@
 //! external deps** — every consumer crate that loads a provider registry
 //! can wire it in without pulling new transitive deps.
 //!
-//! ## Mapping table (September 2026)
+//! ## Mapping table (September 2026, SMOODEV-3342)
+//!
+//! Model policy: every slot runs on the gpt-6-luna family or a Groq model.
 //!
 //! | Old slot                      | Concrete model_name        |
 //! |-------------------------------|----------------------------|
-//! | `smooth-coding`               | `gpt-6-luna`             |
-//! | `smooth-reasoning`            | `deepseek-v4-pro`          |
-//! | `smooth-reviewing`            | `minimax-m2.7-direct`      |
+//! | `smooth-coding`               | `gpt-6-luna`               |
+//! | `smooth-reasoning`            | `gpt-6-luna-high`          |
+//! | `smooth-reviewing`            | `gpt-6-luna`               |
 //! | `smooth-judge`                | `groq-gpt-oss-120b`        |
-//! | `smooth-summarize`            | `gemini-2.5-flash`         |
-//! | `smooth-fast`                 | `gemini-3.5-flash`         |
+//! | `smooth-summarize`            | `gpt-6-luna`               |
+//! | `smooth-fast`                 | `gpt-6-luna-fast`          |
 //! | `smooth-default`              | (alias of coding)          |
 //! | `smooth-planning` (deprecated)| (alias of reasoning)       |
 //! | `smooth-thinking` (deprecated)| (alias of reasoning)       |
@@ -32,6 +34,13 @@
 //! still lets the user pin a specific concrete model — these mappings
 //! only kick in for users whose `providers.json` references a stale
 //! alias.
+//!
+//! [`retired_gateway_default`] is the second half: a config that already
+//! ran this migration holds the *concrete* default of its day
+//! (`gpt-5.6-luna`, `gemini-3.5-flash`, …), which no longer changes when a
+//! slot default moves. Those names are rewritten too — but only on the Smoo
+//! gateway, where they are ours to retire (see
+//! `smooth_cast::provider_migration`).
 
 /// The seven canonical routing-slot names this migration knows about.
 ///
@@ -67,30 +76,36 @@ impl SmoothSlot {
             // the tool-calling + temperature-0 probe; Brent's call to make it
             // the main model. Gateway fallback chain: gpt-6-luna -> gpt-5.6-luna.
             Self::Coding | Self::Default => "gpt-6-luna",
-            Self::Reasoning => "deepseek-v4-pro",
-            Self::Reviewing => "minimax-m2.7-direct",
+            // SMOODEV-3342 (model policy, 2026-09-26): every slot runs on the
+            // gpt-6-luna family or a Groq model. Reasoning was
+            // deepseek-v4-pro; luna-high is the same model at high
+            // reasoning effort.
+            Self::Reasoning => "gpt-6-luna-high",
+            // SMOODEV-3342: was minimax-m2.7-direct.
+            Self::Reviewing => "gpt-6-luna",
             // Pearl th-3468bd: judge runs once per dispatch and gates
             // tool execution; a small model's miss on adversarial
             // paraphrase attacks costs more than the few hundred extra
-            // ms. gpt-oss-120B on Groq is still sub-second p95 and well
-            // under Gemini Flash on cost, with substantially better
-            // refusal/jailbreak detection. (Replaces the deprecated
-            // groq-llama-3.3-70b alias removed at the gateway.)
+            // ms. gpt-oss-120B on Groq is still sub-second p95, with
+            // substantially better refusal/jailbreak detection. (Replaces
+            // the deprecated groq-llama-3.3-70b alias removed at the
+            // gateway.)
             Self::Judge => "groq-gpt-oss-120b",
-            // Summarize needs the 1M context window — gemini-2.5-flash
-            // stays.
-            Self::Summarize => "gemini-2.5-flash",
-            // Fast is utility (titles, autocomplete) — cheap, and it has
-            // to actually be fast.
+            // SMOODEV-3342: was gemini-2.5-flash, kept for its 1M context.
+            // gpt-6-luna's standard-rate input tier runs to 272K tokens
+            // (OpenAI bills above that at a higher rate), far past any
+            // compaction input this slot sees.
+            Self::Summarize => "gpt-6-luna",
+            // Fast is utility (titles, autocomplete, the chief /
+            // intent-classifier routers) — cheap, and it has to actually be
+            // fast.
             //
-            // th-170c67: was groq-gpt-oss-20b, retired. It was chosen for
-            // Groq's reputation for speed and never measured; when it
-            // finally was, it scored 17.9% (a quarter of the next-worst
-            // model), breached safety in 5 trials, and was the SLOWEST
-            // model in the lineup by 3.5x — 67s/scenario against
-            // gemini-3.5-flash's 15s. The slot named Fast was the slowest
-            // thing we shipped.
-            Self::Fast => "gemini-3.5-flash",
+            // th-170c67: groq-gpt-oss-20b was retired from this slot. It
+            // scored 17.9% on the agentic bench, breached safety in 5
+            // trials, and was the SLOWEST model measured. SMOODEV-3342:
+            // gemini-3.5-flash, its replacement, is outside the model
+            // policy; luna-fast is luna at low reasoning effort.
+            Self::Fast => "gpt-6-luna-fast",
         }
     }
 
@@ -186,14 +201,44 @@ fn migrate_deprecated_concrete(lower: &str) -> Option<&'static str> {
     match lower {
         // Judge slot — the removed 70B Llama → gpt-oss-120B.
         "groq-llama-3.3-70b" => Some("groq-gpt-oss-120b"),
-        // Fast slot — the removed 8B Llama → gpt-oss-20B.
-        // th-170c67: retargeted from groq-gpt-oss-20b, which is no longer
-        // routed anywhere — it scored 17.9% and was the slowest model
-        // measured. A legacy config should land on the CURRENT fast
-        // default, not on a model we just stopped shipping.
-        "groq-llama-3.1-8b" => Some("gemini-3.5-flash"),
+        // Fast slot — the removed 8B Llama. A legacy config lands on the
+        // CURRENT fast default (th-170c67), not on a model we stopped
+        // shipping.
+        "groq-llama-3.1-8b" => Some(SmoothSlot::Fast.concrete_default()),
         _ => None,
     }
+}
+
+/// Map a concrete model that USED to be a slot default on the Smoo gateway,
+/// and is outside the SMOODEV-3342 model policy, to the current default for
+/// the same job. Returns `None` for anything else (compliant names, and every
+/// model we never wrote as a default).
+///
+/// Unlike [`migrate_alias`] this is NOT safe on any provider: `gemini-2.5-flash`
+/// on a Google key is a user's real choice and must stay. Callers apply it only
+/// to slots routed to the Smoo gateway, where these names came from our own
+/// migrations and presets (`th model login`, the `smooth-*` rewrite of its
+/// day), not from the user. Case-insensitive, like the rest of the lookup.
+///
+/// | Retired default          | Was the default for              | Now                 |
+/// |--------------------------|----------------------------------|---------------------|
+/// | `gpt-5.6-luna`           | coding/default (Aug–Sep 2026)    | `gpt-6-luna`        |
+/// | `deepseek-v4-flash`      | coding/default, provider default | `gpt-6-luna`        |
+/// | `deepseek-v4-pro`        | reasoning                        | `gpt-6-luna-high`   |
+/// | `minimax-m2.7-direct`    | reviewing                        | `gpt-6-luna`        |
+/// | `gemini-2.5-flash`       | judge, summarize                 | `gpt-6-luna`        |
+/// | `gemini-3.5-flash`       | fast                             | `gpt-6-luna-fast`   |
+/// | `gemini-2.5-flash-lite`  | fast (`th model login` catalog)  | `gpt-6-luna-fast`   |
+#[must_use]
+pub fn retired_gateway_default(model: &str) -> Option<&'static str> {
+    Some(match model.to_ascii_lowercase().as_str() {
+        "gpt-5.6-luna" | "deepseek-v4-flash" => SmoothSlot::Coding.concrete_default(),
+        "deepseek-v4-pro" => SmoothSlot::Reasoning.concrete_default(),
+        "minimax-m2.7-direct" => SmoothSlot::Reviewing.concrete_default(),
+        "gemini-2.5-flash" => SmoothSlot::Summarize.concrete_default(),
+        "gemini-3.5-flash" | "gemini-2.5-flash-lite" => SmoothSlot::Fast.concrete_default(),
+        _ => return None,
+    })
 }
 
 fn match_slot_exact(stripped: &str) -> Option<SmoothSlot> {
@@ -236,41 +281,41 @@ mod tests {
     #[test]
     fn exact_slot_aliases_map_to_concrete_defaults() {
         assert_eq!(migrate_alias("smooth-coding"), Some("gpt-6-luna"));
-        assert_eq!(migrate_alias("smooth-reasoning"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-reviewing"), Some("minimax-m2.7-direct"));
+        assert_eq!(migrate_alias("smooth-reasoning"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-reviewing"), Some("gpt-6-luna"));
         assert_eq!(migrate_alias("smooth-judge"), Some("groq-gpt-oss-120b"));
-        assert_eq!(migrate_alias("smooth-summarize"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("smooth-summarize"), Some("gpt-6-luna"));
+        assert_eq!(migrate_alias("smooth-fast"), Some("gpt-6-luna-fast"));
         assert_eq!(migrate_alias("smooth-default"), Some("gpt-6-luna"));
     }
 
     #[test]
     fn deprecated_planning_and_thinking_fold_to_reasoning() {
-        assert_eq!(migrate_alias("smooth-planning"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-thinking"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-thinking-kimi"), Some("deepseek-v4-pro"));
+        assert_eq!(migrate_alias("smooth-planning"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-thinking"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-thinking-kimi"), Some("gpt-6-luna-high"));
     }
 
     #[test]
     fn sub_aliases_map_to_slot_concrete_default() {
-        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("gemini-3.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("gemini-3.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("gpt-6-luna-fast"));
+        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("gpt-6-luna-fast"));
+        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("gpt-6-luna-fast"));
         assert_eq!(migrate_alias("smooth-judge-gemini"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-judge-haiku"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-judge-gpt"), Some("groq-gpt-oss-120b"));
-        assert_eq!(migrate_alias("smooth-summarize-gemini"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-summarize-gpt"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-summarize-qwen"), Some("gemini-2.5-flash"));
+        assert_eq!(migrate_alias("smooth-summarize-gemini"), Some("gpt-6-luna"));
+        assert_eq!(migrate_alias("smooth-summarize-gpt"), Some("gpt-6-luna"));
+        assert_eq!(migrate_alias("smooth-summarize-qwen"), Some("gpt-6-luna"));
         assert_eq!(migrate_alias("smooth-coding-qwen"), Some("gpt-6-luna"));
         assert_eq!(migrate_alias("smooth-coding-glm"), Some("gpt-6-luna"));
         assert_eq!(migrate_alias("smooth-coding-kimi"), Some("gpt-6-luna"));
         assert_eq!(migrate_alias("smooth-coding-minimax"), Some("gpt-6-luna"));
-        assert_eq!(migrate_alias("smooth-reasoning-kimi"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-reasoning-deepseek"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-reasoning-qwen"), Some("deepseek-v4-pro"));
-        assert_eq!(migrate_alias("smooth-reviewing-minimax"), Some("minimax-m2.7-direct"));
-        assert_eq!(migrate_alias("smooth-reviewing-qwen-coder"), Some("minimax-m2.7-direct"));
+        assert_eq!(migrate_alias("smooth-reasoning-kimi"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-reasoning-deepseek"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-reasoning-qwen"), Some("gpt-6-luna-high"));
+        assert_eq!(migrate_alias("smooth-reviewing-minimax"), Some("gpt-6-luna"));
+        assert_eq!(migrate_alias("smooth-reviewing-qwen-coder"), Some("gpt-6-luna"));
     }
 
     #[test]
@@ -280,12 +325,46 @@ mod tests {
         // holding the literal dead name (no `smooth-` prefix) must still
         // get bumped to the live gpt-oss alias.
         assert_eq!(migrate_alias("groq-llama-3.3-70b"), Some("groq-gpt-oss-120b"));
-        assert_eq!(migrate_alias("groq-llama-3.1-8b"), Some("gemini-3.5-flash"));
+        assert_eq!(migrate_alias("groq-llama-3.1-8b"), Some("gpt-6-luna-fast"));
         // Case-insensitive, matching the rest of the lookup.
         assert_eq!(migrate_alias("GROQ-LLAMA-3.3-70B"), Some("groq-gpt-oss-120b"));
         // The live gpt-oss names are not themselves deprecated.
         assert_eq!(migrate_alias("groq-gpt-oss-120b"), None);
         assert_eq!(migrate_alias("groq-gpt-oss-20b"), None);
+    }
+
+    #[test]
+    fn retired_gateway_defaults_map_to_policy_models() {
+        // SMOODEV-3342: concrete names our own migrations/presets wrote as
+        // slot defaults, now outside the model policy.
+        assert_eq!(retired_gateway_default("gpt-5.6-luna"), Some("gpt-6-luna"));
+        assert_eq!(retired_gateway_default("deepseek-v4-flash"), Some("gpt-6-luna"));
+        assert_eq!(retired_gateway_default("deepseek-v4-pro"), Some("gpt-6-luna-high"));
+        assert_eq!(retired_gateway_default("minimax-m2.7-direct"), Some("gpt-6-luna"));
+        assert_eq!(retired_gateway_default("gemini-2.5-flash"), Some("gpt-6-luna"));
+        assert_eq!(retired_gateway_default("gemini-3.5-flash"), Some("gpt-6-luna-fast"));
+        assert_eq!(retired_gateway_default("GEMINI-2.5-FLASH-LITE"), Some("gpt-6-luna-fast"));
+    }
+
+    #[test]
+    fn retired_gateway_default_leaves_policy_models_and_user_picks_alone() {
+        for m in [
+            "gpt-6-luna",
+            "gpt-6-luna-fast",
+            "gpt-6-luna-high",
+            "gpt-6-sol",
+            "groq-gpt-oss-120b",
+            "groq-gpt-oss-20b",
+        ] {
+            assert_eq!(retired_gateway_default(m), None, "{m} is policy-compliant");
+        }
+        // Never a default we wrote — a user pick, not ours to rewrite.
+        assert_eq!(retired_gateway_default("gemini-3.8-flash"), None);
+        assert_eq!(retired_gateway_default("claude-opus-4-8"), None);
+        // Every slot default is itself compliant, so a rewrite is terminal.
+        for slot in ALL_SLOTS {
+            assert_eq!(retired_gateway_default(slot.concrete_default()), None, "{slot:?} default must not be retired");
+        }
     }
 
     #[test]
@@ -337,7 +416,7 @@ mod tests {
     #[test]
     fn case_insensitive_prefix_match() {
         assert_eq!(migrate_alias("SMOOTH-CODING"), Some("gpt-6-luna"));
-        assert_eq!(migrate_alias("Smooth-Reasoning"), Some("deepseek-v4-pro"));
+        assert_eq!(migrate_alias("Smooth-Reasoning"), Some("gpt-6-luna-high"));
     }
 
     #[test]

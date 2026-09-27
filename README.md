@@ -197,8 +197,18 @@ estimated from a price sheet.
 | `claude-sonnet-5`     | Smoo Jr         | 75.0%     | $0.1747    | $0.008320     | **0**  |
 
 **`gpt-5.6-luna` finishes more scenarios than `gpt-5.5` for 1/766th the
-cost** — $0.013 against $10.21 for the same suite. That is why it is the
-default, and why `gpt-5.5` is not in the picker at all.
+cost** — $0.013 against $10.21 for the same suite. That is why the luna
+line is the default: `gpt-6-luna` since September 2026, at under half
+5.6-luna's price.
+
+**What the pickers offer is narrower than what the bench scores**
+(SMOODEV-3342). Every slot default and every model picker — the web SPA,
+the Big Smooth phone apps, `th code` — runs on the `gpt-6-luna` family
+(`gpt-6-luna`, `-fast`, `-high`) or a Groq model, with `gpt-6-sol` as the
+one explicit high-quality choice. [`docs/model-scores.json`](docs/model-scores.json)
+is that picker catalog: the bench rows for offered models, plus the offered
+models not yet benched, which clients show as "not yet benched" rather than
+with an invented score.
 
 Three things this table is careful about, because each is a claim we
 could not otherwise support:
@@ -216,7 +226,7 @@ could not otherwise support:
 
 Full board, all 14 models, plus tool-call counts and per-scenario
 detail: **[docs/Model-Leaderboard.md](docs/Model-Leaderboard.md)** —
-machine-readable in [`docs/model-scores.json`](docs/model-scores.json).
+machine-readable in [`docs/model-leaderboard.json`](docs/model-leaderboard.json).
 
 ---
 

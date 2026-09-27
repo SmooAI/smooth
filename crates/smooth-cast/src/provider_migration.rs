@@ -21,6 +21,14 @@
 //!    every chat-agent / coding-agent / Narc invocation should funnel
 //!    through this entry point.
 //!
+//! [`load_providers_with_migration`] also retires, ONCE per config file,
+//! the *concrete* names earlier migrations pinned as slot defaults
+//! (`gpt-5.6-luna`, `gemini-3.5-flash`, …) that are outside the SMOODEV-3342
+//! model policy — only on slots routed to the Smoo gateway, where those names
+//! were ours; see [`retire_gateway_defaults`]. Once, because after it runs
+//! nothing distinguishes a leftover default from a model the user then picked
+//! on purpose, and a re-pick must stick.
+//!
 //! Both functions are conservative on failure: a save error is logged
 //! but does not block the returned registry — the in-memory migration
 //! still applies, so the running process keeps working. The next
@@ -28,7 +36,7 @@
 
 use std::path::Path;
 
-use smooth_operator::providers::ProviderRegistry;
+use smooth_operator::providers::{ModelSlot, ProviderRegistry};
 use smooth_policy::smooth_alias;
 
 /// One alias rewrite produced by [`migrate_provider_registry`]: the
@@ -84,6 +92,80 @@ pub fn migrate_provider_registry(registry: &mut ProviderRegistry) -> Vec<AliasRe
     out
 }
 
+/// True when a provider is the Smoo AI gateway: the id `th model login`
+/// stamps, or any provider pointed at `llm.smoo.ai` (installs from before the
+/// id was standardised call it `smooth`).
+fn is_gateway_provider(id: &str, api_url: &str) -> bool {
+    id == "smooai-gateway" || api_url.contains("llm.smoo.ai")
+}
+
+/// SMOODEV-3342: rewrite retired gateway defaults on every slot (and its
+/// fallback chain) that routes to the Smoo gateway. A slot on any other
+/// provider keeps its model — `gemini-2.5-flash` on a Google key is the
+/// user's choice, not a default we wrote.
+///
+/// Callers run this once per config (see [`load_providers_with_migration`]);
+/// it cannot tell a leftover default from a deliberate later pick.
+pub fn retire_gateway_defaults(registry: &mut ProviderRegistry) -> Vec<AliasRewrite> {
+    let mut out = Vec::new();
+    retire_gateway_defaults_into(registry, &mut out);
+    out
+}
+
+fn retire_gateway_defaults_into(registry: &mut ProviderRegistry, out: &mut Vec<AliasRewrite>) {
+    let gateway: std::collections::HashSet<String> = {
+        let r = &registry.routing;
+        let mut ids = vec![
+            &r.coding.provider,
+            &r.reviewing.provider,
+            &r.judge.provider,
+            &r.summarize.provider,
+            &r.default.provider,
+        ];
+        ids.extend([&r.reasoning, &r.fast, &r.planning].into_iter().flatten().map(|s| &s.provider));
+        ids.into_iter()
+            .filter(|id| registry.get_provider(id).is_some_and(|p| is_gateway_provider(&p.id, &p.api_url)))
+            .cloned()
+            .collect()
+    };
+    if gateway.is_empty() {
+        return;
+    }
+    let routing = &mut registry.routing;
+    let mut slots: Vec<(&'static str, &mut ModelSlot)> = vec![
+        ("coding", &mut routing.coding),
+        ("reviewing", &mut routing.reviewing),
+        ("judge", &mut routing.judge),
+        ("summarize", &mut routing.summarize),
+        ("default", &mut routing.default),
+    ];
+    for (name, slot) in [
+        ("reasoning", &mut routing.reasoning),
+        ("fast", &mut routing.fast),
+        ("planning", &mut routing.planning),
+    ] {
+        if let Some(s) = slot.as_mut() {
+            slots.push((name, s));
+        }
+    }
+    for (name, slot) in slots {
+        let mut cur = Some(slot);
+        while let Some(s) = cur {
+            if gateway.contains(&s.provider) {
+                if let Some(new) = smooth_alias::retired_gateway_default(&s.model) {
+                    let old = std::mem::replace(&mut s.model, new.to_string());
+                    out.push(AliasRewrite {
+                        slot: name,
+                        old,
+                        new: new.to_string(),
+                    });
+                }
+            }
+            cur = s.fallback.as_deref_mut();
+        }
+    }
+}
+
 fn rewrite_slot(slot_name: &'static str, model: &mut String, out: &mut Vec<AliasRewrite>) {
     if let Some(concrete) = smooth_alias::migrate_alias(model) {
         if model.as_str() != concrete {
@@ -127,15 +209,21 @@ fn rewrite_fallback(slot_name: &'static str, slot: Option<&mut smooth_operator::
 /// save failure during the on-disk rewrite is logged but not returned.
 pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::load_from_file(path)?;
-    let rewrites = migrate_provider_registry(&mut registry);
+    let mut rewrites = migrate_provider_registry(&mut registry);
+    let marker = retirement_marker(path);
+    let retire = !marker.exists();
+    if retire {
+        retire_gateway_defaults_into(&mut registry, &mut rewrites);
+    }
     if !rewrites.is_empty() {
         for r in &rewrites {
             tracing::info!(
                 slot = r.slot,
                 old = %r.old,
                 new = %r.new,
-                "migrated providers.json: {} smooth-* → {}",
+                "migrated providers.json: {} {} → {}",
                 r.slot,
+                r.old,
                 r.new,
             );
         }
@@ -150,6 +238,9 @@ pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegi
         match crate::providers::load_value(path) {
             Ok(mut root) => {
                 migrate_value_in_place(&mut root);
+                if retire {
+                    retire_gateway_defaults_value(&mut root);
+                }
                 if let Err(e) = crate::providers::save_value(path, &root) {
                     tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
                 }
@@ -162,7 +253,23 @@ pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegi
             }
         }
     }
+    if retire {
+        // Record that this file's retired defaults were handled, so a model the
+        // user picks from now on is never rewritten. Best-effort: a missing
+        // marker only means the (idempotent) retirement runs again next load.
+        if let Err(e) = std::fs::write(&marker, "SMOODEV-3342: retired gateway slot defaults migrated\n") {
+            tracing::debug!(error = %e, path = %marker.display(), "could not write the model-policy marker");
+        }
+    }
     Ok(registry)
+}
+
+/// The sidecar that records [`retire_gateway_defaults`] already ran for a
+/// `providers.json`: `<dir>/.<file name>.model-policy-3342`. A sidecar, not a
+/// key in the file, because the typed `save_to_file` drops unknown keys.
+fn retirement_marker(path: &Path) -> std::path::PathBuf {
+    let name = path.file_name().map_or_else(|| "providers.json".into(), |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.model-policy-3342"))
 }
 
 /// Apply the `smooth-*` alias migration to a raw providers.json `Value`,
@@ -198,6 +305,50 @@ pub fn migrate_value_in_place(root: &mut serde_json::Value) -> bool {
     }
     let mut changed = false;
     walk(root, &mut changed);
+    changed
+}
+
+/// Raw-JSON twin of [`retire_gateway_defaults`]: rewrites retired defaults in
+/// every `routing.<slot>` (and nested `fallback`) whose `provider` is the Smoo
+/// gateway, plus the gateway provider's own `default_model`. Returns `true` if
+/// anything changed.
+fn retire_gateway_defaults_value(root: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    fn retire(model: &mut Value) -> bool {
+        let Some(new) = model.as_str().and_then(smooth_alias::retired_gateway_default) else {
+            return false;
+        };
+        *model = Value::String(new.to_string());
+        true
+    }
+    let mut changed = false;
+    let mut gateway = std::collections::HashSet::new();
+    if let Some(providers) = root.get_mut("providers").and_then(Value::as_array_mut) {
+        for p in providers {
+            let id = p.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            let url = p.get("api_url").and_then(Value::as_str).unwrap_or_default();
+            if is_gateway_provider(&id, url) {
+                if let Some(m) = p.get_mut("default_model") {
+                    changed |= retire(m);
+                }
+                gateway.insert(id);
+            }
+        }
+    }
+    if let Some(routing) = root.get_mut("routing").and_then(Value::as_object_mut) {
+        for slot in routing.values_mut() {
+            let mut cur = Some(slot);
+            while let Some(s) = cur {
+                let on_gateway = s.get("provider").and_then(Value::as_str).is_some_and(|p| gateway.contains(p));
+                if on_gateway {
+                    if let Some(m) = s.get_mut("model") {
+                        changed |= retire(m);
+                    }
+                }
+                cur = s.get_mut("fallback").filter(|f| f.is_object());
+            }
+        }
+    }
     changed
 }
 
@@ -243,12 +394,12 @@ mod tests {
         // default, fast) — all start out as legacy aliases.
         assert_eq!(rewrites.len(), 7, "rewrites = {rewrites:?}");
         assert_eq!(r.routing.coding.model, "gpt-6-luna");
-        assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
-        assert_eq!(r.routing.reviewing.model, "minimax-m2.7-direct");
+        assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "gpt-6-luna-high");
+        assert_eq!(r.routing.reviewing.model, "gpt-6-luna");
         assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
-        assert_eq!(r.routing.summarize.model, "gemini-2.5-flash");
+        assert_eq!(r.routing.summarize.model, "gpt-6-luna");
         assert_eq!(r.routing.default.model, "gpt-6-luna");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gpt-6-luna-fast");
     }
 
     #[test]
@@ -292,7 +443,7 @@ mod tests {
             planning: Some(ModelSlot::new("p", "smooth-planning")),
         });
         let rewrites = migrate_provider_registry(&mut r);
-        assert_eq!(r.routing.planning.as_ref().unwrap().model, "deepseek-v4-pro", "planning folded into reasoning");
+        assert_eq!(r.routing.planning.as_ref().unwrap().model, "gpt-6-luna-high", "planning folded into reasoning");
         assert!(rewrites.iter().any(|r| r.slot == "planning"));
     }
 
@@ -311,7 +462,7 @@ mod tests {
         });
         migrate_provider_registry(&mut r);
         assert_eq!(r.routing.coding.model, "gpt-6-luna");
-        assert_eq!(r.routing.coding.fallback.as_ref().unwrap().model, "deepseek-v4-pro");
+        assert_eq!(r.routing.coding.fallback.as_ref().unwrap().model, "gpt-6-luna-high");
     }
 
     #[test]
@@ -323,13 +474,13 @@ mod tests {
         // Load via the wrapper: should rewrite + save back.
         let loaded = load_providers_with_migration(&path).expect("load");
         assert_eq!(loaded.routing.coding.model, "gpt-6-luna");
-        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
+        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "gpt-6-luna-fast");
 
         // Read again with raw load_from_file — the file on disk must
         // now hold the concrete names too.
         let raw_reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(raw_reloaded.routing.coding.model, "gpt-6-luna");
-        assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
+        assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "gpt-6-luna-high");
         assert_eq!(raw_reloaded.routing.judge.model, "groq-gpt-oss-120b");
     }
 
@@ -376,7 +527,7 @@ mod tests {
         assert!(migrate_value_in_place(&mut root));
         assert_eq!(root["providers"][0]["default_model"], "gpt-6-luna");
         assert_eq!(root["routing"]["coding"]["model"], "gpt-6-luna");
-        assert_eq!(root["routing"]["coding"]["fallback"]["model"], "deepseek-v4-pro");
+        assert_eq!(root["routing"]["coding"]["fallback"]["model"], "gpt-6-luna-high");
         // Non-model field untouched.
         assert_eq!(root["providers"][0]["max_tokens"], 4096);
         // Idempotent.
@@ -407,7 +558,7 @@ mod tests {
         assert_eq!(coding.new, "gpt-6-luna");
         let fast = rewrites.iter().find(|r| r.slot == "fast").expect("fast rewrite");
         assert_eq!(fast.old, "smooth-fast");
-        assert_eq!(fast.new, "gemini-3.5-flash");
+        assert_eq!(fast.new, "gpt-6-luna-fast");
     }
 
     /// SMOODEV-2097: a config that already ran the smooth-* migration is
@@ -431,11 +582,99 @@ mod tests {
         // names.
         assert_eq!(rewrites.len(), 2, "rewrites = {rewrites:?}");
         assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gemini-3.5-flash");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gpt-6-luna-fast");
         let judge = rewrites.iter().find(|r| r.slot == "judge").expect("judge rewrite");
         assert_eq!(judge.old, "groq-llama-3.3-70b");
         assert_eq!(judge.new, "groq-gpt-oss-120b");
         // Idempotent: a second pass makes no further changes.
         assert!(migrate_provider_registry(&mut r).is_empty());
+    }
+
+    /// SMOODEV-3342: the file a user actually has — `th model login` plus the
+    /// smooth-* rewrite of its day pinned the concrete defaults of that day.
+    /// Every one of them that is outside the model policy moves to the current
+    /// slot default, on the gateway only; a slot on another provider is the
+    /// user's own choice and stays.
+    fn pinned_gateway_file() -> serde_json::Value {
+        serde_json::json!({
+            "providers": [
+                { "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "k", "api_format": "OpenAiCompat", "default_model": "deepseek-v4-flash", "max_tokens": 4096 },
+                { "id": "google", "api_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "g", "api_format": "OpenAiCompat", "default_model": "gemini-2.5-flash" }
+            ],
+            "routing": {
+                "coding": { "provider": "smooth", "model": "gpt-5.6-luna", "fallback": { "provider": "smooth", "model": "deepseek-v4-flash" } },
+                "reasoning": { "provider": "smooth", "model": "deepseek-v4-pro" },
+                "reviewing": { "provider": "smooth", "model": "minimax-m2.7-direct" },
+                "judge": { "provider": "google", "model": "gemini-2.5-flash" },
+                "summarize": { "provider": "smooth", "model": "gemini-2.5-flash" },
+                "fast": { "provider": "smooth", "model": "gemini-3.5-flash" },
+                "default": { "provider": "smooth", "model": "gpt-6-luna" }
+            }
+        })
+    }
+
+    #[test]
+    fn retires_pinned_gateway_defaults_but_not_other_providers() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("providers.json");
+        std::fs::write(&path, serde_json::to_string(&pinned_gateway_file()).unwrap()).unwrap();
+        let mut r = ProviderRegistry::load_from_file(&path).expect("registry");
+        assert!(migrate_provider_registry(&mut r).is_empty(), "no smooth-* alias in this file");
+        let rewrites = retire_gateway_defaults(&mut r);
+        assert_eq!(r.routing.coding.model, "gpt-6-luna");
+        assert_eq!(r.routing.coding.fallback.as_ref().unwrap().model, "gpt-6-luna");
+        assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "gpt-6-luna-high");
+        assert_eq!(r.routing.reviewing.model, "gpt-6-luna");
+        assert_eq!(r.routing.summarize.model, "gpt-6-luna");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gpt-6-luna-fast");
+        // Routed to Google, not the gateway — the user's pick.
+        assert_eq!(r.routing.judge.model, "gemini-2.5-flash");
+        let fast = rewrites.iter().find(|w| w.slot == "fast").expect("fast rewrite");
+        assert_eq!((fast.old.as_str(), fast.new.as_str()), ("gemini-3.5-flash", "gpt-6-luna-fast"));
+        assert!(retire_gateway_defaults(&mut r).is_empty(), "idempotent");
+    }
+
+    #[test]
+    fn load_with_migration_retires_pinned_defaults_on_disk() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("providers.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pinned_gateway_file()).unwrap()).unwrap();
+
+        let _ = load_providers_with_migration(&path).expect("load");
+
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["routing"]["coding"]["model"], "gpt-6-luna");
+        assert_eq!(on_disk["routing"]["coding"]["fallback"]["model"], "gpt-6-luna");
+        assert_eq!(on_disk["routing"]["reasoning"]["model"], "gpt-6-luna-high");
+        assert_eq!(on_disk["routing"]["fast"]["model"], "gpt-6-luna-fast");
+        assert_eq!(on_disk["routing"]["summarize"]["model"], "gpt-6-luna");
+        assert_eq!(on_disk["providers"][0]["default_model"], "gpt-6-luna");
+        assert_eq!(on_disk["providers"][0]["max_tokens"], 4096, "unknown fields survive");
+        // The Google provider and the slot routed to it are untouched.
+        assert_eq!(on_disk["routing"]["judge"]["model"], "gemini-2.5-flash");
+        assert_eq!(on_disk["providers"][1]["default_model"], "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn retirement_runs_once_so_a_later_pick_sticks() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("providers.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&pinned_gateway_file()).unwrap()).unwrap();
+        let _ = load_providers_with_migration(&path).expect("first load retires");
+        assert!(retirement_marker(&path).exists(), "the marker records the one-time pass");
+
+        // The user deliberately picks a retired name again (th code picker).
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["routing"]["reasoning"]["model"] = "deepseek-v4-pro".into();
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let reloaded = load_providers_with_migration(&path).expect("second load");
+        assert_eq!(
+            reloaded.routing.reasoning.as_ref().unwrap().model,
+            "deepseek-v4-pro",
+            "a pick made after the migration sticks"
+        );
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["routing"]["reasoning"]["model"], "deepseek-v4-pro");
     }
 }
