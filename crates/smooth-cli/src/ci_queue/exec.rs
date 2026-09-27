@@ -176,12 +176,20 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         (Some((c0, m0)), Some((c1, m1))) => (Some(c1.saturating_sub(c0)), (m1 > m0).then_some(m1)),
         _ => (None, None),
     };
+    let max_single_rss_kb = match (peak.map(|p| p.largest_kb).filter(|kb| *kb > 0), rusage_single) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    // A job shorter than one tick is sampled only at spawn, before it has
+    // allocated anything. The group was never smaller than its largest
+    // process, so that is the floor.
+    let peak_group_rss_kb = match (peak.map(|p| p.total_kb).filter(|kb| *kb > 0), max_single_rss_kb) {
+        (Some(g), Some(m)) => Some(g.max(m)),
+        (g, m) => g.or(m),
+    };
     let usage = Usage {
-        peak_group_rss_kb: peak.map(|p| p.total_kb).filter(|kb| *kb > 0),
-        max_single_rss_kb: match (peak.map(|p| p.largest_kb).filter(|kb| *kb > 0), rusage_single) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (a, b) => a.or(b),
-        },
+        peak_group_rss_kb,
+        max_single_rss_kb,
         cpu_ms,
     };
 
@@ -472,6 +480,24 @@ mod tests {
         assert_eq!(ended, Ended::Exited(0));
         assert!(t.elapsed() < Duration::from_secs(10), "run waited {:?} on the sampler", t.elapsed());
         assert!(u.peak_group_rss_kb.is_some(), "the first sample is taken at once");
+    }
+
+    /// Found by running the real binary: a 1s job with a 2s tick was sampled
+    /// only at spawn and recorded a 1 MB peak for a 100 MB process. The
+    /// sampler's ramp-up (100 ms, 200 ms, …) catches it now, independently of
+    /// `ru_maxrss` — which in this multi-test process may already be higher
+    /// from another test, and so not "grow".
+    #[test]
+    fn a_job_shorter_than_a_tick_still_records_its_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("perl -e '$x = q(a) x (50*1024*1024); sleep 1'");
+        let s = Spec {
+            sample_every: Some(Duration::from_secs(30)),
+            ..spec(&argv, tmp.path(), None)
+        };
+        let (_, u) = run_measured(&s, |_| {}, None::<fn(u64)>);
+        assert!(u.peak_group_rss_kb.unwrap_or(0) >= 50 * 1024, "{u:?}");
+        assert!(u.peak_group_rss_kb >= u.max_single_rss_kb, "{u:?}");
     }
 
     #[test]

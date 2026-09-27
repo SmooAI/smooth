@@ -62,18 +62,21 @@ pub struct Sampler {
 impl Sampler {
     /// Sample group `pgid` now and every `tick`, calling `on_sample` with each
     /// total so the caller can publish it (e.g. into the slot, for `status`).
+    /// The first gaps ramp up from 100 ms (100, 200, 400 … up to `tick`), so a
+    /// job shorter than one tick is still seen after it has allocated.
     pub fn start(pgid: u32, tick: Duration, mut on_sample: impl FnMut(u64) + Send + 'static) -> Self {
         let (stop, rx) = mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
             let mut peak = GroupRss::default();
+            let mut wait = Duration::from_millis(100).min(tick);
             loop {
                 if let Some(g) = sample(pgid) {
                     peak.total_kb = peak.total_kb.max(g.total_kb);
                     peak.largest_kb = peak.largest_kb.max(g.largest_kb);
                     on_sample(g.total_kb);
                 }
-                match rx.recv_timeout(tick) {
-                    Err(RecvTimeoutError::Timeout) => {}
+                match rx.recv_timeout(wait) {
+                    Err(RecvTimeoutError::Timeout) => wait = (wait * 2).min(tick),
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
