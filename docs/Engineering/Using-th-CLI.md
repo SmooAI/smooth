@@ -1365,6 +1365,7 @@ th flow kill <id> [--resume]                             # kill the tree; --resu
 th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pearl + remove the merged worktree/branch, drop the session; refuses dirty/unmerged unless --force
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
+th flow skill                                            # print the SmoothFlow agent skill (SKILL.md) for any harness
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
 th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
