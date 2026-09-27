@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+See the machine-wide check queue live (SMOODEV-3371). `th ci-queue top` is a terminal UI that shows waiters in FIFO order, each with the reason it is still waiting (slots busy, a pressure hold, or which ticket holds the lock it needs). It shows the heavy and light slot lanes, with each running job drawn as a bar of elapsed time against that label's usual (p50) run time. It also shows who holds each shared lock, and one gauge per pressure signal: each gauge draws its threshold at the same column, so the thresholds form a single gate line, and has a ten-minute sparkline beside it. Recent jobs are listed with their exit code, wait time and run time. Keys: q quit, ↑↓ select, enter details, p pause. It falls back to 256 colours, or to no colour under `NO_COLOR`, and drops sections as the window shrinks. Big Smooth gains a Queue tab with the same picture: jobs slide from the line through the gate into their lanes, and the page glows teal → gold → coral with the machine's pressure. The tab is served by the new `GET /api/ci-queue/status`, which relays `th ci-queue status --json` at most once a second and only while a client is asking.

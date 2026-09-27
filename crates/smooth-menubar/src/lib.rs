@@ -189,6 +189,13 @@ define_class!(
             }
         }
 
+        #[unsafe(method(openQueue:))]
+        fn open_queue(&self, _sender: Option<&AnyObject>) {
+            if let Some(url) = WEB_URL.get() {
+                open_url(&queue_url(url));
+            }
+        }
+
         #[unsafe(method(openFullDiskAccess:))]
         fn open_full_disk_access(&self, _sender: Option<&AnyObject>) {
             open_url(FDA_SETTINGS_URL);
@@ -313,6 +320,8 @@ where
 
     let menu = NSMenu::new(mtm);
     add_item(&menu, mtm, ns_string!("Open Big Smooth"), sel!(openApp:), &target);
+    // The machine-wide check queue, live (SMOODEV-3371).
+    add_item(&menu, mtm, ns_string!("Check Queue"), sel!(openQueue:), &target);
     // Only offered when the .app actually carries a `th` — an unbundled or
     // CLI-less build just gets the shorter menu.
     if let Some(th) = std::env::current_exe().ok().and_then(|exe| bundled_th(&exe)) {
@@ -345,6 +354,13 @@ where
 
     app.run();
     ExitCode::SUCCESS
+}
+
+/// The web UI opened straight on its Queue tab (`#queue`), replacing any
+/// fragment the base URL already carries.
+fn queue_url(web_url: &str) -> String {
+    let base = web_url.split('#').next().unwrap_or(web_url);
+    format!("{base}#queue")
 }
 
 /// The `th` mark as a menu-bar template image — black shape + alpha, so macOS
@@ -462,6 +478,13 @@ mod tests {
         assert!(!MESSAGES_PROBE.contains("send"), "{MESSAGES_PROBE}");
         assert!(!MESSAGES_PROBE.contains("participant"), "{MESSAGES_PROBE}");
         assert!(MESSAGES_PROBE.contains("get name"));
+    }
+
+    #[test]
+    fn queue_url_opens_the_queue_tab() {
+        assert_eq!(queue_url("http://127.0.0.1:8787/"), "http://127.0.0.1:8787/#queue");
+        assert_eq!(queue_url("http://127.0.0.1:8787/?token=abc"), "http://127.0.0.1:8787/?token=abc#queue");
+        assert_eq!(queue_url("http://127.0.0.1:8787/#chat"), "http://127.0.0.1:8787/#queue");
     }
 
     #[test]

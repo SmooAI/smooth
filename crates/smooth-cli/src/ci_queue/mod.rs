@@ -31,6 +31,7 @@ pub mod pressure;
 pub mod queue;
 pub mod sampler;
 pub mod shim;
+pub mod top;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -75,6 +76,13 @@ pub enum CiQueueCmd {
         #[command(subcommand)]
         cmd: ShimCmd,
     },
+    /// Watch the queue live in the terminal.
+    ///
+    /// Slot lanes with each job's elapsed time against its usual run, the line
+    /// and why each waiter waits, lock holders, pressure gauges against their
+    /// thresholds with ten minutes of history, and recent jobs. Keys: q quit,
+    /// ↑↓ select, enter details, p pause.
+    Top(top::TopArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,6 +171,7 @@ pub fn cmd(cmd: Option<CiQueueCmd>) -> Result<()> {
         Some(CiQueueCmd::Run(a)) => run(&q, &a),
         Some(CiQueueCmd::Status(a)) => status(&q, &a)?,
         Some(CiQueueCmd::Shim { cmd }) => shim_cmd(&q, &cmd)?,
+        Some(CiQueueCmd::Top(a)) => top::run(&q, &a)?,
         None => status(&q, &StatusArgs::default())?,
     };
     if code != 0 {
