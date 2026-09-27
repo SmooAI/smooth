@@ -249,3 +249,5 @@ control.
   0.2.x phone apps (th-3e6020). It records the ⌘W "last pane empties" rule
   (th-96fcb7), the Directory field (th-145e6b), degraded harnesses
   (th-51bf88), the `$HOME` default workspace, and the Linux/Windows keymap.
+- 2026-09-27: the shells group sits last in every client, as §4 always said.
+  The first cut placed it where a shell first appeared (th-a14327).

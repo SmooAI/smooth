@@ -129,12 +129,14 @@ struct Session: Codable, Equatable, Identifiable {
     /// title, else the directory. A title that is only a path (inference
     /// titles a session by its directory) is shortened to its last folder, so
     /// a tab never reads "/" or a whole path.
-    var tabTitle: String {
+    var tabTitle: String { tabTitle(home: NSHomeDirectory()) }
+
+    func tabTitle(home: String) -> String {
         if let p = pearlId?.trimmingCharacters(in: .whitespaces), !p.isEmpty { return p }
         let t = title.trimmingCharacters(in: .whitespaces)
         if !t.isEmpty, !Session.looksLikePath(t) { return t }
         let dir = !t.isEmpty ? t : (worktree.isEmpty ? project : worktree)
-        return Session.folderName(dir) ?? kind
+        return Session.folderName(dir, home: home) ?? kind
     }
 
     static func looksLikePath(_ s: String) -> Bool { s.hasPrefix("/") || s.hasPrefix("~") }
