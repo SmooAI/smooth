@@ -1642,9 +1642,15 @@ Linux's idle I/O class gets the disk only when nobody else wants it.
 On 2026-09-26, at load ~270, a `cargo test` running under `taskpolicy -b` sat
 at 0% CPU for 35+ minutes. It held the shared target's `.cargo-lock` the whole
 time, so every other Rust build on the machine queued behind it: a priority
-inversion. So `--qos background`, the default, is capped at `nice` for any job
-that holds a lock. Background QoS stays for lock-free work such as a
-typecheck.
+inversion. So a job that holds a lock is capped at `nice`, even with
+`--qos background`.
+
+**The default QoS is `nice`, and `background` is an explicit opt-in.** Under
+contention, background QoS starves even lock-free work. The same night, a
+pre-commit turbo typecheck, which holds no lock, ran 40+ minutes under
+`taskpolicy -b` at load ~180 without finishing, and it happened twice. A job
+that never finishes is worse than one that competes politely, so use
+`--qos background` only for work you're content never to see finish.
 
 **Capacity budget.** Slots are a hard ceiling. Within them, a job is admitted
 only while the machine has room for its **estimate**, so several jobs can run
@@ -1719,7 +1725,7 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
-qos = "background"   # or "nice" / "normal"; capped at nice for a job with a --lock
+qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
 poll_ms = 1000       # how often a waiter re-checks
@@ -1742,6 +1748,46 @@ aimd_max = 2.0
 mem_scale_max = 1.0      # memory never overcommits past (available − reserve)
 sample_ms = 2000         # process-group memory sample interval
 ```
+
+**PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
+`cargo`, `xcodebuild` and `gradle` runs for every caller on the machine,
+including agents that don't know the queue exists. `install` writes a small sh
+shim per tool into `~/.local/bin`, or `--dir DIR`. Each shim runs
+`th ci-queue run --class heavy [--lock cargo] -- <real tool> "$@"`. There are
+four exceptions:
+
+- **Inside a queued job** (`SMOOTH_CI_QUEUE_SLOT` is set), it runs the tool
+  directly. This is the recursion guard: a cargo build script that calls cargo,
+  or turbo calling tsgo, never queues behind its own parent's slot or lock.
+  `th ci-queue run` has the same guard, so there are two layers, and each is
+  tested separately.
+- **`CI_QUEUE=off`** (also `0`, `false` or `no`) runs the tool directly.
+- **No `th` on PATH:** the tool runs directly.
+- **Light commands** never queue. For cargo that means `--version`,
+  `metadata`, `fmt`, `tree`, `clean`, `new` and similar. For xcodebuild it
+  means `-version`, `-list`, `-showBuildSettings` and similar. For gradle it
+  means `--version`, `--stop` and `--status`. `--help` never queues for any
+  tool. The allowlist lives in `shim.rs` and is table-tested against the
+  generated sh, so the two can't drift apart. `th ci-queue run -- cargo …`
+  applies the same rule: a light cargo command takes no cargo lock.
+
+A shim finds the real tool by walking PATH and skipping any file that carries
+the shim marker, so it can never resolve to itself. `install` is idempotent,
+and it refuses to overwrite a file it didn't write. `--force` sets such a file
+aside, and `uninstall` puts it back. `uninstall` removes exactly what was
+recorded in `~/.smooth/ci-queue/shims.json`. `status` lists each shim, the real
+tool it resolves to, and whether callers actually get it first on PATH.
+
+No shell rc file is edited. On the reference Mac, `~/.local/bin` is already
+early on PATH, in both interactive and non-interactive shells. It comes ahead
+of `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/bin`, so the shims take
+effect as soon as they are written.
+
+**turbo and tsgo are not shimmed by default.** pnpm runs them from
+`node_modules/.bin`, which it puts ahead of everything on PATH, so a shim in
+`~/.local/bin` never sees them. They go through the queue via the monorepo
+pre-commit instead. `--tools turbo,tsgo` exists for callers that invoke them
+from PATH directly.
 
 **Unix only.** The queue relies on `flock(2)` semantics: the locks are
 advisory, and a held file can still be read. It also relies on process

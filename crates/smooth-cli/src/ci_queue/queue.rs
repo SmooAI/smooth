@@ -64,10 +64,11 @@ use super::pressure::{self, Probe, Readings, SystemProbe};
 /// deadlock the class.
 pub const NESTED_ENV: &str = "SMOOTH_CI_QUEUE_SLOT";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
     /// Typecheck, clippy, test suites — capped hard and held under pressure.
+    #[default]
     Heavy,
     /// Formatters, linters, guards — a looser cap, never held by the gate.
     Light,
@@ -98,7 +99,8 @@ impl Class {
 }
 
 /// What a job says about itself, in its ticket and then in its slot.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `Default` is for literals in tests and demos (`..Default::default()`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobInfo {
     pub class: Class,
     pub ticket: u64,

@@ -30,6 +30,7 @@ pub mod history;
 pub mod pressure;
 pub mod queue;
 pub mod sampler;
+pub mod shim;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,46 @@ pub enum CiQueueCmd {
     Run(RunArgs),
     /// Running jobs, the queue, current pressure vs thresholds, and recent history.
     Status(StatusArgs),
+    /// PATH shims that send heavy cargo / xcodebuild / gradle runs through the
+    /// queue for every caller, agents included.
+    ///
+    /// A shim in a directory ahead of the real tool on PATH (`~/.local/bin`)
+    /// runs `th ci-queue run --class heavy [--lock cargo] -- <real tool> …`.
+    /// It runs the tool directly inside a queued job (`SMOOTH_CI_QUEUE_SLOT`,
+    /// the recursion guard), with `CI_QUEUE=off`, when `th` is missing, and for
+    /// light commands (`cargo --version`, `cargo metadata`, `cargo fmt`, any
+    /// `--help`, …). No shell rc file is edited.
+    Shim {
+        #[command(subcommand)]
+        cmd: ShimCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ShimCmd {
+    /// Write shims (idempotent). Never overwrites a file it did not write
+    /// unless --force, which sets it aside for uninstall to restore.
+    Install(ShimInstallArgs),
+    /// Remove exactly the shims install recorded, restoring anything set aside.
+    Uninstall,
+    /// What is shimmed, the real tool each resolves to, and whether callers get it.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ShimInstallArgs {
+    /// Directory for the shims. Must come before the real tools on PATH.
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+    /// Tools to shim (default: cargo, xcodebuild, gradle). Also: gradlew, turbo, tsgo, tsc.
+    #[arg(long, value_delimiter = ',', value_name = "TOOL,…")]
+    pub tools: Vec<String>,
+    /// Set aside (and later restore) a same-named file that is not a th shim.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -90,8 +131,9 @@ pub struct RunArgs {
     #[arg(long = "lock", value_name = "NAME")]
     pub locks: Vec<String>,
 
-    /// Priority: `background` (default; macOS background QoS), `nice`, or
-    /// `normal`. A job with a `--lock` is capped at `nice`.
+    /// Priority: `nice` (the default: `nice -n 10`), `background` (macOS
+    /// background QoS — opt-in; under contention it can starve a job so it
+    /// never finishes), or `normal`. A job with a `--lock` is capped at `nice`.
     #[arg(long, value_enum)]
     pub qos: Option<config::Qos>,
 
@@ -120,6 +162,7 @@ pub fn cmd(cmd: Option<CiQueueCmd>) -> Result<()> {
     let code = match cmd {
         Some(CiQueueCmd::Run(a)) => run(&q, &a),
         Some(CiQueueCmd::Status(a)) => status(&q, &a)?,
+        Some(CiQueueCmd::Shim { cmd }) => shim_cmd(&q, &cmd)?,
         None => status(&q, &StatusArgs::default())?,
     };
     if code != 0 {
@@ -199,7 +242,11 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
 /// The resolved `--lock`s, plus `cargo` when the command is cargo itself.
 fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<String> {
     let mut wanted: Vec<&str> = named.iter().map(String::as_str).collect();
-    let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo");
+    // A light cargo command (`--version`, `metadata`, `fmt`, …) takes no lock:
+    // it would only wait out someone else's build for nothing. Seen on the
+    // released binary: `run -- cargo --version` sat 91s behind an outside build.
+    let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo")
+        && !shim::is_light("cargo", &cmd[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
     if runs_cargo && !wanted.contains(&"cargo") {
         wanted.push("cargo");
     }
@@ -207,6 +254,82 @@ fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<S
     out.sort();
     out.dedup();
     out
+}
+
+fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
+    let state = q.dir().join("shims.json");
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    match cmd {
+        ShimCmd::Install(a) => {
+            let dir = a
+                .dir
+                .clone()
+                .or_else(|| dirs_next::home_dir().map(|h| h.join(".local").join("bin")))
+                .ok_or_else(|| anyhow::anyhow!("no home directory; pass --dir"))?;
+            let tools: Vec<String> = if a.tools.is_empty() {
+                shim::DEFAULT_TOOLS.iter().map(ToString::to_string).collect()
+            } else {
+                a.tools.clone()
+            };
+            for (tool, what) in shim::install(&dir, &tools, &path_var, a.force, &state)? {
+                match what {
+                    shim::Installed::Wrote { path, real } => println!("✓ {tool}: {} → {}", path.display(), real.display()),
+                    shim::Installed::Unchanged { path } => println!("· {tool}: {} already current", path.display()),
+                    shim::Installed::NotFound => println!("○ {tool}: not on PATH — skipped"),
+                }
+            }
+            let rows = shim::status(&state, &path_var)?;
+            for r in rows.iter().filter(|r| !r.active) {
+                eprintln!(
+                    "⚠ {}: callers still get {} first — put {} ahead of it on PATH",
+                    r.tool,
+                    r.first_on_path.as_ref().map_or_else(|| "nothing".into(), |p| p.display().to_string()),
+                    dir.display()
+                );
+            }
+            Ok(0)
+        }
+        ShimCmd::Uninstall => {
+            let notes = shim::uninstall(&state)?;
+            if notes.is_empty() {
+                println!("No shims were installed. This is a confirmed read of {}, not a failure.", state.display());
+            }
+            for n in notes {
+                println!("{n}");
+            }
+            Ok(0)
+        }
+        ShimCmd::Status { json } => {
+            let rows = shim::status(&state, &path_var)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(0);
+            }
+            if rows.is_empty() {
+                println!("No shims installed. `th ci-queue shim install` adds cargo, xcodebuild and gradle.");
+            }
+            for r in rows {
+                let glyph = if r.active { "●" } else { "○" };
+                let why = if !r.present {
+                    "missing (removed or replaced)".to_string()
+                } else if r.active {
+                    "active".to_string()
+                } else {
+                    format!(
+                        "installed, but callers get {} first",
+                        r.first_on_path.as_ref().map_or_else(|| "nothing".into(), |p| p.display().to_string())
+                    )
+                };
+                println!(
+                    "  {glyph} {:<11} {:<40} → {:<40} {why}",
+                    r.tool,
+                    r.path.display().to_string(),
+                    r.real_now.as_ref().map_or_else(|| "(no real tool on PATH)".into(), |p| p.display().to_string())
+                );
+            }
+            Ok(0)
+        }
+    }
 }
 
 /// `pnpm turbo typecheck …` — the command, trimmed for a one-line display.
@@ -448,6 +571,13 @@ mod tests {
         let locks = job_locks(&q, &[], &cmd, Path::new("/repo"));
         assert_eq!(locks, vec!["cargo:/t".to_string()]);
         assert_eq!(job_locks(&q, &["cargo".into()], &cmd, Path::new("/repo")), locks, "named twice is one lock");
+        let light: Vec<OsString> = ["cargo", "--version"].iter().map(Into::into).collect();
+        assert!(job_locks(&q, &[], &light, Path::new("/repo")).is_empty(), "a light cargo command takes no lock");
+        assert_eq!(
+            job_locks(&q, &["cargo".into()], &light, Path::new("/repo")),
+            locks,
+            "an explicit --lock still applies"
+        );
         let tsc: Vec<OsString> = ["pnpm", "typecheck"].iter().map(Into::into).collect();
         assert!(job_locks(&q, &[], &tsc, Path::new("/repo")).is_empty());
         assert_eq!(job_locks(&q, &["docker".into()], &tsc, Path::new("/repo")), vec!["docker".to_string()]);
