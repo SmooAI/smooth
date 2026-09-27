@@ -6,7 +6,7 @@
 //!    at any endpoint without touching config.
 //! 2. **`providers.json`** — the credentials `th model login` writes to
 //!    `~/.smooth/providers.json` (overridable with `SMOOTH_PROVIDERS_FILE`).
-//!    Resolved through the engine's [`ProviderRegistry`], so the always-on
+//!    Resolved through the engine's [`ProviderRegistry`](smooth_operator::providers::ProviderRegistry), so the always-on
 //!    daemon Just Works with the same creds the rest of `th` uses.
 //!
 //! If neither is present the daemon errors with an actionable message.
@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use smooth_operator::providers::{Activity, ProviderRegistry};
+use smooth_operator::providers::Activity;
 use smooth_operator::LlmConfig;
 
 /// Resolve the daemon's bearer token from `SMOOTH_DAEMON_TOKEN`.
@@ -188,7 +188,7 @@ fn resolve_llm_inner(
     // 2. providers.json (th model login creds), via the engine's registry.
     if let Some(path) = providers_path {
         if path.exists() {
-            let registry = ProviderRegistry::load_from_file(path).with_context(|| format!("reading {}", path.display()))?;
+            let registry = smooth_cast::provider_migration::load_providers_with_migration(path).with_context(|| format!("reading {}", path.display()))?;
             let mut cfg = registry
                 .llm_config_for(Activity::Coding)
                 .context("resolving an LLM from providers.json (is a provider + routing configured?)")?;

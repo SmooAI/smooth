@@ -89,6 +89,13 @@ jobs:
 
             - name: Test
               run: cargo test
+              env:
+                  # Same knob as pr-checks.yml: parsing the full clap derive tree
+                  # in a debug build overflows libtest's default thread stack
+                  # (org_cli_tests::smoo_namespace_holds_the_platform_surface).
+                  # Without it this job has aborted on every push to main since
+                  # 2026-09-24, so no release has shipped since.
+                  RUST_MIN_STACK: 8388608
 
             - name: Build
               run: cargo build --release -p smooai-smooth-cli

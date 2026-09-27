@@ -61,7 +61,8 @@ pub struct SmoothMcp {
 
 impl SmoothMcp {
     fn new() -> Self {
-        let mut tool_router = Self::tool_router();
+        // th-1efb59: SmoothFlow's tools live in `mcp_flow`.
+        let mut tool_router = Self::tool_router() + Self::flow_tool_router();
         Self::apply_write_gate(&mut tool_router, mcp_writes_allowed());
         Self { tool_router }
     }
@@ -703,6 +704,14 @@ impl SmoothMcp {
                 None
             }
         };
+        // SMOODEV-3356: point the SessionStart hook's state file at the new
+        // name too, exactly as `th agent claim` does. Without this an MCP rename
+        // left `th agent whoami` (and every bare `th msg`, and the mail
+        // watcher) resolving to the OLD, now-unregistered handle — a session
+        // silently watching a mailbox nobody writes to.
+        if let Some(prev) = previous.as_deref().filter(|p| *p != name) {
+            crate::mail::rewrite_session_handles(prev, name);
+        }
         Ok(match carried {
             Some(prev) => format!("You are now `{name}` (was `{prev}` — mail carried over)."),
             None => format!("You are now `{name}`. Publish presence with agent_status, and check mail_inbox at natural breakpoints."),
@@ -1341,6 +1350,8 @@ impl ServerHandler for SmoothMcp {
                  records with what to change; `email_dmarc_summary`, `email_sending_sources` and `email_tls_summary` read the \
                  reports mailbox providers send about the org's own domains; `email_signature_status` shows who gets the managed \
                  signature. No reports is a setup problem (a wrong or missing `rua=`), never a clean domain — say so.\n\n\
+                 SMOOTHFLOW — free, local, no sign-in. The `flow_*` tools drive SmoothFlow, the fleet of coding                  agents (Claude Code, Codex, OpenCode, Gemini, th code, shells) running on this machine. `flow_list` is                  the fleet; `flow_repos` finds a directory by name; `flow_new` starts an agent there (optionally with a                  prompt and a pearl); `flow_prompt_wait` sends a prompt and waits for the turn, `flow_send` does not wait;                  `flow_snapshot` shows the agent's screen. `flow_approve` answers an agent's permission request — ONLY                  with the user's explicit consent: show them what the agent wants to run and let them decide. `flow_kill`,                  `flow_close` and `flow_fanout_pick` end or merge work; confirm with the user first.
+
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -1417,6 +1428,21 @@ mod tests {
             "email_sending_sources",
             "email_tls_summary",
             "email_signature_status",
+            // th-1efb59: SmoothFlow.
+            "flow_list",
+            "flow_snapshot",
+            "flow_handoff",
+            "flow_harnesses",
+            "flow_repos",
+            "flow_infer",
+            "flow_new",
+            "flow_send",
+            "flow_prompt_wait",
+            "flow_approve",
+            "flow_kill",
+            "flow_close",
+            "flow_fanout_new",
+            "flow_fanout_pick",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
@@ -1515,6 +1541,12 @@ mod tests {
         let _lock = crate::mail::ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("SMOOTH_MAIL_DB", tmp.path().join("mail.db"));
+        // Hermetic session-state dir: a rename rewrites these files.
+        let sessions = tmp.path().join("agent-sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::write(sessions.join("sess-bob"), "bob").expect("session file");
+        std::fs::write(sessions.join("sess-other"), "carol").expect("other session file");
+        std::env::set_var("SMOOTH_AGENT_SESSIONS_DIR", &sessions);
 
         let (server_t, client_t) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
@@ -1578,10 +1610,18 @@ mod tests {
         call("agent_identity", json!({ "agent_id": "bob", "name": "reviewer", "continue_from": "bob" })).await;
         let moved = call("mail_inbox", json!({ "agent_id": "reviewer" })).await;
         assert!(moved.contains("second") && moved.contains("please review"), "rename must carry mail: {moved}");
+        // SMOODEV-3356: and the session that was `bob` now resolves to `reviewer`.
+        assert_eq!(std::fs::read_to_string(sessions.join("sess-bob")).expect("read"), "reviewer");
+        assert_eq!(
+            std::fs::read_to_string(sessions.join("sess-other")).expect("read"),
+            "carol",
+            "other sessions untouched"
+        );
 
         client.cancel().await.expect("client shutdown");
         server.abort();
         std::env::remove_var("SMOOTH_MAIL_DB");
+        std::env::remove_var("SMOOTH_AGENT_SESSIONS_DIR");
     }
 
     /// Identity resolution refuses to guess. Getting this wrong writes to a
@@ -1618,7 +1658,7 @@ mod tests {
     /// calls to disabled routes), and unannotated tools fail closed.
     #[test]
     fn write_kill_switch_hides_every_mutating_tool() {
-        let mut router = SmoothMcp::tool_router();
+        let mut router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
         let full = router.list_all().len();
         SmoothMcp::apply_write_gate(&mut router, false);
         let gated = router.list_all();
@@ -1642,15 +1682,35 @@ mod tests {
             "agent_identity",
             "agent_status",
             "operator_tools_set",
+            "flow_new",
+            "flow_send",
+            "flow_prompt_wait",
+            "flow_approve",
+            "flow_kill",
+            "flow_close",
+            "flow_fanout_new",
+            "flow_fanout_pick",
         ] {
             assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
         }
-        for read_tool in ["pearls_ready", "recall", "mail_inbox", "agent_list", "operator_tools"] {
+        for read_tool in [
+            "pearls_ready",
+            "recall",
+            "mail_inbox",
+            "agent_list",
+            "operator_tools",
+            "flow_list",
+            "flow_snapshot",
+            "flow_handoff",
+            "flow_harnesses",
+            "flow_repos",
+            "flow_infer",
+        ] {
             assert!(names.contains(&read_tool), "{read_tool} is read-only and must survive");
         }
 
         // allow_writes = true is a no-op.
-        let mut untouched = SmoothMcp::tool_router();
+        let mut untouched = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
         SmoothMcp::apply_write_gate(&mut untouched, true);
         assert_eq!(untouched.list_all().len(), full);
     }

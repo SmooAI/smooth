@@ -124,13 +124,15 @@ async fn th_without_a_daemon_says_so_in_two_lines() {
     if !prereqs_with_th() {
         return;
     }
-    // A daemon whose HOME has no daemon.addr yet: point `th` at a HOME of
-    // its own by booting a rig and deleting the advertisement.
+    // A HOME with no advertisement at all: boot a rig, then delete both
+    // files `th flow` reads — flow.addr first, then daemon.addr (th-1efb59).
     let d = Daemon::boot().await;
-    std::fs::remove_file(d.home.join(".smooth").join("daemon.addr")).unwrap();
+    for f in ["flow.addr", "daemon.addr"] {
+        let _ = std::fs::remove_file(d.home.join(".smooth").join(f));
+    }
     let (code, _, err) = d.th(&["flow", "ls"]);
     assert_ne!(code, 0);
-    assert!(err.contains("no daemon advertised") && err.contains("th up"), "{err}");
+    assert!(err.contains("no flow engine advertised") && err.contains("th up"), "{err}");
     // `th harness list` degrades to the on-disk registry with a note.
     let (code, out, _) = d.th(&["harness", "list"]);
     assert_eq!(code, 0, "{out}");

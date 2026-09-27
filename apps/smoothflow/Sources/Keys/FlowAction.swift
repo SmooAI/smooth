@@ -139,7 +139,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     ///   exactly a fleet action.
     /// - **⌘W is Close Pane, not Close Tab.** ⌘W acts on the surface in
     ///   Ghostty, iTerm2 and Terminal.app, and the container collapses when it
-    ///   empties: last pane closes the tab, last tab closes the window. ⌘⇧W
+    ///   empties: last pane closes the tab, and the last pane of the last tab
+    ///   empties rather than taking the window (th-96fcb7). ⌘⇧W
     ///   keeps its place as "close the whole tab, splits and all".
     /// - **⌘D is Split Right and ⌘⇧D is Split Down**, matching cmux/Ghostty,
     ///   rather than one untyped "Split Surface". The other two directions are
@@ -196,7 +197,7 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .newShell: return "A shell session in the focused session's worktree, in a new tab."
         case .newTab: return "Another surface layout over the same fleet — tabs hold panes, not sessions."
-        case .closePane: return "Closes the focused pane; the tab, then the window, collapse when they empty. Asks first when a live session is on screen."
+        case .closePane: return "Closes the focused pane; the tab collapses when it empties, and the last pane just empties — the window stays. Asks first when a live session is on screen."
         case .closeTab: return "Closes the whole tab, splits and all."
         case .closeOut: return "Ends the session for good: closes its pearl, removes the merged worktree and branch, drops the row. A running session is killed first."
         case .steerAll: return "Sends the steer bar's text to every working session."

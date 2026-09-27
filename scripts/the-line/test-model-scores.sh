@@ -27,6 +27,7 @@ cat >"$work/board.json" <<'JSON'
   "suite": "convo", "trials": 1, "scenario_count": 9,
   "models": [
     { "model": "deepseek-v4-flash", "pass_rate_pct": 88.9, "passed": 8, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.0188, "cost_per_pass_usd": 0.0024, "duration_s": 204.1 },
+    { "model": "gpt-6-luna", "pass_rate_pct": 77.7, "passed": 7, "conclusive": 9, "inconclusive": 0, "cost_usd": 0.0100, "cost_per_pass_usd": 0.0014, "duration_s": 150.0 },
     { "model": "unpriced", "pass_rate_pct": 55.5, "passed": 5, "conclusive": 9, "inconclusive": 0, "duration_s": 10.0 }
   ]
 }
@@ -45,7 +46,26 @@ check "table carries the cost" "" "$table" '$0.0188'
 # The regression that matters: an unmeasured cost must never render as $0.
 check "missing cost renders as a dash" "" "$table" '| — | — |'
 check "one-trial runs carry the noise warning" "" "$table" '1 trial per scenario'
-check "scoreboard copied verbatim" "" "$(cat "$work/docs/model-scores.json")" '"suite": "convo"'
+catalog=$(cat "$work/docs/model-scores.json")
+check "catalog keeps the run metadata" "" "$catalog" '"suite": "convo"'
+# SMOODEV-3342: the picker catalog carries only offered models...
+check "catalog keeps an offered model" "" "$(jq -r '[.models[].model] | join(",")' "$work/docs/model-scores.json")" 'gpt-6-luna'
+check "catalog drops a non-offered model" "" "$(jq -r '[.models[].model] | index("deepseek-v4-flash") | tostring' "$work/docs/model-scores.json")" 'null'
+check "catalog drops an unknown model" "" "$(jq -r '[.models[].model] | index("unpriced") | tostring' "$work/docs/model-scores.json")" 'null'
+# ...and lists the offered ones the run did not score, never inventing a score.
+check "unbenched lists offered-but-unscored" "" "$(jq -r '.unbenched | join(",")' "$work/docs/model-scores.json")" 'gpt-6-sol'
+check "a benched model is not also unbenched" "" "$(jq -r '.unbenched | index("gpt-6-luna") | tostring' "$work/docs/model-scores.json")" 'null'
+# The table still reports everything the run scored.
+check "table keeps non-offered models" "" "$(cat "$work/docs/Model-Leaderboard.md")" 'unpriced'
+
+# A run that scored none of the offered models must not publish an empty catalog.
+jq '.models |= map(select(.model != "gpt-6-luna"))' "$work/board.json" >"$work/none.json"
+if bash "$render" "$work/none.json" "$work/docs" >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    echo "FAIL: a run with no offered model was published"
+else
+    pass=$((pass + 1))
+fi
 
 # Colour thresholds.
 sed 's/88.9/72.0/' "$work/board.json" >"$work/mid.json"
@@ -111,7 +131,7 @@ if [[ -f "$here/check-readme-board.py" ]]; then
         pass=$((pass + 1))
     else
         fail=$((fail + 1))
-        echo "FAIL: README benchmark table has drifted from docs/model-scores.json"
+        echo "FAIL: README benchmark table has drifted from docs/model-leaderboard.json"
         python3 "$here/check-readme-board.py" "$here/../.." 2>&1 | sed 's/^/      /'
     fi
 fi

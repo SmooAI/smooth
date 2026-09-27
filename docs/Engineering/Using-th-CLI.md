@@ -1202,7 +1202,7 @@ harness that reads `AGENTS.md` learns to register + poll without bespoke wiring.
 // VS Code (Copilot) uses "servers" (not "mcpServers") — otherwise identical.
 ```
 
-**`th mcp install --harness claude-code|codex|opencode|all`** registers that
+**`th mcp install --harness claude-code|codex|opencode|cursor|claude-desktop|all`** registers that
 server with a coding harness for you, so all three reach the same agent mailbox
 and pearl store (pearl th-2f33b6). It is idempotent and preserving: JSON configs
 keep their key order, `~/.codex/config.toml` keeps its comments, keys you added
@@ -1212,16 +1212,19 @@ change. A harness with no config directory is skipped, not conjured. Users of
 the `smooth-agent` Claude Code plugin get the server automatically — it ships in
 the plugin manifest's `mcpServers`.
 
-| Harness       | File                               | Entry                                          |
-| ------------- | ---------------------------------- | ---------------------------------------------- |
-| `claude-code` | `~/.claude.json`                   | `mcpServers.smooth` (`type: "stdio"`)          |
-| `codex`       | `~/.codex/config.toml`             | `[mcp_servers.smooth]`                         |
-| `opencode`    | `~/.config/opencode/opencode.json` | `mcp.smooth` (`type: "local"`, one argv array) |
+| Harness          | File                                                                                                                              | Entry                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `claude-code`    | `~/.claude.json`                                                                                                                  | `mcpServers.smooth` (`type: "stdio"`)                                                              |
+| `codex`          | `~/.codex/config.toml`                                                                                                            | `[mcp_servers.smooth]`                                                                             |
+| `opencode`       | `~/.config/opencode/opencode.json`                                                                                                | `mcp.smooth` (`type: "local"`, one argv array)                                                     |
+| `claude-desktop` | `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude`, Windows `%APPDATA%\Claude`, Linux `~/.config/Claude`) | `mcpServers.smooth` with the **absolute** path of this `th` (the app starts with a minimal `PATH`) |
 
 `th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes three tiers:
 
 - **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
 - **Your business — behind Sign in with Smoo (`smoo auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `smoo api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `smoo auth login`" message rather than failing opaquely.
+
+- **SmoothFlow — free, local, no sign-in (th-1efb59).** Drive the fleet of coding agents on this machine from any MCP host, Claude Desktop included. Read: `flow_list` (sessions, states, pending approvals), `flow_snapshot` (an agent's screen), `flow_handoff`, `flow_harnesses` (what can run, what needs setup), `flow_repos` (search every git repo under `~`), `flow_infer`. Write: `flow_new` (start claude/codex/opencode/… or a shell in a directory, with an optional prompt and pearl), `flow_send`, `flow_prompt_wait` (submit and wait for the turn; refuses while the agent waits on an approval, reports a stall if it never starts), `flow_approve` (only with the user's consent), `flow_kill`, `flow_close`, `flow_fanout_new` / `flow_fanout_pick`. The tools reach the flow engine the way the hooks do — `$SMOOTH_FLOW_ADDR`, then `~/.smooth/flow.addr` (the SmoothFlow app's daemon), then `daemon.addr` — so `th flow` and these tools see the fleet the SmoothFlow app shows. `SMOOTH_MCP_ALLOW_WRITE=0` leaves only the read tools.
 
 - **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else the CLI's own resolver (the handle env vars, then the SessionStart hook's record for this session) — one shared chain, so a tool call and a `th msg` call can never answer for different mailboxes; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
 
