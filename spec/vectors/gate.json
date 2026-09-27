@@ -1,0 +1,242 @@
+{
+  "spec": "SmoothFlow-Client-Spec §4 center tab gating",
+  "cases": [
+    {
+      "name": "nothing loaded yet, row has a branch",
+      "input": {
+        "kind": "claude",
+        "branch": "main",
+        "state_source": "hooks",
+        "packet": null
+      },
+      "expected": {
+        "gate": {
+          "diff": true,
+          "pr": true,
+          "activity": "full"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "pr",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "activity",
+            "allowed": true,
+            "why_not": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "shell in a worktree gets diff and PR",
+      "input": {
+        "kind": "shell",
+        "branch": "main",
+        "state_source": null,
+        "packet": null
+      },
+      "expected": {
+        "gate": {
+          "diff": true,
+          "pr": true,
+          "activity": "none"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "pr",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "activity",
+            "allowed": false,
+            "why_not": "A shell reports no activity"
+          }
+        ]
+      }
+    },
+    {
+      "name": "detached HEAD: diff but no PR",
+      "input": {
+        "kind": "claude",
+        "branch": null,
+        "state_source": "hooks",
+        "packet": {
+          "head": "abc123",
+          "branch": "HEAD"
+        }
+      },
+      "expected": {
+        "gate": {
+          "diff": true,
+          "pr": false,
+          "activity": "full"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "pr",
+            "allowed": false,
+            "why_not": "No branch (detached HEAD)"
+          },
+          {
+            "tab": "activity",
+            "allowed": true,
+            "why_not": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "packet without HEAD: not a repo",
+      "input": {
+        "kind": "aider",
+        "branch": "main",
+        "state_source": "scrape",
+        "packet": {
+          "head": null,
+          "branch": null
+        }
+      },
+      "expected": {
+        "gate": {
+          "diff": false,
+          "pr": false,
+          "activity": "thin"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": false,
+            "why_not": "Not in a git repository"
+          },
+          {
+            "tab": "pr",
+            "allowed": false,
+            "why_not": "Not in a git repository"
+          },
+          {
+            "tab": "activity",
+            "allowed": true,
+            "why_not": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "scraped harness: thin activity",
+      "input": {
+        "kind": "aider",
+        "branch": "dev",
+        "state_source": "scrape",
+        "packet": {
+          "head": "abc123",
+          "branch": "dev"
+        }
+      },
+      "expected": {
+        "gate": {
+          "diff": true,
+          "pr": true,
+          "activity": "thin"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "pr",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "activity",
+            "allowed": true,
+            "why_not": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown harness keeps full activity",
+      "input": {
+        "kind": "mystery",
+        "branch": null,
+        "state_source": null,
+        "packet": null
+      },
+      "expected": {
+        "gate": {
+          "diff": false,
+          "pr": false,
+          "activity": "full"
+        },
+        "tabs": [
+          {
+            "tab": "terminal",
+            "allowed": true,
+            "why_not": null
+          },
+          {
+            "tab": "diff",
+            "allowed": false,
+            "why_not": "Not in a git repository"
+          },
+          {
+            "tab": "pr",
+            "allowed": false,
+            "why_not": "Not in a git repository"
+          },
+          {
+            "tab": "activity",
+            "allowed": true,
+            "why_not": null
+          }
+        ]
+      }
+    }
+  ]
+}

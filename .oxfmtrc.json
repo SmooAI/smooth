@@ -22,6 +22,7 @@
         "docs/model-badge.json",
         "docs/model-scores.json",
         "docs/model-leaderboard.json",
-        "crates/smooth-api-client/openapi.json"
+        "crates/smooth-api-client/openapi.json",
+        "spec/vectors/**"
     ]
 }

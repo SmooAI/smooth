@@ -1,0 +1,2 @@
+# Conformance vectors are compared byte-for-byte (th-3e6020); never CRLF.
+spec/vectors/*.json text eol=lf

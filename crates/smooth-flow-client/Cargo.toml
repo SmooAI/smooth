@@ -1,0 +1,19 @@
+[package]
+name = "smooai-smooth-flow-client"
+description = "SmoothFlow client logic shared by every client: pane trees, close rules, titles, tab gating, directory picking, fleet grouping — plus the JSON conformance vectors the Mac, desktop, iOS and Android apps replay."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "smooth_flow_client"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
