@@ -8,9 +8,12 @@ use serde_json::json;
 
 use crate::support::{e2e_server_bin, prereqs, real_daemon_addr, skip, state, Daemon, WAIT};
 
+/// One file's bytes and mtime, or `None` when it does not exist.
+type FileSnapshot = Option<(Vec<u8>, std::time::SystemTime)>;
+
 /// The real `~/.smooth/{daemon.addr,daemon.lock,operator-token,flow.db}`
 /// — bytes + mtime of each that exists.
-fn real_smooth_files() -> Vec<(String, Option<(Vec<u8>, std::time::SystemTime)>)> {
+fn real_smooth_files() -> Vec<(String, FileSnapshot)> {
     let home = dirs_next::home_dir().unwrap();
     ["daemon.addr", "daemon.lock", "operator-token", "flow.db"]
         .into_iter()
