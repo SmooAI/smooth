@@ -1743,6 +1743,46 @@ mem_scale_max = 1.0      # memory never overcommits past (available − reserve)
 sample_ms = 2000         # process-group memory sample interval
 ```
 
+**PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
+`cargo`, `xcodebuild` and `gradle` runs for every caller on the machine,
+including agents that don't know the queue exists. `install` writes a small sh
+shim per tool into `~/.local/bin`, or `--dir DIR`. Each shim runs
+`th ci-queue run --class heavy [--lock cargo] -- <real tool> "$@"`. There are
+four exceptions:
+
+- **Inside a queued job** (`SMOOTH_CI_QUEUE_SLOT` is set), it runs the tool
+  directly. This is the recursion guard: a cargo build script that calls cargo,
+  or turbo calling tsgo, never queues behind its own parent's slot or lock.
+  `th ci-queue run` has the same guard, so there are two layers, and each is
+  tested separately.
+- **`CI_QUEUE=off`** (also `0`, `false` or `no`) runs the tool directly.
+- **No `th` on PATH:** the tool runs directly.
+- **Light commands** never queue. For cargo that means `--version`,
+  `metadata`, `fmt`, `tree`, `clean`, `new` and similar. For xcodebuild it
+  means `-version`, `-list`, `-showBuildSettings` and similar. For gradle it
+  means `--version`, `--stop` and `--status`. `--help` never queues for any
+  tool. The allowlist lives in `shim.rs` and is table-tested against the
+  generated sh, so the two can't drift apart. `th ci-queue run -- cargo …`
+  applies the same rule: a light cargo command takes no cargo lock.
+
+A shim finds the real tool by walking PATH and skipping any file that carries
+the shim marker, so it can never resolve to itself. `install` is idempotent,
+and it refuses to overwrite a file it didn't write. `--force` sets such a file
+aside, and `uninstall` puts it back. `uninstall` removes exactly what was
+recorded in `~/.smooth/ci-queue/shims.json`. `status` lists each shim, the real
+tool it resolves to, and whether callers actually get it first on PATH.
+
+No shell rc file is edited. On the reference Mac, `~/.local/bin` is already
+early on PATH, in both interactive and non-interactive shells. It comes ahead
+of `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/bin`, so the shims take
+effect as soon as they are written.
+
+**turbo and tsgo are not shimmed by default.** pnpm runs them from
+`node_modules/.bin`, which it puts ahead of everything on PATH, so a shim in
+`~/.local/bin` never sees them. They go through the queue via the monorepo
+pre-commit instead. `--tools turbo,tsgo` exists for callers that invoke them
+from PATH directly.
+
 **Unix only.** The queue relies on `flock(2)` semantics: the locks are
 advisory, and a held file can still be read. It also relies on process
 groups. Windows' `LockFileEx` is mandatory, so another process cannot even
