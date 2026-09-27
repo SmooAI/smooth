@@ -171,16 +171,27 @@ fn a_sigkilled_holder_frees_its_slot() {
     kill(&read(&pid), "-KILL");
 }
 
-/// Mutation-checked: handing the job the slot's fd (so it is inherited across
-/// exec) makes this fail — the orphaned `sleep` keeps the flock, and the next
-/// job waits until `--max-wait` gives up.
+/// Mutation-checked: clearing FD_CLOEXEC on the slot fd makes this fail — the
+/// orphaned `sleep` keeps the flock, and the next job waits until `--max-wait`
+/// gives up. (Leaking it as stdin does NOT: sh points a background job's stdin
+/// at /dev/null.)
 #[test]
 fn an_orphaned_child_does_not_pin_its_slot() {
     let q = Q::new();
     let gc = q.path("grandchild.pid");
     let script = format!("sleep 30 & echo $! > '{}'; exit 0", gc.display());
-    let out = q.output(&["run", "--label", "leaver", "--", "sh", "-c", &script]);
-    assert_eq!(out.status.code(), Some(0));
+    // `status()` with null stdio, not `output()`: the orphan inherits th's
+    // stdio, and `output()` would wait for it to close them — 30s later, when
+    // the orphan is dead and proves nothing.
+    let began = Instant::now();
+    let status = q
+        .th(&["run", "--label", "leaver", "--", "sh", "-c", &script])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert!(began.elapsed() < Duration::from_secs(20), "th waited for its orphan");
     wait_for("the grandchild pid", || !read(&gc).is_empty());
 
     // A pinned slot would hold this until --max-wait and exit 75 (the orphan
