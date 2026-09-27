@@ -99,7 +99,7 @@ Normative words: **must**, **should**, **may**.
   shortened to its last component, so a tab is never titled with a whole path
   or a bare `/`. The tab strip shows only when there are two or more tabs.
 - **Splits.** Right, down, left and up split the focused pane. The new pane
-  shows the session it was split from. There are directional focus moves,
+  shows the session it was split from. There are directional focus moves (only a pane lying beyond the focused pane's edge counts as "that way"; the nearest edge wins, then the nearest centerline, then the lower pane id),
   zoom (the focused pane fills the tab, and again restores it) and equalize.
 - **Close semantics** (`PaneClose`, the scope order is normative):
     1. `closePane` closes the focused pane (scope `pane`).

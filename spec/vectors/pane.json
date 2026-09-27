@@ -1,0 +1,381 @@
+{
+  "spec": "SmoothFlow-Client-Spec §5 panes (top-down geometry; ties go to the lower pane id)",
+  "cases": [
+    {
+      "name": "split right, split down, walk around, close",
+      "input": {
+        "start": {
+          "pane": 1,
+          "session": "fs-1"
+        },
+        "bounds": {
+          "x": 0.0,
+          "y": 0.0,
+          "w": 100.0,
+          "h": 100.0
+        },
+        "ops": [
+          {
+            "op": "split",
+            "direction": "right",
+            "new": 2
+          },
+          {
+            "op": "split",
+            "direction": "down",
+            "new": 3
+          },
+          {
+            "op": "focus",
+            "direction": "left"
+          },
+          {
+            "op": "focus",
+            "direction": "right"
+          },
+          {
+            "op": "focus",
+            "direction": "down"
+          },
+          {
+            "op": "close"
+          },
+          {
+            "op": "close"
+          },
+          {
+            "op": "close"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2,
+              3
+            ],
+            "focused": 3,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2,
+              3
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2,
+              3
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2,
+              3
+            ],
+            "focused": 3,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": true
+          },
+          {
+            "panes": [
+              1
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1"
+            },
+            "returned": true
+          },
+          {
+            "panes": [
+              1
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1"
+            },
+            "returned": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "split left and up insert before the focused pane",
+      "input": {
+        "start": {
+          "pane": 1,
+          "session": "fs-1"
+        },
+        "bounds": {
+          "x": 0.0,
+          "y": 0.0,
+          "w": 100.0,
+          "h": 100.0
+        },
+        "ops": [
+          {
+            "op": "split",
+            "direction": "left",
+            "new": 2
+          },
+          {
+            "op": "split",
+            "direction": "up",
+            "new": 3
+          },
+          {
+            "op": "focus",
+            "direction": "down"
+          },
+          {
+            "op": "focus",
+            "direction": "right"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "panes": [
+              2,
+              1
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              3,
+              2,
+              1
+            ],
+            "focused": 3,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              3,
+              2,
+              1
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              3,
+              2,
+              1
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1",
+              "3": "fs-1"
+            },
+            "returned": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "zoom blocks focus moves; equalize ends zoom",
+      "input": {
+        "start": {
+          "pane": 1,
+          "session": "fs-1"
+        },
+        "bounds": {
+          "x": 0.0,
+          "y": 0.0,
+          "w": 100.0,
+          "h": 100.0
+        },
+        "ops": [
+          {
+            "op": "zoom"
+          },
+          {
+            "op": "split",
+            "direction": "right",
+            "new": 2
+          },
+          {
+            "op": "zoom"
+          },
+          {
+            "op": "focus",
+            "direction": "left"
+          },
+          {
+            "op": "equalize"
+          },
+          {
+            "op": "focus",
+            "direction": "left"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "panes": [
+              1
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": 2,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": 2,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 2,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          },
+          {
+            "panes": [
+              1,
+              2
+            ],
+            "focused": 1,
+            "zoomed": null,
+            "sessions": {
+              "1": "fs-1",
+              "2": "fs-1"
+            },
+            "returned": null
+          }
+        ]
+      }
+    }
+  ]
+}
