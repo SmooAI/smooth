@@ -220,7 +220,12 @@ fn default_label(cmd: &[OsString]) -> String {
 
 fn status(q: &Queue, a: &StatusArgs) -> Result<i32> {
     if !cfg!(unix) {
-        println!("th ci-queue is Unix-only (it relies on flock and process groups). On this OS `run` executes jobs directly and nothing is queued.");
+        let why = "th ci-queue is Unix-only (it relies on flock and process groups). On this OS `run` executes jobs directly and nothing is queued.";
+        if a.json {
+            println!("{}", serde_json::json!({ "schema": queue::SNAPSHOT_SCHEMA, "unsupported": why }));
+        } else {
+            println!("{why}");
+        }
         return Ok(0);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

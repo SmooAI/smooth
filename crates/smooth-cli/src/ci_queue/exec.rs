@@ -277,7 +277,11 @@ mod tests {
             cwd,
             env: vec![("CIQ_TEST".into(), "yes".into())],
             timeout: timeout_ms.map(Duration::from_millis),
-            qos: Qos::Background,
+            // Normal, not Background: at load 70+ Darwin background QoS can
+            // starve a test job past its own timeout (seen: the grandchild pid
+            // was never written within 300ms). The QoS prefixes are covered
+            // by `nice_never_uses_background_qos_or_idle_io`.
+            qos: Qos::Normal,
             kill_grace: Duration::from_millis(500),
             null_stdin: true,
         }
@@ -327,10 +331,11 @@ mod tests {
         // GROUP is killed.
         let argv = sh(&format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()));
         let began = Instant::now();
-        let ended = run(&spec(&argv, tmp.path(), Some(300)), |_| {});
+        // Long enough for sh to write the pid on a loaded machine.
+        let ended = run(&spec(&argv, tmp.path(), Some(3_000)), |_| {});
         assert_eq!(ended, Ended::TimedOut);
         assert_eq!(ended.exit_code(), EXIT_TIMEOUT);
-        assert!(began.elapsed() < Duration::from_secs(10));
+        assert!(began.elapsed() < Duration::from_secs(15));
         let gc: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(gc), None).is_ok();
         let t = Instant::now();

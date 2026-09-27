@@ -26,9 +26,11 @@ impl Q {
             tmp.path().join("ci-queue.toml"),
             "[slots]\nheavy = 1\nlight = 2\n\
              [gate]\nmin_available_memory_pct = 0\nmax_memory_pressure_level = 0\nmax_swap_used_pct = 0\nmax_load_per_core = 0\nmin_free_disk_gb = 0\n\
-             [run]\npoll_ms = 20\nkill_grace_secs = 1\n",
+             [run]\npoll_ms = 20\nkill_grace_secs = 1\nqos = \"normal\"\n",
         )
         .unwrap();
+        // qos = normal: these cases are about admission, and at load 70+
+        // Darwin background QoS can hold even `true` past a 1s timeout.
         Self { tmp }
     }
 
@@ -181,12 +183,13 @@ fn an_orphaned_child_does_not_pin_its_slot() {
     assert_eq!(out.status.code(), Some(0));
     wait_for("the grandchild pid", || !read(&gc).is_empty());
 
-    let began = Instant::now();
-    let next = q.output(&["run", "--max-wait", "5", "--", "true"]);
+    // A pinned slot would hold this until --max-wait and exit 75 (the orphan
+    // sleeps 30s, far longer).
+    let next = q.output(&["run", "--max-wait", "10", "--", "true"]);
     let err = String::from_utf8_lossy(&next.stderr).into_owned();
     kill(&read(&gc), "-KILL");
     assert_eq!(next.status.code(), Some(0), "the orphan pinned the slot: {err}");
-    assert!(began.elapsed() < Duration::from_secs(3), "admission waited on the orphan: {err}");
+    assert!(!err.contains("waiting ("), "admission waited on the orphan: {err}");
 }
 
 #[test]

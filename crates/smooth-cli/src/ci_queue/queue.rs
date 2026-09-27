@@ -98,6 +98,16 @@ pub struct JobInfo {
     /// Resolved named locks (`cargo:/path/to/target`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locks: Vec<String>,
+    /// While waiting: exactly what holds it (the text of its `waiting (…)`
+    /// line), rewritten into its ticket whenever it changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// When `waiting_on` last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on_since_ms: Option<u64>,
+    /// When a named lock holds it: the ticket of the job holding that lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by_ticket: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -298,8 +308,11 @@ impl Queue {
             admitted_at_ms: None,
             slot: None,
             locks: req.locks.clone(),
+            waiting_on: None,
+            waiting_on_since_ms: None,
+            blocked_by_ticket: None,
         };
-        let (ticket_path, ticket_file) = self.take_ticket(&mut me)?;
+        let (ticket_path, mut ticket_file) = self.take_ticket(&mut me)?;
         let poll = Duration::from_millis(self.config.run.poll_ms);
         let note_every = Duration::from_secs(self.config.run.note_every_secs.max(1));
         let mut next_note = Duration::ZERO;
@@ -315,6 +328,9 @@ impl Queue {
                     }
                     me.slot = Some(slot);
                     me.admitted_at_ms = Some(now_ms());
+                    me.waiting_on = None;
+                    me.waiting_on_since_ms = None;
+                    me.blocked_by_ticket = None;
                     return Ok(Admission {
                         lock: Some(file),
                         held_locks: locks,
@@ -323,7 +339,19 @@ impl Queue {
                         queue: Some(self.clone()),
                     });
                 }
-                Attempt::Wait(reason) => reason,
+                Attempt::Wait { reason, by_ticket } => {
+                    // Publish why, for `status` and `top`. We hold the ticket's
+                    // flock, so only we write it; the mutex keeps readers from
+                    // seeing a half-written file.
+                    if me.waiting_on.as_deref() != Some(reason.as_str()) || me.blocked_by_ticket != by_ticket {
+                        me.waiting_on = Some(reason.clone());
+                        me.waiting_on_since_ms = Some(now_ms());
+                        me.blocked_by_ticket = by_ticket;
+                        let _m = self.mutex()?;
+                        rewrite(&mut ticket_file, &me)?;
+                    }
+                    reason
+                }
             };
             held = true;
             let waited = started.elapsed();
@@ -499,15 +527,20 @@ impl Queue {
             .collect();
         let busy_note = busy_summary(class, &busy);
         if ahead > 0 {
-            return Ok(Attempt::Wait(format!("{ahead} ahead in the {} queue / {busy_note}", class.name())));
+            return Ok(Attempt::wait(format!("{ahead} ahead in the {} queue / {busy_note}", class.name())));
         }
         let any_busy = !busy.is_empty();
         let Some(pos) = slots.iter().position(|s| matches!(s, SlotState::Free { .. })) else {
-            return Ok(Attempt::Wait(busy_note));
+            return Ok(Attempt::wait(busy_note));
         };
         let locks = match self.acquire_locks(&me.locks)? {
             Ok(files) => files,
-            Err(why) => return Ok(Attempt::Wait(format!("{why} / {busy_note}"))),
+            Err((why, by_ticket)) => {
+                return Ok(Attempt::Wait {
+                    reason: format!("{why} / {busy_note}"),
+                    by_ticket,
+                })
+            }
         };
         // The gate holds the head of the heavy queue — but never when nothing
         // else heavy is running. Then waiting cannot relieve anything we
@@ -517,15 +550,18 @@ impl Queue {
             let readings = self.probe.read(&self.disk_paths(&me.cwd));
             let why = pressure::holds(&readings, &self.config.gate);
             if !why.is_empty() {
-                return Ok(Attempt::Wait(format!("{} / {busy_note}", why.join(" / "))));
+                return Ok(Attempt::wait(format!("{} / {busy_note}", why.join(" / "))));
             }
         }
         let SlotState::Free { index, mut file } = slots.swap_remove(pos) else {
-            return Ok(Attempt::Wait(busy_note));
+            return Ok(Attempt::wait(busy_note));
         };
         let info = JobInfo {
             slot: Some(index),
             admitted_at_ms: Some(now_ms()),
+            waiting_on: None,
+            waiting_on_since_ms: None,
+            blocked_by_ticket: None,
             ..me.clone()
         };
         rewrite(&mut file, &info)?;
@@ -547,9 +583,9 @@ impl Queue {
         self.locks_dir().join(format!("{hex}.lock"))
     }
 
-    /// Take every named lock, or none: `Ok(Err(reason))` names the first one
-    /// somebody else holds. Call under the mutex.
-    fn acquire_locks(&self, names: &[String]) -> Result<std::result::Result<Vec<File>, String>> {
+    /// Take every named lock, or none: `Ok(Err((reason, holder's ticket)))`
+    /// names the first one somebody else holds. Call under the mutex.
+    fn acquire_locks(&self, names: &[String]) -> Result<std::result::Result<Vec<File>, (String, Option<u64>)>> {
         let mut held = Vec::new();
         for name in names {
             let path = self.lock_path(name);
@@ -565,14 +601,15 @@ impl Queue {
                 Err(TryLockError::WouldBlock) => {
                     let mut text = String::new();
                     let _ = f.read_to_string(&mut text);
-                    let who = serde_json::from_str::<JobInfo>(&text).map_or_else(|_| "?".to_string(), |j| j.label);
-                    return Ok(Err(format!("lock {name} held by {who}")));
+                    let holder = serde_json::from_str::<JobInfo>(&text).ok();
+                    let who = holder.as_ref().map_or_else(|| "?".to_string(), |j| format!("{} (#{})", j.label, j.ticket));
+                    return Ok(Err((format!("lock {name} held by {who}"), holder.map(|j| j.ticket))));
                 }
                 Err(TryLockError::Error(e)) => return Err(e).with_context(|| format!("locking {}", path.display())),
             }
             if let Some(target) = name.strip_prefix("cargo:") {
                 if let Some(busy) = cargo_lock_busy(Path::new(target)) {
-                    return Ok(Err(format!("cargo is building outside the queue ({})", busy.display())));
+                    return Ok(Err((format!("cargo is building outside the queue ({})", busy.display()), None)));
                 }
             }
             held.push(f);
@@ -638,6 +675,7 @@ impl Queue {
         let readings = self.probe.read(&self.disk_paths(cwd));
         let holds = pressure::holds(&readings, &self.config.gate);
         Ok(Snapshot {
+            schema: SNAPSHOT_SCHEMA,
             dir: self.dir.clone(),
             config: self.config.clone(),
             now_ms: now_ms(),
@@ -650,9 +688,15 @@ impl Queue {
     }
 }
 
+impl Attempt {
+    const fn wait(reason: String) -> Self {
+        Self::Wait { reason, by_ticket: None }
+    }
+}
+
 enum Attempt {
     Admitted { slot: usize, file: File, locks: Vec<File> },
-    Wait(String),
+    Wait { reason: String, by_ticket: Option<u64> },
 }
 
 enum SlotState {
@@ -660,8 +704,14 @@ enum SlotState {
     Busy(JobInfo),
 }
 
+/// The shape of [`Snapshot`] as JSON. Bump on any breaking change, so a
+/// consumer (`th ci-queue top`, the daemon's web panel) can refuse a shape it
+/// does not understand instead of rendering garbage.
+pub const SNAPSHOT_SCHEMA: u32 = 1;
+
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
+    pub schema: u32,
     pub dir: PathBuf,
     pub config: Config,
     pub now_ms: u64,
@@ -701,6 +751,9 @@ impl Admission {
                 admitted_at_ms: Some(now_ms()),
                 slot: None,
                 locks: Vec::new(),
+                waiting_on: None,
+                waiting_on_since_ms: None,
+                blocked_by_ticket: None,
             },
             waited: Duration::ZERO,
             queue: None,
@@ -781,6 +834,9 @@ fn unknown_job(ticket: u64) -> JobInfo {
         admitted_at_ms: None,
         slot: None,
         locks: Vec::new(),
+        waiting_on: None,
+        waiting_on_since_ms: None,
+        blocked_by_ticket: None,
     }
 }
 
@@ -1171,6 +1227,28 @@ mod tests {
         drop(outside);
         assert!(f.q.admit(&locked(Class::Heavy, "a", 1_000, &name)).is_ok());
         assert!(!target.join("release/.cargo-lock").exists(), "probing must not create cargo's lock files");
+    }
+
+    #[test]
+    fn a_waiter_publishes_what_holds_it() {
+        let f = fx(2);
+        let holder = f.q.admit(&locked(Class::Heavy, "clippy", 1_000, "cargo:/t")).unwrap();
+        let _w = {
+            let q = f.q.clone();
+            std::thread::spawn(move || q.admit(&locked(Class::Heavy, "test", 5_000, "cargo:/t")).is_ok())
+        };
+        wait_for(|| {
+            let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+            snap.waiting.first().is_some_and(|w| w.waiting_on.is_some())
+        });
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert_eq!(snap.schema, SNAPSHOT_SCHEMA);
+        let w = &snap.waiting[0];
+        let on = w.waiting_on.as_deref().unwrap();
+        assert!(on.starts_with("lock cargo:/t held by clippy (#"), "{on}");
+        assert_eq!(w.blocked_by_ticket, Some(snap.running[0].ticket));
+        assert!(w.waiting_on_since_ms.is_some());
+        drop(holder);
     }
 
     #[test]
