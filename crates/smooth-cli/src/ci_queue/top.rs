@@ -1075,6 +1075,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, p: &Palette, every:
 pub mod demo {
     use std::path::PathBuf;
 
+    use super::super::budget::View;
     use super::super::config::Config;
     use super::super::pressure::{self, Disk, Readings};
     use super::super::queue::{Class, HistoryEntry, JobInfo, Snapshot, SNAPSHOT_SCHEMA};
@@ -1133,7 +1134,7 @@ pub mod demo {
                 let wait_ms = d.rand(90_000);
                 d.history.push(HistoryEntry {
                     label: label.into(),
-                    class,
+                    class: Some(class),
                     cwd: PathBuf::from("/Users/dev").join(wt),
                     ticket,
                     queued_at_ms: d.now - (40 - i) * 60_000,
@@ -1141,6 +1142,7 @@ pub mod demo {
                     run_ms: run,
                     outcome: "exit".into(),
                     exit: i32::from(fail),
+                    ..HistoryEntry::default()
                 });
             }
             for _ in 0..9 {
@@ -1180,6 +1182,8 @@ pub mod demo {
                 waiting_on: None,
                 waiting_on_since_ms: None,
                 blocked_by_ticket: None,
+                est: None,
+                rss_now_kb: None,
             });
         }
 
@@ -1232,14 +1236,16 @@ pub mod demo {
                 let admitted = j.admitted_at_ms.unwrap_or(now);
                 self.history.push(HistoryEntry {
                     label: j.label,
-                    class: j.class,
+                    class: Some(j.class),
                     cwd: j.cwd,
                     ticket: j.ticket,
                     queued_at_ms: j.queued_at_ms,
+                    finished_at_ms: now,
                     wait_ms: admitted - j.queued_at_ms,
                     run_ms: now - admitted,
                     outcome: "exit".into(),
                     exit: i32::from(fail),
+                    ..HistoryEntry::default()
                 });
             }
             if self.history.len() > 200 {
@@ -1282,6 +1288,7 @@ pub mod demo {
             waiting.sort_by_key(|w| w.ticket);
             let mut snap = Snapshot {
                 schema: SNAPSHOT_SCHEMA,
+                budget: View::default(),
                 dir: PathBuf::from("/Users/dev/.smooth/ci-queue"),
                 config: Config::default(),
                 now_ms: self.now,
@@ -1331,6 +1338,7 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             schema: super::super::queue::SNAPSHOT_SCHEMA,
+            budget: super::super::budget::View::default(),
             dir: "/q".into(),
             config: Config::default(),
             now_ms: 100_000,
@@ -1357,6 +1365,8 @@ mod tests {
             waiting_on: None,
             waiting_on_since_ms: None,
             blocked_by_ticket: None,
+            est: None,
+            rss_now_kb: None,
         }
     }
 
@@ -1371,14 +1381,11 @@ mod tests {
     fn hist(label: &str, run_ms: u64, outcome: &str) -> HistoryEntry {
         HistoryEntry {
             label: label.into(),
-            class: Class::Heavy,
+            class: Some(Class::Heavy),
             cwd: "/w".into(),
-            ticket: 1,
-            queued_at_ms: 0,
-            wait_ms: 0,
             run_ms,
             outcome: outcome.into(),
-            exit: 0,
+            ..HistoryEntry::default()
         }
     }
 
