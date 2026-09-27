@@ -607,6 +607,8 @@ impl Queue {
             .iter()
             .chain(other.iter())
             .filter_map(|s| match s {
+                // A held slot with no readable info is not a job: see `is_phantom`.
+                SlotState::Busy(i) if is_phantom(i) => None,
                 SlotState::Busy(i) => Some(Running {
                     est: i.est.unwrap_or_else(|| self.estimate_for(&i.label, i.class)),
                     rss_now_kb: i.rss_now_kb,
@@ -787,7 +789,9 @@ impl Queue {
             for class in [Class::Heavy, Class::Light] {
                 for s in self.scan_slots(class)? {
                     if let SlotState::Busy(i) = s {
-                        running.push(*i);
+                        if !is_phantom(&i) {
+                            running.push(*i);
+                        }
                     }
                 }
             }
@@ -945,16 +949,27 @@ impl Admission {
     /// own dup of the slot fd — same open file, same lock, still close-on-exec —
     /// and only under the queue mutex. Dropping it never releases the slot:
     /// the original fd, held here, keeps the flock.
+    ///
+    /// It re-reads the slot before writing, so it only ever changes
+    /// `rss_now_kb`: a snapshot of the info taken before the job was spawned
+    /// would otherwise overwrite the `child_pid` that `set_child` wrote.
     pub fn progress(&self) -> Option<impl FnMut(u64) + Send + 'static> {
-        let file = self.lock.as_ref()?.try_clone().ok()?;
+        let mut file = self.lock.as_ref()?.try_clone().ok()?;
         let q = self.queue.clone()?;
-        let mut info = self.info.clone();
-        let mut file = file;
+        let fallback = self.info.clone();
         Some(move |kb: u64| {
+            let Ok(_m) = q.mutex() else {
+                return;
+            };
+            let mut text = String::new();
+            let current = file
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| file.read_to_string(&mut text))
+                .ok()
+                .and_then(|_| serde_json::from_str::<JobInfo>(&text).ok());
+            let mut info = current.unwrap_or_else(|| fallback.clone());
             info.rss_now_kb = Some(kb);
-            if let Ok(_m) = q.mutex() {
-                let _ = rewrite(&mut file, &info);
-            }
+            let _ = rewrite(&mut file, &info);
         })
     }
 
@@ -1004,6 +1019,16 @@ fn busy_summary(class: Class, busy: &[&JobInfo]) -> String {
         })
         .collect();
     format!("{} {} busy: {}", busy.len(), class.name(), who.join("; "))
+}
+
+/// A slot that is locked but holds no job description. A real holder writes
+/// its info under the mutex before the mutex is released, so under the mutex
+/// this is never a running job: it is a lock fd briefly inherited by a child
+/// another thread of this process forked (between its fork and exec), which
+/// holds the open file — and so the flock — until the exec closes it. It is
+/// still busy (it cannot be taken), but it is not counted or shown.
+fn is_phantom(i: &JobInfo) -> bool {
+    i.pid == 0 && i.label == "?"
 }
 
 fn unknown_job(ticket: u64) -> JobInfo {
@@ -1086,6 +1111,12 @@ pub fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+// Under plain `cargo test` these share one process with every other test, and
+// a sibling that forks (Command falls back to fork+exec when, e.g., PATH is
+// changed) briefly inherits whatever lock fds this process holds at that
+// instant: a released slot can read as busy for the fork→exec window. CI runs
+// nextest (a process per test), where that cannot happen; `is_phantom` keeps an
+// info-less held slot out of the counts either way.
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
@@ -1568,6 +1599,22 @@ mod tests {
         // The progress writer is a dup of the slot fd: dropping it must not
         // release the slot while the admission still holds it.
         assert!(matches!(f.q.admit(&req(Class::Heavy, "big", 100)), Err(AdmitError::WaitTimeout { .. })));
+        a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
+    }
+
+    /// CI caught this on #676: the progress writer held a copy of the info
+    /// from before spawn, so its first sample erased `child_pid`.
+    #[test]
+    fn progress_never_erases_the_child_pid() {
+        let f = budget_fx();
+        let mut a = admit(&f.q, Class::Heavy, "big");
+        let mut publish = a.progress().unwrap(); // taken before spawn, as run does
+        a.set_child(4242);
+        publish(GB);
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert_eq!(snap.running[0].child_pid, Some(4242));
+        assert_eq!(snap.running[0].rss_now_kb, Some(GB));
+        drop(publish);
         a.finish(Ended::Exited(0), Duration::ZERO, Usage::default());
     }
 
