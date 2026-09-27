@@ -310,8 +310,7 @@ pub fn install(dir: &Path, tools: &[String], path_var: &str, force: bool, state_
         };
         let body = script(tool, &real)?;
         let path = dir.join(tool);
-        let mut moved_aside = None;
-        if path.exists() && !is_shim(&path) {
+        let moved_aside = if path.exists() && !is_shim(&path) {
             if !force {
                 bail!(
                     "{} exists and is not a th shim — refusing to overwrite it.\n  Move it yourself, or pass --force to set it aside as {} (restored by uninstall).",
@@ -321,8 +320,10 @@ pub fn install(dir: &Path, tools: &[String], path_var: &str, force: bool, state_
             }
             let to = aside(&path);
             fs::rename(&path, &to).with_context(|| format!("moving {} aside", path.display()))?;
-            moved_aside = Some(to);
-        }
+            Some(to)
+        } else {
+            None
+        };
         if fs::read_to_string(&path).is_ok_and(|t| t == body) {
             out.push((tool.clone(), Installed::Unchanged { path }));
             continue;
