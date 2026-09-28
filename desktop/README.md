@@ -147,14 +147,14 @@ up 2h · 1 restart`, `Daemon crashed — restarting in 4s (attempt 2/8)`
   daemon's own `th` calls use brew's too, unless you set `SMOOTH_TH_BIN`
   yourself.
 
-  **With no brew `th`**, it links the bundled one. It only ever repoints a link
-  of its own (into an app bundle, or dangling), and never to an older `th` than
-  the one already there. A link to a dev build is left alone, and so is a
-  regular file. On 2026-09-28 a relaunch repointed
-  `~/.local/bin/th → /opt/homebrew/bin/th` (0.58.0) at the bundled 0.54.0,
-  which has no `th ci-queue`, and every queued cargo/xcodebuild/gradle on the
-  machine failed. Every decision is logged to `~/.smooth/desktop.log`
-  (`th: …`). Logic and tests are in `src/installth.ts`.
+    **With no brew `th`**, it links the bundled one. It only ever repoints a link
+    of its own (into an app bundle, or dangling), and never to an older `th` than
+    the one already there. A link to a dev build is left alone, and so is a
+    regular file. On 2026-09-28 a relaunch repointed
+    `~/.local/bin/th → /opt/homebrew/bin/th` (0.58.0) at the bundled 0.54.0,
+    which has no `th ci-queue`, and every queued cargo/xcodebuild/gradle on the
+    machine failed. Every decision is logged to `~/.smooth/desktop.log`
+    (`th: …`). Logic and tests are in `src/installth.ts`.
 
 ## TCC (macOS permissions)
 
