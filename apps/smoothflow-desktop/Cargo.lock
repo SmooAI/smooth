@@ -6377,7 +6377,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-flow-client"
-version = "0.59.1"
+version = "0.59.2"
 dependencies = [
  "serde",
  "serde_json",
