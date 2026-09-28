@@ -3966,6 +3966,18 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         pending.push(SetupStep::SmooLogin);
     }
 
+    // 3c. Which `th` callers get. When Homebrew's `th` is installed it owns
+    // `th`; a Big Smooth link or a stale copy ahead of it on PATH serves an
+    // older binary (th-35d0d0: a bundled 0.54.0 shadowed brew's 0.58.0 and
+    // every `th ci-queue` call failed).
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    if let Some((first, brew)) = ci_queue::shim::th_shadowing_brew(&path_var, &ci_queue::shim::brew_th_links()) {
+        println!("  {} th on PATH: {}", "✗".red().bold(), ci_queue::shim::shadowing_warning(&first, &brew).red());
+        issues += 1;
+    } else if let Some(brew) = ci_queue::shim::brew_th(&ci_queue::shim::brew_th_links()) {
+        println!("  {} th on PATH: {}", "✓".green().bold(), format!("Homebrew's ({})", brew.display()).green());
+    }
+
     // 4. Check smooth home dir
     let smooth_home = dirs_next::home_dir().map(|h| h.join(".smooth"));
     if let Some(ref dir) = smooth_home {

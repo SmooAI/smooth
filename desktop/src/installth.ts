@@ -19,10 +19,21 @@ export type LinkResult = {
         | 'skipped-foreign-link'
         | 'skipped-newer'
         | 'skipped-unknown-version'
+        | 'deferred-to-brew'
         | 'no-writable-dir'
         | 'unsupported';
     path?: string;
     note?: string;
+    /** `deferred-to-brew`: our own links removed so PATH falls through to brew. */
+    removed?: string[];
+    /** Something for the user to do (`brew upgrade smooai/tools/th`). */
+    hint?: string;
+};
+
+export type LinkOptions = {
+    /** Homebrew's `th` ({@link findBrewTh}). When set, brew owns `th`. */
+    brewTh?: string;
+    versionOf?: VersionOf;
 };
 
 /** Reads a `th`'s version (`0.58.0`), `undefined` when it can't be run or parsed. */
@@ -32,8 +43,33 @@ export type VersionOf = (bin: string) => string | undefined;
  * write access; `~/.local/bin` is the always-writable fallback. */
 const DEFAULT_TARGETS = ['/usr/local/bin/th', join(homedir(), '.local', 'bin', 'th')];
 
+/** Where Homebrew links `th` (Apple Silicon, Intel, Linux). Mirrors
+ * `BREW_TH_LINKS` in `crates/smooth-cli/src/ci_queue/shim.rs`. */
+export const BREW_TH_LINKS = ['/opt/homebrew/bin/th', '/usr/local/bin/th', '/home/linuxbrew/.linuxbrew/bin/th'];
+
+/** Homebrew's `th` (`smooai/tools/th`) when installed: the first of `links`
+ * that resolves into a `Cellar/th/<version>/bin/th` keg. A `/usr/local/bin/th`
+ * that is our own link (Intel Macs) is not brew's. */
+export function findBrewTh(links: string[] = BREW_TH_LINKS): string | undefined {
+    return links.find((l) => {
+        try {
+            return /\/Cellar\/th\/[^/]+\/bin\/th$/.test(realpathSync(l));
+        } catch {
+            return false;
+        }
+    });
+}
+
 /**
- * Symlink `bundledTh` onto PATH.
+ * Put a `th` on PATH — or, when Homebrew's is installed, get out of its way.
+ *
+ * PRECEDENCE (th-35d0d0): **Homebrew's `th` is the main one when it exists.**
+ * Then Big Smooth never creates or repoints a `th` link, and it REMOVES any
+ * link of its own (one into an app bundle) so PATH falls through to brew's —
+ * even when the bundled `th` is newer: that is a hint to `brew upgrade`, not a
+ * reason to shadow brew. Only with no brew `th` does it link its bundled one.
+ *
+ * Without brew, symlink `bundledTh` onto PATH:
  *
  * SAFETY RULES (mirrors scripts/dev-link-th.sh): only ever create or repoint a
  * SYMLINK. A regular file at the target is a `th` someone installed on purpose
@@ -49,8 +85,10 @@ const DEFAULT_TARGETS = ['/usr/local/bin/th', join(homedir(), '.local', 'bin', '
  * which predates `th ci-queue`, and every queued cargo/xcodebuild/gradle on the
  * machine failed for two hours.
  */
-export function linkThOnPath(bundledTh: string | undefined, targets: string[] = DEFAULT_TARGETS, versionOf: VersionOf = thVersion): LinkResult {
+export function linkThOnPath(bundledTh: string | undefined, targets: string[] = DEFAULT_TARGETS, opts: LinkOptions = {}): LinkResult {
+    const versionOf = opts.versionOf ?? thVersion;
     if (process.platform === 'win32') return { action: 'unsupported', note: 'windows PATH is not managed this way' };
+    if (opts.brewTh) return deferToBrew(bundledTh, opts.brewTh, targets, versionOf);
     if (!bundledTh || !existsSync(bundledTh)) return { action: 'unsupported', note: 'no bundled th to link' };
 
     for (const target of targets) {
@@ -95,6 +133,39 @@ export function linkThOnPath(bundledTh: string | undefined, targets: string[] = 
         }
     }
     return { action: 'no-writable-dir', note: 'no writable PATH dir among candidates' };
+}
+
+/** Brew owns `th`: remove our own links from `targets`, touch nothing else. */
+function deferToBrew(bundledTh: string | undefined, brewTh: string, targets: string[], versionOf: VersionOf): LinkResult {
+    const removed: string[] = [];
+    const failed: string[] = [];
+    for (const target of targets) {
+        // Absent, or a real file someone installed: not ours.
+        if (!isSymlink(target)) continue;
+        // Brew's own link (Intel: /usr/local/bin/th → ../Cellar/th/…).
+        if (sameFile(target, brewTh)) continue;
+        // A link someone else made (to a dev build, …) stays; so does one that
+        // dangles into somewhere other than an app bundle.
+        if (!ownedLinkDest(resolve(dirname(target), readlinkSafe(target)))) continue;
+        try {
+            unlinkSync(target);
+            removed.push(target);
+        } catch {
+            failed.push(target);
+        }
+    }
+    const brewVersion = versionOf(brewTh);
+    const bundledVersion = bundledTh && existsSync(bundledTh) ? versionOf(bundledTh) : undefined;
+    const hint =
+        brewVersion && bundledVersion && compareVersions(bundledVersion, brewVersion) > 0
+            ? `the bundled th ${bundledVersion} is newer than Homebrew's ${brewVersion}; run: brew upgrade smooai/tools/th`
+            : undefined;
+    const note = [
+        `Homebrew owns th (${brewTh}${brewVersion ? `, ${brewVersion}` : ''})`,
+        removed.length ? `removed our link ${removed.join(', ')}` : 'no link of ours to remove',
+        ...(failed.length ? [`could not remove ${failed.join(', ')}`] : []),
+    ].join('; ');
+    return { action: 'deferred-to-brew', path: brewTh, removed, note, hint };
 }
 
 /** A link into an app bundle's Resources is one this app (or an older copy of

@@ -137,14 +137,24 @@ up 2h · 1 restart`, `Daemon crashed — restarting in 4s (attempt 2/8)`
   `scripts/dev-link-th.sh`): the app only ever creates or repoints a **symlink**.
   A regular file at the target — a `th` you installed with Homebrew or the curl
   installer — is left untouched, never clobbered; the app logs and defers to it.
-  **It never downgrades, and never takes over a link it didn't make**
-  (th-35d0d0): an existing symlink is repointed only when it points into an app
-  bundle (or nowhere), and only when the `th` there is not newer than the bundled
-  one by `th --version`. A link to Homebrew's or a dev build's `th` is left alone.
-  On 2026-09-28 a relaunch repointed `~/.local/bin/th → /opt/homebrew/bin/th`
-  (0.58.0) at the bundled 0.54.0, which has no `th ci-queue`, and every queued
-  cargo/xcodebuild/gradle on the machine failed. Every decision is logged to
-  `~/.smooth/desktop.log` (`th: …`). Logic + tests in `src/installth.ts`.
+  **Homebrew's `th` wins** (th-35d0d0). When a `th` that resolves into
+  `Cellar/th/` is installed (`/opt/homebrew/bin/th`, `/usr/local/bin/th`, or
+  linuxbrew), brew owns `th`. The app then never creates or repoints a `th`
+  link, and it removes its own link (one into an app bundle) so PATH falls
+  through to brew's. It does this even when the bundled `th` is newer; in that
+  case it logs `th: hint: … run: brew upgrade smooai/tools/th` instead of
+  shadowing brew. The daemon it spawns gets `SMOOTH_TH_BIN=<brew th>`, so the
+  daemon's own `th` calls use brew's too, unless you set `SMOOTH_TH_BIN`
+  yourself.
+
+    **With no brew `th`**, it links the bundled one. It only ever repoints a link
+    of its own (into an app bundle, or dangling), and never to an older `th` than
+    the one already there. A link to a dev build is left alone, and so is a
+    regular file. On 2026-09-28 a relaunch repointed
+    `~/.local/bin/th → /opt/homebrew/bin/th` (0.58.0) at the bundled 0.54.0,
+    which has no `th ci-queue`, and every queued cargo/xcodebuild/gradle on the
+    machine failed. Every decision is logged to `~/.smooth/desktop.log`
+    (`th: …`). Logic and tests are in `src/installth.ts`.
 
 ## TCC (macOS permissions)
 

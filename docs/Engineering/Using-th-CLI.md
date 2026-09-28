@@ -1751,7 +1751,7 @@ sample_ms = 2000         # process-group memory sample interval
 ```
 
 **PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
-`cargo`, `xcodebuild` and `gradle` runs for every caller on the machine,
+`cargo`, `cargo-nextest`, `xcodebuild` and `gradle` runs for every caller on the machine,
 including agents that don't know the queue exists. `install` writes a small sh
 shim per tool into `~/.local/bin`, or `--dir DIR`. Each shim runs
 `th ci-queue run --class heavy [--lock cargo] -- <real tool> "$@"`. There are
@@ -1765,9 +1765,9 @@ four exceptions:
 - **`CI_QUEUE=off`** (also `0`, `false` or `no`) runs the tool directly.
 - **No `th` that can run the queue:** the tool runs directly. Before queueing,
   a shim probes for a `th` that has `ci-queue` (`th ci-queue run --help`, about
-  10 ms, heavy invocations only): first the `th` that ran `install` (for a
-  Homebrew install, `<prefix>/bin/th` and then the keg itself), then whatever
-  `th` is on PATH. If a `th` exists but none can run the queue, the shim prints
+  10 ms, heavy invocations only): first Homebrew's `th` when it's installed,
+  then the `th` that ran `install` (for a Homebrew install, `<prefix>/bin/th`
+  and then the keg itself), then whatever `th` is on PATH. If a `th` exists but none can run the queue, the shim prints
   one `th-ci-queue-shim: …` line to stderr and runs the tool unqueued, with the
   tool's own exit status. It never fails the build (th-35d0d0: on 2026-09-28 an
   older `th` took over `~/.local/bin/th`, and v1 shims, which ran
@@ -1794,6 +1794,26 @@ No shell rc file is edited. On the reference Mac, `~/.local/bin` is already
 early on PATH, in both interactive and non-interactive shells. It comes ahead
 of `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/bin`, so the shims take
 effect as soon as they are written.
+
+**`cargo-nextest` has its own shim** because `cargo-nextest nextest run …`,
+called directly, runs rustup's cargo by absolute path, so the cargo shim
+never sees that build. It takes the `cargo` lock like cargo does.
+`cargo nextest …` goes through the cargo shim, and the nested
+`cargo-nextest` then runs directly inside that slot. `nextest list` is
+heavy, because it compiles every test binary. `--version`, `help`,
+`show-config` and `self` are light.
+
+**`./gradlew` is not covered.** A repo's Gradle wrapper is a script in the
+repo, not on PATH, so the `gradle` shim never sees it. The Gradle daemon also
+outlives any queued command. Android lanes need to run
+`th ci-queue run --class heavy -- ./gradlew … --no-daemon` explicitly
+(pearl th-cb3c66).
+
+**Homebrew's `th` is the main one when it's installed.** A `th` that resolves
+into `Cellar/th/` comes first in every shim's list of candidates. `th doctor`,
+`shim install` and `shim status` warn when `command -v th` is something else
+(a Big Smooth link, a stale copy) and say what is shadowing it. Big Smooth
+removes its own `th` link in that case (see the desktop README).
 
 **turbo and tsgo are not shimmed by default.** pnpm runs them from
 `node_modules/.bin`, which it puts ahead of everything on PATH, so a shim in
