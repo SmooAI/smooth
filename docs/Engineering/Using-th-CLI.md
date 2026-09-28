@@ -1555,7 +1555,8 @@ another machine.
 
 Runs a git-hook or CI check through a queue that every session on the machine
 shares. The queue caps how many heavy checks run at once and holds new ones
-while the machine is under pressure. It runs them at background QoS.
+while the machine is under pressure. It runs them at `nice` priority by default
+(`--qos background` is opt-in; see the rule below).
 
 On 2026-09-26, about 35 agent sessions on one 12-core Mac each ran pre-commit
 checks at full priority, all at once. The checks were a turbo typecheck of
@@ -1762,7 +1763,16 @@ four exceptions:
   `th ci-queue run` has the same guard, so there are two layers, and each is
   tested separately.
 - **`CI_QUEUE=off`** (also `0`, `false` or `no`) runs the tool directly.
-- **No `th` on PATH:** the tool runs directly.
+- **No `th` that can run the queue:** the tool runs directly. Before queueing,
+  a shim probes for a `th` that has `ci-queue` (`th ci-queue run --help`, about
+  10 ms, heavy invocations only): first the `th` that ran `install` (for a
+  Homebrew install, `<prefix>/bin/th` and then the keg itself), then whatever
+  `th` is on PATH. If a `th` exists but none can run the queue, the shim prints
+  one `th-ci-queue-shim: …` line to stderr and runs the tool unqueued, with the
+  tool's own exit status. It never fails the build (th-35d0d0: on 2026-09-28 an
+  older `th` took over `~/.local/bin/th`, and v1 shims, which ran
+  `exec th ci-queue run` unconditionally, failed every heavy build for two
+  hours).
 - **Light commands** never queue. For cargo that means `--version`,
   `metadata`, `fmt`, `tree`, `clean`, `new` and similar. For xcodebuild it
   means `-version`, `-list`, `-showBuildSettings` and similar. For gradle it
@@ -1772,11 +1782,13 @@ four exceptions:
   applies the same rule: a light cargo command takes no cargo lock.
 
 A shim finds the real tool by walking PATH and skipping any file that carries
-the shim marker, so it can never resolve to itself. `install` is idempotent,
-and it refuses to overwrite a file it didn't write. `--force` sets such a file
+the shim marker (any version), so it can never resolve to itself. `install` is
+idempotent, upgrades an older shim in place (`↑ cargo: … upgraded v1 → v2`),
+and refuses to overwrite a file it didn't write. `--force` sets such a file
 aside, and `uninstall` puts it back. `uninstall` removes exactly what was
 recorded in `~/.smooth/ci-queue/shims.json`. `status` lists each shim, the real
-tool it resolves to, and whether callers actually get it first on PATH.
+tool it resolves to, whether callers actually get it first on PATH, and flags a
+shim from an older version as outdated.
 
 No shell rc file is edited. On the reference Mac, `~/.local/bin` is already
 early on PATH, in both interactive and non-interactive shells. It comes ahead

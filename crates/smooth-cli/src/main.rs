@@ -120,7 +120,7 @@ enum Commands {
     /// Every heavy job on the machine (pre-commit typecheck, clippy, `th
     /// attest`) takes one of N kernel-flock slots, waits its turn FIFO, waits
     /// longer while memory, swap, load or disk is under pressure, and runs at
-    /// background QoS. `th ci-queue status` shows who is running and waiting
+    /// `nice` priority. `th ci-queue status` shows who is running and waiting
     /// (SMOODEV-3355).
     #[command(name = "ci-queue")]
     CiQueue {

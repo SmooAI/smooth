@@ -11,17 +11,23 @@
 //!   or turbo calling tsgo, must not queue behind its own parent's slot or lock
 //!   — with one heavy slot that is a deadlock.
 //! - **Opted out**: `CI_QUEUE=off` (also `0`, `false`, `no`).
-//! - **No `th` on PATH**: the tool runs directly, exactly as before.
+//! - **No `th` that can run the queue**: the tool runs directly. The shim
+//!   probes the `th`s recorded at install time, then the one on PATH, with
+//!   `th ci-queue run --help`, and queues through the first that answers. If
+//!   one exists but none can run `ci-queue` (an older `th` took over the
+//!   PATH), it says so in one stderr line and runs the tool unqueued — it
+//!   never fails the build.
 //! - **Light commands** never queue: `cargo --version`, `cargo metadata`,
 //!   `cargo fmt`, `gradle --stop`, any `--help`, … — the allowlist below, which
 //!   is part of the contract and is tested.
 //!
 //! The real binary is found by walking PATH and skipping every file that
-//! carries [`MARKER`] — so a shim never resolves to itself or to another shim,
+//! carries [`MARKER_FAMILY`], any version — so a shim never resolves to itself or to another shim,
 //! wherever it sits on PATH. The path found at install time is baked in as a
 //! fallback.
 //!
-//! Install is idempotent. It never overwrites a file it did not write, unless
+//! Install is idempotent, and it upgrades a shim written by an older version
+//! in place. It never overwrites a file it did not write, unless
 //! `--force`, which moves the file aside; uninstall removes exactly what was
 //! recorded in `<queue dir>/shims.json` and moves anything it set aside back.
 //! No shell rc file is touched: the shim dir must already be on PATH ahead of
@@ -33,8 +39,24 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// First-lines marker that identifies a file as one of our shims.
-pub const MARKER: &str = "th-ci-queue-shim v1";
+/// First-lines marker written into every shim this version generates.
+///
+/// v2 (th-35d0d0): v1 ran `exec th ci-queue run …` whenever ANY `th` was on
+/// PATH. On 2026-09-28 the Big Smooth desktop app, relaunching after a reboot,
+/// repointed `~/.local/bin/th` at its bundled th 0.54.0, which has no
+/// `ci-queue` — and for two hours every heavy cargo, xcodebuild and gradle run
+/// on the machine died with "unrecognized subcommand 'ci-queue'". v2 probes
+/// for a `th` that can run the queue and falls back to the real tool.
+pub const MARKER: &str = "th-ci-queue-shim v2";
+
+/// What every shim version's marker starts with. Detection matches on this,
+/// so a v1 shim is still recognised as ours: `install` upgrades it in place
+/// and the PATH walk never resolves to it.
+pub const MARKER_FAMILY: &str = "th-ci-queue-shim v";
+
+/// The probe a shim runs before queueing: exits 0 only on a `th` whose
+/// `ci-queue run` exists. ~10 ms, and only on heavy invocations.
+pub const PROBE: &str = "ci-queue run --help";
 
 /// What `install` shims when no `--tools` is given. turbo and tsgo are not
 /// here on purpose: pnpm runs them from `node_modules/.bin`, which it puts
@@ -153,8 +175,14 @@ pub fn is_light(tool: &str, args: &[String]) -> bool {
     light.contains(&sub)
 }
 
-/// The shim script for `tool`, with `real` as the install-time fallback.
-pub fn script(tool: &str, real: &Path) -> Result<String> {
+/// Single-quote `s` for sh.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The shim script for `tool`, with `real` as the install-time fallback and
+/// `ths` as the `th`s to try (in order) before the one on PATH.
+pub fn script(tool: &str, real: &Path, ths: &[PathBuf]) -> Result<String> {
     let Some(light) = light_commands(tool) else {
         bail!("no shim is defined for `{tool}` (supported: cargo, xcodebuild, gradle, gradlew, turbo, tsgo, tsc)");
     };
@@ -163,14 +191,15 @@ pub fn script(tool: &str, real: &Path) -> Result<String> {
     let light_case = alts(light);
     let help_case = alts(HELP_FLAGS);
     let dash_case = alts(DASH_SUBCOMMANDS);
-    let real = real.display().to_string().replace('\'', "'\\''");
+    let real = sh_quote(&real.display().to_string());
+    let ths: String = ths.iter().map(|p| format!("{} ", sh_quote(&p.display().to_string()))).collect();
     Ok(format!(
         r#"#!/bin/sh
 # {MARKER} — {tool}
 # Installed by `th ci-queue shim install`; remove with `th ci-queue shim uninstall`.
 # Runs heavy {tool} invocations through the machine-wide queue (SMOODEV-3355).
 tool='{tool}'
-fallback='{real}'
+fallback={real}
 
 # The real {tool}: the first one on PATH that is not a shim. Never ourselves.
 real=''
@@ -180,7 +209,7 @@ for d in $PATH; do
     [ -n "$d" ] || continue
     c="$d/$tool"
     [ -f "$c" ] && [ -x "$c" ] || continue
-    if head -n 3 "$c" 2>/dev/null | grep -q '{MARKER}'; then continue; fi
+    if head -n 3 "$c" 2>/dev/null | grep -q '{MARKER_FAMILY}'; then continue; fi
     real=$c
     break
 done
@@ -190,7 +219,6 @@ IFS=$old_ifs
 # Inside a queued job: the recursion guard. Never queue behind our own parent.
 [ -n "${{SMOOTH_CI_QUEUE_SLOT:-}}" ] && exec "$real" "$@"
 case "${{CI_QUEUE:-}}" in off | 0 | false | no) exec "$real" "$@" ;; esac
-command -v th >/dev/null 2>&1 || exec "$real" "$@"
 
 # Light commands never queue. The subcommand is the first argument that is not
 # an option or a +toolchain.
@@ -214,18 +242,83 @@ case "$sub" in
     {light_case}) exec "$real" "$@" ;;
 esac
 
+# The th that runs the queue: the first that can actually run `ci-queue` —
+# the ones recorded at install, then PATH's. A th that cannot (an older one
+# took over the PATH link) must never fail the build: warn, run unqueued.
+th=''
+tried=''
+for c in {ths}"$(command -v th 2>/dev/null)"; do
+    [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] || continue
+    case " $tried " in *" $c "*) continue ;; esac
+    if "$c" {PROBE} >/dev/null 2>&1; then th=$c; break; fi
+    tried="$tried $c"
+done
+if [ -z "$th" ]; then
+    [ -z "$tried" ] || echo "th-ci-queue-shim: no th here can run ci-queue (tried:$tried); running $tool unqueued. Upgrade th, then run: th ci-queue shim install" >&2
+    exec "$real" "$@"
+fi
+
 label=$(printf '%s' "$tool $*" | cut -c1-60)
-exec th ci-queue run --class heavy --label "$label"{lock} -- "$real" "$@"
+exec "$th" ci-queue run --class heavy --label "$label"{lock} -- "$real" "$@"
 "#
     ))
 }
 
-/// Whether `path` is one of our shims.
+/// Whether `path` is one of our shims, any version.
 pub fn is_shim(path: &Path) -> bool {
-    fs::read(path).is_ok_and(|b| {
-        let head: Vec<u8> = b.into_iter().take(512).collect();
-        String::from_utf8_lossy(&head).lines().take(3).any(|l| l.contains(MARKER))
+    shim_version(path).is_some()
+}
+
+/// The version of the shim at `path` (`1`, `2`, …), `None` when it is not one
+/// of ours. A marker with an unparseable version still counts as ours (`0`).
+pub fn shim_version(path: &Path) -> Option<u32> {
+    let b = fs::read(path).ok()?;
+    let head: Vec<u8> = b.into_iter().take(512).collect();
+    let text = String::from_utf8_lossy(&head);
+    text.lines().take(3).find_map(|l| {
+        let rest = &l[l.find(MARKER_FAMILY)? + MARKER_FAMILY.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        Some(digits.parse().unwrap_or(0))
     })
+}
+
+/// The version [`MARKER`] writes.
+pub fn current_version() -> u32 {
+    MARKER[MARKER_FAMILY.len()..].parse().unwrap_or(0)
+}
+
+/// The `th`s a shim should try before PATH's, from the `th` running
+/// `install` (which, being this code, can run the queue).
+///
+/// The path is canonicalised: `~/.local/bin/th` is exactly the kind of link
+/// someone else can repoint. A Homebrew keg (`<prefix>/Cellar/<f>/<ver>/bin/th`)
+/// also yields `<prefix>/bin/th`, first — brew keeps that link on the newest
+/// version, while the keg itself disappears at `brew cleanup`. Every
+/// candidate is probed at run time, so a stale one costs nothing but a
+/// failed `test -x`.
+pub fn queue_th_candidates(exe: &Path) -> Vec<PathBuf> {
+    let canon = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let mut out = Vec::new();
+    if let Some(stable) = homebrew_stable_link(&canon) {
+        out.push(stable);
+    }
+    out.push(canon);
+    out.dedup();
+    out
+}
+
+/// `<prefix>/Cellar/<formula>/<version>/bin/<name>` → `<prefix>/bin/<name>`.
+fn homebrew_stable_link(p: &Path) -> Option<PathBuf> {
+    let name = p.file_name()?;
+    let bin = p.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let cellar = bin.parent()?.parent()?.parent()?;
+    if cellar.file_name()? != "Cellar" {
+        return None;
+    }
+    Some(cellar.parent()?.join("bin").join(name))
 }
 
 /// The first executable `tool` on `path_var` that is not a shim.
@@ -292,14 +385,26 @@ impl State {
 /// What `install` did for one tool.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Installed {
-    Wrote { path: PathBuf, real: PathBuf },
-    Unchanged { path: PathBuf },
+    Wrote {
+        path: PathBuf,
+        real: PathBuf,
+    },
+    /// Replaced a shim written by an older version (`from`).
+    Upgraded {
+        path: PathBuf,
+        real: PathBuf,
+        from: u32,
+    },
+    Unchanged {
+        path: PathBuf,
+    },
     NotFound,
 }
 
-/// Write (or refresh) shims for `tools` into `dir`. `path_var` is the PATH to
-/// resolve the real tools on.
-pub fn install(dir: &Path, tools: &[String], path_var: &str, force: bool, state_file: &Path) -> Result<Vec<(String, Installed)>> {
+/// Write (or refresh, or upgrade) shims for `tools` into `dir`. `path_var` is
+/// the PATH to resolve the real tools on; `ths` are the queue-capable `th`s
+/// the shim tries before PATH's (see [`queue_th_candidates`]).
+pub fn install(dir: &Path, tools: &[String], path_var: &str, ths: &[PathBuf], force: bool, state_file: &Path) -> Result<Vec<(String, Installed)>> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut state = State::load(state_file)?;
     let mut out = Vec::new();
@@ -308,8 +413,9 @@ pub fn install(dir: &Path, tools: &[String], path_var: &str, force: bool, state_
             out.push((tool.clone(), Installed::NotFound));
             continue;
         };
-        let body = script(tool, &real)?;
+        let body = script(tool, &real, ths)?;
         let path = dir.join(tool);
+        let old_version = shim_version(&path);
         let moved_aside = if path.exists() && !is_shim(&path) {
             if !force {
                 bail!(
@@ -344,7 +450,10 @@ pub fn install(dir: &Path, tools: &[String], path_var: &str, force: bool, state_
             real: real.clone(),
             moved_aside: moved_aside.or(previous_aside),
         });
-        out.push((tool.clone(), Installed::Wrote { path, real }));
+        out.push(match old_version {
+            Some(from) if from < current_version() => (tool.clone(), Installed::Upgraded { path, real, from }),
+            _ => (tool.clone(), Installed::Wrote { path, real }),
+        });
     }
     state.save(state_file)?;
     Ok(out)
@@ -383,6 +492,9 @@ pub struct Row {
     pub tool: String,
     pub path: PathBuf,
     pub present: bool,
+    /// The shim's version, when it is one of ours. Older than
+    /// [`current_version`] means `install` should be re-run.
+    pub version: Option<u32>,
     /// The real binary the shim resolves to right now.
     pub real_now: Option<PathBuf>,
     /// What a caller running `<tool>` gets first on PATH.
@@ -397,8 +509,10 @@ pub fn status(state_file: &Path, path_var: &str) -> Result<Vec<Row>> {
         .into_iter()
         .map(|r| {
             let first = first_on_path(&r.tool, path_var);
+            let version = shim_version(&r.path);
             Row {
-                present: is_shim(&r.path),
+                present: version.is_some(),
+                version,
                 real_now: find_real(&r.tool, path_var),
                 active: first.as_deref() == Some(r.path.as_path()),
                 first_on_path: first,
@@ -421,9 +535,31 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    /// Which fake `th` a fixture puts on PATH.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Th {
+        None,
+        /// Answers the probe, logs `th <args>`, then runs the command after
+        /// `--` in a slot (so a queued call still reaches the real tool).
+        Capable,
+        /// Like th 0.54.0: no `ci-queue` subcommand at all.
+        Old,
+    }
+
+    /// A `th` that can run the queue, written to `path`, logging to `log`.
+    fn capable_th(path: &Path, log: &Path) {
+        exe(
+            path,
+            &format!(
+                "for a in \"$@\"; do [ \"$a\" = --help ] && exit 0; done\necho \"th $*\" >> '{}'\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do shift; done\nshift\nSMOOTH_CI_QUEUE_SLOT=heavy-1 exec \"$@\"",
+                log.display()
+            ),
+        );
+    }
+
     /// shims dir (first on PATH), a "real" bin dir with fake tools that log how
-    /// they were called, and a fake `th` that logs its args and then runs the
-    /// command after `--` (so a queued call still reaches the real tool).
+    /// they were called (and exit 7 when an argument is `fail`), and a fake
+    /// `th` per [`Th`].
     struct Fx {
         tmp: tempfile::TempDir,
         shims: PathBuf,
@@ -433,6 +569,10 @@ mod tests {
     }
 
     fn fx(with_th: bool) -> Fx {
+        fx_with(if with_th { Th::Capable } else { Th::None })
+    }
+
+    fn fx_with(th: Th) -> Fx {
         let tmp = tempfile::tempdir().unwrap();
         let shims = tmp.path().join("shims");
         let real = tmp.path().join("real");
@@ -442,17 +582,22 @@ mod tests {
         for tool in ["cargo", "xcodebuild", "gradle"] {
             exe(
                 &real.join(tool),
-                &format!("echo \"real {tool} $* slot=${{SMOOTH_CI_QUEUE_SLOT:-}}\" >> '{}'", log.display()),
-            );
-        }
-        if with_th {
-            exe(
-                &real.join("th"),
                 &format!(
-                    "echo \"th $*\" >> '{}'\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do shift; done\nshift\nSMOOTH_CI_QUEUE_SLOT=heavy-1 exec \"$@\"",
+                    "echo \"real {tool} $* slot=${{SMOOTH_CI_QUEUE_SLOT:-}}\" >> '{}'\nfor a in \"$@\"; do [ \"$a\" = fail ] && exit 7; done\nexit 0",
                     log.display()
                 ),
             );
+        }
+        match th {
+            Th::None => {}
+            Th::Capable => capable_th(&real.join("th"), &log),
+            Th::Old => exe(
+                &real.join("th"),
+                &format!(
+                    "echo \"old-th $*\" >> '{}'\ncase \"$1\" in ci-queue) echo \"error: unrecognized subcommand 'ci-queue'\" >&2; exit 2 ;; esac\nexit 0",
+                    log.display()
+                ),
+            ),
         }
         let state = tmp.path().join("shims.json");
         Fx { tmp, shims, real, log, state }
@@ -464,12 +609,23 @@ mod tests {
         }
 
         fn install(&self, tools: &[&str]) -> Vec<(String, Installed)> {
+            self.install_with(tools, &[])
+        }
+
+        fn install_with(&self, tools: &[&str], ths: &[PathBuf]) -> Vec<(String, Installed)> {
             let tools: Vec<String> = tools.iter().map(ToString::to_string).collect();
-            install(&self.shims, &tools, &self.path_var(), false, &self.state).unwrap()
+            install(&self.shims, &tools, &self.path_var(), ths, false, &self.state).unwrap()
         }
 
         /// Run `<tool> args…` as a caller would (PATH lookup), return the log.
         fn call(&self, tool: &str, args: &[&str], env: &[(&str, &str)]) -> String {
+            let (code, log, _) = self.run(tool, args, env);
+            assert_eq!(code, Some(0), "{tool} {args:?} failed: {log}");
+            log
+        }
+
+        /// Run `<tool> args…`; (exit code, log, stderr).
+        fn run(&self, tool: &str, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, String) {
             let _ = fs::remove_file(&self.log);
             let mut c = Command::new(tool);
             c.args(args)
@@ -479,9 +635,12 @@ mod tests {
             for (k, v) in env {
                 c.env(k, v);
             }
-            let st = c.status().unwrap();
-            assert!(st.success(), "{tool} {args:?} failed: {st:?}");
-            fs::read_to_string(&self.log).unwrap_or_default()
+            let out = c.output().unwrap();
+            (
+                out.status.code(),
+                fs::read_to_string(&self.log).unwrap_or_default(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
         }
     }
 
@@ -515,7 +674,7 @@ mod tests {
         let f = fx(true);
         exe(&f.shims.join("cargo"), "echo mine");
         let tools = vec!["cargo".to_string()];
-        let err = install(&f.shims, &tools, &f.path_var(), false, &f.state).unwrap_err();
+        let err = install(&f.shims, &tools, &f.path_var(), &[], false, &f.state).unwrap_err();
         assert!(err.to_string().contains("is not a th shim"), "{err}");
         assert_eq!(fs::read_to_string(f.shims.join("cargo")).unwrap(), "#!/bin/sh\necho mine\n");
     }
@@ -527,7 +686,7 @@ mod tests {
         fs::write(f.shims.join("unrelated"), "keep me").unwrap();
         let before: Vec<(String, Vec<u8>, u32)> = snapshot(&f.shims);
         let tools = vec!["cargo".to_string(), "gradle".to_string()];
-        install(&f.shims, &tools, &f.path_var(), true, &f.state).unwrap();
+        install(&f.shims, &tools, &f.path_var(), &[], true, &f.state).unwrap();
         assert!(is_shim(&f.shims.join("cargo")), "--force set the file aside and shimmed");
         uninstall(&f.state).unwrap();
         assert_eq!(snapshot(&f.shims), before, "uninstall did not restore the directory");
@@ -570,6 +729,9 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("real cargo build -p x slot=heavy-1"), "{log}");
+        let (code, log, _) = f.run("cargo", &["build", "fail"], &[]);
+        assert_eq!(code, Some(7), "the tool's exit status comes back through the queue: {log}");
+        assert!(log.contains("th ci-queue run"), "{log}");
         let log = f.call("gradle", &["assembleDebug"], &[]);
         assert!(log.contains("th ci-queue run --class heavy --label gradle assembleDebug -- "), "{log}");
         assert!(!log.contains("--lock"), "only cargo takes the cargo lock: {log}");
@@ -637,8 +799,120 @@ mod tests {
         let f = fx(false);
         f.install(&["cargo"]);
         // PATH has no th at all (not even the machine's): only our dirs + system.
-        let log = f.call("cargo", &["build"], &[]);
+        let (code, log, err) = f.run("cargo", &["build"], &[]);
+        assert_eq!(code, Some(0));
         assert!(log.contains("real cargo build slot="), "{log}");
+        assert!(!err.contains("th-ci-queue-shim"), "no th at all is not worth a warning: {err}");
+    }
+
+    /// The 2026-09-28 incident: an older th (no `ci-queue`) took over PATH.
+    /// The build must still run — unqueued, with one warning line — and exit
+    /// with the tool's own status. Mutation-checked: dropping the probe from
+    /// the template makes this fail with the old th's exit 2.
+    #[test]
+    fn a_th_that_cannot_run_ci_queue_runs_the_real_tool_unqueued() {
+        let f = fx_with(Th::Old);
+        f.install(&["cargo", "gradle"]);
+        let (code, log, err) = f.run("cargo", &["build", "-p", "x"], &[]);
+        assert_eq!(code, Some(0), "{log}\n{err}");
+        assert!(log.contains("real cargo build -p x slot=\n"), "ran directly, not in a slot: {log}");
+        assert!(!log.contains("old-th ci-queue run --class"), "never queued through the old th: {log}");
+        let warning: Vec<&str> = err.lines().filter(|l| l.contains("th-ci-queue-shim")).collect();
+        assert_eq!(warning.len(), 1, "exactly one warning line: {err}");
+        assert!(
+            warning[0].contains("running cargo unqueued") && warning[0].contains(&f.real.join("th").display().to_string()),
+            "{err}"
+        );
+        let (code, log, _) = f.run("cargo", &["build", "fail"], &[]);
+        assert_eq!(code, Some(7), "the tool's own exit status: {log}");
+        let (code, log, _) = f.run("gradle", &["assembleDebug"], &[]);
+        assert_eq!(code, Some(0));
+        assert!(log.contains("real gradle assembleDebug"), "{log}");
+    }
+
+    /// The durable half: the th recorded at install (brew's) keeps queueing
+    /// even after an older th takes over the PATH link.
+    #[test]
+    fn a_recorded_th_that_can_queue_wins_over_an_old_th_on_path() {
+        let f = fx_with(Th::Old);
+        let brew = f.tmp.path().join("brew");
+        fs::create_dir_all(&brew).unwrap();
+        capable_th(&brew.join("th"), &f.log);
+        f.install_with(&["cargo"], &[f.tmp.path().join("gone/th"), brew.join("th")]);
+        let (code, log, err) = f.run("cargo", &["build"], &[]);
+        assert_eq!(code, Some(0), "{log}\n{err}");
+        assert!(log.contains("th ci-queue run --class heavy --label cargo build --lock cargo -- "), "{log}");
+        assert!(log.contains("real cargo build slot=heavy-1"), "{log}");
+        assert!(!log.contains("old-th"), "PATH's th is never even probed once a recorded one answers: {log}");
+        assert!(!err.contains("th-ci-queue-shim"), "{err}");
+        let (code, _, _) = f.run("cargo", &["test", "fail"], &[]);
+        assert_eq!(code, Some(7));
+    }
+
+    #[test]
+    fn install_upgrades_a_v1_shim_in_place() {
+        let f = fx(true);
+        let v1 = "#!/bin/sh\n# th-ci-queue-shim v1 — cargo\nexec th ci-queue run --class heavy -- cargo \"$@\"\n";
+        exe(&f.shims.join("cargo"), v1.trim_start_matches("#!/bin/sh\n").trim_end());
+        assert_eq!(shim_version(&f.shims.join("cargo")), Some(1));
+        // No --force: a v1 shim is ours.
+        let out = f.install(&["cargo"]);
+        assert!(matches!(out[0].1, Installed::Upgraded { from: 1, .. }), "{out:?}");
+        assert_eq!(shim_version(&f.shims.join("cargo")), Some(current_version()));
+        assert_eq!(current_version(), 2);
+        let rows = status(&f.state, &f.path_var()).unwrap();
+        assert_eq!(rows[0].version, Some(2));
+        // And again: now current.
+        assert!(matches!(f.install(&["cargo"])[0].1, Installed::Unchanged { .. }));
+    }
+
+    #[test]
+    fn a_v2_shim_skips_a_v1_shim_further_down_path() {
+        let f = fx(true);
+        f.install(&["cargo"]);
+        let old = f.tmp.path().join("old-shims");
+        fs::create_dir_all(&old).unwrap();
+        exe(&old.join("cargo"), "# th-ci-queue-shim v1 — cargo\nexit 99");
+        let path = format!("{}:{}:{}:/usr/bin:/bin", f.shims.display(), old.display(), f.real.display());
+        assert_eq!(find_real("cargo", &path), Some(f.real.join("cargo")));
+        let out = Command::new("cargo")
+            .arg("build")
+            .env("PATH", &path)
+            .env_remove("SMOOTH_CI_QUEUE_SLOT")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(fs::read_to_string(&f.log).unwrap().contains("real cargo build"));
+    }
+
+    #[test]
+    fn a_homebrew_keg_records_the_stable_link_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keg = tmp.path().join("Cellar/th/0.58.0/bin");
+        fs::create_dir_all(&keg).unwrap();
+        fs::create_dir_all(tmp.path().join("bin")).unwrap();
+        exe(&keg.join("th"), "exit 0");
+        std::os::unix::fs::symlink(keg.join("th"), tmp.path().join("bin/th")).unwrap();
+        // Invoked through a link someone else could repoint (~/.local/bin/th).
+        let local = tmp.path().join("local-th");
+        std::os::unix::fs::symlink(tmp.path().join("bin/th"), &local).unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(queue_th_candidates(&local), vec![root.join("bin/th"), root.join("Cellar/th/0.58.0/bin/th")]);
+        // Not a keg: just the canonical binary.
+        let plain = tmp.path().join("plain-th");
+        exe(&plain, "exit 0");
+        assert_eq!(queue_th_candidates(&plain), vec![root.join("plain-th")]);
+    }
+
+    #[test]
+    fn shim_version_reads_the_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("x");
+        fs::write(&p, "#!/bin/sh\n# th-ci-queue-shim v12 — cargo\n").unwrap();
+        assert_eq!(shim_version(&p), Some(12));
+        fs::write(&p, "#!/bin/sh\necho mine\n").unwrap();
+        assert_eq!(shim_version(&p), None);
+        assert!(script("cargo", Path::new("/bin/cargo"), &[]).unwrap().contains(MARKER));
     }
 
     #[test]
@@ -676,7 +950,7 @@ mod tests {
 
     #[test]
     fn unknown_tools_have_no_shim() {
-        assert!(script("rm", Path::new("/bin/rm")).is_err());
+        assert!(script("rm", Path::new("/bin/rm"), &[]).is_err());
         for t in DEFAULT_TOOLS {
             assert!(light_commands(t).is_some(), "{t}");
         }

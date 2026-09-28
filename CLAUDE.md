@@ -128,7 +128,7 @@ th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 
 # Run a heavy check (typecheck, clippy, a test suite) through the machine-wide
 # queue: N kernel-flock slots per class, FIFO, held while memory/swap/load/disk
-# are under pressure, background QoS. Exit 75 = no slot within --max-wait.
+# are under pressure, `nice` priority. Exit 75 = no slot within --max-wait.
 # `--lock cargo` = one job per cargo target dir (auto for a bare `cargo …`);
 # a job holding a lock never runs at background QoS (priority inversion).
 # `th attest`'s local checks already go through it (SMOODEV-3355).
