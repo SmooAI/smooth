@@ -61,7 +61,25 @@ pub const PROBE: &str = "ci-queue run --help";
 /// What `install` shims when no `--tools` is given. turbo and tsgo are not
 /// here on purpose: pnpm runs them from `node_modules/.bin`, which it puts
 /// ahead of everything on PATH, so a shim in `~/.local/bin` never sees them.
-pub const DEFAULT_TOOLS: &[&str] = &["cargo", "xcodebuild", "gradle"];
+///
+/// `cargo-nextest` is here for the direct-binary spelling: `cargo nextest …`
+/// already queues through the cargo shim, but `cargo-nextest nextest run`
+/// then runs rustup's cargo by ABSOLUTE path, so without its own shim the
+/// whole build ran outside the queue (seen live 2026-09-28, th-35d0d0).
+///
+/// A repo's `./gradlew` is a per-repo script no PATH shim ever sees, so the
+/// `gradle` shim does NOT cover Android builds that use the wrapper
+/// (th-cb3c66).
+pub const DEFAULT_TOOLS: &[&str] = &["cargo", "cargo-nextest", "xcodebuild", "gradle"];
+
+/// Tools whose shim takes the machine's `cargo` lock.
+const CARGO_LOCK_TOOLS: &[&str] = &["cargo", "cargo-nextest"];
+
+/// A word a tool's own argv starts with before the real subcommand, skipped
+/// once when finding it: cargo runs `cargo-nextest nextest <sub> …`.
+fn lead_word(tool: &str) -> Option<&'static str> {
+    (tool == "cargo-nextest").then_some("nextest")
+}
 
 /// Tools a shim can be generated for, with the light subcommands and flags
 /// that must never queue.
@@ -114,6 +132,8 @@ pub fn light_commands(tool: &str) -> Option<&'static [&'static str]> {
             "-find-executable",
             "-find-library",
         ],
+        // `list` is NOT light: nextest compiles every test binary to list it.
+        "cargo-nextest" => &["", "help", "show-config", "self"],
         "gradle" | "gradlew" => &["", "-v", "--version", "--status", "--stop", "help", "tasks"],
         "turbo" => &["", "--version", "ls", "login", "logout", "link", "unlink", "daemon", "info", "telemetry"],
         "tsgo" | "tsc" => &["", "-v", "--version", "--init", "--showConfig"],
@@ -158,6 +178,7 @@ pub fn is_light(tool: &str, args: &[String]) -> bool {
         return true;
     }
     let mut sub = "";
+    let mut skip = lead_word(tool);
     for a in args {
         if a.starts_with('+') {
             continue;
@@ -167,6 +188,10 @@ pub fn is_light(tool: &str, args: &[String]) -> bool {
                 sub = a;
                 break;
             }
+            continue;
+        }
+        if skip == Some(a.as_str()) {
+            skip = None;
             continue;
         }
         sub = a;
@@ -184,9 +209,10 @@ fn sh_quote(s: &str) -> String {
 /// `ths` as the `th`s to try (in order) before the one on PATH.
 pub fn script(tool: &str, real: &Path, ths: &[PathBuf]) -> Result<String> {
     let Some(light) = light_commands(tool) else {
-        bail!("no shim is defined for `{tool}` (supported: cargo, xcodebuild, gradle, gradlew, turbo, tsgo, tsc)");
+        bail!("no shim is defined for `{tool}` (supported: cargo, cargo-nextest, xcodebuild, gradle, gradlew, turbo, tsgo, tsc)");
     };
-    let lock = if tool == "cargo" { " --lock cargo" } else { "" };
+    let lock = if CARGO_LOCK_TOOLS.contains(&tool) { " --lock cargo" } else { "" };
+    let lead = lead_word(tool).unwrap_or("");
     let alts = |words: &[&str]| words.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(" | ");
     let light_case = alts(light);
     let help_case = alts(HELP_FLAGS);
@@ -221,8 +247,9 @@ IFS=$old_ifs
 case "${{CI_QUEUE:-}}" in off | 0 | false | no) exec "$real" "$@" ;; esac
 
 # Light commands never queue. The subcommand is the first argument that is not
-# an option or a +toolchain.
+# an option or a +toolchain (or the tool's own lead word, once).
 sub=''
+skip='{lead}'
 for a in "$@"; do
     case "$a" in
         {help_case}) exec "$real" "$@" ;;
@@ -235,7 +262,10 @@ for a in "$@"; do
             case "$a" in {dash_case}) sub=$a; break ;; esac
             continue
             ;;
-        *) sub=$a; break ;;
+        *)
+            if [ -n "$skip" ] && [ "$a" = "$skip" ]; then skip=''; continue; fi
+            sub=$a; break
+            ;;
     esac
 done
 case "$sub" in
@@ -287,38 +317,88 @@ pub fn current_version() -> u32 {
     MARKER[MARKER_FAMILY.len()..].parse().unwrap_or(0)
 }
 
-/// The `th`s a shim should try before PATH's, from the `th` running
-/// `install` (which, being this code, can run the queue).
+/// Where Homebrew links `th` (Apple Silicon, Intel, Linux).
+pub const BREW_TH_LINKS: &[&str] = &["/opt/homebrew/bin/th", "/usr/local/bin/th", "/home/linuxbrew/.linuxbrew/bin/th"];
+
+/// The default [`BREW_TH_LINKS`] as paths.
+pub fn brew_th_links() -> Vec<PathBuf> {
+    BREW_TH_LINKS.iter().map(PathBuf::from).collect()
+}
+
+/// Homebrew's `th` (`smooai/tools/th`), when installed: the first of `links`
+/// that resolves into a `Cellar/th/<version>/bin/th` keg. A `/usr/local/bin/th`
+/// that is someone else's link (Big Smooth's, a dev build's) is not brew's.
+pub fn brew_th(links: &[PathBuf]) -> Option<PathBuf> {
+    links
+        .iter()
+        .find(|l| fs::canonicalize(l).is_ok_and(|c| brew_keg_formula(&c) == Some("th")))
+        .cloned()
+}
+
+/// The `th`s a shim should try before PATH's. Homebrew's `th` owns `th` when
+/// it is installed, so it comes first; then the `th` running `install`
+/// (which, being this code, can run the queue).
 ///
-/// The path is canonicalised: `~/.local/bin/th` is exactly the kind of link
+/// Paths are canonicalised: `~/.local/bin/th` is exactly the kind of link
 /// someone else can repoint. A Homebrew keg (`<prefix>/Cellar/<f>/<ver>/bin/th`)
 /// also yields `<prefix>/bin/th`, first — brew keeps that link on the newest
 /// version, while the keg itself disappears at `brew cleanup`. Every
 /// candidate is probed at run time, so a stale one costs nothing but a
 /// failed `test -x`.
-pub fn queue_th_candidates(exe: &Path) -> Vec<PathBuf> {
-    let canon = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+pub fn queue_th_candidates(exe: &Path, brew_links: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if let Some(brew) = brew_th(brew_links) {
+        out.push(brew);
+    }
+    let canon = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
     if let Some(stable) = homebrew_stable_link(&canon) {
         out.push(stable);
     }
     out.push(canon);
-    out.dedup();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
     out
 }
 
-/// `<prefix>/Cellar/<formula>/<version>/bin/<name>` → `<prefix>/bin/<name>`.
-fn homebrew_stable_link(p: &Path) -> Option<PathBuf> {
-    let name = p.file_name()?;
+/// When Homebrew's `th` exists but `th` on `path_var` is something else:
+/// `(what callers get, brew's)`. `None` when brew has no `th`, nothing is on
+/// PATH, or PATH's `th` resolves to brew's.
+pub fn th_shadowing_brew(path_var: &str, brew_links: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
+    let brew = brew_th(brew_links)?;
+    let first = first_on_path("th", path_var)?;
+    let same = fs::canonicalize(&first).ok().is_some_and(|f| fs::canonicalize(&brew).ok() == Some(f));
+    (!same).then_some((first, brew))
+}
+
+/// One line naming what shadows Homebrew's `th`, for `status` and `th doctor`.
+pub fn shadowing_warning(first: &Path, brew: &Path) -> String {
+    let resolved = fs::canonicalize(first).map_or_else(|_| String::new(), |c| format!(" (→ {})", c.display()));
+    format!(
+        "`th` on PATH is {}{resolved}, which shadows Homebrew's {}. Remove it (Big Smooth ≥ 0.59.2 removes its own link) or put {} first on PATH.",
+        first.display(),
+        brew.display(),
+        brew.parent().map_or_else(|| brew.display().to_string(), |d| d.display().to_string())
+    )
+}
+
+/// `<prefix>/Cellar/<formula>/<version>/bin/<name>` → `<formula>`.
+fn brew_keg_formula(p: &Path) -> Option<&str> {
     let bin = p.parent()?;
     if bin.file_name()? != "bin" {
         return None;
     }
-    let cellar = bin.parent()?.parent()?.parent()?;
-    if cellar.file_name()? != "Cellar" {
+    let formula = bin.parent()?.parent()?;
+    if formula.parent()?.file_name()? != "Cellar" {
         return None;
     }
-    Some(cellar.parent()?.join("bin").join(name))
+    formula.file_name()?.to_str()
+}
+
+/// `<prefix>/Cellar/<formula>/<version>/bin/<name>` → `<prefix>/bin/<name>`.
+fn homebrew_stable_link(p: &Path) -> Option<PathBuf> {
+    brew_keg_formula(p)?;
+    let cellar = p.parent()?.parent()?.parent()?.parent()?;
+    Some(cellar.parent()?.join("bin").join(p.file_name()?))
 }
 
 /// The first executable `tool` on `path_var` that is not a shim.
@@ -579,7 +659,7 @@ mod tests {
         let log = tmp.path().join("log");
         fs::create_dir_all(&shims).unwrap();
         fs::create_dir_all(&real).unwrap();
-        for tool in ["cargo", "xcodebuild", "gradle"] {
+        for tool in ["cargo", "cargo-nextest", "xcodebuild", "gradle"] {
             exe(
                 &real.join(tool),
                 &format!(
@@ -734,14 +814,21 @@ mod tests {
         assert!(log.contains("th ci-queue run"), "{log}");
         let log = f.call("gradle", &["assembleDebug"], &[]);
         assert!(log.contains("th ci-queue run --class heavy --label gradle assembleDebug -- "), "{log}");
-        assert!(!log.contains("--lock"), "only cargo takes the cargo lock: {log}");
+        assert!(!log.contains("--lock"), "only cargo and cargo-nextest take the cargo lock: {log}");
+        f.install(&["cargo-nextest"]);
+        let log = f.call("cargo-nextest", &["nextest", "run", "-p", "smooai-voice"], &[]);
+        assert!(
+            log.contains("th ci-queue run --class heavy --label cargo-nextest nextest run -p smooai-voice --lock cargo -- "),
+            "{log}"
+        );
+        assert!(log.contains("real cargo-nextest nextest run -p smooai-voice slot=heavy-1"), "{log}");
     }
 
     /// Table-driven: the light allowlist is part of the contract.
     #[test]
     fn light_commands_never_queue_and_heavy_ones_do() {
         let f = fx(true);
-        f.install(&["cargo", "xcodebuild", "gradle"]);
+        f.install(&["cargo", "cargo-nextest", "xcodebuild", "gradle"]);
         let cases: &[(&str, &[&str], bool)] = &[
             ("cargo", &["--version"], false),
             ("cargo", &["-V"], false),
@@ -763,6 +850,20 @@ mod tests {
             ("gradle", &["--version"], false),
             ("gradle", &["--stop"], false),
             ("gradle", &["assembleRelease"], true),
+            // The direct-binary spelling cargo itself uses: `cargo-nextest nextest <sub>`.
+            ("cargo-nextest", &["nextest", "run", "-p", "smooai-voice"], true),
+            ("cargo-nextest", &["nextest", "--workspace", "run"], true),
+            // `list` builds every test binary to list it.
+            ("cargo-nextest", &["nextest", "list"], true),
+            ("cargo-nextest", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
+            ("cargo-nextest", &[], false),
+            ("cargo-nextest", &["nextest"], false),
+            ("cargo-nextest", &["--version"], false),
+            ("cargo-nextest", &["nextest", "--version"], false),
+            ("cargo-nextest", &["nextest", "run", "--help"], false),
+            ("cargo-nextest", &["nextest", "show-config", "test-groups"], false),
+            ("cargo-nextest", &["nextest", "self", "update"], false),
+            ("cargo-nextest", &["nextest", "help"], false),
         ];
         for (tool, args, queued) in cases {
             let log = f.call(tool, args, &[]);
@@ -897,11 +998,77 @@ mod tests {
         let local = tmp.path().join("local-th");
         std::os::unix::fs::symlink(tmp.path().join("bin/th"), &local).unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
-        assert_eq!(queue_th_candidates(&local), vec![root.join("bin/th"), root.join("Cellar/th/0.58.0/bin/th")]);
+        assert_eq!(
+            queue_th_candidates(&local, &[]),
+            vec![root.join("bin/th"), root.join("Cellar/th/0.58.0/bin/th")]
+        );
         // Not a keg: just the canonical binary.
         let plain = tmp.path().join("plain-th");
         exe(&plain, "exit 0");
-        assert_eq!(queue_th_candidates(&plain), vec![root.join("plain-th")]);
+        assert_eq!(queue_th_candidates(&plain, &[]), vec![root.join("plain-th")]);
+    }
+
+    /// A tmp "brew prefix" with th linked from its Cellar, plus a Big Smooth
+    /// style link into an app bundle: (tmp, brew link, bundle link).
+    fn brew_and_bundle() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let keg = tmp.path().join("brew/Cellar/th/0.59.2/bin");
+        fs::create_dir_all(&keg).unwrap();
+        exe(&keg.join("th"), "exit 0");
+        fs::create_dir_all(tmp.path().join("brew/bin")).unwrap();
+        std::os::unix::fs::symlink("../Cellar/th/0.59.2/bin/th", tmp.path().join("brew/bin/th")).unwrap();
+        let res = tmp.path().join("Big Smooth.app/Contents/Resources");
+        fs::create_dir_all(&res).unwrap();
+        exe(&res.join("th"), "exit 0");
+        fs::create_dir_all(tmp.path().join("local")).unwrap();
+        std::os::unix::fs::symlink(res.join("th"), tmp.path().join("local/th")).unwrap();
+        let (brew, local) = (tmp.path().join("brew/bin/th"), tmp.path().join("local/th"));
+        (tmp, brew, local)
+    }
+
+    #[test]
+    fn brew_th_is_only_a_link_into_a_th_keg() {
+        let (tmp, brew, bundle) = brew_and_bundle();
+        assert_eq!(brew_th(&[bundle.clone(), brew.clone()]), Some(brew.clone()), "the bundle link is not brew's");
+        assert_eq!(brew_th(&[bundle]), None);
+        assert_eq!(brew_th(&[tmp.path().join("nope/th")]), None);
+        // Another formula's keg is not th's.
+        let other = tmp.path().join("brew/Cellar/other/1.0/bin");
+        fs::create_dir_all(&other).unwrap();
+        exe(&other.join("th"), "exit 0");
+        assert_eq!(brew_th(&[other.join("th")]), None);
+    }
+
+    /// Brew owns `th`: its link is tried first, whoever ran `install`.
+    #[test]
+    fn brew_th_comes_first_even_when_another_th_installs() {
+        let (_tmp, brew, bundle) = brew_and_bundle();
+        let got = queue_th_candidates(&bundle, &[brew.clone()]);
+        assert_eq!(got[0], brew, "{got:?}");
+        assert_eq!(got.len(), 2, "brew's link, then the installer's canonical path: {got:?}");
+        // Installed BY brew's th: no duplicate of brew's link.
+        let got = queue_th_candidates(&brew, &[brew.clone()]);
+        assert_eq!(got[0], brew);
+        assert_eq!(got.iter().filter(|p| **p == brew).count(), 1, "{got:?}");
+    }
+
+    #[test]
+    fn a_th_ahead_of_brews_on_path_is_named() {
+        let (tmp, brew, bundle) = brew_and_bundle();
+        let local = bundle.parent().unwrap().display().to_string();
+        let brew_dir = brew.parent().unwrap().display().to_string();
+        let (first, b) = th_shadowing_brew(&format!("{local}:{brew_dir}"), &[brew.clone()]).expect("shadowed");
+        assert_eq!((first.as_path(), b.as_path()), (bundle.as_path(), brew.as_path()));
+        let msg = shadowing_warning(&first, &b);
+        assert!(msg.contains("Big Smooth.app") && msg.contains(&brew.display().to_string()), "{msg}");
+        // Brew first: fine. A link that resolves to brew's keg: also fine.
+        assert_eq!(th_shadowing_brew(&format!("{brew_dir}:{local}"), &[brew.clone()]), None);
+        let alias = tmp.path().join("alias");
+        fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(&brew, alias.join("th")).unwrap();
+        assert_eq!(th_shadowing_brew(&format!("{}:{local}", alias.display()), &[brew.clone()]), None);
+        // No brew th: nothing to shadow.
+        assert_eq!(th_shadowing_brew(&local, &[tmp.path().join("nope/th")]), None);
     }
 
     #[test]

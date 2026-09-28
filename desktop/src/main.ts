@@ -31,7 +31,7 @@ import {
     tccOpenArgs,
 } from './daemon.js';
 import { discoverDaemons, type RemoteDaemon } from './discovery.js';
-import { linkThOnPath } from './installth.js';
+import { findBrewTh, linkThOnPath } from './installth.js';
 import { firstRunLoginItem, trayModeLabel } from './loginitem.js';
 import { isNewChatChord } from './newchat.js';
 import { buildNotification, type NotifyPayload } from './notify.js';
@@ -440,9 +440,9 @@ function openFullDiskAccess(): void {
  * Symlink the bundled `th` onto PATH so it works from a terminal, and so OTA
  * updates (which replace the whole app bundle) carry `th` too. Best-effort: never
  * let a PATH-link failure block the app. Every decision goes to ~/.smooth/desktop.log.
- * See installth.ts for the safety rules
- * (a real brew/curl `th` is left alone, a link we didn't make is left alone, and
- * a newer `th` is never downgraded to the bundled one).
+ * See installth.ts for the rules: Homebrew's `th` wins when installed (we remove
+ * our own link rather than shadow it), a real brew/curl `th` or a link we didn't
+ * make is left alone, and a newer `th` is never downgraded to the bundled one.
  *
  * Only the BUNDLED th is ever linked: an unpackaged dev run has none, and
  * `resolveThBin()`'s PATH fallback would otherwise hand back the very link it
@@ -451,7 +451,7 @@ function openFullDiskAccess(): void {
 function installThCli(): void {
     try {
         const bundled = app.isPackaged ? resolveThBin([join(process.resourcesPath, 'th')]) : undefined;
-        const res = linkThOnPath(bundled);
+        const res = linkThOnPath(bundled, undefined, { brewTh: findBrewTh() });
         const where = res.path ?? '(no PATH dir)';
         const why = res.note ? ` (${res.note})` : '';
         switch (res.action) {
@@ -462,6 +462,10 @@ function installThCli(): void {
             case 'skipped-newer':
             case 'skipped-unknown-version':
                 desktopLog(`th: left ${where} alone: ${res.action}${why}.`);
+                break;
+            case 'deferred-to-brew':
+                desktopLog(`th: ${res.note}.`);
+                if (res.hint) desktopLog(`th: hint: ${res.hint}`);
                 break;
             case 'created':
             case 'repointed':

@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 
 import { daemonLogDir, RotatingLog } from './daemonlog.js';
+import { findBrewTh } from './installth.js';
 import {
     DEFAULT_POLICY,
     initialState,
@@ -317,6 +318,14 @@ function runAction(action: SupervisorAction): void {
  * sqlite migration on first run. */
 const START_DEADLINE_MS = 60_000;
 
+/** `{ SMOOTH_TH_BIN: <brew th> }` when Homebrew's th is installed and the
+ * caller hasn't pinned one; `{}` otherwise. */
+export function daemonThEnv(env: NodeJS.ProcessEnv, brew: () => string | undefined = findBrewTh): Record<string, string> {
+    if ((env.SMOOTH_TH_BIN ?? '').trim() !== '') return {};
+    const brewTh = brew();
+    return brewTh ? { SMOOTH_TH_BIN: brewTh } : {};
+}
+
 /** Spawn `smooth-daemon run` as our supervised child. Returns false if the
  * binary can't be found (the caller reports that; nothing to supervise). */
 function spawnChild(): boolean {
@@ -330,7 +339,16 @@ function spawnChild(): boolean {
     // the tray, so turn its one off. SMOOTH_LOG_FILE: the daemon's tracing goes
     // to its own rotating file; only panics/aborts reach stderr, which we capture
     // here so an exit line can quote them (th-4b189c).
-    const env = { ...process.env, SMOOTH_ADDR: addr, SMOOTH_MENUBAR: '0', SMOOTH_LOG_FILE: daemonTracingLogPath() };
+    // SMOOTH_TH_BIN: the daemon's own `th` calls (the `th` tool, web_search, …)
+    // use Homebrew's th when it is installed — brew owns `th` (th-35d0d0) —
+    // rather than the one bundled next to it. An explicit setting wins.
+    const env = {
+        ...process.env,
+        SMOOTH_ADDR: addr,
+        SMOOTH_MENUBAR: '0',
+        SMOOTH_LOG_FILE: daemonTracingLogPath(),
+        ...daemonThEnv(process.env),
+    };
     desktopLog(`spawning daemon: ${bin} run (addr ${addr}, logs ${daemonLogDirectory()})`);
     let proc: ChildProcess;
     try {

@@ -64,8 +64,9 @@ pub enum CiQueueCmd {
     Run(RunArgs),
     /// Running jobs, the queue, current pressure vs thresholds, and recent history.
     Status(StatusArgs),
-    /// PATH shims that send heavy cargo / xcodebuild / gradle runs through the
-    /// queue for every caller, agents included.
+    /// PATH shims that send heavy cargo / cargo-nextest / xcodebuild / gradle
+    /// runs through the queue for every caller, agents included. A repo's
+    /// `./gradlew` is not on PATH, so no shim sees it.
     ///
     /// A shim in a directory ahead of the real tool on PATH (`~/.local/bin`)
     /// runs `th ci-queue run --class heavy [--lock cargo] -- <real tool> …`.
@@ -114,7 +115,7 @@ pub struct ShimInstallArgs {
     /// Directory for the shims. Must come before the real tools on PATH.
     #[arg(long, value_name = "DIR")]
     pub dir: Option<PathBuf>,
-    /// Tools to shim (default: cargo, xcodebuild, gradle). Also: gradlew, turbo, tsgo, tsc.
+    /// Tools to shim (default: cargo, cargo-nextest, xcodebuild, gradle). Also: gradlew, turbo, tsgo, tsc.
     #[arg(long, value_delimiter = ',', value_name = "TOOL,…")]
     pub tools: Vec<String>,
     /// Set aside (and later restore) a same-named file that is not a th shim.
@@ -293,7 +294,9 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
             };
             // This th can run the queue (it is running this code), so the shims
             // try it before whatever `th` PATH happens to hold later.
-            let ths = std::env::current_exe().map(|e| shim::queue_th_candidates(&e)).unwrap_or_default();
+            let ths = std::env::current_exe()
+                .map(|e| shim::queue_th_candidates(&e, &shim::brew_th_links()))
+                .unwrap_or_default();
             for (tool, what) in shim::install(&dir, &tools, &path_var, &ths, a.force, &state)? {
                 match what {
                     shim::Installed::Wrote { path, real } => println!("✓ {tool}: {} → {}", path.display(), real.display()),
@@ -313,6 +316,9 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
             if !ths.is_empty() {
                 let list: Vec<String> = ths.iter().map(|p| p.display().to_string()).collect();
                 println!("  queue th: {}, then PATH's th", list.join(", "));
+            }
+            if let Some((first, brew)) = shim::th_shadowing_brew(&path_var, &shim::brew_th_links()) {
+                eprintln!("⚠ {}", shim::shadowing_warning(&first, &brew));
             }
             for r in rows.iter().filter(|r| !r.active) {
                 eprintln!(
@@ -341,7 +347,10 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
                 return Ok(0);
             }
             if rows.is_empty() {
-                println!("No shims installed. `th ci-queue shim install` adds cargo, xcodebuild and gradle.");
+                println!("No shims installed. `th ci-queue shim install` adds cargo, cargo-nextest, xcodebuild and gradle.");
+            }
+            if let Some((first, brew)) = shim::th_shadowing_brew(&path_var, &shim::brew_th_links()) {
+                println!("  ⚠ {}", shim::shadowing_warning(&first, &brew));
             }
             for r in rows {
                 let glyph = if r.active { "●" } else { "○" };
