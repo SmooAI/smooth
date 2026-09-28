@@ -7,7 +7,7 @@
 //! swap filled, and Chrome froze. This is the durable fix: every heavy check
 //! on the machine takes a numbered slot first, waits its turn in FIFO order,
 //! waits longer while the machine is under memory, swap, load or disk
-//! pressure, and then runs at background QoS.
+//! pressure, and then runs at lowered priority (`nice` by default).
 //!
 //! Unix only: on Windows `run` executes the job directly, unqueued, and says
 //! so. There is no daemon. Coordination is kernel `flock`s on files under
@@ -58,8 +58,8 @@ pub enum CiQueueCmd {
     /// pressure — except that one is always admitted when no other heavy job
     /// is running. Light jobs share `slots.light` (default 6) and ignore
     /// pressure. Waiters are served first-come, first-served. The job runs at
-    /// background QoS in its own process group; INT/TERM/HUP are forwarded to
-    /// it. Exit: the job's code (128+n on signal n), 124 when `--timeout`
+    /// `nice` priority (`--qos`) in its own process group; INT/TERM/HUP are
+    /// forwarded to it. Exit: the job's code (128+n on signal n), 124 when `--timeout`
     /// fires, 75 when no slot frees within `--max-wait`.
     Run(RunArgs),
     /// Running jobs, the queue, current pressure vs thresholds, and recent history.
@@ -70,8 +70,9 @@ pub enum CiQueueCmd {
     /// A shim in a directory ahead of the real tool on PATH (`~/.local/bin`)
     /// runs `th ci-queue run --class heavy [--lock cargo] -- <real tool> …`.
     /// It runs the tool directly inside a queued job (`SMOOTH_CI_QUEUE_SLOT`,
-    /// the recursion guard), with `CI_QUEUE=off`, when `th` is missing, and for
-    /// light commands (`cargo --version`, `cargo metadata`, `cargo fmt`, any
+    /// the recursion guard), with `CI_QUEUE=off`, when no `th` it can find can
+    /// run `ci-queue` (it warns if one exists but is too old), and for light
+    /// commands (`cargo --version`, `cargo metadata`, `cargo fmt`, any
     /// `--help`, …). No shell rc file is edited.
     Shim {
         #[command(subcommand)]
@@ -290,14 +291,29 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
             } else {
                 a.tools.clone()
             };
-            for (tool, what) in shim::install(&dir, &tools, &path_var, a.force, &state)? {
+            // This th can run the queue (it is running this code), so the shims
+            // try it before whatever `th` PATH happens to hold later.
+            let ths = std::env::current_exe().map(|e| shim::queue_th_candidates(&e)).unwrap_or_default();
+            for (tool, what) in shim::install(&dir, &tools, &path_var, &ths, a.force, &state)? {
                 match what {
                     shim::Installed::Wrote { path, real } => println!("✓ {tool}: {} → {}", path.display(), real.display()),
+                    shim::Installed::Upgraded { path, real, from } => {
+                        println!(
+                            "↑ {tool}: {} upgraded v{from} → v{} → {}",
+                            path.display(),
+                            shim::current_version(),
+                            real.display()
+                        );
+                    }
                     shim::Installed::Unchanged { path } => println!("· {tool}: {} already current", path.display()),
                     shim::Installed::NotFound => println!("○ {tool}: not on PATH — skipped"),
                 }
             }
             let rows = shim::status(&state, &path_var)?;
+            if !ths.is_empty() {
+                let list: Vec<String> = ths.iter().map(|p| p.display().to_string()).collect();
+                println!("  queue th: {}, then PATH's th", list.join(", "));
+            }
             for r in rows.iter().filter(|r| !r.active) {
                 eprintln!(
                     "⚠ {}: callers still get {} first — put {} ahead of it on PATH",
@@ -331,6 +347,12 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
                 let glyph = if r.active { "●" } else { "○" };
                 let why = if !r.present {
                     "missing (removed or replaced)".to_string()
+                } else if r.version.is_some_and(|v| v < shim::current_version()) {
+                    format!(
+                        "outdated (v{}, current v{}) — run `th ci-queue shim install`",
+                        r.version.unwrap_or(0),
+                        shim::current_version()
+                    )
                 } else if r.active {
                     "active".to_string()
                 } else {

@@ -439,21 +439,46 @@ function openFullDiskAccess(): void {
 /**
  * Symlink the bundled `th` onto PATH so it works from a terminal, and so OTA
  * updates (which replace the whole app bundle) carry `th` too. Best-effort: never
- * let a PATH-link failure block the app. See installth.ts for the safety rule
- * (a real brew/curl `th` is left alone, never clobbered).
+ * let a PATH-link failure block the app. Every decision goes to ~/.smooth/desktop.log.
+ * See installth.ts for the safety rules
+ * (a real brew/curl `th` is left alone, a link we didn't make is left alone, and
+ * a newer `th` is never downgraded to the bundled one).
+ *
+ * Only the BUNDLED th is ever linked: an unpackaged dev run has none, and
+ * `resolveThBin()`'s PATH fallback would otherwise hand back the very link it
+ * is about to replace.
  */
 function installThCli(): void {
     try {
-        const res = linkThOnPath(resolveThBin());
-        if (res.action === 'skipped-regular-file') {
-            console.log(`th: leaving your own \`th\` at ${res.path} in place (not from Big Smooth).`);
-        } else if (res.action === 'created' || res.action === 'repointed') {
-            console.log(`th: ${res.action} ${res.path} → bundled CLI.`);
-        } else if (res.action === 'no-writable-dir') {
-            console.log('th: no writable PATH dir; run the CLI from the app bundle or add ~/.local/bin to PATH.');
+        const bundled = app.isPackaged ? resolveThBin([join(process.resourcesPath, 'th')]) : undefined;
+        const res = linkThOnPath(bundled);
+        const where = res.path ?? '(no PATH dir)';
+        const why = res.note ? ` (${res.note})` : '';
+        switch (res.action) {
+            case 'skipped-regular-file':
+                desktopLog(`th: leaving your own \`th\` at ${where} in place (not from Big Smooth).`);
+                break;
+            case 'skipped-foreign-link':
+            case 'skipped-newer':
+            case 'skipped-unknown-version':
+                desktopLog(`th: left ${where} alone: ${res.action}${why}.`);
+                break;
+            case 'created':
+            case 'repointed':
+                desktopLog(`th: ${res.action} ${where} → bundled CLI${why}.`);
+                break;
+            case 'no-writable-dir':
+                desktopLog(`th: no writable PATH dir; run the CLI from the app bundle or add ~/.local/bin to PATH${why}.`);
+                break;
+            case 'current':
+                desktopLog(`th: ${where} already links the bundled CLI.`);
+                break;
+            case 'unsupported':
+                desktopLog(`th: not linking onto PATH${why}.`);
+                break;
         }
     } catch (err) {
-        console.log(`th: could not link onto PATH: ${String(err)}`);
+        desktopLog(`th: could not link onto PATH: ${String(err)}`);
     }
 }
 

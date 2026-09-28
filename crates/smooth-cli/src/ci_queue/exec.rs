@@ -1,5 +1,6 @@
-//! Running an admitted job: background QoS, its own process group, signals
-//! forwarded to that group, and the whole group killed on timeout.
+//! Running an admitted job: lowered priority (`nice` by default), its own
+//! process group, signals forwarded to that group, and the whole group killed
+//! on timeout.
 //!
 //! The job runs as a CHILD of `th` rather than replacing it, because the slot's
 //! flock lives in this process: it must outlive the job and die with `th`,

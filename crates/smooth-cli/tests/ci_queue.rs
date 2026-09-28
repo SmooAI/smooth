@@ -355,3 +355,64 @@ fn a_shimmed_cargo_calling_cargo_never_deadlocks_on_its_own_parent() {
     assert!(out.status.success());
     assert!(!shims.join("cargo").exists(), "uninstall left the shim behind");
 }
+
+/// The 2026-09-28 incident, end to end (th-35d0d0): after `shim install`, an
+/// older `th` with no `ci-queue` takes over PATH (Big Smooth repointed
+/// `~/.local/bin/th` at its bundled 0.54.0). The shim must keep queueing
+/// through the `th` that installed it — which also pins the shim's probe
+/// (`ci-queue run --help`) against the real CLI.
+#[test]
+fn a_shim_keeps_queueing_through_its_installer_when_an_old_th_takes_over_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let q = Q::new();
+    let shims = q.path("shims");
+    let real = q.path("realbin");
+    let old = q.path("oldbin");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(&old).unwrap();
+    let log = q.path("cargo.log");
+    let write_exe = |p: &Path, body: String| {
+        std::fs::write(p, body).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exe(
+        &real.join("cargo"),
+        format!("#!/bin/sh\necho \"$1 slot=${{SMOOTH_CI_QUEUE_SLOT:-}}\" >> '{}'\nexit 5\n", log.display()),
+    );
+    write_exe(
+        &old.join("th"),
+        "#!/bin/sh\ncase \"$1\" in ci-queue) echo \"error: unrecognized subcommand 'ci-queue'\" >&2; exit 2 ;; esac\n".into(),
+    );
+    // Installed by the real th, found on PATH at install time...
+    let th_dir = th_bin().parent().unwrap().to_path_buf();
+    let install_path = format!("{}:{}:{}:/usr/bin:/bin", shims.display(), real.display(), th_dir.display());
+    let out = q
+        .th(&["shim", "install", "--dir", shims.to_str().unwrap(), "--tools", "cargo"])
+        .env("PATH", &install_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // ...then the only th on PATH is the old one.
+    let path = format!("{}:{}:{}:/usr/bin:/bin", shims.display(), old.display(), real.display());
+    let st = Command::new("cargo")
+        .arg("build")
+        .current_dir(q.tmp.path())
+        .env("PATH", &path)
+        .env("SMOOTH_CI_QUEUE_DIR", q.path("q"))
+        .env("SMOOTH_CI_QUEUE_CONFIG", q.path("ci-queue.toml"))
+        .env("CARGO_TARGET_DIR", q.path("target"))
+        .env_remove("SMOOTH_CI_QUEUE_SLOT")
+        .env_remove("CI_QUEUE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = read(&log);
+    let stderr = String::from_utf8_lossy(&st.stderr);
+    assert_eq!(st.status.code(), Some(5), "the tool's own exit status: {stderr}\nlog: {text}");
+    assert!(text.contains("build slot=heavy-1"), "did not go through the real queue: {text}\n{stderr}");
+    assert!(
+        !stderr.contains("th-ci-queue-shim"),
+        "no fallback warning when the installer's th answers: {stderr}"
+    );
+}
