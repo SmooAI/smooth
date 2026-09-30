@@ -104,19 +104,53 @@ CHECKS=$(
 # A repo with a scripts/ci/ but no runnable checks has nothing to attest.
 [[ -n "$CHECKS" ]] || exit 0
 
+# SMOODEV-3460: a repo whose PR CI is ATTEST-FIRST (smooai since SMOODEV-3458,
+# marked by scripts/ci/_attest-gate.mjs) does not run an uncredited heavy row — it
+# FAILS it. There, "pick what the diff touches" is the wrong advice: a skipped
+# check is a red PR. Elsewhere credits are only an optimisation, so the old
+# pick-your-checks guidance still holds.
+if [[ -f "$ROOT/scripts/ci/_attest-gate.mjs" ]]; then
+    cat >&2 <<EOF
+⚠️  attest-push-hint: bare \`git push\` — this repo's PR CI is ATTEST-FIRST.
+
+An uncredited heavy check does not run in PR CI; the Attest Gate FAILS it within
+~30s. Push with:
+
+  th attest --all
+
+It runs every scripts/ci/<check>.sh the workflow would, THEN pushes, THEN posts a
+ci-attest/<check> status on HEAD, so each row skips green in seconds.
+\`th attest --status\` reads back what is credited for HEAD.
+
+  available: ${CHECKS:-none}
+
+If a check can't run on this machine, push with an ack and add the \`ci:full\`
+label to the PR — CI then runs every row itself. PRs that change
+.github/workflows, .github/actions or scripts/ci get full CI automatically.
+
+A red local check may be the MACHINE, not the code: check \`uptime\` first.
+
+If a bare push is right here (WIP branch, no PR yet, you already attested, or
+you will add \`ci:full\`), append \` # attest:ack reason=...\` and re-run.
+
+Reference: scripts/ci/README.md ("Attest-first PR CI")
+EOF
+    exit 2
+fi
+
 cat >&2 <<EOF
 ⚠️  attest-push-hint: bare \`git push\` — CI will redo work this machine can do.
 
 Run \`th attest <checks>\` INSTEAD of \`git push\`. It runs the same
 scripts/ci/<check>.sh the workflow runs, THEN pushes, THEN posts a
 ci-attest/<check> commit status. Each credited row skips in ~8s instead of
-5-38 minutes. \`th attest --all\` runs every check; \`th attest --status\` reads
+minutes. \`th attest --all\` runs every check; \`th attest --status\` reads
 back what is already credited for HEAD.
 
   available: ${CHECKS:-none}
 
-Pick what the diff actually touches — attesting everything is usually wrong:
-  rust/**            → rust        (38 min on CI, ~5 min warm here — the big one)
+Credit what the diff touches (credits here are an optimisation, not a gate):
+  rust/**            → rust
   packages/, apps/   → typecheck lint test build
   docs/, comments    → nothing; just push
 
