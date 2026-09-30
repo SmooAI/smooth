@@ -135,5 +135,23 @@ assert_hint 'helpers (_env) are not checks'         'available:.*_env'    absent
 assert_hint 'test suites are not checks'            'available:.*attest\.test' absent
 assert_hint 'non-executable scripts are not checks' 'available:.*draft'   absent
 
+# SMOODEV-3460: in an ATTEST-FIRST repo (scripts/ci/_attest-gate.mjs present) an
+# uncredited row FAILS the PR, so the hint must say `--all` + `ci:full` and must
+# NOT carry the pick-what-you-touch advice. Without the marker, the old guidance.
+assert_hint 'plain repo keeps pick-your-checks'     'Credit what the diff touches' present
+assert_hint 'plain repo does not claim a gate'       'ATTEST-FIRST'       absent
+assert_hint 'nobody says attesting all is wrong'     'usually wrong'      absent
+printf '// gate\n' >"$WITH/scripts/ci/_attest-gate.mjs"
+out=$(payload 'git push' "$WITH" | bash "$HOOK" 2>&1)
+assert_hint 'gated repo says attest-first'           'ATTEST-FIRST'       present
+assert_hint 'gated repo says th attest --all'        'th attest --all'    present
+assert_hint 'gated repo names the ci:full label'     'ci:full'            present
+assert_hint 'gated repo drops pick-your-checks'      'Credit what the diff touches' absent
+assert_hint 'gated repo still lists checks'          'available: .*rust'  present
+assert_hint 'the gate script is not a check'         'available:.*_attest-gate' absent
+payload 'git push' "$WITH" | bash "$HOOK" >/dev/null 2>&1
+if [[ $? == 2 ]]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL  gated repo should still block (exit 2)"; fi
+rm -f "$WITH/scripts/ci/_attest-gate.mjs"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ $fail == 0 ]]
