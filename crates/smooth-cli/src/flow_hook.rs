@@ -61,8 +61,12 @@ pub const TOKEN_HEADER: &str = "X-Smooth-Flow-Hook-Token";
 pub const DEFAULT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Fire-and-forget events (the script's `FLOW_HOOK_TIMEOUT` default).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
-/// Upper bound on establishing the TCP connection: a loopback daemon either
-/// accepts at once or refuses at once, so this only bites a black-holed host.
+/// Upper bound on establishing a loopback connection. A live daemon accepts
+/// in microseconds; a dead one refuses at once on Unix, but Windows retries a
+/// refused SYN for ~2 s × 2 before failing, which would stall every hook
+/// while SmoothFlow isn't running. So the budget is explicit and short.
+const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
+/// The same for a non-loopback address (an `https://` or tailnet override).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// A token longer than this is truncated (the script's `head -c 128`).
 const MAX_TOKEN: usize = 128;
@@ -308,7 +312,8 @@ fn remaining(deadline: Instant) -> Option<Duration> {
 fn connect(host: &str, deadline: Instant) -> Option<TcpStream> {
     let addrs = host.to_socket_addrs().ok()?;
     for addr in addrs {
-        let budget = remaining(deadline)?.min(CONNECT_TIMEOUT);
+        let cap = if addr.ip().is_loopback() { LOOPBACK_CONNECT_TIMEOUT } else { CONNECT_TIMEOUT };
+        let budget = remaining(deadline)?.min(cap);
         if let Ok(s) = TcpStream::connect_timeout(&addr, budget) {
             return Some(s);
         }
@@ -332,8 +337,11 @@ pub fn request_bytes(host: &str, token: Option<&str>, body: &str) -> Vec<u8> {
     bytes
 }
 
+/// Lowercased `(name, value)` response headers.
+type Headers = Vec<(String, String)>;
+
 /// Split a raw response into status, lowercase headers and body start.
-fn split_head(raw: &[u8]) -> Option<(u16, Vec<(String, String)>, &[u8])> {
+fn split_head(raw: &[u8]) -> Option<(u16, Headers, &[u8])> {
     let end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = std::str::from_utf8(&raw[..end]).ok()?;
     let mut lines = head.split("\r\n");
@@ -638,7 +646,13 @@ mod tests {
         let t = Instant::now();
         assert_eq!(run("claude-code", "PermissionRequest", &env), "");
         assert_eq!(run("claude-code", "Stop", &env), "");
-        assert!(t.elapsed() < Duration::from_secs(2), "refused connects return at once: {:?}", t.elapsed());
+        // Two hooks: bounded by the explicit loopback connect budget on every
+        // OS (Windows retries a refused connect for ~4 s without it).
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "a dead engine costs ≤ the connect budget per hook: {:?}",
+            t.elapsed()
+        );
     }
 
     #[test]
