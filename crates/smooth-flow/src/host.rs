@@ -367,8 +367,12 @@ fn clear_exit_files(exit_prefix: &Path) {
 /// and every operation is logged to [`FakeHost::calls`]. Tests move a
 /// session's process through its life with [`FakeHost::die`],
 /// [`FakeHost::vanish`] and [`FakeHost::record_exit`].
-#[cfg(test)]
-pub(crate) mod fake {
+///
+/// Public behind the `test-util` feature (th-8b3918) so a host crate's tests
+/// (smooth-daemon's in-process flow tools) can drive a real engine without
+/// tmux or a single real process.
+#[cfg(any(test, feature = "test-util"))]
+pub mod fake {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};

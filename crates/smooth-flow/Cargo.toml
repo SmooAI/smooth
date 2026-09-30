@@ -43,5 +43,10 @@ tempfile.workspace = true
 # th-64d4ab: process liveness and start time without `ps`.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
+[features]
+# th-8b3918: expose `host::fake::FakeHost` (the in-memory session host) to
+# other crates' tests. Never enabled in a shipped build.
+test-util = []
+
 [lints]
 workspace = true

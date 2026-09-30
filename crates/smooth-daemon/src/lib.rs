@@ -37,6 +37,7 @@ mod flow_addr;
 pub mod flow_e2e;
 pub mod flow_pair_route;
 pub mod flow_route;
+pub mod flow_tools;
 pub mod hooks;
 pub mod judge_settings;
 pub mod judge_settings_route;

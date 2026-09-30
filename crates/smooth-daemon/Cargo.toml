@@ -108,6 +108,9 @@ chacha20poly1305 = "0.10"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# th-8b3918: the flow tools' tests drive a real engine on smooth-flow's
+# in-memory `FakeHost` (no tmux, nothing runs).
+smooth-flow = { workspace = true, features = ["test-util"] }
 # Real end-to-end WebSocket smoke tests against the daemon's axum server.
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

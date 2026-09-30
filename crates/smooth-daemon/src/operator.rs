@@ -169,6 +169,11 @@ struct SandboxedToolProvider {
     /// per-conversation and toggleable from the phone — neither can be trusted
     /// when the demo creds ship in the App Store review notes.
     demo: bool,
+    /// The SmoothFlow engine (th-8b3918): backs the `flow_*` tools and
+    /// `project_setup`, so Big Smooth can set up projects, start and steer
+    /// coding agents, and watch the fleet — engine-direct, in-process. `None`
+    /// for the ephemeral/test providers that don't host flow.
+    flow: Option<smooth_flow::Engine>,
 }
 
 /// The tools the App Store reviewer demo (`SMOOTH_DEMO`) exposes — chat plus a
@@ -221,6 +226,14 @@ const PLAN_READONLY_TOOLS: &[&str] = &[
     "cd",
     "present_plan",
     "todo_write",
+    // SmoothFlow reads (th-8b3918): look at the fleet, never touch it. Kept
+    // in sync with `flow_tools::FLOW_READ_TOOLS` by a test.
+    "flow_list",
+    "flow_snapshot",
+    "flow_handoff",
+    "flow_harnesses",
+    "flow_repos",
+    "flow_infer",
     // Read-only macOS Contacts (th-ffa500). Naming a number never mutates
     // anything, so it's safe for a Plan-mode turn to look someone up.
     "contacts",
@@ -265,6 +278,13 @@ impl ToolProvider for SandboxedToolProvider {
             workspace: dir.clone(),
             llm: Arc::new(agent_llm_config),
         }) as Arc<dyn Tool>);
+        // SmoothFlow (th-8b3918): the `flow_*` tools + `project_setup`, over
+        // the daemon's own flow engine (no HTTP). Every write is in
+        // [`CONFIRM_TOOLS`] (parks for the user), the reads are on the Plan
+        // allowlist, and the filters below apply to them like any tool.
+        if let Some(engine) = &self.flow {
+            tools.extend(crate::flow_tools::flow_tools(engine, &dir));
+        }
         // notify (th-c29d34): proactively push to the user's devices via the
         // daemon's web-push + phone fan-out. Injected here (like the calendar
         // allowlist / send_file) because it needs the daemon's notify sink, which
@@ -434,7 +454,11 @@ impl ToolProvider for SandboxedToolProvider {
         if allow_sidekick {
             if let Some(factory) = gateway_llm_factory() {
                 let mut snapshot = smooth_operator::tool::ToolRegistry::new();
-                for tool in &tools {
+                // A sidekick's registry carries none of this turn's hooks — no
+                // confirmation gate — so a tool that must park for the user
+                // (`calendar_delete`, every flow write, `flow_approve`) is never
+                // handed to one; it would run unconfirmed (th-8b3918).
+                for tool in tools.iter().filter(|t| !requires_confirmation(&t.schema().name)) {
                     snapshot.register_arc(Arc::clone(tool));
                 }
                 tools.push(Arc::new(smooth_operator::cast::DispatchSubagentTool::new(
@@ -514,6 +538,34 @@ pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, m
     local_tool_provider_full(cwd, proxy, memory, None, None, crate::session_mode::SessionModes::new(), None)
 }
 
+/// [`local_tool_provider_full`] plus the SmoothFlow engine the `flow_*` tools
+/// and `project_setup` drive (th-8b3918). `serve_local_flavor` passes the
+/// engine it hosts; `None` registers no flow tools.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn local_tool_provider_with_flow(
+    cwd: SessionCwd,
+    proxy: Option<String>,
+    memory: Arc<dyn Memory>,
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
+    family: Option<Arc<FamilyConfig>>,
+    modes: crate::session_mode::SessionModes,
+    notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
+    flow: Option<smooth_flow::Engine>,
+) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider {
+        cwd,
+        proxy,
+        memory,
+        mcp,
+        family,
+        modes,
+        notify_sink,
+        demo: demo_mode(),
+        flow,
+    })
+}
+
 /// The full seam, additionally taking the daemon's live [`McpManager`].
 ///
 /// So remote MCP-server tools (`mcp.toml`) surface on every turn (th-52ec01).
@@ -529,16 +581,7 @@ pub fn local_tool_provider_full(
     modes: crate::session_mode::SessionModes,
     notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
 ) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider {
-        cwd,
-        proxy,
-        memory,
-        mcp,
-        family,
-        modes,
-        notify_sink,
-        demo: demo_mode(),
-    })
+    local_tool_provider_with_flow(cwd, proxy, memory, mcp, family, modes, notify_sink, None)
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -828,7 +871,33 @@ pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(Str
 /// SUBSTRINGS. `calendar_delete` is deliberately not a prefix of any other tool
 /// name — in particular the read/`add`/`update` `calendar` tool does NOT contain
 /// it, and stays unprompted.
-const CONFIRM_TOOLS: &[&str] = &["calendar_delete"];
+///
+/// SmoothFlow (th-8b3918): every flow tool that changes the fleet parks too —
+/// starting or steering an agent, killing or closing a session, a fan-out and
+/// its pick, and `project_setup` (which also `git clone`s on the host). And
+/// `flow_approve` — answering ANOTHER agent's permission prompt — is the
+/// user's call by definition, so it is here unconditionally: this floor is
+/// installed whatever `SMOOTH_AUTO_MODE` says (`bypass` included), and core's
+/// `ConfirmationHook` has no auto-approve path. None of these is a substring
+/// of a read tool (`flow_list`, `flow_snapshot`, …); a test pins that.
+const CONFIRM_TOOLS: &[&str] = &[
+    "calendar_delete",
+    "flow_new",
+    "flow_send",
+    "flow_prompt_wait",
+    "flow_approve",
+    "flow_kill",
+    "flow_close",
+    "flow_fanout_new",
+    "flow_fanout_pick",
+    "project_setup",
+];
+
+/// Whether core's `ConfirmationHook` would park `tool` on the daemon's floor
+/// (`contains` matching, like the hook).
+fn requires_confirmation(tool: &str) -> bool {
+    CONFIRM_TOOLS.iter().any(|p| tool.contains(p))
+}
 
 /// Merge [`CONFIRM_TOOLS`] into `configured` (the env-derived list), preserving
 /// the caller's entries and not duplicating ours.
@@ -1253,7 +1322,16 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // `NotifySink` so `notify` reaches the same devices as scheduled turns.
     let push_state = crate::push::PushState::from_env();
     let turn_notifier = Arc::new(crate::notify::TurnNotifier::new(push_state.clone()));
-    let provider = local_tool_provider_full(
+    // The SmoothFlow engine (th-7f0af3): opens ~/.smooth/flow.db, starts the
+    // supervisor, serves the flow WS + HTTP siblings + the Claude Code hooks
+    // endpoint. Token-gated (except hooks): a flow session is a shell on this
+    // host. The engine handle also backs the phone-pairing authority (th-d98fde),
+    // which shares the daemon's relay identity so the QR names THIS daemon.
+    // Opened BEFORE the tool provider (th-8b3918) so the provider can hand
+    // Big Smooth the in-process `flow_*` tools over this same engine.
+    let (flow_router, flow_engine) =
+        crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
+    let provider = local_tool_provider_with_flow(
         session_cwd.clone(),
         egress_proxy,
         memory,
@@ -1261,14 +1339,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         family.clone(),
         session_modes.clone(),
         Some(turn_notifier.clone() as Arc<dyn smooth_tools::NotifySink>),
+        Some(flow_engine.clone()),
     );
-    // The SmoothFlow engine (th-7f0af3): opens ~/.smooth/flow.db, starts the
-    // supervisor, serves the flow WS + HTTP siblings + the Claude Code hooks
-    // endpoint. Token-gated (except hooks): a flow session is a shell on this
-    // host. The engine handle also backs the phone-pairing authority (th-d98fde),
-    // which shares the daemon's relay identity so the QR names THIS daemon.
-    let (flow_router, flow_engine) =
-        crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
     let relay_url = crate::relay::resolve_relay_url();
     let relay_identity = crate::relay::device_identity();
     // What the relay link is doing, for the app's Phones pane (th-37c286): a
@@ -1632,19 +1704,137 @@ mod tests {
         assert!(names.iter().any(|n| n == "calendar_delete"), "calendar_delete registered: {names:?}");
     }
 
+    /// SmoothFlow permission classes (th-8b3918): every flow tool that
+    /// changes the fleet is on the confirm floor, no read tool is caught by
+    /// its `contains` matching, and the reads — only the reads — are on the
+    /// Plan allowlist.
+    #[test]
+    fn flow_writes_are_confirm_gated_and_flow_reads_are_not() {
+        use crate::flow_tools::{FLOW_APPROVE_TOOL, FLOW_DESTRUCTIVE_TOOLS, FLOW_READ_TOOLS, FLOW_WRITE_TOOLS};
+        for w in FLOW_WRITE_TOOLS.iter().chain(FLOW_DESTRUCTIVE_TOOLS).chain(std::iter::once(&FLOW_APPROVE_TOOL)) {
+            assert!(requires_confirmation(w), "{w} must park for the user");
+            assert!(!PLAN_READONLY_TOOLS.contains(w), "{w} must be dropped in Plan mode");
+            assert!(!DEMO_SAFE_TOOLS.contains(w), "{w} must never reach an App Store reviewer");
+        }
+        for r in FLOW_READ_TOOLS {
+            assert!(!requires_confirmation(r), "{r} is a read and must not prompt");
+            assert!(PLAN_READONLY_TOOLS.contains(r), "{r} is a read and stays in Plan mode");
+            assert!(!DEMO_SAFE_TOOLS.contains(r), "a reviewer must not see the host's sessions: {r}");
+        }
+    }
+
+    /// `flow_approve` answers ANOTHER agent's permission prompt, so it parks
+    /// for the user under every auto-mode posture: the floor is merged into
+    /// whatever the env configured (bypass included), and the real
+    /// `ConfirmationHook` blocks the call until a verdict arrives.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn flow_approve_always_needs_the_user_even_in_bypass() {
+        use smooth_operator::human::{human_channel, HumanRequest, HumanResponse};
+        use smooth_operator::tool::{ToolCall, ToolHook};
+
+        // The floor is merged in `resolve_gateway_config`, which never reads
+        // `SMOOTH_AUTO_MODE`: the posture (Bypass by default) cannot remove it.
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("SMOOTH_AGENT_CONFIRM_TOOLS", "bash");
+        let resolved = resolve_gateway_config().confirm_tools;
+        std::env::remove_var("SMOOTH_AGENT_CONFIRM_TOOLS");
+        assert!(resolved.iter().any(|c| c == "flow_approve"), "{resolved:?}");
+        assert!(resolved.iter().any(|c| c == "bash"), "the env's own list is kept: {resolved:?}");
+
+        let pair = human_channel();
+        let hook = smooth_operator::human::ConfirmationHook::new(resolved, pair.request_tx, pair.response_rx, std::time::Duration::from_secs(5));
+        let call = |name: &str| ToolCall {
+            id: "call-1".into(),
+            name: name.into(),
+            arguments: serde_json::json!({"id": "fs-1", "decision": "allow"}),
+        };
+        let mut request_rx = pair.request_rx;
+        // A read passes straight through.
+        hook.pre_call(&call("flow_list")).await.expect("flow_list is not gated");
+        assert!(request_rx.try_recv().is_err());
+        // A denied approve never runs.
+        tokio::spawn(async move {
+            let req = request_rx.recv().await.expect("flow_approve must ask");
+            assert!(matches!(&req, HumanRequest::Confirm { tool_name, .. } if tool_name == "flow_approve"));
+            pair.response_tx.send(HumanResponse::Denied { reason: "not now".into() }).expect("verdict");
+        });
+        assert!(hook.pre_call(&call("flow_approve")).await.is_err(), "a denied flow_approve is blocked");
+    }
+
+    /// The provider registers the flow tools only when it hosts an engine;
+    /// Plan mode keeps just the reads; a sidekick's snapshot (no confirm
+    /// hook on its registry) never gets a confirm-gated tool.
+    #[tokio::test]
+    async fn the_provider_wires_flow_tools_and_plan_mode_keeps_only_reads() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut cfg = smooth_flow::EngineConfig::new(tmp.path().to_path_buf());
+        cfg.db_path = tmp.path().join("flow.db");
+        cfg.home = tmp.path().join("home");
+        cfg.host = smooth_flow::host::fake::FakeHost::new();
+        let engine = smooth_flow::Engine::open(cfg).expect("engine");
+        let modes = crate::session_mode::SessionModes::new();
+        modes.set("plan-conv", crate::session_mode::Mode::Plan);
+        let provider = local_tool_provider_with_flow(
+            SessionCwd::new(tmp.path().to_path_buf()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            None,
+            modes,
+            None,
+            Some(engine),
+        );
+        let ctx = |conv: &str| ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id(conv);
+        let auto: Vec<String> = provider.tools_for(&ctx("auto-conv")).await.iter().map(|t| t.schema().name).collect();
+        for t in crate::flow_tools::FLOW_READ_TOOLS
+            .iter()
+            .chain(crate::flow_tools::FLOW_WRITE_TOOLS)
+            .chain(crate::flow_tools::FLOW_DESTRUCTIVE_TOOLS)
+            .chain(std::iter::once(&crate::flow_tools::FLOW_APPROVE_TOOL))
+        {
+            assert!(auto.iter().any(|n| n == t), "Auto has {t}: {auto:?}");
+        }
+        let plan: Vec<String> = provider.tools_for(&ctx("plan-conv")).await.iter().map(|t| t.schema().name).collect();
+        for r in crate::flow_tools::FLOW_READ_TOOLS {
+            assert!(plan.iter().any(|n| n == r), "Plan keeps {r}: {plan:?}");
+        }
+        assert!(
+            !plan.iter().any(|n| requires_confirmation(n) || n == "flow_approve"),
+            "Plan drops every flow write: {plan:?}"
+        );
+        // No engine, no flow tools.
+        let bare = local_tool_provider_full(
+            SessionCwd::new(tmp.path().to_path_buf()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            None,
+            crate::session_mode::SessionModes::new(),
+            None,
+        );
+        let names: Vec<String> = bare.tools_for(&ctx("c")).await.iter().map(|t| t.schema().name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("flow_") || n == "project_setup"), "{names:?}");
+    }
+
     /// The confirm-gate floor (pearl th-94cc4a): `calendar_delete` must always be
     /// in the resolved config's `confirm_tools`, whatever the env says, and must
     /// not drag the read/add/update `calendar` tool in with it.
     #[test]
     fn confirm_tools_always_include_calendar_delete() {
+        let floor: Vec<String> = CONFIRM_TOOLS.iter().map(|s| (*s).to_owned()).collect();
         let mut from_env: Vec<String> = Vec::new();
         add_confirm_tools(&mut from_env);
-        assert_eq!(from_env, vec!["calendar_delete".to_owned()]);
+        assert_eq!(from_env, floor);
+        assert!(from_env.iter().any(|c| c == "calendar_delete"));
+        assert!(!from_env.iter().any(|c| c == "calendar"), "the calendar read/add tool stays unprompted");
 
         // An env-configured list is preserved and widened, never replaced.
         let mut widened = vec!["bash".to_owned()];
         add_confirm_tools(&mut widened);
-        assert_eq!(widened, vec!["bash".to_owned(), "calendar_delete".to_owned()]);
+        assert_eq!(widened[0], "bash");
+        assert_eq!(&widened[1..], floor.as_slice());
 
         // Idempotent — a second pass doesn't duplicate the entry.
         add_confirm_tools(&mut widened);
@@ -2044,6 +2234,7 @@ mod tests {
             modes: crate::session_mode::SessionModes::new(),
             notify_sink: None,
             demo: true,
+            flow: None,
         };
         let sink = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
         let mut ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("demo-conv");
