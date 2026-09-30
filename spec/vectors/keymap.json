@@ -1,0 +1,695 @@
+{
+  "spec": "SmoothFlow-Client-Spec §9 keymap",
+  "cases": [
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+shift+n"
+      },
+      "expected": {
+        "chord": {
+          "key": "n",
+          "ctrl": true,
+          "alt": false,
+          "shift": true,
+          "cmd": false
+        },
+        "wire": "ctrl+shift+n"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "Ctrl + Shift + N"
+      },
+      "expected": {
+        "chord": {
+          "key": "n",
+          "ctrl": true,
+          "alt": false,
+          "shift": true,
+          "cmd": false
+        },
+        "wire": "ctrl+shift+n"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "alt+ctrl+="
+      },
+      "expected": {
+        "chord": {
+          "key": "=",
+          "ctrl": true,
+          "alt": true,
+          "shift": false,
+          "cmd": false
+        },
+        "wire": "ctrl+opt+="
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl++"
+      },
+      "expected": {
+        "chord": {
+          "key": "+",
+          "ctrl": true,
+          "alt": false,
+          "shift": false,
+          "cmd": false
+        },
+        "wire": "ctrl++"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+plus"
+      },
+      "expected": {
+        "chord": {
+          "key": "+",
+          "ctrl": true,
+          "alt": false,
+          "shift": false,
+          "cmd": false
+        },
+        "wire": "ctrl++"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "super+return"
+      },
+      "expected": {
+        "chord": {
+          "key": "enter",
+          "ctrl": false,
+          "alt": false,
+          "shift": false,
+          "cmd": true
+        },
+        "wire": "cmd+enter"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+pgdn"
+      },
+      "expected": {
+        "chord": {
+          "key": "pagedown",
+          "ctrl": true,
+          "alt": false,
+          "shift": false,
+          "cmd": false
+        },
+        "wire": "ctrl+pagedown"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+f12"
+      },
+      "expected": {
+        "chord": {
+          "key": "f12",
+          "ctrl": true,
+          "alt": false,
+          "shift": false,
+          "cmd": false
+        },
+        "wire": "ctrl+f12"
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+ctrl+a"
+      },
+      "expected": {
+        "chord": null,
+        "wire": null
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+a+b"
+      },
+      "expected": {
+        "chord": null,
+        "wire": null
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+banana"
+      },
+      "expected": {
+        "chord": null,
+        "wire": null
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": "ctrl+"
+      },
+      "expected": {
+        "chord": null,
+        "wire": null
+      }
+    },
+    {
+      "name": "parse",
+      "input": {
+        "fn": "parse",
+        "text": ""
+      },
+      "expected": {
+        "chord": null,
+        "wire": null
+      }
+    },
+    {
+      "name": "defaults",
+      "input": {
+        "fn": "defaults",
+        "platform": "mac"
+      },
+      "expected": {
+        "bindings": [
+          {
+            "action": "newSession",
+            "wire": "cmd+n",
+            "display": "⌘N"
+          },
+          {
+            "action": "newShell",
+            "wire": "shift+cmd+t",
+            "display": "⇧⌘T"
+          },
+          {
+            "action": "fanOut",
+            "wire": "shift+cmd+n",
+            "display": "⇧⌘N"
+          },
+          {
+            "action": "steerFocused",
+            "wire": "cmd+enter",
+            "display": "⌘↩"
+          },
+          {
+            "action": "steerAll",
+            "wire": "opt+cmd+enter",
+            "display": "⌥⌘↩"
+          },
+          {
+            "action": "allow",
+            "wire": "opt+cmd+y",
+            "display": "⌥⌘Y"
+          },
+          {
+            "action": "deny",
+            "wire": "opt+cmd+n",
+            "display": "⌥⌘N"
+          },
+          {
+            "action": "killResume",
+            "wire": "opt+cmd+r",
+            "display": "⌥⌘R"
+          },
+          {
+            "action": "kill",
+            "wire": "opt+cmd+k",
+            "display": "⌥⌘K"
+          },
+          {
+            "action": "closeOut",
+            "wire": "opt+cmd+w",
+            "display": "⌥⌘W"
+          },
+          {
+            "action": "focusSession1",
+            "wire": "cmd+1",
+            "display": "⌘1"
+          },
+          {
+            "action": "focusSession2",
+            "wire": "cmd+2",
+            "display": "⌘2"
+          },
+          {
+            "action": "focusSession3",
+            "wire": "cmd+3",
+            "display": "⌘3"
+          },
+          {
+            "action": "focusSession4",
+            "wire": "cmd+4",
+            "display": "⌘4"
+          },
+          {
+            "action": "focusSession5",
+            "wire": "cmd+5",
+            "display": "⌘5"
+          },
+          {
+            "action": "focusSession6",
+            "wire": "cmd+6",
+            "display": "⌘6"
+          },
+          {
+            "action": "focusSession7",
+            "wire": "cmd+7",
+            "display": "⌘7"
+          },
+          {
+            "action": "focusSession8",
+            "wire": "cmd+8",
+            "display": "⌘8"
+          },
+          {
+            "action": "focusSession9",
+            "wire": "cmd+9",
+            "display": "⌘9"
+          },
+          {
+            "action": "newTab",
+            "wire": "cmd+t",
+            "display": "⌘T"
+          },
+          {
+            "action": "closePane",
+            "wire": "cmd+w",
+            "display": "⌘W"
+          },
+          {
+            "action": "closeTab",
+            "wire": "shift+cmd+w",
+            "display": "⇧⌘W"
+          },
+          {
+            "action": "previousTab",
+            "wire": "shift+cmd+[",
+            "display": "⇧⌘["
+          },
+          {
+            "action": "nextTab",
+            "wire": "shift+cmd+]",
+            "display": "⇧⌘]"
+          },
+          {
+            "action": "splitRight",
+            "wire": "cmd+d",
+            "display": "⌘D"
+          },
+          {
+            "action": "splitDown",
+            "wire": "shift+cmd+d",
+            "display": "⇧⌘D"
+          },
+          {
+            "action": "splitLeft",
+            "wire": "shift+cmd+left",
+            "display": "⇧⌘←"
+          },
+          {
+            "action": "splitUp",
+            "wire": "shift+cmd+up",
+            "display": "⇧⌘↑"
+          },
+          {
+            "action": "focusPaneLeft",
+            "wire": "opt+cmd+left",
+            "display": "⌥⌘←"
+          },
+          {
+            "action": "focusPaneRight",
+            "wire": "opt+cmd+right",
+            "display": "⌥⌘→"
+          },
+          {
+            "action": "focusPaneUp",
+            "wire": "opt+cmd+up",
+            "display": "⌥⌘↑"
+          },
+          {
+            "action": "focusPaneDown",
+            "wire": "opt+cmd+down",
+            "display": "⌥⌘↓"
+          },
+          {
+            "action": "zoomPane",
+            "wire": "shift+cmd+enter",
+            "display": "⇧⌘↩"
+          },
+          {
+            "action": "equalizePanes",
+            "wire": "opt+cmd+=",
+            "display": "⌥⌘="
+          },
+          {
+            "action": "inbox",
+            "wire": "cmd+i",
+            "display": "⌘I"
+          },
+          {
+            "action": "viewTerminal",
+            "wire": "opt+cmd+1",
+            "display": "⌥⌘1"
+          },
+          {
+            "action": "viewDiff",
+            "wire": "opt+cmd+2",
+            "display": "⌥⌘2"
+          },
+          {
+            "action": "viewPR",
+            "wire": "opt+cmd+3",
+            "display": "⌥⌘3"
+          },
+          {
+            "action": "viewActivity",
+            "wire": "opt+cmd+4",
+            "display": "⌥⌘4"
+          },
+          {
+            "action": "toggleSidebar",
+            "wire": "ctrl+cmd+s",
+            "display": "⌃⌘S"
+          },
+          {
+            "action": "togglePearlRail",
+            "wire": "ctrl+cmd+p",
+            "display": "⌃⌘P"
+          },
+          {
+            "action": "settings",
+            "wire": "cmd+,",
+            "display": "⌘,"
+          }
+        ],
+        "conflicts": 0
+      }
+    },
+    {
+      "name": "defaults",
+      "input": {
+        "fn": "defaults",
+        "platform": "other"
+      },
+      "expected": {
+        "bindings": [
+          {
+            "action": "newSession",
+            "wire": "ctrl+shift+n",
+            "display": "Ctrl+Shift+N"
+          },
+          {
+            "action": "newShell",
+            "wire": "ctrl+opt+shift+t",
+            "display": "Ctrl+Shift+Alt+T"
+          },
+          {
+            "action": "fanOut",
+            "wire": "ctrl+opt+shift+n",
+            "display": "Ctrl+Shift+Alt+N"
+          },
+          {
+            "action": "steerFocused",
+            "wire": "ctrl+enter",
+            "display": "Ctrl+Enter"
+          },
+          {
+            "action": "steerAll",
+            "wire": "ctrl+opt+enter",
+            "display": "Ctrl+Alt+Enter"
+          },
+          {
+            "action": "allow",
+            "wire": "ctrl+opt+y",
+            "display": "Ctrl+Alt+Y"
+          },
+          {
+            "action": "deny",
+            "wire": "ctrl+opt+n",
+            "display": "Ctrl+Alt+N"
+          },
+          {
+            "action": "killResume",
+            "wire": "ctrl+opt+r",
+            "display": "Ctrl+Alt+R"
+          },
+          {
+            "action": "kill",
+            "wire": "ctrl+opt+k",
+            "display": "Ctrl+Alt+K"
+          },
+          {
+            "action": "closeOut",
+            "wire": "ctrl+opt+w",
+            "display": "Ctrl+Alt+W"
+          },
+          {
+            "action": "focusSession1",
+            "wire": "opt+1",
+            "display": "Alt+1"
+          },
+          {
+            "action": "focusSession2",
+            "wire": "opt+2",
+            "display": "Alt+2"
+          },
+          {
+            "action": "focusSession3",
+            "wire": "opt+3",
+            "display": "Alt+3"
+          },
+          {
+            "action": "focusSession4",
+            "wire": "opt+4",
+            "display": "Alt+4"
+          },
+          {
+            "action": "focusSession5",
+            "wire": "opt+5",
+            "display": "Alt+5"
+          },
+          {
+            "action": "focusSession6",
+            "wire": "opt+6",
+            "display": "Alt+6"
+          },
+          {
+            "action": "focusSession7",
+            "wire": "opt+7",
+            "display": "Alt+7"
+          },
+          {
+            "action": "focusSession8",
+            "wire": "opt+8",
+            "display": "Alt+8"
+          },
+          {
+            "action": "focusSession9",
+            "wire": "opt+9",
+            "display": "Alt+9"
+          },
+          {
+            "action": "newTab",
+            "wire": "ctrl+shift+t",
+            "display": "Ctrl+Shift+T"
+          },
+          {
+            "action": "closePane",
+            "wire": "ctrl+shift+w",
+            "display": "Ctrl+Shift+W"
+          },
+          {
+            "action": "closeTab",
+            "wire": "ctrl+opt+shift+w",
+            "display": "Ctrl+Shift+Alt+W"
+          },
+          {
+            "action": "previousTab",
+            "wire": "ctrl+pageup",
+            "display": "Ctrl+PageUp"
+          },
+          {
+            "action": "nextTab",
+            "wire": "ctrl+pagedown",
+            "display": "Ctrl+PageDown"
+          },
+          {
+            "action": "splitRight",
+            "wire": "ctrl+shift+d",
+            "display": "Ctrl+Shift+D"
+          },
+          {
+            "action": "splitDown",
+            "wire": "ctrl+opt+shift+d",
+            "display": "Ctrl+Shift+Alt+D"
+          },
+          {
+            "action": "splitLeft",
+            "wire": "ctrl+shift+left",
+            "display": "Ctrl+Shift+←"
+          },
+          {
+            "action": "splitUp",
+            "wire": "ctrl+shift+up",
+            "display": "Ctrl+Shift+↑"
+          },
+          {
+            "action": "focusPaneLeft",
+            "wire": "ctrl+opt+left",
+            "display": "Ctrl+Alt+←"
+          },
+          {
+            "action": "focusPaneRight",
+            "wire": "ctrl+opt+right",
+            "display": "Ctrl+Alt+→"
+          },
+          {
+            "action": "focusPaneUp",
+            "wire": "ctrl+opt+up",
+            "display": "Ctrl+Alt+↑"
+          },
+          {
+            "action": "focusPaneDown",
+            "wire": "ctrl+opt+down",
+            "display": "Ctrl+Alt+↓"
+          },
+          {
+            "action": "zoomPane",
+            "wire": "ctrl+shift+enter",
+            "display": "Ctrl+Shift+Enter"
+          },
+          {
+            "action": "equalizePanes",
+            "wire": "ctrl+opt+=",
+            "display": "Ctrl+Alt+="
+          },
+          {
+            "action": "inbox",
+            "wire": "ctrl+shift+i",
+            "display": "Ctrl+Shift+I"
+          },
+          {
+            "action": "viewTerminal",
+            "wire": "ctrl+opt+1",
+            "display": "Ctrl+Alt+1"
+          },
+          {
+            "action": "viewDiff",
+            "wire": "ctrl+opt+2",
+            "display": "Ctrl+Alt+2"
+          },
+          {
+            "action": "viewPR",
+            "wire": "ctrl+opt+3",
+            "display": "Ctrl+Alt+3"
+          },
+          {
+            "action": "viewActivity",
+            "wire": "ctrl+opt+4",
+            "display": "Ctrl+Alt+4"
+          },
+          {
+            "action": "toggleSidebar",
+            "wire": "ctrl+opt+shift+s",
+            "display": "Ctrl+Shift+Alt+S"
+          },
+          {
+            "action": "togglePearlRail",
+            "wire": "ctrl+opt+shift+p",
+            "display": "Ctrl+Shift+Alt+P"
+          },
+          {
+            "action": "settings",
+            "wire": "ctrl+,",
+            "display": "Ctrl+,"
+          }
+        ],
+        "conflicts": 0
+      }
+    },
+    {
+      "name": "rebind, unbind, re-typed default, and every kind of problem",
+      "input": {
+        "fn": "parse_file",
+        "platform": "other",
+        "text": "# mine\n[other]\nnewTab = \"ctrl+q\"\n[keys]\nnewTab = \"ctrl+shift+y\" # comment\nclosePane = \"\"\nsplitRight = \"ctrl+shift+d\"\nbogus = \"ctrl+x\"\nkill = \"k\"\ninbox = \"ctrl+nope\"\nnot a line\n"
+      },
+      "expected": {
+        "overrides": [
+          {
+            "action": "newTab",
+            "wire": "ctrl+shift+y"
+          },
+          {
+            "action": "closePane",
+            "wire": null
+          }
+        ],
+        "problems": [
+          "line 8: unknown action `bogus`",
+          "line 9: `k` has no modifier — a bare key would swallow terminal input",
+          "line 10: `ctrl+nope` is not a shortcut (try `ctrl+shift+d`)",
+          "line 11: not `action = \"chord\"` — not a line"
+        ],
+        "conflicts": [],
+        "ctrl+shift+w": null
+      }
+    },
+    {
+      "name": "a conflict is reported, and menu order wins it",
+      "input": {
+        "fn": "parse_file",
+        "platform": "other",
+        "text": "[keys]\nnewTab = \"ctrl+shift+w\"\n"
+      },
+      "expected": {
+        "overrides": [
+          {
+            "action": "newTab",
+            "wire": "ctrl+shift+w"
+          }
+        ],
+        "problems": [],
+        "conflicts": [
+          {
+            "wire": "ctrl+shift+w",
+            "actions": [
+              "newTab",
+              "closePane"
+            ]
+          }
+        ],
+        "ctrl+shift+w": "newTab"
+      }
+    }
+  ]
+}

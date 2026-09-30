@@ -1,0 +1,101 @@
+{
+  "spec": "SmoothFlow-Client-Spec §7 approvals",
+  "cases": [
+    {
+      "name": "permission with a request id",
+      "input": {
+        "attention": {
+          "reason": "permission",
+          "detail": "rm -rf target",
+          "request_id": "r1"
+        }
+      },
+      "expected": {
+        "approval": {
+          "request_id": "r1",
+          "heading": "Permission request",
+          "text": "rm -rf target"
+        }
+      }
+    },
+    {
+      "name": "question with a request id",
+      "input": {
+        "attention": {
+          "reason": "question",
+          "detail": "Which branch?",
+          "request_id": "r2"
+        }
+      },
+      "expected": {
+        "approval": {
+          "request_id": "r2",
+          "heading": "Question",
+          "text": "Which branch?"
+        }
+      }
+    },
+    {
+      "name": "no detail still says something",
+      "input": {
+        "attention": {
+          "reason": "permission",
+          "request_id": "r3"
+        }
+      },
+      "expected": {
+        "approval": {
+          "request_id": "r3",
+          "heading": "Permission request",
+          "text": "The session wants permission."
+        }
+      }
+    },
+    {
+      "name": "no request id is not approvable",
+      "input": {
+        "attention": {
+          "reason": "permission",
+          "detail": "x"
+        }
+      },
+      "expected": {
+        "approval": null
+      }
+    },
+    {
+      "name": "a blank request id is not approvable",
+      "input": {
+        "attention": {
+          "reason": "permission",
+          "detail": "x",
+          "request_id": "  "
+        }
+      },
+      "expected": {
+        "approval": null
+      }
+    },
+    {
+      "name": "usage limit is not approvable",
+      "input": {
+        "attention": {
+          "reason": "usage_limit",
+          "request_id": "r4"
+        }
+      },
+      "expected": {
+        "approval": null
+      }
+    },
+    {
+      "name": "no attention",
+      "input": {
+        "attention": null
+      },
+      "expected": {
+        "approval": null
+      }
+    }
+  ]
+}

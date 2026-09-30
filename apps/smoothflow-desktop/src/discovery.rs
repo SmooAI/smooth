@@ -27,7 +27,13 @@ fn first_nonblank(values: impl IntoIterator<Item = Option<String>>) -> Option<St
 
 /// The endpoint from explicit inputs. Pure, for tests.
 #[must_use]
-pub fn resolve(env_addr: Option<String>, flow_addr: Option<String>, daemon_addr: Option<String>, env_tokens: [Option<String>; 2], token_file: Option<String>) -> Option<Endpoint> {
+pub fn resolve(
+    env_addr: Option<String>,
+    flow_addr: Option<String>,
+    daemon_addr: Option<String>,
+    env_tokens: [Option<String>; 2],
+    token_file: Option<String>,
+) -> Option<Endpoint> {
     let addr = first_nonblank([env_addr, flow_addr, daemon_addr])?;
     let addr = addr.trim_start_matches("http://").trim_end_matches('/').to_string();
     let [a, b] = env_tokens;
@@ -62,17 +68,42 @@ mod tests {
     #[test]
     fn flow_addr_then_daemon_addr_env_first() {
         let e = resolve(None, s("127.0.0.1:5\n"), s("127.0.0.1:9"), [None, None], s("tok\n"));
-        assert_eq!(e, Some(Endpoint { addr: "127.0.0.1:5".into(), token: s("tok") }));
+        assert_eq!(
+            e,
+            Some(Endpoint {
+                addr: "127.0.0.1:5".into(),
+                token: s("tok")
+            })
+        );
         let e = resolve(s("http://h:1/"), s("127.0.0.1:5"), None, [s("env-tok"), None], s("file"));
-        assert_eq!(e, Some(Endpoint { addr: "h:1".into(), token: s("env-tok") }));
-        assert_eq!(resolve(None, s(" "), s("127.0.0.1:9"), [None, None], None).map(|e| e.addr).as_deref(), Some("127.0.0.1:9"));
+        assert_eq!(
+            e,
+            Some(Endpoint {
+                addr: "h:1".into(),
+                token: s("env-tok")
+            })
+        );
+        assert_eq!(
+            resolve(None, s(" "), s("127.0.0.1:9"), [None, None], None).map(|e| e.addr).as_deref(),
+            Some("127.0.0.1:9")
+        );
         assert_eq!(resolve(None, None, None, [None, None], s("t")), None);
     }
 
     #[test]
     fn ws_url_carries_the_token_encoded() {
-        let e = Endpoint { addr: "127.0.0.1:5".into(), token: s("a b") };
+        let e = Endpoint {
+            addr: "127.0.0.1:5".into(),
+            token: s("a b"),
+        };
         assert_eq!(e.ws_url(), "ws://127.0.0.1:5/api/flow/ws?token=a%20b");
-        assert_eq!(Endpoint { addr: "h:1".into(), token: None }.ws_url(), "ws://h:1/api/flow/ws");
+        assert_eq!(
+            Endpoint {
+                addr: "h:1".into(),
+                token: None
+            }
+            .ws_url(),
+            "ws://h:1/api/flow/ws"
+        );
     }
 }
