@@ -380,7 +380,7 @@ hard-coded table (th-5c5457) is now the built-ins, byte-for-byte:
 
 | kind       | launch (binary + rendered `launch.argv`)             | harness session id                                        | restore (`flow.kill {resume:true}`, rule 2) | state                                                        |
 | ---------- | ---------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------ |
-| `claude`   | `claude --session-id <uuid> [--model m] [prompt]`    | pre-assigned by the engine                                | `claude --resume <uuid>`                    | `hooks` (smooth-agent plugin → `flow-hook.sh`)               |
+| `claude`   | `claude --session-id <uuid> [--model m] [prompt]`    | pre-assigned by the engine                                | `claude --resume <uuid>`                    | `hooks` (smooth-agent plugin → `th flow hook`)               |
 | `opencode` | `opencode [--model m] --prompt <prompt>` (th-b423aa) | learned from the first hook carrying the launch's token   | `opencode --session <id>`                   | `hooks` (smooth-agent OpenCode plugin posts the same body)   |
 | `codex`    | `codex [--model m] <prompt>`                         | learned from the first tokened hook, when hooks are wired | `codex resume <id>`                         | `inferred` (pane scraping) until `~/.codex/hooks.json` posts |
 | `th-code`  | `th code [--model m]`, prompt pasted ~4 s later      | pre-assigned; `SMOOTH_FLOW_SESSION` + `SMOOTH_URL` in env | relaunch (th code resumes by its own query) | `native` — th code POSTs `turn_start`/`turn_end` itself      |
@@ -405,7 +405,7 @@ then the first `PATH` hit not under a `skip_path_patterns` directory
 (`cmux-cli-shims` by default), and the engine records the resolved path as
 `argv[0]` in the session row. An explicit bare binary name in `flow.new.argv`
 gets the same treatment. Codex 0.153+ also reads Claude-style hooks from
-`~/.codex/hooks.json`; wiring `flow-hook.sh` into it is
+`~/.codex/hooks.json`; wiring `th flow hook` into it is
 `th harness enable codex`'s job (pearl th-4ad334).
 
 **Pane markers** are each manifest's `[state.scrape]` regexes: OpenCode
@@ -465,6 +465,49 @@ A `PermissionRequest` reply is the harness's own decision JSON
 session-scoped `updatedPermissions` rule for the tool). Timing out replies `{}`
 so the harness falls back to its own prompt — which the scraper then sees.
 
+### `th flow hook` — the hook every harness runs (th-f97a27)
+
+Every hook-capable harness is wired to the same native command, `th flow hook
+<harness> <Event>`, which reads the hook payload on stdin and posts the
+envelope above. It replaced the bash + curl + jq `flow-hook.sh`, which could
+not run natively on Windows. The wire behavior is unchanged:
+
+- **Discovery**: `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` →
+  `~/.smooth/daemon.addr` (see below). With no address it exits 0 and prints
+  nothing.
+- **Auth**: the token from `$SMOOTH_FLOW_HOOK_TOKEN_FILE` (hex only, ≤128
+  chars) goes in `X-Smooth-Flow-Hook-Token`. Without a file the hook still
+  posts, so an adopted session can report state, but it cannot be approved.
+- **Envelope**: `session_id` is the first non-empty string of `.session_id`,
+  `.sessionId` or `.conversation_id`. `cwd` is `.cwd`, then
+  `.workspace_roots[0]`, then `$PWD`. `flow_id` comes from `$SMOOTH_FLOW_ID`.
+  A payload that is not a JSON object is sent as `{"raw": "…"}`, and an empty
+  one as `{}`.
+- **Stdout**: gemini and copilot get `{}` printed first, and cursor-agent gets
+  `{"continue":true}` (on `beforeSubmitPrompt`) or `{}`. For every other
+  harness, `PermissionRequest` long-polls for up to 120 s
+  (`FLOW_HOOK_PERMISSION_TIMEOUT`) and prints the reply verbatim, but only if
+  it has a string at `.hookSpecificOutput.decision.behavior`. A `{}` reply, a
+  4xx/5xx, a timeout or garbage prints nothing, and the harness asks the user.
+  All other events are fire-and-forget with a 2 s budget (`FLOW_HOOK_TIMEOUT`).
+- **Exit code**: always 0. `main` dispatches `flow hook` before clap, the auth
+  profile setup and the log file, so a usage error can never become clap's
+  exit 2, which would block a `PreToolUse`.
+
+One difference from the script: the script detached its curl, while the
+native hook waits for the loopback reply. Detaching is not portable, and a
+second process would cost more than the POST. The 2 s budget still bounds the
+wait, and events now arrive in order.
+
+The overlays spell it `th flow hook <h> <Event> || exit 0`. The same string
+works in sh, bash, cmd and PowerShell 7. When `th` is missing or predates
+`flow hook`, the `|| exit 0` turns clap's exit 2 into a no-op instead of a
+blocked tool call. Harnesses that parse stdout fall back to printing their
+no-opinion answer instead (`|| echo '{}'`). Copilot entries also carry a
+`powershell` form. `flow-hook.sh` remains for one release as a shim: it execs
+`th flow hook` when the `th` on `PATH` has the command, and otherwise runs the
+old curl path.
+
 Scraping (`smooth_tmux::detect`, every 2 s on the visible pane) covers what
 hooks can't: a usage limit ⇒ `limited` with `resume_at`; an approval menu with
 no pending hook request ⇒ `needs_you`, answered by pressing the manifest's
@@ -489,9 +532,10 @@ is a **per-launch hook token** (`smooth_flow::hook_auth`):
   can read it on Linux) nor the environment (agents print that into
   transcripts). `flow.db` stores only its SHA-256, so both daemons that share
   the store can check it.
-- `flow-hook.sh`, the OpenCode plugin, `th code` and the fake-claude fixture
-  read the file and send `X-Smooth-Flow-Hook-Token`. `flow-hook.sh` hands the
-  header to curl as a config line on stdin, never as an argument. Only hex
+- `th flow hook` (and the legacy `flow-hook.sh`), the OpenCode plugin, `th code`
+  and the fake-claude fixture read the file and send `X-Smooth-Flow-Hook-Token`.
+  `th flow hook` writes the header on its own socket. `flow-hook.sh` handed it
+  to curl as a config line on stdin. Neither puts it in an argument. Only hex
   survives the read, so a hostile file cannot inject a curl option or a header.
 - The engine resolves the session **from the token**, never from the body. A
   hook whose `session_id` is not the row's is refused: a nested harness that
@@ -668,7 +712,7 @@ that some LIVE flow engine is reachable. The claim rule (`flow_addr`):
 - our own address → rewrite it (a restart on the same port);
 - released on shutdown, and only when it is still ours.
 
-Discovery chain, in `flow-hook.sh` and the OpenCode plugin alike:
+Discovery chain, in `th flow hook` and the OpenCode plugin alike:
 `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. Nothing
 changes on a machine that runs only Big Smooth.
 

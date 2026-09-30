@@ -153,6 +153,21 @@ pub enum FlowCommands {
     /// installs it as a skill; this prints it for any other harness, e.g.
     /// `th flow skill > ~/.claude/skills/smoothflow/SKILL.md`.
     Skill,
+    /// The SmoothFlow state hook every harness runs on every lifecycle event
+    /// (replaces `flow-hook.sh`). Reads the hook payload on stdin and posts
+    /// `{harness, event, session_id, cwd, payload}` to the engine's
+    /// `/api/flow/hooks` with the pane's hook token. `PermissionRequest`
+    /// waits up to 120 s for SmoothFlow's decision and prints it on stdout.
+    /// Always exits 0 and prints nothing when no engine is advertised — a
+    /// hook never blocks the harness. Wire it as
+    /// `th flow hook <harness> <Event> || exit 0`.
+    Hook {
+        /// The SmoothFlow manifest name (claude-code, codex, gemini, qwen,
+        /// droid, copilot, cursor-agent, …).
+        harness: String,
+        /// The harness's own event name (`SessionStart`, `PermissionRequest`, …).
+        event: String,
+    },
     /// Pair a phone for end-to-end encrypted relay frames: shows a one-time
     /// link (and `--qr` a scannable QR) and waits for the scan. Subcommands
     /// list and revoke pairings.
@@ -236,7 +251,7 @@ pub(crate) fn daemon_addr() -> Result<String> {
 
 /// The first non-blank of the env override, `flow.addr`, `daemon.addr`, with
 /// any `http://` prefix and trailing `/` removed. Pure, for tests.
-fn pick_flow_addr(env: Option<String>, flow_addr: Option<String>, daemon_addr: Option<String>) -> Option<String> {
+pub(crate) fn pick_flow_addr(env: Option<String>, flow_addr: Option<String>, daemon_addr: Option<String>) -> Option<String> {
     [env, flow_addr, daemon_addr].into_iter().flatten().find_map(|a| {
         let a = a.trim().trim_start_matches("http://").trim_end_matches('/').to_string();
         (!a.is_empty()).then_some(a)
@@ -452,6 +467,12 @@ fn emit(json: bool, v: &Value, human: impl FnOnce(&Value)) -> Result<()> {
 /// Entry point for `th flow`.
 pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
     match cmd {
+        // Normally dispatched from `main` before clap (flow_hook::intercept);
+        // this arm only runs if that fast path was bypassed.
+        FlowCommands::Hook { harness, event } => {
+            crate::flow_hook::main(&[harness.into(), event.into()]);
+            Ok(())
+        }
         FlowCommands::Ls { json } => {
             let v = call(reqwest::Method::GET, "/api/flow/sessions", None).await?;
             emit(json, &v, |v| {

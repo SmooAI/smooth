@@ -3,42 +3,42 @@
     "hooks": {
         "sessionStart": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh sessionStart cursor-agent"
+                "command": "th flow hook cursor-agent sessionStart || echo '{}'"
             }
         ],
         "beforeSubmitPrompt": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh beforeSubmitPrompt cursor-agent"
+                "command": "th flow hook cursor-agent beforeSubmitPrompt || echo '{\"continue\":true}'"
             }
         ],
         "postToolUse": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh postToolUse cursor-agent"
+                "command": "th flow hook cursor-agent postToolUse || echo '{}'"
             }
         ],
         "postToolUseFailure": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh postToolUseFailure cursor-agent"
+                "command": "th flow hook cursor-agent postToolUseFailure || echo '{}'"
             }
         ],
         "afterShellExecution": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh afterShellExecution cursor-agent"
+                "command": "th flow hook cursor-agent afterShellExecution || echo '{}'"
             }
         ],
         "afterAgentResponse": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh afterAgentResponse cursor-agent"
+                "command": "th flow hook cursor-agent afterAgentResponse || echo '{}'"
             }
         ],
         "stop": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh stop cursor-agent"
+                "command": "th flow hook cursor-agent stop || echo '{}'"
             }
         ],
         "sessionEnd": [
             {
-                "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh sessionEnd cursor-agent"
+                "command": "th flow hook cursor-agent sessionEnd || echo '{}'"
             }
         ]
     }

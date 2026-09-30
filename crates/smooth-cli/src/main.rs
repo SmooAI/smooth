@@ -23,6 +23,7 @@ mod destructive;
 mod ext;
 mod fda;
 mod flow;
+mod flow_hook;
 mod gradient;
 mod hooks;
 /// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
@@ -1937,6 +1938,13 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut argv = smoo_argv(std::env::args_os().collect());
+    // th-f97a27: `th flow hook` runs on every harness lifecycle event, so it
+    // skips clap, auth-profile setup and the log file — and a usage error
+    // can never become clap's exit 2, which would block a PreToolUse.
+    if flow_hook::intercept(&argv) {
+        flow_hook::main(&argv[3..]);
+        std::process::exit(0);
+    }
     // th-7f1da8: bare `th --help`/`-h`/`help` gets the branded, grouped help;
     // `--help-full` falls through to clap's native flat tree.
     match argv.get(1).and_then(|a| a.to_str()) {

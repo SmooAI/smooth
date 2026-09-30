@@ -2,7 +2,7 @@
 # (`{"version": 1, "hooks": {event: [{type, bash, timeoutSec}]}}` — flat
 # entries, not Claude's matcher groups). PascalCase event names get the
 # VS Code-compatible payload (session_id, tool_name); camelCase ones get
-# sessionId/toolName — flow-hook.sh reads both. Its PermissionRequest fires
+# sessionId/toolName — `th flow hook` reads both. Its PermissionRequest fires
 # BEFORE the allow/ask/deny rules resolve (orca
 # src/shared/agent-hook-listener/providers/copilot-events.ts:15), so it is not
 # an ask; a Notification is, but only for permission_prompt/elicitation_dialog

@@ -25,7 +25,7 @@ mode = "resume_session"
 source = "hooks"
 
 [state.hooks]
-install = "th harness enable claude-code  # smooth-agent plugin → flow-hook.sh posts every event to /api/flow/hooks"
+install = "th harness enable claude-code  # smooth-agent plugin → `th flow hook` posts every event to /api/flow/hooks"
 # event_map omitted ⇒ the Claude Code table (UserPromptSubmit/PreToolUse/PostToolUse → working,
 # Stop → idle, PermissionRequest/Notification(permission|question) → needs_you, SessionEnd → ended).
 
