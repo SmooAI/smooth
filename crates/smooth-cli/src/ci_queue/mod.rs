@@ -528,10 +528,21 @@ fn render(s: &queue::Snapshot) -> String {
     );
     row(
         &mut o,
+        "cpu busy",
+        r.cpu_busy_pct.map_or_else(na, |c| format!("{c:.0}% of {} cores", r.cores)),
+        format!("hold above {}%", g.max_cpu_busy_pct),
+        g.max_cpu_busy_pct > 0.0,
+    );
+    row(
+        &mut o,
         "load (1m)",
         r.load1
             .map_or_else(na, |l| format!("{l:.1} on {} cores = {:.1}/core", r.cores, r.load_per_core().unwrap_or(0.0))),
-        format!("hold above {}/core", g.max_load_per_core),
+        format!(
+            "backstop: hold above {}/core while cpu ≥ {}% busy",
+            g.max_load_per_core,
+            pressure::LOAD_COUNTS_FROM_CPU_BUSY_PCT
+        ),
         g.max_load_per_core > 0.0,
     );
     for d in &r.disks {

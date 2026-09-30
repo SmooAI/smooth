@@ -42,6 +42,10 @@ smooth-api-client.workspace = true
 # SMOODEV-3355: `th ci-queue` keeps job history in SQLite (history.db, WAL),
 # like mail.db/pearls.db. Already linked via smooth-pearls — no new compile.
 rusqlite.workspace = true
+# `th ci-queue`'s pressure gate measures CPU busy % from the kernel's tick
+# counters (host_processor_info needs FFI, and this workspace forbids unsafe).
+# Same version + features as smooth-flow's, so it compiles nothing new.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # Pearl th-abc4e2: `th admin login` uses the Supabase OAuth flow
 # from client-shared. The `auth` feature pulls in the oauth + m2m +
 # storage modules.
