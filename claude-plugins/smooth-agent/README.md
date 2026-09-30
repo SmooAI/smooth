@@ -35,7 +35,7 @@ Code worker sessions in tmux, coordinate them over
   Claude plugin layout is the shared core, and `harness/<name>/` holds the
   per-harness overlays — `harness/opencode/plugin.js` is the OpenCode lifecycle
   plugin (session registration + presence on the th-mail bus), and
-  `harness/codex/hooks.json` runs `flow-hook.sh <Event> codex` from
+  `harness/codex/hooks.json` runs `th flow hook codex <Event>` from
   `~/.codex/hooks.json` so Codex ≥ 0.153 sessions report SmoothFlow state via
   hooks instead of pane scraping (th-4ad334). `th harness enable
 codex|opencode|cursor` is `th pkg install <this dir> --harness <x>` plus the

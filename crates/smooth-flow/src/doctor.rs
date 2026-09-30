@@ -387,8 +387,18 @@ pub fn stale_project_pins(home: &Path) -> Vec<StalePin> {
     stale
 }
 
+/// The native hook command every overlay runs (th-f97a27):
+/// `th flow hook <harness> <Event> || exit 0`.
+pub const NATIVE_FLOW_HOOK: &str = "th flow hook";
+
+/// A hook command (or file text) that runs the SmoothFlow flow hook — the
+/// native `th flow hook` or the legacy `flow-hook.sh`.
+fn is_flow_hook(text: &str) -> bool {
+    text.contains(NATIVE_FLOW_HOOK) || text.contains("flow-hook.sh")
+}
+
 fn mentions_flow_hook(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|t| t.contains("flow-hook.sh"))
+    std::fs::read_to_string(path).is_ok_and(|t| is_flow_hook(&t))
 }
 
 /// Whether an installed `flow-hook.sh` presents the per-launch hook token
@@ -417,10 +427,10 @@ fn overlay_hooks(m: &Machine, rels: &[&str], marker: &str, enable_as: &str) -> C
         } else {
             vec![path.clone()]
         };
-        if let Some((hit, text)) = files
-            .iter()
-            .find_map(|f| std::fs::read_to_string(f).ok().filter(|t| t.contains(marker)).map(|t| (f, t)))
-        {
+        // The native `th flow hook` is what an overlay rendered from a
+        // current package runs; `flow-hook.sh` is a pre-th-f97a27 render.
+        let hit_by = |t: &str| if marker == "flow-hook.sh" { is_flow_hook(t) } else { t.contains(marker) };
+        if let Some((hit, text)) = files.iter().find_map(|f| std::fs::read_to_string(f).ok().filter(|t| hit_by(t)).map(|t| (f, t))) {
             // th-91d032: an overlay (or the flow-hook.sh it runs) from before
             // hook tokens is refused by the engine for every launched session.
             let stale = if marker == "flow-hook.sh" {
@@ -484,7 +494,10 @@ fn claude_hooks(m: &Machine) -> Check {
             fix,
         );
     }
-    if !flow_hook_is_authenticated(&dir.join("hooks/flow-hook.sh")) {
+    // The native hook always presents the token; only a hooks.json that
+    // still runs the script depends on the script's age.
+    let runs_script = std::fs::read_to_string(dir.join("hooks/hooks.json")).is_ok_and(|t| t.contains("flow-hook.sh"));
+    if runs_script && !flow_hook_is_authenticated(&dir.join("hooks/flow-hook.sh")) {
         return check(
             "hooks",
             Level::Fail,
@@ -550,7 +563,7 @@ fn codex_flow_hook_keys(hooks_json: &Path) -> Vec<String> {
     for (event, groups) in events {
         for (gi, group) in groups.as_array().into_iter().flatten().enumerate() {
             for (hi, hook) in group.get("hooks").and_then(Value::as_array).into_iter().flatten().enumerate() {
-                if hook.get("command").and_then(Value::as_str).is_some_and(|c| c.contains("flow-hook.sh")) {
+                if hook.get("command").and_then(Value::as_str).is_some_and(is_flow_hook) {
                     keys.push(format!("{}:{}:{gi}:{hi}", hooks_json.display(), snake(event)));
                 }
             }
@@ -1372,6 +1385,47 @@ mod tests {
         assert!(c.fix.as_deref().unwrap().starts_with("th harness enable codex"));
         std::fs::write(&script, "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
         assert!(!codex_hooks(&m).detail.contains("predates"));
+
+        // th-f97a27: the native hook counts, and is never "stale".
+        std::fs::write(
+            codex.join("hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"th flow hook codex Stop || exit 0"}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(codex_flow_hook_keys(&codex.join("hooks.json")), vec![format!("{hooks}:stop:0:0")]);
+        assert!(codex_flow_hook_scripts(&codex.join("hooks.json")).is_empty());
+        assert_eq!(codex_hooks(&m).level, Level::Ok, "{:?}", codex_hooks(&m));
+    }
+
+    #[test]
+    fn overlays_running_the_native_hook_are_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = machine(tmp.path(), &[], None);
+        let settings = m.home.join(".gemini/settings.json");
+        assert_eq!(overlay_hooks(&m, &[".gemini/settings.json"], "flow-hook.sh", "gemini").level, Level::Fail);
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"AfterAgent":[{"hooks":[{"command":"th flow hook gemini AfterAgent || echo '{}'"}]}]}}"#,
+        )
+        .unwrap();
+        let c = overlay_hooks(&m, &[".gemini/settings.json"], "flow-hook.sh", "gemini");
+        assert_eq!(c.level, Level::Ok, "{c:?}");
+        // A legacy script overlay is still judged by the script's age.
+        let script = tmp.path().join("old/flow-hook.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "curl …/api/flow/hooks").unwrap();
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{"hooks":{{"AfterAgent":[{{"hooks":[{{"command":"{} AfterAgent gemini"}}]}}]}}}}"#,
+                script.display()
+            ),
+        )
+        .unwrap();
+        assert!(overlay_hooks(&m, &[".gemini/settings.json"], "flow-hook.sh", "gemini")
+            .detail
+            .contains("predates hook tokens"));
     }
 
     /// A project-scoped pin older than the user install shadows it for every
@@ -1443,6 +1497,10 @@ mod tests {
         assert_eq!(c.fix.as_deref(), Some("th harness enable claude-code   # then restart Claude Code sessions"));
         std::fs::write(cache.join("0.41.4/hooks/flow-hook.sh"), "cat \"$SMOOTH_FLOW_HOOK_TOKEN_FILE\"").unwrap();
         assert_eq!(claude_hooks(&m).level, Level::Ok);
+        // th-f97a27: a plugin whose hooks.json runs `th flow hook` needs no script at all.
+        std::fs::remove_file(cache.join("0.41.4/hooks/flow-hook.sh")).unwrap();
+        std::fs::write(cache.join("0.41.4/hooks/hooks.json"), r#"{"x":"th flow hook claude-code Stop || exit 0"}"#).unwrap();
+        assert_eq!(claude_hooks(&m).level, Level::Ok, "{:?}", claude_hooks(&m));
         std::fs::write(m.home.join(".claude/settings.json"), "{}").unwrap();
         assert!(claude_hooks(&m).detail.contains("not enabled"));
     }

@@ -48,7 +48,7 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         with open(LOG, "a") as f:
-            f.write(json.dumps({"path": self.path, "token": self.headers.get("X-Smooth-Flow-Hook-Token"), "body": json.loads(body)}) + "\n")
+            f.write(json.dumps({"path": self.path, "token": self.headers.get("X-Smooth-Flow-Hook-Token"), "ctype": self.headers.get("Content-Type"), "raw": body.decode("utf-8", "replace"), "body": json.loads(body)}) + "\n")
         ev = json.loads(body).get("event")
         if self.path != "/api/flow/hooks":
             self.send_response(404); self.end_headers(); return
@@ -78,10 +78,17 @@ SERVER_PID=$!
 for _ in $(seq 1 50); do [ -s "$ADDR" ] && break; sleep 0.1; done
 [ -s "$ADDR" ] || { echo "mock daemon did not start"; exit 1; }
 export SMOOTH_DAEMON_ADDR_FILE="$ADDR"
+# Never the real ~/.smooth/flow.addr: on a machine running SmoothFlow it wins
+# over daemon.addr and every test below would post to the live engine.
+export SMOOTH_FLOW_ADDR_FILE="$TMP/no-flow.addr"
+unset SMOOTH_FLOW_ADDR
 # Wait for a fire-and-forget request to land (they are detached).
 wait_log() { for _ in $(seq 1 50); do [ "$(wc -l <"$LOG" 2>/dev/null | tr -d ' ')" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 
 HOOK="$HERE/flow-hook.sh"
+# The curl path below is the shim's fallback; pin it so a `th` on this
+# machine's PATH that knows `flow hook` doesn't take over (th-f97a27).
+export FLOW_HOOK_NATIVE=0
 PAYLOAD='{"session_id":"sid-123","cwd":"/some/where","hook_event_name":"Stop","stop_hook_active":false}'
 
 echo "flow-hook.sh:"
@@ -209,6 +216,68 @@ out=$(echo "$PAYLOAD" | FLOW_HOOK_PERMISSION_TIMEOUT=1 bash "$HOOK" PermissionRe
 elapsed=$(( $(date +%s) - start ))
 if [ "$rc" = 0 ] && [ -z "$out" ] && [ "$elapsed" -le 3 ]; then ok "PermissionRequest honours the wait timeout (${elapsed}s) and stays silent"; else bad "PermissionRequest timeout — rc=$rc out='$out' elapsed=${elapsed}s"; fi
 echo decide >"$MODE"
+
+# --- the shim hands off to `th flow hook` when th knows it (th-f97a27) -------------
+echo "flow-hook.sh → th flow hook:"
+NATIVE="$TMP/native"; mkdir -p "$NATIVE"
+cat >"$NATIVE/th" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = "flow hook --help" ] && exit 0
+printf '%s|%s\n' "$*" "$(cat)" >>"$NATIVE_LOG"
+printf 'native-out\n'
+SH
+cat >"$NATIVE/old-th" <<'SH'
+#!/usr/bin/env bash
+echo "error: unrecognized subcommand 'hook'" >&2
+exit 2
+SH
+chmod +x "$NATIVE/th" "$NATIVE/old-th"
+export NATIVE_LOG="$TMP/native.log"
+: >"$NATIVE_LOG"
+out=$(echo "$PAYLOAD" | FLOW_HOOK_NATIVE=1 TH="$NATIVE/th" bash "$HOOK" Stop codex 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$out" = "native-out" ] && [ "$(cat "$NATIVE_LOG")" = "flow hook codex Stop|$PAYLOAD" ]; then
+    ok "execs th flow hook <harness> <Event> with stdin and stdout passed through"
+else
+    bad "shim exec — rc=$rc out='$out' log='$(cat "$NATIVE_LOG")'"
+fi
+: >"$NATIVE_LOG"
+out=$(echo "$PAYLOAD" | FLOW_HOOK_NATIVE=1 TH="$NATIVE/th" bash "$HOOK" PermissionRequest 2>&1)
+if [ "$(cut -d'|' -f1 "$NATIVE_LOG")" = "flow hook claude-code PermissionRequest" ]; then ok "the harness still defaults to claude-code"; else bad "default harness — log='$(cat "$NATIVE_LOG")'"; fi
+: >"$LOG"
+echo decide >"$MODE"
+out=$(echo "$PAYLOAD" | FLOW_HOOK_NATIVE=1 TH="$NATIVE/old-th" bash "$HOOK" PermissionRequest 2>/dev/null); rc=$?
+expect "a th without flow hook falls back to the curl path" 0 $rc "$out" '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+
+# --- parity: the native hook sends the same bytes as the script -------------------
+# FLOW_HOOK_TH=<path to a th with `flow hook`> (CI builds one) replays a matrix
+# of payloads through both and diffs what the mock daemon received + stdout.
+if [ -n "${FLOW_HOOK_TH:-}" ] && [ -x "$FLOW_HOOK_TH" ]; then
+    echo "th flow hook parity (FLOW_HOOK_TH=$FLOW_HOOK_TH):"
+    printf 'abc123DEF\n' >"$TMP/parity.token"
+    parity() { # <name> <harness> <event> <payload> [VAR=value …]
+        local name="$1" h="$2" ev="$3" payload="$4"; shift 4
+        : >"$LOG"
+        local a b la lb
+        a=$(printf '%s' "$payload" | env "$@" bash "$HOOK" "$ev" "$h" 2>/dev/null); wait_log 1; la=$(cat "$LOG"); : >"$LOG"
+        b=$(printf '%s' "$payload" | env "$@" "$FLOW_HOOK_TH" flow hook "$h" "$ev" 2>/dev/null); wait_log 1; lb=$(cat "$LOG")
+        if [ -n "$la" ] && [ "$la" = "$lb" ] && [ "$a" = "$b" ]; then ok "parity: $name"; else bad "parity: $name"$'\n'"       script: $la | $a"$'\n'"       native: $lb | $b"; fi
+    }
+    echo decide >"$MODE"
+    parity "Stop, Claude shape" claude-code Stop "$PAYLOAD"
+    parity "token + flow_id" codex PostToolUse "$PAYLOAD" SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/parity.token" SMOOTH_FLOW_ID=flow-7
+    parity "PermissionRequest decision" claude-code PermissionRequest "$PAYLOAD" SMOOTH_FLOW_HOOK_TOKEN_FILE="$TMP/parity.token"
+    parity "copilot sessionId + preface" copilot Stop '{"sessionId":"cp-1","toolName":"bash"}'
+    parity "cursor conversation_id + workspace_roots" cursor-agent beforeSubmitPrompt '{"conversation_id":"cu-1","workspace_roots":["/r1","/r2"]}'
+    parity "gemini PermissionRequest never long-polls" gemini PermissionRequest '{"session_id":"g-1"}'
+    parity "non-JSON stdin → raw" qwen Stop 'not json at all'
+    parity "empty stdin → {}" droid Stop ''
+    parity "unicode + nesting" claude-code UserPromptSubmit '{"session_id":"u","prompt":"héllo \"q\" \\ ✓","n":[1,2.5,{"a":null}],"t":true}'
+    echo empty >"$MODE"
+    parity "PermissionRequest no opinion" claude-code PermissionRequest "$PAYLOAD"
+    echo decide >"$MODE"
+else
+    echo "th flow hook parity: skipped (set FLOW_HOOK_TH to a th with \`flow hook\`)"
+fi
 
 # ── th stub: records argv; canned answers for prime/checkpoint ────────────────────
 STUB="$TMP/bin"; mkdir -p "$STUB"

@@ -5,7 +5,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart gemini",
+                        "command": "th flow hook gemini SessionStart || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -16,7 +16,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh BeforeAgent gemini",
+                        "command": "th flow hook gemini BeforeAgent || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -27,7 +27,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh BeforeTool gemini",
+                        "command": "th flow hook gemini BeforeTool || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -38,7 +38,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh AfterTool gemini",
+                        "command": "th flow hook gemini AfterTool || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -49,7 +49,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh AfterAgent gemini",
+                        "command": "th flow hook gemini AfterAgent || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -60,7 +60,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Notification gemini",
+                        "command": "th flow hook gemini Notification || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -71,7 +71,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PreCompress gemini",
+                        "command": "th flow hook gemini PreCompress || echo '{}'",
                         "timeout": 5000
                     }
                 ]
@@ -82,7 +82,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionEnd gemini",
+                        "command": "th flow hook gemini SessionEnd || echo '{}'",
                         "timeout": 5000
                     }
                 ]
