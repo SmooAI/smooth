@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::support::{prereqs, state, Daemon, Ws, WAIT};
+use crate::support::{prereqs, prereqs_with_th, sid, state, th_bin, Daemon, Ws, WAIT};
 
 /// The next `flow.event` for `id` whose text contains `needle`.
 async fn expect_event(ws: &mut Ws, id: &str, kind: &str, needle: &str) -> Value {
@@ -273,4 +273,54 @@ async fn forged_hooks_move_nothing_on_a_live_session() {
 
     d.kill(&a_id, false).await;
     d.kill(&b_id, false).await;
+}
+
+/// th-f97a27: a harness whose hooks run the native `th flow hook` (the
+/// smooth-agent plugin's wiring) drives a SmoothFlow session end to end —
+/// token-bound state from every event, and the PermissionRequest long-poll
+/// relaying SmoothFlow's decision back to the harness on stdout.
+#[tokio::test]
+async fn native_th_flow_hook_drives_state_and_the_permission_long_poll() {
+    if !prereqs_with_th() {
+        return;
+    }
+    let d = Daemon::boot().await;
+    // `th` on the pane's PATH, where an installed th would be. It finds this
+    // daemon through the rig's ~/.smooth/daemon.addr, like any hook.
+    std::os::unix::fs::symlink(th_bin().unwrap(), d.home.join(".local").join("bin").join("th")).expect("link th");
+
+    let s = d.new_session("fake-agent-th", Some("/work via th")).await;
+    let id = sid(&s);
+    // Only a hook carrying this launch's token can bind a launched session,
+    // so `hooks` here proves `th flow hook` read the pane's token file.
+    d.wait_until(&id, "unread idle via th flow hook", WAIT, |s| {
+        state(s) == "idle" && s["state_source"] == "hooks" && s["unread"] == true
+    })
+    .await;
+    d.wait_screen(&id, "worked: via th", WAIT).await;
+    let log = d.agent_log();
+    for ev in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] {
+        assert!(log.contains(&format!("hook {ev} via th → ")), "{ev} went through th flow hook:\n{log}");
+    }
+    assert!(!log.contains("via th → {"), "fire-and-forget events print nothing:\n{log}");
+
+    // PermissionRequest: `th flow hook` long-polls; the approval comes back
+    // as the harness's decision JSON on its stdout.
+    for decision in ["allow", "deny"] {
+        d.send(&id, "/perm").await;
+        let ask = d.wait_state(&id, "needs_you", WAIT).await;
+        assert_eq!(ask["attention"]["reason"], "permission", "{ask}");
+        assert_eq!(ask["attention"]["detail"], "Bash: git push");
+        let request_id = ask["attention"]["request_id"].as_str().unwrap().to_string();
+        assert!(
+            !request_id.starts_with("scrape-") && !request_id.starts_with("hook-"),
+            "a long-poll request: {ask}"
+        );
+        d.approve(&id, &request_id, decision).await;
+        let screen = d.wait_screen(&id, &format!(r#""behavior":"{decision}""#), WAIT).await;
+        assert!(screen.contains(r#"decision: {"hookSpecificOutput":{"#), "{screen}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let log = d.agent_log();
+    assert!(log.contains(r#"hook PermissionRequest via th → {"hookSpecificOutput""#), "{log}");
 }

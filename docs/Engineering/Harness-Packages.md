@@ -95,7 +95,7 @@ trust changed hooks once ("Hooks need review"); that dialog is expected after
 the first `install`.
 
 `smooth-agent` uses this for **SmoothFlow state from Codex sessions** (pearl
-th-4ad334): its `harness/codex/hooks.json` runs `flow-hook.sh <Event> codex`
+th-4ad334): its `harness/codex/hooks.json` runs `th flow hook codex <Event>`
 on `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
 `PreCompact` and `SessionEnd`, and the daemon binds the id-less Codex row by
 cwd on the first hook. `PermissionRequest` is deliberately not wired for
@@ -205,7 +205,7 @@ harness = "codex"
 file = "/Users/me/.codex/hooks.json"
 event = "SessionStart"
 matcher = ""
-command = "/Users/me/.smooth/pkg/cache/smooth-agent@local/hooks/flow-hook.sh SessionStart codex"
+command = "th flow hook codex SessionStart || exit 0"
 
 [[packages.smooth-agent.sections]]   # M1: a managed AGENTS.md block
 harness = "codex"

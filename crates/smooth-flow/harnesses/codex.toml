@@ -22,7 +22,7 @@ mode = "resume_session"
 source = "hooks"
 
 [state.hooks]
-install = "th harness enable codex  # wires flow-hook.sh into ~/.codex/hooks.json (Codex 0.153+)"
+install = "th harness enable codex  # wires `th flow hook` into ~/.codex/hooks.json (Codex 0.153+)"
 
 [state.scrape]
 working = ["esc to interrupt", "esc to cancel", "\\(running", "tokens · esc"]

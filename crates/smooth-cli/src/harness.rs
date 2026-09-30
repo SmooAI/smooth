@@ -829,11 +829,13 @@ fn codex_plugin_enabled(home: &Path) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// How many `flow-hook.sh` entries `~/.codex/hooks.json` carries (0 = not wired).
+/// How many SmoothFlow flow-hook entries `~/.codex/hooks.json` carries —
+/// the native `th flow hook` (th-f97a27) or a legacy `flow-hook.sh` render
+/// (0 = not wired).
 fn codex_flow_hooks(home: &Path) -> usize {
     fn count(v: &Value) -> usize {
         match v {
-            Value::String(s) => usize::from(s.contains("flow-hook.sh")),
+            Value::String(s) => usize::from(s.contains(smooth_flow::doctor::NATIVE_FLOW_HOOK) || s.contains("flow-hook.sh")),
             Value::Array(a) => a.iter().map(count).sum(),
             Value::Object(m) => m.values().map(count).sum(),
             _ => 0,
@@ -948,7 +950,7 @@ mod tests {
         std::fs::create_dir_all(&cx).unwrap();
         std::fs::write(
             cx.join("hooks.json"),
-            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart codex"}]}],"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Stop codex"}]}]}}"#,
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"th flow hook codex SessionStart || exit 0"}]}],"Stop":[{"hooks":[{"type":"command","command":"th flow hook codex Stop || exit 0"}]}]}}"#,
         )
         .unwrap();
         tmp
@@ -983,9 +985,9 @@ mod tests {
             .map(|h| h["command"].as_str().unwrap())
             .collect();
         assert_eq!(ss[0], "th prime", "the user's hook stays first");
-        assert!(
-            ss[1].ends_with("/hooks/flow-hook.sh SessionStart codex") && ss[1].contains("/.smooth/pkg/cache/"),
-            "{ss:?}"
+        assert_eq!(
+            ss[1], "th flow hook codex SessionStart || exit 0",
+            "the native hook, no script path (th-f97a27)"
         );
         assert_eq!(ss.len(), 2);
         assert_eq!(doc["hooks"]["PreCompact"][0]["hooks"][0]["command"], "th prime");

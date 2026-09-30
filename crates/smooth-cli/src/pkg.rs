@@ -3177,7 +3177,18 @@ mod tests {
                         .unwrap_or_else(|| vec![entry.clone()]);
                     for h in hooks {
                         let cmd = h[field].as_str().unwrap_or_else(|| panic!("{overlay} {event}: no {field}"));
-                        assert_eq!(cmd, format!("${{CLAUDE_PLUGIN_ROOT}}/hooks/flow-hook.sh {event} {name}"), "{overlay}");
+                        // th-f97a27: the native hook, no script path. A
+                        // harness that parses stdout still gets its
+                        // no-opinion answer when `th` is missing or too old.
+                        let fallback = match (name, event.as_str()) {
+                            ("cursor-agent", "beforeSubmitPrompt") => r#"echo '{"continue":true}'"#,
+                            ("gemini" | "copilot" | "cursor-agent", _) => "echo '{}'",
+                            _ => "exit 0",
+                        };
+                        assert_eq!(cmd, format!("th flow hook {name} {event} || {fallback}"), "{overlay}");
+                        if name == "copilot" {
+                            assert_eq!(h["powershell"], format!("th flow hook copilot {event}; exit 0"), "copilot on Windows");
+                        }
                     }
                 }
                 let map = &manifest.state.hooks.event_map;
@@ -3195,6 +3206,24 @@ mod tests {
         for gate in ["preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
             assert!(cursor["hooks"].get(gate).is_none(), "Cursor's {gate} fails closed — never subscribed");
         }
+        // The Claude Code plugin itself: every flow hook is native, and
+        // PermissionRequest's timeout outlasts the 120 s long-poll.
+        let claude = load_json(&pkg.join("hooks/hooks.json")).unwrap();
+        let mut native = 0;
+        for (event, groups) in claude["hooks"].as_object().unwrap() {
+            for g in groups.as_array().unwrap() {
+                for h in g["hooks"].as_array().unwrap() {
+                    let cmd = h["command"].as_str().unwrap();
+                    assert!(!cmd.contains("flow-hook.sh"), "{event}: {cmd}");
+                    if cmd.starts_with("th flow hook") {
+                        assert_eq!(cmd, format!("th flow hook claude-code {event} || exit 0"));
+                        native += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(native, 10, "every Claude Code lifecycle event");
+        assert!(claude["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64().unwrap() > 120);
         // Qwen holds PermissionRequest open for flow.approve: its hook timeout outlasts the long-poll.
         let qwen = load_json(&pkg.join("harness/qwen/hooks.json")).unwrap();
         assert!(qwen["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64().unwrap() > 120);

@@ -207,7 +207,8 @@ session_id, cwd, payload}`). `install` says how that gets wired
   `X-Smooth-Flow-Hook-Token`: the contents of the file the engine names in
   the pane's `SMOOTH_FLOW_HOOK_TOKEN_FILE` (th-91d032). Without it, hooks for
   a session SmoothFlow launched are refused. A new hook integration reads that
-  file (hex only) and sends the header, as `flow-hook.sh` does. See
+  file (hex only) and sends the header, as `th flow hook` does — or just runs
+  `th flow hook <harness> <Event>` with the payload on stdin. See
   SmoothFlow.md § Hook authentication.
 - **scrape** — pane scraping only; `state_source` stays `inferred`.
 - **native** — the harness is ours and reports its own turns. What it means
@@ -738,7 +739,7 @@ Deliberate choices:
 - **Cursor's gate hooks are not subscribed.** `preToolUse`,
   `beforeShellExecution` and `beforeMCPExecution` fail closed on empty
   stdout, and any answer is a decision. orca answers `{"permission":"allow"}`,
-  which silently auto-approves every tool call; we don't. `flow-hook.sh`
+  which silently auto-approves every tool call; we don't. `th flow hook`
   prints `{"continue":true}` for `beforeSubmitPrompt` and `{}` for Cursor's
   other hooks, as the first thing it does.
 - **Gemini and Copilot get `{}` on stdout** before anything can exit early:
@@ -763,7 +764,7 @@ Deliberate choices:
 
 ### Engine changes this needed
 
-- **`SMOOTH_FLOW_ID` in every agent pane**, posted back by `flow-hook.sh` and
+- **`SMOOTH_FLOW_ID` in every agent pane**, posted back by `th flow hook` and
   the plugins as `flow_id`. Since th-91d032, the **hook token** names the row
   and `flow_id` is only a consistency check: a `flow_id` that contradicts the
   token's row is refused, and a tokenless `flow_id` binds nothing (anyone can
@@ -789,7 +790,7 @@ Deliberate choices:
   0.59 folds an Enter that arrives 0 or 50 ms after a paste into the composer
   as a newline; 150 ms and 300 ms submit (measured live), so `gemini.toml`
   sets 300.
-- **`flow-hook.sh`** reads `session_id` from `.session_id | .sessionId |
+- **`th flow hook`** (formerly `flow-hook.sh`) reads `session_id` from `.session_id | .sessionId |
 .conversation_id` and `cwd` from `.cwd | .workspace_roots[0] | $PWD`.
 
 ### Proof — what ran for real

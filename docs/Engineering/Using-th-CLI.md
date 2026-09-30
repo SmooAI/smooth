@@ -1090,7 +1090,7 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 **Compaction-proof handoff (pearl th-9483e8).** `th pearls checkpoint <id> [--note "…"] [--next "…"]` records a checkpoint: the note plus auto-collected handoff state (worktree, branch, HEAD, dirty files, `--session-id`/`$CLAUDE_SESSION_ID`). Handoff fields overwrite (latest wins), notes append; `--auto` is the hook form (silent, always exit 0). `th pearls show <id> --handoff [--json]` prints the packet — `{pearl, handoff, checkpoints, blocks, pr}` — as a compact "resume cold" block; `th pearls prime --in-progress [--cwd .] [--assignee <a>] [--json]` does it for every in-progress pearl, `--cwd` narrowing to the pearls whose recorded worktree is that repo or whose id is in its branch name. `th pearls list --json` is machine-readable too. The smooth-agent plugin's `PreCompact` hook auto-checkpoints and its `SessionStart` (`compact|resume`) hook injects the packets. Model: [Pearls.md](../Architecture/Pearls.md#handoff-model--checkpoints-pearl-th-9483e8).
 
-**SmoothFlow state hooks (pearl th-1b8e05).** The plugin's `flow-hook.sh <Event>` posts every Claude Code lifecycle event (`SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PermissionRequest|Notification|Stop|SubagentStop|PreCompact|SessionEnd`) to the daemon at `POST http://<~/.smooth/daemon.addr>/api/flow/hooks` as `{harness:"claude-code", event, session_id, cwd, payload}`. `PermissionRequest` waits up to 120 s for the engine's decision and prints it as the hook's decision JSON; everything else is fire-and-forget with a 2 s timeout. Every script exits 0 and prints nothing when the daemon is unreachable — hooks never block the harness. `pnpm test:hooks` runs `flow-hook.test.sh` against a mock daemon.
+**SmoothFlow state hooks (pearls th-1b8e05, th-f97a27).** The plugin runs `th flow hook claude-code <Event> || exit 0` on every Claude Code lifecycle event (`SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|PermissionRequest|Notification|Stop|SubagentStop|PreCompact|SessionEnd`). It posts `{harness:"claude-code", event, session_id, cwd, payload}` to `POST http://<flow engine>/api/flow/hooks`, found through `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. `PermissionRequest` waits up to 120 s for the engine's decision and prints it as the hook's decision JSON. Everything else is fire-and-forget with a 2 s timeout. The hook always exits 0 and prints nothing when the daemon is unreachable, so hooks never block the harness. `flow-hook.sh` is kept for one release as a shim that execs `th flow hook`. `pnpm test:hooks` runs `flow-hook.test.sh` against a mock daemon; set `FLOW_HOOK_TH=<th>` to diff the native hook's requests against the script's.
 
 **Scheduling — pearls that speak up when due (pearl th-01aa6a).** `th pearls schedule <id> <when>` sets an optional `scheduled_at` on a pearl; omit `<when>` to clear it. `<when>` is relative (`+2h`, `30m`, `2d`, `1w`, `tomorrow`, `now`) or absolute (`2026-07-10`, `2026-07-10 09:00`, RFC3339; parsed as UTC). `th pearls due` lists pearls whose time has arrived (`scheduled_at <= now`, not closed, soonest-first). The **prime hook** surfaces a `⏰ Scheduled & due` section above `Ready to work`, so a scheduled pearl automatically "speaks up" at the next session start / compaction once it comes due. `th pearls show` and the `ready`/`list`/`due` lines render a `⏰` marker for scheduled pearls.
 
@@ -1366,6 +1366,7 @@ th flow close <id> [--keep-pearl] [--keep-worktree] [--force]   # close the pear
 th flow snapshot <id>                                    # plain-text visible pane (what a phone renders)
 th flow handoff <id>                                     # the pearl-rail block: worktree/branch/head/dirty + pearl + PR
 th flow skill                                            # print the SmoothFlow agent skill (SKILL.md) for any harness
+th flow hook <harness> <Event>                           # the state hook every harness runs (stdin = hook payload; always exit 0)
 th flow fanout new "prompt" --pearl th-abc123 --candidate a --candidate b:claude:opus
 th flow fanout pick <fan_out_id> <winner_session_id>     # merge the winner, GC losers, close child pearls
 th flow pair --qr                                        # pair a phone: QR in the terminal, waits for the scan (th-d98fde)
@@ -1388,6 +1389,19 @@ States: `starting` · `working` · `idle` (✦ = unread) · `needs you` ·
 `limited` (usage limit — the engine resumes at the parsed reset time) ·
 `done` · `dead`. Attention reasons in brackets: `permission`, `question`,
 `usage_limit`, `crashed`, `held` (another live pid owns that harness session).
+
+**`th flow hook` (th-f97a27).** This is the native SmoothFlow state hook that
+`th harness enable` and `th pkg` wire into every hook-capable harness: Claude
+Code, Codex, Gemini, Qwen, Droid, Copilot and Cursor. It runs on macOS, Linux
+and Windows with no bash, curl or jq. It reads the harness's hook payload on
+stdin and posts the envelope, with the pane's hook token, to the flow engine.
+For `PermissionRequest` it long-polls up to 120 s and prints SmoothFlow's
+decision for the harness. It runs before clap and before the auth or log setup,
+so its only startup cost is the process itself. It always exits 0, and with no
+engine or no session it does nothing. Overrides:
+`FLOW_HOOK_PERMISSION_TIMEOUT`, `FLOW_HOOK_TIMEOUT`, `SMOOTH_FLOW_ADDR`,
+`SMOOTH_FLOW_ADDR_FILE`, `SMOOTH_DAEMON_ADDR_FILE`. Wire format:
+`docs/Architecture/SmoothFlow.md` → _`th flow hook`_.
 
 **Nothing is demanded (th-c103c1).** `th flow new` with no arguments starts a
 session in the current directory; the engine infers the worktree, the project

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # smooth-agent — SmoothFlow state hook (pearl th-1b8e05, epic th-6ac036).
 #
+# DEPRECATED (pearl th-f97a27): the hooks now run the native
+# `th flow hook <harness> <Event>`, which works on Windows too. This script
+# stays for one release as a shim for configs that still name it: when the
+# `th` on PATH knows `flow hook`, it execs that; otherwise it falls back to
+# the curl path below. FLOW_HOOK_NATIVE=0 forces the fallback (tests).
+#
 # One script for every harness lifecycle event. Forwards the hook payload to
 # the daemon's flow engine so session state comes from hooks, not scrollback
 # scraping:
@@ -54,6 +60,11 @@ set -u
 event="${1:-}"
 harness="${2:-${FLOW_HOOK_HARNESS:-claude-code}}"
 [ -n "$event" ] || exit 0
+th_bin="${TH:-th}"
+if [ "${FLOW_HOOK_NATIVE:-1}" != 0 ] && command -v "$th_bin" >/dev/null 2>&1 \
+    && "$th_bin" flow hook --help >/dev/null 2>&1; then
+    exec "$th_bin" flow hook "$harness" "$event"
+fi
 answered=0
 case "$harness" in
     gemini | copilot) printf '{}\n'; answered=1 ;;

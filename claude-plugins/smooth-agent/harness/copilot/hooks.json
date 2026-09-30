@@ -4,63 +4,72 @@
         "SessionStart": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionStart copilot",
+                "bash": "th flow hook copilot SessionStart || echo '{}'",
+                "powershell": "th flow hook copilot SessionStart; exit 0",
                 "timeoutSec": 5
             }
         ],
         "UserPromptSubmit": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh UserPromptSubmit copilot",
+                "bash": "th flow hook copilot UserPromptSubmit || echo '{}'",
+                "powershell": "th flow hook copilot UserPromptSubmit; exit 0",
                 "timeoutSec": 5
             }
         ],
         "PreToolUse": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PreToolUse copilot",
+                "bash": "th flow hook copilot PreToolUse || echo '{}'",
+                "powershell": "th flow hook copilot PreToolUse; exit 0",
                 "timeoutSec": 5
             }
         ],
         "PostToolUse": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PostToolUse copilot",
+                "bash": "th flow hook copilot PostToolUse || echo '{}'",
+                "powershell": "th flow hook copilot PostToolUse; exit 0",
                 "timeoutSec": 5
             }
         ],
         "PostToolUseFailure": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh PostToolUseFailure copilot",
+                "bash": "th flow hook copilot PostToolUseFailure || echo '{}'",
+                "powershell": "th flow hook copilot PostToolUseFailure; exit 0",
                 "timeoutSec": 5
             }
         ],
         "Stop": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Stop copilot",
+                "bash": "th flow hook copilot Stop || echo '{}'",
+                "powershell": "th flow hook copilot Stop; exit 0",
                 "timeoutSec": 5
             }
         ],
         "ErrorOccurred": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh ErrorOccurred copilot",
+                "bash": "th flow hook copilot ErrorOccurred || echo '{}'",
+                "powershell": "th flow hook copilot ErrorOccurred; exit 0",
                 "timeoutSec": 5
             }
         ],
         "Notification": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh Notification copilot",
+                "bash": "th flow hook copilot Notification || echo '{}'",
+                "powershell": "th flow hook copilot Notification; exit 0",
                 "timeoutSec": 5
             }
         ],
         "SessionEnd": [
             {
                 "type": "command",
-                "bash": "${CLAUDE_PLUGIN_ROOT}/hooks/flow-hook.sh SessionEnd copilot",
+                "bash": "th flow hook copilot SessionEnd || echo '{}'",
+                "powershell": "th flow hook copilot SessionEnd; exit 0",
                 "timeoutSec": 5
             }
         ]
