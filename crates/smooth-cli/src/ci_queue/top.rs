@@ -1276,6 +1276,7 @@ pub mod demo {
                 swap_total_bytes: Some((23.5 * GIB as f64) as u64),
                 swap_used_bytes: Some((self.swap_gb * GIB as f64) as u64),
                 load1: Some(self.load),
+                cpu_busy_pct: Some((self.load / 12.0 * 60.0).min(100.0)),
                 cores: 12,
                 disks: vec![Disk {
                     path: PathBuf::from("/Users/dev/.cargo/shared-target"),
