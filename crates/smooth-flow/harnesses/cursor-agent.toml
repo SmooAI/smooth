@@ -1,7 +1,7 @@
 # Cursor Agent CLI (th-b00115). Cursor hooks live in ~/.cursor/hooks.json
 # (`{"version": 1, "hooks": {event: [{command}]}}`, camelCase events), stdin
 # carries conversation_id + workspace_roots (no cwd, no session_id —
-# flow-hook.sh reads both). The gate hooks (preToolUse / beforeShellExecution /
+# `th flow hook` reads both). The gate hooks (preToolUse / beforeShellExecution /
 # beforeMCPExecution) FAIL CLOSED on empty or invalid stdout, and answering
 # them means deciding every tool call, so the overlay subscribes to none of
 # them: needs_you comes from the pane. orca answers them with
