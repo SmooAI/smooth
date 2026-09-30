@@ -593,6 +593,8 @@ fn scrim() -> Div {
         .items_center()
         .justify_center()
         .bg(Hsla { a: 0.6, ..hsla(0x11111b) })
+        // Modal: clicks must not reach the panes and fleet rows beneath.
+        .occlude()
 }
 
 impl Render for Workspace {
