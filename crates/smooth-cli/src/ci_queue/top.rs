@@ -1614,7 +1614,7 @@ mod tests {
         let app = busy_app();
         let screen = draw(&app, 140, 44);
         for want in [
-            "ci-queue", "In line", "heavy", "light", "Pressure", "Memory", "Load", "Disk", "Locks", "Recent", "q quit",
+            "ci-queue", "In line", "heavy", "light", "Pressure", "Memory", "CPU", "Load", "Disk", "Locks", "Recent", "q quit",
         ] {
             assert!(screen.contains(want), "missing {want:?}:\n{screen}");
         }
@@ -1629,7 +1629,7 @@ mod tests {
         assert!(!screen.contains("Recent"), "recent drops first:\n{screen}");
         let tiny = draw(&app, 60, 14);
         assert!(!tiny.contains("Pressure"));
-        assert!(tiny.contains("load "), "one-line pressure summary:\n{tiny}");
+        assert!(tiny.contains("cpu "), "one-line pressure summary:\n{tiny}");
         let too_small = draw(&app, 20, 5);
         assert!(too_small.contains("th ci-queue"));
     }
