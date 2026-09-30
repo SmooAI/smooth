@@ -1,5 +1,22 @@
 # @smooai/smooth
 
+## 0.61.0
+
+### Minor Changes
+
+- 1c5da96: Big Smooth drives the SmoothFlow fleet (th-8b3918). The daemon's in-process agent now has the `flow_*` tools — `flow_list`, `flow_snapshot`, `flow_handoff`, `flow_harnesses`, `flow_repos`, `flow_infer`, `flow_new`, `flow_send`, `flow_prompt_wait`, `flow_approve`, `flow_kill`, `flow_close`, `flow_fanout_new`, `flow_fanout_pick` — called straight on the daemon's flow engine, with the same names, arguments and answers as the `th mcp serve` tools. A new `project_setup` tool takes a repo path or a git URL (cloned under `~/dev`), makes a worktree for a pearl or branch, and starts a coding agent there in one step. Every tool that changes the fleet waits for the user's confirmation, whatever the auto-mode setting. `flow_approve` always does. In Plan mode only the read tools remain, and sidekicks never receive a tool that needs confirmation.
+- 9d47380: SmoothFlow Desktop M2 (th-9fd86d): tabs and splits of live terminals, with measured cell metrics, a block or hollow cursor, and resizing on layout. It adds the New Session sheet (a harness picker with degraded and not-installed rows, a repo-searching Directory field, inferred context and a prompt), Allow/Deny for permission requests, and the Linux/Windows keymap with `keybindings.toml` overrides. `smooth-flow-client` gains the keymap, harness picker, approvability and tab-strip rules, with four new conformance vector files.
+
+### Patch Changes
+
+- 401f1ca: `th ci-queue` gates on how busy the CPUs actually are, not on load average.
+
+  macOS load counts threads blocked in the kernel as well as runnable ones. On 2026-09-30 the load read ~108 on 12 cores with only 4 runnable threads, most of it `exec` waiting on `syspolicyd` to check freshly built test binaries. The 4/core load gate, and the AIMD scale it drove to its 0.25 floor, held 20 heavy jobs for 15–24 minutes behind one on a mostly idle machine.
+
+  - New gate signal `max_cpu_busy_pct` (default 90): CPU busy % from the kernel's tick counters, smoothed across every `th` into a ~10 s average (`~/.smooth/ci-queue/cpu.json`). It holds heavy jobs and drives the AIMD scale together with memory, swap and disk.
+  - Load average is now a far backstop: `max_load_per_core` defaults to 12, and it only counts while the CPUs are at least 50% busy (or unreadable). The starvation nights it guards against (load 180–270, 1,022) were CPU-bound too.
+  - `status`, `top` and the web view show the CPU reading.
+
 ## 0.60.0
 
 ### Minor Changes
