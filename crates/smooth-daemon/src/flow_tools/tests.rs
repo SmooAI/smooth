@@ -395,6 +395,10 @@ async fn fanout_errors_surface_as_tool_errors() {
 // ── project_setup ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a canonical Windows tempdir is a verbatim \\\\?\\ path, which git clone cannot write to; the clone path runs on unix"
+)]
 async fn project_setup_clones_a_url_then_reuses_the_clone() {
     let rig = Rig::new();
     let origin = bare_origin(&rig.root);
@@ -433,6 +437,10 @@ async fn project_setup_clones_a_url_then_reuses_the_clone() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a canonical Windows tempdir is a verbatim \\\\?\\ path, which git clone cannot write to; the clone path runs on unix"
+)]
 async fn project_setup_clones_under_the_engines_home_dev_by_default() {
     let rig = Rig::new();
     let origin = bare_origin(&rig.root);
@@ -444,6 +452,10 @@ async fn project_setup_clones_under_the_engines_home_dev_by_default() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "a canonical Windows tempdir is a verbatim \\\\?\\ path, which git clone cannot write to; the clone path runs on unix"
+)]
 async fn project_setup_makes_a_branch_or_pearl_worktree_and_starts_the_agent_there() {
     let rig = Rig::new();
     let origin = bare_origin(&rig.root);
