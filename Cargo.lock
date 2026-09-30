@@ -5301,6 +5301,7 @@ dependencies = [
  "smooai-smooth-tmux",
  "smooai-smooth-tools",
  "smooai-smooth-web",
+ "sysinfo",
  "tabled",
  "tempfile",
  "tiny_http",

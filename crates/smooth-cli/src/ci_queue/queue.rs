@@ -56,7 +56,7 @@ use super::config::{self, Config};
 use super::exec::{Ended, Usage};
 use super::history::History;
 pub use super::history::HistoryEntry;
-use super::pressure::{self, Probe, Readings, SystemProbe};
+use super::pressure::{self, CpuState, Probe, Readings, SystemProbe};
 
 /// Set in every admitted job's environment. A nested `th ci-queue run` (or
 /// `th attest`) inside a queued job runs directly instead of queueing again:
@@ -225,7 +225,7 @@ impl Queue {
         Self {
             dir,
             config: Config::load(config::default_path().as_deref()),
-            probe: Arc::new(SystemProbe),
+            probe: Arc::new(SystemProbe::new()),
             honor_nesting: true,
             cargo_target: None,
         }
@@ -332,6 +332,31 @@ impl Queue {
         if let Ok(bytes) = serde_json::to_vec(a) {
             let _ = write_atomic(&self.aimd_path(), &bytes);
         }
+    }
+
+    fn cpu_path(&self) -> PathBuf {
+        self.dir.join("cpu.json")
+    }
+
+    /// One pressure sample, with CPU busy smoothed across every `th` through
+    /// `cpu.json` (see [`CpuState`]). A process too new to have measured an
+    /// interval of its own uses the kept reading while it is fresh. Under the
+    /// mutex.
+    fn read_pressure(&self, cwd: &Path) -> Readings {
+        let mut r = self.probe.read(&self.disk_paths(cwd));
+        let now = now_ms();
+        let kept: Option<CpuState> = fs::read_to_string(self.cpu_path()).ok().and_then(|t| serde_json::from_str(&t).ok());
+        r.cpu_busy_pct = match r.cpu_busy_pct {
+            Some(raw) => {
+                let next = CpuState::update(kept, raw, now);
+                if let Ok(bytes) = serde_json::to_vec(&next) {
+                    let _ = write_atomic(&self.cpu_path(), &bytes);
+                }
+                Some(next.busy_pct)
+            }
+            None => kept.and_then(|k| k.fresh(now)),
+        };
+        r
     }
 
     fn passes_path(&self, ticket: u64) -> PathBuf {
@@ -631,7 +656,7 @@ impl Queue {
 
         // One pressure sample per attempt while anything runs. It drives the
         // gate, the budget's memory side, and the AIMD scale.
-        let readings = (!running.is_empty()).then(|| self.probe.read(&self.disk_paths(&me.cwd)));
+        let readings = (!running.is_empty()).then(|| self.read_pressure(&me.cwd));
         let mut aimd = self.load_aimd();
         let holds = readings.as_ref().map(|r| pressure::holds(r, &self.config.gate)).unwrap_or_default();
         if readings.is_some() {
@@ -799,12 +824,11 @@ impl Queue {
             }
             (running, self.live_tickets()?)
         };
-        let readings = self.probe.read(&self.disk_paths(cwd));
-        let holds = pressure::holds(&readings, &self.config.gate);
-        let aimd = {
+        let (readings, aimd) = {
             let _m = self.mutex()?;
-            self.load_aimd()
+            (self.read_pressure(cwd), self.load_aimd())
         };
+        let holds = pressure::holds(&readings, &self.config.gate);
         let budget_running: Vec<Running> = running
             .iter()
             .map(|i| Running {
@@ -1143,6 +1167,7 @@ mod tests {
             swap_total_bytes: Some(0),
             swap_used_bytes: Some(0),
             load1: Some(2.0),
+            cpu_busy_pct: Some(20.0),
             cores: 12,
             disks: vec![],
         }
@@ -1324,6 +1349,70 @@ mod tests {
             panic!("expected the gate to hold b");
         };
         assert!(reason.starts_with("memory pressure critical / swap 91% / 1 heavy busy: a"), "{reason}");
+    }
+
+    /// 2026-09-30: load far past its backstop, CPUs mostly idle, the AIMD
+    /// scale already driven to its floor by the old load gate. The scale must
+    /// climb back and the waiter be admitted; with the CPUs saturated it must
+    /// not.
+    #[test]
+    fn the_budget_scale_recovers_on_idle_cpus_however_high_the_load() {
+        let parked = Readings {
+            load1: Some(200.0),
+            cpu_busy_pct: Some(20.0),
+            ..calm()
+        };
+        let floor = Aimd {
+            scale: 0.25,
+            ..Aimd::default()
+        };
+
+        let f = fx(2);
+        let _a = admit(&f.q, Class::Heavy, "a");
+        f.q.save_aimd(&floor);
+        *f.probe.0.lock().unwrap() = parked.clone();
+        // 12 cores × 1.5 × 0.25 = 4.5 cores fits one 4-core heavy job, not two.
+        assert!(f.q.admit(&req(Class::Heavy, "b", 5_000)).is_ok(), "idle CPUs at load 200 still held b");
+        assert!(f.q.load_aimd().scale > 0.25, "scale {}", f.q.load_aimd().scale);
+
+        let f = fx(2);
+        let _a = admit(&f.q, Class::Heavy, "a");
+        f.q.save_aimd(&floor);
+        *f.probe.0.lock().unwrap() = Readings {
+            cpu_busy_pct: Some(97.0),
+            ..parked
+        };
+        let Err(AdmitError::WaitTimeout { reason, .. }) = f.q.admit(&req(Class::Heavy, "b", 300)) else {
+            panic!("saturated CPUs admitted b");
+        };
+        assert!(reason.starts_with("cpu 97% busy / load 200.0 on 12 cores"), "{reason}");
+        assert!((f.q.load_aimd().scale - 0.25).abs() < 1e-9, "scale grew while the CPUs were saturated");
+    }
+
+    /// A `th` too new to have measured a CPU interval of its own uses the
+    /// reading the queue kept, while it is fresh.
+    #[test]
+    fn a_missing_cpu_reading_falls_back_to_the_kept_one() {
+        let f = fx(2);
+        let _a = admit(&f.q, Class::Heavy, "a");
+        *f.probe.0.lock().unwrap() = Readings {
+            cpu_busy_pct: Some(98.0),
+            ..calm()
+        };
+        assert!(f.q.admit(&req(Class::Heavy, "b", 50)).is_err());
+        *f.probe.0.lock().unwrap() = Readings { cpu_busy_pct: None, ..calm() };
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert!(snap.readings.cpu_busy_pct.is_some_and(|c| c > 90.0), "{:?}", snap.readings.cpu_busy_pct);
+        assert_eq!(snap.holds, vec!["cpu 98% busy"]);
+        // A stale one is not used.
+        let old = CpuState {
+            busy_pct: 98.0,
+            at_ms: now_ms() - pressure::CPU_STALE_MS - 1_000,
+        };
+        fs::write(f.q.cpu_path(), serde_json::to_vec(&old).unwrap()).unwrap();
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert_eq!(snap.readings.cpu_busy_pct, None);
+        assert!(snap.holds.is_empty(), "{:?}", snap.holds);
     }
 
     /// The never-deadlock rule: with nothing heavy running, the gate cannot
