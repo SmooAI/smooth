@@ -17,7 +17,8 @@
             "min_available_memory_pct": 5.0,
             "max_memory_pressure_level": 1,
             "max_swap_used_pct": 90.0,
-            "max_load_per_core": 4.0,
+            "max_cpu_busy_pct": 90.0,
+            "max_load_per_core": 12.0,
             "min_free_disk_gb": 20.0,
             "disk_paths": []
         },
@@ -94,6 +95,7 @@
         "swap_total_bytes": 28991029248,
         "swap_used_bytes": 27258655866,
         "load1": 44.36,
+        "cpu_busy_pct": 38.5,
         "cores": 12,
         "disks": [
             {

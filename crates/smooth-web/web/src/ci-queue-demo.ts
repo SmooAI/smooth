@@ -169,12 +169,19 @@ export class NightReplay {
             swap_total_bytes: Math.round(SWAP_GB * GB_BYTES),
             swap_used_bytes: Math.round(this.swapGb * GB_BYTES),
             load1: this.load,
+            cpu_busy_pct: this.cpuBusyPct(),
             cores: CORES,
             disks: [
                 { path: '/Users/dev/.cargo/shared-target', free_bytes: 96 * GB_BYTES },
                 { path: '/Users/dev', free_bytes: 96 * GB_BYTES },
             ],
         };
+    }
+
+    /** That night was CPU-bound as well as memory-bound: busy tracks the run
+     * queue until it saturates. */
+    private cpuBusyPct(): number {
+        return Math.min(100, (this.load / CORES) * 60);
     }
 
     /** The gate's verdict, in the queue's words (reading only, like `pressure::holds`). */
@@ -186,7 +193,9 @@ export class NightReplay {
         if (level > 1) out.push(`memory pressure ${level >= 4 ? 'critical' : 'warn'}`);
         const swapPct = (this.swapGb * 100) / SWAP_GB;
         if (swapPct > 90 && (level > 1 || this.memAvailPct < 10)) out.push(`swap ${Math.round(swapPct)}%`);
-        if (this.load / CORES > 4) out.push(`load ${this.load.toFixed(1)} on ${CORES} cores`);
+        const cpu = this.cpuBusyPct();
+        if (cpu > 90) out.push(`cpu ${Math.round(cpu)}% busy`);
+        if (this.load / CORES > 12 && cpu >= 50) out.push(`load ${this.load.toFixed(1)} on ${CORES} cores`);
         return out;
     }
 
@@ -351,7 +360,14 @@ export class NightReplay {
             dir: '/Users/dev/.smooth/ci-queue',
             config: {
                 slots: { heavy: 2, light: 6 },
-                gate: { min_available_memory_pct: 5, max_memory_pressure_level: 1, max_swap_used_pct: 90, max_load_per_core: 4, min_free_disk_gb: 20 },
+                gate: {
+                    min_available_memory_pct: 5,
+                    max_memory_pressure_level: 1,
+                    max_swap_used_pct: 90,
+                    max_cpu_busy_pct: 90,
+                    max_load_per_core: 12,
+                    min_free_disk_gb: 20,
+                },
                 budget: NightReplay.BUDGET_CFG,
             },
             now_ms: this.now,
