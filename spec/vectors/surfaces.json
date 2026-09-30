@@ -1,0 +1,682 @@
+{
+  "spec": "SmoothFlow-Client-Spec §5 tabs and close scope",
+  "cases": [
+    {
+      "name": "close collapses pane, then tab, then empties the last",
+      "input": {
+        "start": "one tab, one empty pane (id 1)",
+        "ops": [
+          {
+            "op": "show",
+            "session": "fs-a"
+          },
+          {
+            "op": "split",
+            "direction": "right"
+          },
+          {
+            "op": "close_pane"
+          },
+          {
+            "op": "new_tab",
+            "session": "fs-b"
+          },
+          {
+            "op": "close_pane"
+          },
+          {
+            "op": "close_pane"
+          },
+          {
+            "op": "close_pane"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {
+                  "1": "fs-a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1,
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "1": "fs-a",
+                  "2": "fs-a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "pane",
+              "shown_elsewhere": true
+            },
+            "returned": "pane",
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {
+                  "1": "fs-a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {
+                  "1": "fs-a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "fs-b"
+                }
+              }
+            ],
+            "active": 1
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": "tab",
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {
+                  "1": "fs-a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": "last",
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": "last",
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              }
+            ],
+            "active": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "tabs insert after the active one, cycle and wrap, close whole",
+      "input": {
+        "start": "one tab, one empty pane (id 1)",
+        "ops": [
+          {
+            "op": "new_tab",
+            "session": "a"
+          },
+          {
+            "op": "new_tab",
+            "session": "b"
+          },
+          {
+            "op": "cycle",
+            "delta": 1
+          },
+          {
+            "op": "new_tab",
+            "session": "c"
+          },
+          {
+            "op": "cycle",
+            "delta": -1
+          },
+          {
+            "op": "split",
+            "direction": "down"
+          },
+          {
+            "op": "close_tab"
+          },
+          {
+            "op": "close_tab"
+          },
+          {
+            "op": "close_tab"
+          },
+          {
+            "op": "close_tab"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              }
+            ],
+            "active": 1
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 2
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  4
+                ],
+                "focused": 4,
+                "sessions": {
+                  "4": "c"
+                }
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 1
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  4
+                ],
+                "focused": 4,
+                "sessions": {
+                  "4": "c"
+                }
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1,
+                  5
+                ],
+                "focused": 5,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  4
+                ],
+                "focused": 4,
+                "sessions": {
+                  "4": "c"
+                }
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "pane",
+              "shown_elsewhere": false
+            },
+            "returned": "tab",
+            "tabs": [
+              {
+                "panes": [
+                  4
+                ],
+                "focused": 4,
+                "sessions": {
+                  "4": "c"
+                }
+              },
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": "tab",
+            "tabs": [
+              {
+                "panes": [
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": false
+            },
+            "returned": "tab",
+            "tabs": [
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "b"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": "last",
+            "tabs": [
+              {
+                "panes": [
+                  6
+                ],
+                "focused": 6,
+                "sessions": {}
+              }
+            ],
+            "active": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "a session going away empties its panes",
+      "input": {
+        "start": "one tab, one empty pane (id 1)",
+        "ops": [
+          {
+            "op": "show",
+            "session": "a"
+          },
+          {
+            "op": "split",
+            "direction": "right"
+          },
+          {
+            "op": "new_tab",
+            "session": "a"
+          },
+          {
+            "op": "forget",
+            "session": "a"
+          }
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1
+                ],
+                "focused": 1,
+                "sessions": {
+                  "1": "a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "last",
+              "shown_elsewhere": false
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1,
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "1": "a",
+                  "2": "a"
+                }
+              }
+            ],
+            "active": 0
+          },
+          {
+            "before": {
+              "scope": "pane",
+              "shown_elsewhere": true
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1,
+                  2
+                ],
+                "focused": 2,
+                "sessions": {
+                  "1": "a",
+                  "2": "a"
+                }
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {
+                  "3": "a"
+                }
+              }
+            ],
+            "active": 1
+          },
+          {
+            "before": {
+              "scope": "tab",
+              "shown_elsewhere": true
+            },
+            "returned": null,
+            "tabs": [
+              {
+                "panes": [
+                  1,
+                  2
+                ],
+                "focused": 2,
+                "sessions": {}
+              },
+              {
+                "panes": [
+                  3
+                ],
+                "focused": 3,
+                "sessions": {}
+              }
+            ],
+            "active": 1
+          }
+        ]
+      }
+    }
+  ]
+}

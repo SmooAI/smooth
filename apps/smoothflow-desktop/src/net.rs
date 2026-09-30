@@ -18,7 +18,8 @@ use crate::frames::{self, Inbound};
 #[derive(Debug, Clone)]
 pub enum Event {
     Connecting,
-    Connected,
+    /// Connected to this endpoint (its address and token also serve HTTP).
+    Connected(discovery::Endpoint),
     Offline(String),
     Frame(Inbound),
 }
@@ -64,7 +65,7 @@ async fn run(smooth_dir: PathBuf, mut out_rx: mpsc::UnboundedReceiver<String>, e
         match tokio_tungstenite::connect_async(endpoint.ws_url()).await {
             Ok((ws, _)) => {
                 backoff = Duration::from_millis(500);
-                let _ = ev_tx.unbounded_send(Event::Connected);
+                let _ = ev_tx.unbounded_send(Event::Connected(endpoint.clone()));
                 let (mut sink, mut source) = ws.split();
                 loop {
                     tokio::select! {

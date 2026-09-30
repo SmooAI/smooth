@@ -1,20 +1,26 @@
 //! SmoothFlow for Linux and Windows (th-3e6020): the agent fleet console with
 //! GPU-rendered terminals, built on GPUI from the SmoothFlow Client Spec
-//! (docs/Architecture/SmoothFlow-Client-Spec.md). v0: the fleet sidebar and a
-//! live terminal for the focused session; the rest of the spec follows.
+//! (docs/Architecture/SmoothFlow-Client-Spec.md). M2: the fleet sidebar, tabs
+//! and splits of live terminals, New Session, and approvals.
 
-mod app;
 mod discovery;
+mod field;
 mod frames;
+mod http;
 mod keys;
+mod layout;
 mod net;
+mod sheet;
 mod terminal;
+mod view;
+mod workspace;
 
 use gpui_kit::*;
 
 fn main() {
     let smooth_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth");
     let (out, events) = net::start(smooth_dir);
+    let keymap = workspace::load_keymap();
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
@@ -27,7 +33,7 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, move |window, cx| {
-            let view = cx.new(|cx| app::Workspace::new(out, events, cx));
+            let view = cx.new(|cx| workspace::Workspace::new(out, events, keymap, cx));
             view.read(cx).focus_handle().clone().focus(window, cx);
             view
         });

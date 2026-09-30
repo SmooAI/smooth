@@ -9,12 +9,16 @@
 //!
 //! Nothing here does I/O or knows about a UI toolkit.
 
+pub mod attention;
 pub mod close;
 pub mod directory;
 pub mod fleet;
 pub mod gate;
+pub mod harness;
+pub mod keymap;
 pub mod pane;
 pub mod session;
+pub mod surfaces;
 pub mod title;
 pub mod vectors;
 

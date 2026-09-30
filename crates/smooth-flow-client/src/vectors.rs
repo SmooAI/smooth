@@ -11,12 +11,16 @@
 
 use serde_json::{json, Value};
 
+use crate::attention::{self, Attention};
 use crate::close::{self, Scope};
 use crate::directory;
 use crate::fleet;
 use crate::gate::Gate;
+use crate::harness::{self, Harness, Health};
+use crate::keymap::{Action, Chord, Keymap, Platform};
 use crate::pane::{Direction, Rect, Tab};
 use crate::session::{Session, SessionState};
+use crate::surfaces::Surfaces;
 use crate::title;
 
 const HOME: &str = "/Users/me";
@@ -288,6 +292,234 @@ fn pane_vectors() -> Value {
     file("SmoothFlow-Client-Spec §5 panes (top-down geometry; ties go to the lower pane id)", &cases)
 }
 
+/// `keymap.json`: chord parsing, both platforms' default tables (the spec §9
+/// table, pinned), and the override file with its problems and conflicts.
+fn keymap_vectors() -> Value {
+    let mut cases = Vec::new();
+    for raw in [
+        "ctrl+shift+n",
+        "Ctrl + Shift + N",
+        "alt+ctrl+=",
+        "ctrl++",
+        "ctrl+plus",
+        "super+return",
+        "ctrl+pgdn",
+        "ctrl+f12",
+        "ctrl+ctrl+a",
+        "ctrl+a+b",
+        "ctrl+banana",
+        "ctrl+",
+        "",
+    ] {
+        let c = Chord::parse(raw);
+        cases.push(case(
+            "parse",
+            json!({ "fn": "parse", "text": raw }),
+            json!({ "chord": c, "wire": c.as_ref().map(Chord::wire) }),
+        ));
+    }
+    for platform in [Platform::Mac, Platform::Other] {
+        let k = Keymap::defaults(platform);
+        let table: Vec<Value> = Action::ALL
+            .iter()
+            .map(|a| {
+                let c = k.chord(*a);
+                json!({ "action": a.name(), "wire": c.as_ref().map(Chord::wire), "display": c.as_ref().map(|c| c.display(platform)) })
+            })
+            .collect();
+        cases.push(case(
+            "defaults",
+            json!({ "fn": "defaults", "platform": platform }),
+            json!({ "bindings": table, "conflicts": k.conflicts().len() }),
+        ));
+    }
+    for (name, text) in [
+        (
+            "rebind, unbind, re-typed default, and every kind of problem",
+            "# mine\n[other]\nnewTab = \"ctrl+q\"\n[keys]\nnewTab = \"ctrl+shift+y\" # comment\nclosePane = \"\"\nsplitRight = \"ctrl+shift+d\"\nbogus = \"ctrl+x\"\nkill = \"k\"\ninbox = \"ctrl+nope\"\nnot a line\n",
+        ),
+        ("a conflict is reported, and menu order wins it", "[keys]\nnewTab = \"ctrl+shift+w\"\n"),
+    ] {
+        let k = Keymap::parse(text, Platform::Other);
+        let overrides: Vec<Value> = k
+            .overrides
+            .iter()
+            .map(|(a, c)| json!({ "action": a.name(), "wire": c.as_ref().map(Chord::wire) }))
+            .collect();
+        let conflicts: Vec<Value> = k
+            .conflicts()
+            .iter()
+            .map(|(c, v)| json!({ "wire": c.wire(), "actions": v.iter().map(|a| a.name()).collect::<Vec<_>>() }))
+            .collect();
+        let fired = Chord::parse("ctrl+shift+w").and_then(|c| k.action_for(&c)).map(Action::name);
+        cases.push(case(
+            name,
+            json!({ "fn": "parse_file", "platform": Platform::Other, "text": text }),
+            json!({ "overrides": overrides, "problems": k.problems, "conflicts": conflicts, "ctrl+shift+w": fired }),
+        ));
+    }
+    file("SmoothFlow-Client-Spec §9 keymap", &cases)
+}
+
+/// `harness.json`: the New Session kind picker.
+fn harness_vectors() -> Value {
+    let mut missing = Harness::new("codex");
+    missing.installed = false;
+    missing.reason = Some("codex not on PATH".into());
+    let mut missing_no_reason = Harness::new("gemini");
+    missing_no_reason.installed = false;
+    let mut degraded = Harness::new("opencode");
+    degraded.display_name = "OpenCode".into();
+    degraded.health = Some(Health {
+        verdict: "degraded".into(),
+        reason: Some("hooks untrusted".into()),
+        fix: Some("th harness enable opencode".into()),
+    });
+    let mut hidden = Harness::new("aider");
+    hidden.hidden = true;
+    let mut claude = Harness::new("claude");
+    claude.display_name = "Claude Code".into();
+    let all = vec![missing, Harness::new("shell"), claude, degraded, hidden, missing_no_reason];
+    let only_missing = vec![all[0].clone()];
+    let mut cases = Vec::new();
+    for (name, list, shell) in [
+        ("engine order, hidden dropped, shell last, disabled and degraded", &all, true),
+        ("no shell row when the caller has none (fan-out)", &all, false),
+        ("nothing startable but shell", &only_missing, true),
+        ("nothing at all", &Vec::new(), false),
+    ] {
+        let rows = harness::picker(list, shell);
+        cases.push(case(
+            name,
+            json!({ "harnesses": list, "include_shell": shell }),
+            json!({ "rows": rows, "default_kind": harness::default_kind(&rows) }),
+        ));
+    }
+    file("SmoothFlow-Client-Spec §6 kind picker", &cases)
+}
+
+/// `attention.json`: which attentions are approvable, and what they show.
+fn attention_vectors() -> Value {
+    let a = |reason: &str, detail: Option<&str>, request_id: Option<&str>| Attention {
+        reason: reason.into(),
+        detail: detail.map(Into::into),
+        request_id: request_id.map(Into::into),
+        resume_at: None,
+    };
+    let mut cases = Vec::new();
+    for (name, att) in [
+        ("permission with a request id", Some(a("permission", Some("rm -rf target"), Some("r1")))),
+        ("question with a request id", Some(a("question", Some("Which branch?"), Some("r2")))),
+        ("no detail still says something", Some(a("permission", None, Some("r3")))),
+        ("no request id is not approvable", Some(a("permission", Some("x"), None))),
+        ("a blank request id is not approvable", Some(a("permission", Some("x"), Some("  ")))),
+        ("usage limit is not approvable", Some(a("usage_limit", None, Some("r4")))),
+        ("no attention", None),
+    ] {
+        cases.push(case(
+            name,
+            json!({ "attention": att }),
+            json!({ "approval": attention::approval(att.as_ref()) }),
+        ));
+    }
+    file("SmoothFlow-Client-Spec §7 approvals", &cases)
+}
+
+/// `surfaces.json`: tabs of panes, scripted, with the window's state after each step.
+fn surfaces_vectors() -> Value {
+    let scripts: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "close collapses pane, then tab, then empties the last",
+            vec![
+                json!({ "op": "show", "session": "fs-a" }),
+                json!({ "op": "split", "direction": "right" }),
+                json!({ "op": "close_pane" }),
+                json!({ "op": "new_tab", "session": "fs-b" }),
+                json!({ "op": "close_pane" }),
+                json!({ "op": "close_pane" }),
+                json!({ "op": "close_pane" }),
+            ],
+        ),
+        (
+            "tabs insert after the active one, cycle and wrap, close whole",
+            vec![
+                json!({ "op": "new_tab", "session": "a" }),
+                json!({ "op": "new_tab", "session": "b" }),
+                json!({ "op": "cycle", "delta": 1 }),
+                json!({ "op": "new_tab", "session": "c" }),
+                json!({ "op": "cycle", "delta": -1 }),
+                json!({ "op": "split", "direction": "down" }),
+                json!({ "op": "close_tab" }),
+                json!({ "op": "close_tab" }),
+                json!({ "op": "close_tab" }),
+                json!({ "op": "close_tab" }),
+            ],
+        ),
+        (
+            "a session going away empties its panes",
+            vec![
+                json!({ "op": "show", "session": "a" }),
+                json!({ "op": "split", "direction": "right" }),
+                json!({ "op": "new_tab", "session": "a" }),
+                json!({ "op": "forget", "session": "a" }),
+            ],
+        ),
+    ];
+    let mut cases = Vec::new();
+    for (name, ops) in scripts {
+        let mut s = Surfaces::new();
+        let mut steps = Vec::new();
+        for op in &ops {
+            let dir = serde_json::from_value::<Direction>(op["direction"].clone()).ok();
+            let session = op["session"].as_str();
+            let before = json!({ "scope": s.close_scope(), "shown_elsewhere": s.shown_elsewhere() });
+            let returned = match op["op"].as_str().unwrap_or("") {
+                "show" => {
+                    if let Some(x) = session {
+                        s.show(x);
+                    }
+                    Value::Null
+                }
+                "split" => {
+                    if let Some(d) = dir {
+                        s.split(d);
+                    }
+                    Value::Null
+                }
+                "new_tab" => {
+                    s.new_tab(session);
+                    Value::Null
+                }
+                "cycle" => {
+                    s.cycle(op["delta"].as_i64().and_then(|d| isize::try_from(d).ok()).unwrap_or(0));
+                    Value::Null
+                }
+                "close_pane" => json!(s.close_pane()),
+                "close_tab" => json!(s.close_tab()),
+                "forget" => {
+                    if let Some(x) = session {
+                        s.forget(x);
+                    }
+                    Value::Null
+                }
+                _ => Value::Null,
+            };
+            let tabs: Vec<Value> = s
+                .tabs
+                .iter()
+                .map(|t| json!({ "panes": t.panes(), "focused": t.focused, "sessions": t.sessions }))
+                .collect();
+            steps.push(json!({ "before": before, "returned": returned, "tabs": tabs, "active": s.active }));
+        }
+        cases.push(case(
+            name,
+            json!({ "start": "one tab, one empty pane (id 1)", "ops": ops }),
+            json!({ "steps": steps }),
+        ));
+    }
+    file("SmoothFlow-Client-Spec §5 tabs and close scope", &cases)
+}
+
 /// Every vector file, by name.
 #[must_use]
 pub fn all() -> Vec<(&'static str, Value)> {
@@ -298,6 +530,10 @@ pub fn all() -> Vec<(&'static str, Value)> {
         ("directory.json", directory_vectors()),
         ("fleet.json", fleet_vectors()),
         ("pane.json", pane_vectors()),
+        ("keymap.json", keymap_vectors()),
+        ("harness.json", harness_vectors()),
+        ("attention.json", attention_vectors()),
+        ("surfaces.json", surfaces_vectors()),
     ]
 }
 

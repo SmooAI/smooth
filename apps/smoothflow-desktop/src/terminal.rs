@@ -8,7 +8,7 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 
 /// An sRGB color, `0xRRGGBB`.
@@ -22,8 +22,8 @@ pub mod theme {
     pub const CURSOR: Rgb = 0xf5e0dc;
     /// ANSI 0–15.
     pub const ANSI: [Rgb; 16] = [
-        0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7,
-        0x94e2d5, 0xa6adc8,
+        0x45475a, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5, 0xbac2de, 0x585b70, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xf5c2e7, 0x94e2d5,
+        0xa6adc8,
     ];
 }
 
@@ -59,7 +59,7 @@ pub struct Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
     pub rows: Vec<Vec<Run>>,
-    /// Cursor `(row, col)` when visible.
+    /// Cursor `(row, col)` when the program shows it.
     pub cursor: Option<(usize, usize)>,
 }
 
@@ -83,6 +83,7 @@ impl TerminalModel {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub const fn size(&self) -> (usize, usize) {
         (self.cols, self.rows)
@@ -112,10 +113,22 @@ impl TerminalModel {
         (0..self.cols).map(|c| row[Column(c)].c).collect::<String>().trim_end().to_string()
     }
 
-    /// The visible screen as styled runs.
+    /// The visible screen as styled runs. With `block_cursor`, the cursor
+    /// cell is drawn inverted (cursor colour behind, background colour in
+    /// front) — the focused pane's block cursor. An unfocused pane draws a
+    /// hollow box over [`Screen::cursor`] instead.
     #[must_use]
-    pub fn screen(&self) -> Screen {
+    pub fn screen(&self, block_cursor: bool) -> Screen {
         let grid = self.term.grid();
+        let point = grid.cursor.point;
+        let cursor = if self.term.mode().contains(TermMode::SHOW_CURSOR) {
+            usize::try_from(point.line.0)
+                .ok()
+                .filter(|l| *l < self.rows)
+                .map(|l| (l, point.column.0.min(self.cols - 1)))
+        } else {
+            None
+        };
         let mut rows = Vec::with_capacity(self.rows);
         for line in 0..self.rows {
             let row = &grid[Line(i32::try_from(line).unwrap_or(0))];
@@ -130,7 +143,10 @@ impl TerminalModel {
                 if inverse {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let bg = (bg != theme::BACKGROUND).then_some(bg);
+                if block_cursor && cursor == Some((line, col)) {
+                    (fg, bg) = (theme::BACKGROUND, theme::CURSOR);
+                }
+                let bg = (bg != theme::BACKGROUND || (block_cursor && cursor == Some((line, col)))).then_some(bg);
                 let bold = cell.flags.contains(Flags::BOLD);
                 let italic = cell.flags.contains(Flags::ITALIC);
                 let underline = cell.flags.intersects(Flags::ALL_UNDERLINES);
@@ -149,8 +165,6 @@ impl TerminalModel {
             }
             rows.push(runs);
         }
-        let point = grid.cursor.point;
-        let cursor = usize::try_from(point.line.0).ok().map(|l| (l, point.column.0));
         Screen { rows, cursor }
     }
 }
@@ -204,11 +218,25 @@ mod tests {
         t.feed(b"hello\r\n\x1b[1;31mred\x1b[0m done");
         assert_eq!(t.line_text(0), "hello");
         assert_eq!(t.line_text(1), "red done");
-        let s = t.screen();
+        let s = t.screen(false);
         let red = &s.rows[1][0];
         assert_eq!((red.text.as_str(), red.fg, red.bold), ("red", theme::ANSI[1], true));
         assert_eq!(s.rows[1][1].text.trim(), "done", "the reset run carries the space before it");
         assert_eq!(s.cursor, Some((1, 8)));
+    }
+
+    #[test]
+    fn the_block_cursor_inverts_its_cell_and_hides_with_the_program() {
+        let mut t = TerminalModel::new(10, 2);
+        t.feed(b"ab");
+        let s = t.screen(true);
+        assert_eq!(s.cursor, Some((0, 2)));
+        let cell = s.rows[0].iter().find(|r| r.bg == Some(theme::CURSOR)).map(|r| (r.text.clone(), r.fg));
+        assert_eq!(cell, Some((" ".to_string(), theme::BACKGROUND)), "the cell under the cursor, inverted");
+        assert_eq!(s.rows[0][0].text, "ab");
+        assert!(t.screen(false).rows[0].iter().all(|r| r.bg.is_none()), "no block when unfocused");
+        t.feed(b"\x1b[?25l");
+        assert_eq!(t.screen(true).cursor, None, "DECTCEM off hides it");
     }
 
     #[test]
