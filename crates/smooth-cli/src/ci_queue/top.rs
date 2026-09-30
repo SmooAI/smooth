@@ -84,6 +84,7 @@ pub enum SignalKey {
     Memory,
     Pressure,
     Swap,
+    Cpu,
     Load,
     Disk,
 }
@@ -108,7 +109,7 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 #[must_use]
 #[allow(clippy::cast_precision_loss, reason = "GB and ratio display")]
 pub fn signals(r: &Readings, g: &Gate) -> Vec<Signal> {
-    let mut out = Vec::with_capacity(5);
+    let mut out = Vec::with_capacity(6);
     let avail = r.mem_available_pct();
     let mem_limit = 100.0 - g.min_available_memory_pct;
     out.push(Signal {
@@ -145,6 +146,14 @@ pub fn signals(r: &Readings, g: &Gate) -> Vec<Signal> {
         ratio: swap.filter(|_| g.max_swap_used_pct > 0.0).map(|s| s / g.max_swap_used_pct),
         off: g.max_swap_used_pct <= 0.0,
     });
+    out.push(Signal {
+        key: SignalKey::Cpu,
+        name: "CPU",
+        value: r.cpu_busy_pct.map_or_else(|| "unknown".into(), |c| format!("{c:.0}% busy")),
+        limit: format!("holds above {:.0}%", g.max_cpu_busy_pct),
+        ratio: r.cpu_busy_pct.filter(|_| g.max_cpu_busy_pct > 0.0).map(|c| c / g.max_cpu_busy_pct),
+        off: g.max_cpu_busy_pct <= 0.0,
+    });
     let per = r.load_per_core();
     out.push(Signal {
         key: SignalKey::Load,
@@ -153,7 +162,7 @@ pub fn signals(r: &Readings, g: &Gate) -> Vec<Signal> {
             (Some(l), Some(p)) => format!("{l:.0} · {p:.1}/core"),
             _ => "unknown".into(),
         },
-        limit: format!("holds above {}/core", g.max_load_per_core),
+        limit: format!("backstop above {}/core", g.max_load_per_core),
         ratio: per.filter(|_| g.max_load_per_core > 0.0).map(|p| p / g.max_load_per_core),
         off: g.max_load_per_core <= 0.0,
     });
@@ -1267,6 +1276,7 @@ pub mod demo {
                 swap_total_bytes: Some((23.5 * GIB as f64) as u64),
                 swap_used_bytes: Some((self.swap_gb * GIB as f64) as u64),
                 load1: Some(self.load),
+                cpu_busy_pct: Some((self.load / 12.0 * 60.0).min(100.0)),
                 cores: 12,
                 disks: vec![Disk {
                     path: PathBuf::from("/Users/dev/.cargo/shared-target"),
@@ -1320,6 +1330,7 @@ mod tests {
             swap_total_bytes: Some(20 * GB),
             swap_used_bytes: Some(2 * GB),
             load1: Some(12.0),
+            cpu_busy_pct: Some(45.0),
             cores: 12,
             disks: vec![Disk {
                 path: "/".into(),
@@ -1394,7 +1405,9 @@ mod tests {
         assert!((get(SignalKey::Memory).ratio.unwrap() - 50.0 / 95.0).abs() < 1e-9);
         assert_eq!(get(SignalKey::Swap).value, "10% used");
         assert_eq!(get(SignalKey::Load).value, "12 · 1.0/core");
-        assert!((get(SignalKey::Load).ratio.unwrap() - 0.25).abs() < 1e-9);
+        assert!((get(SignalKey::Load).ratio.unwrap() - 1.0 / 12.0).abs() < 1e-9);
+        assert_eq!(get(SignalKey::Cpu).value, "45% busy");
+        assert!((get(SignalKey::Cpu).ratio.unwrap() - 0.5).abs() < 1e-9);
         assert_eq!(get(SignalKey::Disk).value, "200 GB free");
         assert!((get(SignalKey::Disk).ratio.unwrap() - 0.1).abs() < 1e-9);
         assert_eq!(get(SignalKey::Pressure).value, "normal");
@@ -1418,7 +1431,7 @@ mod tests {
     fn machine_heat_follows_the_gate_verdict() {
         assert_eq!(machine_heat(&snap()), 1);
         let mut busy = snap();
-        busy.readings.load1 = Some(72.0);
+        busy.readings.load1 = Some(216.0);
         assert_eq!(machine_heat(&busy), 3, "hot readings with no hold stay at gold");
         busy.holds = vec!["load".into()];
         assert_eq!(machine_heat(&busy), 5);
@@ -1601,7 +1614,7 @@ mod tests {
         let app = busy_app();
         let screen = draw(&app, 140, 44);
         for want in [
-            "ci-queue", "In line", "heavy", "light", "Pressure", "Memory", "Load", "Disk", "Locks", "Recent", "q quit",
+            "ci-queue", "In line", "heavy", "light", "Pressure", "Memory", "CPU", "Load", "Disk", "Locks", "Recent", "q quit",
         ] {
             assert!(screen.contains(want), "missing {want:?}:\n{screen}");
         }
@@ -1616,7 +1629,7 @@ mod tests {
         assert!(!screen.contains("Recent"), "recent drops first:\n{screen}");
         let tiny = draw(&app, 60, 14);
         assert!(!tiny.contains("Pressure"));
-        assert!(tiny.contains("load "), "one-line pressure summary:\n{tiny}");
+        assert!(tiny.contains("cpu "), "one-line pressure summary:\n{tiny}");
         let too_small = draw(&app, 20, 5);
         assert!(too_small.contains("th ci-queue"));
     }

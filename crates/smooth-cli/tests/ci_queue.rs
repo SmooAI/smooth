@@ -48,7 +48,7 @@ impl Q {
         std::fs::write(
             tmp.path().join("ci-queue.toml"),
             "[slots]\nheavy = 1\nlight = 2\n\
-             [gate]\nmin_available_memory_pct = 0\nmax_memory_pressure_level = 0\nmax_swap_used_pct = 0\nmax_load_per_core = 0\nmin_free_disk_gb = 0\n\
+             [gate]\nmin_available_memory_pct = 0\nmax_memory_pressure_level = 0\nmax_swap_used_pct = 0\nmax_cpu_busy_pct = 0\nmax_load_per_core = 0\nmin_free_disk_gb = 0\n\
              [run]\npoll_ms = 20\nkill_grace_secs = 1\nqos = \"normal\"\n",
         )
         .unwrap();

@@ -56,7 +56,9 @@ pub struct Budget {
     pub max_passes: u32,
     /// AIMD on the scale: +`aimd_step` after `aimd_clean_samples` calm pressure
     /// samples in a row, ×0.5 on any gate signal (at most every 10s), clamped to
-    /// [`aimd_min`, `aimd_max`].
+    /// [`aimd_min`, `aimd_max`]. The signals are the gate's: memory, swap,
+    /// disk, CPU busy, and load only as the backstop `Gate::max_load_per_core`
+    /// describes — so the scale recovers on idle CPUs however high load reads.
     pub aimd_step: f64,
     pub aimd_clean_samples: u32,
     pub aimd_min: f64,
@@ -124,9 +126,19 @@ pub struct Gate {
     /// swapped pages stay there long after the pressure that pushed them out
     /// has gone, so a quiet machine routinely reads over 90%.
     pub max_swap_used_pct: f64,
-    /// Hold while the 1-minute load average is above this many per core.
-    /// macOS load counts more than runnable threads, which is why the default
-    /// is well above "busy".
+    /// Hold while the CPUs, all cores together, are busier than this percent
+    /// (user + system + nice, averaged over ~10 s). This is the CPU signal.
+    pub max_cpu_busy_pct: f64,
+    /// A far backstop: hold while the 1-minute load average is above this many
+    /// per core AND the CPUs are at least half busy (or their busy reading is
+    /// unknown). macOS load counts threads blocked in the kernel, not just
+    /// runnable ones: on 2026-09-30 it read ~108 on 12 cores with 4 runnable
+    /// threads, most of it `exec` waiting on `syspolicyd` to scan new test
+    /// binaries, and gating on it at 4/core (with the AIMD scale it drove at
+    /// its floor) held the queue to one heavy job for hours. The backstop
+    /// stays for the real starvation nights — load 180–270 with builds stuck
+    /// behind the shared cargo lock (see [`Qos`]), load 1,022 on 2026-09-26 —
+    /// which were CPU-bound as well.
     pub max_load_per_core: f64,
     /// Hold while any watched volume has less than this free: the job's cwd,
     /// the cargo target dir, and `disk_paths`.
@@ -141,7 +153,8 @@ impl Default for Gate {
             min_available_memory_pct: 5.0,
             max_memory_pressure_level: 1,
             max_swap_used_pct: 90.0,
-            max_load_per_core: 4.0,
+            max_cpu_busy_pct: 90.0,
+            max_load_per_core: 12.0,
             min_free_disk_gb: 20.0,
             disk_paths: Vec::new(),
         }
@@ -154,6 +167,7 @@ impl Gate {
         self.min_available_memory_pct <= 0.0
             && self.max_memory_pressure_level == 0
             && self.max_swap_used_pct <= 0.0
+            && self.max_cpu_busy_pct <= 0.0
             && self.max_load_per_core <= 0.0
             && self.min_free_disk_gb <= 0.0
     }
@@ -325,7 +339,7 @@ mod tests {
     fn all_zero_thresholds_disable_the_gate() {
         assert!(!Gate::default().disabled());
         let c = Config::parse(
-            "[gate]\nmin_available_memory_pct = 0\nmax_memory_pressure_level = 0\nmax_swap_used_pct = 0\nmax_load_per_core = 0\nmin_free_disk_gb = 0\n",
+            "[gate]\nmin_available_memory_pct = 0\nmax_memory_pressure_level = 0\nmax_swap_used_pct = 0\nmax_cpu_busy_pct = 0\nmax_load_per_core = 0\nmin_free_disk_gb = 0\n",
         )
         .unwrap();
         assert!(c.gate.disabled());

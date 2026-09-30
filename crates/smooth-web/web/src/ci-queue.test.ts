@@ -35,7 +35,14 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
         dir: '/q',
         config: {
             slots: { heavy: 2, light: 6 },
-            gate: { min_available_memory_pct: 5, max_memory_pressure_level: 1, max_swap_used_pct: 90, max_load_per_core: 4, min_free_disk_gb: 20 },
+            gate: {
+                min_available_memory_pct: 5,
+                max_memory_pressure_level: 1,
+                max_swap_used_pct: 90,
+                max_cpu_busy_pct: 90,
+                max_load_per_core: 4,
+                min_free_disk_gb: 20,
+            },
         },
         now_ms: 100_000,
         running: [],
@@ -47,6 +54,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
             swap_total_bytes: 20 * GB,
             swap_used_bytes: 2 * GB,
             load1: 12,
+            cpu_busy_pct: 45,
             cores: 12,
             disks: [{ path: '/', free_bytes: 200 * GB }],
         },
@@ -89,6 +97,8 @@ test('signals read each gate threshold in the worse-is-higher direction', () => 
     assert.equal(by.swap.value, '10% used');
     assert.equal(by.load.value, '12 · 1.0/core');
     assert.equal(by.load.ratio, 0.25);
+    assert.equal(by.cpu.value, '45% busy');
+    assert.equal(by.cpu.ratio, 0.5);
     assert.equal(by.disk.value, '200 GB free');
     assert.equal(by.disk.ratio, 0.1);
     assert.equal(by.pressure.value, 'normal');
@@ -101,6 +111,7 @@ test('an unknown reading is unknown, not zero, and a 0 threshold turns a signal 
     assert.ok(s.every((x) => x.ratio === null));
     assert.ok(s.every((x) => x.value === 'unknown'));
     assert.equal(s.find((x) => x.key === 'load')?.off, true);
+    assert.equal(signals(r, { ...g, max_cpu_busy_pct: undefined }).find((x) => x.key === 'cpu')?.off, true, 'an older snapshot has no CPU threshold');
     assert.equal(
         s.find((x) => x.key === 'pressure'),
         undefined,

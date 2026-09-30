@@ -83,6 +83,8 @@ export interface Readings {
     swap_total_bytes?: number | null;
     swap_used_bytes?: number | null;
     load1?: number | null;
+    /** Percent of all CPU time not idle, smoothed over ~10 s. */
+    cpu_busy_pct?: number | null;
     cores: number;
     disks: Disk[];
 }
@@ -91,6 +93,9 @@ export interface Gate {
     min_available_memory_pct: number;
     max_memory_pressure_level: number;
     max_swap_used_pct: number;
+    /** Absent from snapshots older than the CPU signal. */
+    max_cpu_busy_pct?: number;
+    /** A backstop: counts only while the CPUs are at least half busy. */
     max_load_per_core: number;
     min_free_disk_gb: number;
 }
@@ -177,7 +182,7 @@ export function heatOf(ratio: number): Heat {
 
 // ── Signals ──────────────────────────────────────────────────────────────────
 
-export type SignalKey = 'memory' | 'pressure' | 'swap' | 'load' | 'disk';
+export type SignalKey = 'memory' | 'pressure' | 'swap' | 'cpu' | 'load' | 'disk';
 
 export interface Signal {
     key: SignalKey;
@@ -264,12 +269,23 @@ export function signals(r: Readings, g: Gate): Signal[] {
         off: g.max_swap_used_pct <= 0,
         note: 'only while memory is tight',
     });
+    const cpu = r.cpu_busy_pct ?? null;
+    const maxCpu = g.max_cpu_busy_pct ?? 0;
+    out.push({
+        key: 'cpu',
+        name: 'CPU',
+        value: cpu == null ? 'unknown' : `${Math.round(cpu)}% busy`,
+        limit: `holds above ${Math.round(maxCpu)}%`,
+        ratio: cpu == null || maxCpu <= 0 ? null : cpu / maxCpu,
+        off: maxCpu <= 0,
+    });
     const lpc = loadPerCore(r);
     out.push({
         key: 'load',
         name: 'Load',
         value: lpc == null || r.load1 == null ? 'unknown' : `${r.load1.toFixed(0)} · ${lpc.toFixed(1)}/core`,
-        limit: `holds above ${g.max_load_per_core}/core`,
+        limit: `backstop above ${g.max_load_per_core}/core`,
+        note: 'only while the CPUs are busy',
         ratio: lpc == null || g.max_load_per_core <= 0 ? null : lpc / g.max_load_per_core,
         off: g.max_load_per_core <= 0,
     });

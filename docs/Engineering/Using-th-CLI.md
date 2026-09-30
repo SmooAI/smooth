@@ -1611,12 +1611,26 @@ th ci-queue status --json
 | memory available    | below this % of RAM (macOS free + inactive + speculative + purgeable; Linux `MemAvailable`) | 5%      |
 | memory pressure     | macOS `kern.memorystatus_vm_pressure_level` above this (1 normal, 2 warn, 4 critical)       | 1       |
 | swap used           | above this % **and** memory is tight                                                        | 90%     |
-| load (1 min)        | above this many per core                                                                    | 4.0     |
+| cpu busy            | all cores together busier than this % (user + system + nice, ~10 s average)                 | 90%     |
+| load (1 min)        | backstop: above this many per core **and** the CPUs at least 50% busy (or unreadable)       | 12.0    |
 | free disk           | below this on the job's cwd, the cargo target dir, or `disk_paths`                          | 20 GB   |
 
 Swap only counts alongside tight memory. On macOS, swapped pages stay in swap
 long after the pressure that pushed them out has gone, so a quiet machine
 routinely reads over 90%. An unreadable signal never holds a job.
+
+**CPU busy is the CPU signal, not load average.** macOS load counts threads
+blocked in the kernel as well as runnable ones. On 2026-09-30 the load read
+~108 on 12 cores with only 4 runnable threads: most of it was `exec` waiting on
+`syspolicyd` to check the code signatures of freshly built test binaries. The
+old 4/core load gate, and the AIMD scale it drove to its 0.25 floor, held 20
+heavy jobs for 15–24 minutes behind one on a mostly idle machine. CPU busy is
+measured from the kernel's per-CPU tick counters. Each `th` measures its own
+interval, and the queue smooths the readings into one ~10 s average in
+`~/.smooth/ci-queue/cpu.json`. A `th` too new to have an interval of its own
+uses that average while it is under 30 s old. Load stays as a far backstop for
+the real starvation nights (load 180–270 behind a starved lock holder, 1,022 on
+2026-09-26), which were CPU-bound too.
 
 **The gate cannot deadlock:** it holds nothing when no other heavy job is
 running. Waiting then could not relieve anything the queue controls, so a
@@ -1734,7 +1748,8 @@ light = 6
 min_available_memory_pct = 5
 max_memory_pressure_level = 1
 max_swap_used_pct = 90
-max_load_per_core = 4.0
+max_cpu_busy_pct = 90
+max_load_per_core = 12.0 # backstop; counts only while the CPUs are ≥ 50% busy
 min_free_disk_gb = 20
 disk_paths = []
 

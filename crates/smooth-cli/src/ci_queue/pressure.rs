@@ -2,7 +2,17 @@
 //!
 //! Readings come through the [`Probe`] trait so the queue's tests inject them;
 //! nothing in a test reads the real machine. [`SystemProbe`] is the real one:
-//! `vm_stat` + `sysctl` on macOS, `/proc` on Linux, `df -Pk` for disks.
+//! `vm_stat` + `sysctl` on macOS, `/proc` on Linux, `df -Pk` for disks, and
+//! the kernel's CPU tick counters (via `sysinfo`) for how busy the CPUs are.
+//!
+//! **CPU busy, not load average, is the CPU signal.** macOS load counts
+//! threads blocked in the kernel as well as runnable ones. On 2026-09-30 the
+//! load sat at ~108 on 12 cores while only 4 threads were runnable: most of
+//! the "load" was `exec` waiting on `syspolicyd` to validate the signatures of
+//! freshly built test binaries. Gating on it held 20 heavy jobs for 15–24
+//! minutes behind one, on a machine that was mostly idle. Load is now a far
+//! backstop that only counts while the CPUs are also measured busy (see
+//! [`holds`]).
 //!
 //! An unreadable signal is `None` and never holds a job. The gate is a
 //! throttle on top of the slot cap, not a safety interlock, so "don't know"
@@ -10,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +38,10 @@ pub struct Readings {
     pub swap_total_bytes: Option<u64>,
     pub swap_used_bytes: Option<u64>,
     pub load1: Option<f64>,
+    /// Percent of all CPU time spent not idle (user + system + nice), across
+    /// every core, smoothed over ~10 s. `None` until two samples exist.
+    #[serde(default)]
+    pub cpu_busy_pct: Option<f64>,
     pub cores: usize,
     pub disks: Vec<Disk>,
 }
@@ -66,6 +82,9 @@ pub trait Probe: Send + Sync {
     fn read(&self, disk_paths: &[PathBuf]) -> Readings;
 }
 
+/// Below this CPU busy percentage, load average never holds a job: see [`holds`].
+pub const LOAD_COUNTS_FROM_CPU_BUSY_PCT: f64 = 50.0;
+
 /// Why the gate is holding new heavy jobs right now; empty means it is not.
 /// Each entry is one short phrase for the `waiting (…)` line.
 pub fn holds(r: &Readings, g: &Gate) -> Vec<String> {
@@ -92,9 +111,20 @@ pub fn holds(r: &Readings, g: &Gate) -> Vec<String> {
             }
         }
     }
+    if g.max_cpu_busy_pct > 0.0 {
+        if let Some(c) = r.cpu_busy_pct.filter(|c| *c > g.max_cpu_busy_pct) {
+            why.push(format!("cpu {c:.0}% busy"));
+        }
+    }
     if g.max_load_per_core > 0.0 {
         if let (Some(per), Some(l)) = (r.load_per_core(), r.load1) {
-            if per > g.max_load_per_core {
+            // Load is the backstop for when the CPU reading is missing or is
+            // understating real contention — not a signal on its own. With
+            // the CPUs measured under half busy, a high load is threads parked
+            // in the kernel (exec on syspolicyd, I/O), and holding jobs for it
+            // relieves nothing.
+            let cpu_busy_enough = r.cpu_busy_pct.is_none_or(|c| c >= LOAD_COUNTS_FROM_CPU_BUSY_PCT);
+            if per > g.max_load_per_core && cpu_busy_enough {
                 why.push(format!("load {l:.1} on {} cores", r.cores));
             }
         }
@@ -121,8 +151,99 @@ pub const fn pressure_name(level: u32) -> &'static str {
     }
 }
 
-/// The real machine.
-pub struct SystemProbe;
+/// The real machine. Holds the CPU meter, whose previous tick sample is what
+/// a busy percentage is measured against.
+pub struct SystemProbe {
+    cpu: Mutex<CpuMeter>,
+}
+
+impl SystemProbe {
+    /// Takes the first CPU sample now, so the first `read` that is at least
+    /// [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`] later has a delta to measure.
+    pub fn new() -> Self {
+        Self {
+            cpu: Mutex::new(CpuMeter::new()),
+        }
+    }
+}
+
+impl Default for SystemProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// CPU busy % over the time since the previous sample. `sysinfo` diffs the
+/// kernel's per-CPU tick counters (`host_processor_info` on macOS,
+/// `/proc/stat` on Linux) between refreshes; the very first refresh is
+/// measured from boot, so it is only a baseline and never reported.
+struct CpuMeter {
+    sys: sysinfo::System,
+    primed_at: Instant,
+    measured: bool,
+}
+
+impl CpuMeter {
+    fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_usage();
+        Self {
+            sys,
+            primed_at: Instant::now(),
+            measured: false,
+        }
+    }
+
+    fn busy_pct(&mut self) -> Option<f64> {
+        if !self.measured && self.primed_at.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            return None; // no real interval yet; the queue falls back to its last reading
+        }
+        // A refresh sooner than the minimum interval keeps the previous
+        // measurement rather than dividing by a sliver of time.
+        self.sys.refresh_cpu_usage();
+        self.measured = true;
+        let pct = f64::from(self.sys.global_cpu_usage());
+        pct.is_finite().then(|| pct.clamp(0.0, 100.0))
+    }
+}
+
+/// The CPU busy reading the queue keeps between processes (`cpu.json`): each
+/// `th` measures its own interval, and this smooths them into one ~10 s
+/// average, so a compile burst of a second or two neither holds jobs nor
+/// halves the budget's scale on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CpuState {
+    pub busy_pct: f64,
+    pub at_ms: u64,
+}
+
+/// Time constant of the smoothing in [`CpuState::update`].
+pub const CPU_SMOOTHING_MS: f64 = 10_000.0;
+/// A kept reading older than this is not used in place of a fresh one.
+pub const CPU_STALE_MS: u64 = 30_000;
+
+impl CpuState {
+    /// Fold a new raw reading into `prev` (an exponential moving average
+    /// weighted by the time since the last one). No usable `prev` = start
+    /// from the raw reading.
+    pub fn update(prev: Option<Self>, raw: f64, now_ms: u64) -> Self {
+        let busy_pct = match prev.filter(|p| now_ms.saturating_sub(p.at_ms) <= CPU_STALE_MS) {
+            Some(p) => {
+                #[allow(clippy::cast_precision_loss, reason = "milliseconds between samples")]
+                let dt = now_ms.saturating_sub(p.at_ms) as f64;
+                let alpha = 1.0 - (-dt / CPU_SMOOTHING_MS).exp();
+                p.busy_pct + alpha * (raw - p.busy_pct)
+            }
+            None => raw,
+        };
+        Self { busy_pct, at_ms: now_ms }
+    }
+
+    /// The kept reading, if it is recent enough to stand in for a missing one.
+    pub fn fresh(self, now_ms: u64) -> Option<f64> {
+        (now_ms.saturating_sub(self.at_ms) <= CPU_STALE_MS).then_some(self.busy_pct)
+    }
+}
 
 impl Probe for SystemProbe {
     fn read(&self, disk_paths: &[PathBuf]) -> Readings {
@@ -135,6 +256,7 @@ impl Probe for SystemProbe {
                     free_bytes: disk_free(p),
                 })
                 .collect(),
+            cpu_busy_pct: self.cpu.lock().ok().and_then(|mut m| m.busy_pct()),
             ..Readings::default()
         };
         if cfg!(target_os = "macos") {
@@ -299,6 +421,7 @@ Pages purgeable:                          15837.
             swap_total_bytes: Some(gib(19.0)),
             swap_used_bytes: Some(gib(17.7)),
             load1: Some(30.0),
+            cpu_busy_pct: Some(30.0),
             cores: 12,
             disks: vec![Disk {
                 path: "/work".into(),
@@ -371,10 +494,17 @@ Pages purgeable:                          15837.
             swap_total_bytes: Some(gib(23.5)),
             swap_used_bytes: Some(gib(22.0)),
             load1: Some(1022.0),
+            cpu_busy_pct: Some(99.0),
             ..calm()
         };
         let why = holds(&r, &Gate::default()).join(" / ");
-        for want in ["memory 1% available", "memory pressure critical", "swap 94%", "load 1022.0 on 12 cores"] {
+        for want in [
+            "memory 1% available",
+            "memory pressure critical",
+            "swap 94%",
+            "cpu 99% busy",
+            "load 1022.0 on 12 cores",
+        ] {
             assert!(why.contains(want), "missing {want:?} in {why:?}");
         }
     }
@@ -401,10 +531,88 @@ Pages purgeable:                          15837.
     }
 
     #[test]
-    fn load_holds_above_its_per_core_line_only() {
+    fn load_holds_above_its_per_core_line_only_while_the_cpus_are_busy() {
         let g = Gate::default();
-        assert!(holds(&Readings { load1: Some(48.0), ..calm() }, &g).is_empty(), "exactly 4.0/core is not over");
-        assert_eq!(holds(&Readings { load1: Some(49.0), ..calm() }, &g), vec!["load 49.0 on 12 cores"]);
+        let busy = |load: f64| Readings {
+            load1: Some(load),
+            cpu_busy_pct: Some(80.0),
+            ..calm()
+        };
+        assert!(holds(&busy(144.0), &g).is_empty(), "exactly 12/core is not over");
+        assert_eq!(holds(&busy(145.0), &g), vec!["load 145.0 on 12 cores"]);
+        let unknown_cpu = Readings {
+            cpu_busy_pct: None,
+            ..busy(145.0)
+        };
+        assert_eq!(holds(&unknown_cpu, &g), vec!["load 145.0 on 12 cores"], "no CPU reading: load is the backstop");
+    }
+
+    /// 2026-09-30: load ~108 on 12 cores, 4 runnable threads, syspolicyd
+    /// scanning new test binaries, 27% memory free. That is not contention,
+    /// and must admit — even at the load of the priority-inversion nights.
+    #[test]
+    fn high_load_with_idle_cpus_admits() {
+        let g = Gate::default();
+        let r = Readings {
+            load1: Some(108.0),
+            cpu_busy_pct: Some(22.0),
+            mem_available_bytes: Some(gib(17.3)),
+            ..calm()
+        };
+        assert!(holds(&r, &g).is_empty(), "{:?}", holds(&r, &g));
+        let r = Readings { load1: Some(270.0), ..r };
+        assert!(holds(&r, &g).is_empty(), "load 22/core with the CPUs 22% busy is threads parked in the kernel");
+        let r = Readings {
+            cpu_busy_pct: Some(LOAD_COUNTS_FROM_CPU_BUSY_PCT),
+            ..r
+        };
+        assert_eq!(holds(&r, &g), vec!["load 270.0 on 12 cores"], "half-busy CPUs make the backstop count");
+    }
+
+    #[test]
+    fn saturated_cpus_hold_whatever_the_load() {
+        let g = Gate::default();
+        let r = Readings {
+            load1: Some(14.0),
+            cpu_busy_pct: Some(97.0),
+            ..calm()
+        };
+        assert_eq!(holds(&r, &g), vec!["cpu 97% busy"]);
+        assert!(
+            holds(
+                &Readings {
+                    cpu_busy_pct: Some(90.0),
+                    ..r.clone()
+                },
+                &g
+            )
+            .is_empty(),
+            "exactly the limit is not over"
+        );
+        let off = Gate { max_cpu_busy_pct: 0.0, ..g };
+        assert!(holds(&r, &off).is_empty());
+    }
+
+    #[test]
+    fn cpu_state_smooths_bursts_and_restarts_when_stale() {
+        let first = CpuState::update(None, 100.0, 1_000);
+        assert!((first.busy_pct - 100.0).abs() < 1e-9, "no history: the raw reading");
+        let calm = CpuState { busy_pct: 20.0, at_ms: 1_000 };
+        // A 1 s burst to 100% moves a ~10 s average about a tenth of the way.
+        let burst = CpuState::update(Some(calm), 100.0, 2_000);
+        assert!(burst.busy_pct > 25.0 && burst.busy_pct < 30.0, "{burst:?}");
+        assert!(burst.busy_pct < Gate::default().max_cpu_busy_pct);
+        // Sustained saturation gets there.
+        let mut s = calm;
+        for t in 1..=60 {
+            s = CpuState::update(Some(s), 100.0, 1_000 + t * 1_000);
+        }
+        assert!(s.busy_pct > Gate::default().max_cpu_busy_pct, "{s:?}");
+        // A reading from long ago is not averaged into a new one.
+        let stale = CpuState::update(Some(calm), 70.0, 1_000 + CPU_STALE_MS + 1);
+        assert!((stale.busy_pct - 70.0).abs() < 1e-9);
+        assert_eq!(calm.fresh(1_000 + CPU_STALE_MS), Some(20.0));
+        assert_eq!(calm.fresh(1_000 + CPU_STALE_MS + 1), None);
     }
 
     #[test]
@@ -438,15 +646,17 @@ Pages purgeable:                          15837.
     fn a_zero_threshold_turns_its_signal_off() {
         let r = Readings {
             load1: Some(1000.0),
+            cpu_busy_pct: Some(100.0),
             memory_pressure_level: Some(4),
             ..calm()
         };
         let g = Gate {
             max_load_per_core: 0.0,
+            max_cpu_busy_pct: 0.0,
             max_memory_pressure_level: 0,
             ..Gate::default()
         };
-        // Load and the pressure signal are off. Swap is still on, and it
+        // Load, CPU and the pressure signal are off. Swap is still on, and it
         // judges "memory is tight" by the kernel's level whether or not that
         // level is itself a hold signal — so calm()'s 93% swap now counts.
         assert_eq!(holds(&r, &g), vec!["swap 93%"]);
@@ -461,7 +671,10 @@ Pages purgeable:                          15837.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn the_system_probe_reads_this_machine() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = SystemProbe.read(&[tmp.path().to_path_buf()]);
+        let probe = SystemProbe::new();
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL * 2);
+        let r = probe.read(&[tmp.path().to_path_buf()]);
+        assert!(r.cpu_busy_pct.is_some_and(|c| (0.0..=100.0).contains(&c)), "{r:?}");
         assert!(r.cores >= 1);
         assert!(r.mem_total_bytes.unwrap_or(0) > 0, "{r:?}");
         assert!(r.mem_available_bytes.is_some(), "{r:?}");
