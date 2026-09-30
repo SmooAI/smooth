@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.60.0
+
+### Minor Changes
+
+- a0ce5e6: SmoothFlow: `th flow hook <harness> <Event>` replaces `flow-hook.sh` as the state hook that every harness runs (th-f97a27). It is native Rust, so it needs no bash, curl or jq and works on Windows. It keeps the script's wire behavior: the same route, token header and envelope; the same `PermissionRequest` long-poll of up to 120 s, which prints the decision verbatim; the same stdout preface for gemini, copilot and cursor-agent; and exit 0 on every path. It is dispatched before clap and before auth and log setup, so a hook pays only for process startup, and a usage error can never become clap's exit 2, which would block a tool call. The smooth-agent plugin and every `th pkg` overlay (Codex, Gemini, Qwen, Droid, Copilot, Cursor) now run `th flow hook <h> <Event> || exit 0`. Harnesses that parse stdout fall back to printing their no-opinion answer. `th harness doctor` recognizes the native hook. `flow-hook.sh` stays for one release as a shim that execs `th flow hook` when the installed `th` supports it. To pick up the new hooks, run `th harness enable claude-code` (or `codex`, and so on).
+
 ## 0.59.3
 
 ### Patch Changes
