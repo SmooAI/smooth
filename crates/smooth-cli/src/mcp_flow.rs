@@ -14,6 +14,9 @@ use rmcp::{handler::server::wrapper::Parameters, model::ErrorData, tool, tool_ro
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
+// th-8b3918: the list/line/turn rules live in smooth-flow so Big Smooth's
+// in-process flow tools give the model the same answers as these.
+use smooth_flow::vocab::{self, session_line, turn_progress, Turn};
 
 use crate::mcp_serve::SmoothMcp;
 
@@ -176,29 +179,6 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// One line per session, the way a person scans a fleet.
-fn session_line(v: &Value) -> String {
-    let mut line = format!("- {} [{}] {}", s(v, "id"), s(v, "kind"), s(v, "state"));
-    let title = s(v, "title");
-    if !title.is_empty() {
-        let _ = write!(line, " — {title}");
-    }
-    if let Some(p) = v.get("pearl_id").and_then(Value::as_str).filter(|p| !p.is_empty()) {
-        let _ = write!(line, " ({p})");
-    }
-    let wt = s(v, "worktree");
-    if !wt.is_empty() {
-        let _ = write!(line, " @ {wt}");
-    }
-    if let Some(att) = v.get("attention").filter(|a| !a.is_null()) {
-        let _ = write!(line, "  ⚠ {}", s(att, "reason"));
-        if let Some(r) = att.get("request_id").and_then(Value::as_str).filter(|r| !r.is_empty()) {
-            let _ = write!(line, " (request_id {r})");
-        }
-    }
-    line
-}
-
 async fn session(id: &str) -> Result<Value, ErrorData> {
     let v = call(Method::GET, "/api/flow/sessions", None).await?;
     v.get("sessions")
@@ -211,32 +191,7 @@ async fn screen_tail(id: &str, lines: usize) -> String {
     let Ok(v) = crate::flow::call(Method::GET, &format!("/api/flow/sessions/{id}/snapshot"), None).await else {
         return String::new();
     };
-    let text = v.pointer("/screen/text").and_then(Value::as_str).unwrap_or("");
-    let kept: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    kept[kept.len().saturating_sub(lines)..].join("\n")
-}
-
-/// Where a submitted turn stands, from the session's state (th-1efb59).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Turn {
-    /// Keep waiting.
-    Running,
-    /// The turn ended in this state (idle, needs_you, limited, done, dead).
-    Settled,
-    /// The agent never started working after the prompt.
-    Stalled,
-}
-
-/// Pure: has the turn ended? `started` is whether the session has been seen
-/// `working` since the send. A turn that has not started after `stall_after`
-/// stalled (the prompt never landed, or the harness reports no state).
-fn turn_progress(started: bool, state: &str, since_send: Duration, stall_after: Duration) -> Turn {
-    match state {
-        "needs_you" | "limited" | "done" | "dead" => Turn::Settled,
-        "idle" if started => Turn::Settled,
-        _ if !started && since_send >= stall_after => Turn::Stalled,
-        _ => Turn::Running,
-    }
+    vocab::screen_tail(v.pointer("/screen/text").and_then(Value::as_str).unwrap_or(""), lines)
 }
 
 // ── tools ───────────────────────────────────────────────────────────────────
@@ -256,20 +211,7 @@ impl SmoothMcp {
         let args = params.0;
         let v = call(Method::GET, "/api/flow/sessions", None).await?;
         let all = v.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default();
-        let finished = args.include_finished.unwrap_or(false);
-        let rows: Vec<&Value> = all
-            .iter()
-            .filter(|s| args.state.as_deref().is_none_or(|want| self::s(s, "state") == want))
-            .filter(|s| finished || args.state.is_some() || !matches!(self::s(s, "state"), "done" | "dead"))
-            .collect();
-        if rows.is_empty() {
-            return Ok("No SmoothFlow sessions match. Start one with flow_new.".to_string());
-        }
-        let mut out = format!("{} session(s):\n", rows.len());
-        for r in rows {
-            let _ = writeln!(out, "{}", session_line(r));
-        }
-        Ok(out)
+        Ok(vocab::render_list(&all, args.state.as_deref(), args.include_finished.unwrap_or(false)))
     }
 
     /// A session's current screen.
@@ -311,19 +253,7 @@ impl SmoothMcp {
     )]
     pub async fn flow_harnesses(&self) -> Result<String, ErrorData> {
         let v = call(Method::GET, "/api/flow/harnesses", None).await?;
-        let mut out = String::new();
-        for h in v.get("harnesses").and_then(Value::as_array).cloned().unwrap_or_default() {
-            let installed = h.get("installed").and_then(Value::as_bool).unwrap_or(false);
-            let _ = write!(out, "- {} ({})", s(&h, "name"), if installed { "installed" } else { "not installed" });
-            if let Some(health) = h.get("health").filter(|x| s(x, "verdict") == "degraded") {
-                let _ = write!(out, " — needs setup: {}", s(health, "reason"));
-                if !s(health, "fix").is_empty() {
-                    let _ = write!(out, " (fix: {})", s(health, "fix"));
-                }
-            }
-            out.push('\n');
-        }
-        Ok(out)
+        Ok(vocab::render_harnesses(v.get("harnesses").and_then(Value::as_array).map_or(&[], Vec::as_slice)))
     }
 
     /// Search the git repos under the user's home.
@@ -339,25 +269,7 @@ impl SmoothMcp {
         let a = params.0;
         let q = urlencoding::encode(a.query.as_deref().unwrap_or(""));
         let v = call(Method::GET, &format!("/api/flow/repos?q={q}&limit={}", a.limit.unwrap_or(20)), None).await?;
-        let repos = v.get("repos").and_then(Value::as_array).cloned().unwrap_or_default();
-        if repos.is_empty() {
-            let scanning = v.get("scanning").and_then(Value::as_bool).unwrap_or(false);
-            return Ok(if scanning {
-                "No match yet — the repo index is still scanning; try again shortly."
-            } else {
-                "No repo matches."
-            }
-            .to_string());
-        }
-        let mut out = String::new();
-        for r in repos {
-            let _ = write!(out, "- {} {}", s(&r, "name"), s(&r, "path"));
-            if !s(&r, "branch").is_empty() {
-                let _ = write!(out, " ({})", s(&r, "branch"));
-            }
-            out.push('\n');
-        }
-        Ok(out)
+        Ok(vocab::render_repos(&v))
     }
 
     /// The context a new session in `cwd` would inherit.
@@ -426,24 +338,12 @@ impl SmoothMcp {
     pub async fn flow_prompt_wait(&self, params: Parameters<FlowSendArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         let before = session(&a.id).await?;
-        if matches!(s(&before, "state"), "needs_you" | "limited" | "done" | "dead") {
-            return Err(ErrorData::invalid_request(
-                format!(
-                    "{} is {} — it cannot take a prompt now{}",
-                    a.id,
-                    s(&before, "state"),
-                    if s(&before, "state") == "needs_you" {
-                        " (answer its approval with flow_approve first)"
-                    } else {
-                        ""
-                    }
-                ),
-                None,
-            ));
+        if let Some(why) = vocab::prompt_refusal(&a.id, s(&before, "state")) {
+            return Err(ErrorData::invalid_request(why, None));
         }
         call(Method::POST, &format!("/api/flow/sessions/{}/send", a.id), Some(json!({ "text": a.text }))).await?;
-        let timeout = Duration::from_secs(a.timeout_secs.unwrap_or(600).clamp(5, 3600));
-        let stall_after = Duration::from_secs(60).min(timeout);
+        let timeout = vocab::prompt_wait_timeout(a.timeout_secs);
+        let stall_after = Duration::from_secs(vocab::PROMPT_STALL_SECS).min(timeout);
         let sent = tokio::time::Instant::now();
         let mut started = false;
         loop {
@@ -600,47 +500,5 @@ impl SmoothMcp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const S: Duration = Duration::from_secs(1);
-
-    #[test]
-    fn a_turn_settles_only_after_it_started_unless_it_is_blocked() {
-        let stall = Duration::from_secs(60);
-        assert_eq!(turn_progress(false, "idle", S, stall), Turn::Running, "still idle right after the send");
-        assert_eq!(turn_progress(true, "working", S, stall), Turn::Running);
-        assert_eq!(turn_progress(true, "idle", S * 30, stall), Turn::Settled);
-        assert_eq!(
-            turn_progress(false, "needs_you", S, stall),
-            Turn::Settled,
-            "blocked on an approval ends the wait"
-        );
-        assert_eq!(turn_progress(false, "dead", S, stall), Turn::Settled);
-        assert_eq!(turn_progress(false, "idle", S * 61, stall), Turn::Stalled, "never started");
-        assert_eq!(turn_progress(true, "working", S * 600, stall), Turn::Running, "a long turn is not a stall");
-    }
-
-    #[test]
-    fn a_session_line_names_what_a_person_needs() {
-        let v = json!({
-            "id": "fs-1", "kind": "claude", "state": "needs_you", "title": "fix the parser",
-            "pearl_id": "th-1", "worktree": "/w", "attention": { "reason": "permission", "request_id": "r9" }
-        });
-        let line = session_line(&v);
-        for part in [
-            "fs-1",
-            "[claude]",
-            "needs_you",
-            "fix the parser",
-            "(th-1)",
-            "@ /w",
-            "permission",
-            "request_id r9",
-        ] {
-            assert!(line.contains(part), "{part} missing from {line}");
-        }
-        assert_eq!(session_line(&json!({ "id": "fs-2", "kind": "shell", "state": "idle" })), "- fs-2 [shell] idle");
-    }
-}
+// The list/line/turn rules these tools share with Big Smooth's in-process
+// flow tools are tested where they live: `smooth_flow::vocab`.

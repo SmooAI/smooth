@@ -1286,6 +1286,52 @@ impl Engine {
         Ok(path)
     }
 
+    /// Create a worktree `../<repo>-<slug(branch)>` checked out on exactly
+    /// `branch` (th-8b3918, `project_setup`): the existing local branch when
+    /// there is one, else a new branch from `base`. Idempotent when the path
+    /// already exists.
+    ///
+    /// # Errors
+    /// When `branch` is not a valid branch name, or git refuses.
+    pub fn create_branch_worktree(project: &Path, branch: &str, base: &str) -> Result<PathBuf> {
+        let branch = branch.trim();
+        // `check-ref-format --branch` is git's own rule; the leading-dash test
+        // also keeps the name from ever being read as an option.
+        if branch.is_empty() || branch.starts_with('-') || git(project, &["check-ref-format", "--branch", branch]).is_err() {
+            bail!("not a valid branch name: {branch:?}");
+        }
+        let repo = project.file_name().map_or_else(|| "repo".into(), |f| f.to_string_lossy().into_owned());
+        let slug = slugify(branch, 48);
+        let slug = if slug.is_empty() { "branch".to_string() } else { slug };
+        let path = project.parent().unwrap_or(project).join(format!("{repo}-{slug}"));
+        if path.exists() {
+            return Ok(path);
+        }
+        let path_s = path.to_string_lossy().into_owned();
+        let local = format!("refs/heads/{branch}");
+        if git(project, &["rev-parse", "--verify", "--quiet", &local]).is_ok() {
+            git(project, &["worktree", "add", &path_s, branch])?;
+        } else {
+            git(project, &["worktree", "add", &path_s, "-b", branch, base])?;
+        }
+        Ok(path)
+    }
+
+    /// The `$HOME` this engine resolves harnesses and user files against
+    /// (a tempdir under test). Hosts derive user-facing default locations —
+    /// `project_setup`'s `~/dev` clone root — from it rather than from the
+    /// process environment, so a scratch engine never touches the real home.
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        &self.inner.home
+    }
+
+    /// The main checkout new sessions default to.
+    #[must_use]
+    pub fn default_project(&self) -> &Path {
+        &self.inner.default_project
+    }
+
     /// `flow.new`: resolve the worktree, launch under tmux, persist, broadcast.
     ///
     /// # Errors
@@ -3935,6 +3981,31 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-qm", "init"]);
         run(&["checkout", "-q", "-b", branch]);
+    }
+
+    /// th-8b3918: a branch worktree lands beside the checkout on exactly
+    /// that branch, reuses an existing branch, is idempotent, and refuses a
+    /// name git would read as an option or reject.
+    #[test]
+    fn branch_worktrees_check_out_exactly_the_named_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        git_repo(&project, "main");
+
+        let wt = Engine::create_branch_worktree(&project, "feat/login-fix", "HEAD").unwrap();
+        assert_eq!(wt, tmp.path().join("proj-feat-login-fix"));
+        assert_eq!(git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "feat/login-fix");
+        assert_eq!(Engine::create_branch_worktree(&project, "feat/login-fix", "HEAD").unwrap(), wt, "idempotent");
+
+        // An existing branch is checked out, not recreated.
+        git(&project, &["branch", "already-there"]).unwrap();
+        let wt2 = Engine::create_branch_worktree(&project, "already-there", "HEAD").unwrap();
+        assert_eq!(git(&wt2, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "already-there");
+
+        for bad in ["", "-f", "--upload-pack=x", "a..b", "has space"] {
+            assert!(Engine::create_branch_worktree(&project, bad, "HEAD").is_err(), "{bad:?} must be refused");
+        }
     }
 
     /// Issue `id` a hook token the way a launch does, and present it.

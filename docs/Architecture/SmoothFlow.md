@@ -18,17 +18,18 @@ dumb view.
 
 ## Where the pieces live
 
-| Piece                                                    | Path                                                         |
-| -------------------------------------------------------- | ------------------------------------------------------------ |
-| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                        |
-| Session host seam (`SessionHost`, `TmuxHost`)            | `crates/smooth-flow/src/host.rs` — see [host](#session-host) |
-| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                     |
-| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                          |
-| End-to-end encryption + phone pairing (th-d98fde)        | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs` |
-| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                           |
-| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)                |
-| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)         |
-| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)  |
+| Piece                                                    | Path                                                                                 |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                                                |
+| Session host seam (`SessionHost`, `TmuxHost`)            | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
+| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                                             |
+| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                                                  |
+| End-to-end encryption + phone pairing (th-d98fde)        | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
+| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                                                   |
+| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)                                        |
+| Big Smooth's in-process `flow_*` tools (th-8b3918)       | `crates/smooth-daemon/src/flow_tools.rs` — see [fleet](#big-smooth-drives-the-fleet) |
+| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)                                 |
+| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)                          |
 
 ## Process model
 
@@ -772,6 +773,96 @@ exactly this shape) when the installed `th` has it, else `pearl` degrades to
 `{id, text}` from the plain `th pearls show` and the lists to `[]`; `pr`
 comes from `gh pr list --head <branch>` (falling back to the packet's) and is
 `null` without `gh`.
+
+## Big Smooth drives the fleet {#big-smooth-drives-the-fleet}
+
+> th-8b3918 (epic Phase 2). The tool foundation for an in-app copilot that sets
+> up projects, starts and steers coding agents, and watches the fleet.
+
+Big Smooth's own agent (the operator `LocalServer` the daemon hosts) gets the
+SmoothFlow verbs as ordinary tools on its per-turn registry. They call the flow
+`Engine` **in-process**: no HTTP, no token. `serve_local_flavor` opens the
+engine (`flow_route::install`) _before_ it builds the tool provider and hands it
+in (`local_tool_provider_with_flow(…, Some(engine))`). The ephemeral and test
+providers pass `None` and get no flow tools.
+
+The names, argument schemas and answers match the MCP tools in
+`smooth-cli/src/mcp_flow.rs`, so a model sees one vocabulary through either
+door. The rules both share live in `smooth_flow::vocab`: the list filter, the
+one-line session summary, the prompt refusal, and `turn_progress`
+(settled / stalled / running).
+
+| Tool                                                                                       | Class       | Gate                                  |
+| ------------------------------------------------------------------------------------------ | ----------- | ------------------------------------- |
+| `flow_list`, `flow_snapshot`, `flow_handoff`, `flow_harnesses`, `flow_repos`, `flow_infer` | read        | none; kept in Plan mode               |
+| `flow_new`, `flow_send`, `flow_prompt_wait`, `flow_fanout_new`, `project_setup`            | write       | confirm; dropped in Plan mode         |
+| `flow_kill`, `flow_close`, `flow_fanout_pick`                                              | destructive | confirm; dropped in Plan mode         |
+| `flow_approve`                                                                             | approve     | confirm, always; dropped in Plan mode |
+
+- **Confirm** is the daemon's `CONFIRM_TOOLS` floor (`operator.rs`). Core's
+  `ConfirmationHook` parks the turn on `write_confirmation_required` until the
+  user answers. The floor is merged in whatever `SMOOTH_AGENT_CONFIRM_TOOLS`
+  says, and `SMOOTH_AUTO_MODE` never reads it, so `bypass` doesn't skip it.
+  `flow_approve` answers another agent's permission prompt, which is the
+  user's call by definition.
+- **Plan mode** keeps the six reads, via `PLAN_READONLY_TOOLS`, and drops
+  everything else.
+- **Demo mode** (`SMOOTH_DEMO`) drops all fifteen, because a reviewer must not
+  see the host's sessions. Family roles get them only when a role grants them.
+- **Sidekicks.** A `send_sidekick` snapshot never includes a confirm-gated
+  tool. A sidekick's registry carries none of the turn's hooks, so such a tool
+  would run unconfirmed there.
+- **Hooks.** The permission gate and Narc see every flow call like any other
+  tool.
+- **No sandbox.** A flow session runs on the host, outside the kernel sandbox
+  that confines `bash`: an agent session is a process on this machine.
+  `project_setup`'s `git clone` also runs on the host. That is why every write
+  parks for the user.
+
+`flow_prompt_wait` refuses a blocked agent (`needs_you`, `limited`, `done`,
+`dead`) without typing anything. Otherwise it sends the prompt and follows
+the engine's `flow.session` broadcast, so a brief `working` between two polls
+still counts. A 2-second re-read is the backstop. The wait ends settled, or
+stalled (the agent never started working within 60s), or at its timeout
+(default 600s, max 3600s).
+
+`flow_close` never passes `force`. A dirty or unmerged worktree is reported
+back, and forcing past it is the user's call, made in the app or the CLI.
+
+### `project_setup`
+
+`project_setup {repo, clone_into?, pearl_id?, branch?, kind?, prompt?, title?, model?}`
+does in one confirmed call what a person does in the New Session dialog:
+
+1. **The checkout.** `repo` is either a local path or something to clone.
+    - A local path can be absolute, `~/…`, or relative to the turn's cwd. It is
+      used as it is.
+    - A git URL is cloned to `<clone_into>/<name>`. Accepted URLs are
+      `https://`, `http://`, `ssh://`, `git://`, `file://` and scp-style
+      `git@host:owner/repo`; anything else, `ext::` included, is treated as a
+      path. A local **bare** repo path is also cloned.
+    - `clone_into` defaults to `~/dev` under the engine's `$HOME`. There is no
+      new env var for it. A checkout already at the destination is reused when
+      its `origin` matches, and refused otherwise.
+2. **Where the agent runs.**
+    - With `branch`: `Engine::create_branch_worktree` makes
+      `../<repo>-<slug(branch)>` on exactly that branch. It checks out the
+      branch if it exists, else creates it from `HEAD`. Git validates the name,
+      and a name starting with a dash is refused.
+    - With only `pearl_id`: the engine's own pearl worktree
+      (`../<repo>-<pearl>-<slug>`), the same path as `flow.new` with a pearl.
+    - With neither: the checkout itself.
+3. **The session.** It starts `kind` (default `claude`), with the first prompt
+   when one is given. The answer names the checkout, the worktree, the branch
+   and the session id. It also reminds the model that a prompted agent is
+   already working, so it should not be prompted again.
+
+Tests: `crates/smooth-daemon/src/flow_tools/tests.rs` drives every tool against
+a real engine on a scratch `$HOME`, with sessions in smooth-flow's in-memory
+`FakeHost` (the `test-util` feature). It covers list/new/send, `prompt_wait`
+settling, stalling and refusing, approve, kill, close, and `project_setup`
+against a local bare repo. `operator.rs` pins the permission classes: the
+confirm floor, the Plan allowlist, demo exclusion, and the provider wiring.
 
 ## Testing
 

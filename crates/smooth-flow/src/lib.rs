@@ -24,6 +24,7 @@ pub mod repos;
 pub mod scrape;
 pub mod store;
 pub mod tmux;
+pub mod vocab;
 
 pub use engine::{Engine, EngineConfig, HookReply, NewRequest};
 pub use hook_auth::HookCaller;
