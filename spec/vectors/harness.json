@@ -1,0 +1,247 @@
+{
+  "spec": "SmoothFlow-Client-Spec §6 kind picker",
+  "cases": [
+    {
+      "name": "engine order, hidden dropped, shell last, disabled and degraded",
+      "input": {
+        "harnesses": [
+          {
+            "name": "codex",
+            "display_name": "",
+            "installed": false,
+            "reason": "codex not on PATH",
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "shell",
+            "display_name": "",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "claude",
+            "display_name": "Claude Code",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "opencode",
+            "display_name": "OpenCode",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0,
+            "health": {
+              "verdict": "degraded",
+              "reason": "hooks untrusted",
+              "fix": "th harness enable opencode"
+            }
+          },
+          {
+            "name": "aider",
+            "display_name": "",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": true,
+            "order_index": 0
+          },
+          {
+            "name": "gemini",
+            "display_name": "",
+            "installed": false,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          }
+        ],
+        "include_shell": true
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "codex",
+            "label": "codex — codex not on PATH",
+            "enabled": false,
+            "needs_setup": false,
+            "reason": "codex not on PATH"
+          },
+          {
+            "kind": "claude",
+            "label": "Claude Code",
+            "enabled": true,
+            "needs_setup": false
+          },
+          {
+            "kind": "opencode",
+            "label": "OpenCode — needs setup",
+            "enabled": true,
+            "needs_setup": true,
+            "reason": "hooks untrusted",
+            "fix": "th harness enable opencode"
+          },
+          {
+            "kind": "gemini",
+            "label": "gemini — not installed",
+            "enabled": false,
+            "needs_setup": false,
+            "reason": "not installed"
+          },
+          {
+            "kind": "shell",
+            "label": "Shell",
+            "enabled": true,
+            "needs_setup": false
+          }
+        ],
+        "default_kind": "claude"
+      }
+    },
+    {
+      "name": "no shell row when the caller has none (fan-out)",
+      "input": {
+        "harnesses": [
+          {
+            "name": "codex",
+            "display_name": "",
+            "installed": false,
+            "reason": "codex not on PATH",
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "shell",
+            "display_name": "",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "claude",
+            "display_name": "Claude Code",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          },
+          {
+            "name": "opencode",
+            "display_name": "OpenCode",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0,
+            "health": {
+              "verdict": "degraded",
+              "reason": "hooks untrusted",
+              "fix": "th harness enable opencode"
+            }
+          },
+          {
+            "name": "aider",
+            "display_name": "",
+            "installed": true,
+            "state_source": "hooks",
+            "hidden": true,
+            "order_index": 0
+          },
+          {
+            "name": "gemini",
+            "display_name": "",
+            "installed": false,
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          }
+        ],
+        "include_shell": false
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "codex",
+            "label": "codex — codex not on PATH",
+            "enabled": false,
+            "needs_setup": false,
+            "reason": "codex not on PATH"
+          },
+          {
+            "kind": "claude",
+            "label": "Claude Code",
+            "enabled": true,
+            "needs_setup": false
+          },
+          {
+            "kind": "opencode",
+            "label": "OpenCode — needs setup",
+            "enabled": true,
+            "needs_setup": true,
+            "reason": "hooks untrusted",
+            "fix": "th harness enable opencode"
+          },
+          {
+            "kind": "gemini",
+            "label": "gemini — not installed",
+            "enabled": false,
+            "needs_setup": false,
+            "reason": "not installed"
+          }
+        ],
+        "default_kind": "claude"
+      }
+    },
+    {
+      "name": "nothing startable but shell",
+      "input": {
+        "harnesses": [
+          {
+            "name": "codex",
+            "display_name": "",
+            "installed": false,
+            "reason": "codex not on PATH",
+            "state_source": "hooks",
+            "hidden": false,
+            "order_index": 0
+          }
+        ],
+        "include_shell": true
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "codex",
+            "label": "codex — codex not on PATH",
+            "enabled": false,
+            "needs_setup": false,
+            "reason": "codex not on PATH"
+          },
+          {
+            "kind": "shell",
+            "label": "Shell",
+            "enabled": true,
+            "needs_setup": false
+          }
+        ],
+        "default_kind": "shell"
+      }
+    },
+    {
+      "name": "nothing at all",
+      "input": {
+        "harnesses": [],
+        "include_shell": false
+      },
+      "expected": {
+        "rows": [],
+        "default_kind": null
+      }
+    }
+  ]
+}

@@ -258,3 +258,11 @@ control.
 - 2026-09-27: SmoothFlow for iOS renders live `flow.output` in libghostty on Metal
   (smooai#5153, th-a33f6a). SmoothFlow Desktop v0 shipped with an
   `alacritty_terminal` backend (#672).
+- 2026-09-30: `smooth-flow-client` gains the keymap (§9: action names, both
+  platforms' default tables, the `keybindings.toml` parser, conflicts), the
+  harness picker rows (§6), approvability (§7: `permission` or `question` with a
+  non-blank `request_id`), and the tab strip with close scope (§5: `Surfaces`).
+  New vectors: `keymap.json`, `harness.json`, `attention.json` and
+  `surfaces.json`. They are additive; the existing six files are unchanged. A
+  chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
+  SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).

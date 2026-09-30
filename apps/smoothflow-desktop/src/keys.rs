@@ -14,6 +14,18 @@ pub struct Key<'a> {
     pub platform: bool,
 }
 
+/// The chord a keystroke is, for the keymap (`smooth-flow-client::keymap`).
+#[must_use]
+pub fn chord(k: Key<'_>) -> smooth_flow_client::keymap::Chord {
+    smooth_flow_client::keymap::Chord {
+        key: k.key.to_lowercase(),
+        ctrl: k.control,
+        alt: k.alt,
+        shift: k.shift,
+        cmd: k.platform,
+    }
+}
+
 /// The bytes for a keystroke, or `None` when the terminal gets nothing (an
 /// app shortcut, or a lone modifier).
 #[must_use]
@@ -83,16 +95,59 @@ mod tests {
     #[test]
     fn keys_encode_like_xterm() {
         assert_eq!(encode(Key { key_char: Some("a"), ..k("a") }), Some(b"a".to_vec()));
-        assert_eq!(encode(Key { key_char: Some("é"), ..k("e") }), Some("é".as_bytes().to_vec()));
+        assert_eq!(
+            encode(Key {
+                key_char: Some("é"), ..k("e")
+            }),
+            Some("é".as_bytes().to_vec())
+        );
         assert_eq!(encode(k("enter")), Some(b"\r".to_vec()));
         assert_eq!(encode(k("up")), Some(b"\x1b[A".to_vec()));
         assert_eq!(encode(Key { shift: true, ..k("tab") }), Some(b"\x1b[Z".to_vec()));
         assert_eq!(encode(Key { control: true, ..k("c") }), Some(vec![3]));
         assert_eq!(encode(Key { control: true, ..k("d") }), Some(vec![4]));
         assert_eq!(encode(Key { control: true, ..k("[") }), Some(vec![0x1b]));
-        assert_eq!(encode(Key { alt: true, key_char: Some("b"), ..k("b") }), Some(b"\x1bb".to_vec()));
-        assert_eq!(encode(Key { platform: true, key_char: Some("c"), ..k("c") }), None, "⌘C is the app's");
+        assert_eq!(
+            encode(Key {
+                alt: true,
+                key_char: Some("b"),
+                ..k("b")
+            }),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            encode(Key {
+                platform: true,
+                key_char: Some("c"),
+                ..k("c")
+            }),
+            None,
+            "⌘C is the app's"
+        );
         assert_eq!(encode(k("shift")), None);
         assert_eq!(encode(k("space")), Some(b" ".to_vec()));
+    }
+
+    #[test]
+    fn keystrokes_become_keymap_chords() {
+        use smooth_flow_client::keymap::{Action, Chord, Keymap, Platform};
+        let c = chord(Key {
+            control: true,
+            shift: true,
+            ..k("N")
+        });
+        assert_eq!(Some(c.clone()), Chord::parse("ctrl+shift+n"));
+        assert_eq!(Keymap::defaults(Platform::Other).action_for(&c), Some(Action::NewSession));
+        let c = chord(Key {
+            control: true,
+            alt: true,
+            ..k("left")
+        });
+        assert_eq!(Keymap::defaults(Platform::Other).action_for(&c), Some(Action::FocusPaneLeft));
+        assert_eq!(
+            Keymap::defaults(Platform::Other).action_for(&chord(Key { control: true, ..k("c") })),
+            None,
+            "Ctrl+C is the program's"
+        );
     }
 }
