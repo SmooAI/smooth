@@ -21,6 +21,10 @@ expect_used = "warn"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 return_self_not_must_use = "allow"
+# Rust 1.99 fires this on every #[async_trait] trait: the macro marks each
+# method #[must_use] and its boxed future return is already must_use. The
+# lint is in clippy::all (deny), so it broke every Rust CI run.
+double_must_use = "allow"
 doc_markdown = "allow"
 significant_drop_tightening = "allow"
 missing_const_for_fn = "allow"
