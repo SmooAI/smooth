@@ -500,6 +500,9 @@ pub enum LinksCmd {
 pub enum JiraCmd {
     /// Start a Jira work-items import (Temporal pull for the org). Delta by
     /// default; `--full` resets the watermark and re-imports everything.
+    /// Writes work items, so it confirms first (`--yes` for scripts,
+    /// `--dry-run` to only show the target). CLI twin of the hosted MCP's
+    /// `jira_import_start`.
     Import {
         /// Reset the watermark and re-import from the beginning.
         #[arg(long)]
@@ -507,6 +510,8 @@ pub enum JiraCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Show the Jira work-items sync state (watermark, state, last error).
     Status {
@@ -992,9 +997,28 @@ fn link_body(file: Option<&str>, url: Option<&str>, item: Option<&str>, link_typ
 async fn jira(cmd: JiraCmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
-        JiraCmd::Import { full, org } => {
+        JiraCmd::Import { full, org, confirm } => {
             let org = resolve_org(org)?;
-            let body = if full { json!({ "full": true }) } else { json!({}) };
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "start",
+                    noun: "Jira work-items import",
+                    id: if full {
+                        "FULL re-import (resets the watermark)"
+                    } else {
+                        "delta since the last watermark"
+                    },
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if !proceed {
+                return Ok(());
+            }
+            let body = jira_import_body(full);
+            // A single POST — the client never retries a non-401 failure, and
+            // the server joins an already-running import (`alreadyRunning`).
             let r = client
                 .post(&format!("/organizations/{org}/integrations/jira/import-work-items"), &body)
                 .await
@@ -1023,6 +1047,15 @@ async fn jira(cmd: JiraCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `POST integrations/jira/import-work-items` body: `{}` = delta, `{full:true}`.
+fn jira_import_body(full: bool) -> Value {
+    if full {
+        json!({ "full": true })
+    } else {
+        json!({})
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,6 +1614,35 @@ mod tests {
         parse(&["links", "for-file", "abc"]);
         parse(&["jira", "import", "--full"]);
         parse(&["jira", "status"]);
+    }
+
+    /// SMOODEV-3545: the import is a write, so it confirms like every other
+    /// mutating twin — on by default, `--yes` / `--dry-run` to script it.
+    #[test]
+    fn jira_import_confirms_and_builds_the_body() {
+        match parse(&["jira", "import"]) {
+            Cmd::Jira {
+                cmd: JiraCmd::Import { full, confirm, .. },
+            } => assert!(!full && !confirm.yes && !confirm.dry_run),
+            _ => panic!("wrong variant"),
+        }
+        match parse(&["jira", "import", "--full", "--yes"]) {
+            Cmd::Jira {
+                cmd: JiraCmd::Import { full, confirm, .. },
+            } => assert!(full && confirm.yes),
+            _ => panic!("wrong variant"),
+        }
+        assert!(matches!(
+            parse(&["jira", "import", "--dry-run"]),
+            Cmd::Jira {
+                cmd: JiraCmd::Import {
+                    confirm: crate::destructive::Confirm { dry_run: true, .. },
+                    ..
+                }
+            }
+        ));
+        assert_eq!(jira_import_body(false), json!({}));
+        assert_eq!(jira_import_body(true), json!({ "full": true }));
     }
 
     /// CLI-Spec §flags: every platform `list` verb offers `--json`.

@@ -904,6 +904,20 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::blog::Cmd,
     },
+    /// Phone calls — list/get/voicemails/usage, and `place` (confirms, then
+    /// opens your softphone with the call ready). CLI twin of the hosted MCP
+    /// calling tools.
+    #[command(visible_alias = "calls")]
+    Calling {
+        #[command(subcommand)]
+        cmd: smooai::calling::Cmd,
+    },
+    /// Your Google Drive — search and read, as you. CLI twin of the hosted MCP
+    /// `drive_search` / `drive_read`.
+    Drive {
+        #[command(subcommand)]
+        cmd: smooai::drive::Cmd,
+    },
     /// Smoo AI org file system.
     ///
     /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
@@ -1917,6 +1931,8 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
+        SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
+        SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
         SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
     }
