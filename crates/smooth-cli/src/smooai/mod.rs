@@ -193,6 +193,13 @@ fn user_jwt_candidates() -> Vec<std::path::PathBuf> {
     paths
 }
 
+/// Dashboard (web app) origin — `https://smoo.ai`, overridable with
+/// `SMOOAI_WEB_URL` so a local `next dev` can be targeted. `app.smoo.ai` has
+/// no DNS; the dashboard lives on the apex, same host `cli-login` uses.
+pub(crate) fn web_url() -> String {
+    std::env::var("SMOOAI_WEB_URL").unwrap_or_else(|_| "https://smoo.ai".to_string())
+}
+
 /// Resolve the active org id. Delegates to
 /// [`crate::active_org::resolve`] so every `th api` subcommand reads
 /// from the same source `th config` and `th auth whoami` do.

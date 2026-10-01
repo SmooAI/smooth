@@ -908,6 +908,19 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
     },
+    /// Smoo AI org integrations — status, connect, disconnect.
+    ///
+    /// `list` / `status [<provider>]` read the org's connection summary.
+    /// `connect <provider>` hands off to your browser (OAuth consent, or the
+    /// dashboard's connect dialog for API-key providers) and waits until the
+    /// provider is active; `connect twilio --provision` makes a Smoo-managed
+    /// Twilio account. `disconnect <provider>` confirms first. Same commands
+    /// as `th api integrations`.
+    #[command(visible_alias = "integration")]
+    Integrations {
+        #[command(subcommand)]
+        cmd: smooai::integrations::Cmd,
+    },
     /// Smoo AI knowledge base — semantic retrieval over the org's own documents.
     ///
     /// `th knowledge search <query>` runs the SAME retrieval an agent does
@@ -1256,7 +1269,8 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::workflows::Cmd,
     },
-    /// Smoo AI org integrations (SendGrid email).
+    /// Smoo AI org integrations — list / status / connect / disconnect, plus
+    /// SendGrid CRUD. Same commands as `smoo integrations`.
     #[command(visible_alias = "integration")]
     Integrations {
         #[command(subcommand)]
@@ -1897,6 +1911,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
+        SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
     }
 }
 
