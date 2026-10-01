@@ -47,8 +47,9 @@ explicit in the command tree:
   surfaces on mcp.smoo.ai have a CLI twin — `smoo analytics`, `smoo campaigns`
   (send is preview-first; real send needs `--confirm`, suppression stays
   server-side), `smoo drip`, `smoo audiences`, `smoo files search|summarize`,
-  `smoo heypage versions|rollback|source|content`, `smoo api observability
-  metrics` + `web-vitals`, `smoo integrations`, and the one-offs (`forms`, `gbp`,
+  `smoo heypage versions|rollback|source|content`,
+  `smoo api observability metrics` + `web-vitals`, `smoo integrations`, and the
+  one-offs (`forms`, `gbp`,
   `search-console`, `sheets`, `workforce`). Pearl trail: th-739bb1 / th-b1f09c /
   th-088c93 / th-a5d991. **Known gaps (hosted MCP has it, the CLI doesn't), as of
   SMOODEV-3531:** `blog_*`, `site_design_edit`, `site_image_*`, calling

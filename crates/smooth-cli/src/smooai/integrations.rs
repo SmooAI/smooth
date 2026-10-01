@@ -114,6 +114,7 @@ impl Tier {
 }
 
 #[derive(Args, Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent CLI switches, not a state machine
 pub struct ConnectArgs {
     /// Provider type (see `smoo integrations providers`).
     pub provider: String,
@@ -233,6 +234,7 @@ impl ConnectKind {
     }
 }
 
+#[derive(Debug)]
 pub struct Provider {
     /// The `type` string the API and the web app use.
     pub name: &'static str,
@@ -604,10 +606,6 @@ fn account_line(a: &Value) -> String {
     )
 }
 
-fn label_for(provider: &str) -> &str {
-    PROVIDERS.iter().find(|p| p.name == provider).map_or(provider, |p| p.label)
-}
-
 fn print_summary(summary: &Value, only: Option<&str>) {
     let mut entries: Vec<&Value> = summary
         .get("integrations")
@@ -671,6 +669,7 @@ fn open_in_browser(url: &str, what: &str, no_browser: bool) {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)] // one flat dispatch arm per verb
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { mine, org, json } => {
