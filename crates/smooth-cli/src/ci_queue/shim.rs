@@ -67,10 +67,16 @@ pub const PROBE: &str = "ci-queue run --help";
 /// then runs rustup's cargo by ABSOLUTE path, so without its own shim the
 /// whole build ran outside the queue (seen live 2026-09-28, th-35d0d0).
 ///
+/// `swift` and `xcrun` are here because the iOS work that escaped the queue
+/// never touched `xcodebuild`: at load 300–900 on 2026-09-30, 32
+/// `swift-frontend`s came from agents' `swift test` / `swift build` on
+/// SwiftPM packages, and a few from `xcrun xcodebuild`, which runs Xcode's
+/// binary by absolute path past the xcodebuild shim (th-cb3c66).
+///
 /// A repo's `./gradlew` is a per-repo script no PATH shim ever sees, so the
-/// `gradle` shim does NOT cover Android builds that use the wrapper
-/// (th-cb3c66).
-pub const DEFAULT_TOOLS: &[&str] = &["cargo", "cargo-nextest", "xcodebuild", "gradle"];
+/// `gradle` shim does NOT cover Android builds that use the wrapper; the repo
+/// queues its own wrapper (smooai: SMOODEV-3530).
+pub const DEFAULT_TOOLS: &[&str] = &["cargo", "cargo-nextest", "xcodebuild", "gradle", "swift", "xcrun"];
 
 /// Tools whose shim takes the machine's `cargo` lock.
 const CARGO_LOCK_TOOLS: &[&str] = &["cargo", "cargo-nextest"];
@@ -81,8 +87,16 @@ fn lead_word(tool: &str) -> Option<&'static str> {
     (tool == "cargo-nextest").then_some("nextest")
 }
 
+/// Tools that only RUN another tool (`xcrun xcodebuild …`): the other tools
+/// that can be heavy, and the tool's own options that take a value. Anything
+/// else they run (`xcrun simctl`, `xcrun --show-sdk-path`) is light, and a
+/// heavy-capable one is light or heavy by its own [`light_commands`].
+fn dispatch(tool: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    (tool == "xcrun").then_some((&["xcodebuild", "swift"][..], &["--sdk", "-sdk", "--toolchain", "-toolchain"][..]))
+}
+
 /// Tools a shim can be generated for, with the light subcommands and flags
-/// that must never queue.
+/// that must never queue. A [`dispatch`] tool has none of its own.
 pub fn light_commands(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {
         // Metadata, formatting, registry and scaffolding commands: fast, and
@@ -135,6 +149,10 @@ pub fn light_commands(tool: &str) -> Option<&'static [&'static str]> {
         // `list` is NOT light: nextest compiles every test binary to list it.
         "cargo-nextest" => &["", "help", "show-config", "self"],
         "gradle" | "gradlew" => &["", "-v", "--version", "--status", "--stop", "help", "tasks"],
+        // `build`, `test`, `run` and a bare script compile; the REPL and
+        // package metadata do not.
+        "swift" => &["", "repl", "package", "format", "sdk"],
+        "xcrun" => &[],
         "turbo" => &["", "--version", "ls", "login", "logout", "link", "unlink", "daemon", "info", "telemetry"],
         "tsgo" | "tsc" => &["", "-v", "--version", "--init", "--showConfig"],
         _ => return None,
@@ -177,6 +195,17 @@ pub fn is_light(tool: &str, args: &[String]) -> bool {
     if args.iter().any(|a| HELP_FLAGS.contains(&a.as_str())) {
         return true;
     }
+    if let Some((inner, value_opts)) = dispatch(tool) {
+        let mut it = args.iter().enumerate();
+        while let Some((i, a)) = it.next() {
+            if value_opts.contains(&a.as_str()) {
+                it.next();
+            } else if !a.starts_with('-') {
+                return !inner.contains(&a.as_str()) || is_light(a, &args[i + 1..]);
+            }
+        }
+        return true;
+    }
     let mut sub = "";
     let mut skip = lead_word(tool);
     for a in args {
@@ -209,14 +238,89 @@ fn sh_quote(s: &str) -> String {
 /// `ths` as the `th`s to try (in order) before the one on PATH.
 pub fn script(tool: &str, real: &Path, ths: &[PathBuf]) -> Result<String> {
     let Some(light) = light_commands(tool) else {
-        bail!("no shim is defined for `{tool}` (supported: cargo, cargo-nextest, xcodebuild, gradle, gradlew, turbo, tsgo, tsc)");
+        bail!("no shim is defined for `{tool}` (supported: cargo, cargo-nextest, xcodebuild, gradle, swift, xcrun, gradlew, turbo, tsgo, tsc)");
     };
     let lock = if CARGO_LOCK_TOOLS.contains(&tool) { " --lock cargo" } else { "" };
-    let lead = lead_word(tool).unwrap_or("");
     let alts = |words: &[&str]| words.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(" | ");
-    let light_case = alts(light);
     let help_case = alts(HELP_FLAGS);
     let dash_case = alts(DASH_SUBCOMMANDS);
+    // `sub_of LEAD ARGS…` sets $sub: the first argument that is not an option
+    // or a +toolchain (or LEAD, once).
+    let sub_of = format!(
+        r#"sub_of() {{
+    skip=$1
+    shift
+    sub=''
+    for a in "$@"; do
+        case "$a" in
+            +*) continue ;;
+            -*)
+                case "$a" in {dash_case}) sub=$a; break ;; esac
+                continue
+                ;;
+            *)
+                if [ -n "$skip" ] && [ "$a" = "$skip" ]; then skip=''; continue; fi
+                sub=$a; break
+                ;;
+        esac
+    done
+}}"#
+    );
+    let decide = match dispatch(tool) {
+        None => format!(
+            r#"# Light commands never queue. The subcommand is the first argument that is not
+# an option or a +toolchain (or the tool's own lead word, once).
+{sub_of}
+sub_of '{lead}' "$@"
+case "$sub" in
+    {light_case}) exec "$real" "$@" ;;
+esac"#,
+            lead = lead_word(tool).unwrap_or(""),
+            light_case = alts(light),
+        ),
+        Some((inner, value_opts)) => {
+            let inner_cases: String = inner
+                .iter()
+                .map(|t| {
+                    format!(
+                        "\n        {t}) case \"$sub\" in {}) exec \"$real\" \"$@\" ;; esac ;;",
+                        alts(light_commands(t).unwrap_or(&[]))
+                    )
+                })
+                .collect();
+            format!(
+                r#"# {tool} only runs another tool. Only {inner_list} can be heavy, and
+# then by that tool's own light list; anything else {tool} runs never queues.
+{sub_of}
+inner=''
+n=0
+value=''
+for a in "$@"; do
+    n=$((n + 1))
+    if [ -n "$value" ]; then value=''; continue; fi
+    case "$a" in
+        {value_case}) value=1 ;;
+        -*) ;;
+        *) inner=$a; break ;;
+    esac
+done
+case "$inner" in
+    {inner_case}) ;;
+    *) exec "$real" "$@" ;;
+esac
+inner_args() {{
+    shift "$n"
+    sub_of '' "$@"
+}}
+inner_args "$@"
+case "$inner" in{inner_cases}
+esac"#,
+                inner_list = inner.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(" and "),
+                value_case = alts(value_opts),
+                inner_case = alts(inner),
+            )
+        }
+    };
     let real = sh_quote(&real.display().to_string());
     let ths: String = ths.iter().map(|p| format!("{} ", sh_quote(&p.display().to_string()))).collect();
     Ok(format!(
@@ -246,31 +350,14 @@ IFS=$old_ifs
 [ -n "${{SMOOTH_CI_QUEUE_SLOT:-}}" ] && exec "$real" "$@"
 case "${{CI_QUEUE:-}}" in off | 0 | false | no) exec "$real" "$@" ;; esac
 
-# Light commands never queue. The subcommand is the first argument that is not
-# an option or a +toolchain (or the tool's own lead word, once).
-sub=''
-skip='{lead}'
+# --help (and friends) anywhere never queues.
 for a in "$@"; do
     case "$a" in
         {help_case}) exec "$real" "$@" ;;
     esac
 done
-for a in "$@"; do
-    case "$a" in
-        +*) continue ;;
-        -*)
-            case "$a" in {dash_case}) sub=$a; break ;; esac
-            continue
-            ;;
-        *)
-            if [ -n "$skip" ] && [ "$a" = "$skip" ]; then skip=''; continue; fi
-            sub=$a; break
-            ;;
-    esac
-done
-case "$sub" in
-    {light_case}) exec "$real" "$@" ;;
-esac
+
+{decide}
 
 # The th that runs the queue: the first that can actually run `ci-queue` —
 # the ones recorded at install, then PATH's. A th that cannot (an older one
@@ -659,7 +746,7 @@ mod tests {
         let log = tmp.path().join("log");
         fs::create_dir_all(&shims).unwrap();
         fs::create_dir_all(&real).unwrap();
-        for tool in ["cargo", "cargo-nextest", "xcodebuild", "gradle"] {
+        for tool in ["cargo", "cargo-nextest", "xcodebuild", "gradle", "swift", "xcrun"] {
             exe(
                 &real.join(tool),
                 &format!(
@@ -828,7 +915,7 @@ mod tests {
     #[test]
     fn light_commands_never_queue_and_heavy_ones_do() {
         let f = fx(true);
-        f.install(&["cargo", "cargo-nextest", "xcodebuild", "gradle"]);
+        f.install(DEFAULT_TOOLS);
         let cases: &[(&str, &[&str], bool)] = &[
             ("cargo", &["--version"], false),
             ("cargo", &["-V"], false),
@@ -864,6 +951,31 @@ mod tests {
             ("cargo-nextest", &["nextest", "show-config", "test-groups"], false),
             ("cargo-nextest", &["nextest", "self", "update"], false),
             ("cargo-nextest", &["nextest", "help"], false),
+            // SwiftPM: what agents ran outside the queue (th-cb3c66).
+            ("swift", &["test"], true),
+            ("swift", &["build", "-c", "release"], true),
+            ("swift", &["run", "tool"], true),
+            ("swift", &["test", "--filter", "X"], true),
+            ("swift", &[], false),
+            ("swift", &["--version"], false),
+            ("swift", &["package", "resolve"], false),
+            ("swift", &["package", "describe", "--type", "json"], false),
+            ("swift", &["build", "--help"], false),
+            // xcrun queues only the heavy tools it runs, by their own rules.
+            ("xcrun", &["xcodebuild", "-scheme", "App", "test"], true),
+            ("xcrun", &["--sdk", "iphonesimulator", "xcodebuild", "build"], true),
+            ("xcrun", &["swift", "test"], true),
+            ("xcrun", &["--toolchain", "swift", "swift", "build"], true),
+            ("xcrun", &["xcodebuild", "-list"], false),
+            ("xcrun", &["xcodebuild", "-version"], false),
+            ("xcrun", &["swift", "package", "resolve"], false),
+            ("xcrun", &["swift", "--version"], false),
+            ("xcrun", &["simctl", "boot", "X"], false),
+            ("xcrun", &["xcresulttool", "get", "--path", "a.xcresult"], false),
+            ("xcrun", &["--show-sdk-path"], false),
+            ("xcrun", &["--sdk", "macosx", "--show-sdk-path"], false),
+            ("xcrun", &["-f", "xcodebuild"], false),
+            ("xcrun", &[], false),
         ];
         for (tool, args, queued) in cases {
             let log = f.call(tool, args, &[]);

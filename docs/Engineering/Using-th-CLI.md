@@ -1839,7 +1839,7 @@ sample_ms = 2000         # process-group memory sample interval
 ```
 
 **PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
-`cargo`, `cargo-nextest`, `xcodebuild` and `gradle` runs for every caller on the machine,
+`cargo`, `cargo-nextest`, `xcodebuild`, `gradle`, `swift` and `xcrun` runs for every caller on the machine,
 including agents that don't know the queue exists. `install` writes a small sh
 shim per tool into `~/.local/bin`, or `--dir DIR`. Each shim runs
 `th ci-queue run --class heavy [--lock cargo] -- <real tool> "$@"`. There are
@@ -1864,7 +1864,9 @@ four exceptions:
 - **Light commands** never queue. For cargo that means `--version`,
   `metadata`, `fmt`, `tree`, `clean`, `new` and similar. For xcodebuild it
   means `-version`, `-list`, `-showBuildSettings` and similar. For gradle it
-  means `--version`, `--stop` and `--status`. `--help` never queues for any
+  means `--version`, `--stop` and `--status`. For swift it means the REPL,
+  `swift package …`, `swift format` and `swift sdk`; `build`, `test`, `run`
+  and a bare script queue. `--help` never queues for any
   tool. The allowlist lives in `shim.rs` and is table-tested against the
   generated sh, so the two can't drift apart. `th ci-queue run -- cargo …`
   applies the same rule: a light cargo command takes no cargo lock.
@@ -1891,11 +1893,30 @@ never sees that build. It takes the `cargo` lock like cargo does.
 heavy, because it compiles every test binary. `--version`, `help`,
 `show-config` and `self` are light.
 
-**`./gradlew` is not covered.** A repo's Gradle wrapper is a script in the
-repo, not on PATH, so the `gradle` shim never sees it. The Gradle daemon also
-outlives any queued command. Android lanes need to run
-`th ci-queue run --class heavy -- ./gradlew … --no-daemon` explicitly
-(pearl th-cb3c66).
+**`swift` and `xcrun` have their own shims** (th-cb3c66). On 2026-09-30, at
+load 300–900, 32 `swift-frontend` processes were running outside the queue.
+They came from agents' `swift test` / `swift build` on SwiftPM packages, not
+from `xcodebuild`, and `xcrun xcodebuild …` runs Xcode's binary by absolute
+path, past the xcodebuild shim. The `xcrun` shim queues only the heavy tools it
+runs (`xcodebuild`, `swift`), and judges them by that tool's own light list:
+`xcrun xcodebuild -list` and `xcrun swift package resolve` don't queue, and
+nothing else xcrun runs (`simctl`, `xcresulttool`, `--show-sdk-path`, `-f`)
+ever does. It skips xcrun's own `--sdk` / `--toolchain` values to find the
+tool. Run `th ci-queue shim install` after upgrading to add them.
+
+**Not covered:** an absolute path to a tool
+(`/Applications/Xcode.app/…/xcodebuild`) and builds started from the Xcode or
+Android Studio GUI, whose PATH has no `~/.local/bin`. Spell the tool by name,
+or wrap it: `th ci-queue run --class heavy --label ios -- /abs/path/xcodebuild …`.
+
+**`./gradlew` is the repo's job.** A repo's Gradle wrapper is a script in the
+repo, not on PATH, so the `gradle` shim never sees it. smooai puts a queue
+block at the top of each of its `gradlew`s, which runs the wrapper through
+`th ci-queue run --class heavy` and fails open the same way a shim does
+(`scripts/mobile/gradlew-queue.sh`, SMOODEV-3530). A repo without that block
+should run `th ci-queue run --class heavy -- ./gradlew …`. The Gradle daemon
+outlives the queued command, but it sits idle once its client exits, so the
+CPU it burns is inside the slot.
 
 **Homebrew's `th` is the main one when it's installed.** A `th` that resolves
 into `Cellar/th/` comes first in every shim's list of candidates. `th doctor`,
