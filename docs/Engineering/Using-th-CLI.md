@@ -50,14 +50,17 @@ explicit in the command tree:
   `smoo heypage versions|rollback|source|content|preview|design-edit|image search|image generate`
   (the `site_*` tools), `smoo blog list|get|create|update|publish|unpublish|delete|image search|generate|import`
   (the `blog_*` tools; `delete` confirms unless `--yes`),
-  `smoo api observability metrics` + `web-vitals`, `smoo integrations`, and the
-  one-offs (`forms`, `gbp`, `search-console`, `sheets`, `workforce`). Pearl
-  trail: th-739bb1 / th-b1f09c / th-088c93 / th-a5d991 / SMOODEV-3531 /
-  SMOODEV-3537. **Known gaps (hosted MCP has it, the CLI doesn't), as of
-  SMOODEV-3537:** calling
-  (`calls_list`/`calls_get`/`voicemails_list`/`calling_usage`/`call_place`),
-  `jira_import_*`, `drive_search`/`drive_read`. The `/surface-parity` skill in
-  the smooai repo re-derives this list from source.
+  `smoo api observability metrics` + `web-vitals`, `smoo integrations`,
+  `smoo calling list|get|voicemails|usage|place` (the calling tools; `place`
+  confirms by typing the number back, then opens your softphone — nothing rings
+  until you press Call), `smoo drive search|read` (`drive_search`/`drive_read`,
+  as you), `smoo work jira import|status` (`jira_import_*`; `import` confirms
+  unless `--yes`), and the one-offs (`forms`, `gbp`, `search-console`,
+  `sheets`, `workforce`). Pearl trail: th-739bb1 / th-b1f09c / th-088c93 /
+  th-a5d991 / SMOODEV-3531 / SMOODEV-3537 / SMOODEV-3545. **As of SMOODEV-3545
+  the gaps named here are closed** — calling, Drive and Jira import were the
+  last ones listed; nothing enforces parity, so re-derive the list with the
+  `/surface-parity` skill in the smooai repo before claiming it is complete.
   The image `generate` verbs (`blog image generate`, `heypage image generate`)
   call a PAID model and are never auto-retried — a timeout means "unknown", so
   check before re-running. `heypage design-edit` takes minutes and usually
@@ -752,6 +755,47 @@ or prompts for it (masked). `test` sends a verification email through the
 configured integration. Every `smoo integrations …` verb is also reachable as
 `smoo api integrations …`.
 
+### Calling (`smoo calling`, alias `smoo calls`) — SMOODEV-3545
+
+CLI twin of the hosted MCP's `calls_list` / `calls_get` / `voicemails_list` /
+`calling_usage` / `call_place`, over the same `/organizations/{org}/calling/…`
+routes.
+
+```bash
+smoo calling list [--direction inbound|outbound] [--status missed,voicemail] [--contact-id <id>] \
+                  [--since <rfc3339>] [--until <rfc3339>] [--mine] [--limit 1-100] [--cursor <c>] [--json]
+smoo calling get <call-id> [--transcript]          # summary, notes, action items, signals; --transcript = user session
+smoo calling voicemails [--unheard] [--since <rfc3339>] [--limit 1-25] [--json]
+smoo calling usage [--period 2026-09] [--json]     # minutes vs allowance; needs calling admin or billing access
+smoo calling place <number> [--contact-id <id>] [--name "Pat Lee"] [--yes|--dry-run] [--no-browser]
+```
+
+- **`place` never dials by itself** — same contract as the MCP tool. It
+  normalises the number to E.164 (or refuses: a guessed number reaches a
+  stranger), checks `calling/me` (seat, number, outbound on — and says why
+  not), makes you type the number back to confirm (`--yes` for scripts,
+  `--dry-run` to stop after the check), then opens
+  `smoo.ai/apps/phone?dial=…` with the call READY. You press Call there, and
+  the softphone runs caller-ID, do-not-call and quiet-hours checks before
+  anything rings. No request creates a call, so there is nothing to retry.
+- `place` and `get --transcript` need a signed-in **user** (`smoo auth login`);
+  an org API key has no softphone and cannot read transcripts.
+
+### Google Drive (`smoo drive`) — SMOODEV-3545
+
+CLI twin of `drive_search` / `drive_read`. Runs live as **your** Google
+account on the `drive_restricted` grant, so only files you can already open
+come back. User session only.
+
+```bash
+smoo drive search "pricing" [--limit 1-50] [--page-token <t>] [--json]
+smoo drive read <file-id> [--json]   # Docs → markdown, Sheets → CSV (first sheet), Slides → text, on stdout
+```
+
+A 409 means Drive is not connected **for you** — the error names the fix,
+`smoo integrations connect google --purpose drive_restricted`. Truncation and
+"first sheet only" notes go to stderr so `drive read` pipes cleanly.
+
 ### Smooth Operator (org's always-on dashboard agent)
 
 Drive the org's [Smooth Operator](../Product/Features/Org-Copilot.md) from the CLI —
@@ -991,7 +1035,7 @@ smoo work links link <item> --url https://… --title "Design doc"
 smoo work links link <item> --item <other> --type blocks   # typed issue link
 smoo work links for-file <file-id>                    # reverse: which items reference this file
 
-smoo work jira import [--full]                        # start the Temporal pull (--full resets the watermark)
+smoo work jira import [--full] [--yes|--dry-run]     # start the Temporal pull (--full resets the watermark); confirms first
 smoo work jira status                                 # metadata.workItemsSync: state / watermark / error
 ```
 
