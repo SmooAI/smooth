@@ -898,6 +898,12 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::heypage::Cmd,
     },
+    /// HeyPage blog posts — list/get/create/update/publish/unpublish/delete +
+    /// image search/generate/import. CLI twin of the hosted MCP `blog_*` tools.
+    Blog {
+        #[command(subcommand)]
+        cmd: smooai::blog::Cmd,
+    },
     /// Smoo AI org file system.
     ///
     /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
@@ -1910,6 +1916,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
         SmooCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
+        SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
         SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
     }

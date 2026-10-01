@@ -47,15 +47,22 @@ explicit in the command tree:
   surfaces on mcp.smoo.ai have a CLI twin — `smoo analytics`, `smoo campaigns`
   (send is preview-first; real send needs `--confirm`, suppression stays
   server-side), `smoo drip`, `smoo audiences`, `smoo files search|summarize`,
-  `smoo heypage versions|rollback|source|content`,
+  `smoo heypage versions|rollback|source|content|preview|design-edit|image search|image generate`
+  (the `site_*` tools), `smoo blog list|get|create|update|publish|unpublish|delete|image search|generate|import`
+  (the `blog_*` tools; `delete` confirms unless `--yes`),
   `smoo api observability metrics` + `web-vitals`, `smoo integrations`, and the
-  one-offs (`forms`, `gbp`,
-  `search-console`, `sheets`, `workforce`). Pearl trail: th-739bb1 / th-b1f09c /
-  th-088c93 / th-a5d991. **Known gaps (hosted MCP has it, the CLI doesn't), as of
-  SMOODEV-3531:** `blog_*`, `site_design_edit`, `site_image_*`, calling
+  one-offs (`forms`, `gbp`, `search-console`, `sheets`, `workforce`). Pearl
+  trail: th-739bb1 / th-b1f09c / th-088c93 / th-a5d991 / SMOODEV-3531 /
+  SMOODEV-3537. **Known gaps (hosted MCP has it, the CLI doesn't), as of
+  SMOODEV-3537:** calling
   (`calls_list`/`calls_get`/`voicemails_list`/`calling_usage`/`call_place`),
   `jira_import_*`, `drive_search`/`drive_read`. The `/surface-parity` skill in
   the smooai repo re-derives this list from source.
+  The image `generate` verbs (`blog image generate`, `heypage image generate`)
+  call a PAID model and are never auto-retried — a timeout means "unknown", so
+  check before re-running. `heypage design-edit` takes minutes and usually
+  outlives the 15 s gateway: a timeout there means the edit is still running —
+  check `heypage versions` / `source get` rather than re-issuing it.
 - **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).

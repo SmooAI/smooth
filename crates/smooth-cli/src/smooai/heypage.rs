@@ -134,6 +134,107 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ContentCmd,
     },
+    /// Change the site's DESIGN/LAYOUT by describing it ("make the hero full-bleed").
+    /// A model rewrites the component library surgically; content survives.
+    /// Creates a DRAFT. SLOW (minutes) — a gateway timeout means UNKNOWN, not
+    /// failed: check `versions` / `source get` before re-running. Only works on
+    /// a site with stored source.
+    #[command(name = "design-edit")]
+    DesignEdit {
+        /// Site id. Or use `--slug`.
+        #[arg(long, conflicts_with = "slug")]
+        site: Option<String>,
+        /// Site slug (resolved to an id via `list`).
+        #[arg(long)]
+        slug: Option<String>,
+        /// What should change, in plain language.
+        #[arg(long)]
+        instructions: String,
+        /// Page to focus on (`""` = home; a leading `/` is stripped). A hint, not a fence.
+        #[arg(long)]
+        path: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Mint a shareable, expiring link to the site's DRAFT (opens with no
+    /// account, noindex). Shows the draft, not what is live.
+    Preview {
+        /// Site id. Or use `--slug`.
+        #[arg(long, conflicts_with = "slug")]
+        site: Option<String>,
+        /// Site slug (resolved to an id via `list`).
+        #[arg(long)]
+        slug: Option<String>,
+        /// Page the link opens (`""` = home; a leading `/` is stripped).
+        #[arg(long)]
+        path: Option<String>,
+        /// Link lifetime in hours (default 24, clamped to 1–168).
+        #[arg(long = "ttl-hours")]
+        ttl_hours: Option<u64>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Images for a site slot: stock `search` (free) and `generate` (paid).
+    Image {
+        #[command(subcommand)]
+        cmd: ImageCmd,
+    },
+}
+
+/// Image slot roles the route accepts (`heypage-images.ts`, `IMAGE_ROLES`).
+const IMAGE_ROLES: &[&str] = &["hero", "gallery", "interior", "product", "team", "detail"];
+
+/// The business brief both image routes take, flattened into flags.
+#[derive(clap::Args, Debug, Default)]
+pub struct ImageBrief {
+    /// The business the site is for, e.g. `Rager Family Dentistry`.
+    #[arg(long = "business-name")]
+    pub business_name: String,
+    /// Its industry, e.g. `dentistry` — most of what steers the image.
+    #[arg(long)]
+    pub industry: String,
+    /// One or two sentences about the business.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// What the site is FOR, when it changes what the picture should show.
+    #[arg(long)]
+    pub goals: Option<String>,
+    /// Where the image goes: hero, gallery, interior, product, team, detail (default hero).
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(IMAGE_ROLES))]
+    pub role: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum ImageCmd {
+    /// Ranked stock-photo candidates for one slot (free, unlimited — try first).
+    Search {
+        #[command(flatten)]
+        brief: ImageBrief,
+        /// What the picture should SHOW. Omit to re-roll the role's own query.
+        #[arg(long)]
+        keywords: Option<String>,
+        /// How many candidates (1–30).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=30))]
+        count: Option<u32>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Generate an original image and host it on the Smoo CDN. COSTS MONEY
+    /// (paid model; monthly free cap) and is never auto-retried. The prompt is
+    /// moderated fail-closed — a refusal is final.
+    Generate {
+        #[command(flatten)]
+        brief: ImageBrief,
+        /// Override the prompt built from the brief. Don't ask for text in the image.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -286,6 +387,56 @@ fn require_content_edits(body: &serde_json::Value) -> Result<()> {
         anyhow::bail!("no edits — the body needs a non-empty `updates` array");
     }
     Ok(())
+}
+
+/// Page paths are stored without a leading slash (`about`, `""` = home).
+/// Mirrors the MCP's `normalize_page_path`.
+fn normalize_page_path(path: &str) -> &str {
+    let trimmed = path.trim();
+    trimmed.strip_prefix('/').unwrap_or(trimmed).trim_end_matches('/')
+}
+
+/// `POST heypage/sites/{id}/edit` body. Refuses blank instructions.
+fn design_edit_body(instructions: &str, path: Option<&str>) -> Result<serde_json::Value> {
+    if instructions.trim().is_empty() {
+        anyhow::bail!("--instructions is required — say what should change about the design");
+    }
+    let mut body = json!({ "instructions": instructions });
+    if let Some(p) = path {
+        body["path"] = json!(normalize_page_path(p));
+    }
+    Ok(body)
+}
+
+/// `POST heypage/sites/{id}/preview-link` body. The TTL is clamped rather
+/// than forwarded — the route REJECTS an out-of-range number (MCP parity).
+fn preview_body(path: Option<&str>, ttl_hours: Option<u64>) -> serde_json::Value {
+    json!({
+        "path": normalize_page_path(path.unwrap_or("")),
+        "ttlHours": ttl_hours.map_or(24, |h| h.clamp(1, 168)),
+    })
+}
+
+/// `{brief: {businessName, industry, description, goals}, role?}` — the
+/// shared shape of both image routes. Mirrors the MCP's `image_brief`.
+fn image_body(b: &ImageBrief) -> Result<serde_json::Value> {
+    for (name, value) in [("--business-name", &b.business_name), ("--industry", &b.industry)] {
+        if value.trim().is_empty() {
+            anyhow::bail!("{name} is required — it is what steers the image");
+        }
+    }
+    let mut body = json!({
+        "brief": {
+            "businessName": b.business_name,
+            "industry": b.industry,
+            "description": b.description.as_deref().unwrap_or_default(),
+            "goals": b.goals.as_deref().unwrap_or_default(),
+        }
+    });
+    if let Some(r) = &b.role {
+        body["role"] = json!(r);
+    }
+    Ok(body)
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -476,6 +627,74 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 );
             }
         },
+        Cmd::DesignEdit {
+            site,
+            slug,
+            instructions,
+            path,
+            org,
+        } => {
+            let o = require_active_org(&client, org)?;
+            let body = design_edit_body(&instructions, path.as_deref())?;
+            let site = resolve_site_id(&client, &o, site, slug).await?;
+            print_json(
+                &client
+                    .post(&format!("/organizations/{o}/heypage/sites/{site}/edit"), Some(&body))
+                    .await
+                    .context(
+                        "POST heypage/sites/{id}/edit — a timeout here means UNKNOWN, not failed: the edit normally lands. \
+                         Do NOT re-run; check `th smoo heypage versions` / `source get` first",
+                    )?,
+            );
+        }
+        Cmd::Preview {
+            site,
+            slug,
+            path,
+            ttl_hours,
+            org,
+        } => {
+            let o = require_active_org(&client, org)?;
+            let site = resolve_site_id(&client, &o, site, slug).await?;
+            print_json(
+                &client
+                    .post(
+                        &format!("/organizations/{o}/heypage/sites/{site}/preview-link"),
+                        Some(&preview_body(path.as_deref(), ttl_hours)),
+                    )
+                    .await
+                    .context("POST heypage/sites/{id}/preview-link")?,
+            );
+        }
+        Cmd::Image { cmd } => match cmd {
+            ImageCmd::Search { brief, keywords, count, org } => {
+                let o = require_active_org(&client, org)?;
+                let mut body = image_body(&brief)?;
+                if let Some(k) = keywords {
+                    body["keywords"] = json!(k);
+                }
+                if let Some(c) = count {
+                    body["count"] = json!(c);
+                }
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/heypage/images/search"), Some(&body))
+                        .await
+                        .context("POST heypage/images/search")?,
+                );
+            }
+            ImageCmd::Generate { brief, prompt, org } => {
+                let o = require_active_org(&client, org)?;
+                let mut body = image_body(&brief)?;
+                if let Some(p) = prompt {
+                    body["prompt"] = json!(p);
+                }
+                print_json(&client.post(&format!("/organizations/{o}/heypage/images/generate"), Some(&body)).await.context(
+                    "POST heypage/images/generate (paid; not retried — on a timeout the image may still have been made, \
+                             so do not blindly re-run)",
+                )?);
+            }
+        },
     }
     Ok(())
 }
@@ -590,6 +809,117 @@ mod tests {
         assert!(matches!(cg.cmd, Cmd::Content { cmd: ContentCmd::Get { .. } }));
         let cs = Wrap::try_parse_from(["t", "content", "set", "--site", "s1", "--body", "edits.json"]).expect("content set must parse");
         assert!(matches!(cs.cmd, Cmd::Content { cmd: ContentCmd::Set { .. } }));
+    }
+
+    /// SMOODEV-3537: `design-edit` + `image search|generate` mirror the hosted
+    /// `site_design_edit` / `site_image_search` / `site_image_generate` tools.
+    #[test]
+    fn design_and_image_verbs_parse() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let d = Wrap::try_parse_from(["t", "design-edit", "--slug", "acme", "--instructions", "full-bleed hero", "--path", "/about"])
+            .expect("design-edit must parse");
+        assert!(matches!(d.cmd, Cmd::DesignEdit { ref instructions, ref path, .. } if instructions == "full-bleed hero" && path.as_deref() == Some("/about")));
+        assert!(
+            Wrap::try_parse_from(["t", "design-edit", "--site", "s1"]).is_err(),
+            "design-edit requires --instructions"
+        );
+
+        let s = Wrap::try_parse_from([
+            "t",
+            "image",
+            "search",
+            "--business-name",
+            "Acme",
+            "--industry",
+            "dentistry",
+            "--role",
+            "team",
+            "--count",
+            "5",
+        ])
+        .expect("image search must parse");
+        assert!(matches!(
+            s.cmd,
+            Cmd::Image {
+                cmd: ImageCmd::Search { count: Some(5), .. }
+            }
+        ));
+        assert!(
+            Wrap::try_parse_from(["t", "image", "search", "--business-name", "A", "--industry", "x", "--role", "banner"]).is_err(),
+            "unknown role is refused at parse time"
+        );
+        assert!(
+            Wrap::try_parse_from(["t", "image", "search", "--business-name", "A", "--industry", "x", "--count", "31"]).is_err(),
+            "count is capped at 30"
+        );
+        assert!(
+            Wrap::try_parse_from(["t", "image", "generate", "--industry", "x"]).is_err(),
+            "business name is required"
+        );
+        let p = Wrap::try_parse_from(["t", "preview", "--slug", "acme", "--path", "about", "--ttl-hours", "48"]).expect("preview must parse");
+        assert!(matches!(p.cmd, Cmd::Preview { ttl_hours: Some(48), .. }));
+        let g = Wrap::try_parse_from([
+            "t",
+            "image",
+            "generate",
+            "--business-name",
+            "A",
+            "--industry",
+            "x",
+            "--prompt",
+            "a quiet waiting room",
+        ])
+        .expect("image generate must parse");
+        assert!(matches!(
+            g.cmd,
+            Cmd::Image {
+                cmd: ImageCmd::Generate { prompt: Some(_), .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn design_edit_body_normalizes_path_and_refuses_blank() {
+        assert!(design_edit_body("  ", None).is_err());
+        assert_eq!(design_edit_body("tighter", None).unwrap(), json!({ "instructions": "tighter" }));
+        assert_eq!(
+            design_edit_body("tighter", Some("/about/")).unwrap(),
+            json!({ "instructions": "tighter", "path": "about" })
+        );
+        assert_eq!(design_edit_body("x", Some("")).unwrap()["path"], "", "home stays \"\"");
+    }
+
+    #[test]
+    fn preview_body_defaults_and_clamps() {
+        assert_eq!(preview_body(None, None), json!({ "path": "", "ttlHours": 24 }));
+        assert_eq!(preview_body(Some("/pricing"), Some(720)), json!({ "path": "pricing", "ttlHours": 168 }));
+        assert_eq!(preview_body(None, Some(0))["ttlHours"], 1);
+    }
+
+    #[test]
+    fn image_body_builds_the_brief() {
+        let b = ImageBrief {
+            business_name: "Acme".into(),
+            industry: "dentistry".into(),
+            role: Some("hero".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            image_body(&b).unwrap(),
+            json!({ "brief": { "businessName": "Acme", "industry": "dentistry", "description": "", "goals": "" }, "role": "hero" })
+        );
+        let blank = ImageBrief {
+            business_name: " ".into(),
+            industry: "x".into(),
+            ..Default::default()
+        };
+        assert!(image_body(&blank).is_err());
     }
 
     #[test]
