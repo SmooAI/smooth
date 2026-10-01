@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.62.0
+
+### Minor Changes
+
+- 7eb2b1e: `th smoo blog` — CLI twin of the hosted MCP `blog_*` tools (list, get, create, update, publish, unpublish, delete with confirmation, image search/generate/import) — and `th smoo heypage design-edit | preview | image search | image generate`, twins of `site_design_edit`, `site_preview`, `site_image_search` and `site_image_generate` (SMOODEV-3537).
+- 507ed53: `smoo integrations list|status|providers|connect|disconnect` (SMOODEV-3531): see which providers the org has connected, connect one through the browser (OAuth consent, or the dashboard's connect dialog for API-key providers) and wait until it's active, provision a Smoo-managed Twilio account behind a confirmation, and disconnect with a confirmation. No secret is taken on argv.
+
 ## 0.61.0
 
 ### Minor Changes
