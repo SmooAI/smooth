@@ -77,14 +77,8 @@ const PHASE2_TOKENS: &[&str] = &[
 /// cases where the operator knows better.
 const CONTRAST_MIN: f64 = 4.5;
 
-/// Dashboard origin for the preview link. Overridable so a local `next dev`
-/// can be previewed too.
-fn web_url() -> String {
-    std::env::var("SMOOAI_WEB_URL").unwrap_or_else(|_| "https://smoo.ai".to_string())
-}
-
 fn preview_url() -> String {
-    format!("{}/apps?brandPreview=1", web_url().trim_end_matches('/'))
+    format!("{}/apps?brandPreview=1", super::web_url().trim_end_matches('/'))
 }
 
 // ---------------------------------------------------------------------------

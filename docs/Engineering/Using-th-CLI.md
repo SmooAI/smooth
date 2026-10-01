@@ -43,13 +43,18 @@ explicit in the command tree:
   memory keep working, but `--help` shows the clean split. New docs and skills
   should use the `smoo …` spelling; this document was swept to it (pearl
   th-845c06). The old `th <resource>` spellings remain hidden compat aliases.
-- **CLI ↔ hosted-MCP parity**: every read surface on mcp.smoo.ai has a CLI
-  twin — `smoo analytics`, `smoo campaigns` (send is preview-first; real send
-  needs `--confirm`, suppression stays server-side), `smoo drip`,
-  `smoo audiences`, `smoo files search|summarize`, `smoo heypage
-versions|rollback|source|content`, `smoo api observability metrics` +
-  `web-vitals`, and the one-offs (`forms`, `gbp`, `search-console`, `sheets`,
-  `workforce`). Pearl trail: th-739bb1 / th-b1f09c / th-088c93 / th-a5d991.
+- **CLI ↔ hosted-MCP parity is partial — nothing enforces it.** Many read
+  surfaces on mcp.smoo.ai have a CLI twin — `smoo analytics`, `smoo campaigns`
+  (send is preview-first; real send needs `--confirm`, suppression stays
+  server-side), `smoo drip`, `smoo audiences`, `smoo files search|summarize`,
+  `smoo heypage versions|rollback|source|content`, `smoo api observability
+  metrics` + `web-vitals`, `smoo integrations`, and the one-offs (`forms`, `gbp`,
+  `search-console`, `sheets`, `workforce`). Pearl trail: th-739bb1 / th-b1f09c /
+  th-088c93 / th-a5d991. **Known gaps (hosted MCP has it, the CLI doesn't), as of
+  SMOODEV-3531:** `blog_*`, `site_design_edit`, `site_image_*`, calling
+  (`calls_list`/`calls_get`/`voicemails_list`/`calling_usage`/`call_place`),
+  `jira_import_*`, `drive_search`/`drive_read`. The `/surface-parity` skill in
+  the smooai repo re-derives this list from source.
 - **The `th agent`/`th agents` collision is gone**: the machine-local mailbox
   registry owns bare `th agent`, the platform agents live at `smoo agents`
   (where the singular `smoo agent` aliases the plural, per the normalize rule).
@@ -680,7 +685,52 @@ smoo api jobs create <body>
 smoo api jobs update <job-id> <body>
 ```
 
-### Integrations (SendGrid email)
+### Integrations — status, connect, disconnect (SMOODEV-3531)
+
+```bash
+smoo integrations list [--json]                 # every provider + connected / not
+smoo integrations list --mine                   # YOUR user-scoped accounts (user session)
+smoo integrations status [<provider>] [--json]  # one provider with its accounts
+smoo integrations providers                     # what `connect` can do, and how (oauth | web)
+
+# OAuth: fetches the consent URL, opens it, waits until the provider is active
+smoo integrations connect slack [--tier read_only|full_access]
+smoo integrations connect google --purpose features|analytics|ads|gmail_restricted|drive_restricted|directory
+smoo integrations connect microsoft [--purpose features|directory]
+smoo integrations connect meta [--purpose publish|ads|leads|whatsapp]
+smoo integrations connect shopify --shop acme            # → acme.myshopify.com
+smoo integrations connect zendesk --subdomain acme
+smoo integrations connect bluesky [--handle acme.bsky.social]
+smoo integrations connect salesforce [--sandbox]
+smoo integrations connect jira [--site https://acme.atlassian.net]
+#   common: [--no-browser] [--no-wait] [--timeout 300] [--org <id>]
+
+# Dialog providers (API keys, BYO Twilio, Stripe Connect, WhatsApp, Odoo, …):
+# opens <web>/apps/integrations?focus=<p>&connect=<p>, then waits the same way
+smoo integrations connect sendgrid
+smoo integrations connect twilio --provision [--yes]     # Smoo-managed subaccount (billed), confirms first
+
+smoo integrations disconnect <provider> [--dry-run] [--yes]
+```
+
+- **OAuth connects need a signed-in USER** (`smoo auth login`). The authorize
+  route refuses an org API key (M2M) with a 401; the CLI turns that into a
+  "run `smoo auth login`" message.
+- **The wait** polls `/organizations/{org}/integrations/summary` every 3 s until
+  an active account appears that wasn't active before (so adding a second
+  Google account is detected). For google/microsoft it waits on the requested
+  purpose only. A reconnect of an already-connected single-account provider
+  updates the row in place, so the CLI reports "no new account appeared"
+  instead of failing.
+- **The web base** is `https://smoo.ai` (`SMOOAI_WEB_URL` overrides it);
+  `?connect=` auto-opens the dialog once SMOODEV-3533 lands, until then
+  `?focus=` scrolls to the card. iCloud calendars live on `/apps/booking`.
+- **Salesforce** has backend handlers but no api-prime route yet: `connect`
+  falls back to the dashboard on the 404, and there's no CLI disconnect.
+- **No secret is ever taken on argv** — consent happens in the browser and
+  API keys are entered in the dashboard dialog.
+
+SendGrid also keeps its older direct CRUD:
 
 ```bash
 smoo api integrations sendgrid get
@@ -691,7 +741,8 @@ smoo api integrations sendgrid test --to you@example.com
 
 The API key is never passed on argv — `create` reads it from `SENDGRID_API_KEY`
 or prompts for it (masked). `test` sends a verification email through the
-configured integration.
+configured integration. Every `smoo integrations …` verb is also reachable as
+`smoo api integrations …`.
 
 ### Smooth Operator (org's always-on dashboard agent)
 
