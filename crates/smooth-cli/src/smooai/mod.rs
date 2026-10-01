@@ -13,6 +13,7 @@ pub mod agent_tools;
 pub mod agents;
 pub mod analytics;
 pub mod audiences;
+pub mod blog;
 pub mod booking;
 pub mod branding;
 pub mod campaigns;
