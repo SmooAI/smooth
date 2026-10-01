@@ -64,9 +64,9 @@ pub enum CiQueueCmd {
     Run(RunArgs),
     /// Running jobs, the queue, current pressure vs thresholds, and recent history.
     Status(StatusArgs),
-    /// PATH shims that send heavy cargo / cargo-nextest / xcodebuild / gradle
-    /// runs through the queue for every caller, agents included. A repo's
-    /// `./gradlew` is not on PATH, so no shim sees it.
+    /// PATH shims that send heavy cargo / cargo-nextest / xcodebuild / gradle /
+    /// swift / xcrun runs through the queue for every caller, agents included.
+    /// A repo's `./gradlew` is not on PATH, so no shim sees it.
     ///
     /// A shim in a directory ahead of the real tool on PATH (`~/.local/bin`)
     /// runs `th ci-queue run --class heavy [--lock cargo] -- <real tool> …`.
@@ -115,7 +115,7 @@ pub struct ShimInstallArgs {
     /// Directory for the shims. Must come before the real tools on PATH.
     #[arg(long, value_name = "DIR")]
     pub dir: Option<PathBuf>,
-    /// Tools to shim (default: cargo, cargo-nextest, xcodebuild, gradle). Also: gradlew, turbo, tsgo, tsc.
+    /// Tools to shim (default: cargo, cargo-nextest, xcodebuild, gradle, swift, xcrun). Also: gradlew, turbo, tsgo, tsc.
     #[arg(long, value_delimiter = ',', value_name = "TOOL,…")]
     pub tools: Vec<String>,
     /// Set aside (and later restore) a same-named file that is not a th shim.
@@ -347,7 +347,7 @@ fn shim_cmd(q: &Queue, cmd: &ShimCmd) -> Result<i32> {
                 return Ok(0);
             }
             if rows.is_empty() {
-                println!("No shims installed. `th ci-queue shim install` adds cargo, cargo-nextest, xcodebuild and gradle.");
+                println!("No shims installed. `th ci-queue shim install` adds cargo, cargo-nextest, xcodebuild, gradle, swift and xcrun.");
             }
             if let Some((first, brew)) = shim::th_shadowing_brew(&path_var, &shim::brew_th_links()) {
                 println!("  ⚠ {}", shim::shadowing_warning(&first, &brew));
