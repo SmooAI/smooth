@@ -41,7 +41,9 @@ pub enum Cmd {
     Prefs(PrefsCmd),
 }
 
+// A one-shot CLI parse; boxing the `Set` flags would buy nothing (same as booking.rs).
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum PrefsCmd {
     /// Show your current notification routing.
     Get {
