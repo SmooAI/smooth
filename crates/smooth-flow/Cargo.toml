@@ -38,6 +38,15 @@ portable-pty = "=0.9.0"
 # th-473294: the harness validator runs a PRIVATE engine (scratch $HOME +
 # worktree + flow.db) so a draft manifest never touches the user's state.
 tempfile.workspace = true
+# th-26f5b9 (SmoothFlow Diff): word-level change spans inside paired lines.
+similar.workspace = true
+# th-26f5b9: server-side syntax spans. syntect's parser on the pure-Rust
+# fancy-regex engine (no Oniguruma C build), over bat's ~200-syntax set from
+# two-face (TypeScript/TSX, Swift, Kotlin, TOML — which syntect's own default
+# set lacks). No theme dumps: clients theme the token kinds. ~1.3 MB in a
+# stripped release binary.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 
 [target.'cfg(windows)'.dependencies]
 # th-64d4ab: process liveness and start time without `ps`.

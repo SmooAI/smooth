@@ -430,6 +430,14 @@ impl FlowStore {
                  touched INTEGER NOT NULL DEFAULT 0,
                  root    TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS diff_snapshots (
+                 session_id TEXT NOT NULL,
+                 seq        INTEGER NOT NULL,
+                 kind       TEXT NOT NULL,
+                 tree       TEXT NOT NULL,
+                 at         TEXT NOT NULL,
+                 PRIMARY KEY (session_id, seq)
+             );
              CREATE TABLE IF NOT EXISTS pairings (
                  device       TEXT PRIMARY KEY,
                  label        TEXT NOT NULL DEFAULT '',
@@ -773,7 +781,64 @@ impl FlowStore {
     /// # Errors
     /// On a database failure.
     pub fn remove(&self, id: &str) -> Result<bool> {
+        // th-26f5b9: a session's turn snapshots go with it.
+        self.conn
+            .execute("DELETE FROM diff_snapshots WHERE session_id = ?1", params![id])
+            .context("remove snapshots")?;
         Ok(self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]).context("remove session")? > 0)
+    }
+
+    /// Record a turn snapshot (th-26f5b9) and prune to the newest `keep`.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn add_snapshot(&self, session_id: &str, kind: crate::diff::SnapKind, tree: &str, keep: usize) -> Result<crate::diff::Snapshot> {
+        let seq: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM diff_snapshots WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .context("next snapshot seq")?;
+        let at = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO diff_snapshots (session_id, seq, kind, tree, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, seq, kind.as_str(), tree, at],
+            )
+            .context("insert snapshot")?;
+        self.conn
+            .execute(
+                "DELETE FROM diff_snapshots WHERE session_id = ?1 AND seq <= ?2 - ?3",
+                params![session_id, seq, i64::try_from(keep).unwrap_or(i64::MAX)],
+            )
+            .context("prune snapshots")?;
+        Ok(crate::diff::Snapshot {
+            seq,
+            kind,
+            tree: tree.to_string(),
+            at,
+        })
+    }
+
+    /// A session's turn snapshots, oldest first.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn snapshots(&self, session_id: &str) -> Result<Vec<crate::diff::Snapshot>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT seq, kind, tree, at FROM diff_snapshots WHERE session_id = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok(crate::diff::Snapshot {
+                seq: r.get(0)?,
+                kind: crate::diff::SnapKind::parse(&r.get::<_, String>(1)?),
+                tree: r.get(2)?,
+                at: r.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().context("read snapshots")
     }
 
     /// A `config` value (th-0f6126: harness prefs live here as JSON).
