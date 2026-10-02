@@ -477,6 +477,24 @@ smoo api knowledge update <doc-id> <body>
 smoo api knowledge delete <doc-id>
 ```
 
+Authoring + ingest (SMOODEV-3609, CLI twins of the hosted MCP `knowledge_*`,
+`files_share_link`; all need `knowledge.write` except the share, which needs
+`files.share`):
+
+```bash
+smoo knowledge create --name "Refund Policy" --file refunds.md [--folder-id <id>]   # or --file - for stdin
+smoo knowledge edit <file-id> --file refunds.md      # by FILE id (files ls/search); re-indexes if in knowledge
+smoo knowledge add-url https://acme.com [--max-pages 50] [--max-depth 2]   # crawl the site
+smoo knowledge add-url https://acme.com/pricing --page [--personal]       # just this page; --personal = private to you
+smoo files ingest <file-id>                          # index a Files-tree file into knowledge
+smoo files share file <file-id> [--expires-in-days 7] [--max-downloads N] [--password | --password-stdin] [--no-expiry]
+```
+
+`files share` defaults to a 7-day expiry (the copilot's default). The password is
+**never** an argv value: `--password` prompts (masked) on the terminal and
+`--password-stdin` reads one line from stdin. Share responses report
+`hasPassword`, never the hash.
+
 ### Config (org-scoped feature flags + values)
 
 For day-to-day get / set / list against `@smooai/config`, the
@@ -821,6 +839,23 @@ smoo drive read <file-id> [--json]   # Docs → markdown, Sheets → CSV (first 
 A 409 means Drive is not connected **for you** — the error names the fix,
 `smoo integrations connect google --purpose drive_restricted`. Truncation and
 "first sheet only" notes go to stderr so `drive read` pipes cleanly.
+
+### Inbox, agent activity, content generation, plan (SMOODEV-3609)
+
+CLI twins of the hosted MCP `inbox_recent_conversations`, `agents_activity`,
+`templates_generate` and `billing_plan_usage` (and the copilot tools they mirror).
+
+```bash
+smoo inbox [--escalated] [--agent-id <id>] [--limit 10] [--json]   # conversations.read; user session only
+smoo agents activity [--json]                                      # agents.read; 7-day stats, busiest first
+smoo templates generate "Spring sale email" --type email-template [--save-draft]   # landing-page | email-template | form
+smoo billing plan [--json]                                         # billing.read; plans, limits, allowances, features
+```
+
+`billing plan` reads `GET /organizations/{org}/billing/plan-usage`: each plan's
+quotas plus the summed allowances (AI conversations, voice and per-seat calling
+minutes, meeting-bot minutes, HeyPage Studio credits). Minutes used live under
+`smoo calling usage`.
 
 ### Smooth Operator (org's always-on dashboard agent)
 

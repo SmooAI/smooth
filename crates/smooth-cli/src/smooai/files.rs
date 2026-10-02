@@ -185,15 +185,36 @@ pub enum Cmd {
         /// `view` or `download`.
         #[arg(long, default_value = "download")]
         permission: String,
-        /// Optional password gate.
-        #[arg(long)]
-        password: Option<String>,
+        /// Password-protect the link. Prompts for it (masked) on the terminal —
+        /// the password is never taken from the command line, where it would land
+        /// in shell history and the process list (SMOODEV-3609).
+        #[arg(long, conflicts_with = "password_stdin")]
+        password: bool,
+        /// Read the link password from the first line of stdin (for scripts).
+        #[arg(long = "password-stdin")]
+        password_stdin: bool,
         /// Expire the link this many hours from now.
-        #[arg(long = "expires-in-hours")]
+        #[arg(long = "expires-in-hours", conflicts_with_all = ["expires_in_days", "no_expiry"])]
         expires_in_hours: Option<i64>,
+        /// Expire the link this many days from now (1-365). Default: 7 days, the
+        /// same default the Smooth Operator and the hosted MCP use.
+        #[arg(long = "expires-in-days", conflicts_with = "no_expiry")]
+        expires_in_days: Option<i64>,
+        /// Create a link that never expires (anyone holding the URL keeps access
+        /// until you revoke it with `th smoo files unshare`).
+        #[arg(long = "no-expiry")]
+        no_expiry: bool,
         /// Cap the number of downloads.
         #[arg(long = "max-downloads")]
         max_downloads: Option<u32>,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Add a file to the org's knowledge base (index it for search). Needs the
+    /// "Ingest & manage knowledge documents" permission and Editor on the file.
+    Ingest {
+        /// The file id from `th smoo files ls` / `th smoo files search`.
+        file_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
@@ -423,15 +444,20 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             id,
             permission,
             password,
+            password_stdin,
             expires_in_hours,
+            expires_in_days,
+            no_expiry,
             max_downloads,
             org,
         } => {
             let o = require_active_org(&client, org)?;
+            let password = share_password(password, password_stdin)?;
+            let hours = share_hours(expires_in_hours, expires_in_days, no_expiry)?;
             let body = json!({
                 "permission": permission,
                 "password": password,
-                "expiresAt": expires_at(expires_in_hours),
+                "expiresAt": expires_at(hours),
                 "maxDownloads": max_downloads,
             });
             let share = client
@@ -443,6 +469,15 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 println!("  {} {}", "Share link:".dimmed(), format!("https://smoo.ai/share/{token}").cyan().bold());
             }
             print_json(&share);
+        }
+        Cmd::Ingest { file_id, org } => {
+            let o = require_active_org(&client, org)?;
+            let file = client
+                .post(&format!("/organizations/{o}/files/{file_id}/ingest"), None)
+                .await
+                .context("POST file ingest (needs knowledge.write)")?;
+            let name = file.get("name").and_then(|v| v.as_str()).unwrap_or(&file_id);
+            println!("  {} {} — searchable once processing finishes.", "Queued for ingestion:".green(), name.bold());
         }
         Cmd::Shares { kind, id, org } => {
             let o = require_active_org(&client, org)?;
@@ -529,6 +564,56 @@ fn dest_folder_value(dest: &str) -> serde_json::Value {
 }
 
 /// ISO-8601 timestamp `hours` from now, or null when no expiry was requested.
+/// Default share-link lifetime when no expiry flag is given (matches the
+/// Smooth Operator's `files.share_link` and the hosted MCP's `files_share_link`).
+const DEFAULT_SHARE_DAYS: i64 = 7;
+
+/// The link lifetime in hours: explicit hours, or days, or none with
+/// `--no-expiry`, else the 7-day default.
+fn share_hours(hours: Option<i64>, days: Option<i64>, no_expiry: bool) -> Result<Option<i64>> {
+    if no_expiry {
+        return Ok(None);
+    }
+    if let Some(h) = hours {
+        if h < 1 {
+            bail!("--expires-in-hours must be at least 1");
+        }
+        return Ok(Some(h));
+    }
+    let days = days.unwrap_or(DEFAULT_SHARE_DAYS);
+    if !(1..=365).contains(&days) {
+        bail!("--expires-in-days must be between 1 and 365");
+    }
+    Ok(Some(days * 24))
+}
+
+/// The share password: prompted (masked) from the TTY with `--password`, read
+/// from stdin with `--password-stdin`, otherwise none. Never from argv.
+fn share_password(prompt: bool, from_stdin: bool) -> Result<Option<String>> {
+    use std::io::IsTerminal as _;
+    let raw = if from_stdin {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).context("read password from stdin")?;
+        line
+    } else if prompt {
+        if !std::io::stdin().is_terminal() {
+            bail!("--password prompts on a terminal; in a script pipe it in with --password-stdin");
+        }
+        dialoguer::Password::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt("Share link password")
+            .with_confirmation("Repeat password", "Passwords don't match")
+            .interact()
+            .context("read share password")?
+    } else {
+        return Ok(None);
+    };
+    let pw = raw.trim_end_matches(['\r', '\n']).to_string();
+    if pw.is_empty() {
+        bail!("the share password must not be empty");
+    }
+    Ok(Some(pw))
+}
+
 fn expires_at(hours: Option<i64>) -> serde_json::Value {
     match hours {
         Some(h) => json!((Utc::now() + Duration::hours(h)).to_rfc3339()),
@@ -704,7 +789,49 @@ fn print_listing(folders: &serde_json::Value, files: &serde_json::Value) {
 mod tests {
     use serde_json::json;
 
-    use super::{content_text, dest_folder_value, find_file_name, guess_mime};
+    use super::{content_text, dest_folder_value, find_file_name, guess_mime, share_hours, Cmd};
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    /// SMOODEV-3609: a share password is never an argv value — `--password` is a
+    /// flag that prompts, so `--password hunter2` leaves `hunter2` unparsed.
+    #[test]
+    fn share_password_is_never_taken_from_argv() {
+        use clap::Parser as _;
+        let parsed = Wrap::try_parse_from(["t", "share", "file", "f-1", "--password", "hunter2"]);
+        assert!(parsed.is_err(), "a password value on the command line must be rejected");
+        let ok = Wrap::try_parse_from(["t", "share", "file", "f-1", "--password"]).expect("bare --password parses");
+        assert!(matches!(
+            ok.cmd,
+            Cmd::Share {
+                password: true,
+                password_stdin: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn share_expiry_defaults_to_seven_days_and_honours_flags() {
+        assert_eq!(share_hours(None, None, false).unwrap(), Some(7 * 24));
+        assert_eq!(share_hours(Some(5), None, false).unwrap(), Some(5));
+        assert_eq!(share_hours(None, Some(30), false).unwrap(), Some(30 * 24));
+        assert_eq!(share_hours(None, None, true).unwrap(), None);
+        assert!(share_hours(None, Some(0), false).is_err());
+        assert!(share_hours(None, Some(366), false).is_err());
+        assert!(share_hours(Some(0), None, false).is_err());
+    }
+
+    #[test]
+    fn ingest_parses_a_file_id() {
+        use clap::Parser as _;
+        let parsed = Wrap::try_parse_from(["t", "ingest", "f-1"]).expect("ingest parses");
+        assert!(matches!(parsed.cmd, Cmd::Ingest { ref file_id, .. } if file_id == "f-1"));
+    }
 
     #[test]
     fn dest_root_and_empty_map_to_null() {

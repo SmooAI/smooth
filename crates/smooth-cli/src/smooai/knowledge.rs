@@ -60,13 +60,56 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Crawl a website into the org's knowledge base (async ingestion job).
+    /// Write a NEW markdown document into the knowledge base: stored as a file
+    /// in the Files tree and indexed for search. Mirrors the Smooth Operator's
+    /// `knowledge.create` and the hosted MCP's `knowledge_create`.
+    Create {
+        /// Document name, e.g. "Refund Policy".
+        #[arg(long)]
+        name: String,
+        /// Markdown file to read the content from, or `-` for stdin.
+        #[arg(long = "file", short = 'f', value_name = "PATH")]
+        file: String,
+        /// File it into this folder (id from `th smoo files ls`). Root when omitted.
+        #[arg(long = "folder-id", value_name = "FOLDER_ID")]
+        folder_id: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Replace a text document's content with new markdown, by FILE id (from
+    /// `th smoo files ls` / `search`). Re-indexes it if it is in the knowledge
+    /// base. Mirrors `knowledge.update` / the MCP's `knowledge_update`.
+    Edit {
+        /// The file id (Files tree), not a knowledge document id.
+        file_id: String,
+        /// Markdown file to read the new content from, or `-` for stdin.
+        #[arg(long = "file", short = 'f', value_name = "PATH")]
+        file: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Ingest a website into the org's knowledge base (async ingestion job).
+    /// Crawls the site from the URL by default; `--page` ingests just that page.
     AddUrl {
         /// The website URL to crawl and ingest.
         url: String,
         /// Display name for the knowledge source (defaults to the URL).
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+        /// Ingest only this one page instead of crawling the site.
+        #[arg(long)]
+        page: bool,
+        /// Crawl only: max pages to fetch (1-500).
+        #[arg(long = "max-pages", value_name = "N", conflicts_with = "page")]
+        max_pages: Option<u32>,
+        /// Crawl only: max link depth from the URL (0-10).
+        #[arg(long = "max-depth", value_name = "N", conflicts_with = "page")]
+        max_depth: Option<u32>,
+        /// With `--page`: make the document private to you instead of shared with the org.
+        #[arg(long, requires = "page")]
+        personal: bool,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -190,13 +233,40 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("POST knowledge upload")?,
             );
         }
-        Cmd::AddUrl { url, name, org } => {
+        Cmd::Create { name, file, folder_id, org } => {
             let o = require_active_org(&client, org)?;
-            let name = name.unwrap_or_else(|| url.clone());
-            let body = serde_json::json!({ "urls": [url], "name": name });
+            let body = create_body(&name, &read_markdown(&file)?, folder_id.as_deref())?;
             print_json(
                 &client
-                    .post(&format!("/organizations/{o}/knowledge/websites"), Some(&body))
+                    .post(&format!("/organizations/{o}/files/documents"), Some(&body))
+                    .await
+                    .context("POST files/documents (needs knowledge.write)")?,
+            );
+        }
+        Cmd::Edit { file_id, file, org } => {
+            let o = require_active_org(&client, org)?;
+            let body = serde_json::json!({ "content": nonempty(read_markdown(&file)?)? });
+            print_json(
+                &client
+                    .put(&format!("/organizations/{o}/files/{file_id}/content"), &body)
+                    .await
+                    .context("PUT files content (needs knowledge.write)")?,
+            );
+        }
+        Cmd::AddUrl {
+            url,
+            name,
+            page,
+            max_pages,
+            max_depth,
+            personal,
+            org,
+        } => {
+            let o = require_active_org(&client, org)?;
+            let (path, body) = add_url_request(&url, name.as_deref(), page, max_pages, max_depth, personal);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{o}/knowledge/{path}"), Some(&body))
                     .await
                     .context("POST knowledge add-url")?,
             );
@@ -267,6 +337,62 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
     Ok(())
 }
 
+/// Markdown content from a file path, or stdin for `-`.
+fn read_markdown(path: &str) -> Result<String> {
+    if path == "-" {
+        use std::io::Read as _;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("read stdin")?;
+        Ok(s)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("read {path}"))
+    }
+}
+
+fn nonempty(content: String) -> Result<String> {
+    if content.trim().is_empty() {
+        anyhow::bail!("the document content is empty");
+    }
+    Ok(content)
+}
+
+/// `POST /files/documents` body.
+fn create_body(name: &str, content: &str, folder_id: Option<&str>) -> Result<serde_json::Value> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 512 {
+        anyhow::bail!("--name must be 1-512 characters");
+    }
+    let mut body = serde_json::json!({ "name": name, "content": nonempty(content.to_string())? });
+    if let Some(f) = folder_id.map(str::trim).filter(|f| !f.is_empty()) {
+        body["folderId"] = serde_json::json!(f);
+    }
+    Ok(body)
+}
+
+/// The route + body for `add-url`: a single page goes to `/knowledge/process`
+/// (`websiteUrl`), a crawl to `/knowledge/websites` (`urls`).
+fn add_url_request(
+    url: &str,
+    name: Option<&str>,
+    page: bool,
+    max_pages: Option<u32>,
+    max_depth: Option<u32>,
+    personal: bool,
+) -> (&'static str, serde_json::Value) {
+    let name = name.map_or_else(|| url.to_string(), str::to_string);
+    if page {
+        return ("process", serde_json::json!({ "name": name, "websiteUrl": url, "personal": personal }));
+    }
+    let mut body = serde_json::json!({ "urls": [url], "name": name });
+    if let Some(n) = max_pages {
+        body["crawlLimit"] = serde_json::json!(n.clamp(1, 500));
+    }
+    if let Some(d) = max_depth {
+        body["crawlMaxDepth"] = serde_json::json!(d.min(10));
+    }
+    ("websites", body)
+}
+
 /// Compact rendering of `POST /knowledge/search`: a numbered list of
 /// `name` with the passage below each, most-relevant first. Falls back to JSON on
 /// an unexpected shape.
@@ -294,6 +420,44 @@ fn print_knowledge_results(resp: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_url_crawls_by_default_and_ingests_one_page_with_page() {
+        let (path, body) = add_url_request("https://smoo.ai", None, false, Some(9999), Some(3), false);
+        assert_eq!(path, "websites");
+        assert_eq!(body["urls"], serde_json::json!(["https://smoo.ai"]));
+        assert_eq!(body["crawlLimit"], serde_json::json!(500));
+        assert_eq!(body["crawlMaxDepth"], serde_json::json!(3));
+        let (path, body) = add_url_request("https://smoo.ai/p", Some("Pricing"), true, None, None, true);
+        assert_eq!(path, "process");
+        assert_eq!(body["websiteUrl"], serde_json::json!("https://smoo.ai/p"));
+        assert_eq!(body["personal"], serde_json::json!(true));
+        assert_eq!(body["name"], serde_json::json!("Pricing"));
+    }
+
+    #[test]
+    fn create_body_validates_and_carries_the_folder() {
+        let b = create_body(" Refunds ", "# R", Some("fold-1")).unwrap();
+        assert_eq!(b["name"], serde_json::json!("Refunds"));
+        assert_eq!(b["folderId"], serde_json::json!("fold-1"));
+        assert!(create_body("", "# R", None).is_err());
+        assert!(create_body("x", "  ", None).is_err());
+        assert!(create_body("x", "y", None).unwrap().get("folderId").is_none());
+    }
+
+    #[test]
+    fn personal_requires_page() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        assert!(Wrap::try_parse_from(["t", "add-url", "https://smoo.ai", "--personal"]).is_err());
+        assert!(Wrap::try_parse_from(["t", "add-url", "https://smoo.ai", "--page", "--personal"]).is_ok());
+        assert!(Wrap::try_parse_from(["t", "create", "--name", "x", "--file", "-"]).is_ok());
+        assert!(Wrap::try_parse_from(["t", "edit", "f-1", "--file", "doc.md"]).is_ok());
+    }
 
     /// CLI-Spec §flags: every platform `list` verb offers `--json`.
     #[test]
