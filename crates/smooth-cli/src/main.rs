@@ -969,6 +969,23 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::analytics::Cmd,
     },
+    /// Smoo AI analytics dashboards — list / create, and add / update / remove
+    /// widgets (a preset key or a saved query, never raw SQL). CLI twin of the
+    /// copilot's `dashboards.*` and the hosted MCP `dashboards_*` tools. Not to
+    /// be confused with `dashboard` (your `/apps` home-screen layout).
+    #[command(name = "dashboards")]
+    AnalyticsDashboards {
+        #[command(subcommand)]
+        cmd: smooai::analytics_dashboards::Cmd,
+    },
+    /// Your own notification routing in this org — `notifications prefs get`
+    /// / `prefs set` (channels, per-category routes, quiet hours). CLI twin of
+    /// the copilot's `notifications.*_preferences`. User-authed (`th auth login`).
+    #[command(visible_alias = "notification")]
+    Notifications {
+        #[command(subcommand)]
+        cmd: smooai::notification_prefs::Cmd,
+    },
     /// Smoo AI campaigns — list, per-campaign analytics, and (preview-first)
     /// send. CLI twin of the hosted MCP campaign_* tools.
     #[command(visible_alias = "campaign")]
@@ -1899,6 +1916,8 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Work { cmd } => smooai::work::cmd(cmd).await,
         SmooCommands::Workflows { cmd } => smooai::workflows::cmd(cmd).await,
         SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
+        SmooCommands::AnalyticsDashboards { cmd } => smooai::analytics_dashboards::cmd(cmd).await,
+        SmooCommands::Notifications { cmd } => smooai::notification_prefs::cmd(cmd).await,
         SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
         SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
         SmooCommands::Audiences { cmd } => smooai::audiences::cmd(cmd).await,
