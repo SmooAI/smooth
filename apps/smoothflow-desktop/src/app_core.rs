@@ -323,7 +323,15 @@ impl Core {
             }
             Event::Frame(Inbound::Harnesses(h)) => self.set_harnesses(h),
             Event::Frame(Inbound::Output { id, bytes, .. }) => {
-                self.terminals.entry(id).or_insert_with(|| TerminalModel::new(80, 24)).feed(&bytes);
+                let term = self.terminals.entry(id.clone()).or_insert_with(|| TerminalModel::new(80, 24));
+                term.feed(&bytes);
+                // The terminal's answers to the program's queries (DA, DSR,
+                // size reports) are typed back into the session, as on the
+                // Mac and the phones.
+                let replies = term.take_replies();
+                if !replies.is_empty() {
+                    self.out.send(frames::input(&id, &replies));
+                }
             }
             Event::Frame(Inbound::Error(message)) => self.notice = Some(message),
         }
@@ -404,6 +412,11 @@ impl Core {
                 Some(size) if *size != (cols, rows) => {
                     term.resize(cols, rows);
                     self.out.send(frames::resize(&id, c16, r16));
+                    // An in-band size report (mode 2048) the resize produced.
+                    let replies = term.take_replies();
+                    if !replies.is_empty() {
+                        self.out.send(frames::input(&id, &replies));
+                    }
                     self.attached.insert(id, (cols, rows));
                 }
                 Some(_) => {}
@@ -751,6 +764,26 @@ mod tests {
             Some("not connected to a flow engine"),
             "stale answers drop"
         );
+    }
+
+    #[test]
+    fn the_terminals_answers_go_back_as_input() {
+        let (mut c, mut rx) = core();
+        let output = |bytes: &[u8]| {
+            Event::Frame(Inbound::Output {
+                id: "fs-1".into(),
+                seq: 1,
+                bytes: bytes.to_vec(),
+            })
+        };
+        c.apply(output(b"plain text"));
+        assert!(sent(&mut rx).is_empty(), "no query, no answer");
+        c.apply(output(b"\x1b[2;3H\x1b[6n"));
+        let answer = sent(&mut rx);
+        assert_eq!(answer.len(), 1);
+        assert_eq!((answer[0]["type"].as_str(), answer[0]["id"].as_str()), (Some("flow.input"), Some("fs-1")));
+        // base64 of ESC [2;3R: the DSR cursor-position reply.
+        assert_eq!(answer[0]["data_b64"].as_str(), Some("G1syOzNS"));
     }
 
     #[test]

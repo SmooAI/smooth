@@ -1,1 +1,3 @@
 /target
+# libghostty-vt build output (scripts/build-ghostty-vt.sh)
+/.ghostty-vt

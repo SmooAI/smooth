@@ -8,6 +8,7 @@ pub mod app_core;
 pub mod discovery;
 pub mod field;
 pub mod frames;
+pub mod ghostty;
 pub mod http;
 pub mod keys;
 pub mod layout;

@@ -77,6 +77,18 @@ jobs:
             - name: tmux (macOS)
               if: runner.os == 'macOS'
               run: command -v tmux || brew install tmux
+            # libghostty-vt, the terminal engine (th-872ea8): built from source
+            # with the pinned Zig by scripts/build-ghostty-vt.sh, cached on the
+            # lock + script. build.rs runs the same script, which is a no-op
+            # once its stamp matches. Windows runs it under Git Bash.
+            - name: Cache libghostty-vt
+              uses: actions/cache@v4
+              with:
+                  path: apps/smoothflow-desktop/.ghostty-vt/out
+                  key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/smoothflow-desktop/ghostty-vt.lock', 'apps/smoothflow-desktop/scripts/build-ghostty-vt.sh') }}
+            - name: Build libghostty-vt
+              shell: bash
+              run: scripts/build-ghostty-vt.sh
             # The real daemon the e2e test drives (th-032792). Built from the
             # main workspace and handed over by path, so the test never builds
             # it itself here.

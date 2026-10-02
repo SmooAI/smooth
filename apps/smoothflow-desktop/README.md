@@ -25,10 +25,15 @@ replays.
   would lose its last view, offering Close or End Session with Cancel as the
   default. Clicking a fleet row shows that session in the focused pane.
 - **Terminals**: each pane is a live PTY stream (`flow.attach` /
-  `flow.output`) parsed by `alacritty_terminal` and drawn by GPUI (Vulkan on
-  Linux, DirectX on Windows, Metal on macOS). Cell metrics are measured from
-  the font. The cursor is a block in the focused pane and hollow elsewhere.
-  Each pane resizes with the layout.
+  `flow.output`) parsed by **libghostty-vt**, the same Ghostty the Mac, iOS
+  and Android apps run, and drawn by GPUI (Vulkan on Linux, DirectX on
+  Windows, Metal on macOS). Styled runs (bold, italic, underline, inverse,
+  invisible), the 256-colour and truecolor palette on the Catppuccin theme,
+  wide chars (two cells), combining marks and the alternate screen all come
+  from Ghostty. The terminal's answers to the program's queries (DA, DSR,
+  in-band size reports) go back to the session as `flow.input`. Cell metrics
+  are measured from the font. The cursor is a block in the focused pane and
+  hollow elsewhere. Each pane resizes with the layout.
 - **One session in several panes**: a session has one PTY, so one size. It is
   attached at the **smallest** size of the panes showing it, per axis (tmux's
   `window-size smallest`). Every pane shows the whole screen, and larger panes
@@ -61,8 +66,8 @@ the views only draw.
 Not yet: Close Out, Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
 pearl rail, Settings (the "Don't ask again" choice lasts until you quit),
 menus, selection and copy, scrollback, IME in the sheet's fields, Browse… (the
-platform folder picker), a bundled Nerd Font, and libghostty-vt as the VT
-backend.
+platform folder picker), a bundled Nerd Font, and faint/strikethrough
+styling (libghostty-vt reports both; the renderer doesn't draw them yet).
 
 ## Build
 
@@ -72,10 +77,47 @@ cargo run            # needs a running flow engine (SmoothFlow's daemon or `th u
 cargo test           # unit tests + the e2e below (needs tmux; builds smooth-daemon)
 ```
 
-It's its own Cargo workspace, so GPUI never enters the main `th` build. On
+It's its own Cargo workspace, so GPUI never enters the main `th` build. The
+first build also builds libghostty-vt (below), which takes a few minutes. On
 Linux it needs the X11/Wayland/Vulkan/fontconfig/D-Bus/PipeWire development
 packages; `.github/workflows/smoothflow-desktop.yml` lists them. On Windows the
 flow engine runs inside WSL2 until the native PTY host lands (th-2fbc9c).
+
+## libghostty-vt
+
+The terminal engine is libghostty-vt, Ghostty's VT parser and screen as a C
+library, linked statically. Ghostty publishes no binaries, so
+`scripts/build-ghostty-vt.sh` builds it from source, pinned by
+`ghostty-vt.lock`: the manaflow-ai/ghostty commit (the same one
+`apps/smoothflow/scripts/ghosttykit.lock` and the Android app pin) and the Zig
+release (sha256-checked, fetched from community mirrors before ziglang.org).
+It runs `zig build -Demit-lib-vt -Doptimize=ReleaseFast` for the Rust target
+and installs the archive and headers into `.ghostty-vt/out/<rust-target>/`
+(gitignored, along with the Zig toolchain, the ghostty checkout and Zig's
+caches under `.ghostty-vt/`).
+
+| Rust target                | Zig target            | Archive                 | Notes                                                                    |
+| -------------------------- | --------------------- | ----------------------- | ------------------------------------------------------------------------ |
+| `aarch64-apple-darwin`     | `aarch64-macos`       | `libghostty-vt.a`       | SIMD (simdutf, highway) bundled in the archive                           |
+| `x86_64-apple-darwin`      | `x86_64-macos`        | `libghostty-vt.a`       | as above                                                                 |
+| `x86_64-unknown-linux-gnu` | `x86_64-linux-gnu`    | `libghostty-vt.a`       | as above                                                                 |
+| `x86_64-pc-windows-msvc`   | `x86_64-windows-msvc` | `ghostty-vt-static.lib` | `-Dsimd=false` (Windows bundles no SIMD deps); links `ntdll`, `kernel32` |
+
+`build.rs` runs the script for the target being compiled (a no-op once its
+stamp matches the lock and the script), links the archive, and compiles
+`csrc/smoothflow_vt.c`. That small C bridge, the same shape as the Android
+app's JNI bridge, owns the libghostty-vt terminal and render state and hands
+Rust plain words: one snapshot array per frame and a reply buffer. Rust never
+sees a libghostty struct, so there is no layout to get wrong.
+`src/ghostty.rs` is the only module with `unsafe`: it declares the bridge's
+functions and wraps the handle in `Vt` (freed on drop, `Send`, not `Sync`).
+`src/terminal.rs` builds `TerminalModel` on it, so `Core` and the view never
+see the backend.
+
+Set `GHOSTTY_VT_DIR=<dir>` (with `include/` and `lib/`) to link a library you
+built yourself and skip the script. `GHOSTTY_VT_WORK` moves `.ghostty-vt`.
+On Windows the script runs under Git Bash; `GHOSTTY_VT_BASH` names another
+bash. CI caches `.ghostty-vt/out` keyed on the lock and the script.
 
 ## End-to-end test
 
