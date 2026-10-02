@@ -17,6 +17,7 @@ pub mod hook_auth;
 pub mod host;
 pub mod infer;
 pub mod limit;
+pub mod pane_path;
 pub mod proc;
 pub mod protocol;
 pub mod pty;

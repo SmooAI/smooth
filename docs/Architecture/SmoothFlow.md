@@ -49,6 +49,25 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   app crash never kills a PTY: the engine re-opens `flow.db`, finds the tmux
   session by name (the flow session id) and carries on. `remain-on-exit` is on
   so a dead pane stays until the engine has read how it ended.
+- **tmux is found off-`PATH`, and panes get the login `PATH` (th-9f6814).** An
+  app launched from Finder gives its daemon `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+  which holds neither Homebrew's tmux nor the user's CLIs. `smooth_tmux::tmux_bin`
+  resolves tmux once: `$SMOOTH_TMUX_BIN` (an override; a broken one is an error,
+  not a fallback), then `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`,
+  `/opt/local/bin`, `/usr/bin`. Every tmux call in `smooth-flow`, `smooth-tmux`
+  and `th claude` goes through it, `tmux attach` included. Every launch exports a
+  pane `PATH` (`smooth_flow::pane_path`): the daemon's non-system entries, then
+  the user's `$SHELL -l -i` `PATH` (captured once, 5 s timeout;
+  `SMOOTH_FLOW_LOGIN_PATH=0` skips it), then `/usr/bin` and the other system dirs,
+  then the well-known tool dirs. Harness binaries resolve against that same
+  `PATH`. The daemon logs the resolved tmux at boot, and `th harness doctor`
+  prints it.
+- **A launch that fails says why.** No tmux, a tmux error, or a missing harness
+  binary sends the row to `dead` with attention `launch_failed` and a detail
+  such as "tmux not found (looked in PATH, /opt/homebrew/bin, …): install it
+  with `brew install tmux`". The failure is logged at WARN and broadcast as
+  `flow.session`. Before this, the row sat in `starting` with no pid and no
+  detail, and nothing was logged.
 - **A wrapper in the pane records the exit code (th-7ff336).** tmux knows a
   pane's `#{pane_dead_status}` only once its server has reaped the process.
   On Linux that lagged seconds, and tmux sometimes misses the SIGCHLD

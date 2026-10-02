@@ -27,6 +27,7 @@ mod support;
 
 mod agent;
 mod cli;
+mod finder_env;
 mod harnesses;
 mod hooks;
 mod isolation;

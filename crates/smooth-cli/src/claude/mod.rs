@@ -191,7 +191,7 @@ fn attach(id: &str) -> Result<()> {
         }
     };
 
-    let mut cmd = std::process::Command::new("tmux");
+    let mut cmd = smooth_tmux::tmux_command();
     cmd.args(["-L", &entry.socket, "attach", "-t", &entry.session]);
 
     // Hand the terminal over to tmux by replacing this process.

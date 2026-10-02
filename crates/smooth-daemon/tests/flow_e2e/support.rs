@@ -151,6 +151,13 @@ pub struct Daemon {
 impl Daemon {
     /// Boot. Panics (with the daemon log) when it doesn't come up.
     pub async fn boot() -> Self {
+        Self::boot_with(None, &[]).await
+    }
+
+    /// [`Self::boot`] with the daemon's `PATH` replaced by `path` (no rig
+    /// bin dir, no inherited `PATH` — a Finder-launched app's environment)
+    /// and `env` added on top.
+    pub async fn boot_with(path: Option<&str>, env: &[(&str, &str)]) -> Self {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let root = tempfile::Builder::new().prefix("flow-e2e-").tempdir().expect("tempdir");
         let home = root.path().join("home");
@@ -162,11 +169,17 @@ impl Daemon {
         let log_path = root.path().join("daemon.log");
         let log = std::fs::File::create(&log_path).expect("daemon log");
         let err = log.try_clone().expect("daemon log");
-        let mut path = home.join(".local").join("bin").into_os_string();
-        if let Some(p) = std::env::var_os("PATH") {
-            path.push(":");
-            path.push(p);
-        }
+        let path = path.map_or_else(
+            || {
+                let mut path = home.join(".local").join("bin").into_os_string();
+                if let Some(p) = std::env::var_os("PATH") {
+                    path.push(":");
+                    path.push(p);
+                }
+                path
+            },
+            std::ffi::OsString::from,
+        );
         let mut cmd = Command::new(daemon_bin());
         cmd.args(["operator", "--addr", "127.0.0.1:0", "--tmux-socket", &socket])
             .env_clear()
@@ -187,6 +200,9 @@ impl Daemon {
             .stderr(Stdio::from(err));
         if let Some(th) = th_bin() {
             cmd.env("SMOOTH_TH_BIN", th);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
         }
         let mut child = cmd.spawn().expect("spawn smooth-daemon");
 

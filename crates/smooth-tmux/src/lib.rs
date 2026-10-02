@@ -30,7 +30,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
+pub mod bin;
 pub mod detect;
+
+pub use bin::{find_tmux, tmux_bin, tmux_command, KNOWN_TMUX_PATHS, TMUX_BIN_ENV};
 
 /// Default pane geometry. Wide enough that Claude Code's status line and
 /// boxes render without wrapping artifacts that confuse pane scraping.
@@ -150,7 +153,7 @@ impl TmuxDriver {
     /// `workdir`, then wait until the pane first renders.
     ///
     /// # Errors
-    /// - `tmux` is not on `PATH`.
+    /// - No tmux can be found ([`tmux_bin`]).
     /// - The session could not be created.
     /// - The pane never rendered within `boot_timeout`.
     pub fn start(session: &str, workdir: &Path, shell_cmd: &str, boot_timeout: Duration) -> Result<Self> {
@@ -158,7 +161,7 @@ impl TmuxDriver {
         let socket = make_socket_name(session);
 
         let args = new_session_args(&socket, session, PANE_WIDTH, PANE_HEIGHT, &workdir.to_string_lossy(), shell_cmd);
-        let out = Command::new("tmux").args(&args).output().context("spawning tmux new-session")?;
+        let out = tmux_command().args(&args).output().context("spawning tmux new-session")?;
         if !out.status.success() {
             return Err(anyhow!(
                 "tmux new-session for `{session}` exited non-zero: {}",
@@ -253,7 +256,7 @@ impl TmuxDriver {
     pub fn paste(&self, text: &str) -> Result<()> {
         let buffer = format!("smth-{}-{}", self.session, uuid::Uuid::new_v4().simple());
 
-        let mut child = Command::new("tmux")
+        let mut child = tmux_command()
             .args(["-L", &self.socket, "load-buffer", "-b", &buffer, "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -273,12 +276,12 @@ impl TmuxDriver {
         // `-p` wraps the paste in bracketed-paste markers so a TUI treats
         // embedded newlines as soft newlines, not Enter. `-d` deletes the
         // buffer afterward.
-        let out = Command::new("tmux")
+        let out = tmux_command()
             .args(["-L", &self.socket, "paste-buffer", "-b", &buffer, "-t", &self.session, "-d", "-p"])
             .output()
             .context("tmux paste-buffer")?;
         if !out.status.success() {
-            let _ = Command::new("tmux")
+            let _ = tmux_command()
                 .args(["-L", &self.socket, "delete-buffer", "-b", &buffer])
                 .stderr(Stdio::null())
                 .stdout(Stdio::null())
@@ -293,7 +296,7 @@ impl TmuxDriver {
     /// # Errors
     /// On tmux failure.
     pub fn send_enter(&self) -> Result<()> {
-        let out = Command::new("tmux")
+        let out = tmux_command()
             .args(["-L", &self.socket, "send-keys", "-t", &self.session, "Enter"])
             .output()
             .context("tmux send-keys (Enter)")?;
@@ -311,7 +314,7 @@ impl TmuxDriver {
     /// # Errors
     /// On tmux failure.
     pub fn send_key(&self, key: &str) -> Result<()> {
-        let out = Command::new("tmux")
+        let out = tmux_command()
             .args(["-L", &self.socket, "send-keys", "-t", &self.session, key])
             .output()
             .context("tmux send-keys")?;
@@ -345,7 +348,7 @@ impl TmuxDriver {
 
     fn capture_raw(&self, scrollback: bool) -> Result<String> {
         let args = capture_args(&self.socket, &self.session, scrollback);
-        let out = Command::new("tmux").args(&args).output().context("tmux capture-pane")?;
+        let out = tmux_command().args(&args).output().context("tmux capture-pane")?;
         if !out.status.success() {
             return Err(anyhow!(
                 "tmux capture-pane exited non-zero (session `{}`): {}",
@@ -360,7 +363,7 @@ impl TmuxDriver {
     /// exits, tmux tears the session down and this returns `false`.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        Command::new("tmux")
+        tmux_command()
             .args(["-L", &self.socket, "has-session", "-t", &self.session])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -401,7 +404,7 @@ impl TmuxDriver {
         } else {
             &["-L", &self.socket, "kill-session", "-t", &self.session]
         };
-        let _ = Command::new("tmux").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = tmux_command().args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
         Ok(())
     }
 }
@@ -415,17 +418,18 @@ impl Drop for TmuxDriver {
 }
 
 fn require_tmux() -> Result<()> {
-    Command::new("tmux")
+    let tmux = tmux_bin()?;
+    Command::new(&tmux)
         .arg("-V")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|e| anyhow!("tmux is required but could not be run ({e}); install it (macOS: `brew install tmux`)"))
+        .map_err(|e| anyhow!("tmux at {} could not be run ({e}); {}", tmux.display(), bin::install_hint()))
         .and_then(|s| {
             if s.success() {
                 Ok(())
             } else {
-                Err(anyhow!("`tmux -V` failed; is tmux installed and on PATH?"))
+                Err(anyhow!("`{} -V` failed; is tmux installed correctly?", tmux.display()))
             }
         })
 }
