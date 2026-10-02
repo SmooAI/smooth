@@ -35,5 +35,9 @@ url = "2"
 dirs-next = "2"
 urlencoding = "2"
 
+[dev-dependencies]
+# tests/e2e.rs: the scratch HOME a real smooth-daemon runs in.
+tempfile = "3"
+
 [profile.release]
 lto = "thin"

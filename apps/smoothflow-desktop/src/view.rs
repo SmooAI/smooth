@@ -3,16 +3,15 @@
 //! dialog. Nothing here decides anything; it reads `Workspace` and calls
 //! back into it.
 
-use std::collections::BTreeMap;
-
 use gpui_kit::*;
-use smooth_flow_client::keymap::{Action, Platform};
+use smooth_flow_client::keymap::Action;
 use smooth_flow_client::pane::{PaneId, Rect};
 use smooth_flow_client::{fleet, title, SessionState};
 
-use crate::layout::{CellMetrics, PANE_PADDING};
-use crate::sheet::Focus;
-use crate::terminal::theme;
+use smoothflow_desktop::layout::{CellMetrics, PANE_PADDING};
+use smoothflow_desktop::sheet::Focus;
+use smoothflow_desktop::terminal::theme;
+
 use crate::workspace::{Connection, Workspace};
 
 pub const SIDEBAR_WIDTH: f32 = 260.0;
@@ -45,7 +44,7 @@ fn hsla(rgb24: u32) -> Hsla {
 
 /// The chord for `action`, as a hint on a button.
 fn hint(ws: &Workspace, action: Action) -> String {
-    ws.keymap.chord(action).map(|c| c.display(Platform::current())).unwrap_or_default()
+    ws.chord_hint(action)
 }
 
 fn button(label: impl Into<SharedString>, color: u32, enabled: bool) -> Div {
@@ -254,14 +253,10 @@ impl Workspace {
         if multi {
             el = el.border_1().border_color(hsla(if focused { ACCENT } else { BORDER }));
         }
-        let session = self.surfaces.session_of(pane);
-        let Some(term) = session.and_then(|id| self.terminals.get(id)) else {
-            let hint_text = match session.and_then(|id| self.sessions.get(id)) {
-                Some(s) if !s.is_live() => format!("{} is {:?}.", s.kind, s.state).to_lowercase(),
-                Some(_) => "attaching…".to_string(),
-                None if self.sessions.is_empty() => format!("No sessions yet — New Session ({}).", hint(self, Action::NewSession)),
-                None => "Empty pane — pick a session in the sidebar.".to_string(),
-            };
+        let hint_text = self.pane_hint(pane);
+        let term = self.surfaces.session_of(pane).and_then(|id| self.terminals.get(id));
+        let (Some(term), None) = (term, &hint_text) else {
+            let hint_text = hint_text.unwrap_or_else(|| "attaching…".to_string());
             return el.flex().items_center().justify_center().text_color(hsla(MUTED)).child(hint_text);
         };
         let block = focused && window_focused;
@@ -383,7 +378,7 @@ impl Workspace {
                 detail = detail.child(div().text_xs().font_family(mono_family()).text_color(hsla(SUBTLE)).child(format!("fix: {fix}")));
             }
         }
-        let field = |f: &crate::field::Field, focused: bool, placeholder: String| {
+        let field = |f: &smoothflow_desktop::field::Field, focused: bool, placeholder: String| {
             let (before, after) = f.split();
             let mut d = div()
                 .px_2()
@@ -524,7 +519,7 @@ impl Workspace {
                                 .sheet
                                 .as_ref()
                                 .and_then(|s| s.new_session())
-                                .map(crate::sheet::Effect::Start)
+                                .map(smoothflow_desktop::sheet::Effect::Start)
                                 .into_iter()
                                 .collect();
                             this.run_effects(fx, cx);
@@ -605,38 +600,20 @@ impl Render for Workspace {
         let strip = self.surfaces.tabs.len() > 1;
         let approval = self.approval_bar(cx);
         let top = if strip { TAB_STRIP_HEIGHT } else { 0.0 } + if approval.is_some() { APPROVAL_HEIGHT } else { 0.0 };
-        self.pane_area = Rect {
+        let pane_area = Rect {
             x: 0.0,
             y: 0.0,
             w: f64::from((f32::from(viewport.width) - sidebar_w).max(0.0)),
             h: f64::from((f32::from(viewport.height) - top).max(0.0)),
         };
-        // Whole pixels, so neighbouring panes share an edge exactly.
-        let visible: Vec<(PaneId, Rect)> = self
-            .surfaces
-            .visible(self.pane_area)
-            .into_iter()
-            .map(|(p, r)| {
-                let (x, y) = (r.x.round(), r.y.round());
-                (
-                    p,
-                    Rect {
-                        x,
-                        y,
-                        w: (r.x + r.w).round() - x,
-                        h: (r.y + r.h).round() - y,
-                    },
-                )
-            })
-            .collect();
-        let grids: BTreeMap<PaneId, (usize, usize)> = visible.iter().map(|(p, r)| (*p, m.grid(*r))).collect();
-        self.sync_attach(&grids);
+        // Lays the panes out and attaches/resizes their sessions to match.
+        let visible = self.layout(pane_area, m);
 
         let focused_pane = self.surfaces.focused_pane();
         let window_focused = self.focus.is_focused(window);
         let mut area = div().relative().flex_1().overflow_hidden();
-        for (p, r) in &visible {
-            area = area.child(self.pane(*p, *r, *p == focused_pane, window_focused, m, cx));
+        for f in &visible {
+            area = area.child(self.pane(f.pane, f.rect, f.pane == focused_pane, window_focused, m, cx));
         }
         let mut center = div().flex().flex_col().flex_1().h_full().overflow_hidden();
         if strip {

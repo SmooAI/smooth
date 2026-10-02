@@ -6395,6 +6395,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smooai-smooth-flow-client",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "url",

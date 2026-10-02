@@ -16,6 +16,7 @@ use crate::frames::{self, Inbound};
 
 /// What the UI hears about the connection.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant, reason = "one per frame on a channel; boxing every frame buys nothing")]
 pub enum Event {
     Connecting,
     /// Connected to this endpoint (its address and token also serve HTTP).
@@ -32,11 +33,29 @@ impl Outbox {
     pub fn send(&self, frame: String) {
         let _ = self.0.send(frame);
     }
+
+    /// An outbox and the receiving end of it, not connected to anything
+    /// (unit tests read what would have been sent).
+    #[must_use]
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self(tx), rx)
+    }
 }
 
-/// Start the connection thread.
+/// Start the connection thread, discovering the engine on this machine
+/// (`discovery::discover`: the environment, then `smooth_dir`).
 #[must_use]
 pub fn start(smooth_dir: PathBuf) -> (Outbox, fmpsc::UnboundedReceiver<Event>) {
+    start_with(move || discovery::discover(&smooth_dir))
+}
+
+/// Start the connection thread with `locate` finding the engine, re-run
+/// before every (re)connect. The e2e test passes
+/// `discovery::discover_in(scratch, no env)` so a developer's
+/// `$SMOOTH_FLOW_ADDR` can never point it at their real daemon.
+#[must_use]
+pub fn start_with(locate: impl FnMut() -> Option<discovery::Endpoint> + Send + 'static) -> (Outbox, fmpsc::UnboundedReceiver<Event>) {
     let (out_tx, out_rx) = mpsc::unbounded_channel::<String>();
     let (ev_tx, ev_rx) = fmpsc::unbounded::<Event>();
     std::thread::Builder::new()
@@ -46,17 +65,17 @@ pub fn start(smooth_dir: PathBuf) -> (Outbox, fmpsc::UnboundedReceiver<Event>) {
                 let _ = ev_tx.unbounded_send(Event::Offline("could not start the network runtime".into()));
                 return;
             };
-            rt.block_on(run(smooth_dir, out_rx, ev_tx));
+            rt.block_on(run(locate, out_rx, ev_tx));
         })
         .ok();
     (Outbox(out_tx), ev_rx)
 }
 
-async fn run(smooth_dir: PathBuf, mut out_rx: mpsc::UnboundedReceiver<String>, ev_tx: fmpsc::UnboundedSender<Event>) {
+async fn run(mut locate: impl FnMut() -> Option<discovery::Endpoint>, mut out_rx: mpsc::UnboundedReceiver<String>, ev_tx: fmpsc::UnboundedSender<Event>) {
     let mut backoff = Duration::from_millis(500);
     loop {
         let _ = ev_tx.unbounded_send(Event::Connecting);
-        let Some(endpoint) = discovery::discover(&smooth_dir) else {
+        let Some(endpoint) = locate() else {
             let _ = ev_tx.unbounded_send(Event::Offline("no flow engine advertised — start SmoothFlow's daemon or `th up`".into()));
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));

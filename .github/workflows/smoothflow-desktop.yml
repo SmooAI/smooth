@@ -9,6 +9,11 @@ on:
         paths:
             - 'apps/smoothflow-desktop/**'
             - 'crates/smooth-flow-client/**'
+            # tests/e2e.rs runs the app against a real smooth-daemon, so an
+            # engine change can break the app (th-032792).
+            - 'crates/smooth-flow/**'
+            - 'crates/smooth-daemon/**'
+            - 'crates/smooth-tmux/**'
             - 'spec/vectors/**'
             - '.github/workflows/smoothflow-desktop.yml'
     push:
@@ -16,6 +21,11 @@ on:
         paths:
             - 'apps/smoothflow-desktop/**'
             - 'crates/smooth-flow-client/**'
+            # tests/e2e.rs runs the app against a real smooth-daemon, so an
+            # engine change can break the app (th-032792).
+            - 'crates/smooth-flow/**'
+            - 'crates/smooth-daemon/**'
+            - 'crates/smooth-tmux/**'
             - 'spec/vectors/**'
             - '.github/workflows/smoothflow-desktop.yml'
     workflow_dispatch:
@@ -40,22 +50,53 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
               with:
-                  workspaces: apps/smoothflow-desktop
+                  workspaces: |
+                      apps/smoothflow-desktop
+                      . -> target
             # GPUI on Linux: wgpu (Vulkan), X11 + Wayland windowing, xkbcommon,
             # fontconfig, D-Bus (portals, notifications) and PipeWire (screen
             # capture), the last needing clang for its bindings.
+            # The e2e test (tests/e2e.rs) also builds smooth-daemon from the
+            # main workspace (libcap-ng, protoc) and runs shells under tmux.
+            # The google-chrome apt source flakes `apt-get update` with "Hash
+            # Sum mismatch" and nothing here needs it (th-79cef7).
             - name: Linux system libraries
               if: runner.os == 'Linux'
               run: |
+                  sudo rm -f /etc/apt/sources.list.d/google-chrome*
                   sudo apt-get update
                   sudo apt-get install -y --no-install-recommends \
+                    tmux libcap-ng-dev protobuf-compiler \
                     pkg-config clang libclang-dev cmake \
                     libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
                     libx11-xcb-dev libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev \
                     libvulkan-dev libfontconfig-dev libfreetype-dev \
                     libdbus-1-dev libssl-dev libzstd-dev \
                     libpipewire-0.3-dev libspa-0.2-dev libgbm-dev libdrm-dev
+            # macOS runners usually ship Homebrew tmux; install it if not.
+            - name: tmux (macOS)
+              if: runner.os == 'macOS'
+              run: command -v tmux || brew install tmux
+            # The real daemon the e2e test drives (th-032792). Built from the
+            # main workspace and handed over by path, so the test never builds
+            # it itself here.
+            - name: Build smooth-daemon (for the e2e test)
+              if: runner.os != 'Windows'
+              working-directory: .
+              run: |
+                  cargo build --locked -p smooai-smooth-daemon --bin smooth-daemon
+                  echo "SMOOTHFLOW_E2E_DAEMON=$GITHUB_WORKSPACE/target/debug/smooth-daemon" >>"$GITHUB_ENV"
+            # Windows has no native tmux (the engine runs inside WSL2 until
+            # th-2fbc9c), so tests/e2e.rs is `#![cfg(unix)]` and the e2e is
+            # skipped there; the unit tests still run.
+            - name: Note the e2e skip (Windows)
+              if: runner.os == 'Windows'
+              run: echo "::notice::SmoothFlow Desktop e2e skipped on Windows — no native tmux (the flow engine runs in WSL2; th-2fbc9c)"
+            # Unit tests + the e2e. SMOOTH_E2E_STRICT turns a missing
+            # prerequisite (tmux) into a failure instead of a silent skip.
             - name: Test
+              env:
+                  SMOOTH_E2E_STRICT: ${{ runner.os != 'Windows' && '1' || '' }}
               run: cargo test --locked
             - name: Build (release)
               run: cargo build --release --locked
