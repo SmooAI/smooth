@@ -141,6 +141,7 @@ extra=()
 # their own bounds assertion. Localize it, so libghostty-vt keeps using it and
 # everything else binds the platform memset. (COFF never emits it.)
 archive="$OUT/lib/$lib"
+nm_tool=nm
 case "$zig_target" in
   *macos)
     sym=_memset
@@ -158,13 +159,16 @@ case "$zig_target" in
     ;;
   *linux*)
     sym=memset
-    objcopy="$(command -v objcopy || command -v llvm-objcopy || command -v /opt/homebrew/opt/llvm/bin/llvm-objcopy || true)"
-    [[ -n "$objcopy" ]] || { echo "error: objcopy (binutils) or llvm-objcopy is needed to localize memset" >&2; exit 1; }
+    # llvm-objcopy, not GNU objcopy: Zig names the combined archive's members
+    # by absolute path, which binutils rejects ("illegal pathname").
+    objcopy="$(command -v llvm-objcopy || ls /usr/bin/llvm-objcopy-* /usr/lib/llvm-*/bin/llvm-objcopy /opt/homebrew/opt/llvm/bin/llvm-objcopy 2>/dev/null | sort -V | tail -1 || true)"
+    [[ -n "$objcopy" ]] || { echo "error: llvm-objcopy is needed to localize memset (apt install llvm)" >&2; exit 1; }
     "$objcopy" --localize-symbol=memset "$archive"
+    nm_tool="${objcopy%objcopy*}nm${objcopy##*objcopy}"
     ;;
   *) sym="" ;;
 esac
-if [[ -n "$sym" ]] && nm -g "$archive" 2>/dev/null | awk -v s="$sym" '$NF == s && $(NF-1) ~ /^[TW]$/ { found = 1 } END { exit !found }'; then
+if [[ -n "$sym" ]] && "$nm_tool" -g "$archive" 2>/dev/null | awk -v s="$sym" '$NF == s && $(NF-1) ~ /^[TW]$/ { found = 1 } END { exit !found }'; then
   echo "error: $archive still exports $sym" >&2
   exit 1
 fi
