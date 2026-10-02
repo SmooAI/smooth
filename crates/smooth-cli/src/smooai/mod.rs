@@ -12,6 +12,7 @@
 pub mod agent_tools;
 pub mod agents;
 pub mod analytics;
+pub mod analytics_dashboards;
 pub mod audiences;
 pub mod blog;
 pub mod booking;
@@ -35,6 +36,7 @@ pub mod keys;
 pub mod knowledge;
 pub mod llm_gateway;
 pub mod members;
+pub mod notification_prefs;
 pub mod notify;
 pub mod observability;
 pub mod products;

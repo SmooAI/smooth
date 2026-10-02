@@ -1151,6 +1151,55 @@ Things worth knowing:
   `title` (`{{entity.title}}`). The CLI's starter templates use those names;
   a filter on a field the event doesn't carry is `null` and never matches.
 
+### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
+
+CLI twins of the copilot's `dashboards.*`, `notifications.*_preferences` and
+`workforce.*` tools (and the hosted MCP tools of the same names). Every write
+prints its target, stops on `--dry-run`, and needs `--yes` when not on a TTY.
+
+```bash
+# Analytics dashboards (analytics.read / analytics.write, `analytics` product)
+th smoo dashboards list
+th smoo dashboards create --name "Pipeline"            # reuses a same-named dashboard
+th smoo dashboards add-widget <dashboard_id> --title "MRR" --type kpi_card --preset mrr
+th smoo dashboards add-widget <dashboard_id> --title "Deals" --type table --saved-query <id>
+th smoo dashboards update-widget <widget_id> --width 12 --type bar_chart
+th smoo dashboards remove-widget <widget_id>
+```
+
+A widget's source is a preset key (`th smoo analytics catalog`) or a saved
+query (its stored SQL is copied) — there is deliberately no raw-SQL flag, and
+`update-widget` cannot change the source (remove + re-add). Omitted grid
+fields default to col 0, width 6, height 4, on the next free row.
+
+```bash
+# YOUR notification routing in the active org (user session only)
+th smoo notifications prefs get
+th smoo notifications prefs set --sms on --slack off
+th smoo notifications prefs set --route human_escalation=push+sms:high --clear-route conversation_ended
+th smoo notifications prefs set --quiet-hours on --quiet-start 22:00 --quiet-end 07:00 --tz America/New_York
+```
+
+`categoryRouting` and `quietHours` are merged client-side (the PUT replaces
+them wholesale), so a flag only changes what it names. An org API key has no
+person behind it, so this needs `th auth login`.
+
+```bash
+# Roles (org.roles.manage / org.members.manage)
+th roles list                      # + member counts
+th roles templates                 # built-in role templates and their keys
+th roles create-from-template sales_rep --name "Field Sales"
+th roles set-permissions "Field Sales" crm.contacts.read crm.deals.read
+th roles member-roles ana@acme.com # roles + effective permissions
+th roles assign ana@acme.com "Field Sales"   # additive; no-op if already held
+```
+
+The server refuses granting a permission you do not hold yourself, or
+assigning/removing a role that carries one — the 403 lists the
+`ungrantablePermissions` and is printed verbatim. `grant`, `set-permissions`,
+`assign`, `unassign` and `create` now go through the same confirmation gate as
+`delete`/`revoke`, so scripts must pass `--yes`.
+
 ### Profile / products
 
 ```bash
