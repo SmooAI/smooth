@@ -93,25 +93,4 @@ final class CenterTabGateTests: XCTestCase {
         XCTAssertNil(CenterTabGate.usableBranch("HEAD"))
         XCTAssertEqual(CenterTabGate.usableBranch(" main\n"), "main")
     }
-
-    // ── the Diff tab's base ────────────────────────────────────────────────
-
-    func testDiffBaseIsTheFirstRefWithAMergeBase() {
-        let base = DiffPlan.base { ref in ref == "origin/main" ? "deadbeef\n" : nil }
-        XCTAssertEqual(base.ref, "origin/main")
-        XCTAssertEqual(base.sha, "deadbeef")
-    }
-
-    func testDiffBaseFallsBackToHEADWithoutADefaultBranch() {
-        let base = DiffPlan.base { _ in nil }
-        XCTAssertEqual(base.ref, "HEAD"); XCTAssertEqual(base.sha, "HEAD")
-        XCTAssertEqual(DiffPlan.base { _ in "fatal: not a valid object name" }.ref, "HEAD")
-    }
-
-    func testDiffRenderNamesTheBase() {
-        let s = DiffPlan.render(status: " M a.swift\n", baseRef: "origin/main", diff: "diff --git a b")
-        XCTAssertTrue(s.contains("# git status --short\n M a.swift"))
-        XCTAssertTrue(s.contains("merge base with origin/main"))
-        XCTAssertTrue(DiffPlan.render(status: "", baseRef: "HEAD", diff: "").contains("(no changes)"))
-    }
 }

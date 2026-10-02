@@ -103,7 +103,7 @@ struct KeyboardPane: View {
         guard let pressed else { return }
         if pressed.key == "escape", !pressed.hasModifier { return }
         if pressed.key == "backspace", !pressed.hasModifier { keymap.set(action, to: nil); return }
-        guard pressed.hasModifier else { return }
+        guard pressed.hasModifier || action.isViewScoped else { return }
         keymap.set(action, to: pressed)
     }
 

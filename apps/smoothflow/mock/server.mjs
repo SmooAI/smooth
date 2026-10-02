@@ -381,9 +381,107 @@ function handle(c, m) {
             broadcast({ type: 'flow.fanout', fan_out: f, candidates: [sessions.get(m.winner_session_id)].filter(Boolean) });
             return;
         }
+        // th-26f5b9: SmoothFlow Diff — a canned structured diff for any
+        // session, and acknowledgements for the hunk actions and reviews.
+        case 'flow.diff': {
+            if (!s) return send(c, { type: 'flow.error', ref: m.seq ?? null, code: 'not_found', message: `no such session: ${m.id}` });
+            return send(c, { type: 'flow.diff', id: m.id, base: m.base, ...(m.path ? { path: m.path } : {}), diff: mockDiff(m.base, m.path) });
+        }
+        case 'flow.diff.revert':
+        case 'flow.diff.stage':
+        case 'flow.diff.unstage':
+            send(c, { type: 'flow.diff.result', id: m.id, action: m.type.slice('flow.diff.'.length), hunk_id: m.hunk_id, file: 'src/lib.rs' });
+            return broadcast({ type: 'flow.diff.changed', id: m.id });
+        case 'flow.diff.review':
+            if (s && ['needs_you', 'limited', 'done', 'dead'].includes(s.state))
+                return send(c, { type: 'flow.error', ref: m.seq ?? null, code: 'blocked', message: `blocked: ${m.id} is ${s.state}` });
+            return send(c, { type: 'flow.diff.result', id: m.id, action: 'review', message: `Code review — ${(m.comments || []).length} comments` });
         default:
             return; // unknown types are ignored
     }
+}
+
+/** The fixture `flow.diff` payload: one source file, one collapsed lockfile. */
+function mockDiff(base, path) {
+    const lib = {
+        path: 'src/lib.rs',
+        status: 'modified',
+        language: 'Rust',
+        added: 2,
+        deleted: 1,
+        hunks: [
+            {
+                id: 'mockhunk00000001',
+                old_start: 1,
+                old_lines: 3,
+                new_start: 1,
+                new_lines: 4,
+                section: 'pub fn add(a: u32, b: u32) -> u32 {',
+                lines: [
+                    {
+                        kind: 'ctx',
+                        old: 1,
+                        new: 1,
+                        text: 'pub fn add(a: u32, b: u32) -> u32 {',
+                        syntax: [
+                            [0, 3, 0],
+                            [4, 6, 0],
+                            [7, 10, 5],
+                        ],
+                    },
+                    { kind: 'del', old: 2, text: '    a + b', words: [[8, 9]] },
+                    { kind: 'add', new: 2, text: '    a + b + 0', words: [[9, 13]], syntax: [[12, 13, 3]] },
+                    { kind: 'add', new: 3, text: '    // checked', syntax: [[4, 14, 2]] },
+                    { kind: 'ctx', old: 3, new: 4, text: '}' },
+                ],
+            },
+        ],
+    };
+    const lock = { path: 'Cargo.lock', status: 'modified', added: 40, deleted: 2, noise: 'lockfile', collapsed_by_default: true, hunks_omitted: 'collapsed' };
+    if (path === 'Cargo.lock') {
+        lock.hunks = [
+            {
+                id: 'mockhunk00000002',
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: [
+                    { kind: 'del', old: 1, text: 'version = 3' },
+                    { kind: 'add', new: 1, text: 'version = 4' },
+                ],
+            },
+        ];
+        delete lock.hunks_omitted;
+    }
+    const files = path ? [path === 'Cargo.lock' ? lock : lib] : [lib, lock];
+    return {
+        base,
+        from: { ref: 'aaaaaaa', label: base === 'branch' ? 'merge base with origin/main' : base === 'turn' ? 'turn start' : 'HEAD' },
+        to: { ref: 'bbbbbbb', label: base === 'turn' ? 'turn end' : 'worktree' },
+        files,
+        added: 42,
+        deleted: 3,
+        legend: [
+            'keyword',
+            'string',
+            'comment',
+            'number',
+            'constant',
+            'function',
+            'type',
+            'variable',
+            'property',
+            'operator',
+            'punctuation',
+            'tag',
+            'attribute',
+            'macro',
+            'escape',
+            'heading',
+            'link',
+        ],
+    };
 }
 
 // ---------- timers: keep the fleet alive ----------

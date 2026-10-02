@@ -80,10 +80,27 @@ final class KeyChordTests: XCTestCase {
     func testEveryDefaultChordSurvivesTheWireAndTheMenu() {
         for action in FlowAction.allCases {
             guard let chord = action.defaultChord else { continue }
-            XCTAssertTrue(chord.hasModifier, "\(action.rawValue) has a bare-key default")
+            // Menu actions need a modifier; the diff viewer's keys are bare on
+            // purpose and never reach the menu bar (th-26f5b9).
+            XCTAssertEqual(chord.hasModifier, !action.isViewScoped, "\(action.rawValue) default modifier rule")
             XCTAssertEqual(KeyChord.parse(chord.wire), chord, action.rawValue)
             XCTAssertFalse(chord.menuKeyEquivalent.isEmpty, action.rawValue)
         }
+    }
+
+    /// th-26f5b9: a bare key in the file binds a diff action, never a menu one,
+    /// and the diff's `v` does not conflict with anything in the menu.
+    func testDiffKeysAreViewScoped() {
+        let map = Keymap.parse("[keys]\ndiffNextHunk = \"x\"\nnewTab = \"x\"\n")
+        XCTAssertEqual(map.chord(for: .diffNextHunk), KeyChord("x"))
+        XCTAssertEqual(map.chord(for: .newTab), FlowAction.newTab.defaultChord, "a bare key is refused for a menu action")
+        XCTAssertEqual(map.problems.count, 1)
+        XCTAssertEqual(Keymap.default.diffAction(for: KeyChord("n")), .diffNextHunk)
+        XCTAssertNil(Keymap.default.diffAction(for: KeyChord("n", command: true)))
+        XCTAssertTrue(Keymap.default.conflicts.isEmpty)
+        let clash = Keymap.parse("[keys]\ndiffNextHunk = \"j\"\n")
+        XCTAssertEqual(Set(clash.conflictPartners(of: .diffNextHunk)), [.diffNextLine])
+        XCTAssertTrue(clash.conflictPartners(of: .newTab).isEmpty)
     }
 }
 

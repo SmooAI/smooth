@@ -85,29 +85,3 @@ struct CenterTabGate: Equatable {
         }
     }
 }
-
-/// What the Diff tab runs (th-68d10a): status, then the working tree against
-/// the merge base with the default branch — the branch's whole change, not
-/// just what's uncommitted. On the default branch itself the base is its
-/// upstream, so unpushed commits and uncommitted edits both show.
-enum DiffPlan {
-    /// Refs tried in order for the merge base.
-    static let baseCandidates = ["origin/HEAD", "origin/main", "origin/master", "main", "master"]
-
-    /// Pure: the base to diff against, from the first candidate that has a
-    /// merge base with HEAD, or `HEAD` (uncommitted changes only) when none does.
-    static func base(mergeBase: (String) -> String?) -> (ref: String, sha: String) {
-        for ref in baseCandidates {
-            if let sha = mergeBase(ref)?.trimmingCharacters(in: .whitespacesAndNewlines), !sha.isEmpty, !sha.hasPrefix("fatal") {
-                return (ref, sha)
-            }
-        }
-        return ("HEAD", "HEAD")
-    }
-
-    /// The text the Diff tab shows.
-    static func render(status: String, baseRef: String, diff: String) -> String {
-        let against = baseRef == "HEAD" ? "HEAD (no default branch found)" : "the merge base with \(baseRef)"
-        return "# git status --short\n\(status.isEmpty ? "(clean)\n" : status)\n# git diff against \(against)\n\(diff.isEmpty ? "(no changes)" : diff)"
-    }
-}

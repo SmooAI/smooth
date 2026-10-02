@@ -20,7 +20,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
     private var surfaceTabs: [SurfaceTab] = []
     private var activeTabIndex = 0
     private var nextTabId = 1
-    private let diffView = DiffView()
+    /// th-26f5b9: the native review viewer (engine-computed structured diffs).
+    private(set) lazy var diffView = DiffView(app: app)
     private var prHost: NSHostingView<PRView>?
     private var activityHost: NSHostingView<ActivityView>?
     private let steerField = NSTextField()
@@ -115,7 +116,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             case .terminal: show(surfaceArea)
             case .diff:
                 show(diffView)
-                diffView.load(worktree: app.store.focused?.worktree)
+                diffView.show(session: app.store.focused)
+                diffView.focusContent()
             case .pr:
                 let host = NSHostingView(rootView: PRView(app: app, store: app.store))
                 prHost = host
@@ -422,7 +424,10 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         replaceActiveTab(t)
         pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))"
         refreshTabGate()
-        if tab == .diff { diffView.load(worktree: s.worktree) }
+        if tab == .diff {
+            diffView.show(session: s)
+            return
+        }
         focusActiveSurface()
     }
 
@@ -533,45 +538,6 @@ final class SessionPane: NSView {
     func setFocused(_ focused: Bool) {
         layer?.borderColor = (focused ? Theme.teal.withAlphaComponent(0.7) : .clear).cgColor
         setAccessibilityIdentifier(focused ? "pane.focused" : "pane")
-    }
-}
-
-/// `git diff` of the focused worktree. A view over git, not shell state.
-@MainActor
-final class DiffView: NSScrollView {
-    private let text = NSTextView()
-
-    init() {
-        super.init(frame: .zero)
-        documentView = text
-        text.setAccessibilityIdentifier("center.diff.text")
-        hasVerticalScroller = true
-        text.isEditable = false
-        text.font = Theme.monoNSFont(size: 12)
-        text.autoresizingMask = [.width]
-        text.isVerticallyResizable = true
-        text.textContainer?.widthTracksTextView = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
-
-    func load(worktree: String?) {
-        guard let worktree, !worktree.isEmpty else { text.string = "No worktree."; return }
-        text.string = "Loading git diff for \(worktree)…"
-        Task.detached {
-            let git = { (args: [String]) in Shell.run("/usr/bin/git", ["-C", worktree] + args, cwd: nil) }
-            let status = git(["status", "--short"])
-            // The branch's whole change: the working tree against the merge
-            // base with the default branch, not just what is uncommitted.
-            let base = DiffPlan.base { ref in
-                let out = git(["merge-base", "HEAD", ref]).trimmingCharacters(in: .whitespacesAndNewlines)
-                return out.count >= 7 && out.allSatisfy(\.isHexDigit) ? out : nil
-            }
-            let out = git(["--no-pager", "diff", "--stat", "-p", base.sha])
-            let s = DiffPlan.render(status: status, baseRef: base.ref, diff: out)
-            await MainActor.run { self.text.string = s }
-        }
     }
 }
 

@@ -47,6 +47,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     /// reason gets its own sheet instead of disappearing into the rail.
     private var announceRefusals: Set<String> = []
     private var nextSeq = 1
+    /// th-26f5b9: diff requests and actions in flight, by `seq` → session id,
+    /// so an engine refusal (`stale`, `blocked`) lands in the Diff tab.
+    private var pendingDiffs: [Int: String] = [:]
     var notifySettings = NotifySettings.load()
 
     private(set) var surfaces: [String: TerminalSurfaceView] = [:]
@@ -183,8 +186,16 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 if let v = surfaces[id] { client.send(.attach(id: id, cols: v.gridSize.cols, rows: v.gridSize.rows)) }
             case let .handoff(id, h):
                 handoffs[id] = h
+            case let .diff(id, base, path, payload):
+                mainWindow.center.diffView.receive(sessionId: id, base: base, path: path, payload)
+            case let .diffResult(r):
+                mainWindow.center.diffView.actionDone(r)
+            case let .diffChanged(id):
+                mainWindow.center.diffView.changed(sessionId: id)
             case let .error(ref, msg):
-                if let ref, let req = pendingCloses.removeValue(forKey: ref) {
+                if let ref, let sid = pendingDiffs.removeValue(forKey: ref) {
+                    mainWindow.center.diffView.failed(sessionId: sid, message: msg)
+                } else if let ref, let req = pendingCloses.removeValue(forKey: ref) {
                     let refusal = CloseRefusal(request: req, message: msg)
                     closeRefusals[req.sessionId] = refusal
                     if announceRefusals.contains(req.sessionId), let s = store.sessions[req.sessionId] { showCloseRefusal(s, refusal) }
@@ -463,6 +474,18 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     }
 
     func showTab(_ t: CenterTab) { mainWindow.center.tab = t }
+
+    // MARK: diff (th-26f5b9)
+
+    /// Send a diff frame tagged with a fresh `seq`, so its `flow.error` finds
+    /// the Diff tab. The engine's success replies carry the session id.
+    func sendDiff(_ frame: ClientFrame, sessionId: String) {
+        let seq = nextSeq
+        nextSeq += 1
+        pendingDiffs[seq] = sessionId
+        if pendingDiffs.count > 256, let oldest = pendingDiffs.keys.min() { pendingDiffs[oldest] = nil }
+        client.send(frame, seq: seq)
+    }
 
     // MARK: notifications → focus / approve
 

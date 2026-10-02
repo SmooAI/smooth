@@ -22,6 +22,10 @@ enum StoreEffect: Equatable {
     /// `flow.error`. `ref` is the client `seq` the engine echoed (nil when the
     /// error was not a reply to anything we tagged).
     case error(ref: Int?, message: String)
+    /// th-26f5b9: a diff arrived, an action went through, or a diff changed.
+    case diff(id: String, base: DiffBase, path: String?, DiffPayload)
+    case diffResult(DiffResult)
+    case diffChanged(id: String)
 }
 
 enum ConnectionState: Equatable {
@@ -173,6 +177,15 @@ final class FlowStore: ObservableObject {
         case let .error(ref, code, message):
             lastError = "\(code): \(message)"
             return [.error(ref: ref, message: lastError!)]
+
+        case let .diff(id, base, path, payload):
+            return [.diff(id: id, base: base, path: path, payload)]
+
+        case let .diffResult(r):
+            return [.diffResult(r)]
+
+        case let .diffChanged(id):
+            return [.diffChanged(id: id)]
 
         case .unknown:
             return []

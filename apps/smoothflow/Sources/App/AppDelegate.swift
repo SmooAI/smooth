@@ -266,6 +266,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .focusPaneDown: center?.focusPane(.down)
         case .zoomPane: center?.toggleZoom()
         case .equalizePanes: center?.equalizePanes()
+        // th-26f5b9: view-scoped; the diff's own key handling is the usual path.
+        case .diffNextLine, .diffPreviousLine, .diffNextHunk, .diffPreviousHunk, .diffNextFile, .diffPreviousFile,
+             .diffToggleViewed, .diffComment, .diffRevertHunk, .diffStageHunk, .diffToggleSplit:
+            center?.diffView.perform(action)
         default: app.focus(index: FlowAction.focusSessionIndex(action) ?? tag)
         }
     }

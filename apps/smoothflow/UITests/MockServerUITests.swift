@@ -34,6 +34,9 @@ final class MockServerUITests: FlowUITestCase {
         XCTAssertTrue(waitUntil { self.label("center.path").contains("smooth-th-68d10a") }, label("center.path"))
         app.typeKey("2", modifierFlags: [.command, .option])
         XCTAssertTrue(app.descendants(matching: .any)["center.diff"].waitForExistence(timeout: 10), "Diff opens for a shell in a worktree; tree: \(dump())")
+        // th-26f5b9: the native viewer renders the engine's structured diff
+        // (the mock's fixture: src/lib.rs + a collapsed Cargo.lock).
+        XCTAssertTrue(waitUntil { self.label("center.diff.summary").contains("2 files") }, "diff summary: \(label("center.diff.summary"))")
         app.typeKey("3", modifierFlags: [.command, .option])
         XCTAssertTrue(app.descendants(matching: .any)["center.pr.empty"].waitForExistence(timeout: 10), "PR shows its empty state, not a missing tab")
 
