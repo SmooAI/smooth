@@ -117,6 +117,39 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: RemindersCmd,
     },
+    /// Capture a whole interaction in one step: an optional company, one or
+    /// more contacts, and an optional deal — created (upserted) and linked.
+    /// CLI twin of the copilot's `crm.capture` / the hosted MCP `crm_capture`.
+    Capture {
+        /// Company name to create/upsert first.
+        #[arg(long)]
+        company: Option<String>,
+        /// The company's domain (with `--company`).
+        #[arg(long)]
+        domain: Option<String>,
+        /// A contact: `"First Last <a@b.com>"`, a bare email, or a phone
+        /// number. Repeat for several. At least one is required.
+        #[arg(long = "contact", required = true)]
+        contacts: Vec<String>,
+        /// Open a deal with this title, linked to the first contact.
+        #[arg(long)]
+        deal: Option<String>,
+        /// Deal amount.
+        #[arg(long)]
+        amount: Option<f64>,
+        /// Deal stage (one of the org's pipeline stages).
+        #[arg(long)]
+        stage: Option<String>,
+        /// Deal close date, `YYYY-MM-DD`.
+        #[arg(long = "close-date")]
+        close_date: Option<String>,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -743,6 +776,51 @@ pub enum ContactsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Import a CSV/TSV contact table (file or `-` for stdin): upserts each
+    /// row by email and the distinct companies. PREVIEWS by default — pass
+    /// `--apply` to write. CLI twin of `crm.import_apply` / MCP `crm_import_apply`.
+    ImportTable {
+        /// The CSV/TSV file (header row first), or `-` for stdin.
+        file: String,
+        /// Map a CRM field to a header: `--map email=Email`. Fields: email
+        /// (required), first_name, last_name, name, phone, title, company,
+        /// company_domain. Repeat for each.
+        #[arg(long = "map", required = true)]
+        map: Vec<String>,
+        /// Column delimiter — `,` or `tab` (auto-detected if omitted).
+        #[arg(long)]
+        delimiter: Option<String>,
+        /// 0-based data-row index to skip. Repeat for several.
+        #[arg(long = "skip-row")]
+        skip_rows: Vec<u64>,
+        /// Actually import (default is a dry-run preview of what would land).
+        #[arg(long)]
+        apply: bool,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Import your connected Google or Microsoft address book into the CRM
+    /// (upserts by email). PREVIEWS by default — pass `--apply` to import.
+    /// Needs a signed-in user session. CLI twin of `contacts.import_preview` /
+    /// `contacts.import`.
+    ImportAddressBook {
+        /// `google` or `microsoft`.
+        #[arg(long, default_value = "google")]
+        provider: String,
+        /// Actually import (default previews a sample).
+        #[arg(long)]
+        apply: bool,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// Set (or clear) the contact's company. COMPANY is a uuid, name, or
     /// `none`/`-` to unlink. Writes through the legacy `companyId` FK.
     SetCompany {
@@ -848,6 +926,35 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org,
         } => remind(target, id, at, note, assignee, org).await,
         Cmd::Reminders { cmd } => reminders(cmd).await,
+        Cmd::Capture {
+            company,
+            domain,
+            contacts,
+            deal,
+            amount,
+            stage,
+            close_date,
+            json,
+            org,
+        } => {
+            let body = super::crm_bulk::capture_body(&super::crm_bulk::CaptureArgs {
+                company: company.as_deref(),
+                domain: domain.as_deref(),
+                contacts: &contacts,
+                deal: deal.as_deref(),
+                amount,
+                stage: stage.as_deref(),
+                close_date: close_date.as_deref(),
+            })?;
+            let org = resolve_org(org)?;
+            let client = UserClient::from_user_session().await?;
+            let r = client
+                .post(&format!("/organizations/{org}/crm/capture"), &body)
+                .await
+                .context("POST crm/capture")?;
+            super::crm_bulk::print_outcome(&r, json);
+            Ok(())
+        }
     }
 }
 
@@ -909,6 +1016,41 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
         ContactsCmd::Import { file, org, dry_run, rate_ms } => {
             let org = resolve_org(org)?;
             import(&client, &org, &file, dry_run, rate_ms).await?;
+        }
+        ContactsCmd::ImportTable {
+            file,
+            map,
+            delimiter,
+            skip_rows,
+            apply,
+            json,
+            org,
+        } => {
+            let org = resolve_org(org)?;
+            let table = super::crm_bulk::read_text(&file)?;
+            let body = super::crm_bulk::import_table_body(&table, &map, delimiter.as_deref(), &skip_rows, !apply)?;
+            let r = client
+                .post(&format!("/organizations/{org}/crm/import-table"), &body)
+                .await
+                .context("POST crm/import-table")?;
+            super::crm_bulk::print_import_table(&r, json, apply);
+        }
+        ContactsCmd::ImportAddressBook { provider, apply, json, org } => {
+            let org = resolve_org(org)?;
+            let provider = super::crm_bulk::address_book_provider(&provider)?;
+            if apply {
+                let r = client
+                    .post(&format!("/organizations/{org}/contacts/{provider}/sync"), &json!({}))
+                    .await
+                    .with_context(|| format!("POST contacts/{provider}/sync"))?;
+                super::crm_bulk::print_address_book_sync(&r, json);
+            } else {
+                let r = client
+                    .get(&format!("/organizations/{org}/contacts/{provider}/preview?pageSize=25"))
+                    .await
+                    .with_context(|| format!("GET contacts/{provider}/preview"))?;
+                super::crm_bulk::print_address_book_preview(&r, json, provider);
+            }
         }
         ContactsCmd::SetImage { contact_id, path, org } => {
             let org = resolve_org(org)?;

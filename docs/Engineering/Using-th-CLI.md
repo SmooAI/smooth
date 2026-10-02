@@ -358,6 +358,17 @@ smoo api crm remind contact:jane@acme.com --at tomorrow --note "follow up"
 smoo api crm reminders list --mine                   # your pending, soonest first
 smoo api crm reminders list --entity deal:"Acme renewal"
 smoo api crm remind cancel <reminder-id>             # soft-cancel (also `reminders cancel`)
+# Capture + bulk imports (SMOODEV-3611) — CLI twins of the copilot's crm.capture,
+# crm.import_apply and contacts.import(_preview). Imports PREVIEW by default and
+# write nothing until --apply; re-running is safe (upsert by email).
+smoo api crm capture --company Acme --domain acme.com \
+  --contact "Jane Doe <jane@acme.com>" --contact +13175550142 \
+  --deal "Acme pilot" --amount 12000 --stage qualified --close-date 2026-12-01
+smoo api crm contacts import-table leads.csv --map email=Email --map name="Full Name" \
+  --map company=Company [--delimiter tab] [--skip-row 3]      # dry run: counts + skips
+smoo api crm contacts import-table leads.csv --map email=Email --apply
+smoo api crm contacts import-address-book --provider google  # preview a sample (user session)
+smoo api crm contacts import-address-book --provider microsoft --apply
 # Super-admin org membership (SMOODEV-3291) — any org, no invitation. Needs the
 # super_admin role (403 "requires the super_admin role" otherwise) and the
 # internal `admin` build (`pnpm install:th`). --org-id is REQUIRED: these verbs
@@ -853,6 +864,15 @@ smoo calling settings update --set recordingRetentionDays=365 [--body changes.js
   are refused locally, by name, with the list.
 - Every write asks for confirmation: it changes what the next caller gets.
 
+### Support (`smoo support`) — SMOODEV-3611
+
+```bash
+smoo support report [--json]   # open/solved, CSAT, first response, SLA breach rate, by status/channel
+```
+
+User session only (`support.read` + the Support product). Campaign delivery
+stats are `smoo campaigns analytics <id>` (copilot `campaigns.report`).
+
 ### Google Drive (`smoo drive`) — SMOODEV-3545
 
 CLI twin of `drive_search` / `drive_read`. Runs live as **your** Google
@@ -1095,6 +1115,11 @@ smoo work items update <id> --assignee jane@acme.com  # PATCH sends ONLY changed
 smoo work items update <id> --clear-assignee          # explicit null (unassign)
 smoo work items transition <id> done                  # status machine stamps/clears completedAt
 smoo work items rm <id>                               # hard delete (+ its Jira sync mapping)
+smoo work items list --status blocked                 # "what's blocking?" across projects
+smoo work items assign <id> me|jane@acme.com|"Jane Doe"|none   # name/email resolved server-side
+smoo work items bulk-transition --to done --project SMOODEV --status in_review   # dry run: count + titles
+smoo work items bulk-transition --to done --project SMOODEV --status in_review --apply  # one transaction
+smoo work items capture-ticket <ticket-id> --project SUP [--type bug]  # reuses an already-captured ticket
 
 smoo work sprints create "Sprint 12" --project SMOODEV --starts 2026-09-01 --ends 2026-09-14
 smoo work sprints start <id>                          # at most one active per project (409 otherwise)
