@@ -1192,6 +1192,35 @@ enum OrgsCommands {
         /// Org id (UUID) or a name/slug substring. Omit to pick from a list.
         org_id: Option<String>,
     },
+    /// Change the org's profile: name, description, brand voice, brand colors
+    /// (SMOODEV-3612). Needs the branding admin permission; customers see the
+    /// change in emails, the chat widget and the portal right away, so it
+    /// confirms first (`--yes` for scripts, `--dry-run` to preview).
+    Update {
+        /// Org id (UUID). Omit to use the active org.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org_id: Option<String>,
+        /// The organization's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// A short description (`""` clears it).
+        #[arg(long)]
+        description: Option<String>,
+        /// Brand-voice guidelines the AI follows (markdown). `@path` reads a file; `""` clears it.
+        #[arg(long = "brand-voice")]
+        brand_voice: Option<String>,
+        /// Primary brand color, `#RRGGBB`.
+        #[arg(long = "primary-color")]
+        primary_color: Option<String>,
+        /// Secondary brand color, `#RRGGBB`.
+        #[arg(long = "secondary-color")]
+        secondary_color: Option<String>,
+        /// Accent brand color, `#RRGGBB`.
+        #[arg(long = "accent-color")]
+        accent_color: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
+    },
 }
 
 #[derive(Subcommand)]
