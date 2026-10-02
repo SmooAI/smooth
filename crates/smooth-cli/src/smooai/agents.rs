@@ -217,6 +217,17 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: super::agent_tools::ToolsCmd,
     },
+    /// Each agent's last-7-day activity: conversations served, escalation rate,
+    /// last active — busiest first. CLI twin of the Smooth Operator's
+    /// `agents.activity` / the hosted MCP's `agents_activity` (needs `agents.read`).
+    Activity {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON (the stats rows) instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate an agent config from a JSON prompt without persisting it.
     GenerateConfig {
         /// JSON generation request body, or `-` to read from stdin.
@@ -488,6 +499,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Tools { cmd } => super::agent_tools::cmd(cmd).await?,
+        Cmd::Activity { org, json } => {
+            let org = require_active_org(&client, org)?;
+            let stats = client
+                .get(&format!("/organizations/{org}/agents/stats"))
+                .await
+                .context("GET agents/stats (needs agents.read)")?;
+            if json {
+                print_json(&stats);
+            } else {
+                // Names are best-effort: the stats rows carry ids only.
+                let agents = client.get(&format!("/organizations/{org}/agents")).await.unwrap_or(Value::Null);
+                for line in activity_lines(&stats, &agents) {
+                    println!("{line}");
+                }
+            }
+        }
         Cmd::GenerateConfig { body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
@@ -778,8 +805,53 @@ async fn extract_and_apply_palette(client: &super::user_client::UserClient, org:
     Ok(palette)
 }
 
+/// One line per agent, busiest first: `name (id): N conversations, X% escalated, last active …`.
+fn activity_lines(stats: &Value, agents: &Value) -> Vec<String> {
+    let names: std::collections::HashMap<&str, &str> = agents
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| Some((a.get("id")?.as_str()?, a.get("name")?.as_str()?)))
+        .collect();
+    let mut rows: Vec<&Value> = stats.as_array().map(|r| r.iter().collect()).unwrap_or_default();
+    if rows.is_empty() {
+        return vec!["No agents yet.".to_string()];
+    }
+    let n = |r: &Value, k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
+    rows.sort_by_key(|r| std::cmp::Reverse(n(r, "conversationsLast7d")));
+    rows.into_iter()
+        .map(|r| {
+            let id = r.get("agentId").and_then(Value::as_str).unwrap_or("?");
+            let rate = r.get("escalationRate").and_then(Value::as_f64).unwrap_or(0.0);
+            let last = r
+                .get("lastActiveAt")
+                .and_then(Value::as_str)
+                .map_or_else(|| "never active".to_string(), |d| format!("last active {d}"));
+            format!(
+                "{} ({id}): {} conversation(s), {}% escalated, {last}",
+                names.get(id).copied().unwrap_or("(unnamed)"),
+                n(r, "conversationsLast7d"),
+                (rate * 100.0).round() as i64
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_lines_join_names_and_sort_busiest_first() {
+        let stats = serde_json::json!([
+            { "agentId": "a-1", "conversationsLast7d": 1, "escalationRate": 0.0, "lastActiveAt": null },
+            { "agentId": "a-2", "conversationsLast7d": 8, "escalationRate": 0.25, "lastActiveAt": "2026-10-01" }
+        ]);
+        let agents = serde_json::json!([{ "id": "a-1", "name": "Sales" }, { "id": "a-2", "name": "Support" }]);
+        let lines = super::activity_lines(&stats, &agents);
+        assert_eq!(lines[0], "Support (a-2): 8 conversation(s), 25% escalated, last active 2026-10-01");
+        assert_eq!(lines[1], "Sales (a-1): 1 conversation(s), 0% escalated, never active");
+        assert_eq!(super::activity_lines(&serde_json::json!([]), &serde_json::Value::Null), vec!["No agents yet."]);
+    }
+
     use super::*;
 
     fn colors() -> Vec<(String, String)> {

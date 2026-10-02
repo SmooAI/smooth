@@ -918,6 +918,25 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::drive::Cmd,
     },
+    /// The org's plan: active plans + limits, included allowances (AI
+    /// conversations, calling/voice minutes, meeting-bot minutes, HeyPage
+    /// credits) and enabled features. CLI twin of the hosted MCP
+    /// `billing_plan_usage` (needs `billing.read`).
+    Billing {
+        #[command(subcommand)]
+        cmd: smooai::billing::Cmd,
+    },
+    /// Recent customer conversations, newest first; `--escalated` for the
+    /// "needs a human" inbox. CLI twin of the hosted MCP
+    /// `inbox_recent_conversations` (needs `conversations.read`).
+    Inbox(smooai::inbox::InboxArgs),
+    /// Content Builder generation — `generate` a landing page, email template or
+    /// form from a brief. CLI twin of the hosted MCP `templates_generate`.
+    #[command(visible_alias = "template")]
+    Templates {
+        #[command(subcommand)]
+        cmd: smooai::templates::Cmd,
+    },
     /// Smoo AI org file system.
     ///
     /// `ls`, `mkdir`, `upload`, `download`, `mv`, `rm`, `lock`, `share`. Same
@@ -1981,6 +2000,9 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
+        SmooCommands::Billing { cmd } => smooai::billing::cmd(cmd).await,
+        SmooCommands::Inbox(args) => smooai::inbox::cmd(args).await,
+        SmooCommands::Templates { cmd } => smooai::templates::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
         SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
     }
