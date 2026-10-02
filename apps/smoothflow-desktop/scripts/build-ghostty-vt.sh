@@ -127,6 +127,18 @@ fi
 # --- zig build lib-vt ---
 echo "==> libghostty-vt for $target (zig -Dtarget=$zig_target, simd=$simd)"
 rm -rf "$OUT"
+# Fetch build.zig.zon's packages first, with retries: Zig's own HTTP client
+# has failed a CI fetch with a one-off TlsInitializationFailed.
+fetched=0
+for attempt in 1 2 3 4; do
+  if (cd "$SRC" && "$ZIG" build --fetch); then
+    fetched=1
+    break
+  fi
+  echo "warning: fetching ghostty's Zig packages failed (attempt $attempt); retrying" >&2
+  sleep $((attempt * 5))
+done
+[[ $fetched == 1 ]] || { echo "error: could not fetch ghostty's Zig packages" >&2; exit 1; }
 extra=()
 # The xcframework is for Xcode consumers; Cargo links the plain archive.
 [[ "$zig_target" == *macos ]] && extra+=(-Demit-xcframework=false)
