@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use smooth_flow_client::attention::{self, Approval, Attention};
 use smooth_flow_client::close::{self, Scope};
 use smooth_flow_client::harness::Harness;
-use smooth_flow_client::keymap::{Action, Keymap};
+use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::{Direction, PaneId, Rect};
 use smooth_flow_client::surfaces::Surfaces;
 use smooth_flow_client::{fleet, Session};
@@ -186,6 +186,45 @@ impl Core {
     /// The fleet in sidebar order (grouped), for Focus Session 1–9.
     fn sidebar_order(&self) -> Vec<String> {
         fleet::grouped(&self.ordered()).into_iter().flat_map(|g| g.sessions).collect()
+    }
+
+    /// The chord bound to `action`, as this platform writes it ("" if none).
+    #[must_use]
+    pub fn chord_hint(&self, action: Action) -> String {
+        self.keymap.chord(action).map(|c| c.display(Platform::current())).unwrap_or_default()
+    }
+
+    /// The text a pane shows instead of a terminal, or `None` when it shows
+    /// its session's terminal. A session that ended says so, and when the
+    /// engine said why (`launch failed: tmux not found …`, th-9f6814) the
+    /// reason is shown. It replaces a blank terminal, so a failed launch is
+    /// never just an empty pane.
+    #[must_use]
+    pub fn pane_hint(&self, pane: PaneId) -> Option<String> {
+        let Some(id) = self.surfaces.session_of(pane) else {
+            return Some(if self.sessions.is_empty() {
+                format!("No sessions yet — New Session ({}).", self.chord_hint(Action::NewSession))
+            } else {
+                "Empty pane — pick a session in the sidebar.".to_string()
+            });
+        };
+        let has_terminal = self.terminals.contains_key(id);
+        let Some(s) = self.sessions.get(id) else {
+            return (!has_terminal).then(|| "attaching…".to_string());
+        };
+        let why = self.attention.get(id).and_then(|a| a.detail.clone()).filter(|d| !d.trim().is_empty());
+        if s.is_live() {
+            return (!has_terminal).then(|| "attaching…".to_string());
+        }
+        if has_terminal && why.is_none() {
+            // It ran and ended: its last screen is the useful thing to show.
+            return None;
+        }
+        let state = format!("{:?}", s.state).to_lowercase();
+        Some(match why {
+            Some(why) => format!("{} is {state}: {why}", s.kind),
+            None => format!("{} is {state}.", s.kind),
+        })
     }
 
     /// The size `id` is attached at on this connection, if it is.
@@ -605,7 +644,6 @@ impl Core {
 mod tests {
     use super::*;
     use serde_json::Value;
-    use smooth_flow_client::keymap::Platform;
 
     fn core() -> (Core, tokio::sync::mpsc::UnboundedReceiver<String>) {
         let (out, rx) = Outbox::channel();
@@ -713,5 +751,21 @@ mod tests {
             Some("not connected to a flow engine"),
             "stale answers drop"
         );
+    }
+
+    #[test]
+    fn a_pane_says_why_its_session_ended() {
+        let (mut c, _rx) = core();
+        let pane = c.surfaces.focused_pane();
+        assert!(c.pane_hint(pane).is_some_and(|h| h.starts_with("No sessions yet")));
+        c.apply(hello(r#"{"id":"fs-1","kind":"shell","state":"starting"}"#));
+        assert_eq!(c.pane_hint(pane).as_deref(), Some("attaching…"));
+        let dead = r#"{"type":"flow.session","session":{"id":"fs-1","kind":"shell","state":"dead","attention":{"reason":"launch_failed","detail":"launch failed: tmux not found"}}}"#;
+        c.apply(Event::Frame(frames::parse(dead).expect("session")));
+        assert_eq!(c.pane_hint(pane).as_deref(), Some("shell is dead: launch failed: tmux not found"));
+        c.terminals.insert("fs-1".into(), TerminalModel::new(10, 2));
+        assert!(c.pane_hint(pane).is_some(), "a reason beats a stale terminal");
+        c.attention.clear();
+        assert_eq!(c.pane_hint(pane), None, "an ended session with no reason keeps its last screen");
     }
 }

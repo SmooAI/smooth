@@ -4,7 +4,7 @@
 //! back into it.
 
 use gpui_kit::*;
-use smooth_flow_client::keymap::{Action, Platform};
+use smooth_flow_client::keymap::Action;
 use smooth_flow_client::pane::{PaneId, Rect};
 use smooth_flow_client::{fleet, title, SessionState};
 
@@ -44,7 +44,7 @@ fn hsla(rgb24: u32) -> Hsla {
 
 /// The chord for `action`, as a hint on a button.
 fn hint(ws: &Workspace, action: Action) -> String {
-    ws.keymap.chord(action).map(|c| c.display(Platform::current())).unwrap_or_default()
+    ws.chord_hint(action)
 }
 
 fn button(label: impl Into<SharedString>, color: u32, enabled: bool) -> Div {
@@ -253,14 +253,10 @@ impl Workspace {
         if multi {
             el = el.border_1().border_color(hsla(if focused { ACCENT } else { BORDER }));
         }
-        let session = self.surfaces.session_of(pane);
-        let Some(term) = session.and_then(|id| self.terminals.get(id)) else {
-            let hint_text = match session.and_then(|id| self.sessions.get(id)) {
-                Some(s) if !s.is_live() => format!("{} is {:?}.", s.kind, s.state).to_lowercase(),
-                Some(_) => "attaching…".to_string(),
-                None if self.sessions.is_empty() => format!("No sessions yet — New Session ({}).", hint(self, Action::NewSession)),
-                None => "Empty pane — pick a session in the sidebar.".to_string(),
-            };
+        let hint_text = self.pane_hint(pane);
+        let term = self.surfaces.session_of(pane).and_then(|id| self.terminals.get(id));
+        let (Some(term), None) = (term, &hint_text) else {
+            let hint_text = hint_text.unwrap_or_else(|| "attaching…".to_string());
             return el.flex().items_center().justify_center().text_color(hsla(MUTED)).child(hint_text);
         };
         let block = focused && window_focused;

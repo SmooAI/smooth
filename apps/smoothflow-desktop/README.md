@@ -98,8 +98,6 @@ SMOOTHFLOW_E2E_DAEMON=/path/to/target/debug/smooth-daemon cargo test --test e2e
 # …or let the test build it from the main workspace (cargo build -p
 # smooai-smooth-daemon into $CARGO_TARGET_DIR, or <repo>/target when unset).
 cargo test --test e2e
-# Include the Finder-PATH variant (ignored until #707 merges, see below).
-cargo test --test e2e -- --include-ignored
 ```
 
 It needs tmux. Without tmux the test skips, unless `SMOOTH_E2E_STRICT=1`
@@ -109,7 +107,12 @@ Windows has no native tmux. CI runs it on Linux and macOS in
 passes it in through `SMOOTHFLOW_E2E_DAEMON`.
 
 `a_shell_session_gets_a_live_terminal_from_a_finder_launched_daemon` runs the
-daemon with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which is how Big Smooth.app
-and Finder start it. That PATH caused "I created sessions and never got a
-terminal" (th-9f6814). It stays `#[ignore]` until SmooAI/smooth#707
-(`th-flow-tmux-path`) merges. Against `main` it fails with `running tmux`.
+daemon with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, the PATH Big Smooth.app and
+Finder start it with. That PATH caused "I created sessions and never got a
+terminal" (th-9f6814, fixed in #707).
+
+`a_session_that_cannot_launch_shows_why` points the daemon at a tmux that
+doesn't exist. It checks that the session reaches the app as `dead` with
+attention `launch_failed` and a detail naming the problem, that nothing is
+left in `starting`, and that the pane shows `shell is dead: launch failed: …`
+(`Core::pane_hint`) instead of a blank terminal.

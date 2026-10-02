@@ -161,7 +161,8 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn boot(path: DaemonPath) -> Self {
+    /// Boot with `extra` env on top of the isolation set.
+    fn boot(path: DaemonPath, extra: &[(&str, &str)]) -> Self {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let root = tempfile::Builder::new().prefix("sfd-e2e-").tempdir().expect("tempdir");
         let home = root.path().join("home");
@@ -189,6 +190,7 @@ impl Daemon {
             .env("SMOOTH_WORKSPACE", &ws)
             .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
             .env("TERM", "xterm-256color")
+            .envs(extra.iter().copied())
             .current_dir(&ws)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
@@ -395,17 +397,10 @@ fn nonce() -> u64 {
     (u64::from(t.subsec_nanos()) ^ u64::from(std::process::id()) << 7) % 1_000_000
 }
 
-/// The whole user path: discover → connect → hello → New Session (Shell) →
-/// the session opens in the focused pane → attach at 80×24 → live output →
-/// type a command → see its output in the `TerminalModel` → Kill.
-fn shell_session_round_trip(path: DaemonPath) {
-    if !have_tmux() {
-        return;
-    }
-    let d = Daemon::boot(path);
+/// Discover the daemon from its scratch HOME, connect, and get `flow.hello`.
+fn connect(d: &Daemon) -> App {
     let mut app = App::connect(d.smooth_dir());
-
-    app.wait(&d, "connect and receive flow.hello", WAIT, |a| {
+    app.wait(d, "connect and receive flow.hello", WAIT, |a| {
         a.core.connection == Connection::Connected && a.saw_hello
     });
     assert!(app.core.endpoint.as_ref().is_some_and(|e| e.token.is_some()), "discovery found the token");
@@ -414,9 +409,14 @@ fn shell_session_round_trip(path: DaemonPath) {
         d.home.to_string_lossy(),
         "hello carries the daemon's home (titles abbreviate against it)"
     );
+    app
+}
 
-    // New Session, exactly as the user does it: open the sheet (its HTTP
-    // reads go to the real daemon), pick Shell with the arrow keys, Enter.
+/// New Session, exactly as the user does it: open the sheet (its HTTP reads
+/// go to the real daemon), pick Shell with the arrow keys, press Enter. The
+/// engine's `flow.session` for it opens in the focused (empty) pane. Returns
+/// its id.
+fn start_shell(app: &mut App, d: &Daemon) -> String {
     let fetches = app.core.act(Action::NewSession);
     assert!(!fetches.is_empty(), "the sheet loads inference and repos");
     for f in fetches {
@@ -436,15 +436,27 @@ fn shell_session_round_trip(path: DaemonPath) {
     assert_eq!(app.core.sheet.as_ref().and_then(|s| s.selected()).map(|r| r.kind.as_str()), Some("shell"));
     assert!(app.press("enter").is_empty());
     assert!(app.core.sheet.is_none(), "Start sent flow.new and closed the sheet");
-
-    // The engine's flow.session for it opens in the focused (empty) pane,
-    // and the next layout attaches it at that pane's grid.
-    app.wait(&d, "the new shell session to open in the focused pane", WAIT, |a| {
+    app.wait(d, "the new shell session to open in the focused pane", WAIT, |a| {
         a.core.surfaces.focused_session().is_some()
     });
     let id = app.core.surfaces.focused_session().map(str::to_string).expect("focused session");
     assert_eq!(app.core.sessions[&id].kind, "shell");
+    id
+}
+
+/// The whole user path: discover → connect → hello → New Session (Shell) →
+/// the session opens in the focused pane → attach at 80×24 → live output →
+/// type a command → see its output in the `TerminalModel` → Kill.
+fn shell_session_round_trip(path: DaemonPath) {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(path, &[]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    // The next layout attaches it at that pane's grid.
     app.wait(&d, "the session to attach at 80x24", WAIT, |a| a.core.attached_size(&id) == Some((80, 24)));
+    assert_eq!(app.core.pane_hint(app.core.surfaces.focused_pane()), None, "the pane shows the terminal");
 
     // A terminal, not a blank pane forever (the bug): the shell's prompt.
     app.wait(&d, "live output from the shell (a prompt)", WAIT, |a| {
@@ -488,17 +500,45 @@ fn a_shell_session_gets_a_live_terminal() {
 
 /// A daemon started the way Big Smooth.app / Finder starts it, with
 /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew. On macOS tmux is in
-/// /opt/homebrew/bin, so until the engine finds tmux off PATH (th-9f6814,
-/// PR #707 on branch `th-flow-tmux-path`) the session sits in `starting`
-/// with no terminal: the exact bug this suite exists for.
-// TODO(th-9f6814): un-ignore once SmooAI/smooth#707 merges.
+/// /opt/homebrew/bin; before #707 (th-9f6814) the engine looked for it on
+/// PATH only, so the session sat in `starting` with no terminal — the bug
+/// this suite exists for.
 #[test]
-#[ignore = "fails until SmooAI/smooth#707 (th-flow-tmux-path, th-9f6814) merges: the daemon can't find tmux on a Finder PATH"]
 fn a_shell_session_gets_a_live_terminal_from_a_finder_launched_daemon() {
     shell_session_round_trip(DaemonPath::Finder);
 }
 
-// TODO(th-9f6814): once #707 merges, add the failure path — a session whose
-// launch fails (e.g. `SMOOTH_TMUX_BIN=/nonexistent/tmux`) must reach the app
-// as `dead` with attention `launch_failed` and a detail, never stuck in
-// `starting`.
+/// A launch that fails must reach the app as a `dead` session that says
+/// why, never a `starting` row with a blank pane (th-9f6814). The daemon
+/// gets a tmux override that doesn't exist, which is an error, not a
+/// fallback.
+#[test]
+fn a_session_that_cannot_launch_shows_why() {
+    if !have_tmux() {
+        return;
+    }
+    const MISSING: &str = "/nonexistent/th-9f6814/tmux";
+    let d = Daemon::boot(DaemonPath::Finder, &[("SMOOTH_TMUX_BIN", MISSING)]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    app.wait(&d, "the failed session to be dead with launch_failed", WAIT, |a| {
+        a.core.sessions.get(&id).is_some_and(|s| s.state == SessionState::Dead) && a.core.attention.get(&id).is_some_and(|x| x.reason == "launch_failed")
+    });
+    let detail = app.core.attention[&id].detail.clone().unwrap_or_default();
+    assert!(
+        detail.contains("tmux not found") && detail.contains(MISSING),
+        "the detail names the problem and where it looked: {detail}"
+    );
+    assert!(
+        app.core.sessions.values().all(|s| s.state != SessionState::Starting),
+        "nothing is left in `starting`: {:#?}",
+        app.core.ordered()
+    );
+    assert_eq!(app.core.attached_size(&id), None, "a dead session is not attached");
+    // What the window draws in the session's pane: the reason, not a blank terminal.
+    let hint = app
+        .core
+        .pane_hint(app.core.surfaces.focused_pane())
+        .expect("the pane shows text, not a terminal");
+    assert!(hint.starts_with("shell is dead: ") && hint.contains(&detail), "{hint}");
+}
