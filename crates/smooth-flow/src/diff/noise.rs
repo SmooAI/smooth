@@ -1,5 +1,7 @@
-//! Which files are noise a reviewer skips — lockfiles, generated and
-//! vendored code, minified bundles, and anything huge. Noise starts
+//! Which files are noise a reviewer skips.
+//!
+//! Lockfiles, generated and vendored code, minified bundles, and anything
+//! huge. Noise starts
 //! collapsed and its hunks are left out of the full-diff frame until a
 //! client asks for that one file.
 
@@ -31,6 +33,8 @@ const LOCKFILES: &[&str] = &[
     "deno.lock",
     "packages.lock.json",
 ];
+
+const MINIFIED_SUFFIXES: &[&str] = &[".min.js", ".min.css", ".min.mjs", ".map"];
 
 const VENDORED_DIRS: &[&str] = &["vendor", "vendored", "third_party", "third-party", "node_modules", "bower_components", "Pods"];
 
@@ -68,7 +72,7 @@ pub fn classify(path: &str, added: u32, deleted: u32, added_lines: &[&str]) -> O
     {
         return Some(Noise::Generated);
     }
-    if lower.ends_with(".min.js") || lower.ends_with(".min.css") || lower.ends_with(".min.mjs") || lower.ends_with(".map") {
+    if MINIFIED_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
         return Some(Noise::Minified);
     }
     // Content: a few very long added lines is a bundle, not source.

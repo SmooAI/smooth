@@ -123,6 +123,7 @@ pub fn hunk_id(path: &str, h: &RawHunk) -> String {
 /// Undo git's C-style quoting (`"a/sp\303\251c\"ial"`) — octal escapes are
 /// bytes, so the result is decoded as UTF-8 (lossy).
 #[must_use]
+#[allow(clippy::many_single_char_names, reason = "a byte-level escape decoder")]
 pub fn unquote(s: &str) -> String {
     let Some(inner) = s.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
         return s.to_string();
@@ -438,8 +439,9 @@ pub fn parse(patch: &str) -> Vec<RawFile> {
     out
 }
 
-/// A patch carrying exactly one hunk of `file`, for `git apply`. Content
-/// only: a rename is written against the new path (the file the worktree
+/// A patch carrying exactly one hunk of `file`, for `git apply`.
+///
+/// Content only: a rename is written against the new path (the file the worktree
 /// has), and a mode change is left out — neither is a hunk. An added or
 /// deleted file keeps its `new file`/`deleted file` line so applying (or
 /// reversing) the whole-file hunk creates or removes the file.

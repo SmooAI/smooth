@@ -6,6 +6,9 @@ use similar::{Algorithm, DiffOp};
 
 use super::model::LineKind;
 
+/// Changed `[start, end)` char spans of one line.
+pub type Spans = Vec<[u32; 2]>;
+
 /// Lines longer than this (chars) get no word spans — minified output.
 pub const MAX_WORD_LINE_CHARS: usize = 1000;
 /// When more than this share of a line changed, the pair is a rewrite, and
@@ -74,7 +77,7 @@ fn to_u32(n: usize) -> u32 {
 /// The changed spans of `old` and of `new`, or `None` when the pair is not
 /// worth highlighting (too long, or a rewrite).
 #[must_use]
-pub fn pair_spans(old: &str, new: &str) -> Option<(Vec<[u32; 2]>, Vec<[u32; 2]>)> {
+pub fn pair_spans(old: &str, new: &str) -> Option<(Spans, Spans)> {
     let (old_len, new_len) = (old.chars().count(), new.chars().count());
     if old_len > MAX_WORD_LINE_CHARS || new_len > MAX_WORD_LINE_CHARS {
         return None;

@@ -1,6 +1,7 @@
-//! SmoothFlow Diff (epic th-26f5b9): structured diffs the clients render
-//! natively — files, hunks, lines, word-level change spans and syntax token
-//! spans, all computed here so no client runs `git` or a highlighter.
+//! SmoothFlow Diff (epic th-26f5b9): structured diffs the clients render natively.
+//!
+//! Files, hunks, lines, word-level change spans and syntax token spans, all
+//! computed here so no client runs `git` or a highlighter.
 //!
 //! Three bases ([`DiffBase`]):
 //!
@@ -47,7 +48,9 @@ pub const MAX_FILE_LINES: usize = 3000;
 pub const MAX_HUNK_LINES: usize = 1000;
 /// Chars shown per line before the rest is cut (`Line::truncated`).
 pub const MAX_LINE_CHARS: usize = 2000;
-/// The serialized size one `flow.diff` frame aims under. The relay and the
+/// The serialized size one `flow.diff` frame aims under.
+///
+/// The relay and the
 /// phones' WebSocket stacks cap a message near 1 MiB (URLSession's default),
 /// and end-to-end encryption adds a third in base64; 512 KiB of JSON leaves
 /// room for both. Files past the budget arrive as stubs
@@ -322,7 +325,7 @@ fn build_hunk(raw: &RawHunk, id: String, limit: usize, syntax: Option<&'static s
 /// syntax spans, staged marks, and the frame budget. Pure apart from the
 /// highlight clock.
 #[must_use]
-pub fn build(files: &[RawFile], git_truncated: bool, staged: &HashSet<String>, path: Option<&str>, budget: usize) -> Diff {
+pub fn build<S: std::hash::BuildHasher>(files: &[RawFile], git_truncated: bool, staged: &HashSet<String, S>, path: Option<&str>, budget: usize) -> Diff {
     let deadline = Instant::now() + HIGHLIGHT_BUDGET;
     let (mut added, mut deleted) = (0u32, 0u32);
     for f in files {
@@ -330,10 +333,10 @@ pub fn build(files: &[RawFile], git_truncated: bool, staged: &HashSet<String>, p
         added = added.saturating_add(a);
         deleted = deleted.saturating_add(d);
     }
-    let selected: Vec<&RawFile> = match path {
-        Some(p) => files.iter().filter(|f| f.path() == p || f.old_path.as_deref() == Some(p)).take(1).collect(),
-        None => files.iter().take(MAX_FILES).collect(),
-    };
+    let selected: Vec<&RawFile> = path.map_or_else(
+        || files.iter().take(MAX_FILES).collect(),
+        |p| files.iter().filter(|f| f.path() == p || f.old_path.as_deref() == Some(p)).take(1).collect(),
+    );
     let mut out_files = Vec::with_capacity(selected.len());
     for f in selected {
         let (a, d) = f.counts();
@@ -503,12 +506,13 @@ pub fn act(dir: &Path, base: DiffBase, snaps: &[Snapshot], hunk_id: &str, action
 /// Most excerpt lines quoted per comment.
 pub const REVIEW_EXCERPT_LINES: usize = 12;
 
+#[allow(clippy::many_single_char_names, reason = "old/new line counters read best as o/n beside their l")]
 fn excerpt(file: &RawFile, c: &ReviewComment) -> Vec<String> {
     let ids = file.hunk_ids();
-    let hunks: Vec<&RawHunk> = match c.hunk_id.as_deref() {
-        Some(id) => ids.iter().position(|x| x == id).map(|i| vec![&file.hunks[i]]).unwrap_or_default(),
-        None => file.hunks.iter().collect(),
-    };
+    let hunks: Vec<&RawHunk> = c.hunk_id.as_deref().map_or_else(
+        || file.hunks.iter().collect(),
+        |id| ids.iter().position(|x| x == id).map(|i| vec![&file.hunks[i]]).unwrap_or_default(),
+    );
     let old_side = c.side.as_deref() == Some("old");
     for h in hunks {
         let (mut o, mut n) = (h.old_start, h.new_start);

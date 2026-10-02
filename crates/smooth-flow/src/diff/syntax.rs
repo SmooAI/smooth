@@ -1,6 +1,7 @@
-//! Server-side syntax spans (th-26f5b9): syntect's parser over bat's syntax
-//! set (`two-face`), scopes folded onto the small [`TokenKind`] vocabulary
-//! every client maps to its theme. No theme ships with the engine — a theme
+//! Server-side syntax spans (th-26f5b9).
+//!
+//! syntect's parser over bat's syntax set (`two-face`), scopes folded onto
+//! the small [`TokenKind`] vocabulary every client maps to its theme. No theme ships with the engine — a theme
 //! is a client's business.
 //!
 //! **Why syntect + two-face, not tree-sitter.** Pure Rust (the `regex-fancy`

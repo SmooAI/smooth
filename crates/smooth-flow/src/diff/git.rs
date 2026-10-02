@@ -183,9 +183,10 @@ pub fn object_exists(dir: &Path, id: &str) -> bool {
     run(dir, &["cat-file", "-e", id]).is_ok()
 }
 
-/// `git diff` between two trees/commits, unified, rename-aware, no color,
-/// no external diff or textconv, fixed `a/`/`b/` prefixes regardless of the
-/// user's config. Returns the output (lossy UTF-8) and whether it was cut
+/// `git diff` between two trees or commits.
+///
+/// Unified, rename-aware, no color, no external diff or textconv, fixed
+/// `a/`/`b/` prefixes regardless of the user's config. Returns the output (lossy UTF-8) and whether it was cut
 /// at [`MAX_PATCH_BYTES`].
 ///
 /// # Errors

@@ -1,6 +1,7 @@
-//! SmoothFlow Diff client rules (spec §14, th-26f5b9): the pure decisions
-//! every client's native diff viewer makes over the engine's `flow.diff`
-//! payload — side-by-side row pairing, the file tree, keyboard navigation
+//! SmoothFlow Diff client rules (spec §14, th-26f5b9).
+//!
+//! The pure decisions every client's native diff viewer makes over the
+//! engine's `flow.diff` payload — side-by-side row pairing, the file tree, keyboard navigation
 //! order, what starts collapsed, the default base, and the viewer's keys.
 //!
 //! The engine computes the diff (hunks, word spans, syntax spans); none of
@@ -79,7 +80,9 @@ pub struct Row {
     pub right: Option<usize>,
 }
 
-/// Pair a hunk's lines into side-by-side rows. Context fills both columns;
+/// Pair a hunk's lines into side-by-side rows.
+///
+/// Context fills both columns;
 /// in a change block (a run of `del`s then a run of `add`s) the i-th del
 /// sits beside the i-th add, and the longer run's rest gets blank cells on
 /// the other side. An `add` run with no `del`s before it is all right-side.
@@ -136,7 +139,7 @@ pub struct TreeRow {
 #[derive(Default)]
 struct Dir {
     name: String,
-    dirs: Vec<Dir>,
+    dirs: Vec<Self>,
     files: Vec<(String, usize)>,
 }
 
@@ -271,8 +274,9 @@ pub fn viewed_key(f: &File) -> String {
 /// A hunk position: `(file index into files, hunk index in that file)`.
 pub type Pos = (usize, usize);
 
-/// The next (`forward`) or previous hunk from `at`, walking files in
-/// `order` and skipping collapsed files (`collapsed[file]`). From nowhere it
+/// The next (`forward`) or previous hunk from `at`.
+///
+/// Walks files in `order`, skipping collapsed files (`collapsed[file]`). From nowhere it
 /// lands on the first (forward) or last hunk. Stops at the ends — no wrap.
 #[must_use]
 pub fn next_hunk(files: &[File], order: &[usize], collapsed: &[bool], at: Option<Pos>, forward: bool) -> Option<Pos> {
