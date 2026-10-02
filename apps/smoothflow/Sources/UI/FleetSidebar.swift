@@ -57,6 +57,11 @@ struct FleetSidebar: View {
             if s.unread { UnreadBadge() }
         }
         .padding(.vertical, 2)
+        // th-f958f2: middle-click closes the row's session out — the same
+        // Close Out sheet as ⌘⌥W and the menu below, never a silent close.
+        .background(FleetRowMouse { action in
+            if action == .closeOut { app.showCloseOut(s.id) }
+        })
         // th-fe75ca: close-out is reachable from the row itself — a running
         // session included (the engine kills it first, and the sheet says so).
         // Right-click was the only gesture that did nothing here.

@@ -88,6 +88,7 @@ impl Workspace {
                     state.push_str(" · approve?");
                 }
                 let row_id = id.clone();
+                let close_id = id.clone();
                 let mut row = div().flex().items_center().gap_2().px_2().py_1().rounded_md().cursor_pointer();
                 if selected {
                     row = row.bg(hsla(BORDER));
@@ -109,6 +110,12 @@ impl Workspace {
                             this.show_session(&row_id);
                             cx.notify();
                         }),
+                    )
+                    // Middle-click closes the row's session out — the same
+                    // Close Out as Ctrl+Alt+W, confirmation included (spec §4).
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| this.close_out(&close_id, cx)),
                     )
                     .child(div().size_2().rounded_full().bg(hsla(dot)))
                     .child(div().flex().flex_col().child(label).child(div().text_xs().text_color(hsla(MUTED)).child(state))),
@@ -542,7 +549,7 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.dont_ask_again(cx))),
             );
         }
-        buttons = buttons.child(button("Cancel (Enter)", ACCENT, true).on_mouse_down(
+        buttons = buttons.child(button(format!("{} (Enter)", d.cancel), ACCENT, true).on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 this.dialog = None;
@@ -571,7 +578,7 @@ impl Workspace {
                     .border_color(hsla(BORDER))
                     .text_color(hsla(theme::FOREGROUND))
                     .child(div().text_lg().child(d.title.clone()))
-                    .child(div().text_sm().text_color(hsla(SUBTLE)).child(d.message.clone()))
+                    .children(d.message.lines().map(|l| div().text_sm().text_color(hsla(SUBTLE)).child(l.to_string())))
                     .child(buttons),
             ),
         )

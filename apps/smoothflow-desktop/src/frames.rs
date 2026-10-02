@@ -53,7 +53,13 @@ pub enum Inbound {
         seq: u64,
         bytes: Vec<u8>,
     },
-    Error(String),
+    /// `flow.error`. `reference` is the `seq` of the client frame it
+    /// answers, when that frame carried one (`ref` on the wire), so a
+    /// refusal can be matched to the request that caused it.
+    Error {
+        reference: Option<u64>,
+        message: String,
+    },
 }
 
 /// Parse one text frame; `None` for types this client doesn't use or a frame
@@ -84,13 +90,15 @@ pub fn parse(text: &str) -> Option<Inbound> {
             seq: v.get("seq").and_then(Value::as_u64).unwrap_or(0),
             bytes: base64::engine::general_purpose::STANDARD.decode(v.get("data_b64")?.as_str()?).ok()?,
         }),
-        "flow.error" => Some(Inbound::Error(
-            v.pointer("/error/message")
+        "flow.error" => Some(Inbound::Error {
+            reference: v.get("ref").and_then(Value::as_u64),
+            message: v
+                .pointer("/error/message")
                 .or_else(|| v.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("error")
                 .to_string(),
-        )),
+        }),
         _ => None,
     }
 }
@@ -172,6 +180,25 @@ pub fn kill(id: &str, resume: bool) -> String {
     json!({ "type": "flow.kill", "id": id, "resume": resume }).to_string()
 }
 
+/// `flow.close` — Close Out: finish a session for good (SmoothFlow.md §
+/// Frames, th-e126cc). The engine kills a live session first, closes its
+/// pearl when `close_pearl`, and removes its worktree and branch when
+/// `remove_worktree` and the branch is merged and clean. It refuses a dirty or
+/// unmerged worktree with `flow.error` (`ref` = `seq`) and touches nothing.
+/// This client never sends `force`: a refusal is shown, not overridden.
+#[must_use]
+pub fn close(id: &str, close_pearl: bool, remove_worktree: bool, seq: u64) -> String {
+    json!({
+        "type": "flow.close",
+        "id": id,
+        "close_pearl": close_pearl,
+        "remove_worktree": remove_worktree,
+        "force": false,
+        "seq": seq,
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +237,18 @@ mod tests {
         assert_eq!(parse(r#"{"type":"flow.session.removed","id":"fs-2"}"#), Some(Inbound::Removed("fs-2".into())));
         assert_eq!(
             parse(r#"{"type":"flow.error","error":{"message":"nope"}}"#),
-            Some(Inbound::Error("nope".into()))
+            Some(Inbound::Error {
+                reference: None,
+                message: "nope".into()
+            })
+        );
+        assert_eq!(
+            parse(r#"{"type":"flow.error","ref":7,"code":"error","message":"branch b is not merged"}"#),
+            Some(Inbound::Error {
+                reference: Some(7),
+                message: "branch b is not merged".into()
+            }),
+            "the engine's flat error, with the request's seq echoed in ref"
         );
         assert_eq!(parse(r#"{"type":"flow.future_thing"}"#), None);
         assert_eq!(parse("not json"), None);
@@ -267,6 +305,12 @@ mod tests {
         assert_eq!(v, json!({ "type": "flow.approve", "id": "fs-1", "request_id": "r1", "decision": "deny" }));
         let v: Value = serde_json::from_str(&kill("fs-1", false)).unwrap_or_default();
         assert_eq!(v["type"], "flow.kill");
+        let v: Value = serde_json::from_str(&close("fs-1", true, false, 3)).unwrap_or_default();
+        assert_eq!(
+            v,
+            json!({ "type": "flow.close", "id": "fs-1", "close_pearl": true, "remove_worktree": false, "force": false, "seq": 3 }),
+            "Close Out never forces"
+        );
     }
 
     #[test]
