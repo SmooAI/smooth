@@ -36,7 +36,16 @@ const VENDORED_DIRS: &[&str] = &["vendor", "vendored", "third_party", "third-par
 
 const GENERATED_DIRS: &[&str] = &["generated", "__generated__", "gen", "__snapshots__"];
 
-const GENERATED_SUFFIXES: &[&str] = &[".pb.go", "_pb2.py", "_pb2_grpc.py", ".pb.rs", ".g.dart", ".freezed.dart", ".snap", ".designer.cs"];
+const GENERATED_SUFFIXES: &[&str] = &[
+    ".pb.go",
+    "_pb2.py",
+    "_pb2_grpc.py",
+    ".pb.rs",
+    ".g.dart",
+    ".freezed.dart",
+    ".snap",
+    ".designer.cs",
+];
 
 /// Classify by path, then by the added lines' shape (`minified`), then by size.
 #[must_use]
@@ -98,7 +107,11 @@ mod tests {
     fn classifies_by_content_and_size() {
         let bundle = "x".repeat(600);
         assert_eq!(classify("public/app.js", 1, 0, &[bundle.as_str()]), Some(Noise::Minified));
-        assert_eq!(classify("public/app.js", 3, 0, &[bundle.as_str(), "a", "b", "c"]), None, "one long line among many");
+        assert_eq!(
+            classify("public/app.js", 3, 0, &[bundle.as_str(), "a", "b", "c"]),
+            None,
+            "one long line among many"
+        );
         assert_eq!(classify("src/big.rs", LARGE_FILE_LINES, 1, &[]), Some(Noise::Large));
         assert_eq!(classify("src/big.rs", LARGE_FILE_LINES, 0, &[]), None);
     }

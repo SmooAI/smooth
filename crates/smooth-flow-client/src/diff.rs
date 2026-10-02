@@ -385,7 +385,12 @@ mod tests {
             noise: None,
             collapsed_by_default: false,
             hunks_omitted: None,
-            hunks: (0..hunks).map(|i| Hunk { id: format!("{path}#{i}"), lines: vec![] }).collect(),
+            hunks: (0..hunks)
+                .map(|i| Hunk {
+                    id: format!("{path}#{i}"),
+                    lines: vec![],
+                })
+                .collect(),
         }
     }
 
@@ -397,7 +402,14 @@ mod tests {
         let pairs: Vec<(Option<usize>, Option<usize>)> = rows.iter().map(|r| (r.left, r.right)).collect();
         assert_eq!(
             pairs,
-            vec![(Some(0), Some(0)), (Some(1), Some(3)), (Some(2), None), (Some(4), Some(4)), (None, Some(5)), (Some(6), None)]
+            vec![
+                (Some(0), Some(0)),
+                (Some(1), Some(3)),
+                (Some(2), None),
+                (Some(4), Some(4)),
+                (None, Some(5)),
+                (Some(6), None)
+            ]
         );
     }
 

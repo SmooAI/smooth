@@ -140,11 +140,7 @@ pub enum ClientFrame {
     /// batched steer. Reply `flow.diff.result` (with the message sent), or
     /// `flow.error` code `blocked` when the agent can't take a prompt.
     #[serde(rename = "flow.diff.review")]
-    DiffReview {
-        id: String,
-        base: DiffBase,
-        comments: Vec<ReviewComment>,
-    },
+    DiffReview { id: String, base: DiffBase, comments: Vec<ReviewComment> },
 }
 
 const fn uncommitted() -> DiffBase {
@@ -734,7 +730,9 @@ mod tests {
     /// th-26f5b9: the diff frames, both directions.
     #[test]
     fn diff_frames_round_trip() {
-        let f = parse_client_frame(r#"{"channel":"flow","type":"flow.diff","id":"fs-1","base":"turn"}"#).unwrap().unwrap();
+        let f = parse_client_frame(r#"{"channel":"flow","type":"flow.diff","id":"fs-1","base":"turn"}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             f,
             ClientFrame::Diff {
@@ -743,10 +741,17 @@ mod tests {
                 path: None
             }
         );
-        let f = parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"branch","path":"Cargo.lock"}"#).unwrap().unwrap();
+        let f = parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"branch","path":"Cargo.lock"}"#)
+            .unwrap()
+            .unwrap();
         assert!(matches!(f, ClientFrame::Diff { base: DiffBase::Branch, path: Some(ref p), .. } if p == "Cargo.lock"));
-        assert!(parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"main"}"#).is_err(), "unknown base is malformed");
-        let f = parse_client_frame(r#"{"type":"flow.diff.stage","id":"fs-1","hunk_id":"abc"}"#).unwrap().unwrap();
+        assert!(
+            parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"main"}"#).is_err(),
+            "unknown base is malformed"
+        );
+        let f = parse_client_frame(r#"{"type":"flow.diff.stage","id":"fs-1","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             f,
             ClientFrame::DiffStage {
@@ -756,9 +761,19 @@ mod tests {
             },
             "stage defaults to the uncommitted view"
         );
-        let f = parse_client_frame(r#"{"type":"flow.diff.unstage","id":"fs-1","hunk_id":"abc"}"#).unwrap().unwrap();
-        assert!(matches!(f, ClientFrame::DiffUnstage { base: DiffBase::Uncommitted, .. }));
-        let f = parse_client_frame(r#"{"type":"flow.diff.revert","id":"fs-1","base":"turn","hunk_id":"abc"}"#).unwrap().unwrap();
+        let f = parse_client_frame(r#"{"type":"flow.diff.unstage","id":"fs-1","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            f,
+            ClientFrame::DiffUnstage {
+                base: DiffBase::Uncommitted,
+                ..
+            }
+        ));
+        let f = parse_client_frame(r#"{"type":"flow.diff.revert","id":"fs-1","base":"turn","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
         assert!(matches!(f, ClientFrame::DiffRevert { base: DiffBase::Turn, .. }));
         let f = parse_client_frame(
             r#"{"type":"flow.diff.review","id":"fs-1","base":"uncommitted","comments":[{"file":"a.rs","hunk_id":"h","line_range":[3,5],"text":"why?"},{"file":"b.rs","text":"general"}]}"#,

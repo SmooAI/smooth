@@ -28,7 +28,12 @@ fn lines(file: &Value) -> Vec<String> {
 }
 
 fn paths(diff: &Value) -> Vec<String> {
-    diff["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap().to_string()).collect()
+    diff["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect()
 }
 
 #[tokio::test]
@@ -73,7 +78,9 @@ async fn diff_by_turn_revert_stale_and_review() {
 
     // `uncommitted`: the whole new file, untracked as it is.
     ws.send(json!({"type":"flow.diff","id":id,"base":"uncommitted"})).await;
-    let f = ws.wait_for("flow.diff uncommitted", WAIT, |v| v["type"] == "flow.diff" && v["base"] == "uncommitted").await;
+    let f = ws
+        .wait_for("flow.diff uncommitted", WAIT, |v| v["type"] == "flow.diff" && v["base"] == "uncommitted")
+        .await;
     let unc = &f["diff"];
     assert_eq!(paths(unc), ["src/a.txt"], "{unc}");
     assert_eq!(unc["files"][0]["status"], "added");
@@ -86,15 +93,18 @@ async fn diff_by_turn_revert_stale_and_review() {
     assert_eq!(lines(&http["files"][0]), [" one", "+two"]);
 
     // Revert the turn's hunk: the worktree loses `two`, a broadcast says so.
-    ws.send(json!({"type":"flow.diff.revert","id":id,"base":"turn","hunk_id":hunk_id,"seq":2})).await;
+    ws.send(json!({"type":"flow.diff.revert","id":id,"base":"turn","hunk_id":hunk_id,"seq":2}))
+        .await;
     let r = ws.wait_for("flow.diff.result", WAIT, |v| v["type"] == "flow.diff.result").await;
     assert_eq!(r["action"], "revert");
     assert_eq!(r["file"], "src/a.txt");
-    ws.wait_for("flow.diff.changed", WAIT, |v| v["type"] == "flow.diff.changed" && v["id"] == id).await;
+    ws.wait_for("flow.diff.changed", WAIT, |v| v["type"] == "flow.diff.changed" && v["id"] == id)
+        .await;
     assert_eq!(std::fs::read_to_string(d.ws.join("src/a.txt")).unwrap(), "one\n");
 
     // Again: the hunk no longer applies — refused, nothing written.
-    ws.send(json!({"type":"flow.diff.revert","id":id,"base":"turn","hunk_id":hunk_id,"seq":3})).await;
+    ws.send(json!({"type":"flow.diff.revert","id":id,"base":"turn","hunk_id":hunk_id,"seq":3}))
+        .await;
     let e = ws.wait_for("stale error", WAIT, |v| v["type"] == "flow.error" && v["ref"] == 3).await;
     assert_eq!(e["code"], "stale", "{e}");
     assert_eq!(std::fs::read_to_string(d.ws.join("src/a.txt")).unwrap(), "one\n");
@@ -104,7 +114,9 @@ async fn diff_by_turn_revert_stale_and_review() {
         {"file":"src/a.txt","line_range":[1,1],"text":"rename this"}
     ]});
     ws.send(review.clone()).await;
-    let r = ws.wait_for("review result", WAIT, |v| v["type"] == "flow.diff.result" && v["action"] == "review").await;
+    let r = ws
+        .wait_for("review result", WAIT, |v| v["type"] == "flow.diff.result" && v["action"] == "review")
+        .await;
     let message = r["message"].as_str().unwrap();
     assert!(message.contains("1. src/a.txt:1") && message.contains("rename this"), "{message}");
     d.wait_screen(&id, "rename this", WAIT).await;

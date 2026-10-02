@@ -262,7 +262,13 @@ fn build_hunk(raw: &RawHunk, id: String, limit: usize, syntax: Option<&'static s
     for (l, w) in raw.lines[..take].iter().zip(words) {
         let (text, cr) = strip_cr(&l.text);
         let in_time = Instant::now() < deadline;
-        let spans = |h: &mut Option<syntax::Highlighter>| if in_time { h.as_mut().map(|h| h.line(text)).unwrap_or_default() } else { Vec::new() };
+        let spans = |h: &mut Option<syntax::Highlighter>| {
+            if in_time {
+                h.as_mut().map(|h| h.line(text)).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
         let (old, new, syn) = match l.kind {
             LineKind::Ctx => {
                 let _ = spans(&mut old_hl);
@@ -331,12 +337,21 @@ pub fn build(files: &[RawFile], git_truncated: bool, staged: &HashSet<String>, p
     let mut out_files = Vec::with_capacity(selected.len());
     for f in selected {
         let (a, d) = f.counts();
-        let add_texts: Vec<&str> = f.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == LineKind::Add).take(64).map(|l| l.text.as_str()).collect();
+        let add_texts: Vec<&str> = f
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter(|l| l.kind == LineKind::Add)
+            .take(64)
+            .map(|l| l.text.as_str())
+            .collect();
         let noise = noise::classify(f.path(), a, d, &add_texts);
         let syn = if f.binary { None } else { syntax::syntax_for(f.path()) };
         let mut df = DiffFile {
             path: f.path().to_string(),
-            old_path: matches!(f.status, FileStatus::Renamed | FileStatus::Copied).then(|| f.old_path.clone()).flatten(),
+            old_path: matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
+                .then(|| f.old_path.clone())
+                .flatten(),
             status: f.status,
             old_mode: f.old_mode.clone(),
             new_mode: f.new_mode.clone(),
@@ -431,7 +446,9 @@ fn fit_budget(files: &mut [DiffFile], single: bool, budget: usize) {
 /// Find a hunk by id among raw files: `(file, hunk)`.
 #[must_use]
 pub fn find_hunk<'a>(files: &'a [RawFile], hunk_id: &str) -> Option<(&'a RawFile, &'a RawHunk)> {
-    files.iter().find_map(|f| f.hunk_ids().iter().position(|id| id == hunk_id).map(|i| (f, &f.hunks[i])))
+    files
+        .iter()
+        .find_map(|f| f.hunk_ids().iter().position(|id| id == hunk_id).map(|i| (f, &f.hunks[i])))
 }
 
 /// What a hunk action did.
@@ -458,10 +475,7 @@ pub fn act(dir: &Path, base: DiffBase, snaps: &[Snapshot], hunk_id: &str, action
     let r = resolve(dir, base, snaps)?;
     let files = if action == HunkAction::Unstage {
         let index = git::index_tree(dir)?;
-        let staged = Resolved {
-            to: side(index, "index"),
-            ..r
-        };
+        let staged = Resolved { to: side(index, "index"), ..r };
         raw(dir, &staged)?.0
     } else {
         raw(dir, &r)?.0
@@ -514,7 +528,12 @@ fn excerpt(file: &RawFile, c: &ReviewComment) -> Vec<String> {
             numbered.push((l, if old_side { lo } else { ln }));
         }
         let hits: Vec<usize> = match c.line_range {
-            Some([a, b]) => numbered.iter().enumerate().filter(|(_, (_, no))| no.is_some_and(|x| x >= a.min(b) && x <= a.max(b))).map(|(i, _)| i).collect(),
+            Some([a, b]) => numbered
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, no))| no.is_some_and(|x| x >= a.min(b) && x <= a.max(b)))
+                .map(|(i, _)| i)
+                .collect(),
             None => (0..numbered.len()).collect(),
         };
         let (Some(&first), Some(&last)) = (hits.first(), hits.last()) else { continue };

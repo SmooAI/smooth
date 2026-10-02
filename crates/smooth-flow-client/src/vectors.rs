@@ -538,7 +538,10 @@ fn diff_vectors() -> Value {
             vec![LineKind::Ctx, LineKind::Del, LineKind::Del, LineKind::Add, LineKind::Ctx],
         ),
         ("more adds than dels", vec![LineKind::Del, LineKind::Add, LineKind::Add, LineKind::Add]),
-        ("adds with no dels are right-only", vec![LineKind::Ctx, LineKind::Add, LineKind::Add, LineKind::Ctx]),
+        (
+            "adds with no dels are right-only",
+            vec![LineKind::Ctx, LineKind::Add, LineKind::Add, LineKind::Ctx],
+        ),
         ("dels at the end are left-only", vec![LineKind::Ctx, LineKind::Del, LineKind::Del]),
         ("an add then a del is two blocks", vec![LineKind::Add, LineKind::Del]),
     ] {
@@ -553,7 +556,16 @@ fn diff_vectors() -> Value {
     for (name, paths) in [
         (
             "dirs first, case-insensitive, chains compressed",
-            vec!["src/b.rs", "README.md", "src/a.rs", "apps/x/y/z.swift", "Cargo.toml", "src/ui/v.rs", "src/Z.rs", "docs/a.md"],
+            vec![
+                "src/b.rs",
+                "README.md",
+                "src/a.rs",
+                "apps/x/y/z.swift",
+                "Cargo.toml",
+                "src/ui/v.rs",
+                "src/Z.rs",
+                "docs/a.md",
+            ],
         ),
         ("flat", vec!["b.txt", "A.txt", "c.txt"]),
         ("one deep file", vec!["a/b/c/d.rs"]),
@@ -591,7 +603,10 @@ fn diff_vectors() -> Value {
         hunks_omitted: Some("budget".into()),
         ..f("big.rs", 0)
     };
-    let binary = File { binary: true, ..f("logo.png", 0) };
+    let binary = File {
+        binary: true,
+        ..f("logo.png", 0)
+    };
     let mode = File {
         status: "mode_changed".into(),
         added: 0,
@@ -639,7 +654,11 @@ fn diff_vectors() -> Value {
         json!({ "steps": fsteps }),
     ));
     for kind in ["claude", "codex", "shell"] {
-        cases.push(case("default base", json!({ "fn": "default_base", "kind": kind }), json!(d::default_base(kind))));
+        cases.push(case(
+            "default base",
+            json!({ "fn": "default_base", "kind": kind }),
+            json!(d::default_base(kind)),
+        ));
     }
     for (base, label) in [
         (Base::Turn, None),

@@ -1340,11 +1340,18 @@ impl Engine {
         if !s.kind.is_agent() {
             bail!("{id} is a shell — a review goes to an agent");
         }
-        if matches!(s.state, SessionState::NeedsYou | SessionState::Limited | SessionState::Done | SessionState::Dead) {
+        if matches!(
+            s.state,
+            SessionState::NeedsYou | SessionState::Limited | SessionState::Done | SessionState::Dead
+        ) {
             bail!(
                 "blocked: {id} is {} — it cannot take a review now{}",
                 s.state.as_str(),
-                if s.state == SessionState::NeedsYou { " (answer its approval first)" } else { "" }
+                if s.state == SessionState::NeedsYou {
+                    " (answer its approval first)"
+                } else {
+                    ""
+                }
             );
         }
         let comments: Vec<diff::ReviewComment> = comments.iter().filter(|c| !c.text.trim().is_empty()).cloned().collect();
@@ -1355,7 +1362,10 @@ impl Engine {
         let wt = Path::new(&s.worktree);
         // The excerpts come from the diff as it is now; a diff that can't be
         // computed still sends the comments, just without excerpts.
-        let files = diff::resolve(wt, base, &snaps).and_then(|r| diff::raw(wt, &r)).map(|(f, _)| f).unwrap_or_default();
+        let files = diff::resolve(wt, base, &snaps)
+            .and_then(|r| diff::raw(wt, &r))
+            .map(|(f, _)| f)
+            .unwrap_or_default();
         let message = diff::review_message(base, &files, &comments);
         self.send(id, &message)?;
         Ok(message)

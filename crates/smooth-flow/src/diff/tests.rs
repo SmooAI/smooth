@@ -14,7 +14,10 @@ fn snap(seq: i64, kind: SnapKind, tree: &str) -> Snapshot {
 }
 
 fn file<'a>(d: &'a Diff, path: &str) -> &'a DiffFile {
-    d.files.iter().find(|f| f.path == path).unwrap_or_else(|| panic!("no {path} in {:?}", d.files.iter().map(|f| &f.path).collect::<Vec<_>>()))
+    d.files
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("no {path} in {:?}", d.files.iter().map(|f| &f.path).collect::<Vec<_>>()))
 }
 
 fn texts(h: &Hunk) -> Vec<String> {
@@ -103,7 +106,10 @@ fn turn_is_start_to_end_when_idle_and_start_to_now_when_live() {
     assert_eq!(diff.from.label, "previous turn end");
     assert_eq!(diff.files.len(), 1);
     // A pruned tree is an error, not a wrong diff.
-    let gone = vec![snap(1, SnapKind::Start, "0123456789012345678901234567890123456789"), snap(2, SnapKind::End, &t1)];
+    let gone = vec![
+        snap(1, SnapKind::Start, "0123456789012345678901234567890123456789"),
+        snap(2, SnapKind::End, &t1),
+    ];
     assert!(compute(p, DiffBase::Turn, &gone, None).unwrap_err().to_string().contains("pruned"));
 }
 
@@ -129,7 +135,10 @@ fn revert_one_hunk_leaves_the_others_and_refuses_when_stale() {
     assert!(!now.contains("inserted") && now.contains("added\n"), "only the first hunk reverted:\n{now}");
     // The second hunk moved up a line and kept its id.
     let diff = compute(p, DiffBase::Uncommitted, &[], None).unwrap();
-    assert_eq!(file(&diff, "long.txt").hunks.iter().map(|h| h.id.clone()).collect::<Vec<_>>(), vec![second.clone()]);
+    assert_eq!(
+        file(&diff, "long.txt").hunks.iter().map(|h| h.id.clone()).collect::<Vec<_>>(),
+        vec![second.clone()]
+    );
 
     // Reverting it again: gone from the diff → stale, nothing written.
     let err = act(p, DiffBase::Uncommitted, &[], &first, HunkAction::Revert).unwrap_err().to_string();
@@ -187,7 +196,10 @@ fn stage_and_unstage_touch_only_the_index_and_one_hunk() {
     act(p, DiffBase::Uncommitted, &[], &ids[0], HunkAction::Unstage).unwrap();
     assert_eq!(run(p, &["diff", "--cached"]).unwrap(), "");
     // Unstaging what isn't staged is stale.
-    assert!(act(p, DiffBase::Uncommitted, &[], &ids[1], HunkAction::Unstage).unwrap_err().to_string().starts_with("stale:"));
+    assert!(act(p, DiffBase::Uncommitted, &[], &ids[1], HunkAction::Unstage)
+        .unwrap_err()
+        .to_string()
+        .starts_with("stale:"));
     // Stage is an uncommitted-view action.
     assert!(act(p, DiffBase::Branch, &[], &ids[1], HunkAction::Stage).is_err());
 

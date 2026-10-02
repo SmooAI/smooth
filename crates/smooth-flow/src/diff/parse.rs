@@ -478,7 +478,11 @@ pub fn hunk_patch(file: &RawFile, hunk: &RawHunk) -> String {
         "@@ -{} +{} @@{}",
         range(hunk.old_start, hunk.old_lines),
         range(hunk.new_start, hunk.new_lines),
-        if hunk.section.is_empty() { String::new() } else { format!(" {}", hunk.section) }
+        if hunk.section.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", hunk.section)
+        }
     );
     for l in &hunk.lines {
         let p = match l.kind {
@@ -529,7 +533,14 @@ index 1111111..2222222 100644
         assert_eq!((h.old_start, h.old_lines, h.new_start, h.new_lines), (1, 3, 1, 4));
         assert_eq!(h.section, "fn main() {");
         assert_eq!(h.lines.len(), 5);
-        assert_eq!(h.lines[1], RawLine { kind: LineKind::Del, text: "two".into(), no_eol: false });
+        assert_eq!(
+            h.lines[1],
+            RawLine {
+                kind: LineKind::Del,
+                text: "two".into(),
+                no_eol: false
+            }
+        );
         let h2 = &f.hunks[1];
         assert_eq!((h2.old_start, h2.old_lines, h2.new_start, h2.new_lines), (10, 1, 11, 1));
         assert!(h2.lines[0].no_eol && h2.lines[1].no_eol);
