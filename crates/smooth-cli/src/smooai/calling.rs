@@ -149,6 +149,23 @@ pub enum Cmd {
         #[command(flatten)]
         confirm: Confirm,
     },
+    /// Phone numbers and their routing — list, or change one (SMOODEV-3612).
+    #[command(visible_alias = "number")]
+    Numbers {
+        #[command(subcommand)]
+        cmd: super::calling_config::NumbersCmd,
+    },
+    /// Business-hours schedules — list, or change one (SMOODEV-3612).
+    #[command(visible_alias = "business-hours")]
+    Hours {
+        #[command(subcommand)]
+        cmd: super::calling_config::HoursCmd,
+    },
+    /// Calling settings: recording consent, retention, announcements (SMOODEV-3612).
+    Settings {
+        #[command(subcommand)]
+        cmd: super::calling_config::SettingsCmd,
+    },
 }
 
 /// An id destined for a URL path segment. Smoo ids are UUIDs; anything with a
@@ -405,6 +422,9 @@ fn render_usage(body: &Value) {
 #[allow(clippy::too_many_lines)] // one flat dispatch arm per verb
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     match cmd {
+        Cmd::Numbers { cmd } => return super::calling_config::numbers(cmd).await,
+        Cmd::Hours { cmd } => return super::calling_config::hours(cmd).await,
+        Cmd::Settings { cmd } => return super::calling_config::settings(cmd).await,
         Cmd::List {
             direction,
             status,
@@ -613,6 +633,36 @@ mod tests {
         ));
         assert!(matches!(parse(&["usage", "--period", "2026-09"]).unwrap(), Cmd::Usage { .. }));
         assert!(matches!(parse(&["place", "3175550142"]).unwrap(), Cmd::Place { .. }));
+        // SMOODEV-3612 — the configuration verbs.
+        assert!(matches!(parse(&["numbers", "list"]).unwrap(), Cmd::Numbers { .. }));
+        assert!(matches!(
+            parse(&[
+                "numbers",
+                "update",
+                "n1",
+                "--set",
+                "routeType=ring_group",
+                "--set",
+                "routeRingGroupId=g1",
+                "--dry-run"
+            ])
+            .unwrap(),
+            Cmd::Numbers { .. }
+        ));
+        assert!(
+            parse(&["numbers", "update", "n1", "--set", "a=b", "--body", "-"]).is_err(),
+            "--set and --body conflict"
+        );
+        assert!(matches!(parse(&["hours", "ls"]).unwrap(), Cmd::Hours { .. }));
+        assert!(matches!(
+            parse(&["business-hours", "update", "h1", "--set", "name=Main"]).unwrap(),
+            Cmd::Hours { .. }
+        ));
+        assert!(matches!(parse(&["settings", "show"]).unwrap(), Cmd::Settings { .. }));
+        assert!(matches!(
+            parse(&["settings", "update", "--set", "autoExpandSeats=false", "--yes"]).unwrap(),
+            Cmd::Settings { .. }
+        ));
     }
 
     #[test]

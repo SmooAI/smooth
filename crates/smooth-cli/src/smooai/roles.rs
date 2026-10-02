@@ -31,7 +31,32 @@ use crate::smooai::user_client::UserClient;
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// List the org's roles (system + custom) with permission counts.
+    /// List the built-in role templates (kind, name, permission keys) that
+    /// `create-from-template` seeds a role from.
+    Templates {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a custom role from a built-in template (e.g. `sales_rep`,
+    /// `support`, `read_only`). Same as `create <name> --template <kind>`, with
+    /// the name defaulting to the template's.
+    CreateFromTemplate {
+        /// Template kind (see `templates`).
+        kind: String,
+        /// Role name (defaults to the template's name).
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// List the org's roles (system + custom) with permission and member counts.
     List {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
@@ -61,6 +86,8 @@ pub enum Cmd {
         /// Seed from a built-in archetype (e.g. `read_only`, `sales_rep`, `admin`).
         #[arg(long)]
         template: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -87,6 +114,8 @@ pub enum Cmd {
         role: String,
         /// Permission keys to add.
         keys: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -111,6 +140,8 @@ pub enum Cmd {
         role: String,
         /// The complete set of permission keys the role should have.
         keys: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -132,6 +163,8 @@ pub enum Cmd {
         member: String,
         /// Roles to assign (each a name or role-id uuid).
         roles: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -142,6 +175,8 @@ pub enum Cmd {
         member: String,
         /// Roles to unassign (each a name or role-id uuid).
         roles: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -151,21 +186,24 @@ pub enum Cmd {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
+        Cmd::Templates { org, json } => templates(&client, resolve_org(org)?, json).await,
+        Cmd::CreateFromTemplate { kind, name, confirm, org } => create_from_template(&client, resolve_org(org)?, &kind, name.as_deref(), confirm).await,
         Cmd::List { org, json } => list(&client, resolve_org(org)?, json).await,
         Cmd::Show { role, org, json } => show(&client, resolve_org(org)?, &role, json).await,
         Cmd::Create {
             name,
             description,
             template,
+            confirm,
             org,
-        } => create(&client, resolve_org(org)?, &name, description, template).await,
+        } => create(&client, resolve_org(org)?, &name, description, template, confirm).await,
         Cmd::Delete { role, org, dry_run, yes } => delete(&client, resolve_org(org)?, &role, dry_run, yes).await,
-        Cmd::Grant { role, keys, org } => grant(&client, resolve_org(org)?, &role, &keys).await,
+        Cmd::Grant { role, keys, confirm, org } => grant(&client, resolve_org(org)?, &role, &keys, confirm).await,
         Cmd::Revoke { role, keys, org, confirm } => revoke(&client, resolve_org(org)?, &role, &keys, confirm).await,
-        Cmd::SetPermissions { role, keys, org } => set_permissions(&client, resolve_org(org)?, &role, keys).await,
+        Cmd::SetPermissions { role, keys, confirm, org } => set_permissions(&client, resolve_org(org)?, &role, keys, confirm).await,
         Cmd::MemberRoles { member, org, json } => member_roles(&client, resolve_org(org)?, &member, json).await,
-        Cmd::Assign { member, roles, org } => assign(&client, resolve_org(org)?, &member, &roles).await,
-        Cmd::Unassign { member, roles, org } => unassign(&client, resolve_org(org)?, &member, &roles).await,
+        Cmd::Assign { member, roles, confirm, org } => assign(&client, resolve_org(org)?, &member, &roles, confirm).await,
+        Cmd::Unassign { member, roles, confirm, org } => unassign(&client, resolve_org(org)?, &member, &roles, confirm).await,
     }
 }
 
@@ -174,9 +212,46 @@ async fn list(client: &UserClient, org: String, json: bool) -> Result<()> {
     if json {
         print_json(&body);
     } else {
-        render_roles(&body);
+        // Member counts are best-effort: the members list is a separate route,
+        // and a failure there must not hide the catalog itself.
+        let counts = match client.get(&format!("/organizations/{org}/members")).await {
+            Ok(m) => Some(member_counts(&m)),
+            Err(e) => {
+                eprintln!("  {} member counts unavailable: {e:#}", "!".yellow());
+                None
+            }
+        };
+        render_roles(&body, counts.as_ref());
     }
     Ok(())
+}
+
+async fn templates(client: &UserClient, org: String, json: bool) -> Result<()> {
+    let body = client
+        .get(&format!("/organizations/{org}/workforce/role-templates"))
+        .await
+        .context("GET workforce/role-templates")?;
+    if json {
+        print_json(&body);
+    } else {
+        render_templates(&body);
+    }
+    Ok(())
+}
+
+async fn create_from_template(client: &UserClient, org: String, kind: &str, name: Option<&str>, confirm: crate::destructive::Confirm) -> Result<()> {
+    let kind = kind.trim();
+    if kind.is_empty() {
+        anyhow::bail!("a template kind is required — run `th roles templates`");
+    }
+    let tpl = client
+        .get(&format!("/organizations/{org}/workforce/role-templates"))
+        .await
+        .context("GET workforce/role-templates")?;
+    let found = find_template(&tpl, kind).with_context(|| format!("no role template of kind '{kind}' — run `th roles templates`"))?;
+    let default_name = found.get("name").and_then(Value::as_str).unwrap_or(kind).to_string();
+    let name = name.map(str::trim).filter(|n| !n.is_empty()).map_or(default_name, str::to_string);
+    create_templated(client, &org, &name, kind, confirm).await
 }
 
 async fn show(client: &UserClient, org: String, role: &str, json: bool) -> Result<()> {
@@ -190,36 +265,90 @@ async fn show(client: &UserClient, org: String, role: &str, json: bool) -> Resul
     Ok(())
 }
 
-async fn create(client: &UserClient, org: String, name: &str, description: Option<String>, template: Option<String>) -> Result<()> {
+async fn create(
+    client: &UserClient,
+    org: String,
+    name: &str,
+    description: Option<String>,
+    template: Option<String>,
+    confirm: crate::destructive::Confirm,
+) -> Result<()> {
     if let Some(kind) = template.filter(|s| !s.trim().is_empty()) {
         if description.is_some() {
             eprintln!("  {} --description is ignored when --template is used", "!".yellow());
         }
-        let r = client
-            .post(
-                &format!("/organizations/{org}/workforce/role-templates/create-role"),
-                &json!({ "kind": kind, "name": name }),
-            )
-            .await
-            .context("POST create-role from template")?;
-        let role = r.get("role").unwrap_or(&r);
-        let id = role.get("id").and_then(Value::as_str).unwrap_or("?");
-        let perms = permissions_of(role).len();
-        println!(
-            "  {} created role {} {} from template {} ({perms} permission(s))",
-            "✚".green(),
-            id.dimmed(),
-            name.bold(),
-            kind.cyan()
-        );
-    } else {
-        let mut body = json!({ "name": name, "permissions": [] });
-        if let Some(d) = description.filter(|s| !s.trim().is_empty()) {
-            body["description"] = json!(d);
-        }
-        let r = client.post(&format!("/organizations/{org}/roles"), &body).await.context("POST role")?;
-        let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
-        println!("  {} created role {} {}", "✚".green(), id.dimmed(), name.bold());
+        return create_templated(client, &org, name, &kind, confirm).await;
+    }
+    let roles = fetch_roles(client, &org).await?;
+    refuse_taken_name(&roles, name)?;
+    if !gate(&org, "create", "custom role", name, confirm)? {
+        return Ok(());
+    }
+    let mut body = json!({ "name": name, "permissions": [] });
+    if let Some(d) = description.filter(|s| !s.trim().is_empty()) {
+        body["description"] = json!(d);
+    }
+    let r = client.post(&format!("/organizations/{org}/roles"), &body).await.context("POST role")?;
+    let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+    println!("  {} created role {} {}", "✚".green(), id.dimmed(), name.bold());
+    Ok(())
+}
+
+/// Create a role seeded from template `kind`. The server refuses a template
+/// whose permissions exceed the caller's own (SMOODEV-3610) — that 403 names
+/// the ungrantable keys and is surfaced verbatim.
+async fn create_templated(client: &UserClient, org: &str, name: &str, kind: &str, confirm: crate::destructive::Confirm) -> Result<()> {
+    let roles = fetch_roles(client, org).await?;
+    refuse_taken_name(&roles, name)?;
+    if !gate(org, "create", "role from template", &format!("{name} ({kind})"), confirm)? {
+        return Ok(());
+    }
+    let r = client
+        .post(
+            &format!("/organizations/{org}/workforce/role-templates/create-role"),
+            &json!({ "kind": kind, "name": name }),
+        )
+        .await
+        .context("POST create-role from template")?;
+    let role = r.get("role").unwrap_or(&r);
+    let id = role.get("id").and_then(Value::as_str).unwrap_or("?");
+    let perms = permissions_of(role).len();
+    println!(
+        "  {} created role {} {} from template {} ({perms} permission(s))",
+        "✚".green(),
+        id.dimmed(),
+        name.bold(),
+        kind.cyan()
+    );
+    Ok(())
+}
+
+/// The shared yes/no gate for every role write (they all change who can do what).
+fn gate(org: &str, verb: &str, noun: &str, id: &str, confirm: crate::destructive::Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb,
+            noun,
+            id,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )
+}
+
+/// Refuse a name another role in the catalog already uses (case-insensitive,
+/// matching the server's unique index) before any write.
+fn refuse_taken_name(roles: &[Value], name: &str) -> Result<()> {
+    let want = name.trim().to_lowercase();
+    if want.is_empty() {
+        anyhow::bail!("a role name is required");
+    }
+    if roles
+        .iter()
+        .any(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.trim().to_lowercase() == want))
+    {
+        anyhow::bail!("a role named '{}' already exists — pick another name", name.trim());
     }
     Ok(())
 }
@@ -247,7 +376,7 @@ async fn delete(client: &UserClient, org: String, role: &str, dry_run: bool, yes
     Ok(())
 }
 
-async fn grant(client: &UserClient, org: String, role: &str, keys: &[String]) -> Result<()> {
+async fn grant(client: &UserClient, org: String, role: &str, keys: &[String], confirm: crate::destructive::Confirm) -> Result<()> {
     let roles = fetch_roles(client, &org).await?;
     let found = find_role(&roles, role)?;
     refuse_system(found, "modify")?;
@@ -259,6 +388,9 @@ async fn grant(client: &UserClient, org: String, role: &str, keys: &[String]) ->
             perms.push(k.clone());
             added += 1;
         }
+    }
+    if !gate(&org, "grant", "permissions to role", &format!("{role} (+{})", keys.join(", ")), confirm)? {
+        return Ok(());
     }
     patch_permissions(client, &org, role_id(found), &perms).await?;
     println!("  {} granted {added} key(s) to {} — now {} total", "✓".green(), role.bold(), perms.len());
@@ -292,12 +424,16 @@ async fn revoke(client: &UserClient, org: String, role: &str, keys: &[String], c
     Ok(())
 }
 
-async fn set_permissions(client: &UserClient, org: String, role: &str, keys: Vec<String>) -> Result<()> {
+async fn set_permissions(client: &UserClient, org: String, role: &str, keys: Vec<String>, confirm: crate::destructive::Confirm) -> Result<()> {
     let roles = fetch_roles(client, &org).await?;
     let found = find_role(&roles, role)?;
     refuse_system(found, "modify")?;
     warn_bad_keys(&keys);
     let perms = dedup(keys);
+    let target = format!("{role} (replace with {} key(s): {})", perms.len(), perms.join(", "));
+    if !gate(&org, "replace", "permissions of role", &target, confirm)? {
+        return Ok(());
+    }
     patch_permissions(client, &org, role_id(found), &perms).await?;
     println!("  {} set {} to {} permission(s)", "✓".green(), role.bold(), perms.len());
     Ok(())
@@ -314,31 +450,44 @@ async fn member_roles(client: &UserClient, org: String, member: &str, json: bool
     } else {
         let roles = fetch_roles(client, &org).await?;
         render_member_roles(member, &body, &roles);
+        let perms = flattened_permissions(&role_ids_of(&body), &roles);
+        println!(
+            "  {} {}",
+            "effective permissions:".dimmed(),
+            if perms.is_empty() { "(none)".to_string() } else { perms.join(", ") }
+        );
+        println!();
     }
     Ok(())
 }
 
-async fn assign(client: &UserClient, org: String, member: &str, roles: &[String]) -> Result<()> {
+async fn assign(client: &UserClient, org: String, member: &str, roles: &[String], confirm: crate::destructive::Confirm) -> Result<()> {
     let member_id = resolve_member_id(client, &org, member).await?;
     let catalog = fetch_roles(client, &org).await?;
     let want = resolve_role_ids(&catalog, roles)?;
-    let mut next = member_role_ids(client, &org, &member_id).await?;
-    for id in want {
-        if !next.iter().any(|x| x == &id) {
-            next.push(id);
-        }
+    let current = member_role_ids(client, &org, &member_id).await?;
+    let next = union_ids(&current, &want);
+    if next.len() == current.len() {
+        println!("  {} {} already holds {} — nothing to do", "=".cyan(), member.bold(), roles.join(", "));
+        return Ok(());
+    }
+    if !gate(&org, "assign", "roles to member", &format!("{member} (+{})", roles.join(", ")), confirm)? {
+        return Ok(());
     }
     set_member_roles(client, &org, &member_id, &next).await?;
     println!("  {} {} now has {} role(s)", "✓".green(), member.bold(), next.len());
     Ok(())
 }
 
-async fn unassign(client: &UserClient, org: String, member: &str, roles: &[String]) -> Result<()> {
+async fn unassign(client: &UserClient, org: String, member: &str, roles: &[String], confirm: crate::destructive::Confirm) -> Result<()> {
     let member_id = resolve_member_id(client, &org, member).await?;
     let catalog = fetch_roles(client, &org).await?;
     let drop = resolve_role_ids(&catalog, roles)?;
     let current = member_role_ids(client, &org, &member_id).await?;
     let next: Vec<String> = current.into_iter().filter(|id| !drop.iter().any(|d| d == id)).collect();
+    if !gate(&org, "unassign", "roles from member", &format!("{member} (-{})", roles.join(", ")), confirm)? {
+        return Ok(());
+    }
     set_member_roles(client, &org, &member_id, &next).await?;
     println!("  {} {} now has {} role(s)", "✓".green(), member.bold(), next.len());
     Ok(())
@@ -457,6 +606,72 @@ async fn set_member_roles(client: &UserClient, org: &str, member_id: &str, role_
     Ok(())
 }
 
+/// `roleId → member count` from the `/members` list (one row per member-role pair).
+fn member_counts(members_body: &Value) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for m in members_body.get("members").and_then(Value::as_array).into_iter().flatten() {
+        let (Some(member), Some(role)) = (m.get("memberId").and_then(Value::as_str), m.get("roleId").and_then(Value::as_str)) else {
+            continue;
+        };
+        if seen.insert((member.to_string(), role.to_string())) {
+            *counts.entry(role.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+fn role_ids_of(body: &Value) -> Vec<String> {
+    body.get("roleIds")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// The union of every held role's permission keys, first-seen order.
+fn flattened_permissions(role_ids: &[String], catalog: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in role_ids {
+        if let Some(r) = catalog.iter().find(|r| role_id(r) == id) {
+            for k in permissions_of(r) {
+                if !out.contains(&k) {
+                    out.push(k);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `current` plus every id in `add` it lacks, order-preserving.
+fn union_ids(current: &[String], add: &[String]) -> Vec<String> {
+    let mut next = current.to_vec();
+    for id in add {
+        if !next.contains(id) {
+            next.push(id.clone());
+        }
+    }
+    next
+}
+
+/// The templates array from `{data:[...]}` (or a bare array).
+fn template_rows(body: &Value) -> Vec<&Value> {
+    body.get("data")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default()
+}
+
+fn template_kind(t: &Value) -> &str {
+    t.get("templateKind").or_else(|| t.get("kind")).and_then(Value::as_str).unwrap_or_default()
+}
+
+fn find_template<'a>(body: &'a Value, kind: &str) -> Option<&'a Value> {
+    let want = kind.trim().to_lowercase();
+    template_rows(body).into_iter().find(|t| template_kind(t).to_lowercase() == want)
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -482,7 +697,32 @@ fn warn_bad_keys(keys: &[String]) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn render_roles(body: &Value) {
+fn render_templates(body: &Value) {
+    let ts = template_rows(body);
+    println!();
+    println!("  {} {}", "Role templates".bold(), format!("({})", ts.len()).dimmed());
+    println!();
+    for t in ts {
+        let name = t.get("name").and_then(Value::as_str).unwrap_or("—");
+        let keys: Vec<&str> = t
+            .get("permissionKeys")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        println!(
+            "  {:<20}  {}  {}",
+            template_kind(t).cyan(),
+            name.bold(),
+            format!("({} key(s))", keys.len()).dimmed()
+        );
+        if let Some(d) = t.get("description").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+            println!("  {:<20}  {}", "", d.dimmed());
+        }
+    }
+    println!();
+}
+
+fn render_roles(body: &Value, counts: Option<&std::collections::HashMap<String, usize>>) {
     let roles = body.get("roles").and_then(Value::as_array).cloned().unwrap_or_default();
     println!();
     println!("  {} {}", "Roles".bold(), format!("({})", roles.len()).dimmed());
@@ -492,10 +732,11 @@ fn render_roles(body: &Value) {
     }
     println!();
     println!(
-        "  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}",
         format!("{:<24}", "NAME").dimmed(),
         format!("{:<7}", "TYPE").dimmed(),
         format!("{:>5}", "PERMS").dimmed(),
+        format!("{:>7}", "MEMBERS").dimmed(),
         "DESCRIPTION".dimmed()
     );
     for r in &roles {
@@ -503,11 +744,13 @@ fn render_roles(body: &Value) {
         let kind = if is_system(r) { "system" } else { "custom" };
         let perms = permissions_of(r).len();
         let desc = r.get("description").and_then(Value::as_str).unwrap_or("");
+        let members = counts.map_or_else(|| "?".to_string(), |c| c.get(role_id(r)).copied().unwrap_or(0).to_string());
         println!(
-            "  {:<24}  {:<7}  {:>5}  {}",
+            "  {:<24}  {:<7}  {:>5}  {:>7}  {}",
             truncate(name, 24),
             kind,
             perms.to_string(),
+            members,
             truncate(desc, 40).dimmed()
         );
     }
@@ -668,6 +911,61 @@ mod tests {
     }
 
     #[test]
+    fn member_counts_dedup_member_role_pairs() {
+        let m = json!({ "members": [
+            { "memberId": "m1", "roleId": "r1" },
+            { "memberId": "m1", "roleId": "r1" },
+            { "memberId": "m2", "roleId": "r1" },
+            { "memberId": "m2", "roleId": "r2" },
+            { "memberId": "m3" },
+        ]});
+        let c = member_counts(&m);
+        assert_eq!(c.get("r1"), Some(&2));
+        assert_eq!(c.get("r2"), Some(&1));
+        assert!(member_counts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn flattened_permissions_union_held_roles() {
+        let catalog = vec![
+            system_role(),
+            custom_role(),
+            json!({ "id": "r3", "name": "x", "organizationId": "o", "permissions": ["c.d", "e.f"] }),
+        ];
+        let ids = vec!["660e8400-e29b-41d4-a716-446655440000".to_string(), "r3".into(), "ghost".into()];
+        assert_eq!(flattened_permissions(&ids, &catalog), vec!["a.b".to_string(), "c.d".into(), "e.f".into()]);
+        assert!(flattened_permissions(&[], &catalog).is_empty());
+    }
+
+    #[test]
+    fn assign_is_additive_and_detects_a_no_op() {
+        let cur = vec!["a".to_string(), "b".into()];
+        assert_eq!(union_ids(&cur, &["b".into(), "c".into()]), vec!["a".to_string(), "b".into(), "c".into()]);
+        // Already held → same length → the command reports nothing to do.
+        assert_eq!(union_ids(&cur, &["a".into()]).len(), cur.len());
+    }
+
+    #[test]
+    fn taken_names_are_refused_case_insensitively() {
+        let roles = vec![system_role(), custom_role()];
+        assert!(refuse_taken_name(&roles, " support ").is_err());
+        assert!(refuse_taken_name(&roles, "ADMIN").is_err());
+        assert!(refuse_taken_name(&roles, "Field Tech").is_ok());
+        assert!(refuse_taken_name(&roles, "  ").is_err());
+    }
+
+    #[test]
+    fn templates_resolve_by_kind() {
+        let body = json!({ "data": [
+            { "templateKind": "sales_rep", "name": "Sales Rep", "permissionKeys": [] },
+            { "kind": "support", "name": "Support Agent" },
+        ]});
+        assert_eq!(find_template(&body, "SALES_REP").and_then(|t| t["name"].as_str()), Some("Sales Rep"));
+        assert_eq!(find_template(&body, "support").and_then(|t| t["name"].as_str()), Some("Support Agent"));
+        assert!(find_template(&body, "admin").is_none());
+    }
+
+    #[test]
     fn uuid_detection_gates_name_vs_id() {
         assert!(looks_like_uuid("660e8400-e29b-41d4-a716-446655440000"));
         assert!(!looks_like_uuid("Support"));
@@ -681,8 +979,10 @@ mod tests {
 
     #[test]
     fn render_helpers_do_not_panic_on_empty() {
-        render_roles(&json!({ "roles": [] }));
-        render_roles(&json!({}));
+        render_roles(&json!({ "roles": [] }), None);
+        render_roles(&json!({}), None);
+        render_roles(&json!({ "roles": [custom_role()] }), Some(&member_counts(&json!({ "members": [] }))));
+        render_templates(&json!({ "data": [{ "templateKind": "sales_rep", "name": "Sales Rep", "permissionKeys": ["crm.*"] }] }));
         render_role(&custom_role());
         render_member_roles("x@y.com", &json!({ "roleIds": [] }), &[]);
         render_member_roles("x@y.com", &json!({ "roleIds": ["660e8400-e29b-41d4-a716-446655440000"] }), &[custom_role()]);

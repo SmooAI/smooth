@@ -329,6 +329,8 @@ Everything under `api.smoo.ai` has a typed wrapper. **Stop writing `curl -H "Aut
 ```bash
 smoo api orgs list                                   # GET /organizations
 smoo api orgs show                                   # active org details
+smoo orgs update --name "Acme" --brand-voice @voice.md --primary-color '#00a3a3' [--yes|--dry-run]
+                                                     # PATCH the org profile (needs org.branding.manage; SMOODEV-3612)
 smoo api members list --org <id>                     # list seats
 smoo api members invite '{"email":"x@y","role":"admin"}'
 smoo api members invitations
@@ -781,6 +783,30 @@ smoo calling place <number> [--contact-id <id>] [--name "Pat Lee"] [--yes|--dry-
 - `place` and `get --transcript` need a signed-in **user** (`smoo auth login`);
   an org API key has no softphone and cannot read transcripts.
 
+#### Calling configuration — SMOODEV-3612
+
+CLI twin of the hosted MCP's `phone_numbers_list` / `phone_number_update`,
+`business_hours_list` / `business_hours_update` and `calling_settings_get` /
+`calling_settings_update`. Reads need `calling.use`, writes `calling.admin`
+(recording-compliance settings also `calling.recordings.manage`), all behind the
+`telephony` product — the route enforces it.
+
+```bash
+smoo calling numbers list [--json]                  # each number's route, fallback, hours
+smoo calling numbers update <number-id> --set routeType=ring_group --set routeRingGroupId=<id> [--yes|--dry-run]
+smoo calling numbers update <number-id> --set voicemailGreetingUrl=https://cdn.example.com/vm.mp3
+smoo calling hours list [--json]
+smoo calling hours update <hours-id> --set timezone=America/Indiana/Indianapolis \
+    --set 'windows=[{"day":1,"startMinute":540,"endMinute":1020}]'
+smoo calling settings show
+smoo calling settings update --set recordingRetentionDays=365 [--body changes.json]
+```
+
+- `--set key=value` sends JSON when the value parses as JSON (`true`, `30`,
+  `null`, `[...]`), otherwise a string. Keys outside the route's writable list
+  are refused locally, by name, with the list.
+- Every write asks for confirmation: it changes what the next caller gets.
+
 ### Google Drive (`smoo drive`) — SMOODEV-3545
 
 CLI twin of `drive_search` / `drive_read`. Runs live as **your** Google
@@ -1124,6 +1150,55 @@ Things worth knowing:
   a tag event carries `after.tagName` / `after.tagId`, and a deal's name is
   `title` (`{{entity.title}}`). The CLI's starter templates use those names;
   a filter on a field the event doesn't carry is `null` and never matches.
+
+### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
+
+CLI twins of the copilot's `dashboards.*`, `notifications.*_preferences` and
+`workforce.*` tools (and the hosted MCP tools of the same names). Every write
+prints its target, stops on `--dry-run`, and needs `--yes` when not on a TTY.
+
+```bash
+# Analytics dashboards (analytics.read / analytics.write, `analytics` product)
+th smoo dashboards list
+th smoo dashboards create --name "Pipeline"            # reuses a same-named dashboard
+th smoo dashboards add-widget <dashboard_id> --title "MRR" --type kpi_card --preset mrr
+th smoo dashboards add-widget <dashboard_id> --title "Deals" --type table --saved-query <id>
+th smoo dashboards update-widget <widget_id> --width 12 --type bar_chart
+th smoo dashboards remove-widget <widget_id>
+```
+
+A widget's source is a preset key (`th smoo analytics catalog`) or a saved
+query (its stored SQL is copied) — there is deliberately no raw-SQL flag, and
+`update-widget` cannot change the source (remove + re-add). Omitted grid
+fields default to col 0, width 6, height 4, on the next free row.
+
+```bash
+# YOUR notification routing in the active org (user session only)
+th smoo notifications prefs get
+th smoo notifications prefs set --sms on --slack off
+th smoo notifications prefs set --route human_escalation=push+sms:high --clear-route conversation_ended
+th smoo notifications prefs set --quiet-hours on --quiet-start 22:00 --quiet-end 07:00 --tz America/New_York
+```
+
+`categoryRouting` and `quietHours` are merged client-side (the PUT replaces
+them wholesale), so a flag only changes what it names. An org API key has no
+person behind it, so this needs `th auth login`.
+
+```bash
+# Roles (org.roles.manage / org.members.manage)
+th roles list                      # + member counts
+th roles templates                 # built-in role templates and their keys
+th roles create-from-template sales_rep --name "Field Sales"
+th roles set-permissions "Field Sales" crm.contacts.read crm.deals.read
+th roles member-roles ana@acme.com # roles + effective permissions
+th roles assign ana@acme.com "Field Sales"   # additive; no-op if already held
+```
+
+The server refuses granting a permission you do not hold yourself, or
+assigning/removing a role that carries one — the 403 lists the
+`ungrantablePermissions` and is printed verbatim. `grant`, `set-permissions`,
+`assign`, `unassign` and `create` now go through the same confirmation gate as
+`delete`/`revoke`, so scripts must pass `--yes`.
 
 ### Profile / products
 
