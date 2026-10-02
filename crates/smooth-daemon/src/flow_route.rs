@@ -30,6 +30,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use smooth_flow::diff::{DiffBase, HunkAction, ReviewComment};
 use smooth_flow::protocol::{client_seq, parse_client_frame, CandidateSpec};
 use smooth_flow::{ClientFrame, Decision, Engine, HookCaller, HookEvent, HookReply, NewRequest, ServerFrame, SessionKind};
 
@@ -67,6 +68,12 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/sessions/{id}/send", post(send_text))
         .route("/api/flow/sessions/{id}/snapshot", get(snapshot))
         .route("/api/flow/sessions/{id}/handoff", get(handoff))
+        // th-26f5b9: SmoothFlow Diff — twins of the flow.diff* WS frames.
+        .route("/api/flow/sessions/{id}/diff", get(get_diff))
+        .route("/api/flow/sessions/{id}/diff/revert", post(diff_revert))
+        .route("/api/flow/sessions/{id}/diff/stage", post(diff_stage))
+        .route("/api/flow/sessions/{id}/diff/unstage", post(diff_unstage))
+        .route("/api/flow/sessions/{id}/diff/review", post(diff_review))
         // th-1efb59: fan-out over HTTP, so MCP and agent tools need no WS.
         .route("/api/flow/fanout", post(fanout_new))
         .route("/api/flow/fanout/{id}/pick", post(fanout_pick))
@@ -169,6 +176,9 @@ fn err_response(e: &anyhow::Error) -> ApiErr {
     let msg = e.to_string();
     let status = if msg.contains("no such session") || msg.contains("not a candidate") {
         StatusCode::NOT_FOUND
+    } else if msg.starts_with("stale:") || msg.starts_with("blocked:") {
+        // th-26f5b9: the diff moved under the client, or the agent can't take a review.
+        StatusCode::CONFLICT
     } else {
         StatusCode::BAD_REQUEST
     };
@@ -436,6 +446,101 @@ async fn handoff(
     Ok(Json(blocking(move || e.handoff(&id)).await?))
 }
 
+// ── SmoothFlow Diff (th-26f5b9) ──────────────────────────────────────────────
+
+fn diff_base(q: &HashMap<String, String>) -> Result<DiffBase, ApiErr> {
+    q.get("base")
+        .map_or(Ok(DiffBase::Uncommitted), |b| b.parse::<DiffBase>())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))
+}
+
+/// `GET /api/flow/sessions/{id}/diff?base=turn|uncommitted|branch&path=` —
+/// the `flow.diff` reply's `diff`.
+async fn get_diff(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let base = diff_base(&q)?;
+    let path = q.get("path").cloned().filter(|p| !p.is_empty());
+    let e = st.engine.clone();
+    let d = blocking(move || e.diff(&id, base, path.as_deref())).await?;
+    Ok(Json(serde_json::to_value(d).unwrap_or_default()))
+}
+
+#[derive(Deserialize)]
+struct HunkBody {
+    hunk_id: String,
+    #[serde(default)]
+    base: Option<DiffBase>,
+}
+
+async fn hunk_action(st: FlowState, id: String, body: HunkBody, action: HunkAction) -> Result<Json<Value>, ApiErr> {
+    let e = st.engine.clone();
+    let base = body.base.unwrap_or(DiffBase::Uncommitted);
+    let out = blocking(move || e.diff_action(&id, base, &body.hunk_id, action)).await?;
+    Ok(Json(serde_json::to_value(out).unwrap_or_default()))
+}
+
+/// `POST /api/flow/sessions/{id}/diff/revert {hunk_id, base}` (409 when stale).
+async fn diff_revert(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    Json(body): Json<HunkBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    hunk_action(st, id, body, HunkAction::Revert).await
+}
+
+/// `POST /api/flow/sessions/{id}/diff/stage {hunk_id}`.
+async fn diff_stage(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    Json(body): Json<HunkBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    hunk_action(st, id, body, HunkAction::Stage).await
+}
+
+/// `POST /api/flow/sessions/{id}/diff/unstage {hunk_id}`.
+async fn diff_unstage(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    Json(body): Json<HunkBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    hunk_action(st, id, body, HunkAction::Unstage).await
+}
+
+#[derive(Deserialize)]
+struct ReviewBody {
+    base: DiffBase,
+    comments: Vec<ReviewComment>,
+}
+
+/// `POST /api/flow/sessions/{id}/diff/review {base, comments}` → `{message}`
+/// (409 when the agent is blocked).
+async fn diff_review(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    Json(body): Json<ReviewBody>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let e = st.engine.clone();
+    let message = blocking(move || e.diff_review(&id, body.base, &body.comments)).await?;
+    Ok(Json(json!({ "message": message })))
+}
+
 /// `GET /api/flow/harnesses` — every manifest (hidden ones included, flagged),
 /// in the user's order, with the resolved binary.
 async fn list_harnesses(State(st): State<FlowState>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiErr> {
@@ -630,7 +735,16 @@ async fn handle_client_text(engine: &Engine, text: &str, attached: &mut HashSet<
     match dispatch(engine, frame, attached).await {
         Ok(v) => v,
         Err(e) => {
-            let code = if e.to_string().contains("no such session") { "not_found" } else { "failed" };
+            let msg = e.to_string();
+            let code = if msg.contains("no such session") {
+                "not_found"
+            } else if msg.starts_with("stale:") {
+                "stale"
+            } else if msg.starts_with("blocked:") {
+                "blocked"
+            } else {
+                "failed"
+            };
             vec![ServerFrame::error(r#ref, code, e.to_string())]
         }
     }
@@ -643,6 +757,7 @@ async fn run<T: Send + 'static>(engine: &Engine, f: impl FnOnce(Engine) -> anyho
         .map_err(|e| anyhow::anyhow!("flow task panicked: {e}"))?
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per client frame type; splitting it scatters the protocol")]
 async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<String>) -> anyhow::Result<Vec<ServerFrame>> {
     match frame {
         ClientFrame::Attach { id, cols, rows } => {
@@ -752,8 +867,41 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<St
             let v = run(engine, move |e| e.handoff(&sid)).await?;
             Ok(vec![handoff_frame(id, &v)])
         }
+        // th-26f5b9: SmoothFlow Diff. Direct replies only — a diff is big and
+        // per-viewer; `flow.diff.changed` is the broadcast that says "refetch".
+        ClientFrame::Diff { id, base, path } => {
+            let (sid, p) = (id.clone(), path.clone());
+            let diff = run(engine, move |e| e.diff(&sid, base, p.as_deref())).await?;
+            Ok(vec![ServerFrame::Diff { id, base, path, diff }])
+        }
+        ClientFrame::DiffRevert { id, base, hunk_id } => diff_action_frame(engine, id, base, hunk_id, HunkAction::Revert).await,
+        ClientFrame::DiffStage { id, hunk_id, base } => diff_action_frame(engine, id, base, hunk_id, HunkAction::Stage).await,
+        ClientFrame::DiffUnstage { id, hunk_id, base } => diff_action_frame(engine, id, base, hunk_id, HunkAction::Unstage).await,
+        ClientFrame::DiffReview { id, base, comments } => {
+            let sid = id.clone();
+            let message = run(engine, move |e| e.diff_review(&sid, base, &comments)).await?;
+            Ok(vec![ServerFrame::DiffResult {
+                id,
+                action: "review".into(),
+                hunk_id: None,
+                file: None,
+                message: Some(message),
+            }])
+        }
     }
 }
+async fn diff_action_frame(engine: &Engine, id: String, base: DiffBase, hunk_id: String, action: HunkAction) -> anyhow::Result<Vec<ServerFrame>> {
+    let sid = id.clone();
+    let out = run(engine, move |e| e.diff_action(&sid, base, &hunk_id, action)).await?;
+    Ok(vec![ServerFrame::DiffResult {
+        id,
+        action: out.action,
+        hunk_id: Some(out.hunk_id),
+        file: Some(out.file),
+        message: None,
+    }])
+}
+
 /// The HTTP handoff body as the `flow.handoff` frame (nulls kept, so a phone
 /// can tell "no pearl" from "field missing").
 fn handoff_frame(id: String, v: &Value) -> ServerFrame {

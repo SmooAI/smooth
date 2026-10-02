@@ -29,7 +29,7 @@ use crate::protocol::{
 };
 use crate::pty::OnOutput;
 use crate::store::{Attention, FanOut, FlowStore, NewSession, Pairing, Session, SessionKind, SessionState};
-use crate::{limit, tmux};
+use crate::{diff, limit, tmux};
 
 /// Between the keys of a multi-key approval (`Down`, `Down`, `Enter`): a TUI
 /// redraws its selection between presses. The gap the live runs against the
@@ -1237,6 +1237,9 @@ impl Engine {
     #[allow(clippy::needless_pass_by_value)]
     fn set_state(&self, id: &str, state: SessionState, attention: Option<Attention>) -> Result<Option<Session>> {
         let before = self.get(id)?;
+        if let Some(b) = &before {
+            self.turn_boundary(b, state);
+        }
         let after = self.with_store(|st| st.set_state(id, state, attention.as_ref()))?;
         if let Some(s) = &after {
             self.emit_session(s);
@@ -1251,6 +1254,121 @@ impl Engine {
             }
         }
         Ok(after)
+    }
+
+    // ── SmoothFlow Diff (th-26f5b9) ──────────────────────────────────────
+
+    /// Take a turn snapshot when `s` moving to `next` crosses a turn
+    /// boundary (see `diff::snapshot`). Synchronous on purpose: called from
+    /// the hook that reports the transition, so the start tree is written
+    /// before the agent's first edit of the turn. Never fails the caller.
+    fn turn_boundary(&self, s: &Session, next: SessionState) {
+        if s.state == next || !s.kind.is_agent() || s.worktree.is_empty() || !diff::snapshot::enabled(std::env::var(diff::snapshot::ENV).ok().as_deref()) {
+            return;
+        }
+        let wt = Path::new(&s.worktree);
+        if !diff::git::is_repo(wt) {
+            return;
+        }
+        let snaps = self.with_store(|st| st.snapshots(&s.id)).unwrap_or_default();
+        let Some(kind) = diff::snapshot::boundary(next, diff::snapshot::open_turn(&snaps)) else {
+            return;
+        };
+        let started = Instant::now();
+        match diff::git::snapshot_tree(wt) {
+            Ok(tree) => {
+                if let Err(e) = self.with_store(|st| st.add_snapshot(&s.id, kind, &tree, diff::snapshot::KEEP_SNAPSHOTS)) {
+                    tracing::warn!(session = %s.id, error = %e, "flow: recording a turn snapshot");
+                }
+                if kind == diff::SnapKind::End {
+                    self.emit(ServerFrame::DiffChanged { id: s.id.clone() });
+                }
+                tracing::debug!(session = %s.id, kind = kind.as_str(), %tree, ms = started.elapsed().as_millis(), "flow: turn snapshot");
+            }
+            Err(e) => tracing::debug!(session = %s.id, error = %e, "flow: turn snapshot skipped"),
+        }
+    }
+
+    /// The session's turn snapshots, oldest first.
+    ///
+    /// # Errors
+    /// On a store failure.
+    pub fn snapshots(&self, id: &str) -> Result<Vec<diff::Snapshot>> {
+        self.with_store(|st| st.snapshots(id))
+    }
+
+    /// `flow.diff`: the structured diff of the session's worktree against
+    /// `base` (`path` narrows it to one file).
+    ///
+    /// # Errors
+    /// Unknown session, a session outside a repo, or git refusing.
+    pub fn diff(&self, id: &str, base: diff::DiffBase, path: Option<&str>) -> Result<diff::Diff> {
+        let s = self.require(id)?;
+        let snaps = self.snapshots(id)?;
+        diff::compute(Path::new(&s.worktree), base, &snaps, path)
+    }
+
+    /// `flow.diff.revert|stage|unstage`: one hunk, by id.
+    ///
+    /// # Errors
+    /// `stale:` when the hunk is gone or no longer applies; nothing written.
+    pub fn diff_action(&self, id: &str, base: diff::DiffBase, hunk_id: &str, action: diff::HunkAction) -> Result<diff::ActionOutcome> {
+        let s = self.require(id)?;
+        // Serialised with the turn snapshots and hooks of this session.
+        let lock = self.session_lock(id);
+        let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snaps = self.snapshots(id)?;
+        let out = diff::act(Path::new(&s.worktree), base, &snaps, hunk_id, action)?;
+        let verb = match action {
+            diff::HunkAction::Revert => "reverted",
+            diff::HunkAction::Stage => "staged",
+            diff::HunkAction::Unstage => "unstaged",
+        };
+        self.event(id, EventKind::System, &format!("diff: {verb} a hunk of {}", out.file));
+        self.emit(ServerFrame::DiffChanged { id: id.to_string() });
+        Ok(out)
+    }
+
+    /// `flow.diff.review`: send a batch of review comments to the session's
+    /// agent as ONE steer message (via `send`). Returns the message sent.
+    ///
+    /// # Errors
+    /// A shell, an agent that cannot take a prompt now (needs_you, limited,
+    /// done, dead), no comments, or a failed send.
+    pub fn diff_review(&self, id: &str, base: diff::DiffBase, comments: &[diff::ReviewComment]) -> Result<String> {
+        let s = self.require(id)?;
+        if !s.kind.is_agent() {
+            bail!("{id} is a shell — a review goes to an agent");
+        }
+        if matches!(
+            s.state,
+            SessionState::NeedsYou | SessionState::Limited | SessionState::Done | SessionState::Dead
+        ) {
+            bail!(
+                "blocked: {id} is {} — it cannot take a review now{}",
+                s.state.as_str(),
+                if s.state == SessionState::NeedsYou {
+                    " (answer its approval first)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let comments: Vec<diff::ReviewComment> = comments.iter().filter(|c| !c.text.trim().is_empty()).cloned().collect();
+        if comments.is_empty() {
+            bail!("no review comments to send");
+        }
+        let snaps = self.snapshots(id)?;
+        let wt = Path::new(&s.worktree);
+        // The excerpts come from the diff as it is now; a diff that can't be
+        // computed still sends the comments, just without excerpts.
+        let files = diff::resolve(wt, base, &snaps)
+            .and_then(|r| diff::raw(wt, &r))
+            .map(|(f, _)| f)
+            .unwrap_or_default();
+        let message = diff::review_message(base, &files, &comments);
+        self.send(id, &message)?;
+        Ok(message)
     }
 
     // ── events (th-d33afa) ───────────────────────────────────────────────

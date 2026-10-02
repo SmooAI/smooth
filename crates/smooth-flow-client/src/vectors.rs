@@ -520,6 +520,168 @@ fn surfaces_vectors() -> Value {
     file("SmoothFlow-Client-Spec §5 tabs and close scope", &cases)
 }
 
+/// `diff.json` (spec §14, th-26f5b9): the Diff viewer's pure rules.
+#[allow(clippy::too_many_lines, reason = "one table of cases per rule, kept together")]
+fn diff_vectors() -> Value {
+    use crate::diff::{self as d, Base, File, Hunk, Line, LineKind};
+    let line = |k: LineKind| Line {
+        kind: k,
+        old: None,
+        new: None,
+        text: String::new(),
+    };
+    let mut cases = Vec::new();
+    for (name, kinds) in [
+        ("context only", vec![LineKind::Ctx, LineKind::Ctx]),
+        (
+            "a change block pairs del i with add i",
+            vec![LineKind::Ctx, LineKind::Del, LineKind::Del, LineKind::Add, LineKind::Ctx],
+        ),
+        ("more adds than dels", vec![LineKind::Del, LineKind::Add, LineKind::Add, LineKind::Add]),
+        (
+            "adds with no dels are right-only",
+            vec![LineKind::Ctx, LineKind::Add, LineKind::Add, LineKind::Ctx],
+        ),
+        ("dels at the end are left-only", vec![LineKind::Ctx, LineKind::Del, LineKind::Del]),
+        ("an add then a del is two blocks", vec![LineKind::Add, LineKind::Del]),
+    ] {
+        let lines: Vec<Line> = kinds.into_iter().map(line).collect();
+        let rows = d::side_by_side(&lines);
+        cases.push(case(
+            name,
+            json!({ "fn": "side_by_side", "kinds": lines.iter().map(|l| l.kind).collect::<Vec<_>>() }),
+            json!({ "rows": rows }),
+        ));
+    }
+    for (name, paths) in [
+        (
+            "dirs first, case-insensitive, chains compressed",
+            vec![
+                "src/b.rs",
+                "README.md",
+                "src/a.rs",
+                "apps/x/y/z.swift",
+                "Cargo.toml",
+                "src/ui/v.rs",
+                "src/Z.rs",
+                "docs/a.md",
+            ],
+        ),
+        ("flat", vec!["b.txt", "A.txt", "c.txt"]),
+        ("one deep file", vec!["a/b/c/d.rs"]),
+    ] {
+        cases.push(case(
+            name,
+            json!({ "fn": "tree", "paths": paths }),
+            json!({ "rows": d::tree(&paths), "file_order": d::file_order(&paths) }),
+        ));
+    }
+    let f = |path: &str, hunks: usize| File {
+        path: path.into(),
+        old_path: None,
+        status: "modified".into(),
+        added: 3,
+        deleted: 1,
+        binary: false,
+        noise: None,
+        collapsed_by_default: false,
+        hunks_omitted: None,
+        hunks: (0..hunks)
+            .map(|i| Hunk {
+                id: format!("{path}#{i}"),
+                lines: vec![],
+            })
+            .collect(),
+    };
+    let lock = File {
+        noise: Some("lockfile".into()),
+        collapsed_by_default: true,
+        hunks_omitted: Some("collapsed".into()),
+        ..f("Cargo.lock", 0)
+    };
+    let budget = File {
+        hunks_omitted: Some("budget".into()),
+        ..f("big.rs", 0)
+    };
+    let binary = File {
+        binary: true,
+        ..f("logo.png", 0)
+    };
+    let mode = File {
+        status: "mode_changed".into(),
+        added: 0,
+        deleted: 0,
+        ..f("run.sh", 0)
+    };
+    for (name, file, viewed) in [
+        ("a plain file is expanded", f("a.rs", 2), false),
+        ("viewed folds it", f("a.rs", 2), true),
+        ("noise starts collapsed and must be fetched", lock.clone(), false),
+        ("a budget stub is expanded but must be fetched", budget, false),
+        ("binary has nothing inline", binary, false),
+        ("a mode-only change has nothing inline", mode, false),
+    ] {
+        cases.push(case(
+            name,
+            json!({ "fn": "display", "file": file, "viewed": viewed }),
+            json!({ "display": d::display(&file, viewed), "viewed_key": d::viewed_key(&file) }),
+        ));
+    }
+    let files = vec![f("src/b.rs", 2), lock, f("src/a.rs", 1), f("README.md", 1)];
+    let paths: Vec<&str> = files.iter().map(|x| x.path.as_str()).collect();
+    let order = d::file_order(&paths);
+    let collapsed: Vec<bool> = files.iter().map(|x| d::display(x, false).collapsed).collect();
+    let mut steps = Vec::new();
+    let mut at = None;
+    for forward in [true, true, true, true, true, false, false] {
+        at = d::next_hunk(&files, &order, &collapsed, at, forward).or(at);
+        steps.push(json!({ "forward": forward, "at": at }));
+    }
+    cases.push(case(
+        "n / p walk visible hunks in tree order and stop at the ends",
+        json!({ "fn": "next_hunk", "paths": paths, "hunks": files.iter().map(|x| x.hunks.len()).collect::<Vec<_>>(), "collapsed": collapsed, "order": order }),
+        json!({ "steps": steps }),
+    ));
+    let mut fsteps = Vec::new();
+    let mut fat = None;
+    for forward in [true, true, true, true, true, false] {
+        fat = d::next_file(&order, fat, forward).or(fat);
+        fsteps.push(json!({ "forward": forward, "at": fat }));
+    }
+    cases.push(case(
+        "] / [ walk every file in tree order",
+        json!({ "fn": "next_file", "order": order }),
+        json!({ "steps": fsteps }),
+    ));
+    for kind in ["claude", "codex", "shell"] {
+        cases.push(case(
+            "default base",
+            json!({ "fn": "default_base", "kind": kind }),
+            json!(d::default_base(kind)),
+        ));
+    }
+    for (base, label) in [
+        (Base::Turn, None),
+        (Base::Uncommitted, None),
+        (Base::Branch, Some("merge base with origin/main")),
+        (Base::Branch, Some("merge base with master")),
+        (Base::Branch, Some("HEAD")),
+    ] {
+        let r = label.and_then(d::branch_ref_from_label);
+        cases.push(case(
+            "base label",
+            json!({ "fn": "base_label", "base": base, "from_label": label }),
+            json!(d::base_label(base, r)),
+        ));
+    }
+    cases.push(case(
+        "the viewer's bare keys",
+        json!({ "fn": "keys" }),
+        json!(d::KEYS.iter().map(|(k, a)| json!({ "key": k, "action": a })).collect::<Vec<_>>()),
+    ));
+    file("SmoothFlow-Client-Spec §14 Diff viewer", &cases)
+}
+
 /// Every vector file, by name.
 #[must_use]
 pub fn all() -> Vec<(&'static str, Value)> {
@@ -534,6 +696,7 @@ pub fn all() -> Vec<(&'static str, Value)> {
         ("harness.json", harness_vectors()),
         ("attention.json", attention_vectors()),
         ("surfaces.json", surfaces_vectors()),
+        ("diff.json", diff_vectors()),
     ]
 }
 

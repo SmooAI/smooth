@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::diff::{Diff, DiffBase, ReviewComment};
 use crate::harness::HarnessInfo;
 use crate::store::{Attention, FanOut, Session, SessionKind, SessionState};
 
@@ -105,6 +106,45 @@ pub enum ClientFrame {
         #[serde(default)]
         force: bool,
     },
+    /// Additive (th-26f5b9): the structured diff of the session's worktree.
+    /// Reply is `ServerFrame::Diff`. `path` narrows it to one file (expanding
+    /// a collapsed or budget-stubbed file).
+    #[serde(rename = "flow.diff")]
+    Diff {
+        id: String,
+        base: DiffBase,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Additive (th-26f5b9): reverse one hunk of the `base` diff in the
+    /// worktree. Reply `flow.diff.result`, or `flow.error` code `stale`.
+    #[serde(rename = "flow.diff.revert")]
+    DiffRevert { id: String, base: DiffBase, hunk_id: String },
+    /// Additive (th-26f5b9): stage one hunk of the uncommitted diff.
+    #[serde(rename = "flow.diff.stage")]
+    DiffStage {
+        id: String,
+        hunk_id: String,
+        #[serde(default = "uncommitted")]
+        base: DiffBase,
+    },
+    /// Additive (th-26f5b9): unstage one hunk (looked up in HEAD → index).
+    #[serde(rename = "flow.diff.unstage")]
+    DiffUnstage {
+        id: String,
+        hunk_id: String,
+        #[serde(default = "uncommitted")]
+        base: DiffBase,
+    },
+    /// Additive (th-26f5b9): send review comments to the agent as one
+    /// batched steer. Reply `flow.diff.result` (with the message sent), or
+    /// `flow.error` code `blocked` when the agent can't take a prompt.
+    #[serde(rename = "flow.diff.review")]
+    DiffReview { id: String, base: DiffBase, comments: Vec<ReviewComment> },
+}
+
+const fn uncommitted() -> DiffBase {
+    DiffBase::Uncommitted
 }
 
 /// What `flow.close` did (the HTTP reply of `POST /api/flow/sessions/{id}/close`).
@@ -208,8 +248,9 @@ pub fn parse_client_frame(text: &str) -> anyhow::Result<Option<ClientFrame>> {
     }
     match serde_json::from_value::<ClientFrame>(v.clone()) {
         Ok(f) => Ok(Some(f)),
-        // Unknown variant ⇒ ignore; anything else is a malformed known frame.
-        Err(e) if e.to_string().contains("unknown variant") => Ok(None),
+        // An unknown frame TYPE ⇒ ignore; anything else (an unknown value of
+        // a field, like a diff base) is a malformed known frame.
+        Err(e) if e.to_string().contains(&format!("unknown variant `{ty}`")) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("malformed {ty}: {e}")),
     }
 }
@@ -275,6 +316,34 @@ pub enum ServerFrame {
         blocks: Value,
         pr: Value,
     },
+    /// Additive (th-26f5b9): the reply to `flow.diff` — never broadcast.
+    #[serde(rename = "flow.diff")]
+    Diff {
+        id: String,
+        base: DiffBase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        diff: Diff,
+    },
+    /// Additive (th-26f5b9): a hunk action or review succeeded.
+    #[serde(rename = "flow.diff.result")]
+    DiffResult {
+        id: String,
+        /// `revert` | `stage` | `unstage` | `review`.
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hunk_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        /// `review`: the steer message that was sent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    /// Additive (th-26f5b9): broadcast — the session's diff may have changed
+    /// (a turn snapshot was taken, a hunk was reverted or staged). A client
+    /// showing that session's diff re-requests it.
+    #[serde(rename = "flow.diff.changed")]
+    DiffChanged { id: String },
 }
 
 /// The `daemon` block of `flow.hello`.
@@ -657,6 +726,89 @@ mod tests {
         assert_eq!(v["type"], "flow.handoff");
         assert_eq!(v["handoff"]["branch"], "b");
         assert_eq!(parse_server_frame(&ho.to_wire()).unwrap(), ho);
+    }
+
+    /// th-26f5b9: the diff frames, both directions.
+    #[test]
+    fn diff_frames_round_trip() {
+        let f = parse_client_frame(r#"{"channel":"flow","type":"flow.diff","id":"fs-1","base":"turn"}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            f,
+            ClientFrame::Diff {
+                id: "fs-1".into(),
+                base: DiffBase::Turn,
+                path: None
+            }
+        );
+        let f = parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"branch","path":"Cargo.lock"}"#)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(f, ClientFrame::Diff { base: DiffBase::Branch, path: Some(ref p), .. } if p == "Cargo.lock"));
+        assert!(
+            parse_client_frame(r#"{"type":"flow.diff","id":"fs-1","base":"main"}"#).is_err(),
+            "unknown base is malformed"
+        );
+        let f = parse_client_frame(r#"{"type":"flow.diff.stage","id":"fs-1","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            f,
+            ClientFrame::DiffStage {
+                id: "fs-1".into(),
+                hunk_id: "abc".into(),
+                base: DiffBase::Uncommitted
+            },
+            "stage defaults to the uncommitted view"
+        );
+        let f = parse_client_frame(r#"{"type":"flow.diff.unstage","id":"fs-1","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            f,
+            ClientFrame::DiffUnstage {
+                base: DiffBase::Uncommitted,
+                ..
+            }
+        ));
+        let f = parse_client_frame(r#"{"type":"flow.diff.revert","id":"fs-1","base":"turn","hunk_id":"abc"}"#)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(f, ClientFrame::DiffRevert { base: DiffBase::Turn, .. }));
+        let f = parse_client_frame(
+            r#"{"type":"flow.diff.review","id":"fs-1","base":"uncommitted","comments":[{"file":"a.rs","hunk_id":"h","line_range":[3,5],"text":"why?"},{"file":"b.rs","text":"general"}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let ClientFrame::DiffReview { comments, .. } = f else { panic!() };
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].line_range, Some([3, 5]));
+        assert!(comments[1].hunk_id.is_none() && comments[1].line_range.is_none());
+
+        let d = crate::diff::build(&[], false, &std::collections::HashSet::new(), None, 1024);
+        for frame in [
+            ServerFrame::Diff {
+                id: "fs-1".into(),
+                base: DiffBase::Turn,
+                path: None,
+                diff: d,
+            },
+            ServerFrame::DiffResult {
+                id: "fs-1".into(),
+                action: "revert".into(),
+                hunk_id: Some("h".into()),
+                file: Some("a.rs".into()),
+                message: None,
+            },
+            ServerFrame::DiffChanged { id: "fs-1".into() },
+        ] {
+            let wire = frame.to_wire();
+            let v: Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(v["channel"], "flow");
+            assert!(v["type"].as_str().unwrap().starts_with("flow.diff"), "{wire}");
+            assert_eq!(parse_server_frame(&wire).unwrap(), frame);
+        }
     }
 
     #[test]

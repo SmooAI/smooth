@@ -48,9 +48,16 @@ struct Keymap: Equatable, Sendable {
     /// never auto-resolved: which of the two the user wanted is not ours to
     /// guess, and AppKit's own answer (first matching menu item wins) is at
     /// least stable.
+    ///
+    /// View-scoped actions (the diff viewer's bare keys) only conflict with
+    /// each other: `v` in the diff and ⌘V in the menu never meet.
     var conflicts: [KeyChord: [FlowAction]] {
+        conflicts(scoped: false).merging(conflicts(scoped: true)) { a, b in a + b }
+    }
+
+    private func conflicts(scoped: Bool) -> [KeyChord: [FlowAction]] {
         var byChord: [KeyChord: [FlowAction]] = [:]
-        for action in FlowAction.allCases {
+        for action in FlowAction.allCases where action.isViewScoped == scoped {
             guard let c = chord(for: action) else { continue }
             byChord[c, default: []].append(action)
         }
@@ -59,7 +66,12 @@ struct Keymap: Equatable, Sendable {
 
     func conflictPartners(of action: FlowAction) -> [FlowAction] {
         guard let c = chord(for: action) else { return [] }
-        return conflicts[c]?.filter { $0 != action } ?? []
+        return conflicts(scoped: action.isViewScoped)[c]?.filter { $0 != action } ?? []
+    }
+
+    /// The view-scoped action a key press fires inside the diff viewer.
+    func diffAction(for chord: KeyChord) -> FlowAction? {
+        FlowAction.allCases.first { $0.isViewScoped && self.chord(for: $0) == chord }
     }
 
     // MARK: file
@@ -109,7 +121,7 @@ struct Keymap: Equatable, Sendable {
                 map.problems.append("line \(i + 1): `\(value)` is not a shortcut (try `cmd+shift+d`)")
                 continue
             }
-            guard chord.hasModifier else {
+            guard chord.hasModifier || action.isViewScoped else {
                 map.problems.append("line \(i + 1): `\(value)` has no modifier — a bare key would swallow terminal input")
                 continue
             }

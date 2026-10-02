@@ -25,6 +25,9 @@
 #            relaunch crash again, or a resumed agent do work.
 #   stdin    one command per line (what `flow.send` pastes):
 #              /work <text>   a turn: working → idle
+#              /edit <path> <line>   a turn that appends <line> to <path>
+#                             (created, with its directory) between the
+#                             turn's start and end hooks (th-26f5b9)
 #              /perm          ask permission; prints `decision: <reply>`
 #              /ask <text>    a question notification (needs_you · question)
 #              /limit [time]  the usage-limit banner (default `11:59pm`)
@@ -169,6 +172,32 @@ run_cmd() {
                     printf 'decision: %s\n' "$reply"
                     ;;
             esac
+            ;;
+        /edit*)
+            local rest="${line#/edit}"
+            rest="${rest# }"
+            local path="${rest%% *}"
+            local add="${rest#* }"
+            [ "$add" = "$rest" ] && add=""
+            case "$mode" in
+                native) hook turn_start '{}' >/dev/null ;;
+                scrape) paint_working ;;
+                *)
+                    hook UserPromptSubmit "{\"prompt\":\"edit $(json_str "$path")\"}" >/dev/null
+                    hook PreToolUse "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$(json_str "$path")\"}}" >/dev/null
+                    ;;
+            esac
+            mkdir -p "$(dirname "$path")"
+            printf '%s\n' "$add" >>"$path"
+            case "$mode" in
+                native) hook turn_end "{\"message\":\"edited $(json_str "$path")\"}" >/dev/null ;;
+                scrape) erase_working ;;
+                *)
+                    hook PostToolUse '{"tool_name":"Edit"}' >/dev/null
+                    hook Stop "{\"last_assistant_message\":\"edited $(json_str "$path")\"}" >/dev/null
+                    ;;
+            esac
+            printf 'edited: %s\n' "$path"
             ;;
         /ask*)
             local text="${line#/ask}"

@@ -359,6 +359,12 @@ enum FlowFrame: Equatable {
     /// Additive: the handoff packet pushed instead of polled — the same shape
     /// as `GET /api/flow/sessions/{id}/handoff`, plus `id`.
     case handoff(id: String, Handoff)
+    /// th-26f5b9: the reply to `flow.diff`.
+    case diff(id: String, base: DiffBase, path: String?, DiffPayload)
+    /// th-26f5b9: a hunk action or review went through.
+    case diffResult(DiffResult)
+    /// th-26f5b9: broadcast — this session's diff may have changed.
+    case diffChanged(id: String)
     case unknown(type: String)
 
     private struct Key: CodingKey {
@@ -409,6 +415,19 @@ enum FlowFrame: Equatable {
                 frame = .event(try FlowEvent(from: decoder))
             case "flow.handoff":
                 frame = .handoff(id: try c.decode(String.self, forKey: Key("id")), try Handoff(from: decoder))
+            case "flow.diff":
+                frame = .diff(id: try c.decode(String.self, forKey: Key("id")),
+                              base: try c.decodeIfPresent(DiffBase.self, forKey: Key("base")) ?? .uncommitted,
+                              path: try c.decodeIfPresent(String.self, forKey: Key("path")),
+                              try c.decode(DiffPayload.self, forKey: Key("diff")))
+            case "flow.diff.result":
+                frame = .diffResult(DiffResult(id: try c.decode(String.self, forKey: Key("id")),
+                                               action: try c.decodeIfPresent(String.self, forKey: Key("action")) ?? "",
+                                               hunkId: try c.decodeIfPresent(String.self, forKey: Key("hunk_id")),
+                                               file: try c.decodeIfPresent(String.self, forKey: Key("file")),
+                                               message: try c.decodeIfPresent(String.self, forKey: Key("message"))))
+            case "flow.diff.changed":
+                frame = .diffChanged(id: try c.decode(String.self, forKey: Key("id")))
             case "flow.error":
                 frame = .error(ref: try? c.decodeIfPresent(Int.self, forKey: Key("ref")),
                                code: try c.decodeFlexibleString(forKey: Key("code")) ?? "unknown",
@@ -440,6 +459,12 @@ enum ClientFrame: Equatable {
     /// remove the merged worktree + branch, drop the row. The engine refuses a
     /// dirty or unmerged worktree (`flow.error`, nothing touched) unless `force`.
     case close(id: String, closePearl: Bool, removeWorktree: Bool, force: Bool)
+    /// th-26f5b9: SmoothFlow Diff.
+    case diff(id: String, base: DiffBase, path: String?)
+    case diffRevert(id: String, base: DiffBase, hunkId: String)
+    case diffStage(id: String, hunkId: String)
+    case diffUnstage(id: String, hunkId: String)
+    case diffReview(id: String, base: DiffBase, comments: [DiffComment])
 
     var type: String {
         switch self {
@@ -457,6 +482,11 @@ enum ClientFrame: Equatable {
         case .fanoutPick: "flow.fanout.pick"
         case .markRead: "flow.mark_read"
         case .close: "flow.close"
+        case .diff: "flow.diff"
+        case .diffRevert: "flow.diff.revert"
+        case .diffStage: "flow.diff.stage"
+        case .diffUnstage: "flow.diff.unstage"
+        case .diffReview: "flow.diff.review"
         }
     }
 
@@ -478,6 +508,11 @@ enum ClientFrame: Equatable {
         case let .markRead(id): ["id": id]
         case let .close(id, closePearl, removeWorktree, force):
             ["id": id, "close_pearl": closePearl, "remove_worktree": removeWorktree, "force": force]
+        case let .diff(id, base, path): ["id": id, "base": base.rawValue, "path": path as Any]
+        case let .diffRevert(id, base, hunkId): ["id": id, "base": base.rawValue, "hunk_id": hunkId]
+        case let .diffStage(id, hunkId): ["id": id, "hunk_id": hunkId, "base": DiffBase.uncommitted.rawValue]
+        case let .diffUnstage(id, hunkId): ["id": id, "hunk_id": hunkId, "base": DiffBase.uncommitted.rawValue]
+        case let .diffReview(id, base, comments): ["id": id, "base": base.rawValue, "comments": comments.map(\.fields)]
         }
     }
 

@@ -137,4 +137,73 @@ final class ConformanceVectorTests: XCTestCase {
             }
         }
     }
+
+    /// th-26f5b9: the Diff viewer's rules (spec §14).
+    func testDiff() throws {
+        func pos(_ v: Any?) -> [Int]? { v as? [Int] }
+        for c in try cases("diff.json") {
+            let name = c["name"] as? String ?? "?"
+            let input = try XCTUnwrap(c["input"] as? [String: Any])
+            let expected = c["expected"]
+            switch input["fn"] as? String {
+            case "side_by_side":
+                let kinds = try XCTUnwrap(input["kinds"] as? [String]).compactMap(DiffLineKind.init(rawValue:))
+                let rows = DiffRules.sideBySide(kinds).map { [$0.left ?? -1, $0.right ?? -1] }
+                let want = try XCTUnwrap((expected as? [String: Any])?["rows"] as? [[String: Any]]).map { [$0["left"] as? Int ?? -1, $0["right"] as? Int ?? -1] }
+                XCTAssertEqual(rows, want, name)
+            case "tree":
+                let paths = try XCTUnwrap(input["paths"] as? [String])
+                let exp = try XCTUnwrap(expected as? [String: Any])
+                let rows = DiffRules.tree(paths).map { "\($0.kind)|\($0.name)|\($0.path)|\($0.depth)|\($0.file ?? -1)" }
+                let want = try XCTUnwrap(exp["rows"] as? [[String: Any]]).map {
+                    "\($0["kind"] as? String ?? "")|\($0["name"] as? String ?? "")|\($0["path"] as? String ?? "")|\($0["depth"] as? Int ?? -1)|\($0["file"] as? Int ?? -1)"
+                }
+                XCTAssertEqual(rows, want, name)
+                XCTAssertEqual(DiffRules.fileOrder(paths), exp["file_order"] as? [Int], name)
+            case "display":
+                let data = try JSONSerialization.data(withJSONObject: try XCTUnwrap(input["file"]))
+                let file = try JSONDecoder().decode(DiffFile.self, from: data)
+                let exp = try XCTUnwrap(expected as? [String: Any])
+                let d = DiffRules.display(file, viewed: input["viewed"] as? Bool ?? false)
+                let want = try XCTUnwrap(exp["display"] as? [String: Any])
+                XCTAssertEqual(d.collapsed, want["collapsed"] as? Bool, name)
+                XCTAssertEqual(d.reason, want["reason"] as? String, name)
+                XCTAssertEqual(d.fetch, want["fetch"] as? Bool, name)
+                XCTAssertEqual(DiffRules.viewedKey(file), exp["viewed_key"] as? String, name)
+            case "next_hunk":
+                let counts = try XCTUnwrap(input["hunks"] as? [Int])
+                let collapsed = try XCTUnwrap(input["collapsed"] as? [Bool])
+                let order = try XCTUnwrap(input["order"] as? [Int])
+                var at: DiffRules.Pos?
+                for step in try XCTUnwrap((expected as? [String: Any])?["steps"] as? [[String: Any]]) {
+                    let forward = step["forward"] as? Bool ?? true
+                    at = DiffRules.nextHunk(hunkCounts: counts, order: order, collapsed: collapsed, at: at, forward: forward) ?? at
+                    XCTAssertEqual(at.map { [$0.file, $0.hunk] }, pos(step["at"]), name)
+                }
+            case "next_file":
+                let order = try XCTUnwrap(input["order"] as? [Int])
+                var at: Int?
+                for step in try XCTUnwrap((expected as? [String: Any])?["steps"] as? [[String: Any]]) {
+                    at = DiffRules.nextFile(order: order, at: at, forward: step["forward"] as? Bool ?? true) ?? at
+                    XCTAssertEqual(at, step["at"] as? Int, name)
+                }
+            case "default_base":
+                XCTAssertEqual(DiffRules.defaultBase(kind: input["kind"] as? String ?? "").rawValue, expected as? String, name)
+            case "base_label":
+                let base = try XCTUnwrap(DiffBase(rawValue: input["base"] as? String ?? ""))
+                let ref = (input["from_label"] as? String).flatMap(DiffRules.branchRef(fromLabel:))
+                XCTAssertEqual(DiffRules.baseLabel(base, branchRef: ref), expected as? String, name)
+            case "keys":
+                let want = try XCTUnwrap(expected as? [[String: Any]])
+                for k in want {
+                    let key = try XCTUnwrap(k["key"] as? String)
+                    let action = Keymap.default.diffAction(for: KeyChord(key))
+                    XCTAssertEqual(action?.diffSpecName, k["action"] as? String, "key \(key)")
+                }
+                XCTAssertEqual(FlowAction.allCases.filter(\.isViewScoped).count, want.count, "every spec key has an action and no more")
+            default:
+                XCTFail("unknown fn in \(name)")
+            }
+        }
+    }
 }

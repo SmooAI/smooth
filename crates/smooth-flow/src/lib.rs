@@ -7,6 +7,7 @@
 //! duplicate-resume guard). Hosted by `smooth-daemon`; `th flow`, the macOS
 //! app and the phones are dumb views over it.
 
+pub mod diff;
 pub mod doctor;
 pub mod engine;
 pub mod harness;

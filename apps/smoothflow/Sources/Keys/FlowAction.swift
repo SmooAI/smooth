@@ -49,6 +49,21 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case togglePearlRail
     case settings
 
+    // Diff viewer (th-26f5b9). Bare keys, live only while the Diff tab has
+    // focus — never menu items (see `isViewScoped`). The table is the Client
+    // Spec's §14 key list (`spec/vectors/diff.json`).
+    case diffNextLine
+    case diffPreviousLine
+    case diffNextHunk
+    case diffPreviousHunk
+    case diffNextFile
+    case diffPreviousFile
+    case diffToggleViewed
+    case diffComment
+    case diffRevertHunk
+    case diffStageHunk
+    case diffToggleSplit
+
     var id: String { rawValue }
 
     enum Category: String, CaseIterable, Identifiable, Sendable {
@@ -56,7 +71,31 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case tabs = "Tabs"
         case splits = "Splits"
         case view = "View"
+        case diff = "Diff Viewer"
         var id: String { rawValue }
+    }
+
+    /// Bound to a bare key inside one view instead of the menu bar. A bare
+    /// key in the menu would swallow terminal input; inside the diff it is
+    /// how every review tool works.
+    var isViewScoped: Bool { category == .diff }
+
+    /// The Client Spec's name for a diff action (`spec/vectors/diff.json`).
+    var diffSpecName: String? {
+        switch self {
+        case .diffNextLine: "next_line"
+        case .diffPreviousLine: "previous_line"
+        case .diffNextHunk: "next_hunk"
+        case .diffPreviousHunk: "previous_hunk"
+        case .diffNextFile: "next_file"
+        case .diffPreviousFile: "previous_file"
+        case .diffToggleViewed: "toggle_viewed"
+        case .diffComment: "comment"
+        case .diffRevertHunk: "revert_hunk"
+        case .diffStageHunk: "stage_hunk"
+        case .diffToggleSplit: "toggle_split"
+        default: nil
+        }
     }
 
     var category: Category {
@@ -73,6 +112,9 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
             .splits
         case .inbox, .viewTerminal, .viewDiff, .viewPR, .viewActivity, .toggleSidebar, .togglePearlRail, .settings:
             .view
+        case .diffNextLine, .diffPreviousLine, .diffNextHunk, .diffPreviousHunk, .diffNextFile, .diffPreviousFile,
+             .diffToggleViewed, .diffComment, .diffRevertHunk, .diffStageHunk, .diffToggleSplit:
+            .diff
         }
     }
 
@@ -113,6 +155,17 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .toggleSidebar: return "Toggle Sidebar"
         case .togglePearlRail: return "Toggle Pearl Rail"
         case .settings: return "Settings…"
+        case .diffNextLine: return "Next Line"
+        case .diffPreviousLine: return "Previous Line"
+        case .diffNextHunk: return "Next Hunk"
+        case .diffPreviousHunk: return "Previous Hunk"
+        case .diffNextFile: return "Next File"
+        case .diffPreviousFile: return "Previous File"
+        case .diffToggleViewed: return "Mark File Viewed"
+        case .diffComment: return "Comment on Line"
+        case .diffRevertHunk: return "Revert Hunk…"
+        case .diffStageHunk: return "Stage Hunk"
+        case .diffToggleSplit: return "Unified / Side by Side"
         default:
             if let n = Self.focusSessionIndex(self) { return "Focus Session \(n + 1)" }
             return rawValue
@@ -185,6 +238,18 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .togglePearlRail: return KeyChord("p", command: true, control: true)
         case .settings: return KeyChord(",", command: true)
 
+        case .diffNextLine: return KeyChord("j")
+        case .diffPreviousLine: return KeyChord("k")
+        case .diffNextHunk: return KeyChord("n")
+        case .diffPreviousHunk: return KeyChord("p")
+        case .diffNextFile: return KeyChord("]")
+        case .diffPreviousFile: return KeyChord("[")
+        case .diffToggleViewed: return KeyChord("v")
+        case .diffComment: return KeyChord("c")
+        case .diffRevertHunk: return KeyChord("r")
+        case .diffStageHunk: return KeyChord("s")
+        case .diffToggleSplit: return KeyChord("u")
+
         default:
             if let n = Self.focusSessionIndex(self) { return KeyChord(String(n + 1), command: true) }
             return nil
@@ -203,7 +268,10 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .steerAll: return "Sends the steer bar's text to every working session."
         case .zoomPane: return "The focused pane fills the tab; again restores the layout."
         case .equalizePanes: return "Resets every divider in the focused tab to an even split."
-        default: return nil
+        case .diffComment: return "Diff tab only. Comments on the selected line or range; Send Review delivers them all to the agent as one message."
+        case .diffRevertHunk: return "Diff tab only. Asks first, then undoes the selected hunk in the worktree."
+        case .diffStageHunk: return "Diff tab only, Uncommitted view. Stages (or unstages) the selected hunk."
+        default: return isViewScoped ? "Diff tab only — a bare key, live while the diff has focus." : nil
         }
     }
 }
