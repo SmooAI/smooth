@@ -47,12 +47,19 @@ pub fn resolve(
 /// (`~/.smooth`).
 #[must_use]
 pub fn discover(smooth_dir: &Path) -> Option<Endpoint> {
+    discover_in(smooth_dir, |name| std::env::var(name).ok())
+}
+
+/// [`discover`] with the environment supplied by `env` (`|_| None` = an
+/// empty environment, so only the files in `smooth_dir` count).
+#[must_use]
+pub fn discover_in(smooth_dir: &Path, env: impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
     let read = |name: &str| std::fs::read_to_string(smooth_dir.join(name)).ok();
     resolve(
-        std::env::var("SMOOTH_FLOW_ADDR").ok(),
+        env("SMOOTH_FLOW_ADDR"),
         read("flow.addr"),
         read("daemon.addr"),
-        [std::env::var("SMOOTHFLOW_DAEMON_TOKEN").ok(), std::env::var("SMOOTH_LOCAL_TOKEN").ok()],
+        [env("SMOOTHFLOW_DAEMON_TOKEN"), env("SMOOTH_LOCAL_TOKEN")],
         read("operator-token"),
     )
 }

@@ -53,7 +53,10 @@ replays.
 The rules (pane trees, tabs and close scope, titles, picker rows,
 approvability, keymap) come from `crates/smooth-flow-client`. This app's own
 pure logic (layout math, the sheet, the text field, frames and HTTP) is
-unit-tested. The views only draw.
+unit-tested. Everything the window does (engine events, New Session,
+attach/resize, keystrokes, close/kill) lives in the toolkit-free
+`app_core::Core` in the crate's library. The GPUI `Workspace` wraps it and
+the views only draw.
 
 Not yet: Close Out, Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
 pearl rail, Settings (the "Don't ask again" choice lasts until you quit),
@@ -66,10 +69,47 @@ backend.
 ```bash
 cd apps/smoothflow-desktop
 cargo run            # needs a running flow engine (SmoothFlow's daemon or `th up`)
-cargo test
+cargo test           # unit tests + the e2e below (needs tmux; builds smooth-daemon)
 ```
 
 It's its own Cargo workspace, so GPUI never enters the main `th` build. On
 Linux it needs the X11/Wayland/Vulkan/fontconfig/D-Bus/PipeWire development
 packages; `.github/workflows/smoothflow-desktop.yml` lists them. On Windows the
 flow engine runs inside WSL2 until the native PTY host lands (th-2fbc9c).
+
+## End-to-end test
+
+`tests/e2e.rs` runs the app's core against a **real `smooth-daemon`**
+(th-032792). It never opens a window. It boots an isolated daemon with a
+scratch `$HOME`, an ephemeral port, its own `tmux -L` socket, no relay and no
+`tailscale serve`, so it never touches a daemon you have running. It then
+discovers the daemon from that HOME's `flow.addr` and `operator-token`,
+connects, gets `flow.hello`, and opens New Session (whose repo and inference
+reads go to the daemon). It picks **Shell** with the arrow keys, presses
+Enter, waits for the session to open in the focused pane and attach at 80x24,
+and waits for live output. Then it types `echo smoothflow-e2e-$((N+1))`
+through the key encoder and checks that the `TerminalModel` shows the
+computed line. Finally it kills the session through the Kill confirmation.
+
+```bash
+cd apps/smoothflow-desktop
+# Use a daemon you already built…
+SMOOTHFLOW_E2E_DAEMON=/path/to/target/debug/smooth-daemon cargo test --test e2e
+# …or let the test build it from the main workspace (cargo build -p
+# smooai-smooth-daemon into $CARGO_TARGET_DIR, or <repo>/target when unset).
+cargo test --test e2e
+# Include the Finder-PATH variant (ignored until #707 merges, see below).
+cargo test --test e2e -- --include-ignored
+```
+
+It needs tmux. Without tmux the test skips, unless `SMOOTH_E2E_STRICT=1`
+(which CI sets), which turns the skip into a failure. The test is Unix only:
+Windows has no native tmux. CI runs it on Linux and macOS in
+`.github/workflows/smoothflow-desktop.yml`, which builds the daemon first and
+passes it in through `SMOOTHFLOW_E2E_DAEMON`.
+
+`a_shell_session_gets_a_live_terminal_from_a_finder_launched_daemon` runs the
+daemon with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which is how Big Smooth.app
+and Finder start it. That PATH caused "I created sessions and never got a
+terminal" (th-9f6814). It stays `#[ignore]` until SmooAI/smooth#707
+(`th-flow-tmux-path`) merges. Against `main` it fails with `running tmux`.

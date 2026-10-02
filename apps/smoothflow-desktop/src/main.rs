@@ -3,19 +3,11 @@
 //! (docs/Architecture/SmoothFlow-Client-Spec.md). M2: the fleet sidebar, tabs
 //! and splits of live terminals, New Session, and approvals.
 
-mod discovery;
-mod field;
-mod frames;
-mod http;
-mod keys;
-mod layout;
-mod net;
-mod sheet;
-mod terminal;
 mod view;
 mod workspace;
 
 use gpui_kit::*;
+use smoothflow_desktop::net;
 
 fn main() {
     let smooth_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth");
