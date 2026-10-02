@@ -198,7 +198,7 @@ pub enum Cmd {
         /// Allow a SECRET-tier value as the positional argument anyway. It
         /// will be visible in `ps`, shell history and logs — prefer
         /// `--value-stdin`.
-        #[arg(long, requires = "value")]
+        #[arg(long, conflicts_with_all = ["value_stdin", "value_file"])]
         insecure_argv: bool,
         /// Environment name. Defaults to `development`.
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]

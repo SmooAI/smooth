@@ -729,15 +729,15 @@ first, `--dry-run` stops there, a terminal is asked (default no), and a
 non-interactive run without `--yes` is **refused**. In scripts and CI,
 pass `--yes`.
 
-| Area | Gated verbs |
-| --- | --- |
-| Credentials | `api keys rotate`, `llm rotate-key`, `llm keys rotate` |
-| Access | `roles grant` / `set-permissions` / `assign` / `unassign` (and `revoke`, `delete`), `api teams set-members` / `set-roles` |
-| AI behaviour | `api smooth-operator tools enable` / `disable` (org-wide), `agents tools enable` / `disable` |
-| Sends | `drip enroll` (names the contact count) |
-| Billing | `api products free` / `bypass` |
-| Public site | `heypage publish` / `rollback` / `regen` / `build --publish`, `blog publish` / `unpublish` |
-| Sharing | `files unshare` |
+| Area         | Gated verbs                                                                                                               |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Credentials  | `api keys rotate`, `llm rotate-key`, `llm keys rotate`                                                                    |
+| Access       | `roles grant` / `set-permissions` / `assign` / `unassign` (and `revoke`, `delete`), `api teams set-members` / `set-roles` |
+| AI behaviour | `api smooth-operator tools enable` / `disable` (org-wide), `agents tools enable` / `disable`                              |
+| Sends        | `drip enroll` (names the contact count)                                                                                   |
+| Billing      | `api products free` / `bypass`                                                                                            |
+| Public site  | `heypage publish` / `rollback` / `regen` / `build --publish`, `blog publish` / `unpublish`                                |
+| Sharing      | `files unshare`                                                                                                           |
 
 `files share` takes its password from `--password-stdin` or
 `--password-prompt` (masked); the old `--password <value>` is refused with
