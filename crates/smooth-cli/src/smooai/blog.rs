@@ -96,6 +96,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Changes the public site immediately — `--dry-run` / `--yes`.
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Take a post off the public site. It stays as a draft with its history.
     Unpublish {
@@ -104,6 +107,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Changes the public site immediately — `--dry-run` / `--yes`.
+        #[command(flatten)]
+        confirm: Confirm,
     },
     /// Permanently delete a DRAFT post and its revision history. Irreversible;
     /// a published post is refused upstream — unpublish it first.
@@ -191,6 +197,21 @@ pub struct MetaArgs {
 }
 
 /// Read a text file (or stdin for `-`).
+/// Publish and unpublish change what the public sees on the org's site the
+/// moment they run, so they print the org + post and confirm (SMOODEV-3606).
+fn gate_public(verb: &str, post_id: &str, org: &str, confirm: Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &Target {
+            verb,
+            noun: "blog post",
+            id: post_id,
+            org,
+            severity: Severity::Standard,
+        },
+        confirm,
+    )
+}
+
 fn read_text(path: &str) -> Result<String> {
     if path == "-" {
         use std::io::Read;
@@ -376,16 +397,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             eprintln_note("draft updated — the live page is unchanged until `th smoo blog publish`");
             print_json(unwrap(&resp, "post"));
         }
-        Cmd::Publish { post_id, org } => {
+        Cmd::Publish { post_id, org, confirm } => {
             let o = require_active_org(&client, org)?;
+            if !gate_public("publish", &post_id, &o, confirm)? {
+                return Ok(());
+            }
             let resp = client
                 .post(&format!("/organizations/{o}/heypage/blog/posts/{post_id}/publish"), Some(&json!({})))
                 .await
                 .context("POST heypage/blog/posts/{id}/publish")?;
             print_json(unwrap(&resp, "post"));
         }
-        Cmd::Unpublish { post_id, org } => {
+        Cmd::Unpublish { post_id, org, confirm } => {
             let o = require_active_org(&client, org)?;
+            if !gate_public("unpublish", &post_id, &o, confirm)? {
+                return Ok(());
+            }
             let resp = client
                 .post(&format!("/organizations/{o}/heypage/blog/posts/{post_id}/unpublish"), Some(&json!({})))
                 .await

@@ -25,6 +25,12 @@
 //!   `--force`. A credential-shaped value resolving to `public` prompts
 //!   for confirmation (refused non-interactively without `--force`).
 //!
+//!   Value source (SMOODEV-3606): `--value-stdin`, `--value-file <path>`,
+//!   or — with no value at all on a terminal — a prompt that is masked for
+//!   the secret tier. The positional `<value>` is for public / feature-flag
+//!   / limit values only: a key that resolves to `secret` refuses it (argv
+//!   is visible in `ps` and shell history) unless `--insecure-argv`.
+//!
 //! - `th config list [--environment=<env>] [--org-id=<id>] [--json]`
 //!   GET `/organizations/{org}/config/values?environment={env}`
 //!   → `{ values: { key: value, ... } }`. Pretty-prints key/value pairs
@@ -173,12 +179,27 @@ pub enum Cmd {
     Set {
         /// The config key name.
         key: String,
-        /// The new value. Parsed as JSON when valid; raw string otherwise.
-        /// Empty / whitespace-only values are rejected at parse time —
-        /// use `th config delete` (or PUT a null via API) if you mean
-        /// to clear a key.
-        #[arg(value_parser = parse_non_empty_value)]
-        value: String,
+        /// The new value — NON-SECRET tiers only. Parsed as JSON when
+        /// valid; raw string otherwise. A key that resolves to the `secret`
+        /// tier (including any undeclared key) refuses a value here: use
+        /// `--value-stdin`, `--value-file`, or omit it to be prompted
+        /// (masked). Empty / whitespace-only values are rejected — use
+        /// `th config delete` if you mean to clear a key.
+        #[arg(value_parser = parse_non_empty_value, conflicts_with_all = ["value_stdin", "value_file"])]
+        value: Option<String>,
+        /// Read the value from stdin (one trailing newline is stripped).
+        /// The way to set a secret from a script:
+        /// `op read … | th config set KEY --value-stdin`.
+        #[arg(long, conflicts_with = "value_file")]
+        value_stdin: bool,
+        /// Read the value from a file (one trailing newline is stripped).
+        #[arg(long, value_name = "PATH")]
+        value_file: Option<std::path::PathBuf>,
+        /// Allow a SECRET-tier value as the positional argument anyway. It
+        /// will be visible in `ps`, shell history and logs — prefer
+        /// `--value-stdin`.
+        #[arg(long, conflicts_with_all = ["value_stdin", "value_file"])]
+        insecure_argv: bool,
         /// Environment name. Defaults to `development`.
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
@@ -810,6 +831,8 @@ pub enum EnvironmentsCmd {
         confirm: crate::destructive::Confirm,
     },
     /// List all config values set in an environment (across schemas).
+    /// Every value is masked to its last 4 characters — this listing spans
+    /// the secret tier — unless `--reveal`.
     Values {
         /// The environment id (from `list`).
         env_id: String,
@@ -819,6 +842,10 @@ pub enum EnvironmentsCmd {
         /// Emit the raw JSON response.
         #[arg(long)]
         json: bool,
+        /// Show values in plaintext instead of the last-4 mask (applies to
+        /// the JSON output too — this endpoint mixes every tier).
+        #[arg(long)]
+        reveal: bool,
         /// Use the M2M session instead of the user JWT.
         #[arg(long)]
         m2m: bool,
@@ -844,6 +871,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Set {
             key,
             value,
+            value_stdin,
+            value_file,
+            insecure_argv,
             environment,
             org_id,
             tier,
@@ -853,7 +883,10 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             reveal,
             m2m,
             force,
-        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force, string).await,
+        } => {
+            let source = ValueSource::from_args(value, value_stdin, value_file, insecure_argv);
+            cmd_set(key, source, environment, org_id, tier, schema_name, json, reveal, m2m, force, string).await
+        }
         Cmd::List {
             environment,
             org_id,
@@ -1006,13 +1039,24 @@ async fn cmd_environments(cmd: EnvironmentsCmd) -> Result<()> {
                 println!();
             }
         }
-        EnvironmentsCmd::Values { env_id, org_id, json: _, m2m } => {
+        EnvironmentsCmd::Values {
+            env_id,
+            org_id,
+            json: _,
+            reveal,
+            m2m,
+        } => {
             let cfg = ConfigClient::load(m2m).await?;
             let org = cfg.resolve_org(org_id)?;
-            let resp = cfg
+            let mut resp = cfg
                 .get(&format!("/organizations/{org}/config/environments/{env_id}/values"))
                 .await
                 .context("GET environment values")?;
+            // SMOODEV-3606: this used to print every secret in the
+            // environment verbatim. Same last-4 mask as `config list`.
+            if !reveal {
+                mask_config_values(&mut resp);
+            }
             println!();
             println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
             println!();
@@ -1177,10 +1221,73 @@ fn parse_set_value(key: &str, value: &str, tier: Tier, force_string: bool) -> Re
     Ok(parsed)
 }
 
+/// Where `config set` reads its value from (SMOODEV-3606).
+#[derive(Debug, PartialEq, Eq)]
+enum ValueSource {
+    /// The positional argument. `insecure` is the `--insecure-argv` opt-in
+    /// that lets it carry a secret-tier value.
+    Argv {
+        value: String,
+        insecure: bool,
+    },
+    Stdin,
+    File(std::path::PathBuf),
+    /// Nothing given: prompt on the terminal (masked for the secret tier).
+    Prompt,
+}
+
+impl ValueSource {
+    fn from_args(value: Option<String>, stdin: bool, file: Option<std::path::PathBuf>, insecure: bool) -> Self {
+        match (value, stdin, file) {
+            (Some(value), _, _) => Self::Argv { value, insecure },
+            (None, true, _) => Self::Stdin,
+            (None, false, Some(path)) => Self::File(path),
+            (None, false, None) => Self::Prompt,
+        }
+    }
+
+    /// Produce the value, now that the tier is known. A secret-tier value on
+    /// argv is refused here rather than at parse time because the tier comes
+    /// from the org's schema — an undeclared key is `secret` (ADR-075).
+    fn read(self, key: &str, tier: Tier) -> Result<String> {
+        match self {
+            Self::Argv { value, insecure } => {
+                check_argv_value_allowed(key, tier, insecure)?;
+                Ok(value)
+            }
+            Self::Stdin => crate::secret_input::from_stdin(&format!("value for `{key}`")),
+            Self::File(path) => crate::secret_input::from_file(&path, &format!("value for `{key}`")),
+            Self::Prompt => crate::secret_input::prompt(&format!("Value for {key} ({})", tier.as_wire()), tier == Tier::Secret),
+        }
+    }
+}
+
+/// A secret on argv is visible to every local user through `ps`, lands in
+/// shell history, and is copied into agent transcripts and CI logs. Refuse it
+/// for the secret tier unless the caller explicitly opted in; warn when they
+/// did (SMOODEV-3606).
+fn check_argv_value_allowed(key: &str, tier: Tier, insecure: bool) -> Result<()> {
+    if tier != Tier::Secret {
+        return Ok(());
+    }
+    if !insecure {
+        anyhow::bail!(
+            "`{key}` is a secret-tier key, so its value may not be passed on the command line (visible in `ps` and shell history). \
+             Pipe it in with `--value-stdin`, read it with `--value-file <path>`, or omit the value to be prompted. \
+             `--insecure-argv` overrides this."
+        );
+    }
+    eprintln!(
+        "  {} `{key}` is secret-tier and its value was passed on the command line (--insecure-argv) — it is now in `ps` and your shell history",
+        "!".yellow().bold()
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_set(
     key: String,
-    value: String,
+    source: ValueSource,
     environment: String,
     org_id: Option<String>,
     tier: Option<Tier>,
@@ -1251,6 +1358,7 @@ async fn cmd_set(
     let schemas_slice: &[Value] = schema_arr.map_or(&[], |a| a.as_slice());
     let derived = derive_tier_from_schemas(schemas_slice, &key);
     let resolved_tier = resolve_set_tier(tier, derived, &key, force)?;
+    let value = source.read(&key, resolved_tier)?;
 
     // Credential tripwire (D6): a public-tier slot is unencrypted and, on the
     // ADR-074 app surface, anonymously readable — a credential-shaped value
@@ -1456,7 +1564,21 @@ async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
             // Reuse the shared value-write path with the tier pinned to Limit.
             // `reveal=true` because limit values are non-sensitive numbers —
             // masking a number to `**` would be pure noise.
-            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false, false).await
+            // A limit is a number, never a secret, so argv is fine here.
+            cmd_set(
+                key,
+                ValueSource::Argv { value, insecure: false },
+                environment,
+                org_id,
+                Some(Tier::Limit),
+                schema_name,
+                json,
+                true,
+                m2m,
+                false,
+                false,
+            )
+            .await
         }
     }
 }
@@ -1616,6 +1738,30 @@ fn display_value_for(v: &Value, reveal: bool) -> String {
         raw
     } else {
         mask_secret(&raw)
+    }
+}
+
+/// Mask every config VALUE in an environment-values response, whatever its
+/// envelope: a value row (`{key, value, tier, …}`, at any depth) has its
+/// `value` masked, and a `values` key→value map has each entry masked. Ids,
+/// keys and tiers are left readable so the listing is still useful.
+fn mask_config_values(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                match (k.as_str(), &mut *child) {
+                    ("value", c) => *c = Value::String(display_value_for(c, false)),
+                    ("values", Value::Object(entries)) => {
+                        for entry in entries.values_mut() {
+                            *entry = Value::String(display_value_for(entry, false));
+                        }
+                    }
+                    _ => mask_config_values(child),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_config_values),
+        _ => {}
     }
 }
 
@@ -3971,6 +4117,88 @@ mod tests {
             "properties": { "secretConfigSchema": { "properties": { "apiKey": {"type":"string"} } } }
         });
         assert_eq!(derive_tier_from_schemas(&[bare], "apiKey"), Some(Tier::Secret));
+    }
+
+    /// SMOODEV-3606: `environments values` masks every value (row shape and
+    /// map shape) but leaves keys / ids / tiers readable.
+    #[test]
+    fn environment_values_are_masked() {
+        let mut rows = serde_json::json!({ "data": [
+            { "id": "v1", "key": "stripeSecretKey", "tier": "secret", "value": "sk_live_abcdef123456" },
+            { "id": "v2", "key": "retries", "tier": "limit", "value": 12345 },
+        ]});
+        mask_config_values(&mut rows);
+        assert_eq!(rows["data"][0]["value"], serde_json::json!("****************3456"));
+        assert_eq!(rows["data"][0]["key"], serde_json::json!("stripeSecretKey"));
+        assert_eq!(rows["data"][0]["tier"], serde_json::json!("secret"));
+        assert_eq!(rows["data"][1]["value"], serde_json::json!("*2345"));
+
+        let mut map = serde_json::json!({ "values": { "apiToken": "tok_0123456789" } });
+        mask_config_values(&mut map);
+        assert_eq!(map["values"]["apiToken"], serde_json::json!("**********6789"));
+        assert!(!map.to_string().contains("tok_0123"), "no plaintext may survive");
+    }
+
+    /// SMOODEV-3606: a secret-tier value on argv is refused (and the error
+    /// names the safe alternative); non-secret tiers keep the positional
+    /// form; `--insecure-argv` is the explicit escape hatch.
+    #[test]
+    fn secret_tier_refuses_a_positional_value() {
+        let err = check_argv_value_allowed("stripeKey", Tier::Secret, false).expect_err("secret on argv must be refused");
+        assert!(err.to_string().contains("--value-stdin"), "error must name --value-stdin: {err}");
+        assert!(check_argv_value_allowed("stripeKey", Tier::Secret, true).is_ok());
+        for tier in [Tier::Public, Tier::FeatureFlag, Tier::Limit] {
+            assert!(check_argv_value_allowed("k", tier, false).is_ok(), "{tier:?} keeps argv");
+        }
+        // An undeclared key resolves to `secret`, so it is refused too.
+        let undeclared = resolve_set_tier(None, None, "mystery", false).expect("defaults");
+        assert!(check_argv_value_allowed("mystery", undeclared, false).is_err());
+    }
+
+    #[test]
+    fn set_value_source_flags_parse() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let p = |args: &[&str]| Wrap::try_parse_from(std::iter::once("t").chain(args.iter().copied()));
+        let source = |args: &[&str]| match p(args).expect("parse").cmd {
+            Cmd::Set {
+                value,
+                value_stdin,
+                value_file,
+                insecure_argv,
+                ..
+            } => ValueSource::from_args(value, value_stdin, value_file, insecure_argv),
+            _ => panic!("expected Set"),
+        };
+
+        assert_eq!(
+            source(&["set", "k", "v"]),
+            ValueSource::Argv {
+                value: "v".into(),
+                insecure: false
+            }
+        );
+        assert_eq!(source(&["set", "k", "--value-stdin"]), ValueSource::Stdin);
+        assert_eq!(source(&["set", "k", "--value-file", "/tmp/x"]), ValueSource::File("/tmp/x".into()));
+        assert_eq!(source(&["set", "k"]), ValueSource::Prompt);
+        assert_eq!(
+            source(&["set", "k", "v", "--insecure-argv"]),
+            ValueSource::Argv {
+                value: "v".into(),
+                insecure: true
+            }
+        );
+        // One source at a time.
+        assert!(p(&["set", "k", "v", "--value-stdin"]).is_err());
+        assert!(p(&["set", "k", "v", "--value-file", "/tmp/x"]).is_err());
+        assert!(p(&["set", "k", "--value-stdin", "--value-file", "/tmp/x"]).is_err());
+        // --insecure-argv only means something next to a positional value.
+        assert!(p(&["set", "k", "--value-stdin", "--insecure-argv"]).is_err());
     }
 
     #[test]

@@ -98,19 +98,25 @@ pub enum ToolsCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Turn a tool ON for the org (e.g. `email.send`).
+    /// Turn a tool ON for the org (e.g. `email.send`). Org-wide: changes
+    /// what the operator may do for everyone, so it confirms first.
     Enable {
         /// Dotted tool id, as shown by `tools list`.
         tool_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Turn a tool OFF for the org — the operator can no longer use it at all.
+    /// Org-wide, so it confirms first.
     Disable {
         /// Dotted tool id, as shown by `tools list`.
         tool_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -166,8 +172,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         ),
         Cmd::Tools { cmd } => match cmd {
             ToolsCmd::List { org, json } => tools_list(&resolve_org(org)?, json).await,
-            ToolsCmd::Enable { tool_id, org } => tools_set(&resolve_org(org)?, &tool_id, true).await,
-            ToolsCmd::Disable { tool_id, org } => tools_set(&resolve_org(org)?, &tool_id, false).await,
+            ToolsCmd::Enable { tool_id, org, confirm } => tools_set(&resolve_org(org)?, &tool_id, true, confirm).await,
+            ToolsCmd::Disable { tool_id, org, confirm } => tools_set(&resolve_org(org)?, &tool_id, false, confirm).await,
         },
         Cmd::History { conversation_id, org, json } => history(&client, &resolve_org(org)?, &conversation_id, json).await,
     }
@@ -354,7 +360,20 @@ async fn tools_list(org: &str, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-async fn tools_set(org: &str, tool_id: &str, enabled: bool) -> Result<()> {
+async fn tools_set(org: &str, tool_id: &str, enabled: bool, confirm: crate::destructive::Confirm) -> Result<()> {
+    let proceed = crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb: if enabled { "enable" } else { "disable" },
+            noun: "operator tool (org-wide)",
+            id: tool_id,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )?;
+    if !proceed {
+        return Ok(());
+    }
     let tools = set_operator_tool(org, tool_id, enabled).await?;
     let verb = if enabled {
         "enabled".green().to_string()

@@ -49,6 +49,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Only consulted with `--publish`, which takes the site live.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Regenerate an EXISTING site in place: fresh spec → new revision on each
     /// page it already has → publish. Idempotent — updates the live site (its
@@ -68,6 +71,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Going live is public and immediate — `--dry-run` / `--yes`.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// List the org's sites (id + slug + name). Slug resolution for `regen --slug`.
     List {
@@ -86,6 +92,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Going live is public and immediate — `--dry-run` / `--yes`.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Editor view of a site — pages + latest revisions + publish state.
     Get {
@@ -123,6 +132,9 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Going live is public and immediate — `--dry-run` / `--yes`.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Read/write a site's SOURCE: component HTML/CSS/JS, stylesheet rules, page SEO text.
     Source {
@@ -306,6 +318,22 @@ pub enum ContentCmd {
 /// Read the `--brief` file and shape it into the generate request body.
 /// Accepts either the bare SiteBrief object or a `{brief, brand?, assetUrls?}`
 /// wrapper; injects `contentType: "website"` either way.
+/// Publishing, regenerating and rolling back all change what the PUBLIC sees
+/// at the site's URL, immediately — so they print the org + site and confirm
+/// first, like a delete (SMOODEV-3606).
+fn gate_live(verb: &str, noun: &str, id: &str, org: &str, confirm: crate::destructive::Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb,
+            noun,
+            id,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )
+}
+
 fn generate_body(brief_path: &str) -> Result<serde_json::Value> {
     let mut body = read_body(brief_path)?;
     if body.get("brief").is_none() {
@@ -452,8 +480,19 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("POST content-items/generate")?,
             );
         }
-        Cmd::Build { brief, name, publish, org } => {
+        Cmd::Build {
+            brief,
+            name,
+            publish,
+            org,
+            confirm,
+        } => {
             let o = require_active_org(&client, org)?;
+            // Ask before generating anything, so a declined publish doesn't
+            // leave an orphan draft site behind.
+            if publish && !gate_live("publish", "new site", &name, &o, confirm)? {
+                return Ok(());
+            }
 
             // 1. Generate the SiteSpec.
             let gen = client
@@ -488,9 +527,18 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 "url": live_url(&site_resp),
             }));
         }
-        Cmd::Regen { site, slug, brief, org } => {
+        Cmd::Regen {
+            site,
+            slug,
+            brief,
+            org,
+            confirm,
+        } => {
             let o = require_active_org(&client, org)?;
             let site = resolve_site_id(&client, &o, site, slug).await?;
+            if !gate_live("republish", "live site (regenerated from the brief)", &site, &o, confirm)? {
+                return Ok(());
+            }
 
             // 1. Fresh spec from the brief.
             let gen = client
@@ -540,8 +588,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 print_list_envelope(&body, "sites");
             }
         }
-        Cmd::Publish { site, org } => {
+        Cmd::Publish { site, org, confirm } => {
             let o = require_active_org(&client, org)?;
+            if !gate_live("publish", "site", &site, &o, confirm)? {
+                return Ok(());
+            }
             print_json(
                 &client
                     .post(&format!("/organizations/{o}/heypage/sites/{site}/publish"), None)
@@ -568,9 +619,19 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("GET heypage/sites/{id}/versions")?,
             );
         }
-        Cmd::Rollback { site, slug, publish_id, org } => {
+        Cmd::Rollback {
+            site,
+            slug,
+            publish_id,
+            org,
+            confirm,
+        } => {
             let o = require_active_org(&client, org)?;
             let site = resolve_site_id(&client, &o, site, slug).await?;
+            let target = format!("{site} → {}", publish_id.as_deref().unwrap_or("the previous publish"));
+            if !gate_live("roll back", "live site", &target, &o, confirm)? {
+                return Ok(());
+            }
             let body = publish_id.map_or_else(|| json!({}), |id| json!({ "publishId": id }));
             print_json(
                 &client

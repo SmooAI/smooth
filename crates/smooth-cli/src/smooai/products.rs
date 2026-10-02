@@ -16,13 +16,17 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Activate the free tier.
+    /// Activate the free tier. Changes the org's billing plan, so it
+    /// prints the org and confirms first (SMOODEV-3606).
     Free {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
-    /// Activate a bypass — admin only. Optional JSON body.
+    /// Activate a bypass — admin only. Optional JSON body. Grants paid
+    /// entitlements without payment, so it confirms first.
     Bypass {
         /// Optional JSON body (file path, or `-` for stdin) with bypass details.
         #[arg(long)]
@@ -30,6 +34,8 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -45,8 +51,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 print_list_envelope(&body, "products");
             }
         }
-        Cmd::Free { org } => {
+        Cmd::Free { org, confirm } => {
             let o = require_active_org(&client, org)?;
+            if !gate_plan_change("activate", "free tier for org", &o, confirm)? {
+                return Ok(());
+            }
             print_json(
                 &client
                     .post(&format!("/organizations/{o}/products/free"), None)
@@ -54,12 +63,15 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("POST products free")?,
             );
         }
-        Cmd::Bypass { body, org } => {
+        Cmd::Bypass { body, org, confirm } => {
             let o = require_active_org(&client, org)?;
             let b = match body {
                 Some(p) => Some(read_body(&p)?),
                 None => None,
             };
+            if !gate_plan_change("activate", "billing bypass for org", &o, confirm)? {
+                return Ok(());
+            }
             print_json(
                 &client
                     .post(&format!("/organizations/{o}/products/bypass"), b.as_ref())
@@ -69,6 +81,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A plan change (free tier, bypass) alters what the org is billed for and
+/// entitled to; it gets the destructive gate so a stale active org cannot
+/// silently take the change (SMOODEV-3606).
+fn gate_plan_change(verb: &str, noun: &str, org: &str, confirm: crate::destructive::Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb,
+            noun,
+            id: org,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )
 }
 
 #[cfg(test)]
