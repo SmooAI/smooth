@@ -59,7 +59,9 @@ const UTF8_FLAG: &str = "-u";
 fn tmux(socket: &str, args: &[&str]) -> Result<std::process::Output> {
     let mut full: Vec<&str> = vec![UTF8_FLAG, "-L", socket];
     full.extend_from_slice(args);
-    Command::new("tmux").args(&full).output().context("running tmux")
+    // th-9f6814: resolved off-PATH too, and a missing tmux says so.
+    let bin = smooth_tmux::tmux_bin()?;
+    Command::new(&bin).args(&full).output().with_context(|| format!("running {}", bin.display()))
 }
 
 fn tmux_ok(socket: &str, args: &[&str]) -> Result<String> {
@@ -236,6 +238,10 @@ pub fn launch_with(socket: &str, session: &str, cwd: &Path, argv: &[String], env
     if argv.is_empty() {
         return Err(anyhow!("cannot launch an empty argv"));
     }
+    // th-9f6814: say what is missing up front — no tmux, or no program —
+    // instead of a pane that dies with 127 or a session that never starts.
+    smooth_tmux::tmux_bin()?;
+    check_program(&argv[0], env)?;
     let cmd = exit_prefix.map_or_else(|| exec_command_env(argv, env), |p| wrapped_command_env(argv, env, p));
     let cwd_s = cwd.to_string_lossy();
     ensure_server(socket);
@@ -261,6 +267,32 @@ pub fn launch_with(socket: &str, session: &str, cwd: &Path, argv: &[String], env
         return Err(anyhow!("tmux new-session `{session}` failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     pane_pid(socket, session)
+}
+
+/// `argv0` is runnable in the pane: an executable path, or a bare name on
+/// the pane's `PATH` (the `PATH` in `env` when the launch sets one).
+///
+/// # Errors
+/// A human message naming the program and where it was looked for.
+pub fn check_program(argv0: &str, env: &[(String, String)]) -> Result<()> {
+    if argv0.contains('/') {
+        if smooth_tmux::bin::is_executable(Path::new(argv0)) {
+            return Ok(());
+        }
+        return Err(anyhow!("`{argv0}` does not exist or is not executable"));
+    }
+    let path = env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "PATH")
+        .map_or_else(|| std::env::var_os("PATH").unwrap_or_default(), |(_, v)| v.into());
+    if std::env::split_paths(&path).any(|d| smooth_tmux::bin::is_executable(&d.join(argv0))) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "`{argv0}` not found on PATH ({}); install it, or check `th harness doctor`",
+        path.to_string_lossy()
+    ))
 }
 
 /// The pane's process id.
@@ -496,7 +528,7 @@ pub fn kill_server(socket: &str) {
 #[must_use]
 pub fn attach_argv(socket: &str, session: &str) -> Vec<String> {
     vec![
-        "tmux".into(),
+        tmux_program(),
         UTF8_FLAG.into(),
         "-L".into(),
         socket.into(),
@@ -506,6 +538,20 @@ pub fn attach_argv(socket: &str, session: &str) -> Vec<String> {
     ]
 }
 
+/// The tmux to run, as a string for an argv: the resolved path, or the bare
+/// name when none resolves (the spawn then fails the way it always did).
+fn tmux_program() -> String {
+    smooth_tmux::tmux_bin().map_or_else(|_| "tmux".to_string(), |p| p.to_string_lossy().into_owned())
+}
+
+/// Where the engine's tmux is, or why there is none (doctor + logs).
+///
+/// # Errors
+/// The resolver's human message when no tmux can be found.
+pub fn tmux_path() -> Result<PathBuf> {
+    smooth_tmux::tmux_bin()
+}
+
 fn driver(socket: &str, session: &str) -> TmuxDriver {
     TmuxDriver::open_existing(socket, session)
 }
@@ -513,7 +559,7 @@ fn driver(socket: &str, session: &str) -> TmuxDriver {
 /// True when a `tmux` binary runs.
 #[must_use]
 pub fn tmux_available() -> bool {
-    Command::new("tmux")
+    smooth_tmux::tmux_command()
         .arg("-V")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -622,10 +668,34 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn check_program_finds_paths_and_bare_names_and_explains_a_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let agent = bin.join("my-agent");
+        std::fs::write(&agent, "#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        check_program(&agent.to_string_lossy(), &[]).unwrap();
+        let env = vec![("PATH".to_string(), bin.to_string_lossy().into_owned())];
+        check_program("my-agent", &env).unwrap();
+        let err = check_program("claude-nope", &env).unwrap_err().to_string();
+        assert!(
+            err.contains("`claude-nope` not found on PATH") && err.contains(&*bin.to_string_lossy()),
+            "{err}"
+        );
+        let err = check_program("/nonexistent/claude", &[]).unwrap_err().to_string();
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
     #[test]
     fn attach_argv_targets_the_flow_socket() {
         let a = attach_argv("smoothflow", "fs-1");
-        assert_eq!(a[0], "tmux");
+        assert!(a[0] == "tmux" || std::path::Path::new(&a[0]).ends_with("tmux"), "{}", a[0]);
         // th-bcd819: forced UTF-8, or a LANG-less client (the app's child
         // daemon) gets `_` for every Nerd Font glyph.
         assert_eq!(a[1], "-u");

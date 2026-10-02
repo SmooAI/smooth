@@ -68,6 +68,10 @@ const HARNESS_PREFS_KEY: &str = "harness_prefs";
 /// back as `flow_id`.
 pub const FLOW_ID_ENV: &str = "SMOOTH_FLOW_ID";
 
+/// The attention reason on a row whose launch failed (th-9f6814): no tmux,
+/// tmux refused, or the harness binary is missing. The detail says which.
+pub const LAUNCH_FAILED: &str = "launch_failed";
+
 /// How the engine is configured by its host.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -765,6 +769,8 @@ impl Engine {
     /// When the store cannot be opened.
     pub fn open(cfg: EngineConfig) -> Result<Self> {
         let store = FlowStore::open(&cfg.db_path)?;
+        // th-9f6814: read the login shell's PATH now, off the launch path.
+        crate::pane_path::warm();
         let hook_tokens = crate::hook_auth::token_dir(&cfg.db_path);
         let exit_dir = cfg.db_path.parent().unwrap_or_else(|| Path::new(".")).join(EXIT_DIR);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -831,12 +837,10 @@ impl Engine {
     /// [`Self::set_resolve_env`] override (bare first name when nothing resolves).
     fn resolve_bin(&self, m: &Manifest) -> String {
         let env = self.inner.resolve_env.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        match env {
-            Some((home, path)) => m
-                .resolve_binary_in(&home, &path)
-                .map_or_else(|| m.binary.names[0].clone(), |p| p.to_string_lossy().into_owned()),
-            None => m.resolve_binary(),
-        }
+        // th-9f6814: without the override, against the pane's PATH — where it runs.
+        let (home, path) = env.unwrap_or_else(|| (dirs_next::home_dir().unwrap_or_default(), crate::pane_path::pane_path()));
+        m.resolve_binary_in(&home, &path)
+            .map_or_else(|| m.binary.names[0].clone(), |p| p.to_string_lossy().into_owned())
     }
 
     // ── harnesses (th-0f6126) ─────────────────────────────────────────────
@@ -982,7 +986,8 @@ impl Engine {
         let prefs = self.harness_prefs()?;
         let mut infos = self
             .registry()
-            .infos(&prefs, all, &self.inner.home, &std::env::var_os("PATH").unwrap_or_default());
+            // th-9f6814: "installed" means found where a pane will look.
+            .infos(&prefs, all, &self.inner.home, &crate::pane_path::pane_path());
         if let Some(cache) = &self.inner.health {
             let cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for info in &mut infos {
@@ -1466,8 +1471,13 @@ impl Engine {
         // is gone before this one can exit.
         self.clear_exit_files(&session.id);
         let _ = std::fs::create_dir_all(&self.inner.exit_dir);
+        // th-9f6814: a Finder-launched daemon's PATH is /usr/bin:/bin:…; the
+        // pane gets the user's login PATH unless the manifest set one.
+        if !env.iter().any(|(k, _)| k == "PATH") {
+            env.insert(0, ("PATH".to_string(), crate::pane_path::pane_path().to_string_lossy().into_owned()));
+        }
         let prefix = self.exit_prefix(&session.id);
-        let pid = self.host().launch(
+        let launched = self.host().launch(
             &target,
             &Launch {
                 cwd: Path::new(&session.worktree),
@@ -1475,7 +1485,11 @@ impl Engine {
                 env: &env,
                 exit_prefix: Some(&prefix),
             },
-        )?;
+        );
+        let pid = match launched {
+            Ok(pid) => pid,
+            Err(err) => return Err(self.launch_failed(&session.id, &target, err)),
+        };
         let start = self.host().process_start(pid);
         self.with_store(|st| st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv))?;
         if let Some(agent) = &session.agent_session_id {
@@ -1484,6 +1498,23 @@ impl Engine {
         let s = self.require(&session.id)?;
         self.emit_session(&s);
         Ok(s)
+    }
+
+    /// A launch failed (no tmux, tmux refused, the harness binary missing):
+    /// the row goes `dead` with the reason, every client is told, the daemon
+    /// log says it at WARN — never a silent `starting` (th-9f6814). Returns
+    /// the error for the caller to surface too.
+    fn launch_failed(&self, id: &str, target: &SessionRef, err: anyhow::Error) -> anyhow::Error {
+        let detail = format!("launch failed: {err:#}");
+        tracing::warn!(session = %id, error = %format!("{err:#}"), "flow: session launch failed");
+        // A half-made session (created, then its pid unreadable) must not linger.
+        if self.host().alive(target) {
+            self.host().kill_session(target);
+        }
+        if let Err(e) = self.set_state(id, SessionState::Dead, Some(Attention::new(LAUNCH_FAILED).with_detail(detail))) {
+            tracing::warn!(session = %id, error = %e, "flow: could not record the launch failure");
+        }
+        err
     }
 
     /// The session's PTY bridge, spawning it on a miss. `attaching` counts a
@@ -3217,7 +3248,19 @@ mod tests {
             .unwrap()
         };
         let shell = mk(SessionKind::Shell, vec!["sh"]);
-        let oc = mk(SessionKind::Opencode, vec!["/x/opencode", "--prompt", "hi"]);
+        // A real executable, so the relaunch below can come up (th-9f6814: a
+        // missing program now fails the launch up front).
+        let bin_dir = tmp.path().join("x");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let opencode = bin_dir.join("opencode");
+        std::fs::write(&opencode, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let opencode = opencode.to_string_lossy().into_owned();
+        let oc = mk(SessionKind::Opencode, vec![opencode.as_str(), "--prompt", "hi"]);
         let ev = |event: &str, sid: &str, cwd: &str| HookEvent {
             harness: "opencode".into(),
             event: event.into(),
@@ -3238,11 +3281,24 @@ mod tests {
         assert_eq!(bound.agent_session_id.as_deref(), Some("ses_1"));
         assert_eq!(bound.state_source, "hooks");
         assert_eq!(e.get(&shell.id).unwrap().unwrap().agent_session_id, None);
-        // A relaunch (fails without tmux, launches a dead `/x/opencode` pane
-        // with it) resets the source first either way, and rotates the token.
+        // Restore mode per kind.
+        assert_eq!(resume_argv(&bound, &reg()), vec![opencode.as_str(), "--session", "ses_1"]);
+        let mut cx = mk(SessionKind::Codex, vec!["/x/codex", "hi"]);
+        assert_eq!(resume_argv(&cx, &reg()), cx.argv, "no id yet ⇒ relaunch, not resume");
+        cx.agent_session_id = Some("t-9".into());
+        assert_eq!(resume_argv(&cx, &reg()), vec!["/x/codex", "resume", "t-9"]);
+        // A relaunch resets the source first, and rotates the token.
         let relaunched = e.relaunch(&bound);
-        let _ = std::process::Command::new("tmux").args(["-L", &sock, "kill-server"]).output();
-        drop(relaunched);
+        let _ = smooth_tmux::tmux_command().args(["-L", &sock, "kill-server"]).output();
+        if !tmux::tmux_available() {
+            // No tmux: the launch fails, and says so — dead, not stuck.
+            assert!(relaunched.is_err());
+            let failed = e.get(&oc.id).unwrap().unwrap();
+            assert_eq!(failed.state, SessionState::Dead);
+            assert_eq!(failed.attention.unwrap().reason, LAUNCH_FAILED);
+            return;
+        }
+        relaunched.unwrap();
         assert_eq!(
             e.get(&oc.id).unwrap().unwrap().state_source,
             "inferred",
@@ -3263,12 +3319,51 @@ mod tests {
         // Once bound, the token speaks for ses_1 only; a second id does not steal it.
         e.hook(ev("SessionStart", "ses_2", &wt), &second).unwrap();
         assert_eq!(e.get(&oc.id).unwrap().unwrap().agent_session_id.as_deref(), Some("ses_1"));
-        // Restore mode per kind.
-        assert_eq!(resume_argv(&e.get(&oc.id).unwrap().unwrap(), &reg()), vec!["/x/opencode", "--session", "ses_1"]);
-        let mut cx = mk(SessionKind::Codex, vec!["/x/codex", "hi"]);
-        assert_eq!(resume_argv(&cx, &reg()), cx.argv, "no id yet ⇒ relaunch, not resume");
-        cx.agent_session_id = Some("t-9".into());
-        assert_eq!(resume_argv(&cx, &reg()), vec!["/x/codex", "resume", "t-9"]);
+    }
+
+    /// th-9f6814: a launch that cannot happen — here, a program that does
+    /// not exist — leaves the row `dead` with the reason, broadcast to every
+    /// client, never `starting` with no pid and no word.
+    #[test]
+    fn a_failed_launch_is_dead_with_the_reason_not_stuck_starting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let mut rx = e.subscribe();
+        let sock = format!("flow-test-lf-{}", std::process::id());
+        let err = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                worktree: Some(tmp.path().to_string_lossy().into()),
+                argv: Some(vec!["/nonexistent/th-9f6814/agent".into()]),
+                tmux_socket: Some(sock.clone()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .to_string();
+        let _ = smooth_tmux::tmux_command().args(["-L", &sock, "kill-server"]).output();
+        let rows = e.list().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.state, SessionState::Dead, "{row:?}");
+        assert_eq!(row.pid, None);
+        let att = row.attention.clone().unwrap();
+        assert_eq!(att.reason, LAUNCH_FAILED);
+        let detail = att.detail.unwrap();
+        assert!(detail.starts_with("launch failed: "), "{detail}");
+        // With tmux it is the program that is missing; without, tmux.
+        let names_it = |t: &str| t.contains("/nonexistent/th-9f6814/agent") || t.contains("tmux not found");
+        assert!(names_it(&detail) && names_it(&err), "{detail} / {err}");
+        if tmux::tmux_available() {
+            assert!(detail.contains("does not exist or is not executable"), "{detail}");
+        }
+        // Every client heard about it.
+        let mut saw_dead = false;
+        while let Ok(f) = rx.try_recv() {
+            if let ServerFrame::Session { session } = f {
+                saw_dead |= session.id == row.id && session.state == SessionState::Dead;
+            }
+        }
+        assert!(saw_dead, "the dead row was broadcast");
     }
 
     #[test]
@@ -4575,7 +4670,7 @@ mod tests {
 
     /// The tmux clients attached to `session` — one per live PTY bridge.
     fn tmux_clients(sock: &str, session: &str) -> Vec<String> {
-        let out = std::process::Command::new("tmux")
+        let out = smooth_tmux::tmux_command()
             .args(["-L", sock, "list-clients", "-t", session, "-F", "#{client_pid}"])
             .output()
             .unwrap();
@@ -5450,7 +5545,13 @@ quiet_ms = 300
             Some(tmp.path().join(EXIT_DIR).join(&s.id).as_path()),
             "every launch is wrapped for exit-code capture"
         );
-        assert!(launched.env.is_empty(), "a shell gets no harness env: {:?}", launched.env);
+        // th-9f6814: only the pane PATH, never a harness's env.
+        assert_eq!(
+            launched.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            ["PATH"],
+            "a shell gets the pane PATH and no harness env: {:?}",
+            launched.env
+        );
 
         // A running pane stays put through supervision.
         e.supervise_tick().unwrap();

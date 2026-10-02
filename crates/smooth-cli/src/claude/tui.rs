@@ -10,7 +10,6 @@
 //! the `App` navigation) is pure and unit tested; the draw + event loop
 //! is the IO shell, verified by running it.
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -166,7 +165,7 @@ fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
 /// Suspend the TUI, hand the terminal to `tmux attach`, then restore it.
 fn attach_handoff(terminal: &mut DefaultTerminal, entry: &SessionEntry) -> Result<()> {
     ratatui::restore();
-    let status = Command::new("tmux").args(["-L", &entry.socket, "attach", "-t", &entry.session]).status();
+    let status = smooth_tmux::tmux_command().args(["-L", &entry.socket, "attach", "-t", &entry.session]).status();
     *terminal = ratatui::init();
     let _ = terminal.clear();
     status.context("running tmux attach")?;
@@ -174,7 +173,7 @@ fn attach_handoff(terminal: &mut DefaultTerminal, entry: &SessionEntry) -> Resul
 }
 
 fn capture_pane(entry: &SessionEntry) -> String {
-    Command::new("tmux")
+    smooth_tmux::tmux_command()
         .args(["-L", &entry.socket, "capture-pane", "-t", &entry.session, "-p"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

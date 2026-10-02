@@ -60,12 +60,27 @@ pub fn run(home: &Path, only: Option<&str>, json: bool, verbose: bool) -> Result
     let registry = Registry::load(home, project.as_deref());
     let machine = Machine::current(home.to_path_buf());
     let rows = diagnose_all(&registry, &machine, only)?;
+    // th-9f6814: every session runs under tmux, found the way the daemon finds it.
+    let tmux = smooth_flow::tmux::tmux_path();
     if json {
+        let (tmux_path, tmux_error) = match &tmux {
+            Ok(p) => (Some(p.to_string_lossy().into_owned()), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "harnesses": rows, "app_path": machine.app_path.map(|p| p.to_string_lossy().into_owned()) }))?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "harnesses": rows,
+                "app_path": machine.app_path.map(|p| p.to_string_lossy().into_owned()),
+                "tmux": tmux_path,
+                "tmux_error": tmux_error,
+            }))?
         );
     } else {
+        match &tmux {
+            Ok(p) => println!("{} {}", "● tmux".bold(), p.display().dimmed()),
+            Err(e) => println!("{} {e}", "○ tmux".bold()),
+        }
         print_human(&rows, verbose);
     }
     Ok(())

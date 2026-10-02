@@ -7,7 +7,7 @@
 //! prune entries whose tmux session has died.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -90,7 +90,7 @@ pub fn read_all() -> Vec<SessionEntry> {
 /// True if a tmux session is still present on its socket.
 #[must_use]
 pub fn is_session_live(entry: &SessionEntry) -> bool {
-    Command::new("tmux")
+    smooth_tmux::tmux_command()
         .args(["-L", &entry.socket, "has-session", "-t", &entry.session])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

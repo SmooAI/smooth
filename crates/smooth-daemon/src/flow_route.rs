@@ -96,6 +96,12 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
         repo_root: dirs_next::home_dir(),
         ..smooth_flow::EngineConfig::new(workspace)
     })?;
+    // th-9f6814: say at boot which tmux sessions will run under — or that
+    // there is none, which otherwise only surfaces at the first launch.
+    match smooth_flow::tmux::tmux_path() {
+        Ok(p) => tracing::info!(tmux = %p.display(), "flow: tmux resolved"),
+        Err(e) => tracing::warn!(error = %e, "flow: no tmux; every SmoothFlow session will fail to launch"),
+    }
     // Index now, so the first New Session dialog has rows to offer.
     engine.rescan_repos(false);
     drop(spawn_supervisor(engine.clone()));
