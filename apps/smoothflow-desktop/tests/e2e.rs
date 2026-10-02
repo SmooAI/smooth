@@ -542,3 +542,47 @@ fn a_session_that_cannot_launch_shows_why() {
         .expect("the pane shows text, not a terminal");
     assert!(hint.starts_with("shell is dead: ") && hint.contains(&detail), "{hint}");
 }
+
+/// Close Out a live shell, the way a middle-click on its fleet row does it
+/// (`Core::close_out` with the row's id, th-f958f2): the confirmation says it
+/// kills the session first, confirming sends `flow.close`, and the real
+/// engine kills it and drops the row. A shell has no pearl and no worktree of
+/// its own, so nothing else happens and nothing is refused.
+#[test]
+fn closing_out_a_shell_drops_it_from_the_fleet() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    app.wait(&d, "the shell to attach", WAIT, |a| a.core.attached_size(&id).is_some());
+
+    app.core.close_out(&id);
+    let dialog = app.core.dialog.clone().expect("Close Out asks first");
+    assert!(dialog.message.contains("kills it first"), "a live session says so: {}", dialog.message);
+    let (label, close) = dialog
+        .buttons
+        .into_iter()
+        .find(|(_, c)| matches!(c, Confirmed::CloseOut { .. }))
+        .expect("a Close Out button");
+    assert_eq!(label, "Kill and Close Out");
+    assert!(
+        matches!(
+            &close,
+            Confirmed::CloseOut {
+                close_pearl: false,
+                remove_worktree: false,
+                ..
+            }
+        ),
+        "a shell has no pearl or worktree of its own: {close:?}"
+    );
+    app.core.confirm(close);
+    app.wait(&d, "the closed-out shell to leave the fleet", WAIT, |a| {
+        !a.core.sessions.contains_key(&id) && !a.core.order.contains(&id)
+    });
+    assert!(app.core.dialog.is_none(), "no refusal: {:?}", app.core.dialog);
+    assert_eq!(app.core.surfaces.focused_session(), None, "no pane still shows it");
+    assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}

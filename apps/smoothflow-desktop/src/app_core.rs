@@ -15,7 +15,7 @@ use smooth_flow_client::harness::Harness;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::{Direction, PaneId, Rect};
 use smooth_flow_client::surfaces::Surfaces;
-use smooth_flow_client::{fleet, Session};
+use smooth_flow_client::{fleet, title, Session};
 
 use crate::discovery::Endpoint;
 use crate::frames::{self, Decision, Inbound, NewSession};
@@ -59,6 +59,13 @@ pub enum Confirmed {
         session: String,
         resume: bool,
     },
+    /// Close Out (`flow.close`, never forced): kill it if live, close its
+    /// pearl, remove its own worktree and branch once merged, drop the row.
+    CloseOut {
+        session: String,
+        close_pearl: bool,
+        remove_worktree: bool,
+    },
 }
 
 /// A modal question. Cancel is always offered and is the default (Enter/Esc).
@@ -69,6 +76,68 @@ pub struct Dialog {
     pub buttons: Vec<(String, Confirmed)>,
     /// Offer "Don't ask again" (the close confirmation setting).
     pub offers_dont_ask: bool,
+    /// The dismiss button's label: "Cancel" for a question, "OK" for a
+    /// dialog that only reports (an engine refusal).
+    pub cancel: String,
+}
+
+/// Whether a session lives in a worktree of its own, so Close Out may offer
+/// to remove it. The main checkout never qualifies (the engine refuses too),
+/// and neither does a row with no project, such as a shell started in
+/// `$HOME`: there is nothing to compare against, and the alternative is
+/// offering to delete the home directory. Same rule as the Mac's
+/// `SessionClose.hasOwnWorktree`.
+#[must_use]
+pub fn has_own_worktree(s: &Session) -> bool {
+    !s.worktree.is_empty() && !s.project.is_empty() && s.worktree != s.project
+}
+
+/// The Close Out confirmation for `s` (spec §7). It always asks: Close Out
+/// is for good. It says, before you confirm, that a live session is killed
+/// first, which pearl closes, and which worktree and branch go (and that the
+/// engine refuses a dirty or unmerged one and touches nothing). Cancel is the
+/// default, as for every dialog here.
+#[must_use]
+pub fn close_out_dialog(s: &Session, home: &str) -> Dialog {
+    let name = title::tab_title(s, home);
+    let live = s.is_live();
+    let own = has_own_worktree(s);
+    let mut lines = Vec::new();
+    if live {
+        let state = format!("{:?}", s.state).to_lowercase().replace("needsyou", "needs you");
+        lines.push(format!(
+            "This session is still running ({state}) — Close Out kills it first. An agent killed mid-turn loses its in-flight work."
+        ));
+    }
+    lines.push(
+        s.pearl_id
+            .as_ref()
+            .map_or_else(|| "No pearl on this session.".to_string(), |p| format!("Closes pearl {p}.")),
+    );
+    lines.push(if own {
+        let branch = s.branch.as_ref().map(|b| format!(" and deletes branch {b}")).unwrap_or_default();
+        format!(
+            "Removes worktree {}{branch} — only once the branch is merged and the worktree is clean; otherwise the engine refuses and changes nothing.",
+            smooth_flow_client::directory::abbreviate(&s.worktree, home)
+        )
+    } else {
+        "Main checkout or no worktree — nothing on disk is removed.".to_string()
+    });
+    lines.push("The session leaves the fleet.".to_string());
+    Dialog {
+        title: format!("Close out {name}?"),
+        message: lines.join("\n"),
+        buttons: vec![(
+            if live { "Kill and Close Out" } else { "Close Out" }.to_string(),
+            Confirmed::CloseOut {
+                session: s.id.clone(),
+                close_pearl: s.pearl_id.is_some(),
+                remove_worktree: own,
+            },
+        )],
+        offers_dont_ask: false,
+        cancel: "Cancel".into(),
+    }
 }
 
 /// An HTTP read the New Session sheet asked for (`GET /api/flow/repos` or
@@ -142,6 +211,12 @@ pub struct Core {
     pub pane_area: Rect,
     /// The last engine error or "not yet" note, shown in the footer.
     pub notice: Option<String>,
+    /// The `seq` the next request that wants an answer carries.
+    next_seq: u64,
+    /// Close Outs in flight: `seq` → (session id, its title). The engine
+    /// answers with `flow.session.removed`, or `flow.error` whose `ref` is
+    /// the seq.
+    closing: HashMap<u64, (String, String)>,
 }
 
 impl Core {
@@ -175,6 +250,8 @@ impl Core {
                 h: 0.0,
             },
             notice: None,
+            next_seq: 1,
+            closing: HashMap::new(),
         }
     }
 
@@ -300,6 +377,18 @@ impl Core {
                     }
                 }
                 self.attached.clear();
+                // A reconnect: answers to Close Outs sent on the old
+                // connection never come. One whose row is gone did close.
+                let done: Vec<String> = self
+                    .closing
+                    .values()
+                    .filter(|(id, _)| !self.sessions.contains_key(id))
+                    .map(|(_, n)| n.clone())
+                    .collect();
+                if let Some(name) = done.last() {
+                    self.notice = Some(format!("Closed out {name}."));
+                }
+                self.closing.clear();
             }
             Event::Frame(Inbound::Session(row)) => {
                 let id = row.session.id.clone();
@@ -308,6 +397,10 @@ impl Core {
                 }
             }
             Event::Frame(Inbound::Removed(id)) => {
+                let closed: Vec<u64> = self.closing.iter().filter(|(_, (s, _))| *s == id).map(|(seq, _)| *seq).collect();
+                if let Some((_, name)) = closed.iter().filter_map(|seq| self.closing.remove(seq)).last() {
+                    self.notice = Some(format!("Closed out {name}."));
+                }
                 self.order.retain(|x| *x != id);
                 self.sessions.remove(&id);
                 self.attention.remove(&id);
@@ -333,7 +426,21 @@ impl Core {
                     self.out.send(frames::input(&id, &replies));
                 }
             }
-            Event::Frame(Inbound::Error(message)) => self.notice = Some(message),
+            Event::Frame(Inbound::Error { reference, message }) => match reference.and_then(|r| self.closing.remove(&r)) {
+                // A refused Close Out: the engine's reason, verbatim, in a
+                // dialog of its own, so it can't be missed. Nothing forces it
+                // from here.
+                Some((_, name)) => {
+                    self.dialog = Some(Dialog {
+                        title: format!("Couldn't close out {name}"),
+                        message: format!("{message}\nThe session is still in the fleet."),
+                        buttons: Vec::new(),
+                        offers_dont_ask: false,
+                        cancel: "OK".into(),
+                    });
+                }
+                None => self.notice = Some(message),
+            },
         }
     }
 
@@ -460,6 +567,10 @@ impl Core {
             Action::Allow => self.approve(Decision::Allow),
             Action::Deny => self.approve(Decision::Deny),
             Action::Kill | Action::KillResume => self.ask_kill(action == Action::KillResume),
+            Action::CloseOut => match self.surfaces.focused_session().map(str::to_string) {
+                Some(id) => self.close_out(&id),
+                None => self.notice = Some("Close Out: the focused pane shows no session".into()),
+            },
             Action::NewTab => {
                 let s = self.surfaces.focused_session().map(str::to_string);
                 self.surfaces.new_tab(s.as_deref());
@@ -536,7 +647,17 @@ impl Core {
             message: format!("It is {state}. An agent killed mid-turn loses its in-flight work."),
             buttons: vec![(verb.to_string(), Confirmed::Kill { session: s.id.clone(), resume })],
             offers_dont_ask: false,
+            cancel: "Cancel".into(),
         });
+    }
+
+    /// Close Out `id` (spec §7): the `closeOut` action on the focused
+    /// session, and a middle-click on a fleet row. It always asks first
+    /// ([`close_out_dialog`]); confirming sends `flow.close`.
+    pub fn close_out(&mut self, id: &str) {
+        if let Some(s) = self.sessions.get(id) {
+            self.dialog = Some(close_out_dialog(s, &self.home));
+        }
     }
 
     /// `closePane` / `closeTab` with the spec's asking rule.
@@ -567,6 +688,7 @@ impl Core {
                         (p.kill_title, Confirmed::EndAndClose { session: id, whole_tab }),
                     ],
                     offers_dont_ask: true,
+                    cancel: "Cancel".into(),
                 });
             }
             _ => self.close_now(whole_tab),
@@ -591,6 +713,18 @@ impl Core {
                 self.close_now(whole_tab);
             }
             Confirmed::Kill { session, resume } => self.out.send(frames::kill(&session, resume)),
+            Confirmed::CloseOut {
+                session,
+                close_pearl,
+                remove_worktree,
+            } => {
+                let seq = self.next_seq;
+                self.next_seq += 1;
+                let name = self.sessions.get(&session).map_or_else(|| session.clone(), |s| title::tab_title(s, &self.home));
+                self.out.send(frames::close(&session, close_pearl, remove_worktree, seq));
+                self.notice = Some(format!("Closing out {name}…"));
+                self.closing.insert(seq, (session, name));
+            }
         }
     }
 
@@ -764,6 +898,157 @@ mod tests {
             Some("not connected to a flow engine"),
             "stale answers drop"
         );
+    }
+
+    fn row(json: &str) -> Event {
+        Event::Frame(frames::parse(&format!(r#"{{"type":"flow.session","session":{json}}}"#)).expect("session"))
+    }
+
+    fn connected(c: &mut Core) {
+        c.apply(Event::Connected(Endpoint {
+            addr: "127.0.0.1:1".into(),
+            token: None,
+        }));
+    }
+
+    #[test]
+    fn close_out_asks_then_sends_an_unforced_close_and_the_row_leaves() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"claude","state":"working","title":"fix it","project":"/home/d/r","worktree":"/home/d/r-th-1","branch":"th-1-x","pearl_id":"th-1"}"#,
+        ));
+        sent(&mut rx);
+        c.close_out("fs-1");
+        let d = c.dialog.clone().expect("Close Out always asks");
+        assert_eq!(d.cancel, "Cancel", "Cancel is offered (and is the Enter/Esc default)");
+        assert!(d.message.contains("kills it first"), "a live session says it will be killed: {}", d.message);
+        assert!(d.message.contains("Closes pearl th-1"));
+        assert!(d.message.contains("~/r-th-1") && d.message.contains("branch th-1-x"), "{}", d.message);
+        assert_eq!(d.buttons.len(), 1);
+        assert_eq!(d.buttons[0].0, "Kill and Close Out");
+        assert!(sent(&mut rx).is_empty(), "nothing is sent before you confirm");
+
+        c.confirm(d.buttons[0].1.clone());
+        let v = sent(&mut rx);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "flow.close");
+        assert_eq!(v[0]["id"], "fs-1");
+        assert_eq!((v[0]["close_pearl"].as_bool(), v[0]["remove_worktree"].as_bool()), (Some(true), Some(true)));
+        assert_eq!(v[0]["force"], false, "Close Out never forces");
+        assert!(v[0]["seq"].as_u64().is_some(), "the seq the engine echoes on a refusal");
+
+        c.apply(Event::Frame(Inbound::Removed("fs-1".into())));
+        assert!(c.sessions.is_empty() && c.order.is_empty(), "the row leaves the fleet");
+        assert_eq!(c.surfaces.focused_session(), None);
+        assert_eq!(c.notice.as_deref(), Some("Closed out th-1."), "titled like its tab (the pearl)");
+        assert!(c.dialog.is_none());
+    }
+
+    #[test]
+    fn a_refused_close_out_is_shown_verbatim_and_never_forced() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"claude","state":"done","title":"t","project":"/p","worktree":"/p-wt","branch":"b"}"#,
+        ));
+        sent(&mut rx);
+        c.close_out("fs-1");
+        let d = c.dialog.clone().expect("dialog");
+        assert_eq!(d.buttons[0].0, "Close Out", "a finished session isn't killed");
+        assert!(!d.message.contains("kills it first"));
+        assert!(d.message.contains("No pearl on this session."));
+        c.confirm(d.buttons[0].1.clone());
+        let seq = sent(&mut rx)[0]["seq"].as_u64().expect("seq");
+
+        // An unrelated error stays in the footer.
+        c.apply(Event::Frame(Inbound::Error {
+            reference: Some(seq + 100),
+            message: "other".into(),
+        }));
+        assert!(c.dialog.is_none());
+        assert_eq!(c.notice.as_deref(), Some("other"));
+
+        c.apply(Event::Frame(Inbound::Error {
+            reference: Some(seq),
+            message: "branch b is not merged into /p — merge the PR first, or close with force".into(),
+        }));
+        let r = c.dialog.clone().expect("the refusal gets a dialog");
+        assert!(r.title.starts_with("Couldn't close out"), "{}", r.title);
+        assert!(r.message.starts_with("branch b is not merged into /p"), "verbatim: {}", r.message);
+        assert!(r.buttons.is_empty(), "no Force here");
+        assert_eq!(r.cancel, "OK");
+        assert!(c.sessions.contains_key("fs-1"), "a refused close keeps the row");
+        c.key(keys::Key {
+            key: "enter",
+            ..keys::Key::default()
+        });
+        assert!(c.dialog.is_none());
+        assert!(sent(&mut rx).is_empty(), "dismissing a refusal sends nothing (no forced retry)");
+    }
+
+    #[test]
+    fn close_out_from_the_keymap_targets_the_focused_session_and_cancel_keeps_it() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.act(Action::CloseOut);
+        assert!(c.dialog.is_none());
+        assert!(c.notice.as_deref().is_some_and(|n| n.contains("no session")));
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"shell","state":"idle"},{"id":"fs-2","kind":"shell","state":"idle"}"#,
+        ));
+        sent(&mut rx);
+        assert_eq!(c.surfaces.focused_session(), Some("fs-1"));
+        // Ctrl+Alt+W, as Linux/Windows bind closeOut.
+        c.key(keys::Key {
+            key: "w",
+            key_char: Some("w"),
+            control: true,
+            alt: true,
+            ..keys::Key::default()
+        });
+        let d = c.dialog.clone().expect("closeOut asks");
+        assert!(matches!(&d.buttons[0].1, Confirmed::CloseOut { session, close_pearl: false, remove_worktree: false } if session == "fs-1"));
+        assert!(d.message.contains("kills it first"), "a live shell is killed first — it says so: {}", d.message);
+        c.key(keys::Key {
+            key: "escape",
+            ..keys::Key::default()
+        });
+        assert!(c.dialog.is_none());
+        assert!(sent(&mut rx).is_empty(), "cancel sends nothing");
+        assert_eq!(c.sessions.len(), 2);
+    }
+
+    #[test]
+    fn close_out_never_offers_to_remove_the_main_checkout_or_home() {
+        let s = |json: &str| match row(json) {
+            Event::Frame(Inbound::Session(r)) => r.session,
+            _ => unreachable!(),
+        };
+        let main = s(r#"{"id":"a","kind":"claude","state":"done","project":"/p","worktree":"/p"}"#);
+        let home_shell = s(r#"{"id":"b","kind":"shell","state":"done","worktree":"/home/me"}"#);
+        let own = s(r#"{"id":"c","kind":"claude","state":"done","project":"/p","worktree":"/p-wt"}"#);
+        assert!(!has_own_worktree(&main) && !has_own_worktree(&home_shell) && has_own_worktree(&own));
+        for x in [&main, &home_shell] {
+            let d = close_out_dialog(x, "/home/me");
+            assert!(matches!(d.buttons[0].1, Confirmed::CloseOut { remove_worktree: false, .. }));
+            assert!(d.message.contains("nothing on disk is removed"));
+        }
+    }
+
+    #[test]
+    fn a_reconnect_settles_close_outs_whose_row_is_gone() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(r#"{"id":"fs-1","kind":"shell","state":"done","title":"sh"}"#));
+        c.close_out("fs-1");
+        let d = c.dialog.clone().expect("dialog");
+        c.confirm(d.buttons[0].1.clone());
+        sent(&mut rx);
+        c.apply(Event::Offline("gone".into()));
+        c.apply(hello(""));
+        assert_eq!(c.notice.as_deref(), Some("Closed out sh."));
+        assert!(c.closing.is_empty());
     }
 
     #[test]
