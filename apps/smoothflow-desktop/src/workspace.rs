@@ -114,6 +114,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Close Out a fleet row's session (middle-click): asks first, like
+    /// the `closeOut` action.
+    pub(crate) fn close_out(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.core.close_out(id);
+        cx.notify();
+    }
+
     pub(crate) fn dont_ask_again(&mut self, cx: &mut Context<Self>) {
         self.core.dont_ask_again();
         cx.notify();

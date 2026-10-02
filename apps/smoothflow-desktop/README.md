@@ -42,6 +42,12 @@ replays.
   (`GET /api/flow/infer`). There is an inferred-context box and an optional
   prompt. Start sends `flow.new`, and the new session opens in the focused pane
   (or a new tab when that pane is busy).
+- **Close Out** (spec §7): `closeOut` (Ctrl+Alt+W) on the focused session,
+  or a **middle-click on a fleet row** for that row's session. It always asks
+  first, saying whether the session will be killed and which pearl,
+  worktree and branch go, with Cancel as the default. Confirming sends
+  `flow.close`, never forced. An engine refusal (a dirty or unmerged
+  worktree) is shown verbatim in a dialog of its own and the row stays.
 - **Approvals** (spec §7): when the focused session's attention is an
   approvable `permission` or `question` (it has a `request_id`), a bar shows
   the command or question with Allow and Deny (`flow.approve`).
@@ -58,7 +64,7 @@ attach/resize, keystrokes, close/kill) lives in the toolkit-free
 `app_core::Core` in the crate's library. The GPUI `Workspace` wraps it and
 the views only draw.
 
-Not yet: Close Out, Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
+Not yet: Force after a refused Close Out, Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
 pearl rail, Settings (the "Don't ask again" choice lasts until you quit),
 menus, selection and copy, scrollback, IME in the sheet's fields, Browse… (the
 platform folder picker), a bundled Nerd Font, and libghostty-vt as the VT
@@ -90,6 +96,11 @@ Enter, waits for the session to open in the focused pane and attach at 80x24,
 and waits for live output. Then it types `echo smoothflow-e2e-$((N+1))`
 through the key encoder and checks that the `TerminalModel` shows the
 computed line. Finally it kills the session through the Kill confirmation.
+
+`closing_out_a_shell_drops_it_from_the_fleet` closes out a live shell the way
+a middle-click on its row does (`Core::close_out` with the row's id), through
+the confirmation, and checks that the engine kills it and the row leaves the
+fleet with no refusal.
 
 ```bash
 cd apps/smoothflow-desktop

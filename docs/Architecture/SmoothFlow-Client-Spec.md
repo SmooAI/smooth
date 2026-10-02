@@ -77,6 +77,12 @@ Normative words: **must**, **should**, **may**.
     - Sessions are grouped by project, in first-seen order, with plain shells last under "shells".
     - Each row shows a state dot, title, state word and unread badge. Needs-you rows are tinted amber.
     - The footer shows the connection and the counts: working, need you, done, idle.
+    - Clicking a row shows its session. **Middle-clicking a row closes that
+      session out**: it runs the same `closeOut` as the keymap and menus, with
+      the same confirmation and the same refusal handling (§7). It acts on the
+      clicked row, not the focused session, and never ends a session without
+      asking. Phones have no middle click: their explicit session controls
+      (§5, §9) are the equivalent, and they are unchanged.
     - Toggle: `toggleSidebar`.
 - **Center tabs** (`CenterTabGate`):
     - **terminal** is always available.
@@ -145,9 +151,19 @@ Normative words: **must**, **should**, **may**.
   first, naming the harness and the state, because an agent killed mid-turn
   loses its in-flight work.
 - **Close Out** (`closeOut`) ends the session for good: it closes the pearl,
-  removes the merged worktree and branch, and drops the row. It works from the
-  sidebar menu, the Session menu or the card, and a live session is killed
-  first.
+  removes the merged worktree and branch, and drops the row (`flow.close`). It
+  works from the sidebar menu, a middle-click on the sidebar row, the Session
+  menu or the card, and a live session is killed first.
+    - **It always asks first**, because it is for good. The confirmation says
+      that a live session will be killed (an agent loses its in-flight work),
+      which pearl closes, and which worktree and branch go. Cancel is the
+      default.
+    - **The engine can refuse.** A dirty or unmerged worktree (or an adopted
+      session still running) is refused with nothing touched. The client
+      shows the engine's reason verbatim and the row stays. Close Out never
+      sends `force` on its own; the Mac offers Force only in the refusal
+      sheet, after the reason has been read, and SmoothFlow Desktop doesn't
+      offer it yet.
 - **Fan out** runs one prompt against N candidates, each with its own
   worktree and child pearl. **Pick winner** merges one and garbage-collects
   the others.
@@ -258,6 +274,11 @@ control.
 - 2026-09-27: SmoothFlow for iOS renders live `flow.output` in libghostty on Metal
   (smooai#5153, th-a33f6a). SmoothFlow Desktop v0 shipped with an
   `alacritty_terminal` backend (#672).
+- 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
+  the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
+  Out confirmation. Close Out now always asks first and shows an engine
+  refusal verbatim, and SmoothFlow Desktop implements it (th-f958f2). Phones
+  are unchanged; their explicit controls are the equivalent.
 - 2026-09-30: `smooth-flow-client` gains the keymap (§9: action names, both
   platforms' default tables, the `keybindings.toml` parser, conflicts), the
   harness picker rows (§6), approvability (§7: `permission` or `question` with a
