@@ -292,6 +292,11 @@ control.
   `surfaces.json`. They are additive; the existing six files are unchanged. A
   chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
   SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
+- 2026-10-02: SmoothFlow Desktop parses VT with libghostty-vt instead of
+  `alacritty_terminal` (th-872ea8). It links the same pinned manaflow-ai/ghostty
+  commit as the Mac, iOS and Android apps, built from source with Zig on macOS,
+  Linux and Windows, and answers DA/DSR queries with `flow.input` as the phones
+  do. Every SmoothFlow client now runs Ghostty's terminal.
 
 ## 14. Diff
 
@@ -341,38 +346,3 @@ all come from the engine. No client embeds a web view for it.
   `n`/`p` walk the hunks of expanded files in tree order and stop at the ends;
   `]`/`[` walk every file. Rebindable like any action (`diffNextHunk`, …).
   Phones show every one of these as a visible control.
-
-## 13. Change log
-
-- 2026-09-26: first version, written from SmoothFlow for Mac 0.2.8 and the
-  0.2.x phone apps (th-3e6020). It records the ⌘W "last pane empties" rule
-  (th-96fcb7), the Directory field (th-145e6b), degraded harnesses
-  (th-51bf88), the `$HOME` default workspace, and the Linux/Windows keymap.
-- 2026-09-27: the shells group sits last in every client, as §4 always said.
-  The first cut placed it where a shell first appeared (th-a14327).
-- 2026-09-27: `flow.hello`'s `daemon` carries `home`, and tab titles abbreviate
-  against the daemon's home (th-89eb13).
-- 2026-09-27: SmoothFlow for iOS renders live `flow.output` in libghostty on Metal
-  (smooai#5153, th-a33f6a). SmoothFlow Desktop v0 shipped with an
-  `alacritty_terminal` backend (#672).
-- 2026-10-02: §14 Diff — the native review viewer over structured diffs by
-  turn, with `spec/vectors/diff.json` (th-26f5b9). SmoothFlow for Mac ships it
-  first; desktop and phones follow.
-- 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
-  the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
-  Out confirmation. Close Out now always asks first and shows an engine
-  refusal verbatim, and SmoothFlow Desktop implements it (th-f958f2). Phones
-  are unchanged; their explicit controls are the equivalent.
-- 2026-09-30: `smooth-flow-client` gains the keymap (§9: action names, both
-  platforms' default tables, the `keybindings.toml` parser, conflicts), the
-  harness picker rows (§6), approvability (§7: `permission` or `question` with a
-  non-blank `request_id`), and the tab strip with close scope (§5: `Surfaces`).
-  New vectors: `keymap.json`, `harness.json`, `attention.json` and
-  `surfaces.json`. They are additive; the existing six files are unchanged. A
-  chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
-  SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
-- 2026-10-02: SmoothFlow Desktop parses VT with libghostty-vt instead of
-  `alacritty_terminal` (th-872ea8). It links the same pinned manaflow-ai/ghostty
-  commit as the Mac, iOS and Android apps, built from source with Zig on macOS,
-  Linux and Windows, and answers DA/DSR queries with `flow.input` as the phones
-  do. Every SmoothFlow client now runs Ghostty's terminal.
