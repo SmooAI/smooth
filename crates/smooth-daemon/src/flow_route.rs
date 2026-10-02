@@ -757,6 +757,7 @@ async fn run<T: Send + 'static>(engine: &Engine, f: impl FnOnce(Engine) -> anyho
         .map_err(|e| anyhow::anyhow!("flow task panicked: {e}"))?
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per client frame type; splitting it scatters the protocol")]
 async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<String>) -> anyhow::Result<Vec<ServerFrame>> {
     match frame {
         ClientFrame::Attach { id, cols, rows } => {

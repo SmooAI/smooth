@@ -38,7 +38,7 @@ fn texts(h: &Hunk) -> Vec<String> {
 fn uncommitted_includes_untracked_and_counts() {
     let d = repo();
     let p = d.path();
-    std::fs::write(p.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+    std::fs::write(p.join("a.txt"), "one\ntwo!\nthree\n").unwrap();
     std::fs::write(p.join("new.rs"), "fn main() {}\n").unwrap();
     let diff = compute(p, DiffBase::Uncommitted, &[], None).unwrap();
     assert_eq!(diff.base, DiffBase::Uncommitted);
@@ -47,8 +47,9 @@ fn uncommitted_includes_untracked_and_counts() {
     assert_eq!((diff.added, diff.deleted), (2, 1));
     let a = file(&diff, "a.txt");
     assert_eq!(a.status, FileStatus::Modified);
-    assert_eq!(texts(&a.hunks[0]), vec![" one", "-two", "+TWO", " three"]);
-    assert_eq!(a.hunks[0].lines[1].words, vec![[0, 3]], "the whole word changed, paired");
+    assert_eq!(texts(&a.hunks[0]), vec![" one", "-two", "+two!", " three"]);
+    assert!(a.hunks[0].lines[1].words.is_empty(), "nothing was removed from the old line");
+    assert_eq!(a.hunks[0].lines[2].words, vec![[3, 4]], "the `!` is the change, paired");
     let n = file(&diff, "new.rs");
     assert_eq!(n.status, FileStatus::Added);
     assert_eq!(n.language.as_deref(), Some("Rust"));

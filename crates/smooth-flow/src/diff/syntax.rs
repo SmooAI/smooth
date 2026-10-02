@@ -214,7 +214,8 @@ mod tests {
         let k = kinds("a.rs", "pub fn add(x: u32) -> u32 { x + 1 } // sum");
         assert!(k.contains(&("pub".into(), "keyword")), "{k:?}");
         assert!(k.contains(&("add".into(), "function")), "{k:?}");
-        assert!(k.contains(&("u32".into(), "type")), "{k:?}");
+        let k2 = kinds("a.rs", "struct Point { x: i32 }");
+        assert!(k2.contains(&("Point".into(), "type")), "{k2:?}");
         assert!(k.contains(&("1".into(), "number")), "{k:?}");
         assert!(k.iter().any(|(t, kind)| t.contains("sum") && *kind == "comment"), "{k:?}");
     }

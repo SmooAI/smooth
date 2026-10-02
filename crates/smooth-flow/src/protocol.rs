@@ -248,8 +248,9 @@ pub fn parse_client_frame(text: &str) -> anyhow::Result<Option<ClientFrame>> {
     }
     match serde_json::from_value::<ClientFrame>(v.clone()) {
         Ok(f) => Ok(Some(f)),
-        // Unknown variant ⇒ ignore; anything else is a malformed known frame.
-        Err(e) if e.to_string().contains("unknown variant") => Ok(None),
+        // An unknown frame TYPE ⇒ ignore; anything else (an unknown value of
+        // a field, like a diff base) is a malformed known frame.
+        Err(e) if e.to_string().contains(&format!("unknown variant `{ty}`")) => Ok(None),
         Err(e) => Err(anyhow::anyhow!("malformed {ty}: {e}")),
     }
 }

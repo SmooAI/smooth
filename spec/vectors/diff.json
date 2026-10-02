@@ -1,0 +1,756 @@
+{
+  "spec": "SmoothFlow-Client-Spec §14 Diff viewer",
+  "cases": [
+    {
+      "name": "context only",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "ctx",
+          "ctx"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": 0,
+            "right": 0
+          },
+          {
+            "left": 1,
+            "right": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "a change block pairs del i with add i",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "ctx",
+          "del",
+          "del",
+          "add",
+          "ctx"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": 0,
+            "right": 0
+          },
+          {
+            "left": 1,
+            "right": 3
+          },
+          {
+            "left": 2,
+            "right": null
+          },
+          {
+            "left": 4,
+            "right": 4
+          }
+        ]
+      }
+    },
+    {
+      "name": "more adds than dels",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "del",
+          "add",
+          "add",
+          "add"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": 0,
+            "right": 1
+          },
+          {
+            "left": null,
+            "right": 2
+          },
+          {
+            "left": null,
+            "right": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "adds with no dels are right-only",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "ctx",
+          "add",
+          "add",
+          "ctx"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": 0,
+            "right": 0
+          },
+          {
+            "left": null,
+            "right": 1
+          },
+          {
+            "left": null,
+            "right": 2
+          },
+          {
+            "left": 3,
+            "right": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "dels at the end are left-only",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "ctx",
+          "del",
+          "del"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": 0,
+            "right": 0
+          },
+          {
+            "left": 1,
+            "right": null
+          },
+          {
+            "left": 2,
+            "right": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "an add then a del is two blocks",
+      "input": {
+        "fn": "side_by_side",
+        "kinds": [
+          "add",
+          "del"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "left": null,
+            "right": 0
+          },
+          {
+            "left": 1,
+            "right": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "dirs first, case-insensitive, chains compressed",
+      "input": {
+        "fn": "tree",
+        "paths": [
+          "src/b.rs",
+          "README.md",
+          "src/a.rs",
+          "apps/x/y/z.swift",
+          "Cargo.toml",
+          "src/ui/v.rs",
+          "src/Z.rs",
+          "docs/a.md"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "dir",
+            "name": "apps/x/y",
+            "path": "apps/x/y",
+            "depth": 0
+          },
+          {
+            "kind": "file",
+            "name": "z.swift",
+            "path": "apps/x/y/z.swift",
+            "depth": 1,
+            "file": 3
+          },
+          {
+            "kind": "dir",
+            "name": "docs",
+            "path": "docs",
+            "depth": 0
+          },
+          {
+            "kind": "file",
+            "name": "a.md",
+            "path": "docs/a.md",
+            "depth": 1,
+            "file": 7
+          },
+          {
+            "kind": "dir",
+            "name": "src",
+            "path": "src",
+            "depth": 0
+          },
+          {
+            "kind": "dir",
+            "name": "ui",
+            "path": "src/ui",
+            "depth": 1
+          },
+          {
+            "kind": "file",
+            "name": "v.rs",
+            "path": "src/ui/v.rs",
+            "depth": 2,
+            "file": 5
+          },
+          {
+            "kind": "file",
+            "name": "a.rs",
+            "path": "src/a.rs",
+            "depth": 1,
+            "file": 2
+          },
+          {
+            "kind": "file",
+            "name": "b.rs",
+            "path": "src/b.rs",
+            "depth": 1,
+            "file": 0
+          },
+          {
+            "kind": "file",
+            "name": "Z.rs",
+            "path": "src/Z.rs",
+            "depth": 1,
+            "file": 6
+          },
+          {
+            "kind": "file",
+            "name": "Cargo.toml",
+            "path": "Cargo.toml",
+            "depth": 0,
+            "file": 4
+          },
+          {
+            "kind": "file",
+            "name": "README.md",
+            "path": "README.md",
+            "depth": 0,
+            "file": 1
+          }
+        ],
+        "file_order": [
+          3,
+          7,
+          5,
+          2,
+          0,
+          6,
+          4,
+          1
+        ]
+      }
+    },
+    {
+      "name": "flat",
+      "input": {
+        "fn": "tree",
+        "paths": [
+          "b.txt",
+          "A.txt",
+          "c.txt"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "file",
+            "name": "A.txt",
+            "path": "A.txt",
+            "depth": 0,
+            "file": 1
+          },
+          {
+            "kind": "file",
+            "name": "b.txt",
+            "path": "b.txt",
+            "depth": 0,
+            "file": 0
+          },
+          {
+            "kind": "file",
+            "name": "c.txt",
+            "path": "c.txt",
+            "depth": 0,
+            "file": 2
+          }
+        ],
+        "file_order": [
+          1,
+          0,
+          2
+        ]
+      }
+    },
+    {
+      "name": "one deep file",
+      "input": {
+        "fn": "tree",
+        "paths": [
+          "a/b/c/d.rs"
+        ]
+      },
+      "expected": {
+        "rows": [
+          {
+            "kind": "dir",
+            "name": "a/b/c",
+            "path": "a/b/c",
+            "depth": 0
+          },
+          {
+            "kind": "file",
+            "name": "d.rs",
+            "path": "a/b/c/d.rs",
+            "depth": 1,
+            "file": 0
+          }
+        ],
+        "file_order": [
+          0
+        ]
+      }
+    },
+    {
+      "name": "a plain file is expanded",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "a.rs",
+          "status": "modified",
+          "added": 3,
+          "deleted": 1,
+          "binary": false,
+          "collapsed_by_default": false,
+          "hunks": [
+            {
+              "id": "a.rs#0",
+              "lines": []
+            },
+            {
+              "id": "a.rs#1",
+              "lines": []
+            }
+          ]
+        },
+        "viewed": false
+      },
+      "expected": {
+        "display": {
+          "collapsed": false,
+          "fetch": false
+        },
+        "viewed_key": "a.rs|a.rs#0,a.rs#1"
+      }
+    },
+    {
+      "name": "viewed folds it",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "a.rs",
+          "status": "modified",
+          "added": 3,
+          "deleted": 1,
+          "binary": false,
+          "collapsed_by_default": false,
+          "hunks": [
+            {
+              "id": "a.rs#0",
+              "lines": []
+            },
+            {
+              "id": "a.rs#1",
+              "lines": []
+            }
+          ]
+        },
+        "viewed": true
+      },
+      "expected": {
+        "display": {
+          "collapsed": true,
+          "reason": "viewed",
+          "fetch": false
+        },
+        "viewed_key": "a.rs|a.rs#0,a.rs#1"
+      }
+    },
+    {
+      "name": "noise starts collapsed and must be fetched",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "Cargo.lock",
+          "status": "modified",
+          "added": 3,
+          "deleted": 1,
+          "binary": false,
+          "noise": "lockfile",
+          "collapsed_by_default": true,
+          "hunks_omitted": "collapsed",
+          "hunks": []
+        },
+        "viewed": false
+      },
+      "expected": {
+        "display": {
+          "collapsed": true,
+          "reason": "noise",
+          "fetch": true
+        },
+        "viewed_key": "Cargo.lock|modified|+3-1"
+      }
+    },
+    {
+      "name": "a budget stub is expanded but must be fetched",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "big.rs",
+          "status": "modified",
+          "added": 3,
+          "deleted": 1,
+          "binary": false,
+          "collapsed_by_default": false,
+          "hunks_omitted": "budget",
+          "hunks": []
+        },
+        "viewed": false
+      },
+      "expected": {
+        "display": {
+          "collapsed": false,
+          "fetch": true
+        },
+        "viewed_key": "big.rs|modified|+3-1"
+      }
+    },
+    {
+      "name": "binary has nothing inline",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "logo.png",
+          "status": "modified",
+          "added": 3,
+          "deleted": 1,
+          "binary": true,
+          "collapsed_by_default": false,
+          "hunks": []
+        },
+        "viewed": false
+      },
+      "expected": {
+        "display": {
+          "collapsed": true,
+          "reason": "binary",
+          "fetch": false
+        },
+        "viewed_key": "logo.png|modified|+3-1"
+      }
+    },
+    {
+      "name": "a mode-only change has nothing inline",
+      "input": {
+        "fn": "display",
+        "file": {
+          "path": "run.sh",
+          "status": "mode_changed",
+          "added": 0,
+          "deleted": 0,
+          "binary": false,
+          "collapsed_by_default": false,
+          "hunks": []
+        },
+        "viewed": false
+      },
+      "expected": {
+        "display": {
+          "collapsed": true,
+          "reason": "no_content",
+          "fetch": false
+        },
+        "viewed_key": "run.sh|mode_changed|+0-0"
+      }
+    },
+    {
+      "name": "n / p walk visible hunks in tree order and stop at the ends",
+      "input": {
+        "fn": "next_hunk",
+        "paths": [
+          "src/b.rs",
+          "Cargo.lock",
+          "src/a.rs",
+          "README.md"
+        ],
+        "hunks": [
+          2,
+          0,
+          1,
+          1
+        ],
+        "collapsed": [
+          false,
+          true,
+          false,
+          false
+        ],
+        "order": [
+          2,
+          0,
+          1,
+          3
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "forward": true,
+            "at": [
+              2,
+              0
+            ]
+          },
+          {
+            "forward": true,
+            "at": [
+              0,
+              0
+            ]
+          },
+          {
+            "forward": true,
+            "at": [
+              0,
+              1
+            ]
+          },
+          {
+            "forward": true,
+            "at": [
+              3,
+              0
+            ]
+          },
+          {
+            "forward": true,
+            "at": [
+              3,
+              0
+            ]
+          },
+          {
+            "forward": false,
+            "at": [
+              0,
+              1
+            ]
+          },
+          {
+            "forward": false,
+            "at": [
+              0,
+              0
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "] / [ walk every file in tree order",
+      "input": {
+        "fn": "next_file",
+        "order": [
+          2,
+          0,
+          1,
+          3
+        ]
+      },
+      "expected": {
+        "steps": [
+          {
+            "forward": true,
+            "at": 2
+          },
+          {
+            "forward": true,
+            "at": 0
+          },
+          {
+            "forward": true,
+            "at": 1
+          },
+          {
+            "forward": true,
+            "at": 3
+          },
+          {
+            "forward": true,
+            "at": 3
+          },
+          {
+            "forward": false,
+            "at": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "default base",
+      "input": {
+        "fn": "default_base",
+        "kind": "claude"
+      },
+      "expected": "turn"
+    },
+    {
+      "name": "default base",
+      "input": {
+        "fn": "default_base",
+        "kind": "codex"
+      },
+      "expected": "turn"
+    },
+    {
+      "name": "default base",
+      "input": {
+        "fn": "default_base",
+        "kind": "shell"
+      },
+      "expected": "uncommitted"
+    },
+    {
+      "name": "base label",
+      "input": {
+        "fn": "base_label",
+        "base": "turn",
+        "from_label": null
+      },
+      "expected": "Last turn"
+    },
+    {
+      "name": "base label",
+      "input": {
+        "fn": "base_label",
+        "base": "uncommitted",
+        "from_label": null
+      },
+      "expected": "Uncommitted"
+    },
+    {
+      "name": "base label",
+      "input": {
+        "fn": "base_label",
+        "base": "branch",
+        "from_label": "merge base with origin/main"
+      },
+      "expected": "vs main"
+    },
+    {
+      "name": "base label",
+      "input": {
+        "fn": "base_label",
+        "base": "branch",
+        "from_label": "merge base with master"
+      },
+      "expected": "vs master"
+    },
+    {
+      "name": "base label",
+      "input": {
+        "fn": "base_label",
+        "base": "branch",
+        "from_label": "HEAD"
+      },
+      "expected": "vs default branch"
+    },
+    {
+      "name": "the viewer's bare keys",
+      "input": {
+        "fn": "keys"
+      },
+      "expected": [
+        {
+          "key": "j",
+          "action": "next_line"
+        },
+        {
+          "key": "k",
+          "action": "previous_line"
+        },
+        {
+          "key": "n",
+          "action": "next_hunk"
+        },
+        {
+          "key": "p",
+          "action": "previous_hunk"
+        },
+        {
+          "key": "]",
+          "action": "next_file"
+        },
+        {
+          "key": "[",
+          "action": "previous_file"
+        },
+        {
+          "key": "v",
+          "action": "toggle_viewed"
+        },
+        {
+          "key": "c",
+          "action": "comment"
+        },
+        {
+          "key": "r",
+          "action": "revert_hunk"
+        },
+        {
+          "key": "s",
+          "action": "stage_hunk"
+        },
+        {
+          "key": "u",
+          "action": "toggle_split"
+        }
+      ]
+    }
+  ]
+}

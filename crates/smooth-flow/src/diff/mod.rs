@@ -541,6 +541,14 @@ fn excerpt(file: &RawFile, c: &ReviewComment) -> Vec<String> {
             None => (0..numbered.len()).collect(),
         };
         let (Some(&first), Some(&last)) = (hits.first(), hits.last()) else { continue };
+        // A comment on added lines quotes what they replaced: back up over
+        // the change block (its dels, and adds before the first hit).
+        let mut first = first;
+        if !old_side {
+            while first > 0 && numbered[first - 1].0.kind != LineKind::Ctx && numbered[first].0.kind != LineKind::Ctx {
+                first -= 1;
+            }
+        }
         let mut out: Vec<String> = numbered[first..=last]
             .iter()
             .map(|(l, _)| {
