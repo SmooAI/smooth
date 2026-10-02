@@ -54,6 +54,12 @@ final class DiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         appearance = NSAppearance(named: .darkAqua)
         wantsLayer = true
         layer?.backgroundColor = DiffPalette.base.cgColor
+        // A plain NSView is no accessibility element, so its identifier
+        // (`center.diff`) is invisible to VoiceOver and XCUITest; a group is,
+        // and still exposes the toolbar, tree and table inside it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Diff")
         build()
     }
 
