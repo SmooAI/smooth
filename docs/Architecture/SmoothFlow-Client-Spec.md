@@ -263,6 +263,36 @@ control.
 - **UI tests run in CI only.** They never run on a developer's Mac, where
   macOS UI automation asks for a password.
 
+## 13. Change log
+
+- 2026-09-26: first version, written from SmoothFlow for Mac 0.2.8 and the
+  0.2.x phone apps (th-3e6020). It records the ⌘W "last pane empties" rule
+  (th-96fcb7), the Directory field (th-145e6b), degraded harnesses
+  (th-51bf88), the `$HOME` default workspace, and the Linux/Windows keymap.
+- 2026-09-27: the shells group sits last in every client, as §4 always said.
+  The first cut placed it where a shell first appeared (th-a14327).
+- 2026-09-27: `flow.hello`'s `daemon` carries `home`, and tab titles abbreviate
+  against the daemon's home (th-89eb13).
+- 2026-09-27: SmoothFlow for iOS renders live `flow.output` in libghostty on Metal
+  (smooai#5153, th-a33f6a). SmoothFlow Desktop v0 shipped with an
+  `alacritty_terminal` backend (#672).
+- 2026-10-02: §14 Diff — the native review viewer over structured diffs by
+  turn, with `spec/vectors/diff.json` (th-26f5b9). SmoothFlow for Mac ships it
+  first; desktop and phones follow.
+- 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
+  the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
+  Out confirmation. Close Out now always asks first and shows an engine
+  refusal verbatim, and SmoothFlow Desktop implements it (th-f958f2). Phones
+  are unchanged; their explicit controls are the equivalent.
+- 2026-09-30: `smooth-flow-client` gains the keymap (§9: action names, both
+  platforms' default tables, the `keybindings.toml` parser, conflicts), the
+  harness picker rows (§6), approvability (§7: `permission` or `question` with a
+  non-blank `request_id`), and the tab strip with close scope (§5: `Surfaces`).
+  New vectors: `keymap.json`, `harness.json`, `attention.json` and
+  `surfaces.json`. They are additive; the existing six files are unchanged. A
+  chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
+  SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
+
 ## 14. Diff
 
 The Diff tab is a native review viewer over the engine's structured diff
