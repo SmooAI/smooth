@@ -17,6 +17,7 @@ pub mod blog;
 pub mod booking;
 pub mod branding;
 pub mod calling;
+pub mod calling_config;
 pub mod campaigns;
 pub mod crawl;
 pub mod crm;
@@ -330,8 +331,103 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
             }
             println!();
         }
+        super::OrgsCommands::Update {
+            org_id,
+            name,
+            description,
+            brand_voice,
+            primary_color,
+            secondary_color,
+            accent_color,
+            confirm,
+        } => {
+            let brand_voice = match brand_voice {
+                Some(v) if v.starts_with('@') => Some(std::fs::read_to_string(&v[1..]).with_context(|| format!("read {}", &v[1..]))?),
+                other => other,
+            };
+            let body = org_update_body(&OrgUpdate {
+                name: name.as_deref(),
+                description: description.as_deref(),
+                brand_voice: brand_voice.as_deref(),
+                primary_color: primary_color.as_deref(),
+                secondary_color: secondary_color.as_deref(),
+                accent_color: accent_color.as_deref(),
+            })?;
+            let resolved =
+                crate::active_org::resolve(org_id).context("no org id specified and no active org set — pass --org-id or run `th smoo orgs switch <id>`")?;
+            if confirm.dry_run {
+                print_json(&body);
+            }
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "change",
+                    noun: "organization profile",
+                    id: &resolved,
+                    org: &resolved,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                let updated = client
+                    .patch(&format!("/organizations/{resolved}"), &body)
+                    .await
+                    .context("PATCH /organizations/{org_id} (needs the branding admin permission)")?;
+                println!("\n  {} organization updated", "✓".green());
+                print_json(&updated);
+            }
+        }
     }
     Ok(())
+}
+
+/// `th smoo orgs update` flags, before validation.
+#[derive(Debug, Default)]
+struct OrgUpdate<'a> {
+    name: Option<&'a str>,
+    description: Option<&'a str>,
+    brand_voice: Option<&'a str>,
+    primary_color: Option<&'a str>,
+    secondary_color: Option<&'a str>,
+    accent_color: Option<&'a str>,
+}
+
+/// The PATCH body for `th smoo orgs update` — only the profile fields the
+/// dashboard's Organization form edits (never `sccTier`, which the route
+/// refuses, nor `metaData`). Same rules as the hosted MCP's `org_settings_update`.
+fn org_update_body(u: &OrgUpdate) -> Result<serde_json::Value> {
+    use serde_json::{json, Map, Value};
+    let clearable = |v: &str| if v.trim().is_empty() { Value::Null } else { json!(v.trim()) };
+    let mut body = Map::new();
+    if let Some(n) = u.name.map(str::trim) {
+        if n.is_empty() || n.chars().count() > 200 {
+            anyhow::bail!("--name must be 1-200 characters");
+        }
+        body.insert("name".into(), json!(n));
+    }
+    if let Some(d) = u.description {
+        body.insert("description".into(), clearable(d));
+    }
+    if let Some(v) = u.brand_voice {
+        body.insert("brandVoice".into(), clearable(v));
+    }
+    for (flag, key, value) in [
+        ("--primary-color", "primaryColor", u.primary_color),
+        ("--secondary-color", "secondaryColor", u.secondary_color),
+        ("--accent-color", "accentColor", u.accent_color),
+    ] {
+        if let Some(c) = value.map(str::trim) {
+            let ok = c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit());
+            if !ok {
+                anyhow::bail!("{flag} must be a #RRGGBB color; got {c:?}");
+            }
+            body.insert(key.into(), json!(c));
+        }
+    }
+    if body.is_empty() {
+        anyhow::bail!("nothing to change — pass --name, --description, --brand-voice or a --*-color");
+    }
+    Ok(Value::Object(body))
 }
 
 /// A single org as far as the switcher cares.
@@ -515,6 +611,31 @@ fn resolve_org_query(orgs: &[OrgRef], query: &str) -> Result<OrgRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SMOODEV-3612 — `th smoo orgs update` sends only profile fields, validates
+    /// colors, and treats an empty string as "clear".
+    #[test]
+    fn org_update_body_validates_and_clears() {
+        let body = org_update_body(&OrgUpdate {
+            name: Some(" Acme "),
+            description: Some(""),
+            primary_color: Some("#00a3A3"),
+            ..OrgUpdate::default()
+        })
+        .unwrap();
+        assert_eq!(body, serde_json::json!({ "name": "Acme", "description": null, "primaryColor": "#00a3A3" }));
+        assert!(org_update_body(&OrgUpdate {
+            accent_color: Some("teal"),
+            ..OrgUpdate::default()
+        })
+        .is_err());
+        assert!(org_update_body(&OrgUpdate {
+            name: Some("  "),
+            ..OrgUpdate::default()
+        })
+        .is_err());
+        assert!(org_update_body(&OrgUpdate::default()).is_err());
+    }
 
     fn org(id: &str, name: &str, slug: &str) -> OrgRef {
         OrgRef {

@@ -329,6 +329,8 @@ Everything under `api.smoo.ai` has a typed wrapper. **Stop writing `curl -H "Aut
 ```bash
 smoo api orgs list                                   # GET /organizations
 smoo api orgs show                                   # active org details
+smoo orgs update --name "Acme" --brand-voice @voice.md --primary-color '#00a3a3' [--yes|--dry-run]
+                                                     # PATCH the org profile (needs org.branding.manage; SMOODEV-3612)
 smoo api members list --org <id>                     # list seats
 smoo api members invite '{"email":"x@y","role":"admin"}'
 smoo api members invitations
@@ -780,6 +782,30 @@ smoo calling place <number> [--contact-id <id>] [--name "Pat Lee"] [--yes|--dry-
   anything rings. No request creates a call, so there is nothing to retry.
 - `place` and `get --transcript` need a signed-in **user** (`smoo auth login`);
   an org API key has no softphone and cannot read transcripts.
+
+#### Calling configuration — SMOODEV-3612
+
+CLI twin of the hosted MCP's `phone_numbers_list` / `phone_number_update`,
+`business_hours_list` / `business_hours_update` and `calling_settings_get` /
+`calling_settings_update`. Reads need `calling.use`, writes `calling.admin`
+(recording-compliance settings also `calling.recordings.manage`), all behind the
+`telephony` product — the route enforces it.
+
+```bash
+smoo calling numbers list [--json]                  # each number's route, fallback, hours
+smoo calling numbers update <number-id> --set routeType=ring_group --set routeRingGroupId=<id> [--yes|--dry-run]
+smoo calling numbers update <number-id> --set voicemailGreetingUrl=https://cdn.example.com/vm.mp3
+smoo calling hours list [--json]
+smoo calling hours update <hours-id> --set timezone=America/Indiana/Indianapolis \
+    --set 'windows=[{"day":1,"startMinute":540,"endMinute":1020}]'
+smoo calling settings show
+smoo calling settings update --set recordingRetentionDays=365 [--body changes.json]
+```
+
+- `--set key=value` sends JSON when the value parses as JSON (`true`, `30`,
+  `null`, `[...]`), otherwise a string. Keys outside the route's writable list
+  are refused locally, by name, with the list.
+- Every write asks for confirmation: it changes what the next caller gets.
 
 ### Google Drive (`smoo drive`) — SMOODEV-3545
 
