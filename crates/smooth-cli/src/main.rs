@@ -912,6 +912,12 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::calling::Cmd,
     },
+    /// Support health report — open/solved tickets, CSAT, first response,
+    /// SLA breaches. CLI twin of the copilot's `support.report`.
+    Support {
+        #[command(subcommand)]
+        cmd: smooai::support::Cmd,
+    },
     /// Your Google Drive — search and read, as you. CLI twin of the hosted MCP
     /// `drive_search` / `drive_read`.
     Drive {
@@ -1980,6 +1986,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
+        SmooCommands::Support { cmd } => smooai::support::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
         SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,

@@ -239,6 +239,65 @@ pub enum ItemsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Move EVERY item matching a filter to a new status, in one transaction.
+    /// PREVIEWS by default (count + titles); `--apply` commits. At least one
+    /// filter is required. CLI twin of `workitems.bulk_transition`.
+    BulkTransition {
+        /// Target status: open, in_progress, blocked, in_review, done, cancelled.
+        #[arg(long = "to")]
+        to: String,
+        /// Only items in this project — name, KEY, or id.
+        #[arg(long)]
+        project: Option<String>,
+        /// Only items currently in this status.
+        #[arg(long)]
+        status: Option<String>,
+        /// Only items of this type: task, issue, bug, feature, incident.
+        #[arg(long = "type")]
+        item_type: Option<String>,
+        /// Actually move them (default is a dry-run count).
+        #[arg(long)]
+        apply: bool,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Turn a support ticket into a work item (title + description copied,
+    /// ticket linked). A ticket already captured is reused, not duplicated.
+    /// CLI twin of `workitems.capture_from_ticket`.
+    CaptureTicket {
+        /// The support ticket id.
+        ticket_id: String,
+        /// Target project — name, KEY, or id.
+        #[arg(long)]
+        project: String,
+        /// Type: task (default), issue, bug, feature, incident.
+        #[arg(long = "type")]
+        item_type: Option<String>,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Assign a work item to a member (`me`, an email, or a name), or `none`
+    /// to unassign. CLI twin of `workitems.assign`.
+    Assign {
+        /// The work item id from `smoo work items list`.
+        item_id: String,
+        /// `me`, a member email or name, or `none` / `-` to unassign.
+        assignee: String,
+        /// Print the raw response JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// Delete a work item permanently (its Jira sync mapping goes with it).
     #[command(visible_alias = "delete")]
     Rm {
@@ -738,6 +797,53 @@ async fn items(cmd: ItemsCmd) -> Result<()> {
             let title = r.get("title").and_then(Value::as_str).unwrap_or("?");
             println!("  {} {} → {}", "✓".green(), title.bold(), status_cell(&status));
         }
+        ItemsCmd::BulkTransition {
+            to,
+            project,
+            status,
+            item_type,
+            apply,
+            json,
+            org,
+        } => {
+            let body = bulk_transition_body(&to, project.as_deref(), status.as_deref(), item_type.as_deref(), !apply)?;
+            let org = resolve_org(org)?;
+            let r = client
+                .post(&format!("/organizations/{org}/work-items/bulk-transition"), &body)
+                .await
+                .context("POST work-items/bulk-transition")?;
+            if json {
+                print_json(&r);
+            } else {
+                print!("{}", render_bulk_transition(&r, &to, apply));
+            }
+        }
+        ItemsCmd::CaptureTicket {
+            ticket_id,
+            project,
+            item_type,
+            json,
+            org,
+        } => {
+            let org = resolve_org(org)?;
+            let mut body = json!({ "supportTicketId": ticket_id.trim(), "project": project.trim() });
+            if let Some(t) = item_type {
+                body["type"] = json!(t);
+            }
+            let r = client
+                .post(&format!("/organizations/{org}/work-items/capture-from-ticket"), &body)
+                .await
+                .context("POST work-items/capture-from-ticket")?;
+            print_summary(&r, json);
+        }
+        ItemsCmd::Assign { item_id, assignee, json, org } => {
+            let org = resolve_org(org)?;
+            let r = client
+                .post(&format!("/organizations/{org}/work-items/{item_id}/assign"), &assign_body(&assignee))
+                .await
+                .context("POST work-items/{id}/assign")?;
+            print_summary(&r, json);
+        }
         ItemsCmd::Rm { item_id, org, dry_run, yes } => {
             let org = resolve_org(org)?;
             let proceed = crate::destructive::gate(
@@ -1133,6 +1239,104 @@ fn parse_ts(s: &str) -> Result<String> {
 // ---------------------------------------------------------------------------
 // Pure flag → wire mappings (unit-tested)
 // ---------------------------------------------------------------------------
+
+/// Work item statuses (mirrors `work_item_status`).
+const ITEM_STATUSES: &[&str] = &["open", "in_progress", "blocked", "in_review", "done", "cancelled"];
+/// Work item types (mirrors `work_item_type`).
+const ITEM_TYPES: &[&str] = &["task", "issue", "bug", "feature", "incident"];
+
+/// `POST work-items/bulk-transition` body. Refuses an unfiltered move —
+/// "transition the whole org" must be impossible to express by omission.
+fn bulk_transition_body(to: &str, project: Option<&str>, status: Option<&str>, item_type: Option<&str>, dry_run: bool) -> Result<Value> {
+    let clean = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let (project, status, item_type) = (clean(project), clean(status), clean(item_type));
+    let to = to.trim();
+    for (label, v) in [("--to", Some(to)), ("--status", status.as_deref())] {
+        if let Some(v) = v {
+            if !ITEM_STATUSES.contains(&v) {
+                bail!("{label} {v:?} must be one of {}", ITEM_STATUSES.join(", "));
+            }
+        }
+    }
+    if let Some(t) = item_type.as_deref() {
+        if !ITEM_TYPES.contains(&t) {
+            bail!("--type {t:?} must be one of {}", ITEM_TYPES.join(", "));
+        }
+    }
+    if project.is_none() && status.is_none() && item_type.is_none() {
+        bail!("pass at least one filter (--project, --status or --type) — refusing to move every work item in the org");
+    }
+    let mut body = json!({ "toStatus": to, "dryRun": dry_run });
+    if let Some(p) = project {
+        body["project"] = json!(p);
+    }
+    if let Some(s) = status {
+        body["status"] = json!(s);
+    }
+    if let Some(t) = item_type {
+        body["type"] = json!(t);
+    }
+    Ok(body)
+}
+
+/// `POST work-items/{id}/assign` body: `none` / `-` / `unassign` → null.
+fn assign_body(who: &str) -> Value {
+    let who = who.trim();
+    if who.is_empty() || ["none", "-", "unassign", "nobody", "null"].iter().any(|n| who.eq_ignore_ascii_case(n)) {
+        json!({ "assignee": Value::Null })
+    } else {
+        json!({ "assignee": who })
+    }
+}
+
+/// A bulk-transition response as text: the dry-run count + titles, or the
+/// committed summary.
+fn render_bulk_transition(r: &Value, to: &str, applied: bool) -> String {
+    let data = r.get("data").unwrap_or(r);
+    let titles: Vec<&str> = data
+        .get("titles")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let count = data
+        .get("total")
+        .or_else(|| data.get("moved"))
+        .and_then(Value::as_i64)
+        .unwrap_or(titles.len() as i64);
+    let mut out = String::new();
+    if applied {
+        let summary = r.get("summary").and_then(Value::as_str).unwrap_or("");
+        if summary.is_empty() {
+            out.push_str(&format!("  moved {count} work item(s) to {to}\n"));
+        } else {
+            out.push_str(&format!("  {summary}\n"));
+        }
+        return out;
+    }
+    out.push_str(&format!("  {count} work item(s) would move to {to}"));
+    if titles.is_empty() {
+        out.push('\n');
+    } else {
+        out.push_str(":\n");
+        for t in &titles {
+            out.push_str(&format!("    - {t}\n"));
+        }
+        let more = count - titles.len() as i64;
+        if more > 0 {
+            out.push_str(&format!("    … +{more} more\n"));
+        }
+    }
+    out.push_str("  dry run — nothing moved. Re-run with --apply to move them.\n");
+    out
+}
+
+/// `{ok, summary, data}` → the summary line (raw JSON with `--json`).
+fn print_summary(r: &Value, json: bool) {
+    match r.get("summary").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(s) if !json => println!("  {} {s}", "✓".green()),
+        _ => print_json(r),
+    }
+}
 
 /// The `items list` filter flags as a query string. `project_id` /
 /// `assignee_id` are the RESOLVED ids (KEY / `me` / email already looked up).
@@ -1565,6 +1769,44 @@ fn render_jira_status(body: &Value) -> String {
     }
     let _ = writeln!(out);
     out
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_transition_needs_a_filter_and_valid_enums() {
+        assert!(bulk_transition_body("done", None, None, None, true).is_err());
+        assert!(bulk_transition_body("finished", Some("ENG"), None, None, true).is_err());
+        assert!(bulk_transition_body("done", None, Some("closed"), None, true).is_err());
+        assert!(bulk_transition_body("done", None, None, Some("epic"), true).is_err());
+        assert!(
+            bulk_transition_body("done", Some("  "), None, None, true).is_err(),
+            "blank project is no filter"
+        );
+        let b = bulk_transition_body("done", Some("ENG"), Some("in_review"), None, true).unwrap();
+        assert_eq!(b, json!({ "toStatus": "done", "dryRun": true, "project": "ENG", "status": "in_review" }));
+        assert_eq!(bulk_transition_body("open", None, None, Some("bug"), false).unwrap()["dryRun"], false);
+    }
+
+    #[test]
+    fn assign_none_unassigns() {
+        assert_eq!(assign_body("none"), json!({ "assignee": null }));
+        assert_eq!(assign_body("-"), json!({ "assignee": null }));
+        assert_eq!(assign_body("me"), json!({ "assignee": "me" }));
+        assert_eq!(assign_body(" jane@acme.com "), json!({ "assignee": "jane@acme.com" }));
+    }
+
+    #[test]
+    fn bulk_transition_render_previews_titles_and_overflow() {
+        let r = json!({ "dryRun": true, "data": { "total": 12, "titles": ["A", "B"] } });
+        let out = render_bulk_transition(&r, "done", false);
+        assert!(out.contains("12 work item(s) would move to done"));
+        assert!(out.contains("- A") && out.contains("+10 more") && out.contains("--apply"));
+        let r = json!({ "summary": "Moved 2 work item(s) to done: \"A\", \"B\".", "data": { "moved": 2 } });
+        assert_eq!(render_bulk_transition(&r, "done", true), "  Moved 2 work item(s) to done: \"A\", \"B\".\n");
+    }
 }
 
 #[cfg(test)]
