@@ -306,6 +306,8 @@ pub mod tests {
             vec!["config", "user.email", "t@t"],
             vec!["config", "user.name", "t"],
             vec!["config", "commit.gpgsign", "false"],
+            // Windows runners default to autocrlf=true; the tests compare bytes.
+            vec!["config", "core.autocrlf", "false"],
         ] {
             run(p, &args).unwrap();
         }
