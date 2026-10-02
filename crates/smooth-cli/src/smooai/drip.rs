@@ -70,6 +70,10 @@ pub enum Cmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Enrolling sends real email to real people — the gate names the
+        /// contact count and the org before anything goes out (SMOODEV-3606).
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Stop ONE contact's enrollment, leaving everyone else's running.
     Cancel {
@@ -169,10 +173,25 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             contacts,
             json: as_json,
             org,
+            confirm,
         } => {
             let o = require_active_org(&client, org)?;
             validate_cohort(contacts.len())?;
             let asked = contacts.len();
+            let target = format!("{} ({asked} contact(s) will start receiving email)", sequence_id.trim());
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "enroll",
+                    noun: "contacts into drip sequence",
+                    id: &target,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if !proceed {
+                return Ok(());
+            }
             let body = client
                 .post(
                     &format!("/organizations/{o}/drip-sequences/{}/enroll", urlencoding::encode(sequence_id.trim())),

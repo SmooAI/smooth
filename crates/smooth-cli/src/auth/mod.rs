@@ -61,11 +61,22 @@ pub enum AuthCommands {
         /// if omitted.
         #[arg(long, conflicts_with = "client_id", conflicts_with = "client_secret")]
         email: Option<String>,
-        /// Password (user flow only). Prompted interactively
-        /// (without echo) if omitted. Avoid passing on the command
-        /// line in interactive shells — it lands in shell history.
-        #[arg(long, conflicts_with = "client_id", conflicts_with = "client_secret")]
+        /// DEPRECATED (hidden): a password on argv is visible in `ps` and
+        /// lands in shell history. Still accepted, with a warning. Use
+        /// `--password-stdin`, or omit it for the masked prompt.
+        #[arg(long, hide = true, conflicts_with = "client_id", conflicts_with = "client_secret")]
         password: Option<String>,
+        /// Read the password from stdin (user flow only), e.g.
+        /// `op read … | th auth login --no-browser --email … --password-stdin`.
+        /// Omit for the masked prompt.
+        #[arg(
+            long,
+            conflicts_with = "password",
+            conflicts_with = "client_id",
+            conflicts_with = "client_secret",
+            conflicts_with = "client_secret_stdin"
+        )]
+        password_stdin: bool,
         /// Open the browser for the OAuth2 + PKCE user/org flow against
         /// `smoo.ai/cli-login` (Supabase session). This is the **default**
         /// on a TTY; pass `--no-browser` for the password prompt or `--m2m`
@@ -75,7 +86,8 @@ pub enum AuthCommands {
             conflicts_with = "no_browser",
             conflicts_with = "m2m",
             conflicts_with = "email",
-            conflicts_with = "password"
+            conflicts_with = "password",
+            conflicts_with = "password_stdin"
         )]
         browser: bool,
         /// Force the prompt-based Supabase password flow instead of the
@@ -88,10 +100,17 @@ pub enum AuthCommands {
         /// Prompted interactively if omitted.
         #[arg(long)]
         client_id: Option<String>,
-        /// Service-account client_secret (M2M flow only — implies
-        /// --m2m). Prompted interactively (without echo) if omitted.
-        #[arg(long)]
+        /// DEPRECATED (hidden): a client_secret on argv is visible in `ps`
+        /// and lands in shell history. Still accepted, with a warning. Use
+        /// `--client-secret-stdin`, `SMOOAI_CLIENT_SECRET`, or the masked
+        /// prompt.
+        #[arg(long, hide = true)]
         client_secret: Option<String>,
+        /// Read the service-account client_secret from stdin (M2M flow —
+        /// implies --m2m). Without it: `SMOOAI_CLIENT_SECRET`, then a
+        /// masked prompt.
+        #[arg(long, conflicts_with = "client_secret")]
+        client_secret_stdin: bool,
     },
     /// Clear stored session(s). By default clears the user session;
     /// pass `--m2m` to clear the M2M session instead, `--all` to
@@ -154,11 +173,31 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
             m2m,
             email,
             password,
+            password_stdin,
             browser,
             no_browser,
             client_id,
             client_secret,
+            client_secret_stdin,
         } => {
+            // SMOODEV-3606: secrets on argv are deprecated, not yet removed —
+            // existing scripts keep working, loudly.
+            if password.is_some() {
+                warn_secret_on_argv("--password", "--password-stdin");
+            }
+            if client_secret.is_some() {
+                warn_secret_on_argv("--client-secret", "--client-secret-stdin (or SMOOAI_CLIENT_SECRET)");
+            }
+            let password = if password_stdin {
+                Some(crate::secret_input::from_stdin("password")?)
+            } else {
+                password
+            };
+            let client_secret = if client_secret_stdin {
+                Some(crate::secret_input::from_stdin("client_secret")?)
+            } else {
+                client_secret
+            };
             // --client-id / --client-secret implies --m2m even if
             // the flag wasn't passed (saves a keystroke).
             let m2m = m2m || client_id.is_some() || client_secret.is_some();
@@ -183,6 +222,14 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
         AuthCommands::Whoami => whoami::cmd_whoami().await,
         AuthCommands::Profile { cmd } => profile::dispatch(cmd),
     }
+}
+
+fn warn_secret_on_argv(flag: &str, instead: &str) {
+    use owo_colors::OwoColorize;
+    anstream::eprintln!(
+        "  {} {flag} is deprecated: a secret on the command line is visible in `ps` and shell history. Use {instead} instead.",
+        "warning:".yellow().bold()
+    );
 }
 
 /// Resolve the prod Supabase URL: `SMOOAI_SUPABASE_URL` env var
@@ -218,6 +265,39 @@ mod tests {
 
         let off = Wrap::try_parse_from(["t", "list"]).expect("bare list must still parse");
         assert!(matches!(off.cmd, ProfileCommands::List { json: false }), "--json must default to off");
+    }
+
+    /// SMOODEV-3606: secrets come in on stdin, not argv. The `-stdin`
+    /// flags parse, `--client-secret-stdin` sits in the M2M flow, the
+    /// legacy flags still parse (with a warning at dispatch) but are hidden.
+    #[test]
+    fn login_secret_flags_prefer_stdin_and_hide_argv_spelling() {
+        use clap::{CommandFactory, Parser};
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: AuthCommands,
+        }
+        let p = |args: &[&str]| Wrap::try_parse_from(std::iter::once("t").chain(args.iter().copied()));
+
+        let user = p(&["login", "--no-browser", "--email", "a@b.co", "--password-stdin"]).expect("--password-stdin parses");
+        assert!(matches!(user.cmd, AuthCommands::Login { password_stdin: true, .. }));
+        let m2m = p(&["login", "--client-id", "cid", "--client-secret-stdin"]).expect("--client-secret-stdin parses");
+        assert!(matches!(m2m.cmd, AuthCommands::Login { client_secret_stdin: true, .. }));
+
+        // Two sources for the same secret is a mistake, not a precedence rule.
+        assert!(p(&["login", "--password", "x", "--password-stdin"]).is_err());
+        assert!(p(&["login", "--client-secret", "x", "--client-secret-stdin"]).is_err());
+        // A user password and an M2M secret on the same call make no sense.
+        assert!(p(&["login", "--password-stdin", "--client-secret-stdin"]).is_err());
+
+        let cmd = Wrap::command();
+        let login = cmd.find_subcommand("login").expect("login subcommand");
+        for legacy in ["password", "client-secret"] {
+            let arg = login.get_arguments().find(|a| a.get_long() == Some(legacy)).expect("legacy flag kept");
+            assert!(arg.is_hide_set(), "--{legacy} must be hidden from help");
+        }
     }
 
     #[test]

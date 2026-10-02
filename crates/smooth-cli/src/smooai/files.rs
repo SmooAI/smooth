@@ -185,8 +185,17 @@ pub enum Cmd {
         /// `view` or `download`.
         #[arg(long, default_value = "download")]
         permission: String,
-        /// Optional password gate.
+        /// Password-gate the link, reading the password from stdin
+        /// (`… | th files share … --password-stdin`). Never on argv.
+        #[arg(long, conflicts_with = "password_prompt")]
+        password_stdin: bool,
+        /// Password-gate the link, prompting for the password (masked).
         #[arg(long)]
+        password_prompt: bool,
+        /// REMOVED: a password on argv is visible in `ps` and shell
+        /// history. Kept hidden only so the old spelling fails with a
+        /// pointer to `--password-stdin` / `--password-prompt`.
+        #[arg(long, hide = true)]
         password: Option<String>,
         /// Expire the link this many hours from now.
         #[arg(long = "expires-in-hours")]
@@ -197,7 +206,8 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// List the shares on a file or folder.
+    /// List the shares on a file or folder. Share tokens (each one IS a
+    /// working anonymous link) are masked unless `--reveal`.
     Shares {
         /// `file` or `folder`.
         kind: Kind,
@@ -205,8 +215,12 @@ pub enum Cmd {
         id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Print share tokens in full instead of masked to the last 4.
+        #[arg(long)]
+        reveal: bool,
     },
-    /// Revoke a share.
+    /// Revoke a share. Everyone holding the link loses access, so it prints
+    /// the target and confirms first.
     Unshare {
         /// `file` or `folder`.
         kind: Kind,
@@ -216,6 +230,8 @@ pub enum Cmd {
         share_id: String,
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Send a tracked email invite for an existing share.
     Invite {
@@ -422,11 +438,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             kind,
             id,
             permission,
+            password_stdin,
+            password_prompt,
             password,
             expires_in_hours,
             max_downloads,
             org,
         } => {
+            if password.is_some() {
+                anyhow::bail!(
+                    "`--password` was removed: a password on the command line is visible in `ps` and shell history. \
+                     Use `--password-stdin` (pipe it in) or `--password-prompt` (masked prompt)."
+                );
+            }
+            let password = if password_stdin {
+                Some(crate::secret_input::from_stdin("share password")?)
+            } else if password_prompt {
+                Some(crate::secret_input::prompt("Share password", true)?)
+            } else {
+                None
+            };
             let o = require_active_org(&client, org)?;
             let body = json!({
                 "permission": permission,
@@ -444,17 +475,38 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
             print_json(&share);
         }
-        Cmd::Shares { kind, id, org } => {
+        Cmd::Shares { kind, id, org, reveal } => {
             let o = require_active_org(&client, org)?;
-            print_json(
-                &client
-                    .get(&format!("/organizations/{o}/{}/{id}/shares", kind.seg()))
-                    .await
-                    .context("GET shares")?,
-            );
+            let mut shares = client
+                .get(&format!("/organizations/{o}/{}/{id}/shares", kind.seg()))
+                .await
+                .context("GET shares")?;
+            if !reveal {
+                mask_share_tokens(&mut shares);
+            }
+            print_json(&shares);
         }
-        Cmd::Unshare { kind, id, share_id, org } => {
+        Cmd::Unshare {
+            kind,
+            id,
+            share_id,
+            org,
+            confirm,
+        } => {
             let o = require_active_org(&client, org)?;
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "revoke",
+                    noun: "share link",
+                    id: &share_id,
+                    org: &o,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if !proceed {
+                return Ok(());
+            }
             print_json(
                 &client
                     .delete(&format!("/organizations/{o}/{}/{id}/shares/{share_id}", kind.seg()))
@@ -493,6 +545,42 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fields of a share listing that are bearer credentials: anyone holding the
+/// value can open the share. Masked to the last 4 (the same shape as
+/// `th config list`) so a listing pasted into a ticket or transcript does not
+/// hand out working links.
+const SHARE_SECRET_FIELDS: &[&str] = &["token", "password", "passwordHash"];
+
+/// Recursively mask [`SHARE_SECRET_FIELDS`] in a shares response, whatever
+/// envelope (`{shares: [...]}`, a bare array, nested recipients) it uses.
+fn mask_share_tokens(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                if SHARE_SECRET_FIELDS.contains(&k.as_str()) {
+                    if let serde_json::Value::String(s) = child {
+                        *s = mask_tail(s);
+                    }
+                } else {
+                    mask_share_tokens(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(mask_share_tokens),
+        _ => {}
+    }
+}
+
+fn mask_tail(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    if n <= 4 {
+        "*".repeat(n)
+    } else {
+        format!("{}{}", "*".repeat(n - 4), chars[n - 4..].iter().collect::<String>())
+    }
 }
 
 /// Human rendering of the `/files/{id}/content` response: the text itself with
@@ -704,7 +792,56 @@ fn print_listing(folders: &serde_json::Value, files: &serde_json::Value) {
 mod tests {
     use serde_json::json;
 
-    use super::{content_text, dest_folder_value, find_file_name, guess_mime};
+    use super::{content_text, dest_folder_value, find_file_name, guess_mime, mask_share_tokens};
+
+    /// SMOODEV-3606: a share token is a working anonymous link, so the
+    /// listing masks it (at any depth) unless `--reveal`.
+    #[test]
+    fn share_listing_masks_tokens_at_any_depth() {
+        let mut v = json!({ "shares": [{
+            "id": "sh-1",
+            "token": "abcdefghijklmnop",
+            "recipients": [{ "email": "a@b.co", "token": "zyxwvutsrq" }],
+        }] });
+        mask_share_tokens(&mut v);
+        assert_eq!(v["shares"][0]["token"], json!("************mnop"));
+        assert_eq!(v["shares"][0]["recipients"][0]["token"], json!("******tsrq"));
+        // Non-secret fields are untouched.
+        assert_eq!(v["shares"][0]["id"], json!("sh-1"));
+        assert_eq!(v["shares"][0]["recipients"][0]["email"], json!("a@b.co"));
+    }
+
+    /// SMOODEV-3606: the share password never rides argv. The new flags
+    /// parse; `--password-stdin` and `--password-prompt` are exclusive; the
+    /// old flag still parses (so dispatch can refuse it with a pointer) but is
+    /// hidden from help.
+    #[test]
+    fn share_password_flags_keep_the_secret_off_argv() {
+        use clap::{CommandFactory, Parser};
+
+        use super::Cmd;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let p = |args: &[&str]| Wrap::try_parse_from(std::iter::once("t").chain(args.iter().copied()));
+        assert!(matches!(
+            p(&["share", "file", "f1", "--password-stdin"]).expect("parse").cmd,
+            Cmd::Share { password_stdin: true, .. }
+        ));
+        assert!(matches!(
+            p(&["share", "file", "f1", "--password-prompt"]).expect("parse").cmd,
+            Cmd::Share { password_prompt: true, .. }
+        ));
+        assert!(p(&["share", "file", "f1", "--password-stdin", "--password-prompt"]).is_err());
+
+        let cmd = Wrap::command();
+        let share = cmd.find_subcommand("share").expect("share subcommand");
+        let legacy = share.get_arguments().find(|a| a.get_long() == Some("password")).expect("legacy flag kept");
+        assert!(legacy.is_hide_set(), "--password must be hidden from help");
+    }
 
     #[test]
     fn dest_root_and_empty_map_to_null() {

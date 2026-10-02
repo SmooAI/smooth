@@ -69,6 +69,9 @@ pub enum Cmd {
         /// Emit the raw JSON response (still contains the key once).
         #[arg(long)]
         json: bool,
+        /// The live key stops working the moment this runs — confirm first.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Manage additional named keys beyond the default — e.g. one per
     /// service or environment.
@@ -111,6 +114,9 @@ pub enum KeysCmd {
         /// Emit the raw JSON response (still contains the key once).
         #[arg(long)]
         json: bool,
+        /// The live key stops working the moment this runs — confirm first.
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Revoke (soft-delete) a named key. It stops working at the
     /// provider immediately; the name can be re-minted later.
@@ -166,8 +172,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 .context("POST llm-gateway create-key")?;
             print_minted_key(&resp, json);
         }
-        Cmd::RotateKey { org_id, json } => {
+        Cmd::RotateKey { org_id, json, confirm } => {
             let org = crate::active_org::resolve(org_id)?;
+            if !confirm_rotate("default LLM gateway key", &org, confirm)? {
+                return Ok(());
+            }
             let resp = client
                 .post(&format!("/organizations/{org}/llm-gateway/rotate-key"), &json!({}))
                 .await
@@ -177,6 +186,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Keys { cmd } => keys(cmd, &client).await?,
     }
     Ok(())
+}
+
+/// Rotation invalidates the live key immediately, so every consumer still
+/// holding it starts failing — the same blast radius as a revoke
+/// (SMOODEV-3606).
+fn confirm_rotate(id: &str, org: &str, confirm: crate::destructive::Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb: "rotate",
+            noun: "LLM gateway key (the live value stops working)",
+            id,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )
 }
 
 async fn keys(cmd: KeysCmd, client: &UserClient) -> Result<()> {
@@ -201,8 +226,11 @@ async fn keys(cmd: KeysCmd, client: &UserClient) -> Result<()> {
                 .context("POST llm-gateway named key")?;
             print_minted_key(&resp, json);
         }
-        KeysCmd::Rotate { name, org_id, json } => {
+        KeysCmd::Rotate { name, org_id, json, confirm } => {
             let org = crate::active_org::resolve(org_id)?;
+            if !confirm_rotate(&name, &org, confirm)? {
+                return Ok(());
+            }
             let resp = client
                 .post(&format!("/organizations/{org}/llm-gateway/keys/{name}/rotate"), &json!({}))
                 .await

@@ -110,6 +110,20 @@ fn base_url() -> String {
     std::env::var("SMOOAI_API_URL").unwrap_or_else(|_| "https://api.smoo.ai".to_string())
 }
 
+/// "delete" → "deleted", "grant" → "granted", "roll back" → "rolled back".
+/// Only the first word inflects, so a phrasal verb reads naturally. Verbs
+/// passed to [`Target`] are regular; irregular ones ("set", "send") are
+/// spelled as a regular synonym at the call site instead.
+fn past_tense(verb: &str) -> String {
+    let (head, rest) = verb.split_once(' ').unwrap_or((verb, ""));
+    let mut out = if head.ends_with('e') { format!("{head}d") } else { format!("{head}ed") };
+    if !rest.is_empty() {
+        out.push(' ');
+        out.push_str(rest);
+    }
+    out
+}
+
 /// Print the target banner. Runs on every path, `--yes` included — an
 /// unattended run should still leave the org it acted on in the log.
 fn announce(t: &Target) {
@@ -169,7 +183,7 @@ pub fn gate(t: &Target, dry_run: bool, yes: bool) -> Result<bool> {
     announce(t);
     match decide(dry_run, yes, std::io::stdin().is_terminal()) {
         Decision::DryRun => {
-            println!("  {} dry-run — nothing was {}d", "●".dimmed(), t.verb);
+            println!("  {} dry-run — nothing was {}", "●".dimmed(), past_tense(t.verb));
             println!();
             Ok(false)
         }
@@ -193,7 +207,7 @@ pub fn gate(t: &Target, dry_run: bool, yes: bool) -> Result<bool> {
             if confirmed {
                 Ok(true)
             } else {
-                eprintln!("  {} aborted — nothing was {}d", "✗".yellow(), t.verb);
+                eprintln!("  {} aborted — nothing was {}", "✗".yellow(), past_tense(t.verb));
                 anyhow::bail!("aborted by operator")
             }
         }
@@ -226,6 +240,15 @@ mod tests {
         assert_eq!(decide(false, false, true), Decision::Prompt);
         // no terminal, no --yes: fail closed.
         assert_eq!(decide(false, false, false), Decision::Refuse);
+    }
+
+    #[test]
+    fn past_tense_reads_naturally() {
+        assert_eq!(past_tense("delete"), "deleted");
+        assert_eq!(past_tense("revoke"), "revoked");
+        assert_eq!(past_tense("grant"), "granted");
+        assert_eq!(past_tense("publish"), "published");
+        assert_eq!(past_tense("roll back"), "rolled back");
     }
 
     /// Fail CLOSED, not open — the defect this gate exists to prevent is a

@@ -52,6 +52,7 @@ mod reclaim;
 /// macOS Reminders setup driven by `th doctor --setup-reminders` (pearl th-94cc4a).
 #[cfg(target_os = "macos")]
 mod reminders_setup;
+mod secret_input;
 mod service;
 mod smooai;
 mod statusline_setup;
@@ -8131,6 +8132,93 @@ mod cli_dispatch_tests {
             offenders.is_empty(),
             "these remote delete verbs hit production with no confirmation — wire them through \
              `destructive::gate` (or add them to LOCAL_ONLY if they only touch this machine): {offenders:#?}"
+        );
+    }
+
+    /// SMOODEV-3606: verbs that are not named "delete" but are every bit as
+    /// consequential — they kill a live credential, send email to real
+    /// contacts, change who can do what, change billing, or change what the
+    /// public sees — carry the same `--dry-run` / `--yes` gate. The verb
+    /// names vary too much for the sweep above, so they are pinned by path;
+    /// a path that no longer resolves fails loudly rather than passing.
+    #[test]
+    fn consequential_non_delete_verbs_are_gated() {
+        const GATED: &[&[&str]] = &[
+            // Kill the live key.
+            &["smoo", "api", "keys", "rotate"],
+            &["smoo", "llm", "rotate-key"],
+            &["smoo", "llm", "keys", "rotate"],
+            // Change other people's access.
+            &["smoo", "roles", "grant"],
+            &["smoo", "roles", "set-permissions"],
+            &["smoo", "roles", "assign"],
+            &["smoo", "roles", "unassign"],
+            &["smoo", "api", "teams", "set-members"],
+            &["smoo", "api", "teams", "set-roles"],
+            // Org-wide / per-agent AI behaviour.
+            &["smoo", "api", "smooth-operator", "tools", "enable"],
+            &["smoo", "api", "smooth-operator", "tools", "disable"],
+            &["smoo", "agents", "tools", "enable"],
+            &["smoo", "agents", "tools", "disable"],
+            // Sends email to real people.
+            &["smoo", "drip", "enroll"],
+            // Billing.
+            &["smoo", "api", "products", "free"],
+            &["smoo", "api", "products", "bypass"],
+            // Changes the public site.
+            &["smoo", "heypage", "publish"],
+            &["smoo", "heypage", "rollback"],
+            &["smoo", "heypage", "regen"],
+            &["smoo", "heypage", "build"],
+            &["smoo", "blog", "publish"],
+            &["smoo", "blog", "unpublish"],
+            // Cuts off everyone holding the link.
+            &["smoo", "files", "unshare"],
+        ];
+        let root = Cli::command();
+        let mut offenders = Vec::new();
+        for path in GATED {
+            let mut cmd = &root;
+            for seg in *path {
+                cmd = cmd
+                    .find_subcommand(seg)
+                    .unwrap_or_else(|| panic!("`th {}` does not resolve (stuck at `{seg}`)", path.join(" ")));
+            }
+            let has = |long: &str| cmd.get_arguments().any(|a| a.get_long() == Some(long));
+            if !has("dry-run") || !has("yes") {
+                offenders.push(path.join(" "));
+            }
+        }
+        assert!(offenders.is_empty(), "these verbs act without confirmation: {offenders:#?}");
+    }
+
+    /// SMOODEV-3606: a flag whose name says it carries a secret must not take
+    /// that secret as its value. The only survivors are hidden, deprecated
+    /// spellings kept so old scripts get a pointer instead of "unknown flag".
+    #[test]
+    fn no_visible_flag_takes_a_secret_on_argv() {
+        fn is_secret_name(long: &str) -> bool {
+            let l = long.to_ascii_lowercase();
+            (l == "password" || l.ends_with("-password") || l.ends_with("secret") || l == "api-key" || l == "token") && !l.ends_with("-stdin")
+        }
+        fn walk(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+            for a in cmd.get_arguments() {
+                if let Some(long) = a.get_long() {
+                    let takes_value = a.get_action().takes_values();
+                    if is_secret_name(long) && takes_value && !a.is_hide_set() {
+                        offenders.push(format!("{path} --{long}"));
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), offenders);
+            }
+        }
+        let mut offenders = Vec::new();
+        walk(&Cli::command(), "th", &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "these flags put a secret on argv (visible in `ps` / shell history) — read it from stdin, a file, or a masked prompt: {offenders:#?}"
         );
     }
 

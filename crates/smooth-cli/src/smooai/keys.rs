@@ -136,6 +136,10 @@ pub enum Cmd {
         /// Emit the raw JSON response (still contains the new key once).
         #[arg(long)]
         json: bool,
+        /// Rotating revokes the live key, so every consumer still holding
+        /// it breaks — confirm first (SMOODEV-3606).
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -230,9 +234,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-        Cmd::Rotate { client_id, org_id, json } => {
+        Cmd::Rotate {
+            client_id,
+            org_id,
+            json,
+            confirm,
+        } => {
             let org = crate::active_org::resolve(org_id)?;
-            rotate(&client, &org, &client_id, json).await?;
+            let proceed = crate::destructive::gate_with(
+                &crate::destructive::Target {
+                    verb: "rotate",
+                    noun: "auth client (its live key is revoked)",
+                    id: &client_id,
+                    org: &org,
+                    severity: crate::destructive::Severity::Standard,
+                },
+                confirm,
+            )?;
+            if proceed {
+                rotate(&client, &org, &client_id, json).await?;
+            }
         }
     }
     Ok(())

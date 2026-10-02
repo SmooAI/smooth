@@ -77,6 +77,10 @@ pub enum ToolsCmd {
         /// Print the raw JSON instead of the rendered view.
         #[arg(long)]
         json: bool,
+        /// Changes what the agent can do for every end user it talks to —
+        /// `--dry-run` / `--yes` (SMOODEV-3606).
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
     /// Turn ONE tool off for ONE agent. The merge happens server-side.
     ///
@@ -94,6 +98,10 @@ pub enum ToolsCmd {
         /// Print the raw JSON instead of the rendered view.
         #[arg(long)]
         json: bool,
+        /// Changes what the agent can do for every end user it talks to —
+        /// `--dry-run` / `--yes` (SMOODEV-3606).
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
     },
 }
 
@@ -508,6 +516,26 @@ pub async fn set_agent_tool(org: Option<String>, agent_id: &str, tool_id: &str, 
     parse_agent_tools(&raw)
 }
 
+/// Gate a per-agent tool flip. Returns the resolved org to act on, or `None`
+/// for a dry run. The org is resolved HERE (not inside [`set_agent_tool`]) so
+/// the banner names the exact org the POST will hit (SMOODEV-3606).
+async fn gate_agent_tool(verb: &str, agent_id: &str, tool_id: &str, org: Option<String>, confirm: crate::destructive::Confirm) -> Result<Option<String>> {
+    let client = require_authed().await?;
+    let org = require_active_org(&client, org)?;
+    let target = format!("{tool_id} on agent {agent_id}");
+    let proceed = crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb,
+            noun: "agent tool",
+            id: &target,
+            org: &org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )?;
+    Ok(proceed.then_some(org))
+}
+
 // ---- Dispatch --------------------------------------------------------------
 
 /// # Errors
@@ -540,7 +568,12 @@ pub async fn cmd(cmd: ToolsCmd) -> Result<()> {
             auth_level,
             org,
             json: json_out,
+            confirm,
         } => {
+            let Some(org) = gate_agent_tool("enable", &agent_id, &tool_id, org, confirm).await? else {
+                return Ok(());
+            };
+            let org = Some(org);
             let view = set_agent_tool(org.clone(), &agent_id, &tool_id, true, auth_level.map(AuthLevelArg::api_value)).await?;
             report(&view, org, &agent_id, &tool_id, "enabled", json_out).await;
         }
@@ -549,7 +582,12 @@ pub async fn cmd(cmd: ToolsCmd) -> Result<()> {
             tool_id,
             org,
             json: json_out,
+            confirm,
         } => {
+            let Some(org) = gate_agent_tool("disable", &agent_id, &tool_id, org, confirm).await? else {
+                return Ok(());
+            };
+            let org = Some(org);
             let view = set_agent_tool(org.clone(), &agent_id, &tool_id, false, None).await?;
             report(&view, org, &agent_id, &tool_id, "disabled", json_out).await;
         }

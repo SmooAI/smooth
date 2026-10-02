@@ -75,6 +75,8 @@ pub enum Cmd {
         team: String,
         /// Members to set — each an email or a member-id uuid.
         members: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -85,6 +87,8 @@ pub enum Cmd {
         team: String,
         /// Roles to set — each a role name or a role-id uuid.
         roles: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -141,10 +145,15 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 println!("  {} deleted team {}", "🗑".red(), id.dimmed());
             }
         }
-        Cmd::SetMembers { team, members, org } => {
+        Cmd::SetMembers { team, members, org, confirm } => {
             let org = resolve_org(org)?;
             let id = resolve_team_id(&client, &org, &team).await?;
             let member_ids = resolve_member_ids(&client, &org, &members).await?;
+            // Replace-all: anyone not listed loses the team's roles.
+            let target = format!("{team} (replace-all → {} member(s))", member_ids.len());
+            if !gate_access_change("replace", "members of team", &target, &org, confirm)? {
+                return Ok(());
+            }
             client
                 .put(&format!("/organizations/{org}/teams/{id}/members"), &json!({ "memberIds": member_ids }))
                 .await
@@ -156,10 +165,14 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 member_ids.len().to_string().bold()
             );
         }
-        Cmd::SetRoles { team, roles, org } => {
+        Cmd::SetRoles { team, roles, org, confirm } => {
             let org = resolve_org(org)?;
             let id = resolve_team_id(&client, &org, &team).await?;
             let role_ids = resolve_role_ids(&client, &org, &roles).await?;
+            let target = format!("{team} (replace-all → {})", roles.join(", "));
+            if !gate_access_change("replace", "roles of team", &target, &org, confirm)? {
+                return Ok(());
+            }
             client
                 .put(&format!("/organizations/{org}/teams/{id}/roles"), &json!({ "roleIds": role_ids }))
                 .await
@@ -168,6 +181,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Replacing a team's members or roles changes every member's effective
+/// access at once, so it gets the same gate as a delete (SMOODEV-3606).
+fn gate_access_change(verb: &str, noun: &str, target: &str, org: &str, confirm: crate::destructive::Confirm) -> Result<bool> {
+    crate::destructive::gate_with(
+        &crate::destructive::Target {
+            verb,
+            noun,
+            id: target,
+            org,
+            severity: crate::destructive::Severity::Standard,
+        },
+        confirm,
+    )
 }
 
 /// Resolve a team id from a uuid (used as-is) or a case-insensitive name.

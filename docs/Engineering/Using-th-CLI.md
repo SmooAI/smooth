@@ -230,16 +230,24 @@ The Smoo AI platform uses a two-tier identity model that `th` mirrors exactly:
 ### Logging in today (M2M client_credentials)
 
 ```bash
-smoo auth login --m2m                # interactive — prompts for client_id + secret
+smoo auth login --m2m                # interactive — prompts for client_id + secret (masked)
 SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… smoo auth login --m2m   # env-driven (CI, scripts)
-smoo auth login --m2m --client-id=… --client-secret=…              # flag-driven
+op read op://… | smoo auth login --client-id=… --client-secret-stdin   # secret on stdin
 ```
 
 Credential resolution order (first present wins):
 
-1. `--client-id` / `--client-secret` flags
+1. `--client-id` flag; `--client-secret-stdin` for the secret
 2. `SMOOAI_CLIENT_ID` / `SMOOAI_CLIENT_SECRET` env vars
-3. Interactive prompt
+3. Interactive prompt (the secret is masked)
+
+**Secrets never go on argv (SMOODEV-3606).** A value on the command line
+is visible to every local user through `ps`, lands in shell history, and
+gets copied into agent transcripts. `--client-secret <value>` and the
+user flow's `--password <value>` are deprecated: hidden from `--help`,
+still accepted, and they print a warning to stderr. Use
+`--client-secret-stdin` / `--password-stdin` (one trailing newline is
+stripped; empty input is refused), the env var, or the masked prompt.
 
 The exchange happens against `https://auth.smoo.ai/token` with `grant_type=client_credentials` and `provider=client_credentials`. The response is a JWT (with org claims, role claims, expiration) that `th` stores at `~/.smooth/auth/smooai.json` and replays as `Authorization: Bearer …` on every `smoo api` call.
 
@@ -486,11 +494,25 @@ stored Supabase refresh_token:
 
 ```bash
 smoo config get <key> --environment=<env>             # raw value (use --json to wrap)
-smoo config set <key> <value> --environment=<env>     # parses value as JSON when possible
+smoo config set <key> <value> --environment=<env>     # NON-secret tiers; parses value as JSON when possible
+smoo config set <key> --value-stdin --environment=<env>   # secret: `op read … | smoo config set KEY --value-stdin`
+smoo config set <key> --value-file ./secret.txt           # secret from a file
+smoo config set <key>                                     # no value on a TTY → prompt (masked for the secret tier)
 smoo config list --environment=<env>                  # key→value map (--json for raw)
 smoo config <sub> --m2m                               # use ~/.smooth/auth/smooai.json instead
 smoo config <sub> --org-id=<id>                       # override active org
 ```
+
+**Secret-tier values never go on argv (SMOODEV-3606).** The positional
+`<value>` is refused when the key resolves to the `secret` tier — and an
+undeclared key defaults to `secret` (ADR-075) — with an error naming
+`--value-stdin`. Public / feature-flag / limit values keep the positional
+form. `--insecure-argv` is the explicit escape hatch (it warns). Stdin and
+file input strip exactly one trailing newline and refuse empty input.
+
+`smoo config environments values <env-id>` masks every value to its last
+4 characters (the JSON output too — that endpoint mixes every tier);
+`--reveal` prints plaintext.
 
 #### Patching the schema from the CLI — `smoo config schema`
 
@@ -644,7 +666,7 @@ smoo api keys create --type b2m \
 smoo api keys update <client_id> \
   --allowed-origin https://new.example.com        # replace a B2M client's origins (B2M only)
 
-smoo api keys rotate <client_id>                     # mint replacement (same type/origins), revoke old
+smoo api keys rotate <client_id> [--dry-run|--yes]   # mint replacement (same type/origins), revoke old
 smoo api keys revoke <client_id>                     # delete a client
 
 smoo api keys create --type b2m --allowed-origin … --org-id <child>   # master admin, child org
@@ -670,13 +692,13 @@ cross-org).
 ```bash
 smoo llm overview                       # masked key + month-to-date spend (--json for raw)
 smoo llm create-key                     # mint the org's persistent key — prints the value ONCE
-smoo llm rotate-key                     # invalidate + reissue the persistent key (prints once)
+smoo llm rotate-key [--dry-run|--yes]   # invalidate + reissue the persistent key (prints once)
 smoo llm usage --days 30                # spend by model + by day (JSON timeseries)
 
 # additional named keys (e.g. per service / environment)
 smoo llm keys list                      # masked list (--json for raw)
 smoo llm keys create ci                 # mint a named key — prints the value ONCE
-smoo llm keys rotate ci                 # reissue a named key
+smoo llm keys rotate ci [--dry-run|--yes]   # reissue a named key
 smoo llm keys delete ci                 # revoke (soft-delete; name reusable later)
 
 smoo llm create-key --org-id <child>    # master admin minting for a child org
@@ -697,6 +719,30 @@ smoo api jobs show <job-id>
 smoo api jobs create <body>
 smoo api jobs update <job-id> <body>
 ```
+
+### Confirmation on consequential verbs (SMOODEV-3606)
+
+Every verb that kills a live credential, sends to real people, changes
+someone's access, changes billing, or changes what the public sees goes
+through the same gate as `delete`: it prints the org, host and target
+first, `--dry-run` stops there, a terminal is asked (default no), and a
+non-interactive run without `--yes` is **refused**. In scripts and CI,
+pass `--yes`.
+
+| Area | Gated verbs |
+| --- | --- |
+| Credentials | `api keys rotate`, `llm rotate-key`, `llm keys rotate` |
+| Access | `roles grant` / `set-permissions` / `assign` / `unassign` (and `revoke`, `delete`), `api teams set-members` / `set-roles` |
+| AI behaviour | `api smooth-operator tools enable` / `disable` (org-wide), `agents tools enable` / `disable` |
+| Sends | `drip enroll` (names the contact count) |
+| Billing | `api products free` / `bypass` |
+| Public site | `heypage publish` / `rollback` / `regen` / `build --publish`, `blog publish` / `unpublish` |
+| Sharing | `files unshare` |
+
+`files share` takes its password from `--password-stdin` or
+`--password-prompt` (masked); the old `--password <value>` is refused with
+a pointer to those. `files shares` masks share tokens (each is a working
+anonymous link) to the last 4 unless `--reveal`.
 
 ### Integrations — status, connect, disconnect (SMOODEV-3531)
 
