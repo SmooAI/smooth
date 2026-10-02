@@ -1,0 +1,15 @@
+# libghostty-vt for SmoothFlow Desktop's terminals (th-872ea8), built from source
+# by scripts/build-ghostty-vt.sh. ghostty_sha is the SAME manaflow-ai/ghostty commit
+# as apps/smoothflow/scripts/ghosttykit.lock (Mac + iOS) and the Android app's
+# ghostty-vt.lock: every SmoothFlow client parses VT with the same Ghostty.
+# Bump them together.
+ghostty_repo=https://github.com/manaflow-ai/ghostty.git
+ghostty_sha=abd40f6e472d57f2d4bb182004bb5f3fac8df961
+# That commit's build.zig.zon minimum_zig_version. sha256s from ziglang.org/download/index.json.
+zig_version=0.16.0
+zig_sha256_x86_64-linux=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+zig_sha256_aarch64-linux=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+zig_sha256_aarch64-macos=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+zig_sha256_x86_64-macos=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
+zig_sha256_x86_64-windows=68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+zig_sha256_aarch64-windows=aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef

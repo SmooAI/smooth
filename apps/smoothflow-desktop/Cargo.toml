@@ -7,6 +7,7 @@
 [package]
 name = "smoothflow-desktop"
 version = "0.1.0"
+build = "build.rs"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -21,9 +22,6 @@ path = "src/main.rs"
 [dependencies]
 # GPUI + GPUI Component through the one facade crate that pins a matching set.
 gpui-kit = "0.6.6"
-# Terminal state (VT parsing + grid). Swappable behind terminal::TerminalModel;
-# libghostty-vt is the planned default once its C API ships.
-alacritty_terminal = "0.25"
 smooai-smooth-flow-client = { path = "../../crates/smooth-flow-client" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,6 +32,12 @@ futures = "0.3"
 url = "2"
 dirs-next = "2"
 urlencoding = "2"
+
+# Terminal state comes from libghostty-vt (th-872ea8): build.rs links the
+# static library scripts/build-ghostty-vt.sh builds and compiles the C bridge
+# (csrc/smoothflow_vt.c) that src/ghostty.rs wraps.
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 # tests/e2e.rs: the scratch HOME a real smooth-daemon runs in.

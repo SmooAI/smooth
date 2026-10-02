@@ -56,6 +56,7 @@ jobs:
             # GPUI on Linux: wgpu (Vulkan), X11 + Wayland windowing, xkbcommon,
             # fontconfig, D-Bus (portals, notifications) and PipeWire (screen
             # capture), the last needing clang for its bindings.
+            # llvm: llvm-objcopy for scripts/build-ghostty-vt.sh (th-872ea8).
             # The e2e test (tests/e2e.rs) also builds smooth-daemon from the
             # main workspace (libcap-ng, protoc) and runs shells under tmux.
             # The google-chrome apt source flakes `apt-get update` with "Hash
@@ -67,7 +68,7 @@ jobs:
                   sudo apt-get update
                   sudo apt-get install -y --no-install-recommends \
                     tmux libcap-ng-dev protobuf-compiler \
-                    pkg-config clang libclang-dev cmake \
+                    pkg-config clang libclang-dev cmake llvm \
                     libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
                     libx11-xcb-dev libxcb1-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-randr0-dev \
                     libvulkan-dev libfontconfig-dev libfreetype-dev \
@@ -77,6 +78,18 @@ jobs:
             - name: tmux (macOS)
               if: runner.os == 'macOS'
               run: command -v tmux || brew install tmux
+            # libghostty-vt, the terminal engine (th-872ea8): built from source
+            # with the pinned Zig by scripts/build-ghostty-vt.sh, cached on the
+            # lock + script. build.rs runs the same script, which is a no-op
+            # once its stamp matches. Windows runs it under Git Bash.
+            - name: Cache libghostty-vt
+              uses: actions/cache@v4
+              with:
+                  path: apps/smoothflow-desktop/.ghostty-vt/out
+                  key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/smoothflow-desktop/ghostty-vt.lock', 'apps/smoothflow-desktop/scripts/build-ghostty-vt.sh') }}
+            - name: Build libghostty-vt
+              shell: bash
+              run: scripts/build-ghostty-vt.sh
             # The real daemon the e2e test drives (th-032792). Built from the
             # main workspace and handed over by path, so the test never builds
             # it itself here.

@@ -7,12 +7,12 @@
 
 ## 1. Clients and the parity rule
 
-| Client                     | Platform       | Stack                                                    | Terminal                                                                                       |
-| -------------------------- | -------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| **SmoothFlow for Mac**     | macOS          | Swift/AppKit (`apps/smoothflow`)                         | libghostty, Metal                                                                              |
-| **SmoothFlow Desktop**     | Linux, Windows | Rust + GPUI (`apps/smoothflow-desktop`)                  | `alacritty_terminal` state today (libghostty-vt planned), GPUI GPU renderer (Vulkan / DirectX) |
-| **SmoothFlow for iOS**     | iPhone, iPad   | SwiftUI (`smooai/apps/smoothflow-mobile/ios`)            | libghostty, Metal: live `flow.output` over the relay                                           |
-| **SmoothFlow for Android** | Android        | Kotlin/Compose (`smooai/apps/smoothflow-mobile/android`) | libghostty-vt + hardware-accelerated grid (planned; text snapshot today)                       |
+| Client                     | Platform       | Stack                                                    | Terminal                                                                  |
+| -------------------------- | -------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **SmoothFlow for Mac**     | macOS          | Swift/AppKit (`apps/smoothflow`)                         | libghostty, Metal                                                         |
+| **SmoothFlow Desktop**     | Linux, Windows | Rust + GPUI (`apps/smoothflow-desktop`)                  | libghostty-vt (static, from source), GPUI GPU renderer (Vulkan / DirectX) |
+| **SmoothFlow for iOS**     | iPhone, iPad   | SwiftUI (`smooai/apps/smoothflow-mobile/ios`)            | libghostty, Metal: live `flow.output` over the relay                      |
+| **SmoothFlow for Android** | Android        | Kotlin/Compose (`smooai/apps/smoothflow-mobile/android`) | libghostty-vt + hardware-accelerated grid (planned; text snapshot today)  |
 
 **Every client renders its terminals on the GPU.** Web and Electron are not
 SmoothFlow clients.
@@ -287,3 +287,8 @@ control.
   `surfaces.json`. They are additive; the existing six files are unchanged. A
   chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
   SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
+- 2026-10-02: SmoothFlow Desktop parses VT with libghostty-vt instead of
+  `alacritty_terminal` (th-872ea8). It links the same pinned manaflow-ai/ghostty
+  commit as the Mac, iOS and Android apps, built from source with Zig on macOS,
+  Linux and Windows, and answers DA/DSR queries with `flow.input` as the phones
+  do. Every SmoothFlow client now runs Ghostty's terminal.
