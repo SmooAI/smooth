@@ -38,15 +38,23 @@ async fn a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_pat
     let mut ws = d.ws().await;
     ws.attach(&id, 200, 40).await;
     ws.wait_for("first flow.output", WAIT, |v| v["type"] == "flow.output" && v["id"] == id).await;
-    ws.input(&id, "printf 'PANE-%s-PATH\\n' \"$PATH\"\r").await;
-    let screen = d.wait_screen(&id, "PANE-/", WAIT).await;
-    let line = screen
-        .lines()
-        .find(|l| l.starts_with("PANE-/"))
-        .unwrap_or_else(|| panic!("no PATH line:\n{screen}"));
-    let path = line.trim_start_matches("PANE-").trim_end().trim_end_matches("-PATH");
-    assert!(path.split(':').any(|d| d == tmux_dir), "pane PATH `{path}` lacks {tmux_dir}");
-    assert!(path != FINDER_PATH, "the pane got Finder's bare PATH");
+    // Ask the shell itself, so a long PATH wrapping on screen can't matter.
+    // The marker is split by `""` in the typed line, so only output matches.
+    ws.input(
+        &id,
+        &format!("case \":$PATH:\" in *\":{tmux_dir}:\"*) echo HAS\"\"DIROK;; *) echo NO\"\"DIROK;; esac\r"),
+    )
+    .await;
+    let start = std::time::Instant::now();
+    let (answer, screen) = loop {
+        let screen = d.screen(&id).await;
+        if let Some(l) = screen.lines().map(str::trim).find(|l| *l == "HASDIROK" || *l == "NODIROK") {
+            break (l.to_string(), screen);
+        }
+        assert!(start.elapsed() < WAIT, "the shell never answered:\n{screen}");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    assert_eq!(answer, "HASDIROK", "pane PATH lacks {tmux_dir}:\n{screen}");
 
     d.kill(&id, false).await;
 }
