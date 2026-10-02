@@ -11,6 +11,7 @@
 
 pub mod attention;
 pub mod close;
+pub mod diff;
 pub mod directory;
 pub mod fleet;
 pub mod gate;
