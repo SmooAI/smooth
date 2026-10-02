@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.63.1
+
+### Patch Changes
+
+- e9ddb51: SmoothFlow: find tmux off-PATH, and make a failed launch say why (th-9f6814). A Finder-launched daemon (Big Smooth.app, the SmoothFlow app) has `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so it never found Homebrew's tmux, and every session it created sat in `starting` with no pid, no detail and no log line. tmux now resolves through `$SMOOTH_TMUX_BIN`, then `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin` and `/usr/bin`. Panes get the user's login-shell `PATH`, so `claude`, `node` and `git` are found. A launch that fails (no tmux, a tmux error, a missing harness binary) now sends the session to `dead` with a `launch_failed` reason and a detail, logs it at WARN, and broadcasts it to every client. The daemon logs the tmux it resolved at boot, and `th harness doctor` prints it.
+- 70961fd: SmoothFlow Desktop gets an end-to-end test against a real `smooth-daemon` (th-032792). The app's non-GPUI core (`app_core::Core`: engine events, New Session, attach/resize, keystrokes) moved into a library that the GPUI window wraps, so `apps/smoothflow-desktop/tests/e2e.rs` drives the same code the window runs. The test boots an isolated daemon, discovers it, creates a shell session through New Session, attaches at 80x24, types a command through the key encoder, and checks that the output reaches the terminal model. A second variant runs the daemon with a Finder PATH (th-9f6814). A third makes the launch fail and checks that the app sees a `dead` session with `launch_failed` and its detail. The pane now shows that reason instead of a blank terminal. CI runs the e2e on Linux and macOS, and daemon or flow-engine changes now trigger the desktop workflow.
+
 ## 0.63.0
 
 ### Minor Changes
