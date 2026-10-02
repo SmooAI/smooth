@@ -246,7 +246,9 @@ control.
     - The pure logic covered: pane tree ops, the close scope and decision, tab
       titles, the center tab gate, directory picking (`abbreviate`,
       `expandedPath`, `moved`), keymap parsing and conflicts, the harness
-      picker's label, default and degraded, and fleet grouping and counts.
+      picker's label, default and degraded, fleet grouping and counts, and
+      (§14) the Diff viewer's side-by-side pairing, file tree, navigation
+      order, collapsed state, viewed keys, default base and keys.
 - **Scenarios.** A shared list of UI scenarios, each run by every client's UI
   test harness against the mock flow server:
     - new session in a picked directory
@@ -261,6 +263,55 @@ control.
 - **UI tests run in CI only.** They never run on a developer's Mac, where
   macOS UI automation asks for a password.
 
+## 14. Diff
+
+The Diff tab is a native review viewer over the engine's structured diff
+(`flow.diff`; wire and engine side in [SmoothFlow-Diff.md](SmoothFlow-Diff.md)).
+Clients never run `git` or a highlighter: hunks, word spans and syntax spans
+all come from the engine. No client embeds a web view for it.
+
+- **Base picker:** Last turn (`turn`), Uncommitted (`uncommitted`), and
+  `vs <branch>` (`branch`; the label is the ref in `from.label`'s
+  `merge base with <ref>`, without its remote, else "vs default branch").
+  The tab opens on **Last turn for an agent and Uncommitted for a shell**, and
+  remembers the user's pick per session. While a turn runs the `turn` diff is
+  live (`turn.live`) and says so.
+- **File tree** beside the diff: directories before files at each level, each
+  sorted case-insensitively, single-child directory chains compressed
+  (`apps/x/y`). Each file shows its status badge (A/M/D/R/C/X), `+added
+−deleted`, and a viewed check. The main pane lists files in tree order.
+- **Unified / side by side** toggle. Side by side pairs a change block's i-th
+  del with its i-th add; the longer run's rest gets blank cells.
+- **Colors:** syntax spans by the `legend` kind names mapped to the client's
+  theme (Catppuccin Mocha by default), word spans as a stronger add/del
+  background over the line's tint. Offsets are Unicode scalars.
+- **Collapsed:** a file starts collapsed when it is viewed, noise
+  (`collapsed_by_default`), binary, or has nothing inline (mode-only, pure
+  rename). Collapsed files say why, with a Show control. A file with
+  `hunks_omitted` set is fetched with `flow.diff{path}` when it is expanded.
+- **Viewed** marks are per session and keyed by `viewed_key` — the path plus
+  its hunk ids (or its counts when no hunks are loaded) — so a file the agent
+  changes again comes back unviewed. Marking a file viewed collapses it and
+  moves to the next file. In-memory is enough.
+- **Hunk actions:** Revert on every base, always behind a confirmation whose
+  default is Cancel; Stage / Unstage on the Uncommitted view only (`staged`
+  marks a hunk already in the index). A `stale` error refreshes the diff and
+  says the hunk changed.
+- **Comments:** on a line, a range within one hunk, or a file. Clicking the
+  line-number gutter comments on that line; shift-click extends to a range.
+  Comments show inline under the last line of their range until sent. "Send
+  review to agent (N)" sends all of them in one `flow.diff.review`; a
+  `blocked` error is shown, never dropped. Shells have no review.
+- **Refresh** on `flow.diff.changed` for the session on screen, and on demand.
+- **Truncation** is always visible: banners for `diff.truncated`, notices for
+  `file.truncated`, `hunk.truncated` and `line.truncated`.
+- **Keys** (desktop; live only while the diff has focus — bare keys, never
+  menu shortcuts): `j`/`k` line, `n`/`p` hunk, `]`/`[` file, `v` viewed, `c`
+  comment, `r` revert (confirms), `s` stage/unstage, `u` unified/split.
+  `n`/`p` walk the hunks of expanded files in tree order and stop at the ends;
+  `]`/`[` walk every file. Rebindable like any action (`diffNextHunk`, …).
+  Phones show every one of these as a visible control.
+
 ## 13. Change log
 
 - 2026-09-26: first version, written from SmoothFlow for Mac 0.2.8 and the
@@ -274,6 +325,9 @@ control.
 - 2026-09-27: SmoothFlow for iOS renders live `flow.output` in libghostty on Metal
   (smooai#5153, th-a33f6a). SmoothFlow Desktop v0 shipped with an
   `alacritty_terminal` backend (#672).
+- 2026-10-02: §14 Diff — the native review viewer over structured diffs by
+  turn, with `spec/vectors/diff.json` (th-26f5b9). SmoothFlow for Mac ships it
+  first; desktop and phones follow.
 - 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
   the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
   Out confirmation. Close Out now always asks first and shows an engine

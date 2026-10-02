@@ -18,18 +18,19 @@ dumb view.
 
 ## Where the pieces live
 
-| Piece                                                    | Path                                                                                 |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Engine crate (store, tmux glue, PTY, supervision)        | `crates/smooth-flow/`                                                                |
-| Session host seam (`SessionHost`, `TmuxHost`)            | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
-| Daemon transport (`/api/flow/*`, WS, hooks long-poll)    | `crates/smooth-daemon/src/flow_route.rs`                                             |
-| Relay routing of `channel:"flow"` envelopes + phone caps | `crates/smooth-daemon/src/relay.rs`                                                  |
-| End-to-end encryption + phone pairing (th-d98fde)        | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
-| Shared pane-state heuristics (moved from `th claude`)    | `crates/smooth-tmux/src/detect.rs`                                                   |
-| CLI                                                      | `crates/smooth-cli/src/flow.rs` (`th flow …`)                                        |
-| Big Smooth's in-process `flow_*` tools (th-8b3918)       | `crates/smooth-daemon/src/flow_tools.rs` — see [fleet](#big-smooth-drives-the-fleet) |
-| Session store                                            | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)                                 |
-| tmux server                                              | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)                          |
+| Piece                                                      | Path                                                                                 |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Engine crate (store, tmux glue, PTY, supervision)          | `crates/smooth-flow/`                                                                |
+| Session host seam (`SessionHost`, `TmuxHost`)              | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
+| Daemon transport (`/api/flow/*`, WS, hooks long-poll)      | `crates/smooth-daemon/src/flow_route.rs`                                             |
+| Relay routing of `channel:"flow"` envelopes + phone caps   | `crates/smooth-daemon/src/relay.rs`                                                  |
+| End-to-end encryption + phone pairing (th-d98fde)          | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
+| Shared pane-state heuristics (moved from `th claude`)      | `crates/smooth-tmux/src/detect.rs`                                                   |
+| CLI                                                        | `crates/smooth-cli/src/flow.rs` (`th flow …`)                                        |
+| Big Smooth's in-process `flow_*` tools (th-8b3918)         | `crates/smooth-daemon/src/flow_tools.rs` — see [fleet](#big-smooth-drives-the-fleet) |
+| Structured diffs, turn snapshots, hunk actions (th-26f5b9) | `crates/smooth-flow/src/diff/` — see [SmoothFlow-Diff.md](SmoothFlow-Diff.md)        |
+| Session store                                              | `~/.smooth/flow.db` (SQLite, WAL; `$SMOOTH_FLOW_DB`)                                 |
+| tmux server                                                | `tmux -L smooth-flow` — see [tmux socket](#tmux-socket-tcc)                          |
 
 ## Process model
 
@@ -212,12 +213,15 @@ real signals).
 Engine → clients (broadcast; `flow.output` only to clients that attached
 the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
 `flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`, (v0.1)
-`flow.event`, `flow.handoff`, and (th-0f6126) `flow.harnesses`.
+`flow.event`, `flow.handoff`, (th-0f6126) `flow.harnesses`, and (th-26f5b9)
+`flow.diff.changed` — plus the direct replies `flow.diff` and `flow.diff.result`.
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
 `flow.fanout.new`, `flow.fanout.pick`, `flow.mark_read`, (v0.1)
-`flow.hello`, `flow.handoff`, and (th-e126cc) `flow.close`.
+`flow.hello`, `flow.handoff`, (th-e126cc) `flow.close`, and (th-26f5b9)
+`flow.diff`, `flow.diff.revert`, `flow.diff.stage`, `flow.diff.unstage`,
+`flow.diff.review` — see [SmoothFlow-Diff.md](SmoothFlow-Diff.md).
 
 Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
