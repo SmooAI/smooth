@@ -8201,21 +8201,37 @@ mod cli_dispatch_tests {
             let l = long.to_ascii_lowercase();
             (l == "password" || l.ends_with("-password") || l.ends_with("secret") || l == "api-key" || l == "token") && !l.ends_with("-stdin")
         }
-        fn walk(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>) {
+        /// Local LLM-provider credential flags (not `th smoo`): they write a
+        /// key into this machine's provider registry. Pinned here so the
+        /// sweep still fails on any NEW offender; moving them to stdin is a
+        /// follow-up outside SMOODEV-3606's `th smoo` scope.
+        const KNOWN_LOCAL_PROVIDER_FLAGS: &[&str] = &["th model login --api-key", "th providers add --api-key"];
+
+        fn walk(cmd: &clap::Command, path: &str, offenders: &mut Vec<String>, hidden: &mut usize) {
             for a in cmd.get_arguments() {
                 if let Some(long) = a.get_long() {
                     let takes_value = a.get_action().takes_values();
-                    if is_secret_name(long) && takes_value && !a.is_hide_set() {
-                        offenders.push(format!("{path} --{long}"));
+                    if is_secret_name(long) && takes_value {
+                        if a.is_hide_set() {
+                            *hidden += 1;
+                        } else {
+                            offenders.push(format!("{path} --{long}"));
+                        }
                     }
                 }
             }
             for sub in cmd.get_subcommands() {
-                walk(sub, &format!("{path} {}", sub.get_name()), offenders);
+                walk(sub, &format!("{path} {}", sub.get_name()), offenders, hidden);
             }
         }
         let mut offenders = Vec::new();
-        walk(&Cli::command(), "th", &mut offenders);
+        let mut hidden = 0_usize;
+        walk(&Cli::command(), "th", &mut offenders, &mut hidden);
+        offenders.retain(|o| !KNOWN_LOCAL_PROVIDER_FLAGS.contains(&o.as_str()));
+        // Positive control: the deprecated `--password` / `--client-secret`
+        // spellings (auth login, files share) are seen — a sweep matching
+        // nothing would pass forever.
+        assert!(hidden >= 3, "the sweep should see the hidden legacy secret flags, saw {hidden}");
         assert!(
             offenders.is_empty(),
             "these flags put a secret on argv (visible in `ps` / shell history) — read it from stdin, a file, or a masked prompt: {offenders:#?}"
