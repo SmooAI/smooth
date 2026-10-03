@@ -593,12 +593,14 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
     assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
 }
 
-/// Scrollback against a real shell (th-1977a8): a long output scrolls into
-/// libghostty-vt's history; the wheel and Shift+PageUp/Home move the
-/// viewport over it, new output leaves it there, and typing snaps it back to
-/// the live screen (and still reaches the shell).
+/// The wheel against a real session (th-1977a8). The engine streams a
+/// `tmux attach` client, and tmux draws on the alternate screen, so by
+/// Ghostty's rules (the Mac's too) the wheel is arrow keys for the program —
+/// here the shell, which recalls its last command — and the viewport never
+/// leaves the screen. History scrolling on the primary screen is covered by
+/// `terminal.rs` and `app_core.rs` unit tests.
 #[test]
-fn a_shell_scrolls_its_history_and_typing_snaps_back() {
+fn the_wheel_over_a_tmux_session_is_arrow_keys() {
     if !have_tmux() {
         return;
     }
@@ -608,50 +610,19 @@ fn a_shell_scrolls_its_history_and_typing_snaps_back() {
     app.wait(&d, "the shell to attach at 80x24", WAIT, |a| a.core.attached_size(&id) == Some((80, 24)));
     app.wait(&d, "a prompt", WAIT, |a| a.screen(&id).iter().any(|l| !l.trim().is_empty()));
     let n = nonce();
-    app.type_text(&format!("for i in $(seq 1 200); do echo sfd-{n}-$i; done"));
+    let cmd = format!("echo sfd-{n}-marker");
+    app.type_text(&cmd);
     assert!(app.press("enter").is_empty());
-    let last = format!("sfd-{n}-200");
-    app.wait(&d, "200 lines of output", WAIT, |a| a.screen(&id).iter().any(|l| l.trim() == last));
+    let out = format!("sfd-{n}-marker");
+    app.wait(&d, "the echo", WAIT, |a| a.screen(&id).iter().any(|l| l.trim() == out));
+    assert!(app.core.terminals[&id].alt_screen(), "a tmux attach client draws on the alternate screen");
+
     let pane = app.core.surfaces.focused_pane();
-    let top = |a: &App| a.core.terminals[&id].line_text(0);
-    assert!(app.core.terminals[&id].at_bottom());
-    let before = app.core.terminals[&id].scrollbar();
-    assert!(before.total >= 200, "the output is in the history: {before:?}");
-
-    // The wheel: ten lines up, over the shell (no mouse tracking).
-    assert!(app.core.wheel(pane, 10.0, 0, 0));
-    assert_eq!(app.core.terminals[&id].scrollbar().below(), 10, "{:?}", app.core.terminals[&id].scrollbar());
-    // Shift+Home: the oldest line of the output is in view.
-    app.core.key(Key {
-        key: "home",
-        shift: true,
-        ..Key::default()
+    assert!(app.core.wheel(pane, 1.0, 0, 0));
+    app.wait(&d, "the wheel's Up arrow to recall the command", WAIT, |a| {
+        a.screen(&id).iter().filter(|l| l.contains(&cmd)).count() >= 2
     });
-    app.pump();
-    let first = format!("sfd-{n}-1");
-    assert!(
-        app.screen(&id).iter().any(|l| l.trim() == first),
-        "Shift+Home shows the top: {:?}",
-        app.screen(&id)
-    );
-    let at_top = top(&app);
-
-    // Output while scrolled back doesn't move the viewport.
-    app.type_text(&format!("echo sfd-{n}-tail"));
-    assert!(app.core.terminals[&id].at_bottom(), "typing snapped it back to the screen");
-    app.core.key(Key {
-        key: "pageup",
-        shift: true,
-        ..Key::default()
-    });
-    assert!(!app.core.terminals[&id].at_bottom());
-    let held = top(&app);
-    assert!(app.press("enter").is_empty(), "Enter still goes to the shell");
-    let tail = format!("sfd-{n}-tail");
-    app.wait(&d, "the echo to run", WAIT, |a| {
-        a.core.terminals[&id].at_bottom() && a.screen(&id).iter().any(|l| l.trim() == tail)
-    });
-    assert_ne!(held, at_top, "Shift+PageUp from the screen is not the top");
+    assert!(app.core.terminals[&id].at_bottom(), "no history scrolled on the alternate screen");
 }
 
 /// Close Out a shell in a dirty linked worktree (th-1977a8): the real engine

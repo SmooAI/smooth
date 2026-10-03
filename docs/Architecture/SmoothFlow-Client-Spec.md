@@ -241,6 +241,10 @@ control.
     - Typing snaps a scrolled-back pane to the live screen. New output leaves
       it where it is (Ghostty's `scroll-to-bottom = keystroke`).
     - A scrolled-back pane shows how far back it is.
+    - Live sessions stream a `tmux attach` client, and tmux draws on the
+      alternate screen. On every client today, the wheel over a live session
+      therefore sends arrow keys, and the client's own history stays empty.
+      The session's real history is in tmux (`history-limit`).
 - Faint (SGR 2) draws at reduced alpha, and strikethrough (SGR 9) draws as a
   line, beside bold, italic, underline and inverse.
 - IME, selection and copy, links, scrollback search, and font size zoom.

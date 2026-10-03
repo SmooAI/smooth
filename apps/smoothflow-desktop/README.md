@@ -59,7 +59,9 @@ replays.
   libghostty-vt's history, unless the program tracks the mouse (it gets wheel
   reports) or is on the alternate screen (arrow keys). Shift+PageUp/PageDown/
   Home/End page and jump. Typing snaps back to the live screen; new output
-  doesn't. A scrolled-back pane says how far back it is. Faint text draws at
+  doesn't. A scrolled-back pane says how far back it is. A live session is a
+  `tmux attach` client on the alternate screen, so there the wheel is arrow
+  keys, as on the Mac. Faint text draws at
   half alpha and strikethrough as a line.
 - **Approvals** (spec §7): when the focused session's attention is an
   approvable `permission` or `question` (it has a `request_id`), a bar shows
