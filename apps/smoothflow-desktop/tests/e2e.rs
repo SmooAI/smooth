@@ -671,6 +671,10 @@ fn the_diff_tab_shows_a_shells_uncommitted_work_and_stages_a_hunk() {
     std::fs::write(ws.join("src/lib.rs"), lib_rs(5, "500")).expect("edit");
     std::fs::write(ws.join("notes.md"), "# notes\n").expect("new file");
     let (mut app, _id) = shell_with_diff(&d, &ws);
+    // A fresh engine's first diff can come back without syntax spans: the
+    // highlight budget's clock starts before the syntax set's cold load
+    // (pearl th-35271b). The second one is highlighted.
+    refreshed(&mut app, &d, 2);
     let diff = app.core.diff.diff.clone().expect("diff");
     assert_eq!(diff.base, Base::Uncommitted);
     assert_eq!(diff.legend.len(), 17, "the legend names every syntax kind");
