@@ -1172,8 +1172,8 @@ mod tests {
         c.apply(hello(
             r#"{"id":"fs-1","kind":"shell","state":"idle"},{"id":"fs-2","kind":"claude","state":"working","branch":"th-1-x","worktree":"/w"}"#,
         ));
+        c.show_session("fs-1");
         sent(&mut rx);
-        assert_eq!(c.surfaces.focused_session(), Some("fs-1"));
         c.act(Action::ViewDiff);
         assert_eq!(c.center, CenterTab::Terminal, "no repo, no Diff");
         assert_eq!(c.notice.as_deref(), Some("Diff: Not in a git repository"));
