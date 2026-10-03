@@ -459,9 +459,11 @@ async fn smoke_dangerous_read_is_blocked_in_bypass() {
     let mut client = connect(&server).await;
     let (sid, _cid) = create_session(&mut client).await;
 
-    // ~/.ssh is on the kernel sandbox's read-deny list AND trips Narc's
-    // secret-exfil detector. Bypass allows benign work unprompted, but this must
-    // still be stopped — proving Bypass ≠ wide-open.
+    // ~/.ssh trips Narc's secret-exfil detector (and, with the opt-in
+    // SMOOTH_SANDBOX=1, the kernel sandbox's read-deny list too — off by
+    // default since th-efbab1, so the userspace layers must hold on their own).
+    // Bypass allows benign work unprompted, but this must still be stopped —
+    // proving Bypass ≠ wide-open.
     let turn = run_turn(
         &mut client,
         &sid,

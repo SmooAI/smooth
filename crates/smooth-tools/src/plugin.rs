@@ -13,8 +13,10 @@
 //! stateful or with a typed protocol, prefer MCP.
 //!
 //! The rendered command runs through [`crate::sandbox::SandboxedCommand`] —
-//! the same kernel OS sandbox `bash` uses — so a plugin cannot write outside the
-//! workspace, read credential stores, or bypass the goalie egress allowlist.
+//! the same spawn point `bash` uses — so a plugin gets exactly the shell posture
+//! `bash` does: a plain user subprocess by default, or, with the opt-in kernel
+//! sandbox (`SMOOTH_SANDBOX=1`), no credential-store reads and kernel-forced
+//! egress through the goalie allowlist.
 //!
 //! ## Manifest format
 //!
@@ -342,8 +344,9 @@ impl Tool for CliPluginTool {
         };
         let rendered = render_command(&self.manifest.command, &map);
 
-        // Same deny gates + kernel sandbox as the `bash` tool: a plugin is a
-        // user-installed shell alias, not an escape hatch around them.
+        // Same deny gates + spawn point (and so the same opt-in kernel sandbox)
+        // as the `bash` tool: a plugin is a user-installed shell alias, not an
+        // escape hatch around them.
         if crate::guard::is_circuit_breaker(&rendered) {
             return Ok(format!("BLOCKED: plugin `{}` rendered a circuit-breaker command: {rendered}", self.tool_name));
         }

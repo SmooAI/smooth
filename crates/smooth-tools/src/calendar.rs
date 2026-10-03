@@ -5,8 +5,10 @@
 //!
 //! **It must run OUTSIDE the kernel sandbox.** `ical` is a native EventKit
 //! client, and EventKit talks to `calaccessd`/`tccd` over XPC + mach lookups
-//! that [`crate::sandbox`]'s seatbelt profile denies. Run through the sandboxed
-//! `bash` tool it fails with an opaque EventKit error every time. So this tool
+//! that [`crate::sandbox`]'s seatbelt profile denies. Run through `bash` with
+//! the opt-in sandbox on (`SMOOTH_SANDBOX=1`) it fails with an opaque EventKit
+//! error every time. The sandbox is off by default now (pearl th-efbab1), but
+//! the calendar has to keep working for users who turn it on, so this tool
 //! spawns a plain [`tokio::process::Command`] — a deliberate, narrow
 //! trusted-integration exception to "all subprocesses go through
 //! `SandboxedCommand`".

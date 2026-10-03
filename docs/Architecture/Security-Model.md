@@ -39,11 +39,16 @@ The [[Daemon-Direction|daemon epic]]'s security verdict: the load-bearing bounda
 - **Gate 2** — an LLM classifier (narc's judge) in `auto` mode only, run out-of-process with an rlimit cap, fail-closed on timeout.
 - **Kernel sandbox** — sandbox the **tool subprocesses, never the daemon** (Codex's model): macOS Seatbelt / `sandbox-exec`, Linux `bubblewrap` + Landlock + seccomp, Windows restricted token + Job Object / AppContainer; plus an egress-allowlist proxy as the real network boundary.
 
-> ⚠️ **Only macOS enforces the kernel layer today** (th-08e05a). On Linux and Windows the `bash` tool runs unsandboxed with a startup warning, which also demotes the egress allowlist from a boundary to a suggestion (a tool that ignores `HTTP_PROXY` can still connect out). Before shipping a Windows build, read **[[Windows-Security-Posture]]** — it enumerates exactly what is exposed there.
+> ⚠️ **The kernel sandbox is opt-in and OFF by default** (pearl th-efbab1). Set `SMOOTH_SANDBOX=1` (`true`/`yes`/`on`) in the daemon's environment to turn it on. Big Smooth is a personal agent that operates AS its user on the user's own machine, and with the sandbox on the ordinary things a user asks of it broke: `ssh smoo-hub` timed out (direct outbound kernel-denied behind the egress proxy) and `git fetch` failed with "Operation not permitted" on `~/.ssh/known_hosts` (the credential-store read-deny). With it off, `bash` is a normal user subprocess (the user's env, `HOME`, `SSH_AUTH_SOCK`, `PATH`; only the daemon's own config, `SMOOTH_*` and `SMOOAI_GATEWAY_KEY`, is stripped), the permission gate and Narc still run on every call, and a configured egress allowlist still runs but is **advisory** (`HTTP(S)_PROXY` set, direct connections not blocked). The daemon logs one startup line stating the posture, and `th doctor` shows a "Tool sandbox" row.
+>
+> **Only macOS can enforce the kernel layer** (th-08e05a). `SMOOTH_SANDBOX=1` on Linux or Windows logs a warning and runs `bash` unsandboxed. Before shipping a Windows build, read **[[Windows-Security-Posture]]** — it enumerates exactly what is exposed there.
 
 Threat model: single-tenant (one trusted operator per instance). The real risk isn't a malicious tenant — it's prompt-injection / untrusted repo content turning the operator's own agent against them (the "lethal trifecta": private-data access + untrusted content + egress). The kernel sandbox + egress allowlist + auto-mode is the cheaper, correct defense for that.
 
 ## Trusted-integration exceptions to the kernel sandbox
+
+These matter when the opt-in sandbox (`SMOOTH_SANDBOX=1`) is on; the tools below
+run outside it either way so they keep working for users who enable it.
 
 Some OS integrations cannot run inside the tool sandbox at all. macOS is the
 recurring case: the seatbelt profile denies the XPC + mach lookups that EventKit

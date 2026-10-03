@@ -3,10 +3,12 @@
 //! `smooth-daemon` runs **smooth-operator's local deployment flavor** as its
 //! one and only agent runtime. It targets a **single trusted operator**
 //! self-hosting their own instance (hermes-style) on a personal machine
-//! reachable over SSH/Tailscale — NOT a multi-tenant service. Security is a
-//! kernel-enforced OS sandbox on tool subprocesses + an egress allowlist proxy
-//! (EPIC th-c89c2a); the microVM substrate it replaced was removed in 2026-07
-//! (pearl th-f4a801).
+//! reachable over SSH/Tailscale — NOT a multi-tenant service. Security is the
+//! permission gate + Narc on every tool call, plus an **opt-in** kernel OS
+//! sandbox on tool subprocesses (`SMOOTH_SANDBOX=1`, off by default since pearl
+//! th-efbab1 — the agent operates as its user) and an optional egress allowlist
+//! proxy (EPIC th-c89c2a); the microVM substrate it replaced was removed in
+//! 2026-07 (pearl th-f4a801).
 //!
 //! # Shape — one operator, one protocol (the north star)
 //!
@@ -18,7 +20,7 @@
 //!
 //! ```text
 //! th daemon  →  smooth-operator LocalServer (:8787, canonical WS + widget)
-//!   ├─ kernel-sandboxed tools (per-turn ToolProvider; egress via goalie)
+//!   ├─ tools (per-turn ToolProvider; opt-in kernel sandbox, egress via goalie)
 //!   └─ durable local storage  (sqlite StorageAdapter — survives restart, no Postgres)
 //! ```
 //!
@@ -74,6 +76,11 @@ pub use tailscale::TailscaleServe;
 /// through it). Returns `None` when `SMOOTH_EGRESS_ALLOWLIST` is unset (egress
 /// unrestricted) or the audit log can't be opened. Shared by the bespoke
 /// daemon and the operator local flavor so both gate egress the same way.
+///
+/// Started whenever the allowlist is configured, regardless of the kernel
+/// sandbox switch: with the sandbox on it is the egress boundary, with it off
+/// the tools' `HTTP(S)_PROXY` still point here (advisory) and every proxied
+/// request is still audited. [`config::log_sandbox_posture`] states which.
 pub(crate) fn start_egress_proxy() -> Option<String> {
     let setup = config::resolve_egress()?;
     let audit = match smooth_goalie::AuditLogger::new(&config::egress_audit_path().to_string_lossy()) {
@@ -86,12 +93,12 @@ pub(crate) fn start_egress_proxy() -> Option<String> {
     if !setup.rejected.is_empty() {
         tracing::warn!(rejected = ?setup.rejected, "egress allowlist dropped invalid entries");
     }
-    tracing::info!(proxy = %setup.proxy_addr, hosts = setup.allowlist.len(), "egress boundary ON");
+    tracing::info!(proxy = %setup.proxy_addr, hosts = setup.allowlist.len(), "egress allowlist proxy ON");
     let proxy_addr = setup.proxy_addr.clone();
     let allowlist = setup.allowlist;
     tokio::spawn(async move {
         if let Err(e) = smooth_goalie::run_proxy_local(&proxy_addr, allowlist, audit).await {
-            tracing::error!(error = %e, "egress proxy exited — sandboxed egress now fails closed");
+            tracing::error!(error = %e, "egress proxy exited — proxied egress now fails (closed if the kernel sandbox is on)");
         }
     });
     Some(setup.proxy_addr)

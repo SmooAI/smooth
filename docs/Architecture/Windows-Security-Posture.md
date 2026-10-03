@@ -3,6 +3,13 @@
 **Status: Big Smooth on Windows runs with NO kernel sandbox.** Pearl th-a59af5
 (engine half of cross-platform), sandbox gap tracked as th-08e05a.
 
+> **Since pearl th-efbab1 the kernel sandbox is opt-in and OFF by default on
+> every platform**, macOS included (`SMOOTH_SANDBOX=1` turns it on). So in the
+> default posture a Windows host and a macOS host are exposed the same way
+> described below: the agent runs as the user. What this page still records is
+> the gap for users who OPT IN: on macOS `SMOOTH_SANDBOX=1` gives a real kernel
+> boundary; on Windows it logs a warning and gives nothing.
+
 This page exists so nobody ships a Windows build believing it has the same
 containment as the macOS one. It does not. Read this before enabling a Windows
 release, and link it from anything that offers a Windows download.
@@ -12,13 +19,14 @@ release, and link it from anything that offers a Windows download.
 [[Security-Model]] describes three layers a tool call passes through. Only two
 of the three exist on Windows.
 
-| Layer                                                                | macOS       | Linux   | Windows     |
-| -------------------------------------------------------------------- | ----------- | ------- | ----------- |
-| 1. Permission gate (`smooth-policy` auto-mode + `DenyPolicy`)        | ✅          | ✅      | ✅          |
-| 2. Narc surveillance (regex detectors + LLM judge, secret redaction) | ✅          | ✅      | ✅          |
-| 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`)             | ✅ Seatbelt | ❌ TODO | ❌ **TODO** |
-| Secret-env scrubbing at the spawn point                              | ✅          | ✅      | ✅          |
-| Egress boundary (goalie exact-host allowlist, kernel-enforced)       | ✅          | ❌      | ❌          |
+| Layer                                                                  | macOS                     | Linux   | Windows     |
+| ---------------------------------------------------------------------- | ------------------------- | ------- | ----------- |
+| 1. Permission gate (`smooth-policy` auto-mode + `DenyPolicy`)          | ✅                        | ✅      | ✅          |
+| 2. Narc surveillance (regex detectors + LLM judge, secret redaction)   | ✅                        | ✅      | ✅          |
+| 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`, opt-in)       | ✅ Seatbelt when opted in | ❌ TODO | ❌ **TODO** |
+| Full secret-env scrubbing at the spawn point (opt-in sandbox mode)     | ✅                        | ✅      | ✅          |
+| Daemon `SMOOTH_*` env stripped at the spawn point (default mode)       | ✅                        | ✅      | ✅          |
+| Egress boundary (goalie exact-host allowlist, kernel-enforced, opt-in) | ✅ when opted in          | ❌      | ❌          |
 
 Layers 1 and 2 are **userspace**. They are worth having, and they are not the
 load-bearing boundary — the whole premise of the security model is that a
@@ -95,9 +103,11 @@ do not add Windows path denies without testing them on Windows.
 
 What _does_ still hold on Windows:
 
-- **Secret-named env vars are scrubbed** from the child at the single spawn
-  point (`scrub_secret_env`), so `set` / `env` cannot dump the daemon's own
-  credentials out of its process environment.
+- **The daemon's own config (`SMOOTH_*`, `SMOOAI_GATEWAY_KEY`) is stripped** from the child at the
+  single spawn point, so `set` / `env` cannot dump the daemon's LLM key or WS
+  bearer out of its process environment. With `SMOOTH_SANDBOX=1` every
+  secret-named variable is scrubbed (`scrub_secret_env`), even though Windows
+  has no kernel layer to go with it.
 - The **permission gate runs first** and short-circuits denies before the tool
   executes, and **Narc** still redacts detected secrets out of tool results.
 - The daemon still binds **loopback only** by default.
@@ -107,8 +117,8 @@ What _does_ still hold on Windows:
 1. **Single trusted operator, trusted workspaces only.** Do not point a Windows
    Big Smooth at a repo you would not run `npm install` in unattended.
 2. **Do not present Windows as sandboxed** in any UI, README, or release note.
-   `SandboxPolicy::is_enforced()` returns `false` there — surface that, don't
-   paper over it.
+   `SandboxPolicy::is_enforced()` returns `false` there even with
+   `SMOOTH_SANDBOX=1` — surface that, don't paper over it.
 3. Prefer a stricter permission posture: `SMOOTH_AUTO_MODE=ask` rather than the
    default `Bypass`, since the userspace gate is the _only_ gate.
 
