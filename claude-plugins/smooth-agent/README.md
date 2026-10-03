@@ -15,6 +15,10 @@ Code worker sessions in tmux, coordinate them over
   watcher so an arriving message _pulls the session back in_ instead of it
   polling. The only surface that gets you _pushed_ mail rather than checking for
   it.
+- **`th-handoff`** skill — `/th-handoff` moves a session's work to a fresh
+  session: it writes the state into one pearl (`th pearls checkpoint`), makes
+  every live worker push and append to that pearl first, reads it back, and
+  gives the user one line to resume with (`/th-handoff resume <pearl>`).
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
 - **`smoothflow`** skill — teaches an agent to run _other_ agents through
