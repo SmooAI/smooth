@@ -1641,6 +1641,22 @@ mod tests {
     /// Apple-ns stamp of the outgoing rows [`outgoing_fixture`] adds.
     const SENT_AT: i64 = 694_224_600_000_000_000;
 
+    /// The group body [`outgoing_fixture`] stores only as an attributedBody.
+    const GROUP_BODY: &str = "pipeline is a fishy $134k";
+
+    /// [`attributed`] with the one-byte length prefix derived from the body, so
+    /// the fixture can never disagree with what it encodes. A hand-typed length
+    /// once said 16 for this 25-byte body; the decoder read it faithfully and
+    /// returned "pipeline is a fi", and nobody saw because this module is
+    /// macOS-only and CI tests only Linux and Windows.
+    fn attributed_short(body: &str) -> Vec<u8> {
+        let len = u8::try_from(body.len())
+            .ok()
+            .filter(|n| *n < 0x80)
+            .expect("one-byte prefix needs a body under 128 bytes");
+        attributed(body, &[len])
+    }
+
     /// The base fixture plus two outgoing messages: a 1:1 to the phone handle
     /// (plain `text`) and a group message stored only as an attributedBody —
     /// the shape Messages actually writes for a send from this Mac.
@@ -1657,7 +1673,7 @@ mod tests {
         conn.execute(
             "INSERT INTO message (ROWID, date, is_from_me, text, attributedBody, cache_has_attachments, service, handle_id)
              VALUES (11, ?1, 1, NULL, ?2, 0, 'iMessage', 0)",
-            rusqlite::params![SENT_AT + 1_000_000_000, attributed("pipeline is a fishy $134k", &[16])],
+            rusqlite::params![SENT_AT + 1_000_000_000, attributed_short(GROUP_BODY)],
         )
         .unwrap();
         conn.execute("INSERT INTO chat_message_join VALUES (2, 11)", []).unwrap();
@@ -1701,7 +1717,7 @@ mod tests {
         // Trailing whitespace from the model is not a different message.
         assert!(find_outgoing(&db, &contact("5551234567", "on my way  "), SENT_AT - 1).unwrap().is_some());
         // The group copy lives only in the attributedBody blob.
-        let g = find_outgoing(&db, &group("iMessage;+;chat99", "pipeline is a fishy $134k"), SENT_AT - 1).unwrap();
+        let g = find_outgoing(&db, &group("iMessage;+;chat99", GROUP_BODY), SENT_AT - 1).unwrap();
         assert_eq!(g.map(|h| h.rowid), Some(11));
     }
 
@@ -1761,7 +1777,7 @@ mod tests {
     async fn an_ambiguous_send_that_landed_is_reported_sent_not_failed() {
         let dir = tempfile::tempdir().unwrap();
         let db = outgoing_fixture(dir.path());
-        let t = group("iMessage;+;chat99", "pipeline is a fishy $134k");
+        let t = group("iMessage;+;chat99", GROUP_BODY);
         let verdict = confirm_sent(Some(db), &t, SENT_AT - 1, 1, Duration::ZERO).await;
         assert!(matches!(verdict, Verdict::Delivered(OutgoingHit { rowid: 11, .. })), "{verdict:?}");
         let reply: Value = serde_json::from_str(&ambiguous_reply(&t, "osascript timed out after 30s", &verdict)).unwrap();
