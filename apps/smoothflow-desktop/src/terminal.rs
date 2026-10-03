@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 
-use crate::ghostty::{self, flag, Snapshot, Vt};
+use crate::ghostty::{self, flag, mode, Scroll, Scrollbar, Snapshot, Vt};
 
 /// An sRGB color, `0xRRGGBB`.
 pub type Rgb = u32;
@@ -25,9 +25,38 @@ pub mod theme {
     ];
 }
 
-/// Lines of history libghostty-vt keeps (the view shows only the screen
-/// today; scrolling back is a later milestone).
+/// Lines of history libghostty-vt keeps.
 const SCROLLBACK: usize = 10_000;
+
+/// The most wheel lines one event turns into reports or arrow keys: a fling
+/// on a trackpad must not type hundreds of arrows into vim.
+const MAX_WHEEL_LINES: usize = 30;
+
+/// Where a wheel goes, by Ghostty's rules: a program that asked for mouse
+/// reports gets them; on the alternate screen with alternate scroll (1007,
+/// on by default) it gets arrow keys; otherwise the viewport scrolls the
+/// history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelRoute {
+    Report,
+    ArrowKeys { application: bool },
+    Scrollback,
+}
+
+impl WheelRoute {
+    #[must_use]
+    pub const fn of(modes: u32) -> Self {
+        if modes & mode::MOUSE != 0 {
+            Self::Report
+        } else if modes & mode::ALT_SCREEN != 0 && modes & mode::ALT_SCROLL != 0 {
+            Self::ArrowKeys {
+                application: modes & mode::CURSOR_KEYS != 0,
+            }
+        } else {
+            Self::Scrollback
+        }
+    }
+}
 
 /// One run of same-styled cells in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +67,10 @@ pub struct Run {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// Drawn at reduced alpha (SGR 2).
+    pub faint: bool,
+    /// Struck through (SGR 9).
+    pub strike: bool,
     /// Grid cells the run covers. A wide char counts two: its text holds the
     /// char once, and the spacer cell after it has no text.
     pub cells: usize,
@@ -110,6 +143,61 @@ impl TerminalModel {
         self.vt.get_mut().take_replies()
     }
 
+    /// Move the viewport over the history (Shift+PageUp and friends).
+    pub fn scroll(&mut self, to: Scroll) {
+        self.vt.get_mut().scroll(to);
+    }
+
+    /// Where the viewport sits; [`Scrollbar::below`] is how far back it is.
+    #[must_use]
+    pub fn scrollbar(&self) -> Scrollbar {
+        self.vt.borrow_mut().scrollbar()
+    }
+
+    /// Whether the viewport shows the live screen (not scrolled back).
+    #[must_use]
+    pub fn at_bottom(&self) -> bool {
+        self.scrollbar().below() == 0
+    }
+
+    /// Whether the alternate screen is up (full-screen programs; it has no
+    /// history, so Shift+PageUp belongs to the program there).
+    #[must_use]
+    pub fn alt_screen(&self) -> bool {
+        self.vt.borrow_mut().input_modes() & mode::ALT_SCREEN != 0
+    }
+
+    /// A wheel of `lines` (up into history is positive) over cell (`col`,
+    /// `row`), routed by [`WheelRoute`]. Returns the bytes for the program
+    /// (mouse reports or arrow keys); empty when it scrolled the history.
+    pub fn wheel(&mut self, lines: isize, col: usize, row: usize) -> Vec<u8> {
+        if lines == 0 {
+            return Vec::new();
+        }
+        let vt = self.vt.get_mut();
+        let up = lines > 0;
+        let n = lines.unsigned_abs().min(MAX_WHEEL_LINES);
+        match WheelRoute::of(vt.input_modes()) {
+            WheelRoute::Report => {
+                let one = vt.mouse_wheel(up, dim(col), dim(row));
+                one.repeat(n)
+            }
+            WheelRoute::ArrowKeys { application } => {
+                let key: &[u8] = match (application, up) {
+                    (true, true) => b"\x1bOA",
+                    (true, false) => b"\x1bOB",
+                    (false, true) => b"\x1b[A",
+                    (false, false) => b"\x1b[B",
+                };
+                key.repeat(n)
+            }
+            WheelRoute::Scrollback => {
+                vt.scroll(Scroll::Delta(-lines));
+                Vec::new()
+            }
+        }
+    }
+
     fn snapshot(&self) -> Snapshot {
         self.vt.borrow_mut().snapshot()
     }
@@ -164,11 +252,21 @@ impl TerminalModel {
                 let bold = cell.flags & flag::BOLD != 0;
                 let italic = cell.flags & flag::ITALIC != 0;
                 let underline = cell.flags & flag::UNDERLINE != 0;
+                let faint = cell.flags & flag::FAINT != 0;
+                let strike = cell.flags & flag::STRIKE != 0;
                 let invisible = cell.flags & flag::INVISIBLE != 0;
                 let ch = if invisible { ' ' } else { cell_char(cell.codepoint) };
                 let extras: &[char] = if invisible { &[] } else { &s.extras[i] };
                 match runs.last_mut() {
-                    Some(r) if r.fg == fg && r.bg == bg && r.bold == bold && r.italic == italic && r.underline == underline => {
+                    Some(r)
+                        if r.fg == fg
+                            && r.bg == bg
+                            && r.bold == bold
+                            && r.italic == italic
+                            && r.underline == underline
+                            && r.faint == faint
+                            && r.strike == strike =>
+                    {
                         r.text.push(ch);
                         r.text.extend(extras);
                         r.cells += 1;
@@ -183,6 +281,8 @@ impl TerminalModel {
                             bold,
                             italic,
                             underline,
+                            faint,
+                            strike,
                             cells: 1,
                         });
                     }
@@ -364,6 +464,117 @@ mod tests {
         t.feed(b"\x1b[?1049l");
         assert_eq!(t.line_text(0), "shell$", "leaving restores the primary screen");
         assert_eq!(t.screen(false).cursor, Some((0, 7)), "and its cursor");
+    }
+
+    #[test]
+    fn faint_and_strikethrough_are_their_own_runs() {
+        let mut t = TerminalModel::new(20, 1);
+        t.feed(b"a\x1b[2mb\x1b[22;9mc\x1b[2md\x1b[0me");
+        let runs = t.screen(false).rows.remove(0);
+        let by = |s: &str| {
+            runs.iter()
+                .find(|r| r.text.starts_with(s))
+                .cloned()
+                .unwrap_or_else(|| panic!("no run {s:?} in {runs:?}"))
+        };
+        assert!(!by("a").faint && !by("a").strike);
+        assert!(by("b").faint && !by("b").strike, "SGR 2");
+        assert!(!by("c").faint && by("c").strike, "SGR 22 ends faint, 9 strikes");
+        assert!(by("d").faint && by("d").strike, "both");
+        assert!(!by("e").faint && !by("e").strike, "SGR 0 resets both");
+    }
+
+    /// `n` numbered lines, so a viewport's first row says where it is.
+    fn numbered(t: &mut TerminalModel, n: usize) {
+        for i in 1..=n {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn the_viewport_scrolls_the_history_and_new_output_leaves_it_be() {
+        let mut t = TerminalModel::new(20, 5);
+        numbered(&mut t, 50);
+        assert!(t.at_bottom());
+        assert_eq!(t.line_text(0), "line 47", "the screen: lines 47–50 and the prompt row");
+        let sb = t.scrollbar();
+        assert_eq!((sb.total, sb.len, sb.below()), (51, 5, 0));
+
+        assert!(t.wheel(3, 0, 0).is_empty(), "a plain shell: the wheel scrolls, nothing is sent");
+        assert_eq!(t.line_text(0), "line 44");
+        assert_eq!(t.scrollbar().below(), 3);
+        assert!(!t.at_bottom());
+        assert_eq!(t.screen(true).cursor, None, "the cursor is below the viewport");
+
+        t.feed(b"line 51\r\n");
+        assert_eq!(t.line_text(0), "line 44", "new output does not pull the viewport down (Ghostty's default)");
+        assert_eq!(t.scrollbar().below(), 4);
+
+        t.scroll(Scroll::Top);
+        assert_eq!(t.line_text(0), "line 1");
+        t.scroll(Scroll::Delta(2));
+        assert_eq!(t.line_text(0), "line 3");
+        assert!(t.wheel(-1, 0, 0).is_empty());
+        assert_eq!(t.line_text(0), "line 4", "wheel down moves toward the screen");
+        t.scroll(Scroll::Bottom);
+        assert!(t.at_bottom());
+        assert_eq!(t.line_text(0), "line 48");
+        assert!(t.wheel(-5, 0, 0).is_empty());
+        assert!(t.at_bottom(), "never below the screen");
+    }
+
+    #[test]
+    fn the_alternate_screen_turns_the_wheel_into_arrow_keys() {
+        let mut t = TerminalModel::new(20, 5);
+        numbered(&mut t, 30);
+        t.feed(b"\x1b[?1049h");
+        assert!(t.alt_screen());
+        assert_eq!(t.wheel(2, 0, 0), b"\x1b[A\x1b[A", "alternate scroll (1007) is on by default");
+        assert_eq!(t.wheel(-1, 0, 0), b"\x1b[B");
+        t.feed(b"\x1b[?1h");
+        assert_eq!(t.wheel(1, 0, 0), b"\x1bOA", "application cursor keys");
+        assert!(t.at_bottom(), "no history scrolled meanwhile");
+        t.feed(b"\x1b[?1007l");
+        assert!(t.wheel(1, 0, 0).is_empty(), "1007 off: nothing to scroll and nothing sent");
+        t.feed(b"\x1b[?1049l");
+        assert!(!t.alt_screen());
+        assert_eq!(t.wheel(40, 0, 0), b"", "back on the primary screen it scrolls again");
+        assert!(!t.at_bottom());
+    }
+
+    #[test]
+    fn a_program_tracking_the_mouse_gets_wheel_reports() {
+        let mut t = TerminalModel::new(20, 5);
+        numbered(&mut t, 30);
+        // Normal tracking, SGR format — what vim, htop and Claude Code ask for.
+        t.feed(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(t.wheel(1, 3, 2), b"\x1b[<64;4;3M", "button 4 at column 4, row 3 (1-based)");
+        assert_eq!(t.wheel(-2, 0, 0), b"\x1b[<65;1;1M\x1b[<65;1;1M", "button 5, once per line");
+        assert!(t.at_bottom(), "the history never moved");
+        assert_eq!(t.wheel(500, 0, 0).len(), MAX_WHEEL_LINES * b"\x1b[<64;1;1M".len(), "a fling is capped");
+        t.feed(b"\x1b[?1000l");
+        assert!(t.wheel(1, 0, 0).is_empty(), "tracking off: the history scrolls again");
+        assert!(!t.at_bottom());
+    }
+
+    #[test]
+    fn wheel_routing_follows_ghostty() {
+        assert_eq!(WheelRoute::of(0), WheelRoute::Scrollback);
+        assert_eq!(
+            WheelRoute::of(mode::ALT_SCROLL),
+            WheelRoute::Scrollback,
+            "1007 only matters on the alternate screen"
+        );
+        assert_eq!(WheelRoute::of(mode::ALT_SCREEN), WheelRoute::Scrollback);
+        assert_eq!(
+            WheelRoute::of(mode::ALT_SCREEN | mode::ALT_SCROLL | mode::CURSOR_KEYS),
+            WheelRoute::ArrowKeys { application: true }
+        );
+        assert_eq!(
+            WheelRoute::of(mode::MOUSE | mode::ALT_SCREEN | mode::ALT_SCROLL),
+            WheelRoute::Report,
+            "reports win"
+        );
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub struct Workspace {
     pub(crate) metrics: Option<CellMetrics>,
     /// The Diff body's virtualized list.
     pub(crate) diff_scroll: UniformListScrollHandle,
+    /// The pane area's top-left in the window (sidebar and bars above it).
+    pub(crate) pane_origin: (f32, f32),
     core: Core,
 }
 
@@ -62,6 +64,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             metrics: None,
             diff_scroll: UniformListScrollHandle::new(),
+            pane_origin: (0.0, 0.0),
             core: Core::new(out, keymap, home),
         }
     }

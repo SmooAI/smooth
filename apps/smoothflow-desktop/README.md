@@ -51,8 +51,18 @@ replays.
   or a **middle-click on a fleet row** for that row's session. It always asks
   first, saying whether the session will be killed and which pearl,
   worktree and branch go, with Cancel as the default. Confirming sends
-  `flow.close`, never forced. An engine refusal (a dirty or unmerged
-  worktree) is shown verbatim in a dialog of its own and the row stays.
+  `flow.close`, unforced. An engine refusal (a dirty or unmerged
+  worktree) is shown verbatim in a dialog of its own and the row stays; only
+  then is **Force close** offered (Keep it is the default), which resends the
+  request with `force`.
+- **Scrollback** (spec §10, Ghostty's rules): the wheel or trackpad scrolls
+  libghostty-vt's history, unless the program tracks the mouse (it gets wheel
+  reports) or is on the alternate screen (arrow keys). Shift+PageUp/PageDown/
+  Home/End page and jump. Typing snaps back to the live screen; new output
+  doesn't. A scrolled-back pane says how far back it is. A live session is a
+  `tmux attach` client on the alternate screen, so there the wheel is arrow
+  keys, as on the Mac. Faint text draws at
+  half alpha and strikethrough as a line.
 - **Approvals** (spec §7): when the focused session's attention is an
   approvable `permission` or `question` (it has a `request_id`), a bar shows
   the command or question with Allow and Deny (`flow.approve`).
@@ -69,11 +79,10 @@ attach/resize, keystrokes, close/kill) lives in the toolkit-free
 `app_core::Core` in the crate's library. The GPUI `Workspace` wraps it and
 the views only draw.
 
-Not yet: Force after a refused Close Out, Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
+Not yet: Fan Out, steer bar, Inbox, diff/PR/activity tabs, the
 pearl rail, Settings (the "Don't ask again" choice lasts until you quit),
-menus, selection and copy, scrollback, IME in the sheet's fields, Browse… (the
-platform folder picker), a bundled Nerd Font, and faint/strikethrough
-styling (libghostty-vt reports both; the renderer doesn't draw them yet).
+menus, selection and copy, scrollback search, IME in the sheet's fields,
+Browse… (the platform folder picker), and a bundled Nerd Font.
 
 ## Build
 

@@ -593,6 +593,116 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
     assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
 }
 
+/// The wheel against a real session (th-1977a8). The engine streams a
+/// `tmux attach` client, and tmux draws on the alternate screen, so by
+/// Ghostty's rules (the Mac's too) the wheel is arrow keys for the program —
+/// here the shell — and the viewport never
+/// leaves the screen. History scrolling on the primary screen is covered by
+/// `terminal.rs` and `app_core.rs` unit tests.
+#[test]
+fn the_wheel_over_a_tmux_session_is_arrow_keys() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    app.wait(&d, "the shell to attach at 80x24", WAIT, |a| a.core.attached_size(&id) == Some((80, 24)));
+    app.wait(&d, "a prompt", WAIT, |a| a.screen(&id).iter().any(|l| !l.trim().is_empty()));
+    let n = nonce();
+    let cmd = format!("echo sfd-{n}-marker");
+    app.type_text(&cmd);
+    assert!(app.press("enter").is_empty());
+    let out = format!("sfd-{n}-marker");
+    app.wait(&d, "the echo", WAIT, |a| a.screen(&id).iter().any(|l| l.trim() == out));
+    assert!(app.core.terminals[&id].alt_screen(), "a tmux attach client draws on the alternate screen");
+
+    let pane = app.core.surfaces.focused_pane();
+    assert!(app.core.wheel(pane, 1.0, 0, 0));
+    // A line-editing shell recalls the command; one without (dash, CI's
+    // `sh`) echoes the raw `^[[A`. Either way the Up arrow reached it.
+    app.wait(&d, "the wheel's Up arrow to reach the shell", WAIT, |a| {
+        // Joined: a long prompt wraps the command across rows.
+        let screen = a.screen(&id).concat();
+        screen.matches(&cmd).count() >= 2 || screen.contains("[A")
+    });
+    assert!(app.core.terminals[&id].at_bottom(), "no history scrolled on the alternate screen");
+}
+
+/// Close Out a shell in a dirty linked worktree (th-1977a8): the real engine
+/// refuses and touches nothing; the refusal offers Force close (Keep it is
+/// the default), and Force close removes the worktree and drops the row.
+#[test]
+fn a_refused_close_out_offers_force_and_force_removes_the_worktree() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    let wt = ws.with_file_name("ws-feature");
+    git(&ws, &["worktree", "add", "-q", "-b", "feature", wt.to_str().expect("utf-8 path")]);
+    std::fs::write(wt.join("scratch.txt"), "uncommitted\n").expect("dirty the worktree");
+
+    let mut app = connect(&d);
+    let fetches = app
+        .core
+        .run_effects(vec![smoothflow_desktop::sheet::Effect::Start(smoothflow_desktop::frames::NewSession {
+            kind: "shell".into(),
+            worktree: Some(wt.to_string_lossy().into_owned()),
+            ..Default::default()
+        })]);
+    assert!(fetches.is_empty());
+    app.wait(&d, "the shell in the worktree to open", WAIT, |a| a.core.surfaces.focused_session().is_some());
+    let id = app.core.surfaces.focused_session().map(str::to_string).expect("focused session");
+    let s = app.core.sessions[&id].clone();
+    assert!(smoothflow_desktop::app_core::has_own_worktree(&s), "a linked worktree is its own: {s:?}");
+
+    app.core.close_out(&id);
+    let ask = app.core.dialog.clone().expect("Close Out asks");
+    let close = ask.buttons[0].1.clone();
+    assert!(
+        matches!(
+            close,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: false,
+                ..
+            }
+        ),
+        "it offers to remove the worktree, unforced: {close:?}"
+    );
+    app.core.confirm(close);
+    app.wait(&d, "the engine's refusal", WAIT, |a| a.core.dialog.is_some());
+    let refusal = app.core.dialog.clone().expect("refusal");
+    assert!(
+        refusal.message.contains("uncommitted changes"),
+        "the engine's reason, verbatim: {}",
+        refusal.message
+    );
+    assert_eq!(refusal.cancel, "Keep it");
+    let (label, force) = refusal.buttons[0].clone();
+    assert_eq!(label, "Force close");
+    assert!(
+        matches!(
+            force,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: true,
+                ..
+            }
+        ),
+        "{force:?}"
+    );
+    assert!(wt.join("scratch.txt").is_file(), "nothing was touched");
+    assert!(app.core.sessions.contains_key(&id), "the row stays");
+
+    app.core.confirm(force);
+    app.wait(&d, "the forced close to drop the row", WAIT, |a| !a.core.sessions.contains_key(&id));
+    assert!(app.core.dialog.is_none(), "no second refusal: {:?}", app.core.dialog);
+    assert!(!wt.exists(), "force removed the worktree");
+    assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}
+
 // ── Diff (th-26f5b9) ────────────────────────────────────────────────────
 
 /// `git` in `dir`, isolated from the developer's config; panics on failure.
