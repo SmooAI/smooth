@@ -542,6 +542,25 @@ impl SmoothMcp {
         Ok(out.trim_end().to_string())
     }
 
+    // ── Machine settings (free, local, read-only) ────────────────────────────
+
+    /// Every `th settings` key with its effective value and source. Writes
+    /// stay CLI-only (`th settings set`), so an agent proposes the command and
+    /// the user (or a permitted shell) runs it. Pearl th-f95ecf.
+    ///
+    /// # Errors
+    /// None in practice: an unreadable settings file is reported in the
+    /// result's `file_error`, not as an MCP error.
+    #[tool(
+        name = "settings_list",
+        description = "List Smooth's machine settings (~/.smooth/settings.toml): every key's effective value, its source (env/file/default), default, legacy SMOOTH_* env var, description, and whether a change needs a Big Smooth restart. Read-only; change one with `th settings set <key> <value>`.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn settings_list(&self) -> Result<String, ErrorData> {
+        let resolver = smooth_policy::settings::Resolver::from_process();
+        serde_json::to_string_pretty(&crate::settings::list_json(&resolver)).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+
     // ── Your business (requires Sign in with Smoo: `smoo auth login`) ──────────
 
     /// Fast semantic read of your org's knowledge base.
@@ -1317,7 +1336,8 @@ impl ServerHandler for SmoothMcp {
             .with_instructions(
                 "Smooth exposes your Smoo AI `th` CLI as MCP tools, in two tiers.\n\n\
                  LOCAL — free, no sign-in. `pearls_ready` / `pearls_create` track work in the pearl \
-                 store of the workspace this server was launched in. `remember` / `recall` keep local notes.\n\n\
+                 store of the workspace this server was launched in. `remember` / `recall` keep local notes. \
+                 `settings_list` shows Smooth's machine settings (read-only; change one with `th settings set`).\n\n\
                  YOUR BUSINESS — requires Sign in with Smoo (tell the user to run `smoo auth login`). \
                  `ask_business` talks to Smooth Operator, the agent that runs on the user's live Smoo org: \
                  ask about revenue and the pipeline, search the CRM, and draft — or, with the user's explicit \
@@ -1405,6 +1425,7 @@ mod tests {
             "pearls_create",
             "remember",
             "recall",
+            "settings_list",
             "knowledge_search",
             "ask_business",
             "operator_tools",
@@ -1703,6 +1724,7 @@ mod tests {
         for read_tool in [
             "pearls_ready",
             "recall",
+            "settings_list",
             "mail_inbox",
             "agent_list",
             "operator_tools",

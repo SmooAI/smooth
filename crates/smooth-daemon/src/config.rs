@@ -41,10 +41,11 @@ pub const DEFAULT_EGRESS_PROXY_ADDR: &str = "127.0.0.1:4419";
 /// session (personal scope needs a human identity); a Family AI subscription gate
 /// is a separate stream (th-74e0f8), not enforced here.
 ///
-/// Set `SMOOTH_CLOUD_MEMORY` to `1`/`true`/`yes`/`on` to enable.
+/// Set `SMOOTH_CLOUD_MEMORY` to `1`/`true`/`yes`/`on` (or `th settings set
+/// cloud_memory true`) to enable.
 #[must_use]
 pub fn cloud_memory_enabled() -> bool {
-    cloud_memory_enabled_inner(std::env::var("SMOOTH_CLOUD_MEMORY").ok().as_deref())
+    cloud_memory_enabled_inner(smooth_policy::settings::raw("cloud_memory").as_deref())
 }
 
 /// Pure core (no env read) so the truthiness policy is unit-testable.
@@ -74,10 +75,12 @@ pub struct SandboxSetting {
     pub unrecognized: Option<String>,
 }
 
-/// Resolve [`SandboxSetting`] from the environment.
+/// Resolve [`SandboxSetting`] from the environment, else `sandbox.enabled` in
+/// the settings file (th-f95ecf) — the same lookup
+/// [`SandboxMode::from_env`] makes, so the logged posture matches.
 #[must_use]
 pub fn resolve_sandbox() -> SandboxSetting {
-    resolve_sandbox_inner(std::env::var(smooth_tools::SANDBOX_ENV).ok())
+    resolve_sandbox_inner(smooth_policy::settings::raw(smooth_tools::sandbox::SETTING_KEY))
 }
 
 /// Pure core (no env read) so the opt-in policy is unit-testable.
@@ -122,12 +125,15 @@ pub fn sandbox_posture(setting: &SandboxSetting, egress_proxy: Option<&str>, pla
     match (setting.mode, platform_supported, egress_proxy) {
         (SandboxMode::PassThrough, _, None) => (
             PostureLevel::Info,
-            format!("kernel sandbox OFF (default): agent tools run as you; set {}=1 to enable", smooth_tools::SANDBOX_ENV),
+            format!(
+                "kernel sandbox OFF (default): agent tools run as you; enable with `th settings set sandbox.enabled true` (or {}=1) and restart",
+                smooth_tools::SANDBOX_ENV
+            ),
         ),
         (SandboxMode::PassThrough, _, Some(p)) => (
             PostureLevel::Info,
             format!(
-                "kernel sandbox OFF (default): agent tools run as you; egress allowlist via {p} is ADVISORY (HTTP(S)_PROXY set, direct connections not blocked) — set {}=1 to enforce it",
+                "kernel sandbox OFF (default): agent tools run as you; egress allowlist via {p} is ADVISORY (HTTP(S)_PROXY set, direct connections not blocked) — `th settings set sandbox.enabled true` (or {}=1) enforces it",
                 smooth_tools::SANDBOX_ENV
             ),
         ),
@@ -142,7 +148,7 @@ pub fn sandbox_posture(setting: &SandboxSetting, egress_proxy: Option<&str>, pla
         (SandboxMode::Enforced, false, _) => (
             PostureLevel::Warn,
             format!(
-                "{}=1 but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED{}",
+                "sandbox.enabled is on ({} / `th settings`) but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED{}",
                 smooth_tools::SANDBOX_ENV,
                 if egress_proxy.is_some() { "; egress allowlist is ADVISORY" } else { "" }
             ),
@@ -152,6 +158,11 @@ pub fn sandbox_posture(setting: &SandboxSetting, egress_proxy: Option<&str>, pla
 
 /// Log [`sandbox_posture`] for this process once, at startup.
 pub fn log_sandbox_posture(egress_proxy: Option<&str>) {
+    // th-f95ecf: a malformed settings file is ignored (defaults apply) rather
+    // than failing startup — say so once, here, so it isn't silent.
+    if let Some(err) = smooth_policy::settings::Resolver::from_process().file_load_error() {
+        tracing::warn!("settings file ignored, defaults apply: {err} (fix it, then check `th settings list`)");
+    }
     let setting = resolve_sandbox();
     let (level, line) = sandbox_posture(&setting, egress_proxy, smooth_tools::SandboxPolicy::platform_supported());
     match level {
@@ -207,9 +218,11 @@ pub struct EgressSetup {
 /// [`sandbox_posture`].
 /// The `defaults` token expands to [`DEFAULT_EGRESS_HOSTS`] (mergeable with your
 /// own hosts). `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
+/// The allowlist can also live in the settings file (`th settings set
+/// egress.allowlist defaults,github.com`, th-f95ecf); the env var wins.
 #[must_use]
 pub fn resolve_egress() -> Option<EgressSetup> {
-    resolve_egress_inner(std::env::var("SMOOTH_EGRESS_ALLOWLIST").ok(), std::env::var("SMOOTH_EGRESS_PROXY_ADDR").ok())
+    resolve_egress_inner(smooth_policy::settings::raw("egress.allowlist"), std::env::var("SMOOTH_EGRESS_PROXY_ADDR").ok())
 }
 
 /// Pure core (no env reads) so the parse/expand logic is unit-testable without
@@ -364,7 +377,7 @@ mod tests {
         let (level, line) = sandbox_posture(&setting(SandboxMode::PassThrough), None, true);
         assert_eq!(level, PostureLevel::Info, "the default is not a warning");
         assert!(
-            line.contains("OFF") && line.contains("run as you") && line.contains("SMOOTH_SANDBOX=1"),
+            line.contains("OFF") && line.contains("run as you") && line.contains("SMOOTH_SANDBOX=1") && line.contains("th settings set sandbox.enabled true"),
             "{line}"
         );
         // Off is off on every platform — no 'UNSANDBOXED' warning when nobody asked for one.
@@ -428,6 +441,54 @@ mod tests {
         // …and the `defaults` sentinel is NOT treated as a (rejected) host.
         assert!(setup.rejected.is_empty(), "sentinel must not surface as rejected: {:?}", setup.rejected);
         assert!(setup.allowlist.len() > DEFAULT_EGRESS_HOSTS.len());
+    }
+
+    /// th-f95ecf: the startup posture reads `sandbox.enabled` from the file
+    /// through the same core; `SMOOTH_SANDBOX` still wins.
+    #[test]
+    fn settings_file_feeds_the_sandbox_posture_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        let key = smooth_tools::sandbox::SETTING_KEY;
+        let on = || SettingsFile::parse("[sandbox]\nenabled = true\n").unwrap();
+        let s = resolve_sandbox_inner(Resolver::new(|_| None, on()).raw(key));
+        assert_eq!((s.mode, s.unrecognized), (SandboxMode::Enforced, None));
+        let s = resolve_sandbox_inner(Resolver::new(|n| (n == "SMOOTH_SANDBOX").then(|| "off".to_owned()), on()).raw(key));
+        assert_eq!(s.mode, SandboxMode::PassThrough, "env beats file");
+        let s = resolve_sandbox_inner(Resolver::new(|_| None, SettingsFile::parse("sandbox.enabled = \"maybe\"\n").unwrap()).raw(key));
+        assert_eq!(
+            (s.mode, s.unrecognized),
+            (SandboxMode::PassThrough, None),
+            "an invalid file value is ignored, not a typo warning"
+        );
+    }
+
+    /// th-f95ecf: the settings file feeds the same pure cores; the legacy env
+    /// var still wins.
+    #[test]
+    fn settings_file_feeds_cloud_memory_and_egress_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        let file = || SettingsFile::parse("cloud_memory = true\n[egress]\nallowlist = [\"defaults\", \"corp.internal\"]\n").unwrap();
+
+        let r = Resolver::new(|_| None, file());
+        assert!(cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()));
+        let setup = resolve_egress_inner(r.raw("egress.allowlist"), None).expect("file turns the boundary on");
+        assert!(setup.allowlist.is_allowed("corp.internal") && setup.allowlist.is_allowed("github.com"));
+        assert!(setup.rejected.is_empty());
+
+        let env = |name: &str| match name {
+            "SMOOTH_CLOUD_MEMORY" => Some("0".to_owned()),
+            "SMOOTH_EGRESS_ALLOWLIST" => Some("only.example".to_owned()),
+            _ => None,
+        };
+        let r = Resolver::new(env, file());
+        assert!(!cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()), "env 0 beats file true");
+        let setup = resolve_egress_inner(r.raw("egress.allowlist"), None).expect("env set");
+        assert!(setup.allowlist.is_allowed("only.example"));
+        assert!(!setup.allowlist.is_allowed("corp.internal"), "env replaces, not merges with, the file");
+
+        let r = Resolver::new(|_| None, SettingsFile::empty());
+        assert!(!cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()));
+        assert!(resolve_egress_inner(r.raw("egress.allowlist"), None).is_none(), "neither → boundary off");
     }
 
     #[test]

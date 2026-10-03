@@ -137,10 +137,12 @@ fn resolve_relay_url_from(enabled: Option<&str>, url: Option<&str>) -> Option<St
     Some(url.map_or(DEFAULT_RELAY_URL, str::trim).to_string()).filter(|u| !u.is_empty())
 }
 
-/// [`resolve_relay_url_from`] over the real environment.
+/// [`resolve_relay_url_from`] over the real environment and the settings file
+/// (`relay.enabled` / `relay.url`, th-f95ecf; the env vars win).
 pub fn resolve_relay_url() -> Option<String> {
-    let enabled = std::env::var("SMOOTH_RELAY").ok();
-    let url = std::env::var("SMOOTH_RELAY_URL").ok();
+    let settings = smooth_policy::settings::Resolver::from_process();
+    let enabled = settings.raw("relay.enabled");
+    let url = settings.raw("relay.url");
     resolve_relay_url_from(enabled.as_deref(), url.as_deref())
 }
 
@@ -1381,6 +1383,30 @@ mod tests {
     #[test]
     fn relay_enabled_by_default_at_the_production_url() {
         assert_eq!(resolve_relay_url_from(None, None).as_deref(), Some(DEFAULT_RELAY_URL));
+        // `th settings` advertises the same default it falls back to.
+        assert_eq!(smooth_policy::settings::def("relay.url").unwrap().default, Some(DEFAULT_RELAY_URL));
+    }
+
+    /// th-f95ecf: `relay.enabled` / `relay.url` in the settings file feed the
+    /// same core; `SMOOTH_RELAY` / `SMOOTH_RELAY_URL` still win.
+    #[test]
+    fn settings_file_feeds_relay_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        let resolve = |r: &Resolver| resolve_relay_url_from(r.raw("relay.enabled").as_deref(), r.raw("relay.url").as_deref());
+
+        let off = Resolver::new(|_| None, SettingsFile::parse("[relay]\nenabled = false\n").unwrap());
+        assert_eq!(resolve(&off), None, "file kill switch");
+        let url = Resolver::new(|_| None, SettingsFile::parse("[relay]\nurl = \"wss://relay.dev.smoo.ai/ws\"\n").unwrap());
+        assert_eq!(resolve(&url).as_deref(), Some("wss://relay.dev.smoo.ai/ws"));
+
+        let env_on = Resolver::new(
+            |n| (n == "SMOOTH_RELAY").then(|| "1".to_owned()),
+            SettingsFile::parse("[relay]\nenabled = false\n").unwrap(),
+        );
+        assert_eq!(resolve(&env_on).as_deref(), Some(DEFAULT_RELAY_URL), "env beats the file's kill switch");
+
+        let neither = Resolver::new(|_| None, SettingsFile::empty());
+        assert_eq!(resolve(&neither).as_deref(), Some(DEFAULT_RELAY_URL));
     }
 
     #[test]

@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+New `th settings`: one machine settings file (`~/.smooth/settings.toml`) for Smooth's user-facing knobs, so you no longer find a `SMOOTH_*` env var by reading the code. A typed registry in `smooth-policy` names each key, its type, default, legacy env var, reader and whether a change needs a Big Smooth restart; `th settings list | show | set | unset | explain | path` (all with `--json`) reads and writes it, refusing unknown keys with a closest match and validating values. Precedence is legacy env var > file > default, so every existing `SMOOTH_*` launch recipe still works. First keys: `sandbox.enabled`, `egress.allowlist`, `auto_mode`, `fast_mode`, `model` (`SMOOTH_AGENT_MODEL`), `relay.enabled`, `relay.url`, `tailscale.serve` and `cloud_memory`. `th mcp serve` gains a read-only `settings_list` tool. Because the file now carries Big Smooth's own security posture, the agent cannot write it: its fs tools are denied `~/.smooth/settings.toml` and its `th` tool refuses `th settings set|unset`.
