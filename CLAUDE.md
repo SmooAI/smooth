@@ -21,7 +21,7 @@ Fourteen crates. `ls crates/` is the source of truth; this list is kept in sync 
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary `th` — clap entry point (57 top-level commands)
+│   ├── smooth-cli/          # Binary `th` — clap entry point (58 top-level commands)
 │   ├── smooth-daemon/       # Binary + lib — Big Smooth: the always-on personal-agent daemon
 │   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the opt-in kernel OS sandbox
 │   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
@@ -45,7 +45,7 @@ smooth/
 
 ### Key Crates
 
-- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 57 top-level commands (59 enum variants: `web-search` is hidden, `admin` is behind the non-default `admin` feature). Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
+- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 58 top-level commands (60 enum variants: `web-search` is hidden, `admin` is behind the non-default `admin` feature). Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
 - **smooth-daemon** (`crates/smooth-daemon/`): **Big Smooth.** The always-on, single-tenant personal-agent daemon (EPIC th-c89c2a). It hosts smooth-operator's `LocalServer` in-process — canonical WS protocol, no bespoke agent loop — with durable SQLite storage, scheduled/proactive turns, web push, tailnet exposure, and the security hooks. `th daemon` runs it directly; `th up` also launches it.
 - **smooth-operator**: the agent engine (LLM client, agent loop, tool registry + hooks, conversation, checkpointing, cast, permissions, `DenyPolicy`). **It is not in this workspace** — it's a git/crates.io dependency from the separate `SmooAI/smooth-operator` repo. Don't look for `crates/smooth-operator/`.
 - **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` spawns only through `sandbox.rs`'s `SandboxedCommand`, which runs it as the user by default and inside the kernel OS sandbox when `SMOOTH_SANDBOX=1` (§4). `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox even when it is on, because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
@@ -159,6 +159,14 @@ th flow fanout new / pick
 # (M1, th-6ad314). `th harness enable` is sugar for installing smooth-agent.
 # Spec: docs/Engineering/Harness-Packages.md
 th pkg install <source> [--harness all|claude-code,codex,opencode,cursor] / list / status [name] / rm <name> / init [dir]
+
+# Machine settings — ~/.smooth/settings.toml over a typed registry of the
+# user-facing SMOOTH_* knobs (sandbox.enabled, egress.allowlist, auto_mode,
+# model, fast_mode, relay.*, tailscale.serve, cloud_memory). Precedence:
+# legacy env var > file > default. `list --json` is the agent view; `set`
+# validates and prints the restart command. NOT `th config` (= smoo config).
+# Adding a key: smooth_policy::settings::REGISTRY + settings::raw("key").
+th settings list [--json] / show <key> / set <key> <value> / unset <key> / explain <key> / path
 
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
@@ -345,8 +353,9 @@ Two layers always, a third opt-in, in the order a tool call meets them:
    fail-closed LLM-judge escalation on ambiguous hits; `post_call` redacts
    detected secrets out of the tool result in place.
 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — **opt-in, OFF by
-   default** (pearl th-efbab1). Turn it on with `SMOOTH_SANDBOX=1` in the
-   daemon's environment. Big Smooth is a personal agent that operates AS its
+   default** (pearl th-efbab1). Turn it on with `th settings set
+sandbox.enabled true` and restart Big Smooth (or `SMOOTH_SANDBOX=1` in the
+   daemon's environment, which wins over the file). Big Smooth is a personal agent that operates AS its
    user on the user's own machine, and the sandbox got in the way of exactly
    that: asked to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound
    kernel-denied behind the egress proxy) and git failed with "Operation not

@@ -28,6 +28,9 @@ dirs-next.workspace = true
 # th-16b0ca: `auth_paths` reads the stored session JSON to name a migrated
 # profile after its user's email.
 serde_json.workspace = true
+# th-f95ecf: `settings` edits ~/.smooth/settings.toml in place (comments and
+# unknown keys survive a `th settings set`).
+toml_edit.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
