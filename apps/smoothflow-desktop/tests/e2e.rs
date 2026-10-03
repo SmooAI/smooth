@@ -622,8 +622,9 @@ fn the_wheel_over_a_tmux_session_is_arrow_keys() {
     // A line-editing shell recalls the command; one without (dash, CI's
     // `sh`) echoes the raw `^[[A`. Either way the Up arrow reached it.
     app.wait(&d, "the wheel's Up arrow to reach the shell", WAIT, |a| {
-        let screen = a.screen(&id);
-        screen.iter().filter(|l| l.contains(&cmd)).count() >= 2 || screen.iter().any(|l| l.contains("[A"))
+        // Joined: a long prompt wraps the command across rows.
+        let screen = a.screen(&id).concat();
+        screen.matches(&cmd).count() >= 2 || screen.contains("[A")
     });
     assert!(app.core.terminals[&id].at_bottom(), "no history scrolled on the alternate screen");
 }
