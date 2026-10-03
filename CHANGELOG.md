@@ -1,5 +1,22 @@
 # @smooai/smooth
 
+## 0.68.0
+
+### Minor Changes
+
+- 1e7d6ff: The kernel OS sandbox around Big Smooth's `bash` tool (and CLI-wrapper plugins) is now opt-in and off by default. Big Smooth is a personal agent that acts as its user on the user's own machine, and the sandbox stopped it doing exactly that: asked from `th code` to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound was kernel-denied behind the egress proxy) and git failed with "Operation not permitted" on `~/.ssh/known_hosts`. By default `bash` now runs as a normal user subprocess with the user's env, `HOME`, `SSH_AUTH_SOCK` and `PATH`; only the daemon's own config (`SMOOTH_*`, `SMOOAI_GATEWAY_KEY`) is stripped. The permission gate and Narc still check every call. Set `SMOOTH_SANDBOX=1` (or `true`/`yes`/`on`) in the daemon's environment to get the Seatbelt sandbox back exactly as before (macOS only). A configured `SMOOTH_EGRESS_ALLOWLIST` still starts the goalie proxy and sets `HTTP(S)_PROXY`, but it only blocks direct connections when the sandbox is on; with it off the allowlist is advisory. The daemon logs one startup line naming the posture, and `th doctor` has a "Tool sandbox" row in place of the stale microsandbox line.
+
+### Patch Changes
+
+- 71f1df0: th-mail: broadcasts reach only agents registered before they were sent and expire after 72 hours, and the Stop hook no longer blocks on broadcasts. Every new session registers a fresh handle, so it used to inherit the machine's whole broadcast history and could not stop until it had read and acked all of it. Adds `th msg unread-count --direct` (direct mail only).
+
+  `th msg inbox` and the `mail_inbox` MCP tool show only unread mail by default (`--all` / `unread_only=false` for history), so checking the inbox no longer re-reads handled mail.
+
+- af71d49: Big Smooth: sidekick tool calls now run the permission gate (with the DenyPolicy) and Narc, in the same order as a top-level turn. The engine gives each sidekick a fresh tool registry with no host hooks, so before this a sidekick's `bash` and file calls skipped both checks. That mattered more once the kernel sandbox became opt-in. A sidekick call that needs approval asks the user over the parent turn, and is denied if there is no way to ask.
+- ee069fd: th-handoff: the handoff ends with a copy-pasteable launch command for the harness the user opens next (Claude Code, Codex, OpenCode), and the plain resume prompt for `th code` or any harness without a prompt argument.
+
+  Resume without an id: `/th-handoff resume` lists in-progress pearls with checkpoints, newest first (`--cwd .` narrows to this repo), and resumes the one the user picks.
+
 ## 0.67.0
 
 ### Minor Changes
