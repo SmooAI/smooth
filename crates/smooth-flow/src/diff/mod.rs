@@ -326,6 +326,8 @@ fn build_hunk(raw: &RawHunk, id: String, limit: usize, syntax: Option<&'static s
 /// highlight clock.
 #[must_use]
 pub fn build<S: std::hash::BuildHasher>(files: &[RawFile], git_truncated: bool, staged: &HashSet<String, S>, path: Option<&str>, budget: usize) -> Diff {
+    // The clock covers highlighting, not the one-time syntax-set load.
+    syntax::warm();
     let deadline = Instant::now() + HIGHLIGHT_BUDGET;
     let (mut added, mut deleted) = (0u32, 0u32);
     for f in files {
