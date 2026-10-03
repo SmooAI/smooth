@@ -21,6 +21,8 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     private var lastGrid: (cols: Int, rows: Int) = (0, 0)
     private var trackingArea: NSTrackingArea?
     private var cursorShape: NSCursor = .iBeam
+    /// Screen-change observers for the current window (th-b9e6df).
+    private var screenObservers: [NSObjectProtocol] = []
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -34,6 +36,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     required init?(coder: NSCoder) { nil }
 
     deinit {
+        screenObservers.forEach(NotificationCenter.default.removeObserver)
         if let surface { ghostty_surface_free(surface) }
     }
 
@@ -88,14 +91,41 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        updateScale()
-        updateSize()
+        observeScreen()
+        screenChanged()
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        screenChanged()
+    }
+
+    /// Undocking, plugging in a monitor, or changing a resolution moves the
+    /// window to another screen (or changes this one). Ghostty's renderer is
+    /// tied to a display through `set_display_id`, which this view never set,
+    /// so after an undock the terminal kept its old size and stopped
+    /// redrawing (th-b9e6df). Ghostty's own app re-sends the display id on
+    /// every screen change; do the same, then re-apply scale and size.
+    private func observeScreen() {
+        screenObservers.forEach(NotificationCenter.default.removeObserver)
+        screenObservers = []
+        guard let window else { return }
+        let nc = NotificationCenter.default
+        let changed: (Notification) -> Void = { [weak self] _ in self?.screenChanged() }
+        screenObservers.append(nc.addObserver(forName: NSWindow.didChangeScreenNotification, object: window, queue: .main, using: changed))
+        screenObservers.append(nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main, using: changed))
+    }
+
+    private func screenChanged() {
+        updateDisplayID()
         updateScale()
         updateSize()
+    }
+
+    private func updateDisplayID() {
+        guard let surface,
+              let id = window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return }
+        ghostty_surface_set_display_id(surface, id.uint32Value)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -126,6 +156,16 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         reportGridIfChanged()
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in self?.reportGridIfChanged() }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in self?.reportGridIfChanged() }
+        // A display change can take longer than 300 ms to settle (the window
+        // is re-laid out for the new screen); one late check catches it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in self?.reportGridIfChanged() }
+    }
+
+    /// Ghostty reports a new cell size (font metrics after a scale change):
+    /// the grid in cells may have changed even though the view's size did not.
+    func cellSizeChanged() {
+        reportGridIfChanged()
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in self?.reportGridIfChanged() }
     }
 
     private func reportGridIfChanged() {
