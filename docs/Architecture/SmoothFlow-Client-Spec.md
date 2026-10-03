@@ -279,6 +279,9 @@ control.
 - 2026-10-02: §14 Diff — the native review viewer over structured diffs by
   turn, with `spec/vectors/diff.json` (th-26f5b9). SmoothFlow for Mac ships it
   first; desktop and phones follow.
+- 2026-10-03: §14 Diff — long lines scroll sideways instead of clipping, and
+  comments are multi-line (Ctrl/⌘+Enter adds one). SmoothFlow Desktop first
+  (th-4ec2f6).
 - 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
   the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
   Out confirmation. Close Out now always asks first and shows an engine
@@ -332,8 +335,14 @@ all come from the engine. No client embeds a web view for it.
   default is Cancel; Stage / Unstage on the Uncommitted view only (`staged`
   marks a hunk already in the index). A `stale` error refreshes the diff and
   says the hunk changed.
+- **Long lines** are never wrapped or cut off: the diff body scrolls
+  sideways (wheel or trackpad; shift+wheel; on desktop `←`/`→` too) as far as
+  the widest line. On desktop the line-number gutters stay put while the code
+  scrolls, and side by side both panes move together.
 - **Comments:** on a line, a range within one hunk, or a file. Clicking the
   line-number gutter comments on that line; shift-click extends to a range.
+  A comment is multi-line: Enter adds a line, Ctrl/⌘+Enter adds the comment,
+  Esc drops it; the box grows to a few lines, then scrolls.
   Comments show inline under the last line of their range until sent. "Send
   review to agent (N)" sends all of them in one `flow.diff.review`; a
   `blocked` error is shown, never dropped. Shells have no review.

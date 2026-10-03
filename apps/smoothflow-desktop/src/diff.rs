@@ -331,6 +331,19 @@ pub fn styled(l: &Line, legend: &[String]) -> (String, Vec<Run>) {
     (text, runs)
 }
 
+/// A line's width in columns, as `styled` draws it (markers included).
+#[must_use]
+pub fn columns(l: &Line) -> usize {
+    let mut n = l.text.chars().count();
+    if l.truncated {
+        n += " …".chars().count();
+    }
+    if l.no_eol {
+        n += "  (no newline at end of file)".len();
+    }
+    n
+}
+
 // ── rows ─────────────────────────────────────────────────────────────────────
 
 /// One row of the main pane. Rows are computed, never views: the list is
@@ -598,12 +611,50 @@ enum Pending {
     Review,
 }
 
-/// A comment being written.
+/// A comment being written: multi-line, Enter for a newline, Ctrl/⌘+Enter
+/// to add it. It grows to `DRAFT_LINES` lines, then scrolls with the caret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     pub field: Field,
     pub target: Comment,
+    /// The first line shown.
+    top: usize,
 }
+
+/// The most lines a comment draft shows at once.
+pub const DRAFT_LINES: usize = 6;
+
+impl Draft {
+    fn new(target: Comment) -> Self {
+        Self {
+            field: Field::multiline(),
+            target,
+            top: 0,
+        }
+    }
+
+    /// The lines on screen: at most `DRAFT_LINES`, always holding the caret's.
+    #[must_use]
+    pub fn window(&self) -> std::ops::Range<usize> {
+        let lines = self.field.lines().count();
+        self.top..(self.top + DRAFT_LINES).min(lines)
+    }
+
+    /// Scroll just enough to keep the caret's line on screen.
+    fn follow(&mut self) {
+        let (line, _) = self.field.caret_line_col();
+        let lines = self.field.lines().count();
+        if line < self.top {
+            self.top = line;
+        } else if line >= self.top + DRAFT_LINES {
+            self.top = line + 1 - DRAFT_LINES;
+        }
+        self.top = self.top.min(lines.saturating_sub(DRAFT_LINES));
+    }
+}
+
+/// Columns ←/→ scroll the diff body by.
+pub const KEY_SCROLL_COLUMNS: f32 = 8.0;
 
 /// A Revert waiting for its confirmation (the caller shows the dialog).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -644,6 +695,13 @@ pub struct Viewer {
     branch_ref: Option<String>,
     /// Side by side instead of unified.
     pub split: bool,
+    /// Horizontal scroll of the diff text, in columns. Every row shares it, so
+    /// the line-number gutters stay put; side by side, both panes move together.
+    x: f32,
+    /// Columns of code the view shows (one pane's, side by side).
+    view_cols: f32,
+    /// The widest line among the rows, in columns.
+    longest: usize,
     /// Per session: viewed keys, collapse overrides by path, pending comments.
     viewed: HashMap<String, HashSet<String>>,
     toggles: HashMap<String, HashMap<String, bool>>,
@@ -680,6 +738,9 @@ impl Viewer {
             diff: None,
             branch_ref: None,
             split: false,
+            x: 0.0,
+            view_cols: 0.0,
+            longest: 0,
             viewed: HashMap::new(),
             toggles: HashMap::new(),
             comments: HashMap::new(),
@@ -792,6 +853,7 @@ impl Viewer {
         self.cursor = None;
         self.anchor = None;
         self.draft = None;
+        self.x = 0.0;
         self.rebuild();
     }
 
@@ -978,6 +1040,37 @@ impl Viewer {
         self.diff.as_ref().and_then(|d| d.files.get(fi)).is_some_and(|f| self.is_viewed(f))
     }
 
+    // ── horizontal scroll ───────────────────────────────────────────────
+
+    /// How far the diff text is scrolled right, in columns.
+    #[must_use]
+    pub const fn scroll_x(&self) -> f32 {
+        self.x
+    }
+
+    /// The furthest it can scroll: the widest line's end at the right edge.
+    #[must_use]
+    pub fn max_scroll_x(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss, reason = "line widths are far below f32's exact range")]
+        let longest = self.longest as f32;
+        (longest - self.view_cols).max(0.0)
+    }
+
+    /// The view's width for code, in columns; re-clamps the offset (a wider
+    /// pane or a narrower diff may leave nothing to scroll).
+    pub fn set_view_columns(&mut self, cols: f32) {
+        self.view_cols = cols.max(0.0);
+        self.x = self.x.clamp(0.0, self.max_scroll_x());
+    }
+
+    /// Scroll by `cols` (positive = right). Whether it moved.
+    pub fn scroll_by(&mut self, cols: f32) -> bool {
+        let x = (self.x + cols).clamp(0.0, self.max_scroll_x());
+        let moved = (x - self.x).abs() > f32::EPSILON;
+        self.x = x;
+        moved
+    }
+
     fn rebuild(&mut self) {
         let keep = self.cursor.and_then(|c| self.rows.get(c).cloned());
         if let Some(d) = &self.diff {
@@ -985,6 +1078,19 @@ impl Viewer {
             let viewed: Vec<bool> = d.files.iter().map(|f| self.is_viewed(f)).collect();
             self.rows = rows(d, self.split, &collapsed, &viewed, self.comments());
             self.tree = d.tree();
+            self.longest = self
+                .rows
+                .iter()
+                .filter_map(|r| match *r {
+                    Row::Line { file, hunk, line } => Some(columns(&d.files[file].hunks[hunk].lines[line])),
+                    Row::Pair { file, hunk, left, right } => {
+                        let h = &d.files[file].hunks[hunk];
+                        left.into_iter().chain(right).map(|i| columns(&h.lines[i])).max()
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
         } else {
             self.rows = if self.session.is_none() {
                 vec![Row::Banner("No session focused.".into())]
@@ -992,7 +1098,9 @@ impl Viewer {
                 Vec::new()
             };
             self.tree = Vec::new();
+            self.longest = 0;
         }
+        self.x = self.x.clamp(0.0, self.max_scroll_x());
         self.cursor = keep
             .and_then(|k| self.rows.iter().position(|r| *r == k))
             .or_else(|| self.cursor.map(|c| c.min(self.rows.len().saturating_sub(1))));
@@ -1220,10 +1328,7 @@ impl Viewer {
                 target.side = "old";
             }
         }
-        self.draft = Some(Draft {
-            field: Field::default(),
-            target,
-        });
+        self.draft = Some(Draft::new(target));
     }
 
     /// Add the draft as a pending comment (a blank one is dropped).
@@ -1283,10 +1388,15 @@ impl Viewer {
     pub fn key(&mut self, key: &str, key_char: Option<&str>, shift: bool, command: bool) -> KeyOutcome {
         if let Some(d) = &mut self.draft {
             match key {
-                "enter" => self.commit_draft(),
+                "enter" if command => self.commit_draft(),
+                "enter" => {
+                    d.field.insert("\n");
+                    d.follow();
+                }
                 "escape" => self.draft = None,
                 _ => {
                     let _: Edit = d.field.key(key, key_char, command);
+                    d.follow();
                 }
             }
             return KeyOutcome::Handled;
@@ -1310,6 +1420,10 @@ impl Viewer {
             }
             "escape" => {
                 self.anchor = None;
+                return KeyOutcome::Handled;
+            }
+            "left" | "right" => {
+                self.scroll_by(if key == "right" { KEY_SCROLL_COLUMNS } else { -KEY_SCROLL_COLUMNS });
                 return KeyOutcome::Handled;
             }
             _ => {}
@@ -1671,9 +1785,12 @@ mod tests {
         for k in ["w", "h", "y"] {
             v.key(k, Some(k), false, false);
         }
-        v.key("space", None, false, false);
         v.key("enter", None, false, false);
-        assert!(v.draft.is_none());
+        assert!(v.draft.is_some(), "Enter is a newline, not the end of the comment");
+        v.key("backspace", None, false, false);
+        v.key("space", None, false, false);
+        v.key("enter", None, false, true);
+        assert!(v.draft.is_none(), "Ctrl/⌘+Enter adds it");
         assert_eq!(v.comments()[0].text, "why");
         assert!(v.rows.contains(&Row::Comment { file: 0, index: 0 }), "shown under its line");
         // A deleted-only selection comments on the old side.
@@ -1686,7 +1803,7 @@ mod tests {
         v.move_to(0, false);
         v.comment();
         v.key("k", Some("k"), false, false);
-        v.key("enter", None, false, false);
+        v.key("enter", None, false, true);
         assert_eq!(v.comments()[1].range, None);
 
         v.submit_review();
@@ -1710,6 +1827,84 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_is_multi_line_and_its_box_scrolls_with_the_caret() {
+        let (mut v, mut rx) = shown(Base::Turn);
+        v.click(4, true, false);
+        for i in 0..8 {
+            let c = i.to_string();
+            v.key(&c, Some(&c), false, false);
+            if i < 7 {
+                v.key("enter", None, true, false);
+            }
+        }
+        let d = v.draft.as_ref().expect("still writing");
+        assert_eq!(d.field.lines().count(), 8, "Enter and Shift+Enter add lines");
+        assert_eq!(d.window(), 2..8, "the box shows the last DRAFT_LINES lines, the caret's included");
+        for _ in 0..7 {
+            v.key("up", None, false, false);
+        }
+        assert_eq!(v.draft.as_ref().map(Draft::window), Some(0..6), "↑ to the top scrolls back");
+        assert_eq!(v.cursor, Some(4), "arrows move the caret, not the diff cursor");
+        v.key("enter", None, false, true);
+        assert_eq!(v.comments()[0].text, "0\n1\n2\n3\n4\n5\n6\n7");
+        v.submit_review();
+        assert_eq!(sent(&mut rx)[0]["comments"][0]["text"], "0\n1\n2\n3\n4\n5\n6\n7", "newlines reach the agent");
+        // A blank multi-line draft is dropped, like a blank line.
+        v.click(4, true, false);
+        v.key("enter", None, false, false);
+        v.key("enter", None, false, false);
+        v.key("enter", None, false, true);
+        assert!(v.draft.is_none() && v.comments().len() == 1);
+    }
+
+    #[test]
+    fn long_lines_scroll_sideways_within_the_widest_line() {
+        let (mut v, _rx) = shown(Base::Turn);
+        let widest = v
+            .rows
+            .iter()
+            .filter_map(|r| match *r {
+                Row::Line { file, hunk, line } => v.diff.as_ref().map(|d| columns(&d.files[file].hunks[hunk].lines[line])),
+                _ => None,
+            })
+            .max()
+            .expect("lines");
+        #[allow(clippy::cast_precision_loss, reason = "small test widths")]
+        let widest = widest as f32;
+        v.set_view_columns(4.0);
+        assert!((v.max_scroll_x() - (widest - 4.0)).abs() < f32::EPSILON);
+        assert!(!v.scroll_by(-3.0), "nothing left of column 0");
+        assert!(v.scroll_by(4.5));
+        assert!((v.scroll_x() - 4.5).abs() < f32::EPSILON, "a trackpad scrolls by fractions of a column");
+        v.key("right", None, false, false);
+        assert!((v.scroll_x() - (4.5 + KEY_SCROLL_COLUMNS).min(widest - 4.0)).abs() < f32::EPSILON);
+        v.scroll_by(1e6);
+        assert!(
+            (v.scroll_x() - v.max_scroll_x()).abs() < f32::EPSILON,
+            "stops with the widest line's end at the edge"
+        );
+        v.key("left", None, false, false);
+        assert!((v.scroll_x() - (v.max_scroll_x() - KEY_SCROLL_COLUMNS).max(0.0)).abs() < f32::EPSILON);
+        // A wider pane re-clamps; a pane wider than every line can't scroll.
+        v.set_view_columns(widest + 5.0);
+        assert!(v.scroll_x().abs() < f32::EPSILON && !v.scroll_by(2.0));
+        // Side by side keeps one offset for both panes; a new session starts at 0.
+        v.set_view_columns(4.0);
+        v.scroll_by(3.0);
+        v.toggle_split();
+        assert!((v.scroll_x() - 3.0).abs() < f32::EPSILON);
+        v.show(Some(("fs-2", "claude")));
+        assert!(v.scroll_x().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn columns_count_scalars_and_the_markers() {
+        let l: Line = serde_json::from_value(json!({"kind": "add", "text": "é😀a", "truncated": true, "no_eol": true})).expect("line");
+        let (text, _) = styled(&l, &[]);
+        assert_eq!(columns(&l), text.chars().count(), "as wide as what styled() draws");
+    }
+
+    #[test]
     fn shells_get_no_review_and_results_refresh() {
         let (mut v, mut rx) = viewer();
         v.show(Some(("fs-1", "shell")));
@@ -1719,7 +1914,7 @@ mod tests {
         v.move_to(4, false);
         v.comment();
         v.key("a", Some("a"), false, false);
-        v.key("enter", None, false, false);
+        v.key("enter", None, false, true);
         v.submit_review();
         assert!(sent(&mut rx).is_empty());
         assert!(v.error);

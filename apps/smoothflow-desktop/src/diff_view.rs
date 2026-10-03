@@ -20,6 +20,12 @@ const TOOLBAR_HEIGHT: f32 = 34.0;
 const TREE_WIDTH: f32 = 260.0;
 /// Line-number gutter: two 5-digit columns.
 const GUTTER_CHARS: usize = 12;
+/// The `+`/`-` column after the gutter in unified mode.
+const SIGN_WIDTH: f32 = 16.0;
+/// Room after a line's last character when scrolled all the way right.
+const END_PAD_CHARS: f32 = 2.0;
+/// Ctrl/⌘+Enter adds a comment.
+const SUBMIT_CHORD: &str = if cfg!(target_os = "macos") { "⌘↩" } else { "Ctrl+Enter" };
 
 fn tint(rgb24: u32, a: f32) -> Hsla {
     Hsla { a, ..hsla(rgb24) }
@@ -71,8 +77,35 @@ fn number(n: Option<u32>) -> String {
 }
 
 impl Workspace {
+    /// One monospace column, in pixels.
+    fn diff_char_width(&self) -> f32 {
+        self.metrics.map_or(8.0, |m| m.width).max(6.0)
+    }
+
+    fn gutter_width(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss, reason = "a fixed small character count")]
+        let chars = GUTTER_CHARS as f32;
+        chars * self.diff_char_width()
+    }
+
+    /// Tell the viewer how many columns of code fit, from the list's width
+    /// last frame (one pane's, side by side), so it can clamp the offset.
+    fn measure_diff_columns(&mut self) {
+        let Some(width) = self.diff_scroll.0.borrow().last_item_size.map(|s| f32::from(s.item.width)) else {
+            return;
+        };
+        let text = if self.diff.split {
+            (width - 1.0) / 2.0 - self.gutter_width()
+        } else {
+            width - self.gutter_width() - SIGN_WIDTH
+        };
+        let cw = self.diff_char_width();
+        self.diff.set_view_columns(text / cw - END_PAD_CHARS);
+    }
+
     /// The whole Diff tab for the focused session.
     pub(crate) fn diff_panel(&mut self, cx: &mut Context<Self>) -> Div {
+        self.measure_diff_columns();
         if let Some((row, top)) = self.diff.take_scroll() {
             self.diff_scroll
                 .scroll_to_item(row, if top { ScrollStrategy::Top } else { ScrollStrategy::Nearest });
@@ -89,7 +122,7 @@ impl Workspace {
                 .child(if self.diff.loading() { "Loading…" } else { "" })
                 .into_any_element()
         } else {
-            uniform_list(
+            let mut list = uniform_list(
                 "diff-rows",
                 count,
                 cx.processor(|this, range: Range<usize>, _window, cx| {
@@ -102,8 +135,26 @@ impl Workspace {
             .flex_1()
             .h_full()
             .font_family(mono_family())
-            .text_size(px(FONT_SIZE))
-            .into_any_element()
+            .text_size(px(FONT_SIZE));
+            // Marking x scrollable keeps a sideways swipe from scrolling the
+            // list vertically; the list never scrolls x itself (its rows fit),
+            // the code inside them does, by the viewer's shared offset.
+            list.interactivity().base_style.overflow.x = Some(Overflow::Scroll);
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .h_full()
+                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                    let d = e.delta.pixel_delta(window.line_height());
+                    let (dx, dy) = (f32::from(d.x), f32::from(d.y));
+                    let cw = this.diff_char_width();
+                    if dx.abs() > dy.abs() && this.diff.scroll_by(-dx / cw) {
+                        cx.notify();
+                    }
+                }))
+                .child(list)
+                .into_any_element()
         };
         let mut middle = div().flex().flex_1().overflow_hidden();
         if !self.diff.tree.is_empty() {
@@ -112,7 +163,38 @@ impl Workspace {
         middle = middle.child(div().flex().flex_col().flex_1().h_full().overflow_hidden().child(body));
         panel = panel.child(middle);
         if let Some(d) = &self.diff.draft {
-            let (before, after) = d.field.split();
+            let window = d.window();
+            let total = d.field.lines().count();
+            let (caret_line, caret_col) = d.field.caret_line_col();
+            let more = if window.len() < total {
+                format!(" · lines {}–{} of {total}", window.start + 1, window.end)
+            } else {
+                String::new()
+            };
+            let mut editor = div()
+                .flex()
+                .flex_col()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(hsla(ACCENT))
+                .font_family(mono_family())
+                .text_sm();
+            for (i, line) in d.field.lines().enumerate().skip(window.start).take(window.len()) {
+                let mut row = div().flex().h(px(FONT_SIZE + 6.0)).items_center().whitespace_nowrap().overflow_hidden();
+                if i == caret_line {
+                    let at = line.char_indices().nth(caret_col).map_or(line.len(), |(b, _)| b);
+                    let (before, after) = line.split_at(at);
+                    row = row
+                        .child(before.to_string())
+                        .child(div().flex_none().w(px(1.5)).h(px(FONT_SIZE + 2.0)).bg(hsla(theme::CURSOR)))
+                        .child(after.to_string());
+                } else {
+                    row = row.child(if line.is_empty() { " ".to_string() } else { line.to_string() });
+                }
+                editor = editor.child(row);
+            }
             panel = panel.child(
                 div()
                     .flex()
@@ -123,23 +205,10 @@ impl Workspace {
                     .border_t_1()
                     .border_color(hsla(ACCENT))
                     .child(div().text_xs().text_color(hsla(SUBTLE)).child(format!(
-                        "Comment on {} — Enter adds it · Esc cancels · comments go to the agent together, as one review",
+                        "Comment on {} — {SUBMIT_CHORD} adds it · Enter for a new line · Esc cancels · comments go to the agent together, as one review{more}",
                         d.target.place()
                     )))
-                    .child(
-                        div()
-                            .flex()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(hsla(ACCENT))
-                            .font_family(mono_family())
-                            .text_sm()
-                            .child(before.to_string())
-                            .child(div().w(px(1.5)).h(px(FONT_SIZE + 2.0)).bg(hsla(theme::CURSOR)))
-                            .child(after.to_string()),
-                    ),
+                    .child(editor),
             );
         }
         panel
@@ -425,7 +494,7 @@ impl Workspace {
                     LineKind::Ctx => " ",
                 };
                 el.child(self.gutter(ix, format!("{} {}", number(l.old), number(l.new)), cx))
-                    .child(div().w(px(16.0)).pl_1().text_color(hsla(MUTED)).child(sign))
+                    .child(div().flex_none().w(px(SIGN_WIDTH)).pl_1().text_color(hsla(MUTED)).child(sign))
                     .child(self.text_cell(ix, l, &d.legend, cx))
             }
             Row::Pair { file, hunk, left, right } => {
@@ -454,7 +523,14 @@ impl Workspace {
                     .bg(tint(palette::YELLOW, 0.08))
                     .text_xs()
                     .child(div().text_color(hsla(AMBER)).child(format!("» {}", c.place())))
-                    .child(div().flex_1().overflow_hidden().text_color(hsla(theme::FOREGROUND)).child(c.text.clone()))
+                    // One row per comment: its lines run together, each break marked.
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_color(hsla(theme::FOREGROUND))
+                            .child(c.text.replace('\n', " ⏎ ")),
+                    )
                     .child(div().pr_2().cursor_pointer().text_color(hsla(MUTED)).child("remove").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -475,10 +551,9 @@ impl Workspace {
     }
 
     /// The line-number gutter: a click comments on the line (shift extends).
+    /// It stays put while the code beside it scrolls sideways.
     fn gutter(&self, ix: usize, numbers: String, cx: &mut Context<Self>) -> Div {
-        let width = self.metrics.map_or(8.0, |m| m.width);
-        #[allow(clippy::cast_precision_loss, reason = "a fixed small character count")]
-        let w = GUTTER_CHARS as f32 * width.max(6.0);
+        let w = self.gutter_width();
         let numbers = if numbers.len() < 6 { format!("{numbers:>5}") } else { numbers };
         div()
             .w(px(w))
@@ -495,13 +570,22 @@ impl Workspace {
             )
     }
 
+    /// The code of a line, shifted left by the viewer's horizontal offset
+    /// (shared by every row, and by both panes side by side) and clipped.
     fn text_cell(&self, ix: usize, l: &Line, legend: &[String], cx: &mut Context<Self>) -> Div {
-        div().flex_1().overflow_hidden().child(line_text(l, legend)).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                this.diff.click(ix, false, e.modifiers.shift);
-                cx.notify();
-            }),
-        )
+        let shift = self.diff.scroll_x() * self.diff_char_width();
+        div()
+            .flex()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(div().flex_none().ml(px(-shift)).child(line_text(l, legend)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    this.diff.click(ix, false, e.modifiers.shift);
+                    cx.notify();
+                }),
+            )
     }
 }
