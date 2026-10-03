@@ -1503,8 +1503,12 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // flow.addr → daemon.addr. (th-c103c1 — see `flow_addr`.)
     let flow_addr = server.addr().to_string();
     let flow_addr_dir = dirs_next::home_dir().map(|h| h.join(".smooth"));
+    // The SmoothFlow app's engine outranks a live Big Smooth: it runs its own
+    // store, so a Big Smooth holding the file hides every app session from the
+    // clients that read it (th-5069eb).
+    let preferred_flow_engine = crate::flow_addr::launched_by_app(std::env::var(crate::flow_addr::APP_PARENT_ENV).ok().as_deref());
     let holds_flow_addr = match &flow_addr_dir {
-        Some(dir) => crate::flow_addr::claim(dir, &flow_addr).await,
+        Some(dir) => crate::flow_addr::claim(dir, &flow_addr, preferred_flow_engine).await,
         None => false,
     };
 
@@ -1546,7 +1550,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         }
     };
 
-    tokio::signal::ctrl_c().await.ok();
+    shutdown_signal().await;
     tracing::info!("shutdown signal received");
     if holds_flow_addr {
         if let Some(dir) = &flow_addr_dir {
@@ -1611,6 +1615,32 @@ fn persist_daemon_addr_to(dir: &std::path::Path, addr: &str) -> std::io::Result<
     let path = dir.join("daemon.addr");
     crate::secret_file::write_secret(&path, addr)?;
     Ok(path)
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM where there is one. The SmoothFlow app
+/// stops its daemon with TERM; waiting on Ctrl-C alone let TERM's default
+/// action kill the process before it released `flow.addr`, leaving a dead
+/// address that every client then tried first (th-5069eb).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not install a SIGTERM handler — only Ctrl-C shuts down cleanly");
+                tokio::signal::ctrl_c().await.ok();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
 
 #[cfg(test)]
