@@ -11,12 +11,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use smooth_flow_client::attention::{self, Approval, Attention};
 use smooth_flow_client::close::{self, Scope};
+use smooth_flow_client::diff::Base;
+use smooth_flow_client::gate::{CenterTab, Gate};
 use smooth_flow_client::harness::Harness;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::{Direction, PaneId, Rect};
 use smooth_flow_client::surfaces::Surfaces;
 use smooth_flow_client::{fleet, title, Session};
 
+use crate::diff::{KeyOutcome, Viewer};
 use crate::discovery::Endpoint;
 use crate::frames::{self, Decision, Inbound, NewSession};
 use crate::http::{self, Inferred, RepoList};
@@ -65,6 +68,12 @@ pub enum Confirmed {
         session: String,
         close_pearl: bool,
         remove_worktree: bool,
+    },
+    /// Revert one hunk (the Diff tab, `flow.diff.revert`, never forced).
+    DiffRevert {
+        session: String,
+        base: Base,
+        hunk_id: String,
     },
 }
 
@@ -217,6 +226,11 @@ pub struct Core {
     /// answers with `flow.session.removed`, or `flow.error` whose `ref` is
     /// the seq.
     closing: HashMap<u64, (String, String)>,
+    /// The center tab on screen (spec §4): the focused pane's terminal(s),
+    /// or the focused session's Diff.
+    pub center: CenterTab,
+    /// The Diff tab (spec §14).
+    pub diff: Viewer,
 }
 
 impl Core {
@@ -225,6 +239,8 @@ impl Core {
     #[must_use]
     pub fn new(out: Outbox, keymap: Keymap, home: String) -> Self {
         Self {
+            diff: Viewer::new(out.clone()),
+            center: CenterTab::Terminal,
             out,
             connection: Connection::Connecting,
             machine: String::new(),
@@ -389,6 +405,7 @@ impl Core {
                     self.notice = Some(format!("Closed out {name}."));
                 }
                 self.closing.clear();
+                self.diff.reconnected();
             }
             Event::Frame(Inbound::Session(row)) => {
                 let id = row.session.id.clone();
@@ -426,7 +443,14 @@ impl Core {
                     self.out.send(frames::input(&id, &replies));
                 }
             }
-            Event::Frame(Inbound::Error { reference, message }) => match reference.and_then(|r| self.closing.remove(&r)) {
+            Event::Frame(Inbound::Diff { id, base, path, diff }) => self.diff.received(&id, base, path.as_deref(), *diff),
+            Event::Frame(Inbound::DiffResult { id, action, file }) => self.diff.result(&id, &action, file.as_deref()),
+            Event::Frame(Inbound::DiffChanged(id)) => {
+                if self.center == CenterTab::Diff {
+                    self.diff.changed(&id);
+                }
+            }
+            Event::Frame(Inbound::Error { reference, code, message }) => match reference.and_then(|r| self.closing.remove(&r)) {
                 // A refused Close Out: the engine's reason, verbatim, in a
                 // dialog of its own, so it can't be missed. Nothing forces it
                 // from here.
@@ -439,8 +463,54 @@ impl Core {
                         cancel: "OK".into(),
                     });
                 }
+                // The Diff tab's own requests report in its status line.
+                None if reference.is_some_and(|r| self.diff.failed(r, code.as_deref(), &message)) => {}
                 None => self.notice = Some(message),
             },
+        }
+        self.sync_center();
+    }
+
+    // ── center tabs ─────────────────────────────────────────────────────
+
+    /// The gate for the focused session (spec §4): Diff follows the worktree.
+    #[must_use]
+    pub fn gate(&self) -> Gate {
+        let Some(s) = self.surfaces.focused_session().and_then(|id| self.sessions.get(id)) else {
+            return Gate::NOTHING;
+        };
+        let source = self.harnesses.iter().find(|h| h.name == s.kind).map(|h| h.state_source.as_str());
+        Gate::of(&s.kind, s.branch.as_deref(), source, None)
+    }
+
+    /// Keep the center tab honest: back to Terminal when the focused
+    /// session can't have the tab, and the Diff shows the focused session.
+    pub fn sync_center(&mut self) {
+        self.center = self.gate().resolve(self.center);
+        if self.center == CenterTab::Diff {
+            let s = self.surfaces.focused_session().and_then(|id| self.sessions.get(id));
+            self.diff.show(s.map(|s| (s.id.as_str(), s.kind.as_str())));
+        }
+    }
+
+    /// Switch the center tab; a disabled one says why instead.
+    pub fn view(&mut self, tab: CenterTab) {
+        let gate = self.gate();
+        if let Some(why) = gate.why_not(tab) {
+            self.notice = Some(format!("{tab:?}: {why}"));
+            return;
+        }
+        if !matches!(tab, CenterTab::Terminal | CenterTab::Diff) {
+            self.notice = Some(format!("{tab:?} isn't in this build yet"));
+            return;
+        }
+        // Coming back to a session's Diff: it may have moved meanwhile
+        // (changes are only followed while the tab is on screen).
+        let back = self.center != CenterTab::Diff && tab == CenterTab::Diff && self.diff.session.as_deref() == self.surfaces.focused_session();
+        self.center = tab;
+        self.sync_center();
+        if back {
+            self.diff.request();
         }
     }
 
@@ -546,8 +616,19 @@ impl Core {
             let effects = sheet.key(key.key, key.key_char, key.control || key.platform, key.shift);
             return self.run_effects(effects);
         }
+        let diff = self.center == CenterTab::Diff;
+        // A comment being typed gets every key, chords included (Ctrl+U).
+        if diff && self.diff.draft.is_some() {
+            self.diff_key(key);
+            return Vec::new();
+        }
         if let Some(action) = self.keymap.action_for(&keys::chord(key)) {
             return self.act(action);
+        }
+        if diff {
+            // The Diff tab's bare keys; nothing reaches the terminal.
+            self.diff_key(key);
+            return Vec::new();
         }
         let Some(id) = self.surfaces.focused_session().filter(|id| self.attached.contains_key(*id)).map(str::to_string) else {
             return Vec::new();
@@ -556,6 +637,30 @@ impl Core {
             self.out.send(frames::input(&id, &bytes));
         }
         Vec::new()
+    }
+
+    fn diff_key(&mut self, key: keys::Key<'_>) {
+        if let KeyOutcome::Revert(ask) = self.diff.key(key.key, key.key_char, key.shift, key.control || key.alt || key.platform) {
+            self.ask_revert(ask);
+        }
+    }
+
+    /// The Revert confirmation (a hunk's button, or `r`). Cancel is the default.
+    pub fn ask_revert(&mut self, ask: crate::diff::RevertAsk) {
+        self.dialog = Some(Dialog {
+            title: ask.title,
+            message: ask.message,
+            buttons: vec![(
+                "Revert".into(),
+                Confirmed::DiffRevert {
+                    session: ask.session,
+                    base: ask.base,
+                    hunk_id: ask.hunk_id,
+                },
+            )],
+            offers_dont_ask: false,
+            cancel: "Cancel".into(),
+        });
     }
 
     /// Run a keymap action (also what the buttons call).
@@ -590,6 +695,10 @@ impl Core {
             Action::ZoomPane => self.surfaces.toggle_zoom(),
             Action::EqualizePanes => self.surfaces.equalize(),
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::ViewTerminal => self.view(CenterTab::Terminal),
+            Action::ViewDiff => self.view(CenterTab::Diff),
+            Action::ViewPr => self.view(CenterTab::Pr),
+            Action::ViewActivity => self.view(CenterTab::Activity),
             other => {
                 if let Some(i) = other.focus_session_index() {
                     if let Some(id) = self.sidebar_order().get(i).cloned() {
@@ -600,12 +709,14 @@ impl Core {
                 }
             }
         }
+        self.sync_center();
         Vec::new()
     }
 
     /// A fleet row was picked: the focused pane shows it.
     pub fn show_session(&mut self, id: &str) {
         self.surfaces.show(id);
+        self.sync_center();
         if let Some(s) = self.sessions.get_mut(id) {
             if s.unread {
                 s.unread = false;
@@ -725,6 +836,7 @@ impl Core {
                 self.notice = Some(format!("Closing out {name}…"));
                 self.closing.insert(seq, (session, name));
             }
+            Confirmed::DiffRevert { session, base, hunk_id } => self.diff.revert(&session, base, &hunk_id),
         }
     }
 
@@ -964,6 +1076,7 @@ mod tests {
         // An unrelated error stays in the footer.
         c.apply(Event::Frame(Inbound::Error {
             reference: Some(seq + 100),
+            code: None,
             message: "other".into(),
         }));
         assert!(c.dialog.is_none());
@@ -971,6 +1084,7 @@ mod tests {
 
         c.apply(Event::Frame(Inbound::Error {
             reference: Some(seq),
+            code: None,
             message: "branch b is not merged into /p — merge the PR first, or close with force".into(),
         }));
         let r = c.dialog.clone().expect("the refusal gets a dialog");
@@ -1049,6 +1163,96 @@ mod tests {
         c.apply(hello(""));
         assert_eq!(c.notice.as_deref(), Some("Closed out sh."));
         assert!(c.closing.is_empty());
+    }
+
+    #[test]
+    fn the_diff_tab_is_gated_by_the_worktree_and_owns_the_keys() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"shell","state":"idle"},{"id":"fs-2","kind":"claude","state":"working","branch":"th-1-x","worktree":"/w"}"#,
+        ));
+        c.show_session("fs-1");
+        sent(&mut rx);
+        c.act(Action::ViewDiff);
+        assert_eq!(c.center, CenterTab::Terminal, "no repo, no Diff");
+        assert_eq!(c.notice.as_deref(), Some("Diff: Not in a git repository"));
+        assert!(sent(&mut rx).is_empty());
+
+        c.show_session("fs-2");
+        c.act(Action::ViewDiff);
+        assert_eq!(c.center, CenterTab::Diff);
+        let r = sent(&mut rx);
+        assert_eq!((r[0]["type"].as_str(), r[0]["base"].as_str()), (Some("flow.diff"), Some("turn")));
+        let seq = r[0]["seq"].as_u64().expect("seq");
+
+        // Bare keys are the viewer's, never typed into the terminal.
+        c.attached.insert("fs-2".into(), (80, 24));
+        c.key(keys::Key {
+            key: "j",
+            key_char: Some("j"),
+            ..keys::Key::default()
+        });
+        assert!(sent(&mut rx).is_empty(), "no flow.input from the Diff tab");
+
+        // The engine refusing the diff request lands in the Diff's status, not the footer.
+        c.notice = None;
+        c.apply(Event::Frame(Inbound::Error {
+            reference: Some(seq),
+            code: Some("failed".into()),
+            message: "not a git repository".into(),
+        }));
+        assert_eq!(c.diff.status.as_deref(), Some("not a git repository"));
+        assert_eq!(c.notice, None);
+
+        // A changed diff on screen refetches; the terminal tab ignores it.
+        c.apply(Event::Frame(Inbound::DiffChanged("fs-2".into())));
+        assert_eq!(sent(&mut rx).len(), 1);
+        let reply = r#"{"type":"flow.diff","id":"fs-2","base":"turn","diff":{"base":"turn","files":[],"legend":[]}}"#;
+        c.apply(Event::Frame(frames::parse(reply).expect("diff")));
+        c.act(Action::ViewTerminal);
+        c.apply(Event::Frame(Inbound::DiffChanged("fs-2".into())));
+        assert!(sent(&mut rx).is_empty());
+        c.act(Action::ViewDiff);
+        assert_eq!(sent(&mut rx).len(), 1, "coming back refreshes");
+
+        // Focusing a shell outside a repo drops back to the terminal.
+        c.show_session("fs-1");
+        assert_eq!(c.center, CenterTab::Terminal);
+    }
+
+    #[test]
+    fn revert_from_the_diff_tab_confirms_with_cancel_as_default() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(r#"{"id":"fs-1","kind":"shell","state":"idle","branch":"main"}"#));
+        c.act(Action::ViewDiff);
+        sent(&mut rx);
+        let diff = r#"{"type":"flow.diff","id":"fs-1","base":"uncommitted","diff":{"base":"uncommitted","files":[{"path":"a.rs","status":"modified","added":1,"deleted":0,
+            "hunks":[{"id":"h1","old_start":1,"old_lines":0,"new_start":1,"new_lines":1,"lines":[{"kind":"add","new":1,"text":"x"}]}]}],"legend":[]}}"#;
+        c.apply(Event::Frame(frames::parse(diff).expect("diff")));
+        let press = |c: &mut Core, k: &str| {
+            c.key(keys::Key {
+                key: k,
+                key_char: Some(k),
+                ..keys::Key::default()
+            })
+        };
+        press(&mut c, "n");
+        press(&mut c, "r");
+        let d = c.dialog.clone().expect("Revert asks");
+        assert_eq!((d.cancel.as_str(), d.buttons[0].0.as_str()), ("Cancel", "Revert"));
+        assert!(sent(&mut rx).is_empty());
+        c.key(keys::Key {
+            key: "enter",
+            ..keys::Key::default()
+        });
+        assert!(c.dialog.is_none() && sent(&mut rx).is_empty(), "Enter cancels");
+        press(&mut c, "r");
+        let d = c.dialog.clone().expect("Revert asks");
+        c.confirm(d.buttons[0].1.clone());
+        let r = sent(&mut rx);
+        assert_eq!((r[0]["type"].as_str(), r[0]["hunk_id"].as_str()), (Some("flow.diff.revert"), Some("h1")));
     }
 
     #[test]

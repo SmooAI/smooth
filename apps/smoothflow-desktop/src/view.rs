@@ -4,6 +4,7 @@
 //! back into it.
 
 use gpui_kit::*;
+use smooth_flow_client::gate::CenterTab;
 use smooth_flow_client::keymap::Action;
 use smooth_flow_client::pane::{PaneId, Rect};
 use smooth_flow_client::{fleet, title, SessionState};
@@ -19,13 +20,15 @@ pub const TAB_STRIP_HEIGHT: f32 = 30.0;
 pub const APPROVAL_HEIGHT: f32 = 84.0;
 pub const FONT_SIZE: f32 = 13.0;
 
-const SURFACE: u32 = 0x181825;
-const BORDER: u32 = 0x313244;
-const MUTED: u32 = 0x7f849c;
-const SUBTLE: u32 = 0x9399b2;
-const ACCENT: u32 = 0x89b4fa;
-const AMBER: u32 = 0xf9e2af;
-const RED: u32 = 0xf38ba8;
+pub const CENTER_TABS_HEIGHT: f32 = 28.0;
+
+pub const SURFACE: u32 = 0x181825;
+pub const BORDER: u32 = 0x313244;
+pub const MUTED: u32 = 0x7f849c;
+pub const SUBTLE: u32 = 0x9399b2;
+pub const ACCENT: u32 = 0x89b4fa;
+pub const AMBER: u32 = 0xf9e2af;
+pub const RED: u32 = 0xf38ba8;
 const GREEN: u32 = 0xa6e3a1;
 
 pub fn mono_family() -> &'static str {
@@ -38,7 +41,7 @@ pub fn mono_family() -> &'static str {
     }
 }
 
-fn hsla(rgb24: u32) -> Hsla {
+pub fn hsla(rgb24: u32) -> Hsla {
     rgb(rgb24).into()
 }
 
@@ -47,7 +50,7 @@ fn hint(ws: &Workspace, action: Action) -> String {
     ws.chord_hint(action)
 }
 
-fn button(label: impl Into<SharedString>, color: u32, enabled: bool) -> Div {
+pub fn button(label: impl Into<SharedString>, color: u32, enabled: bool) -> Div {
     let b = div().px_3().py_1().rounded_md().border_1().text_sm().child(label.into());
     if enabled {
         b.border_color(hsla(color)).text_color(hsla(color)).cursor_pointer()
@@ -200,6 +203,41 @@ impl Workspace {
             strip = strip.child(t);
         }
         strip
+    }
+
+    /// Terminal | Diff for the focused session (spec §4). A tab the session
+    /// can't have is greyed, with why, never hidden.
+    fn center_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let gate = self.gate();
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(CENTER_TABS_HEIGHT))
+            .px_2()
+            .bg(hsla(SURFACE))
+            .border_b_1()
+            .border_color(hsla(BORDER));
+        for (tab, action, label) in [
+            (CenterTab::Terminal, Action::ViewTerminal, "Terminal"),
+            (CenterTab::Diff, Action::ViewDiff, "Diff"),
+        ] {
+            let on = self.center == tab;
+            let allowed = gate.allows(tab);
+            let mut t = div().px_2().py_0p5().rounded_md().text_xs().child(format!("{label}  {}", hint(self, action)));
+            t = if on {
+                t.bg(hsla(BORDER)).text_color(hsla(theme::FOREGROUND))
+            } else if allowed {
+                t.text_color(hsla(SUBTLE)).cursor_pointer()
+            } else {
+                t.text_color(hsla(0x45475a))
+            };
+            bar = bar.child(t.on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.act(action, cx))));
+            if let Some(why) = gate.why_not(tab) {
+                bar = bar.child(div().text_xs().text_color(hsla(MUTED)).child(why));
+            }
+        }
+        bar
     }
 
     fn approval_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -606,21 +644,29 @@ impl Render for Workspace {
         let sidebar_w = if self.sidebar_visible { SIDEBAR_WIDTH } else { 0.0 };
         let strip = self.surfaces.tabs.len() > 1;
         let approval = self.approval_bar(cx);
-        let top = if strip { TAB_STRIP_HEIGHT } else { 0.0 } + if approval.is_some() { APPROVAL_HEIGHT } else { 0.0 };
+        let tabs = self.surfaces.focused_session().is_some();
+        let top =
+            if strip { TAB_STRIP_HEIGHT } else { 0.0 } + if approval.is_some() { APPROVAL_HEIGHT } else { 0.0 } + if tabs { CENTER_TABS_HEIGHT } else { 0.0 };
         let pane_area = Rect {
             x: 0.0,
             y: 0.0,
             w: f64::from((f32::from(viewport.width) - sidebar_w).max(0.0)),
             h: f64::from((f32::from(viewport.height) - top).max(0.0)),
         };
-        // Lays the panes out and attaches/resizes their sessions to match.
-        let visible = self.layout(pane_area, m);
-
-        let focused_pane = self.surfaces.focused_pane();
-        let window_focused = self.focus.is_focused(window);
+        // A click may have moved the focus to a session the tab can't show.
+        self.sync_center();
         let mut area = div().relative().flex_1().overflow_hidden();
-        for f in &visible {
-            area = area.child(self.pane(f.pane, f.rect, f.pane == focused_pane, window_focused, m, cx));
+        if self.center == CenterTab::Diff {
+            // The terminals stay attached at their size while the Diff is up.
+            area = area.child(self.diff_panel(cx));
+        } else {
+            // Lays the panes out and attaches/resizes their sessions to match.
+            let visible = self.layout(pane_area, m);
+            let focused_pane = self.surfaces.focused_pane();
+            let window_focused = self.focus.is_focused(window);
+            for f in &visible {
+                area = area.child(self.pane(f.pane, f.rect, f.pane == focused_pane, window_focused, m, cx));
+            }
         }
         let mut center = div().flex().flex_col().flex_1().h_full().overflow_hidden();
         if strip {
@@ -628,6 +674,9 @@ impl Render for Workspace {
         }
         if let Some(a) = approval {
             center = center.child(a);
+        }
+        if tabs {
+            center = center.child(self.center_tabs(cx));
         }
         center = center.child(area);
         let mut root = div()

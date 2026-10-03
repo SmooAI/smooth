@@ -338,6 +338,16 @@ all come from the engine. No client embeds a web view for it.
   review to agent (N)" sends all of them in one `flow.diff.review`; a
   `blocked` error is shown, never dropped. Shells have no review.
 - **Refresh** on `flow.diff.changed` for the session on screen, and on demand.
+  A client may ignore `flow.diff.changed` while the Diff tab is not showing
+  and refetch when the user comes back to it. Keep one whole-diff request in
+  flight; a change that lands meanwhile queues exactly one refetch.
+- **Paging:** a file with `hunks_omitted: "budget"` (the frame ran out of
+  room) is not collapsed; its hunks are fetched with `flow.diff{path}` when
+  it scrolls into view or is selected in the tree, once per file until the
+  page lands. Noise files (`collapsed`) wait for Show.
+- **Errors** are matched to their request: send a `seq` on every diff frame
+  and read the engine's `flow.error` `ref`/`code`. Show the `message`
+  verbatim (`stale: …`, `blocked: …`); never retry or force.
 - **Truncation** is always visible: banners for `diff.truncated`, notices for
   `file.truncated`, `hunk.truncated` and `line.truncated`.
 - **Keys** (desktop; live only while the diff has focus — bare keys, never

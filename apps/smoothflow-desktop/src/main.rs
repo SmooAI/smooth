@@ -3,6 +3,7 @@
 //! (docs/Architecture/SmoothFlow-Client-Spec.md). M2: the fleet sidebar, tabs
 //! and splits of live terminals, New Session, and approvals.
 
+mod diff_view;
 mod view;
 mod workspace;
 
