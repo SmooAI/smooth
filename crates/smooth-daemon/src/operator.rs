@@ -176,6 +176,13 @@ struct SandboxedToolProvider {
     /// coding agents, and watch the fleet — engine-direct, in-process. `None`
     /// for the ephemeral/test providers that don't host flow.
     flow: Option<smooth_flow::Engine>,
+    /// The host hook chain every SIDEKICK tool call runs through (th-8d1951):
+    /// the same instances, in the same order, the server installs on each
+    /// per-turn registry (tool log, permission gate, Narc). The engine gives a
+    /// sidekick a fresh registry with no host hooks, so the snapshot handed to
+    /// `send_sidekick` is built from tools wrapped in this chain
+    /// ([`crate::hooks::sidekick::hooked_registry`]).
+    sidekick_hooks: Vec<Arc<dyn smooth_operator::tool::ToolHook>>,
 }
 
 /// The tools the App Store reviewer demo (`SMOOTH_DEMO`) exposes — chat plus a
@@ -446,23 +453,19 @@ impl ToolProvider for SandboxedToolProvider {
         // sidekick's LLM. Registered LAST so the snapshot it filters never
         // contains `send_sidekick` itself — no recursive dispatch.
         //
-        // ponytail: sidekick sub-calls share the tool Arcs (so the same opt-in
-        // kernel sandbox, when on, and `bash`'s built-in circuit-breaker +
-        // deny-rule gates) but NOT the daemon's userspace deny-policy/narc
-        // hooks — those live on the LocalServer's per-turn registry, not the
-        // sidekick's inner one. With the sandbox off by default (th-efbab1)
-        // that gap matters more; wire those hooks onto the sidekick registry
-        // via the engine's hook seam (pearl th-8d1951).
+        // Host hooks (th-8d1951): the engine builds the sidekick's registry
+        // fresh from this snapshot's tool Arcs and drops any registry hooks, so
+        // each tool is WRAPPED in the daemon's host chain (tool log, permission
+        // gate + DenyPolicy, Narc). A sidekick call meets the same checks, in the
+        // same order, as a top-level one; the parent's own registry keeps the
+        // unwrapped tools, so nothing is hooked twice.
         if allow_sidekick {
             if let Some(factory) = gateway_llm_factory() {
-                let mut snapshot = smooth_operator::tool::ToolRegistry::new();
-                // A sidekick's registry carries none of this turn's hooks — no
-                // confirmation gate — so a tool that must park for the user
-                // (`calendar_delete`, every flow write, `flow_approve`) is never
-                // handed to one; it would run unconfirmed (th-8b3918).
-                for tool in tools.iter().filter(|t| !requires_confirmation(&t.schema().name)) {
-                    snapshot.register_arc(Arc::clone(tool));
-                }
+                // The per-turn confirmation gate (`ConfirmationHook`) is not part
+                // of the host chain, so a tool that must park for the user
+                // (`calendar_delete`, every flow write, `flow_approve`) is still
+                // never handed to a sidekick; it would run unconfirmed (th-8b3918).
+                let snapshot = sidekick_snapshot(&tools, &self.sidekick_hooks);
                 tools.push(Arc::new(smooth_operator::cast::DispatchSubagentTool::new(
                     Arc::new(smooth_operator::cast::Cast::builtin()),
                     snapshot,
@@ -555,6 +558,7 @@ pub fn local_tool_provider_with_flow(
     modes: crate::session_mode::SessionModes,
     notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
     flow: Option<smooth_flow::Engine>,
+    sidekick_hooks: Vec<Arc<dyn smooth_operator::tool::ToolHook>>,
 ) -> Arc<dyn ToolProvider> {
     Arc::new(SandboxedToolProvider {
         cwd,
@@ -566,6 +570,7 @@ pub fn local_tool_provider_with_flow(
         notify_sink,
         demo: demo_mode(),
         flow,
+        sidekick_hooks,
     })
 }
 
@@ -584,7 +589,29 @@ pub fn local_tool_provider_full(
     modes: crate::session_mode::SessionModes,
     notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
 ) -> Arc<dyn ToolProvider> {
-    local_tool_provider_with_flow(cwd, proxy, memory, mcp, family, modes, notify_sink, None)
+    local_tool_provider_with_flow(cwd, proxy, memory, mcp, family, modes, notify_sink, None, default_sidekick_hooks())
+}
+
+/// The snapshot `send_sidekick` is built from: every tool of this turn that
+/// does not need the per-turn confirmation gate, each wrapped in the host hook
+/// chain `hooks` (th-8d1951). See [`crate::hooks::sidekick`].
+fn sidekick_snapshot(tools: &[Arc<dyn Tool>], hooks: &[Arc<dyn smooth_operator::tool::ToolHook>]) -> smooth_operator::tool::ToolRegistry {
+    crate::hooks::sidekick::hooked_registry(tools.iter().filter(|t| !requires_confirmation(&t.schema().name)), hooks)
+}
+
+/// The sidekick hook chain for providers built without the server's live
+/// instances (tests, ad-hoc providers): the same three hooks in the same
+/// order, but the permission gate has NO approver, so an `Ask` verdict is a
+/// denial (fail-closed) and Narc runs regex-only unless a gateway is
+/// configured. [`serve_local_flavor`] passes the server's own instances
+/// instead, so a sidekick's `Ask` reaches the user like a top-level one.
+#[must_use]
+pub fn default_sidekick_hooks() -> Vec<Arc<dyn smooth_operator::tool::ToolHook>> {
+    vec![
+        Arc::new(crate::hooks::ToolLogHook::new()),
+        Arc::new(smooth_operator::permission::PermissionHook::new(permission_mode()).with_deny_policy(Arc::new(default_deny_policy()))),
+        Arc::new(crate::hooks::NarcHook::new(narc_judge_config())),
+    ]
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -1337,6 +1364,15 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // Big Smooth the in-process `flow_*` tools over this same engine.
     let (flow_router, flow_engine) =
         crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
+    // The host hook chain, built ONCE and shared by the server's per-turn
+    // registry (`.tool_hooks` below) and every sidekick call (th-8d1951), so a
+    // sidekick meets the same gate, the same approver channel and the same
+    // Narc judge settings as a top-level turn.
+    let host_hooks: Vec<Arc<dyn smooth_operator::tool::ToolHook>> = vec![
+        Arc::new(crate::hooks::ToolLogHook::new()),
+        Arc::new(permission_gate),
+        Arc::new(crate::hooks::NarcHook::with_settings(narc_judge_config(), judge_settings.clone())),
+    ];
     let provider = local_tool_provider_with_flow(
         session_cwd.clone(),
         egress_proxy,
@@ -1346,6 +1382,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         session_modes.clone(),
         Some(turn_notifier.clone() as Arc<dyn smooth_tools::NotifySink>),
         Some(flow_engine.clone()),
+        host_hooks.clone(),
     );
     let relay_url = crate::relay::resolve_relay_url();
     let relay_identity = crate::relay::device_identity();
@@ -1399,11 +1436,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         //
         // Ahead of both: the INFO tool-call log (th-5d48ca) — name, duration,
         // outcome, never argument values. First, so a blocked call still logs.
-        .tool_hooks(vec![
-            Arc::new(crate::hooks::ToolLogHook::new()) as Arc<dyn smooth_operator::tool::ToolHook>,
-            Arc::new(permission_gate) as Arc<dyn smooth_operator::tool::ToolHook>,
-            Arc::new(crate::hooks::NarcHook::with_settings(narc_judge_config(), judge_settings.clone())),
-        ])
+        //
+        // The chain is `host_hooks` (built above), shared with the sidekick
+        // snapshot so delegated calls are gated identically (th-8d1951).
+        .tool_hooks(host_hooks)
         // th-be3f55: hand the server the gate's approver channel, so an `Ask`
         // parks the turn and asks the human over the same WS the SPA already
         // renders approve/deny for — instead of failing closed, which is what
@@ -1651,6 +1687,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
+#[path = "operator_sidekick_tests.rs"]
+mod sidekick_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
 
     /// th-96fcb7: a GUI-launched daemon's cwd is `/`; that is never a workspace.
@@ -1799,8 +1840,8 @@ mod tests {
     }
 
     /// The provider registers the flow tools only when it hosts an engine;
-    /// Plan mode keeps just the reads; a sidekick's snapshot (no confirm
-    /// hook on its registry) never gets a confirm-gated tool.
+    /// Plan mode keeps just the reads; a sidekick's snapshot (the per-turn
+    /// confirm hook is not in its chain) never gets a confirm-gated tool.
     #[tokio::test]
     async fn the_provider_wires_flow_tools_and_plan_mode_keeps_only_reads() {
         use smooth_operator_svc::access_control::AccessContext;
@@ -1821,6 +1862,7 @@ mod tests {
             modes,
             None,
             Some(engine),
+            default_sidekick_hooks(),
         );
         let ctx = |conv: &str| ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id(conv);
         let auto: Vec<String> = provider.tools_for(&ctx("auto-conv")).await.iter().map(|t| t.schema().name).collect();
@@ -2009,7 +2051,7 @@ mod tests {
     /// this the two gateway tests race — one's `remove_var` can land between the
     /// other's `set_var` and its assertion, failing it intermittently. Poison is
     /// ignored (`into_inner`) so one failing test doesn't cascade into the other.
-    static GATEWAY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static GATEWAY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // Holding the guard across the `tools_for` await is the point: the env
     // vars must stay put for the whole call, which is exactly what the lock
@@ -2271,6 +2313,7 @@ mod tests {
             notify_sink: None,
             demo: true,
             flow: None,
+            sidekick_hooks: default_sidekick_hooks(),
         };
         let sink = Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
         let mut ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("demo-conv");

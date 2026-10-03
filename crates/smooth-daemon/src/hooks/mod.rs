@@ -28,8 +28,14 @@
 //!
 //! Wiring order in [`crate::operator::serve_local_flavor`] is
 //! `vec![tool_log, permission gate, narc]`.
+//!
+//! The same instances also guard **sidekick** calls (th-8d1951): the engine's
+//! `send_sidekick` builds each sidekick a fresh registry that carries no host
+//! hooks, so [`sidekick`] wraps the tool `Arc`s it is handed in a
+//! [`sidekick::HookedTool`] that runs this chain around each call.
 
 pub mod narc;
+pub mod sidekick;
 pub mod tool_log;
 
 pub use narc::NarcHook;
