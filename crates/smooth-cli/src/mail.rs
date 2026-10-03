@@ -193,6 +193,10 @@ pub enum MsgCommands {
         /// Whose inbox (defaults to the resolved handle).
         #[arg(long)]
         agent: Option<String>,
+        /// Count only mail addressed to this agent by name, not broadcasts.
+        /// The Stop hook uses this: a broadcast shouldn't hold a session open.
+        #[arg(long)]
+        direct: bool,
     },
     /// Reply to a message (threads automatically).
     Reply {
@@ -777,10 +781,15 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 println!("{} acknowledged {}", "✓".green().bold(), ids.join(", ").dimmed());
             }
         }
-        MsgCommands::UnreadCount { agent } => {
+        MsgCommands::UnreadCount { agent, direct } => {
             let who = agent.unwrap_or_else(resolve_handle);
+            let n = if direct {
+                s.unread_direct_count(&who).await?
+            } else {
+                s.unread_count(&who).await?
+            };
             // Bare number, no decoration — the statusline hook embeds this.
-            println!("{}", s.unread_count(&who).await?);
+            println!("{n}");
         }
         MsgCommands::Reply {
             id,
