@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Build libghostty-vt for SmoothFlow Desktop (th-872ea8): the static library
-# src/vt/ffi.rs links, plus its C headers. build.rs runs this when the library
-# for the target being compiled is missing; CI runs it first so the result can
-# be cached.
+# Build libghostty-vt, the static library + C headers every Rust consumer of
+# Ghostty's VT parser links: SmoothFlow Desktop (apps/smoothflow-desktop,
+# th-872ea8) and the daemon's headless terminal (crates/smooth-flow-vt,
+# th-5025fb). Each consumer's build.rs runs this when the library for the
+# target being compiled is missing; CI runs it first so the result can be
+# cached.
 #
-# Output (gitignored): apps/smoothflow-desktop/.ghostty-vt/out/<rust-target>/
+# Output (gitignored): $GHOSTTY_VT_WORK/out/<rust-target>/
 #   include/ghostty/vt.h …
 #   lib/libghostty-vt.a          (macOS, Linux)
 #   lib/ghostty-vt-static.lib    (Windows MSVC)
+# GHOSTTY_VT_WORK defaults to <repo>/.ghostty-vt; the build.rs files pass
+# their own (the desktop: apps/smoothflow-desktop/.ghostty-vt; smooth-flow-vt:
+# a per-user cache shared by every worktree, keyed by the ghostty commit).
 #
 # Why from source: Ghostty publishes no libghostty-vt binaries. It is
 # zero-dependency Zig, and Ghostty's own CI builds it for macOS, Linux and
@@ -15,20 +20,23 @@
 # (smooai apps/smoothflow-mobile/android/scripts/build-ghostty-vt.sh) does the
 # same thing with the NDK.
 #
-# Everything is pinned in ../ghostty-vt.lock: the ghostty commit (the same one
-# the Mac, iOS and Android apps link) and the Zig release (sha256-verified,
-# fetched from community mirrors first). Idempotent: a stamp of the lock and
-# this script short-circuits. Needs bash, git, curl, tar (and unzip on Windows).
+# Everything is pinned in ghostty-vt.lock (next to this script): the ghostty
+# commit (the same one the Mac, iOS and Android apps link) and the Zig release
+# (sha256-verified, fetched from community mirrors first). Idempotent: a stamp
+# of the lock and this script short-circuits. Concurrent runs against one
+# GHOSTTY_VT_WORK serialize on a lock directory, so parallel cargo builds in
+# several worktrees can share it. Needs bash, git, curl, tar (and unzip on
+# Windows).
 #
-#   scripts/build-ghostty-vt.sh                          # the host's Rust target
-#   scripts/build-ghostty-vt.sh x86_64-apple-darwin      # an explicit one
-#   GHOSTTY_VT_WORK=/elsewhere scripts/build-ghostty-vt.sh
+#   scripts/ghostty-vt/build-ghostty-vt.sh                          # the host's Rust target
+#   scripts/ghostty-vt/build-ghostty-vt.sh x86_64-apple-darwin      # an explicit one
+#   GHOSTTY_VT_WORK=/elsewhere scripts/ghostty-vt/build-ghostty-vt.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="$(dirname "$HERE")"
-LOCK="$APP_DIR/ghostty-vt.lock"
-WORK="${GHOSTTY_VT_WORK:-$APP_DIR/.ghostty-vt}"
+REPO_DIR="$(dirname "$(dirname "$HERE")")"
+LOCK="$HERE/ghostty-vt.lock"
+WORK="${GHOSTTY_VT_WORK:-$REPO_DIR/.ghostty-vt}"
 mkdir -p "$WORK"
 WORK="$(cd "$WORK" && pwd)"
 
@@ -68,11 +76,36 @@ esac
 
 OUT="$WORK/out/$target"
 stamp_want="$(cat "$LOCK" "$HERE/build-ghostty-vt.sh" | sha256 /dev/stdin) $target"
-if [[ -f "$OUT/.stamp" && "$(cat "$OUT/.stamp")" == "$stamp_want" && -f "$OUT/lib/$lib" && -f "$OUT/include/ghostty/vt.h" ]]; then
+built() { [[ -f "$OUT/.stamp" && "$(cat "$OUT/.stamp")" == "$stamp_want" && -f "$OUT/lib/$lib" && -f "$OUT/include/ghostty/vt.h" ]]; }
+if built; then
   echo "==> libghostty-vt already built for $target (ghostty ${ghostty_sha:0:12})"
   exit 0
 fi
-mkdir -p "$WORK"
+
+# --- one build per work dir at a time ---
+# mkdir is atomic everywhere this runs (Git Bash included; flock is not on
+# macOS). A holder that died leaves its pid behind, which a waiter reclaims.
+LOCKDIR="$WORK/.build.lock"
+waited=0
+until mkdir "$LOCKDIR" 2>/dev/null; do
+  holder="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
+    echo "==> reclaiming $LOCKDIR from dead pid $holder" >&2
+    rm -rf "$LOCKDIR"
+    continue
+  fi
+  ((waited % 30 == 0)) && echo "==> waiting for another libghostty-vt build in $WORK (pid ${holder:-?})" >&2
+  sleep 2
+  waited=$((waited + 2))
+  ((waited < 3600)) || { echo "error: gave up waiting for $LOCKDIR after an hour" >&2; exit 1; }
+done
+echo $$ >"$LOCKDIR/pid"
+trap 'rm -rf "$LOCKDIR"' EXIT
+# The holder we waited on may have built exactly this.
+if built; then
+  echo "==> libghostty-vt already built for $target (ghostty ${ghostty_sha:0:12})"
+  exit 0
+fi
 
 # --- zig (pinned, sha256-verified) ---
 ZIG_DIR="$WORK/zig-$zig_host-$zig_version"

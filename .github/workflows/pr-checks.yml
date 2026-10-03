@@ -85,6 +85,8 @@ jobs:
                           # touches no other path, so every step below gates off
                           # and the job reports success having compiled nothing.
                           - 'mise.toml'
+                          # crates/smooth-flow-vt builds libghostty-vt with these.
+                          - 'scripts/ghostty-vt/**'
 
             # One boolean instead of repeating the compound condition on a dozen
             # steps. `shell: bash` because the Windows leg defaults to pwsh,
@@ -94,6 +96,8 @@ jobs:
               shell: bash
               run: echo "run=${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}" >>"$GITHUB_OUTPUT"
 
+            # llvm: llvm-objcopy, which scripts/ghostty-vt/build-ghostty-vt.sh
+            # uses to localize libghostty-vt's memset (crates/smooth-flow-vt).
             # tmux: the SmoothFlow engine e2e suite (crates/smooth-daemon/tests/
             # flow_e2e, th-8e3087) boots a real daemon per test and runs
             # fake-agent under a private tmux server. Without it the suite
@@ -107,7 +111,7 @@ jobs:
               # a mirror we don't use (pearl th-79cef7).
               run: |
                   sudo rm -f /etc/apt/sources.list.d/google-chrome*
-                  sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler tmux
+                  sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler tmux llvm
 
             # No apt on Windows — protoc is the only native build-time tool the
             # workspace needs there (tonic-build in smooth-scribe et al.).
@@ -124,6 +128,28 @@ jobs:
 
             - uses: Swatinem/rust-cache@v2
               if: steps.gate.outputs.run == 'true'
+
+            # libghostty-vt for crates/smooth-flow-vt (th-5025fb): Zig-built
+            # from source by the pinned script SmoothFlow Desktop uses too,
+            # cached on the lock + script (a cold build is a few minutes; a
+            # hit is seconds). The crate's build.rs runs the same script,
+            # which is a no-op once the stamp matches. GHOSTTY_VT_WORK keeps
+            # the output in the checkout so actions/cache can see it; `pwd -W`
+            # gives Git Bash a D:/… path the native build.rs can read too.
+            - name: Locate libghostty-vt work dir
+              if: steps.gate.outputs.run == 'true'
+              shell: bash
+              run: echo "GHOSTTY_VT_WORK=$(pwd -W 2>/dev/null || pwd)/.ghostty-vt" >>"$GITHUB_ENV"
+            - name: Cache libghostty-vt
+              if: steps.gate.outputs.run == 'true'
+              uses: actions/cache@v4
+              with:
+                  path: .ghostty-vt/out
+                  key: ghostty-vt-ws-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ghostty-vt/ghostty-vt.lock', 'scripts/ghostty-vt/build-ghostty-vt.sh') }}
+            - name: Build libghostty-vt
+              if: steps.gate.outputs.run == 'true'
+              shell: bash
+              run: scripts/ghostty-vt/build-ghostty-vt.sh
 
             - uses: pnpm/action-setup@v4
               if: steps.gate.outputs.run == 'true'

@@ -48,11 +48,20 @@ similar.workspace = true
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 
+# th-5025fb (ADR-011): the session host's headless libghostty-vt. Optional,
+# behind `pty-host`, until PtyHost lands (th-dc9822): the crate builds
+# libghostty-vt with a pinned Zig, and nothing that builds smooth-flow today
+# (the daemon, `th`, their release builds) should need that before it is used.
+smooth-flow-vt = { workspace = true, optional = true }
+
 [target.'cfg(windows)'.dependencies]
 # th-64d4ab: process liveness and start time without `ps`.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [features]
+# th-5025fb: the engine-owned PTY session host (ADR-011). Pulls in
+# smooth-flow-vt and with it the libghostty-vt build. Off by default for now.
+pty-host = ["dep:smooth-flow-vt"]
 # th-8b3918: expose `host::fake::FakeHost` (the in-memory session host) to
 # other crates' tests. Never enabled in a shipped build.
 test-util = []
