@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use smooth_operator::providers::Activity;
 use smooth_operator::LlmConfig;
+use smooth_tools::SandboxMode;
 
 /// Resolve the daemon's bearer token from `SMOOTH_DAEMON_TOKEN`.
 ///
@@ -49,6 +50,114 @@ pub fn cloud_memory_enabled() -> bool {
 /// Pure core (no env read) so the truthiness policy is unit-testable.
 fn cloud_memory_enabled_inner(raw: Option<&str>) -> bool {
     matches!(raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
+/// The daemon's kernel-sandbox switch, resolved from `SMOOTH_SANDBOX`
+/// ([`smooth_tools::SANDBOX_ENV`]).
+///
+/// **Opt-in, default OFF** (pearl th-efbab1). Big Smooth is a personal agent
+/// that operates AS its user on the user's own machine; with the kernel sandbox
+/// on, `ssh` to the user's own boxes and `git fetch` failed (credential-store
+/// read-deny on `~/.ssh/known_hosts`, kernel-denied direct outbound). Set
+/// `SMOOTH_SANDBOX` to `1`/`true`/`yes`/`on` to turn it back on. The permission
+/// gate and Narc run either way.
+///
+/// The value is read where every shell policy is built
+/// ([`smooth_tools::SandboxPolicy::for_workspace`]); the daemon resolves the
+/// same variable here only to log its startup posture, so the two can't
+/// disagree.
+pub struct SandboxSetting {
+    /// The resolved mode (default [`SandboxMode::PassThrough`]).
+    pub mode: SandboxMode,
+    /// A set-but-unrecognized raw value (a typo), so startup can warn that it
+    /// resolved to the default instead of silently guessing.
+    pub unrecognized: Option<String>,
+}
+
+/// Resolve [`SandboxSetting`] from the environment.
+#[must_use]
+pub fn resolve_sandbox() -> SandboxSetting {
+    resolve_sandbox_inner(std::env::var(smooth_tools::SANDBOX_ENV).ok())
+}
+
+/// Pure core (no env read) so the opt-in policy is unit-testable.
+fn resolve_sandbox_inner(raw: Option<String>) -> SandboxSetting {
+    let parsed = raw.as_deref().map(SandboxMode::parse);
+    SandboxSetting {
+        mode: SandboxMode::from_env_value(raw.as_deref()),
+        unrecognized: match parsed {
+            Some(None) => raw,
+            _ => None,
+        },
+    }
+}
+
+/// Whether the startup posture line is a warning or plain info.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostureLevel {
+    /// The posture is what the operator asked for.
+    Info,
+    /// The operator asked for something this host can't give (sandbox on a
+    /// platform without one, or an unrecognized switch value).
+    Warn,
+}
+
+/// The one startup line stating the tool-execution posture.
+///
+/// Says whether the agent runs as the user or kernel-sandboxed, and whether
+/// the egress allowlist (if configured) is a boundary or advisory. Pure so
+/// every combination is tested.
+#[must_use]
+pub fn sandbox_posture(setting: &SandboxSetting, egress_proxy: Option<&str>, platform_supported: bool) -> (PostureLevel, String) {
+    if let Some(raw) = &setting.unrecognized {
+        return (
+            PostureLevel::Warn,
+            format!(
+                "kernel sandbox OFF: {}={raw:?} is not a recognized value (use 1/true/yes/on or 0/false/no/off) — tools run as you{}",
+                smooth_tools::SANDBOX_ENV,
+                egress_proxy.map_or(String::new(), |p| format!("; egress allowlist via {p} is ADVISORY (not kernel-enforced)")),
+            ),
+        );
+    }
+    match (setting.mode, platform_supported, egress_proxy) {
+        (SandboxMode::PassThrough, _, None) => (
+            PostureLevel::Info,
+            format!("kernel sandbox OFF (default): agent tools run as you; set {}=1 to enable", smooth_tools::SANDBOX_ENV),
+        ),
+        (SandboxMode::PassThrough, _, Some(p)) => (
+            PostureLevel::Info,
+            format!(
+                "kernel sandbox OFF (default): agent tools run as you; egress allowlist via {p} is ADVISORY (HTTP(S)_PROXY set, direct connections not blocked) — set {}=1 to enforce it",
+                smooth_tools::SANDBOX_ENV
+            ),
+        ),
+        (SandboxMode::Enforced, true, None) => (
+            PostureLevel::Info,
+            "kernel sandbox ON (Seatbelt): credential stores + git hooks kernel-denied; egress unrestricted".to_owned(),
+        ),
+        (SandboxMode::Enforced, true, Some(p)) => (
+            PostureLevel::Info,
+            format!("kernel sandbox ON (Seatbelt): credential stores + git hooks kernel-denied; egress kernel-forced through the allowlist proxy at {p}"),
+        ),
+        (SandboxMode::Enforced, false, _) => (
+            PostureLevel::Warn,
+            format!(
+                "{}=1 but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED{}",
+                smooth_tools::SANDBOX_ENV,
+                if egress_proxy.is_some() { "; egress allowlist is ADVISORY" } else { "" }
+            ),
+        ),
+    }
+}
+
+/// Log [`sandbox_posture`] for this process once, at startup.
+pub fn log_sandbox_posture(egress_proxy: Option<&str>) {
+    let setting = resolve_sandbox();
+    let (level, line) = sandbox_posture(&setting, egress_proxy, smooth_tools::SandboxPolicy::platform_supported());
+    match level {
+        PostureLevel::Info => tracing::info!(sandbox = ?setting.mode, "{line}"),
+        PostureLevel::Warn => tracing::warn!(sandbox = ?setting.mode, "{line}"),
+    }
 }
 
 /// A curated default egress allowlist.
@@ -93,6 +202,9 @@ pub struct EgressSetup {
 /// **Opt-in**: returns `Some` only when `SMOOTH_EGRESS_ALLOWLIST` is set (a
 /// comma/whitespace-separated list of exact hosts). With it unset, the bash
 /// tool's network is unrestricted (matching the auth/sandbox opt-in posture).
+/// The allowlist is only a hard boundary with the opt-in kernel sandbox on
+/// (macOS); with it off the proxy env vars are set but advisory — see
+/// [`sandbox_posture`].
 /// The `defaults` token expands to [`DEFAULT_EGRESS_HOSTS`] (mergeable with your
 /// own hosts). `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
 #[must_use]
@@ -221,6 +333,74 @@ mod tests {
         for v in ["1", "true", "TRUE", " yes ", "On"] {
             assert!(cloud_memory_enabled_inner(Some(v)), "{v:?} should enable");
         }
+    }
+
+    #[test]
+    fn sandbox_is_opt_in_and_off_by_default() {
+        // Unset → pass-through: the agent runs as the user.
+        let unset = resolve_sandbox_inner(None);
+        assert_eq!(unset.mode, SandboxMode::PassThrough);
+        assert!(unset.unrecognized.is_none());
+        for v in ["", "0", "false", "off", "NO"] {
+            let s = resolve_sandbox_inner(Some(v.to_owned()));
+            assert_eq!(s.mode, SandboxMode::PassThrough, "{v:?}");
+            assert!(s.unrecognized.is_none(), "{v:?} is a recognized off value");
+        }
+        for v in ["1", "true", "YES", " on "] {
+            assert_eq!(resolve_sandbox_inner(Some(v.to_owned())).mode, SandboxMode::Enforced, "{v:?} should enable");
+        }
+        // A typo resolves to the default AND is surfaced for a warning.
+        let typo = resolve_sandbox_inner(Some("enabled".to_owned()));
+        assert_eq!(typo.mode, SandboxMode::PassThrough);
+        assert_eq!(typo.unrecognized.as_deref(), Some("enabled"));
+    }
+
+    fn setting(mode: SandboxMode) -> SandboxSetting {
+        SandboxSetting { mode, unrecognized: None }
+    }
+
+    #[test]
+    fn posture_line_off_says_agent_runs_as_you() {
+        let (level, line) = sandbox_posture(&setting(SandboxMode::PassThrough), None, true);
+        assert_eq!(level, PostureLevel::Info, "the default is not a warning");
+        assert!(
+            line.contains("OFF") && line.contains("run as you") && line.contains("SMOOTH_SANDBOX=1"),
+            "{line}"
+        );
+        // Off is off on every platform — no 'UNSANDBOXED' warning when nobody asked for one.
+        let (level, _) = sandbox_posture(&setting(SandboxMode::PassThrough), None, false);
+        assert_eq!(level, PostureLevel::Info);
+    }
+
+    #[test]
+    fn posture_line_off_with_egress_marks_allowlist_advisory() {
+        let (level, line) = sandbox_posture(&setting(SandboxMode::PassThrough), Some("127.0.0.1:4419"), true);
+        assert_eq!(level, PostureLevel::Info);
+        assert!(line.contains("ADVISORY") && line.contains("127.0.0.1:4419"), "{line}");
+    }
+
+    #[test]
+    fn posture_line_on_states_the_boundary() {
+        let (level, line) = sandbox_posture(&setting(SandboxMode::Enforced), Some("127.0.0.1:4419"), true);
+        assert_eq!(level, PostureLevel::Info);
+        assert!(line.contains("ON") && line.contains("kernel-forced"), "{line}");
+        let (_, line) = sandbox_posture(&setting(SandboxMode::Enforced), None, true);
+        assert!(line.contains("egress unrestricted"), "{line}");
+    }
+
+    #[test]
+    fn posture_line_warns_when_sandbox_requested_but_unsupported() {
+        let (level, line) = sandbox_posture(&setting(SandboxMode::Enforced), Some("127.0.0.1:4419"), false);
+        assert_eq!(level, PostureLevel::Warn);
+        assert!(line.contains("UNSANDBOXED") && line.contains("ADVISORY"), "{line}");
+    }
+
+    #[test]
+    fn posture_line_warns_on_unrecognized_value() {
+        let s = resolve_sandbox_inner(Some("enabled".to_owned()));
+        let (level, line) = sandbox_posture(&s, None, true);
+        assert_eq!(level, PostureLevel::Warn);
+        assert!(line.contains("\"enabled\"") && line.contains("OFF"), "{line}");
     }
 
     #[test]

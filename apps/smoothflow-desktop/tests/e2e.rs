@@ -33,6 +33,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedReceiver;
+use smooth_flow_client::diff::{Base, LineKind};
+use smooth_flow_client::gate::CenterTab;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::Rect;
 use smooth_flow_client::SessionState;
@@ -155,6 +157,8 @@ struct Daemon {
     /// Held for its Drop: the scratch HOME, workspace and log go with it.
     _root: tempfile::TempDir,
     home: PathBuf,
+    /// The daemon's workspace (`SMOOTH_WORKSPACE`): where New Session opens.
+    ws: PathBuf,
     socket: String,
     child: Child,
     log_path: PathBuf,
@@ -188,6 +192,7 @@ impl Daemon {
             .env("SMOOTH_TAILSCALE_SERVE", "0")
             .env("SMOOTH_FLOW_HARNESS_DOCTOR", "0")
             .env("SMOOTH_WORKSPACE", &ws)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
             .env("TERM", "xterm-256color")
             .envs(extra.iter().copied())
@@ -200,6 +205,7 @@ impl Daemon {
         let mut d = Self {
             _root: root,
             home,
+            ws,
             socket,
             child,
             log_path,
@@ -585,4 +591,315 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
     assert!(app.core.dialog.is_none(), "no refusal: {:?}", app.core.dialog);
     assert_eq!(app.core.surfaces.focused_session(), None, "no pane still shows it");
     assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}
+
+/// The wheel against a real session (th-1977a8). The engine streams a
+/// `tmux attach` client, and tmux draws on the alternate screen, so by
+/// Ghostty's rules (the Mac's too) the wheel is arrow keys for the program —
+/// here the shell — and the viewport never
+/// leaves the screen. History scrolling on the primary screen is covered by
+/// `terminal.rs` and `app_core.rs` unit tests.
+#[test]
+fn the_wheel_over_a_tmux_session_is_arrow_keys() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    app.wait(&d, "the shell to attach at 80x24", WAIT, |a| a.core.attached_size(&id) == Some((80, 24)));
+    app.wait(&d, "a prompt", WAIT, |a| a.screen(&id).iter().any(|l| !l.trim().is_empty()));
+    let n = nonce();
+    let cmd = format!("echo sfd-{n}-marker");
+    app.type_text(&cmd);
+    assert!(app.press("enter").is_empty());
+    let out = format!("sfd-{n}-marker");
+    app.wait(&d, "the echo", WAIT, |a| a.screen(&id).iter().any(|l| l.trim() == out));
+    assert!(app.core.terminals[&id].alt_screen(), "a tmux attach client draws on the alternate screen");
+
+    let pane = app.core.surfaces.focused_pane();
+    assert!(app.core.wheel(pane, 1.0, 0, 0));
+    // A line-editing shell recalls the command; one without (dash, CI's
+    // `sh`) echoes the raw `^[[A`. Either way the Up arrow reached it.
+    app.wait(&d, "the wheel's Up arrow to reach the shell", WAIT, |a| {
+        // Joined: a long prompt wraps the command across rows.
+        let screen = a.screen(&id).concat();
+        screen.matches(&cmd).count() >= 2 || screen.contains("[A")
+    });
+    assert!(app.core.terminals[&id].at_bottom(), "no history scrolled on the alternate screen");
+}
+
+/// Close Out a shell in a dirty linked worktree (th-1977a8): the real engine
+/// refuses and touches nothing; the refusal offers Force close (Keep it is
+/// the default), and Force close removes the worktree and drops the row.
+#[test]
+fn a_refused_close_out_offers_force_and_force_removes_the_worktree() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    let wt = ws.with_file_name("ws-feature");
+    git(&ws, &["worktree", "add", "-q", "-b", "feature", wt.to_str().expect("utf-8 path")]);
+    std::fs::write(wt.join("scratch.txt"), "uncommitted\n").expect("dirty the worktree");
+
+    let mut app = connect(&d);
+    let fetches = app
+        .core
+        .run_effects(vec![smoothflow_desktop::sheet::Effect::Start(smoothflow_desktop::frames::NewSession {
+            kind: "shell".into(),
+            worktree: Some(wt.to_string_lossy().into_owned()),
+            ..Default::default()
+        })]);
+    assert!(fetches.is_empty());
+    app.wait(&d, "the shell in the worktree to open", WAIT, |a| a.core.surfaces.focused_session().is_some());
+    let id = app.core.surfaces.focused_session().map(str::to_string).expect("focused session");
+    let s = app.core.sessions[&id].clone();
+    assert!(smoothflow_desktop::app_core::has_own_worktree(&s), "a linked worktree is its own: {s:?}");
+
+    app.core.close_out(&id);
+    let ask = app.core.dialog.clone().expect("Close Out asks");
+    let close = ask.buttons[0].1.clone();
+    assert!(
+        matches!(
+            close,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: false,
+                ..
+            }
+        ),
+        "it offers to remove the worktree, unforced: {close:?}"
+    );
+    app.core.confirm(close);
+    app.wait(&d, "the engine's refusal", WAIT, |a| a.core.dialog.is_some());
+    let refusal = app.core.dialog.clone().expect("refusal");
+    assert!(
+        refusal.message.contains("uncommitted changes"),
+        "the engine's reason, verbatim: {}",
+        refusal.message
+    );
+    assert_eq!(refusal.cancel, "Keep it");
+    let (label, force) = refusal.buttons[0].clone();
+    assert_eq!(label, "Force close");
+    assert!(
+        matches!(
+            force,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: true,
+                ..
+            }
+        ),
+        "{force:?}"
+    );
+    assert!(wt.join("scratch.txt").is_file(), "nothing was touched");
+    assert!(app.core.sessions.contains_key(&id), "the row stays");
+
+    app.core.confirm(force);
+    app.wait(&d, "the forced close to drop the row", WAIT, |a| !a.core.sessions.contains_key(&id));
+    assert!(app.core.dialog.is_none(), "no second refusal: {:?}", app.core.dialog);
+    assert!(!wt.exists(), "force removed the worktree");
+    assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}
+
+// ── Diff (th-26f5b9) ────────────────────────────────────────────────────
+
+/// `git` in `dir`, isolated from the developer's config; panics on failure.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=sfd-e2e", "-c", "user.email=sfd-e2e@example.com", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `src/lib.rs`, twenty functions, with function `n` returning `ret`.
+fn lib_rs(n: u32, ret: &str) -> String {
+    (1..=20)
+        .map(|i| {
+            if i == n {
+                format!("pub fn f{i}() -> u32 {{ {ret} }}\n")
+            } else {
+                format!("pub fn f{i}() -> u32 {{ {i} }}\n")
+            }
+        })
+        .collect()
+}
+
+/// Make the daemon's workspace a repo on `main` with one commit.
+fn scratch_repo(d: &Daemon) -> PathBuf {
+    let ws = d.ws.clone();
+    std::fs::create_dir_all(ws.join("src")).expect("src");
+    std::fs::write(ws.join("src/lib.rs"), lib_rs(0, "")).expect("lib.rs");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "-A"]);
+    git(&ws, &["commit", "-q", "-m", "init"]);
+    ws
+}
+
+/// A shell in the scratch repo with its Diff tab open, and the first diff in.
+fn shell_with_diff(d: &Daemon, ws: &Path) -> (App, String) {
+    let mut app = connect(d);
+    let id = start_shell(&mut app, d);
+    let s = &app.core.sessions[&id];
+    assert_eq!(
+        Path::new(&s.worktree).canonicalize().ok(),
+        ws.canonicalize().ok(),
+        "the shell runs in the scratch repo: {s:?}"
+    );
+    assert_eq!(s.branch.as_deref(), Some("main"), "the row carries the branch, so Diff is enabled");
+    assert!(app.core.act(Action::ViewDiff).is_empty());
+    assert_eq!(app.core.center, CenterTab::Diff, "notice: {:?}", app.core.notice);
+    assert_eq!(app.core.diff.base, Base::Uncommitted, "a shell opens on Uncommitted");
+    app.wait(d, "the first diff", WAIT, |a| a.core.diff.diff.is_some() && !a.core.diff.loading());
+    (app, id)
+}
+
+/// Refresh and wait for the diff to settle on `files` files.
+fn refreshed(app: &mut App, d: &Daemon, files: usize) {
+    app.core.diff.request();
+    app.wait(d, &format!("a refreshed diff with {files} file(s)"), WAIT, |a| {
+        !a.core.diff.loading() && a.core.diff.diff.as_ref().is_some_and(|x| x.files.len() == files)
+    });
+}
+
+/// The Diff tab against a real engine: a shell in a git repo gets the
+/// structured diff of its uncommitted work — files in tree order, hunks with
+/// line numbers, word and syntax spans — and a hunk stages and unstages.
+#[test]
+fn the_diff_tab_shows_a_shells_uncommitted_work_and_stages_a_hunk() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    std::fs::write(ws.join("src/lib.rs"), lib_rs(5, "500")).expect("edit");
+    std::fs::write(ws.join("notes.md"), "# notes\n").expect("new file");
+    let (mut app, _id) = shell_with_diff(&d, &ws);
+    // A fresh engine's first diff can come back without syntax spans: the
+    // highlight budget's clock starts before the syntax set's cold load
+    // (pearl th-35271b). The second one is highlighted.
+    refreshed(&mut app, &d, 2);
+    let diff = app.core.diff.diff.clone().expect("diff");
+    assert_eq!(diff.base, Base::Uncommitted);
+    assert_eq!(diff.legend.len(), 17, "the legend names every syntax kind");
+    assert_eq!((diff.added, diff.deleted), (2, 1), "{diff:#?}");
+    let paths: Vec<&str> = app.core.diff.tree.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(paths, ["src", "lib.rs", "notes.md"], "directories first");
+    let lib = diff.files.iter().find(|f| f.path == "src/lib.rs").expect("src/lib.rs");
+    assert_eq!(
+        (lib.status.as_str(), lib.added, lib.deleted, lib.language.as_deref()),
+        ("modified", 1, 1, Some("Rust"))
+    );
+    let h = &lib.hunks[0];
+    let del = h.lines.iter().find(|l| l.kind == LineKind::Del).expect("a deleted line");
+    let add = h.lines.iter().find(|l| l.kind == LineKind::Add).expect("an added line");
+    assert_eq!((del.old, add.new), (Some(5), Some(5)));
+    assert_eq!(add.text, "pub fn f5() -> u32 { 500 }");
+    assert!(!add.words.is_empty(), "the changed word is marked: {add:?}");
+    assert!(!add.syntax.is_empty(), "the engine highlighted the Rust: {add:?}");
+    assert!(!h.staged);
+    let notes = diff.files.iter().find(|f| f.path == "notes.md").expect("notes.md");
+    assert_eq!(notes.status, "added");
+    assert!(app.core.diff.rows.iter().any(|r| r.is_line()), "the body has lines to draw");
+
+    // `n` lands on the first hunk (src/lib.rs, tree order); `s` stages it.
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("s");
+    app.wait(&d, "the hunk to show as staged", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Staged a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().any(|f| f.path == "src/lib.rs" && f.hunks.first().is_some_and(|h| h.staged)))
+    });
+    // `s` on a staged hunk unstages it.
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("s");
+    app.wait(&d, "the hunk to be unstaged", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Unstaged a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().any(|f| f.path == "src/lib.rs" && f.hunks.first().is_some_and(|h| !h.staged)))
+    });
+}
+
+/// Revert, the way the user does it (`r`, then the confirmation): the real
+/// engine restores the file. Then a hunk that changed under the viewer is
+/// refused as `stale`: the refusal is shown verbatim, the file is left
+/// alone (no retry, no force), and the diff refreshes.
+#[test]
+fn reverting_a_hunk_restores_the_file_and_a_stale_hunk_is_refused() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    let lib = ws.join("src/lib.rs");
+    std::fs::write(&lib, lib_rs(5, "500")).expect("edit");
+    let (mut app, _id) = shell_with_diff(&d, &ws);
+    assert_eq!(app.core.diff.diff.as_ref().map(|x| x.files.len()), Some(1));
+
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("r");
+    let dialog = app.core.dialog.clone().expect("Revert asks first");
+    assert_eq!(dialog.cancel, "Cancel");
+    assert!(dialog.title.contains("src/lib.rs"), "{}", dialog.title);
+    let (_, revert) = dialog
+        .buttons
+        .into_iter()
+        .find(|(_, c)| matches!(c, Confirmed::DiffRevert { .. }))
+        .expect("a Revert button");
+    app.core.confirm(revert);
+    app.wait(&d, "the revert to land and the diff to empty", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Reverted a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core.diff.diff.as_ref().is_some_and(|x| x.files.is_empty())
+    });
+    assert_eq!(std::fs::read_to_string(&lib).expect("lib.rs"), lib_rs(0, ""), "the worktree is back at HEAD");
+
+    // The viewer holds a hunk; the file then changes under it (no
+    // flow.diff.changed: the engine didn't do it).
+    std::fs::write(&lib, lib_rs(5, "501")).expect("edit");
+    refreshed(&mut app, &d, 1);
+    std::fs::write(&lib, lib_rs(5, "777")).expect("edit under the viewer");
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("r");
+    let dialog = app.core.dialog.clone().expect("Revert asks first");
+    let (_, revert) = dialog
+        .buttons
+        .into_iter()
+        .find(|(_, c)| matches!(c, Confirmed::DiffRevert { .. }))
+        .expect("a Revert button");
+    app.core.confirm(revert);
+    app.wait(&d, "the stale refusal, shown verbatim, then a refresh", WAIT, |a| {
+        a.core.diff.error
+            && a.core.diff.status.as_deref().is_some_and(|s| s.starts_with("stale:"))
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().flat_map(|f| &f.hunks).flat_map(|h| &h.lines).any(|l| l.text.contains("777")))
+    });
+    assert_eq!(
+        std::fs::read_to_string(&lib).expect("lib.rs"),
+        lib_rs(5, "777"),
+        "a refused revert touches nothing"
+    );
+    assert!(app.core.dialog.is_none());
 }

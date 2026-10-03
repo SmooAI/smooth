@@ -1,5 +1,70 @@
 # @smooai/smooth
 
+## 0.68.0
+
+### Minor Changes
+
+- 1e7d6ff: The kernel OS sandbox around Big Smooth's `bash` tool (and CLI-wrapper plugins) is now opt-in and off by default. Big Smooth is a personal agent that acts as its user on the user's own machine, and the sandbox stopped it doing exactly that: asked from `th code` to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound was kernel-denied behind the egress proxy) and git failed with "Operation not permitted" on `~/.ssh/known_hosts`. By default `bash` now runs as a normal user subprocess with the user's env, `HOME`, `SSH_AUTH_SOCK` and `PATH`; only the daemon's own config (`SMOOTH_*`, `SMOOAI_GATEWAY_KEY`) is stripped. The permission gate and Narc still check every call. Set `SMOOTH_SANDBOX=1` (or `true`/`yes`/`on`) in the daemon's environment to get the Seatbelt sandbox back exactly as before (macOS only). A configured `SMOOTH_EGRESS_ALLOWLIST` still starts the goalie proxy and sets `HTTP(S)_PROXY`, but it only blocks direct connections when the sandbox is on; with it off the allowlist is advisory. The daemon logs one startup line naming the posture, and `th doctor` has a "Tool sandbox" row in place of the stale microsandbox line.
+
+### Patch Changes
+
+- 71f1df0: th-mail: broadcasts reach only agents registered before they were sent and expire after 72 hours, and the Stop hook no longer blocks on broadcasts. Every new session registers a fresh handle, so it used to inherit the machine's whole broadcast history and could not stop until it had read and acked all of it. Adds `th msg unread-count --direct` (direct mail only).
+
+  `th msg inbox` and the `mail_inbox` MCP tool show only unread mail by default (`--all` / `unread_only=false` for history), so checking the inbox no longer re-reads handled mail.
+
+- af71d49: Big Smooth: sidekick tool calls now run the permission gate (with the DenyPolicy) and Narc, in the same order as a top-level turn. The engine gives each sidekick a fresh tool registry with no host hooks, so before this a sidekick's `bash` and file calls skipped both checks. That mattered more once the kernel sandbox became opt-in. A sidekick call that needs approval asks the user over the parent turn, and is denied if there is no way to ask.
+- ee069fd: th-handoff: the handoff ends with a copy-pasteable launch command for the harness the user opens next (Claude Code, Codex, OpenCode), and the plain resume prompt for `th code` or any harness without a prompt argument.
+
+  Resume without an id: `/th-handoff resume` lists in-progress pearls with checkpoints, newest first (`--cwd .` narrows to this repo), and resumes the one the user picks.
+
+## 0.67.0
+
+### Minor Changes
+
+- f4dc6e7: A `th-handoff` skill in the smooth-agent package moves a session's work to a fresh session without losing it, in Claude Code, Codex, OpenCode and `th code` alike (`th pkg` renders it into each). `/th-handoff` writes the state into one pearl via `th pearls checkpoint`: what's done, what's open in order, what's blocked on the user, the approvals already given, and which agents won't carry over. Before writing the final note, it makes every live worker push its branch and append to that pearl, then reads the handoff back. `/th-handoff resume <pearl>` is the receiving side: it re-verifies every PR and worktree before acting, and trusts nothing it hasn't re-checked.
+
+## 0.66.7
+
+### Patch Changes
+
+- 100746a: SmoothFlow (macOS): terminals resize after a display change. Undocking, plugging in a monitor or changing a resolution now re-binds the renderer to the new display (ghostty_surface_set_display_id, which the app never set), re-applies scale and size, and reports the new grid on Ghostty's cell-size change (th-b9e6df).
+
+## 0.66.6
+
+### Patch Changes
+
+- 54a457e: SmoothFlow Desktop: terminal scrollback (wheel/trackpad and Shift+PageUp/PageDown/Home/End over libghostty-vt's history, with Ghostty's rules for mouse-tracking programs and the alternate screen, and a scrolled-back indicator), faint and strikethrough text, and a Force close offer after the engine refuses a Close Out (th-1977a8).
+
+## 0.66.5
+
+### Patch Changes
+
+- 261eaa7: SmoothFlow Desktop's Diff tab scrolls long lines sideways instead of clipping them (wheel, trackpad, shift+wheel, or ←/→), with the line-number gutters pinned and both side-by-side panes moving together. Review comments are now multi-line: Enter adds a line, Ctrl/⌘+Enter adds the comment, and the box grows to six lines before scrolling with the caret (th-4ec2f6).
+
+## 0.66.4
+
+### Patch Changes
+
+- ac0359f: SmoothFlow diff: a fresh engine's first diff now has syntax colors. The 750 ms highlight budget used to start before the syntax set had loaded, and that one-time load ate the whole budget (th-35271b).
+
+## 0.66.3
+
+### Patch Changes
+
+- 6fc4a0b: SmoothFlow diff: the 512 KiB frame budget is now a hard cap. Every file's summary stub is reserved up front, so a listing with hundreds of changed files no longer grows past the budget (and past what a phone can receive over the relay) (th-b994a1).
+
+## 0.66.2
+
+### Patch Changes
+
+- a8448b1: SmoothFlow Desktop gets the Diff tab (th-26f5b9, th-d89238). The Linux/Windows GPUI app now has Terminal | Diff center tabs, gated by the worktree like the Mac. The Diff tab is a virtualized review viewer over the engine's `flow.diff`: the file tree with status badges, counts and viewed marks; unified or side-by-side lines with the engine's syntax and word spans in Catppuccin Mocha; the Last turn / Uncommitted / vs branch picker; noise files collapsed with Show; big diffs paged in per file as they scroll into view; per-hunk Revert (confirmed, Cancel by default), Stage and Unstage; line, range and file comments sent as one `flow.diff.review`; refresh on `flow.diff.changed`; and the shared `j`/`k`, `n`/`p`, `]`/`[`, `v`, `c`, `r`, `s`, `u` keys. `stale` and `blocked` refusals are shown verbatim and never retried.
+
+## 0.66.1
+
+### Patch Changes
+
+- a683260: SmoothFlow: the app's own engine now owns `~/.smooth/flow.addr` even while Big Smooth is running. The app's engine keeps a separate session store, so a long-running Big Smooth that held the file sent harness hooks, `th flow`, the MCP flow tools and SmoothFlow Desktop to an engine that had none of the app's sessions. Big Smooth still never takes the file from a live holder. The daemon also shuts down cleanly on SIGTERM (how the app stops it), so it releases `flow.addr` instead of leaving a dead address that every client tried first (th-5069eb).
+
 ## 0.66.0
 
 ### Minor Changes

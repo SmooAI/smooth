@@ -73,7 +73,10 @@ Project grants win over user grants on collision (project file loaded last).
 ## What this is _not_
 
 The permission engine expresses **intent + UX**; it is bypassable by the same
-reasoning agent it constrains. The load-bearing boundary in the daemon design is
-the **kernel OS-sandbox + egress proxy** layer (see the smooth-daemon epic,
+reasoning agent it constrains. The hard boundary in the daemon design is the
+**kernel OS-sandbox + egress proxy** layer (see the smooth-daemon epic,
 th-c89c2a) — the auto-mode engine is the deterministic Gate-1 in front of it, not
-a substitute for kernel enforcement.
+a substitute for kernel enforcement. That layer is **opt-in** (`SMOOTH_SANDBOX=1`,
+off by default since pearl th-efbab1: Big Smooth acts as its user, and the
+sandbox broke `ssh` / `git fetch`), so in the default posture this gate and
+Narc are the whole safety net — choose the permission mode accordingly.

@@ -46,6 +46,12 @@
 #define SF_SPACER (1u << 8)
 #define SF_EXTRA_SHIFT 16
 
+// sf_vt_input_modes bits, mirrored in src/ghostty.rs.
+#define SF_MODE_MOUSE (1u << 0)
+#define SF_MODE_ALT_SCREEN (1u << 1)
+#define SF_MODE_ALT_SCROLL (1u << 2)
+#define SF_MODE_CURSOR_KEYS (1u << 3)
+
 typedef struct SfVt {
     GhosttyTerminal terminal;
     GhosttyRenderState render;
@@ -61,6 +67,9 @@ typedef struct SfVt {
     size_t snap_cap;
     uint32_t *extras;
     size_t extras_cap;
+    // Wheel reports for programs that track the mouse; made on first use.
+    GhosttyMouseEncoder mouse;
+    GhosttyMouseEvent mouse_event;
 } SfVt;
 
 static GhosttyColorRgb rgb(uint32_t v) {
@@ -106,6 +115,8 @@ static bool on_device_attributes(GhosttyTerminal terminal, void *userdata, Ghost
 
 void sf_vt_free(SfVt *t) {
     if (!t) return;
+    if (t->mouse_event) ghostty_mouse_event_free(t->mouse_event);
+    if (t->mouse) ghostty_mouse_encoder_free(t->mouse);
     if (t->cells) ghostty_render_state_row_cells_free(t->cells);
     if (t->rows) ghostty_render_state_row_iterator_free(t->rows);
     if (t->render) ghostty_render_state_free(t->render);
@@ -307,4 +318,87 @@ const uint32_t *sf_vt_snapshot(SfVt *t, size_t *len) {
     if (extra_count) memcpy(t->snap + SF_HEADER + cell_words, t->extras, extra_count * sizeof(uint32_t));
     *len = total;
     return t->snap;
+}
+
+/// Move the viewport over the scrollback: `kind` 0 by `delta` rows (up is
+/// negative), 1 to the top, 2 back to the bottom (the active area).
+void sf_vt_scroll(SfVt *t, int kind, intptr_t delta) {
+    if (!t) return;
+    GhosttyTerminalScrollViewport s;
+    memset(&s, 0, sizeof(s));
+    switch (kind) {
+    case 1: s.tag = GHOSTTY_SCROLL_VIEWPORT_TOP; break;
+    case 2: s.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM; break;
+    default:
+        s.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+        s.value.delta = delta;
+        break;
+    }
+    ghostty_terminal_scroll_viewport(t->terminal, s);
+}
+
+/// Where the viewport sits: out[0] rows in all (scrollback + screen),
+/// out[1] the viewport's first row among them, out[2] the viewport's rows.
+/// 0 on success.
+int sf_vt_scrollbar(SfVt *t, uint64_t *out) {
+    if (!t || !out) return -1;
+    GhosttyTerminalScrollbar sb;
+    memset(&sb, 0, sizeof(sb));
+    if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &sb) != GHOSTTY_SUCCESS) return -1;
+    out[0] = sb.total;
+    out[1] = sb.offset;
+    out[2] = sb.len;
+    return 0;
+}
+
+/// What a wheel and the arrow keys should do (SF_MODE_* bits): the program
+/// tracks the mouse, the alternate screen is up, alternate scroll (1007) is
+/// on, application cursor keys (DECCKM) are on.
+uint32_t sf_vt_input_modes(SfVt *t) {
+    if (!t) return 0;
+    uint32_t bits = 0;
+    bool on = false;
+    if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &on) == GHOSTTY_SUCCESS && on) bits |= SF_MODE_MOUSE;
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) == GHOSTTY_SUCCESS && screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE)
+        bits |= SF_MODE_ALT_SCREEN;
+    on = false;
+    if (ghostty_terminal_mode_get(t->terminal, GHOSTTY_MODE_ALT_SCROLL, &on) == GHOSTTY_SUCCESS && on) bits |= SF_MODE_ALT_SCROLL;
+    on = false;
+    if (ghostty_terminal_mode_get(t->terminal, GHOSTTY_MODE_DECCKM, &on) == GHOSTTY_SUCCESS && on) bits |= SF_MODE_CURSOR_KEYS;
+    return bits;
+}
+
+/// One wheel notch at cell (`col`, `row`), encoded the way the program asked
+/// for mouse reports (format and tracking mode come from the terminal):
+/// button 4 for `up`, else 5. Returns the bytes written to `out`, 0 when the
+/// program tracks no mouse (or `cap` is too small).
+size_t sf_vt_mouse_wheel(SfVt *t, int up, uint16_t col, uint16_t row, uint8_t *out, size_t cap) {
+    if (!t || !out || cap == 0) return 0;
+    if (!t->mouse && ghostty_mouse_encoder_new(NULL, &t->mouse) != GHOSTTY_SUCCESS) return 0;
+    if (!t->mouse_event && ghostty_mouse_event_new(NULL, &t->mouse_event) != GHOSTTY_SUCCESS) return 0;
+    uint16_t cols = 0, rows = 0;
+    ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols);
+    ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows);
+    if (cols == 0 || rows == 0) return 0;
+    if (col >= cols) col = cols - 1;
+    if (row >= rows) row = rows - 1;
+    ghostty_mouse_encoder_setopt_from_terminal(t->mouse, t->terminal);
+    // Positions in cells: one "pixel" per cell, no padding.
+    GhosttyMouseEncoderSize size;
+    memset(&size, 0, sizeof(size));
+    size.size = sizeof(size);
+    size.screen_width = cols;
+    size.screen_height = rows;
+    size.cell_width = 1;
+    size.cell_height = 1;
+    ghostty_mouse_encoder_setopt(t->mouse, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+    ghostty_mouse_event_set_action(t->mouse_event, GHOSTTY_MOUSE_ACTION_PRESS);
+    ghostty_mouse_event_set_button(t->mouse_event, up ? GHOSTTY_MOUSE_BUTTON_FOUR : GHOSTTY_MOUSE_BUTTON_FIVE);
+    ghostty_mouse_event_set_mods(t->mouse_event, 0);
+    GhosttyMousePosition pos = {(float)col + 0.5f, (float)row + 0.5f};
+    ghostty_mouse_event_set_position(t->mouse_event, pos);
+    size_t len = 0;
+    if (ghostty_mouse_encoder_encode(t->mouse, t->mouse_event, (char *)out, cap, &len) != GHOSTTY_SUCCESS) return 0;
+    return len;
 }

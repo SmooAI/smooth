@@ -11,14 +11,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use smooth_flow_client::attention::{self, Approval, Attention};
 use smooth_flow_client::close::{self, Scope};
+use smooth_flow_client::diff::Base;
+use smooth_flow_client::gate::{CenterTab, Gate};
 use smooth_flow_client::harness::Harness;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::{Direction, PaneId, Rect};
 use smooth_flow_client::surfaces::Surfaces;
 use smooth_flow_client::{fleet, title, Session};
 
+use crate::diff::{KeyOutcome, Viewer};
 use crate::discovery::Endpoint;
 use crate::frames::{self, Decision, Inbound, NewSession};
+use crate::ghostty::Scroll;
 use crate::http::{self, Inferred, RepoList};
 use crate::keys;
 use crate::layout::{self, CellMetrics};
@@ -59,12 +63,20 @@ pub enum Confirmed {
         session: String,
         resume: bool,
     },
-    /// Close Out (`flow.close`, never forced): kill it if live, close its
-    /// pearl, remove its own worktree and branch once merged, drop the row.
+    /// Close Out (`flow.close`): kill it if live, close its pearl, remove
+    /// its own worktree and branch once merged, drop the row. `force` only
+    /// ever comes from the Force close button on an engine refusal.
     CloseOut {
         session: String,
         close_pearl: bool,
         remove_worktree: bool,
+        force: bool,
+    },
+    /// Revert one hunk (the Diff tab, `flow.diff.revert`, never forced).
+    DiffRevert {
+        session: String,
+        base: Base,
+        hunk_id: String,
     },
 }
 
@@ -133,11 +145,62 @@ pub fn close_out_dialog(s: &Session, home: &str) -> Dialog {
                 session: s.id.clone(),
                 close_pearl: s.pearl_id.is_some(),
                 remove_worktree: own,
+                force: false,
             },
         )],
         offers_dont_ask: false,
         cancel: "Cancel".into(),
     }
+}
+
+/// The engine refused Close Out `c` with `message` (dirty or unmerged
+/// worktree, an adopted session still running; nothing was touched). The
+/// reason is shown verbatim. An unforced close then offers **Force close** —
+/// the Mac's follow-up, offered only now that the reason has been read, with
+/// "Keep it" as the Enter/Esc default. A forced close that is refused anyway
+/// offers nothing more.
+#[must_use]
+pub fn close_refused_dialog(c: &Closing, message: &str) -> Dialog {
+    if c.force {
+        return Dialog {
+            title: format!("Couldn't close out {}", c.name),
+            message: format!("{message}\nThe session is still in the fleet."),
+            buttons: Vec::new(),
+            offers_dont_ask: false,
+            cancel: "OK".into(),
+        };
+    }
+    let what = if c.remove_worktree {
+        "Force removes the worktree and its branch anyway — uncommitted and unmerged work goes with it."
+    } else {
+        "Force closes it out anyway."
+    };
+    Dialog {
+        title: format!("Not closed · {}", c.name),
+        message: format!("{message}\nNothing was touched. {what}"),
+        buttons: vec![(
+            "Force close".into(),
+            Confirmed::CloseOut {
+                session: c.session.clone(),
+                close_pearl: c.close_pearl,
+                remove_worktree: c.remove_worktree,
+                force: true,
+            },
+        )],
+        offers_dont_ask: false,
+        cancel: "Keep it".into(),
+    }
+}
+
+/// A Close Out in flight, until the engine removes the row or refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Closing {
+    pub session: String,
+    /// Its title when it was sent (the row may be gone by the answer).
+    pub name: String,
+    pub close_pearl: bool,
+    pub remove_worktree: bool,
+    pub force: bool,
 }
 
 /// An HTTP read the New Session sheet asked for (`GET /api/flow/repos` or
@@ -213,10 +276,16 @@ pub struct Core {
     pub notice: Option<String>,
     /// The `seq` the next request that wants an answer carries.
     next_seq: u64,
-    /// Close Outs in flight: `seq` → (session id, its title). The engine
-    /// answers with `flow.session.removed`, or `flow.error` whose `ref` is
-    /// the seq.
-    closing: HashMap<u64, (String, String)>,
+    /// Close Outs in flight by `seq`. The engine answers with
+    /// `flow.session.removed`, or `flow.error` whose `ref` is the seq.
+    closing: HashMap<u64, Closing>,
+    /// Wheel movement per pane not yet a whole line (trackpads send pixels).
+    wheel_rest: HashMap<PaneId, f32>,
+    /// The center tab on screen (spec §4): the focused pane's terminal(s),
+    /// or the focused session's Diff.
+    pub center: CenterTab,
+    /// The Diff tab (spec §14).
+    pub diff: Viewer,
 }
 
 impl Core {
@@ -225,6 +294,8 @@ impl Core {
     #[must_use]
     pub fn new(out: Outbox, keymap: Keymap, home: String) -> Self {
         Self {
+            diff: Viewer::new(out.clone()),
+            center: CenterTab::Terminal,
             out,
             connection: Connection::Connecting,
             machine: String::new(),
@@ -252,6 +323,7 @@ impl Core {
             notice: None,
             next_seq: 1,
             closing: HashMap::new(),
+            wheel_rest: HashMap::new(),
         }
     }
 
@@ -382,13 +454,14 @@ impl Core {
                 let done: Vec<String> = self
                     .closing
                     .values()
-                    .filter(|(id, _)| !self.sessions.contains_key(id))
-                    .map(|(_, n)| n.clone())
+                    .filter(|c| !self.sessions.contains_key(&c.session))
+                    .map(|c| c.name.clone())
                     .collect();
                 if let Some(name) = done.last() {
                     self.notice = Some(format!("Closed out {name}."));
                 }
                 self.closing.clear();
+                self.diff.reconnected();
             }
             Event::Frame(Inbound::Session(row)) => {
                 let id = row.session.id.clone();
@@ -397,9 +470,9 @@ impl Core {
                 }
             }
             Event::Frame(Inbound::Removed(id)) => {
-                let closed: Vec<u64> = self.closing.iter().filter(|(_, (s, _))| *s == id).map(|(seq, _)| *seq).collect();
-                if let Some((_, name)) = closed.iter().filter_map(|seq| self.closing.remove(seq)).last() {
-                    self.notice = Some(format!("Closed out {name}."));
+                let closed: Vec<u64> = self.closing.iter().filter(|(_, c)| c.session == id).map(|(seq, _)| *seq).collect();
+                if let Some(c) = closed.iter().filter_map(|seq| self.closing.remove(seq)).last() {
+                    self.notice = Some(format!("Closed out {}.", c.name));
                 }
                 self.order.retain(|x| *x != id);
                 self.sessions.remove(&id);
@@ -426,21 +499,69 @@ impl Core {
                     self.out.send(frames::input(&id, &replies));
                 }
             }
-            Event::Frame(Inbound::Error { reference, message }) => match reference.and_then(|r| self.closing.remove(&r)) {
-                // A refused Close Out: the engine's reason, verbatim, in a
-                // dialog of its own, so it can't be missed. Nothing forces it
-                // from here.
-                Some((_, name)) => {
-                    self.dialog = Some(Dialog {
-                        title: format!("Couldn't close out {name}"),
-                        message: format!("{message}\nThe session is still in the fleet."),
-                        buttons: Vec::new(),
-                        offers_dont_ask: false,
-                        cancel: "OK".into(),
-                    });
+            Event::Frame(Inbound::Diff { id, base, path, diff }) => self.diff.received(&id, base, path.as_deref(), *diff),
+            Event::Frame(Inbound::DiffResult { id, action, file }) => self.diff.result(&id, &action, file.as_deref()),
+            Event::Frame(Inbound::DiffChanged(id)) => {
+                if self.center == CenterTab::Diff {
+                    self.diff.changed(&id);
                 }
+            }
+            Event::Frame(Inbound::Error { reference, code, message }) => match reference.and_then(|r| self.closing.remove(&r)) {
+                // A refused Close Out: the engine's reason, verbatim, in a
+                // dialog of its own, so it can't be missed — with Force
+                // close offered only now ([`close_refused_dialog`]).
+                Some(c) => {
+                    self.notice = None;
+                    self.dialog = Some(close_refused_dialog(&c, &message));
+                }
+                // The Diff tab's own requests report in its status line.
+                None if reference.is_some_and(|r| self.diff.failed(r, code.as_deref(), &message)) => {}
                 None => self.notice = Some(message),
             },
+        }
+        self.sync_center();
+    }
+
+    // ── center tabs ─────────────────────────────────────────────────────
+
+    /// The gate for the focused session (spec §4): Diff follows the worktree.
+    #[must_use]
+    pub fn gate(&self) -> Gate {
+        let Some(s) = self.surfaces.focused_session().and_then(|id| self.sessions.get(id)) else {
+            return Gate::NOTHING;
+        };
+        let source = self.harnesses.iter().find(|h| h.name == s.kind).map(|h| h.state_source.as_str());
+        Gate::of(&s.kind, s.branch.as_deref(), source, None)
+    }
+
+    /// Keep the center tab honest: back to Terminal when the focused
+    /// session can't have the tab, and the Diff shows the focused session.
+    pub fn sync_center(&mut self) {
+        self.center = self.gate().resolve(self.center);
+        if self.center == CenterTab::Diff {
+            let s = self.surfaces.focused_session().and_then(|id| self.sessions.get(id));
+            self.diff.show(s.map(|s| (s.id.as_str(), s.kind.as_str())));
+        }
+    }
+
+    /// Switch the center tab; a disabled one says why instead.
+    pub fn view(&mut self, tab: CenterTab) {
+        let gate = self.gate();
+        if let Some(why) = gate.why_not(tab) {
+            self.notice = Some(format!("{tab:?}: {why}"));
+            return;
+        }
+        if !matches!(tab, CenterTab::Terminal | CenterTab::Diff) {
+            self.notice = Some(format!("{tab:?} isn't in this build yet"));
+            return;
+        }
+        // Coming back to a session's Diff: it may have moved meanwhile
+        // (changes are only followed while the tab is on screen).
+        let back = self.center != CenterTab::Diff && tab == CenterTab::Diff && self.diff.session.as_deref() == self.surfaces.focused_session();
+        self.center = tab;
+        self.sync_center();
+        if back {
+            self.diff.request();
         }
     }
 
@@ -546,16 +667,116 @@ impl Core {
             let effects = sheet.key(key.key, key.key_char, key.control || key.platform, key.shift);
             return self.run_effects(effects);
         }
+        let diff = self.center == CenterTab::Diff;
+        // A comment being typed gets every key, chords included (Ctrl+U).
+        if diff && self.diff.draft.is_some() {
+            self.diff_key(key);
+            return Vec::new();
+        }
         if let Some(action) = self.keymap.action_for(&keys::chord(key)) {
             return self.act(action);
+        }
+        if diff {
+            // The Diff tab's bare keys; nothing reaches the terminal.
+            self.diff_key(key);
+            return Vec::new();
+        }
+        if self.scroll_key(key) {
+            return Vec::new();
         }
         let Some(id) = self.surfaces.focused_session().filter(|id| self.attached.contains_key(*id)).map(str::to_string) else {
             return Vec::new();
         };
         if let Some(bytes) = keys::encode(key) {
+            // Typing snaps a scrolled-back pane to the live screen; output
+            // never does (Ghostty's `scroll-to-bottom = keystroke`).
+            if let Some(t) = self.terminals.get_mut(&id) {
+                t.scroll(Scroll::Bottom);
+            }
             self.out.send(frames::input(&id, &bytes));
         }
         Vec::new()
+    }
+
+    /// Shift+PageUp / PageDown / Home / End scroll the focused pane's
+    /// history, as in Ghostty. Not on the alternate screen: it has no
+    /// history, so there the keys are the program's (less, vim). `true` when
+    /// the key was taken.
+    fn scroll_key(&mut self, key: keys::Key<'_>) -> bool {
+        if !key.shift || key.control || key.alt || key.platform {
+            return false;
+        }
+        let Some(t) = self.surfaces.focused_session().and_then(|id| self.terminals.get_mut(id)) else {
+            return false;
+        };
+        let page = isize::try_from(t.size().1.saturating_sub(1).max(1)).unwrap_or(isize::MAX);
+        let to = match key.key {
+            "pageup" => Scroll::Delta(-page),
+            "pagedown" => Scroll::Delta(page),
+            "home" => Scroll::Top,
+            "end" => Scroll::Bottom,
+            _ => return false,
+        };
+        if t.alt_screen() {
+            return false;
+        }
+        t.scroll(to);
+        true
+    }
+
+    /// A wheel or trackpad over `pane`: `lines` rows, up (into the history)
+    /// positive, fractions carried to the next event; (`col`, `row`) is the
+    /// cell under the pointer. By Ghostty's rules ([`crate::terminal::WheelRoute`])
+    /// it scrolls the history, or — when the program tracks the mouse, or on
+    /// the alternate screen — becomes mouse reports or arrow keys typed into
+    /// the session (only when it is attached). `true` when something changed.
+    pub fn wheel(&mut self, pane: PaneId, lines: f32, col: usize, row: usize) -> bool {
+        let Some(id) = self.surfaces.session_of(pane).map(str::to_string) else {
+            return false;
+        };
+        let rest = self.wheel_rest.entry(pane).or_insert(0.0);
+        // A change of direction drops what was left of the other one.
+        if rest.signum() * lines.signum() < 0.0 {
+            *rest = 0.0;
+        }
+        *rest += lines;
+        let whole = rest.trunc();
+        *rest -= whole;
+        #[allow(clippy::cast_possible_truncation, reason = "whole lines from a wheel event")]
+        let whole = whole as isize;
+        if whole == 0 {
+            return false;
+        }
+        let Some(t) = self.terminals.get_mut(&id) else { return false };
+        let bytes = t.wheel(whole, col, row);
+        if !bytes.is_empty() && self.attached.contains_key(&id) {
+            self.out.send(frames::input(&id, &bytes));
+        }
+        true
+    }
+
+    fn diff_key(&mut self, key: keys::Key<'_>) {
+        if let KeyOutcome::Revert(ask) = self.diff.key(key.key, key.key_char, key.shift, key.control || key.alt || key.platform) {
+            self.ask_revert(ask);
+        }
+    }
+
+    /// The Revert confirmation (a hunk's button, or `r`). Cancel is the default.
+    pub fn ask_revert(&mut self, ask: crate::diff::RevertAsk) {
+        self.dialog = Some(Dialog {
+            title: ask.title,
+            message: ask.message,
+            buttons: vec![(
+                "Revert".into(),
+                Confirmed::DiffRevert {
+                    session: ask.session,
+                    base: ask.base,
+                    hunk_id: ask.hunk_id,
+                },
+            )],
+            offers_dont_ask: false,
+            cancel: "Cancel".into(),
+        });
     }
 
     /// Run a keymap action (also what the buttons call).
@@ -590,6 +811,10 @@ impl Core {
             Action::ZoomPane => self.surfaces.toggle_zoom(),
             Action::EqualizePanes => self.surfaces.equalize(),
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::ViewTerminal => self.view(CenterTab::Terminal),
+            Action::ViewDiff => self.view(CenterTab::Diff),
+            Action::ViewPr => self.view(CenterTab::Pr),
+            Action::ViewActivity => self.view(CenterTab::Activity),
             other => {
                 if let Some(i) = other.focus_session_index() {
                     if let Some(id) = self.sidebar_order().get(i).cloned() {
@@ -600,12 +825,14 @@ impl Core {
                 }
             }
         }
+        self.sync_center();
         Vec::new()
     }
 
     /// A fleet row was picked: the focused pane shows it.
     pub fn show_session(&mut self, id: &str) {
         self.surfaces.show(id);
+        self.sync_center();
         if let Some(s) = self.sessions.get_mut(id) {
             if s.unread {
                 s.unread = false;
@@ -717,14 +944,25 @@ impl Core {
                 session,
                 close_pearl,
                 remove_worktree,
+                force,
             } => {
                 let seq = self.next_seq;
                 self.next_seq += 1;
                 let name = self.sessions.get(&session).map_or_else(|| session.clone(), |s| title::tab_title(s, &self.home));
-                self.out.send(frames::close(&session, close_pearl, remove_worktree, seq));
-                self.notice = Some(format!("Closing out {name}…"));
-                self.closing.insert(seq, (session, name));
+                self.out.send(frames::close(&session, close_pearl, remove_worktree, force, seq));
+                self.notice = Some(format!("{} {name}…", if force { "Force closing" } else { "Closing out" }));
+                self.closing.insert(
+                    seq,
+                    Closing {
+                        session,
+                        name,
+                        close_pearl,
+                        remove_worktree,
+                        force,
+                    },
+                );
             }
+            Confirmed::DiffRevert { session, base, hunk_id } => self.diff.revert(&session, base, &hunk_id),
         }
     }
 
@@ -946,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_close_out_is_shown_verbatim_and_never_forced() {
+    fn a_refused_close_out_is_shown_verbatim_then_force_is_offered() {
         let (mut c, mut rx) = core();
         connected(&mut c);
         c.apply(hello(
@@ -959,32 +1197,231 @@ mod tests {
         assert!(!d.message.contains("kills it first"));
         assert!(d.message.contains("No pearl on this session."));
         c.confirm(d.buttons[0].1.clone());
-        let seq = sent(&mut rx)[0]["seq"].as_u64().expect("seq");
+        let first = sent(&mut rx);
+        assert_eq!(first[0]["force"], false, "the first Close Out never forces");
+        let seq = first[0]["seq"].as_u64().expect("seq");
 
         // An unrelated error stays in the footer.
         c.apply(Event::Frame(Inbound::Error {
             reference: Some(seq + 100),
+            code: None,
             message: "other".into(),
         }));
         assert!(c.dialog.is_none());
         assert_eq!(c.notice.as_deref(), Some("other"));
 
-        c.apply(Event::Frame(Inbound::Error {
-            reference: Some(seq),
-            message: "branch b is not merged into /p — merge the PR first, or close with force".into(),
-        }));
+        let refuse = |c: &mut Core, seq: u64| {
+            c.apply(Event::Frame(Inbound::Error {
+                reference: Some(seq),
+                code: None,
+                message: "branch b is not merged into /p — merge the PR first, or close with force".into(),
+            }));
+        };
+        refuse(&mut c, seq);
         let r = c.dialog.clone().expect("the refusal gets a dialog");
-        assert!(r.title.starts_with("Couldn't close out"), "{}", r.title);
+        assert!(r.title.starts_with("Not closed"), "{}", r.title);
         assert!(r.message.starts_with("branch b is not merged into /p"), "verbatim: {}", r.message);
-        assert!(r.buttons.is_empty(), "no Force here");
-        assert_eq!(r.cancel, "OK");
+        assert!(
+            r.message.contains("Nothing was touched") && r.message.contains("worktree and its branch"),
+            "{}",
+            r.message
+        );
+        assert_eq!(r.cancel, "Keep it", "keeping it is the Enter/Esc default");
+        assert_eq!(r.buttons.len(), 1);
+        assert_eq!(r.buttons[0].0, "Force close");
+        assert_eq!(
+            r.buttons[0].1,
+            Confirmed::CloseOut {
+                session: "fs-1".into(),
+                close_pearl: false,
+                remove_worktree: true,
+                force: true,
+            },
+            "force repeats the refused request"
+        );
         assert!(c.sessions.contains_key("fs-1"), "a refused close keeps the row");
+        assert!(sent(&mut rx).is_empty(), "nothing is forced until you press it");
+
+        // Enter keeps it: nothing is sent.
         c.key(keys::Key {
             key: "enter",
             ..keys::Key::default()
         });
         assert!(c.dialog.is_none());
         assert!(sent(&mut rx).is_empty(), "dismissing a refusal sends nothing (no forced retry)");
+
+        // Refused again; this time Force close.
+        c.close_out("fs-1");
+        let d = c.dialog.clone().expect("dialog");
+        c.confirm(d.buttons[0].1.clone());
+        let seq = sent(&mut rx)[0]["seq"].as_u64().expect("seq");
+        refuse(&mut c, seq);
+        let force = c.dialog.clone().expect("refusal").buttons[0].1.clone();
+        c.confirm(force);
+        let v = sent(&mut rx);
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0]["type"].as_str(), v[0]["force"].as_bool()), (Some("flow.close"), Some(true)));
+        assert_eq!(v[0]["remove_worktree"], true);
+        assert_eq!(c.notice.as_deref(), Some("Force closing t…"));
+
+        // A forced close refused anyway offers nothing further.
+        let seq = v[0]["seq"].as_u64().expect("seq");
+        c.apply(Event::Frame(Inbound::Error {
+            reference: Some(seq),
+            code: None,
+            message: "git worktree remove failed".into(),
+        }));
+        let r = c.dialog.clone().expect("dialog");
+        assert!(r.buttons.is_empty(), "no second Force");
+        assert_eq!((r.cancel.as_str(), r.title.as_str()), ("OK", "Couldn't close out t"));
+
+        // An accepted force drops the row like any Close Out.
+        c.dialog = None;
+        c.close_out("fs-1");
+        c.confirm(c.dialog.clone().expect("dialog").buttons[0].1.clone());
+        let seq = sent(&mut rx)[0]["seq"].as_u64().expect("seq");
+        refuse(&mut c, seq);
+        c.confirm(c.dialog.clone().expect("refusal").buttons[0].1.clone());
+        sent(&mut rx);
+        c.apply(Event::Frame(Inbound::Removed("fs-1".into())));
+        assert!(c.sessions.is_empty());
+        assert_eq!(c.notice.as_deref(), Some("Closed out t."));
+    }
+
+    #[test]
+    fn force_on_a_session_with_no_worktree_says_only_that_it_closes() {
+        let c = Closing {
+            session: "fs-1".into(),
+            name: "x".into(),
+            close_pearl: true,
+            remove_worktree: false,
+            force: false,
+        };
+        let d = close_refused_dialog(
+            &c,
+            "session fs-1 is adopted and still working — stop it where it is running, or close with force",
+        );
+        assert!(d.message.ends_with("Force closes it out anyway."), "{}", d.message);
+        assert!(matches!(
+            &d.buttons[0].1,
+            Confirmed::CloseOut {
+                close_pearl: true,
+                remove_worktree: false,
+                force: true,
+                ..
+            }
+        ));
+    }
+
+    /// A shell with `n` numbered lines of output, attached and focused.
+    fn scrolled_shell(n: usize) -> (Core, tokio::sync::mpsc::UnboundedReceiver<String>, PaneId) {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(r#"{"id":"fs-1","kind":"shell","state":"idle"}"#));
+        c.layout(AREA, METRICS);
+        let out: String = (1..=n).map(|i| format!("line {i}\r\n")).collect();
+        c.apply(Event::Frame(Inbound::Output {
+            id: "fs-1".into(),
+            seq: 1,
+            bytes: out.into_bytes(),
+        }));
+        sent(&mut rx);
+        let pane = c.surfaces.focused_pane();
+        (c, rx, pane)
+    }
+
+    fn shift(key: &str) -> keys::Key<'_> {
+        keys::Key {
+            key,
+            shift: true,
+            ..keys::Key::default()
+        }
+    }
+
+    #[test]
+    fn shift_page_keys_scroll_the_history_and_typing_snaps_back() {
+        let (mut c, mut rx, _) = scrolled_shell(100);
+        let term = |c: &Core| c.terminals["fs-1"].line_text(0);
+        assert_eq!(term(&c), "line 78", "24 rows: lines 78–100 and the prompt row");
+        c.key(shift("pageup"));
+        assert_eq!(term(&c), "line 55", "a page is the screen less one line");
+        c.key(shift("home"));
+        assert_eq!(term(&c), "line 1");
+        c.key(shift("pagedown"));
+        assert_eq!(term(&c), "line 24");
+        c.key(shift("end"));
+        assert!(c.terminals["fs-1"].at_bottom());
+        assert!(sent(&mut rx).is_empty(), "scrolling sends nothing");
+
+        c.key(shift("pageup"));
+        // Output does not move a scrolled-back pane…
+        c.apply(Event::Frame(Inbound::Output {
+            id: "fs-1".into(),
+            seq: 2,
+            bytes: b"more\r\n".to_vec(),
+        }));
+        assert!(!c.terminals["fs-1"].at_bottom());
+        // …typing does, and the key still goes to the session.
+        c.key(keys::Key {
+            key: "a",
+            key_char: Some("a"),
+            ..keys::Key::default()
+        });
+        assert!(c.terminals["fs-1"].at_bottom());
+        assert_eq!(sent(&mut rx)[0]["type"], "flow.input");
+        // Ctrl+PageUp is still Previous Tab, never a scroll.
+        c.key(keys::Key {
+            key: "pageup",
+            control: true,
+            ..keys::Key::default()
+        });
+        assert!(c.terminals["fs-1"].at_bottom());
+    }
+
+    #[test]
+    fn shift_page_keys_belong_to_a_full_screen_program() {
+        let (mut c, mut rx, _) = scrolled_shell(100);
+        c.apply(Event::Frame(Inbound::Output {
+            id: "fs-1".into(),
+            seq: 2,
+            bytes: b"\x1b[?1049h".to_vec(),
+        }));
+        c.key(shift("pageup"));
+        let v = sent(&mut rx);
+        assert_eq!(v.len(), 1, "less/vim get Shift+PageUp on the alternate screen");
+        assert_eq!(v[0]["data_b64"], "G1s1fg==", "ESC [5~");
+    }
+
+    #[test]
+    fn the_wheel_accumulates_trackpad_fractions_and_routes_like_ghostty() {
+        let (mut c, mut rx, pane) = scrolled_shell(100);
+        let top = |c: &Core| c.terminals["fs-1"].line_text(0);
+        assert!(!c.wheel(pane, 0.4, 0, 0), "under a line: nothing yet");
+        assert!(c.wheel(pane, 0.7, 0, 0));
+        assert_eq!(top(&c), "line 77", "0.4 + 0.7 is one line");
+        assert!(!c.wheel(pane, -0.5, 0, 0), "a reversal drops the leftover");
+        assert!(c.wheel(pane, -1.5, 0, 0));
+        assert!(c.terminals["fs-1"].at_bottom());
+        assert!(sent(&mut rx).is_empty(), "history scrolling sends nothing");
+
+        // A program that tracks the mouse gets reports instead.
+        c.apply(Event::Frame(Inbound::Output {
+            id: "fs-1".into(),
+            seq: 2,
+            bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+        }));
+        assert!(c.wheel(pane, 2.0, 4, 1));
+        let v = sent(&mut rx);
+        assert_eq!(v.len(), 1);
+        // base64 of ESC[<64;5;2M twice.
+        assert_eq!(v[0]["data_b64"], "G1s8NjQ7NTsyTRtbPDY0OzU7Mk0=");
+        assert!(c.terminals["fs-1"].at_bottom());
+
+        // An empty pane ignores the wheel.
+        c.surfaces.new_tab(None);
+        let empty = c.surfaces.focused_pane();
+        assert_eq!(c.surfaces.session_of(empty), None);
+        assert!(!c.wheel(empty, 3.0, 0, 0));
     }
 
     #[test]
@@ -1008,7 +1445,7 @@ mod tests {
             ..keys::Key::default()
         });
         let d = c.dialog.clone().expect("closeOut asks");
-        assert!(matches!(&d.buttons[0].1, Confirmed::CloseOut { session, close_pearl: false, remove_worktree: false } if session == "fs-1"));
+        assert!(matches!(&d.buttons[0].1, Confirmed::CloseOut { session, close_pearl: false, remove_worktree: false, force: false } if session == "fs-1"));
         assert!(d.message.contains("kills it first"), "a live shell is killed first — it says so: {}", d.message);
         c.key(keys::Key {
             key: "escape",
@@ -1049,6 +1486,96 @@ mod tests {
         c.apply(hello(""));
         assert_eq!(c.notice.as_deref(), Some("Closed out sh."));
         assert!(c.closing.is_empty());
+    }
+
+    #[test]
+    fn the_diff_tab_is_gated_by_the_worktree_and_owns_the_keys() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"shell","state":"idle"},{"id":"fs-2","kind":"claude","state":"working","branch":"th-1-x","worktree":"/w"}"#,
+        ));
+        c.show_session("fs-1");
+        sent(&mut rx);
+        c.act(Action::ViewDiff);
+        assert_eq!(c.center, CenterTab::Terminal, "no repo, no Diff");
+        assert_eq!(c.notice.as_deref(), Some("Diff: Not in a git repository"));
+        assert!(sent(&mut rx).is_empty());
+
+        c.show_session("fs-2");
+        c.act(Action::ViewDiff);
+        assert_eq!(c.center, CenterTab::Diff);
+        let r = sent(&mut rx);
+        assert_eq!((r[0]["type"].as_str(), r[0]["base"].as_str()), (Some("flow.diff"), Some("turn")));
+        let seq = r[0]["seq"].as_u64().expect("seq");
+
+        // Bare keys are the viewer's, never typed into the terminal.
+        c.attached.insert("fs-2".into(), (80, 24));
+        c.key(keys::Key {
+            key: "j",
+            key_char: Some("j"),
+            ..keys::Key::default()
+        });
+        assert!(sent(&mut rx).is_empty(), "no flow.input from the Diff tab");
+
+        // The engine refusing the diff request lands in the Diff's status, not the footer.
+        c.notice = None;
+        c.apply(Event::Frame(Inbound::Error {
+            reference: Some(seq),
+            code: Some("failed".into()),
+            message: "not a git repository".into(),
+        }));
+        assert_eq!(c.diff.status.as_deref(), Some("not a git repository"));
+        assert_eq!(c.notice, None);
+
+        // A changed diff on screen refetches; the terminal tab ignores it.
+        c.apply(Event::Frame(Inbound::DiffChanged("fs-2".into())));
+        assert_eq!(sent(&mut rx).len(), 1);
+        let reply = r#"{"type":"flow.diff","id":"fs-2","base":"turn","diff":{"base":"turn","files":[],"legend":[]}}"#;
+        c.apply(Event::Frame(frames::parse(reply).expect("diff")));
+        c.act(Action::ViewTerminal);
+        c.apply(Event::Frame(Inbound::DiffChanged("fs-2".into())));
+        assert!(sent(&mut rx).is_empty());
+        c.act(Action::ViewDiff);
+        assert_eq!(sent(&mut rx).len(), 1, "coming back refreshes");
+
+        // Focusing a shell outside a repo drops back to the terminal.
+        c.show_session("fs-1");
+        assert_eq!(c.center, CenterTab::Terminal);
+    }
+
+    #[test]
+    fn revert_from_the_diff_tab_confirms_with_cancel_as_default() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        c.apply(hello(r#"{"id":"fs-1","kind":"shell","state":"idle","branch":"main"}"#));
+        c.act(Action::ViewDiff);
+        sent(&mut rx);
+        let diff = r#"{"type":"flow.diff","id":"fs-1","base":"uncommitted","diff":{"base":"uncommitted","files":[{"path":"a.rs","status":"modified","added":1,"deleted":0,
+            "hunks":[{"id":"h1","old_start":1,"old_lines":0,"new_start":1,"new_lines":1,"lines":[{"kind":"add","new":1,"text":"x"}]}]}],"legend":[]}}"#;
+        c.apply(Event::Frame(frames::parse(diff).expect("diff")));
+        let press = |c: &mut Core, k: &str| {
+            c.key(keys::Key {
+                key: k,
+                key_char: Some(k),
+                ..keys::Key::default()
+            })
+        };
+        press(&mut c, "n");
+        press(&mut c, "r");
+        let d = c.dialog.clone().expect("Revert asks");
+        assert_eq!((d.cancel.as_str(), d.buttons[0].0.as_str()), ("Cancel", "Revert"));
+        assert!(sent(&mut rx).is_empty());
+        c.key(keys::Key {
+            key: "enter",
+            ..keys::Key::default()
+        });
+        assert!(c.dialog.is_none() && sent(&mut rx).is_empty(), "Enter cancels");
+        press(&mut c, "r");
+        let d = c.dialog.clone().expect("Revert asks");
+        c.confirm(d.buttons[0].1.clone());
+        let r = sent(&mut rx);
+        assert_eq!((r[0]["type"].as_str(), r[0]["hunk_id"].as_str()), (Some("flow.diff.revert"), Some("h1")));
     }
 
     #[test]

@@ -26,9 +26,11 @@ layers, in order of importance:
 2. **`SMOOTH_WORKSPACE=/opt/demo-scratch`** — a throwaway dir with a couple of sample
    files. `read_file`/`list_files`/`grep` are confined here (`resolve_workspace_path`),
    so the reviewer can demo "ask it about these files" without seeing anything real.
-3. **`SMOOTH_EGRESS_ALLOWLIST=llm.smoo.ai,api.smoo.ai,auth.smoo.ai`** — even the
-   surviving network tools can only reach the gateway; everything else is kernel-denied
-   by the goalie proxy.
+3. **`SMOOTH_EGRESS_ALLOWLIST=llm.smoo.ai,api.smoo.ai,auth.smoo.ai`** — the goalie
+   proxy's allowlist for tool subprocesses. It is only kernel-enforced together with
+   **`SMOOTH_SANDBOX=1`** on a macOS host (the kernel sandbox is opt-in and off by
+   default since pearl th-efbab1); otherwise it is advisory. `SMOOTH_DEMO` already
+   removes `bash` and plugins, the tools it governs, so this is defense-in-depth.
 
 Run it on **Linux** for a fourth layer: the macOS personal-data tools
 (calendar/reminders/imessage/contacts/location) are `#[cfg(target_os = "macos")]` and
@@ -55,6 +57,7 @@ them from the allowlist, so macOS hosting is safe too — Linux is defense-in-de
     SMOOTH_DEMO=1 \
     SMOOTH_WORKSPACE=/opt/demo-scratch \
     SMOOTH_EGRESS_ALLOWLIST=llm.smoo.ai,api.smoo.ai,auth.smoo.ai \
+    SMOOTH_SANDBOX=1 \
     SMOOTH_RELAY_LABEL="Big Smooth (Demo)" \
       th daemon
     ```

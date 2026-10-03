@@ -1668,8 +1668,9 @@ fn read_hook_token(path: &std::path::Path) -> Option<String> {
 
 /// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
-/// execution happens inside a hardware-isolated sandbox — smooth-code is
-/// just a rendering client.
+/// execution happens in the daemon (as the user, unless its opt-in
+/// `SMOOTH_SANDBOX=1` kernel sandbox is on) — smooth-code is just a
+/// rendering client.
 async fn run_agent_streaming(
     message: &str,
     tx: mpsc::UnboundedSender<AgentEvent>,

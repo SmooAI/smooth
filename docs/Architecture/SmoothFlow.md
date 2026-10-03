@@ -840,8 +840,9 @@ one-line session summary, the prompt refusal, and `turn_progress`
 - **Demo mode** (`SMOOTH_DEMO`) drops all fifteen, because a reviewer must not
   see the host's sessions. Family roles get them only when a role grants them.
 - **Sidekicks.** A `send_sidekick` snapshot never includes a confirm-gated
-  tool. A sidekick's registry carries none of the turn's hooks, so such a tool
-  would run unconfirmed there.
+  tool. Every sidekick call runs the daemon's host hooks (the permission gate,
+  then Narc; th-8d1951), but the per-turn confirmation gate is not one of them,
+  so such a tool would run unconfirmed there.
 - **Hooks.** The permission gate and Narc see every flow call like any other
   tool.
 - **No sandbox.** A flow session runs on the host, outside the kernel sandbox

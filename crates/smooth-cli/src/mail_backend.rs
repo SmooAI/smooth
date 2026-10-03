@@ -544,6 +544,19 @@ impl Mail {
         }
     }
 
+    /// Unread mail addressed to `agent` by name, broadcasts excluded.
+    ///
+    /// # Errors
+    /// Propagates store/API failures.
+    pub async fn unread_direct_count(&self, agent: &str) -> Result<usize> {
+        match self {
+            Self::Sqlite(s) => s.unread_direct_count(agent),
+            // The cloud inbox has no direct-only count yet; over-reporting only
+            // costs a nudge, so fall back to the full count.
+            Self::Cloud(_) => self.unread_count(agent).await,
+        }
+    }
+
     /// # Errors
     /// Propagates store/API failures.
     pub async fn unread_count(&self, agent: &str) -> Result<usize> {

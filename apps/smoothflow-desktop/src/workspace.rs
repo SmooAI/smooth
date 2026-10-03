@@ -20,6 +20,10 @@ pub use smoothflow_desktop::app_core::Connection;
 pub struct Workspace {
     pub(crate) focus: FocusHandle,
     pub(crate) metrics: Option<CellMetrics>,
+    /// The Diff body's virtualized list.
+    pub(crate) diff_scroll: UniformListScrollHandle,
+    /// The pane area's top-left in the window (sidebar and bars above it).
+    pub(crate) pane_origin: (f32, f32),
     core: Core,
 }
 
@@ -59,6 +63,8 @@ impl Workspace {
         Self {
             focus: cx.focus_handle(),
             metrics: None,
+            diff_scroll: UniformListScrollHandle::new(),
+            pane_origin: (0.0, 0.0),
             core: Core::new(out, keymap, home),
         }
     }
@@ -106,6 +112,11 @@ impl Workspace {
     pub(crate) fn run_effects(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
         let fetches = self.core.run_effects(effects);
         self.fetch(fetches, cx);
+    }
+
+    /// Ask before reverting a hunk (its Revert button).
+    pub(crate) fn ask_revert(&mut self, ask: smoothflow_desktop::diff::RevertAsk) {
+        self.core.ask_revert(ask);
     }
 
     /// A dialog button.

@@ -161,9 +161,15 @@ Normative words: **must**, **should**, **may**.
     - **The engine can refuse.** A dirty or unmerged worktree (or an adopted
       session still running) is refused with nothing touched. The client
       shows the engine's reason verbatim and the row stays. Close Out never
-      sends `force` on its own; the Mac offers Force only in the refusal
-      sheet, after the reason has been read, and SmoothFlow Desktop doesn't
-      offer it yet.
+      sends `force` on its own.
+    - **Force is offered only after a refusal.** The refusal shows the reason
+      verbatim, says nothing was touched, and offers **Force close** beside
+      **Keep it**, which is the default (Enter/Esc). Force close resends the
+      refused request (same `close_pearl` and `remove_worktree`) with
+      `force: true`. It is never a checkbox armed before the reason exists. A
+      forced close that is refused anyway offers nothing further. The Mac
+      offers this on the Inbox card or in a sheet, and SmoothFlow Desktop in
+      the refusal dialog.
 - **Fan out** runs one prompt against N candidates, each with its own
   worktree and child pearl. **Pick winner** merges one and garbage-collects
   the others.
@@ -223,6 +229,24 @@ control.
   bytes written to the terminal in `seq` order. Input is `flow.input{data_b64}`
   (keyboard and mouse encodings, bracketed paste). Resize sends `flow.resize`.
   A late joiner gets a full redraw from the engine.
+- **Scrollback**, following Ghostty's rules:
+    - The wheel or trackpad scrolls the history. It sends the program mouse
+      reports instead when the program asked for them (1000/1002/1003: vim,
+      htop, Claude Code's TUI). On the alternate screen with alternate scroll
+      (1007, on by default) it sends arrow keys instead, `ESC O A` under
+      DECCKM. A fling sends at most 30 of either.
+    - Shift+PageUp/PageDown/Home/End page through the history and jump to its
+      top or bottom. On the alternate screen, which has no history, these keys
+      go to the program.
+    - Typing snaps a scrolled-back pane to the live screen. New output leaves
+      it where it is (Ghostty's `scroll-to-bottom = keystroke`).
+    - A scrolled-back pane shows how far back it is.
+    - Live sessions stream a `tmux attach` client, and tmux draws on the
+      alternate screen. On every client today, the wheel over a live session
+      therefore sends arrow keys, and the client's own history stays empty.
+      The session's real history is in tmux (`history-limit`).
+- Faint (SGR 2) draws at reduced alpha, and strikethrough (SGR 9) draws as a
+  line, beside bold, italic, underline and inverse.
 - IME, selection and copy, links, scrollback search, and font size zoom.
 - Phones must render live `flow.output` in a real terminal. `flow.screen` text
   is for thumbnails and the fleet list only.
@@ -279,6 +303,9 @@ control.
 - 2026-10-02: §14 Diff — the native review viewer over structured diffs by
   turn, with `spec/vectors/diff.json` (th-26f5b9). SmoothFlow for Mac ships it
   first; desktop and phones follow.
+- 2026-10-03: §14 Diff — long lines scroll sideways instead of clipping, and
+  comments are multi-line (Ctrl/⌘+Enter adds one). SmoothFlow Desktop first
+  (th-4ec2f6).
 - 2026-10-02: middle-clicking a fleet sidebar row closes that session out on
   the desktop clients (Mac and SmoothFlow Desktop), through the usual Close
   Out confirmation. Close Out now always asks first and shows an engine
@@ -292,6 +319,10 @@ control.
   `surfaces.json`. They are additive; the existing six files are unchanged. A
   chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
   SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
+- 2026-10-03: §10 scrollback and faint/strikethrough, written from Ghostty's
+  behaviour on the Mac, and §7 Force close after a refused Close Out.
+  SmoothFlow Desktop implements both (th-1977a8). The Mac already behaved
+  this way.
 - 2026-10-02: SmoothFlow Desktop parses VT with libghostty-vt instead of
   `alacritty_terminal` (th-872ea8). It links the same pinned manaflow-ai/ghostty
   commit as the Mac, iOS and Android apps, built from source with Zig on macOS,
@@ -332,12 +363,28 @@ all come from the engine. No client embeds a web view for it.
   default is Cancel; Stage / Unstage on the Uncommitted view only (`staged`
   marks a hunk already in the index). A `stale` error refreshes the diff and
   says the hunk changed.
+- **Long lines** are never wrapped or cut off: the diff body scrolls
+  sideways (wheel or trackpad; shift+wheel; on desktop `←`/`→` too) as far as
+  the widest line. On desktop the line-number gutters stay put while the code
+  scrolls, and side by side both panes move together.
 - **Comments:** on a line, a range within one hunk, or a file. Clicking the
   line-number gutter comments on that line; shift-click extends to a range.
+  A comment is multi-line: Enter adds a line, Ctrl/⌘+Enter adds the comment,
+  Esc drops it; the box grows to a few lines, then scrolls.
   Comments show inline under the last line of their range until sent. "Send
   review to agent (N)" sends all of them in one `flow.diff.review`; a
   `blocked` error is shown, never dropped. Shells have no review.
 - **Refresh** on `flow.diff.changed` for the session on screen, and on demand.
+  A client may ignore `flow.diff.changed` while the Diff tab is not showing
+  and refetch when the user comes back to it. Keep one whole-diff request in
+  flight; a change that lands meanwhile queues exactly one refetch.
+- **Paging:** a file with `hunks_omitted: "budget"` (the frame ran out of
+  room) is not collapsed; its hunks are fetched with `flow.diff{path}` when
+  it scrolls into view or is selected in the tree, once per file until the
+  page lands. Noise files (`collapsed`) wait for Show.
+- **Errors** are matched to their request: send a `seq` on every diff frame
+  and read the engine's `flow.error` `ref`/`code`. Show the `message`
+  verbatim (`stale: …`, `blocked: …`); never retry or force.
 - **Truncation** is always visible: banners for `diff.truncated`, notices for
   `file.truncated`, `hunk.truncated` and `line.truncated`.
 - **Keys** (desktop; live only while the diff has focus — bare keys, never

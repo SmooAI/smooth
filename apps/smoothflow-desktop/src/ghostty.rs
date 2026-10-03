@@ -23,6 +23,10 @@ extern "C" {
     fn sf_vt_reply(t: *const SfVt, len: *mut usize) -> *const u8;
     fn sf_vt_reply_clear(t: *mut SfVt);
     fn sf_vt_snapshot(t: *mut SfVt, len: *mut usize) -> *const u32;
+    fn sf_vt_scroll(t: *mut SfVt, kind: i32, delta: isize);
+    fn sf_vt_scrollbar(t: *mut SfVt, out: *mut u64) -> i32;
+    fn sf_vt_input_modes(t: *mut SfVt) -> u32;
+    fn sf_vt_mouse_wheel(t: *mut SfVt, up: i32, col: u16, row: u16, out: *mut u8, cap: usize) -> usize;
 }
 
 // Snapshot layout — mirrors csrc/smoothflow_vt.c; change both together.
@@ -42,6 +46,46 @@ pub mod flag {
     pub const WIDE: u32 = 1 << 7;
     pub const SPACER: u32 = 1 << 8;
     pub const EXTRA_SHIFT: u32 = 16;
+}
+
+/// `Vt::input_modes` bits (csrc/smoothflow_vt.c `SF_MODE_*`).
+pub mod mode {
+    /// The program asked for mouse reports (1000/1002/1003, X10).
+    pub const MOUSE: u32 = 1 << 0;
+    /// The alternate screen is up (it has no scrollback).
+    pub const ALT_SCREEN: u32 = 1 << 1;
+    /// Alternate scroll (1007): on the alternate screen a wheel is arrow keys.
+    pub const ALT_SCROLL: u32 = 1 << 2;
+    /// Application cursor keys (DECCKM): arrows are `ESC O A`, not `ESC [ A`.
+    pub const CURSOR_KEYS: u32 = 1 << 3;
+}
+
+/// Where the viewport sits in the history, in rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Scrollbar {
+    /// Scrollback plus the screen.
+    pub total: u64,
+    /// The viewport's first row, counted from the oldest kept line.
+    pub offset: u64,
+    /// The viewport's height.
+    pub len: u64,
+}
+
+impl Scrollbar {
+    /// Rows of newer output below the viewport: 0 when it follows the screen.
+    #[must_use]
+    pub const fn below(&self) -> u64 {
+        self.total.saturating_sub(self.offset.saturating_add(self.len))
+    }
+}
+
+/// How to move the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    /// By rows; up (into history) is negative.
+    Delta(isize),
+    Top,
+    Bottom,
 }
 
 /// The theme a terminal starts with: default colours and the 256 palette.
@@ -163,6 +207,50 @@ impl Vt {
             std::slice::from_raw_parts(data, len)
         };
         decode(words)
+    }
+
+    /// Move the viewport over the scrollback. New output never moves it; the
+    /// alternate screen has no scrollback, so there it stays put.
+    pub fn scroll(&mut self, to: Scroll) {
+        let (kind, delta) = match to {
+            Scroll::Delta(d) => (0, d),
+            Scroll::Top => (1, 0),
+            Scroll::Bottom => (2, 0),
+        };
+        // SAFETY: `ptr` is live; plain values.
+        unsafe { sf_vt_scroll(self.ptr.as_ptr(), kind, delta) }
+    }
+
+    /// Where the viewport is.
+    pub fn scrollbar(&mut self) -> Scrollbar {
+        let mut out = [0u64; 3];
+        // SAFETY: `ptr` is live; `out` holds the three words the C side writes.
+        let ok = unsafe { sf_vt_scrollbar(self.ptr.as_ptr(), out.as_mut_ptr()) } == 0;
+        if ok {
+            Scrollbar {
+                total: out[0],
+                offset: out[1],
+                len: out[2],
+            }
+        } else {
+            Scrollbar::default()
+        }
+    }
+
+    /// The [`mode`] bits now in force.
+    pub fn input_modes(&mut self) -> u32 {
+        // SAFETY: `ptr` is live.
+        unsafe { sf_vt_input_modes(self.ptr.as_ptr()) }
+    }
+
+    /// One wheel notch at cell (`col`, `row`) as the mouse report the
+    /// program asked for; empty when it tracks no mouse.
+    pub fn mouse_wheel(&mut self, up: bool, col: u16, row: u16) -> Vec<u8> {
+        let mut buf = [0u8; 64];
+        // SAFETY: `ptr` is live; `buf` is writable for its length and the C
+        // side writes at most `cap` bytes, returning how many.
+        let n = unsafe { sf_vt_mouse_wheel(self.ptr.as_ptr(), i32::from(up), col, row, buf.as_mut_ptr(), buf.len()) };
+        buf[..n.min(buf.len())].to_vec()
     }
 }
 

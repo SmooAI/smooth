@@ -5,6 +5,7 @@
 //! test exercises the code the GUI runs, not a copy of it.
 
 pub mod app_core;
+pub mod diff;
 pub mod discovery;
 pub mod field;
 pub mod frames;
