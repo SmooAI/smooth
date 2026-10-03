@@ -1363,7 +1363,7 @@ th agent claim <handle>                    # take a durable name; carries your m
 th agent list                              # who can I reach (presence, branch, current task)
 th agent status --status working --task "…"   # publish presence: idle|working|waiting|offline
 th msg send <name|all> "…" [--type request] [--priority 2] [--re <id>]
-th msg inbox [--unread] [--mark-read] [--limit N] [--json]
+th msg inbox [--all] [--mark-read] [--limit N] [--json]  # unread only unless --all
 th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
 th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
@@ -1420,7 +1420,9 @@ context, and the Stop hook held it until all of them were acked. `rename` and
 `claim` keep the original registration time, so claiming a handle does not reopen
 the backlog. Direct mail never expires. The smooth-agent Stop hook blocks only on
 direct mail (`unread-count --direct`); broadcasts still show in the per-prompt
-hint.
+hint. `th msg inbox` and the `mail_inbox` MCP tool show only unread mail by
+default (`--all` / `unread_only=false` for history), so checking the inbox never
+re-reads mail you already handled.
 
 **Presence** is `idle|working|waiting|offline` plus a free-form `--task`, and
 `th agent list` reaps first: an agent whose recorded pid is dead flips to
