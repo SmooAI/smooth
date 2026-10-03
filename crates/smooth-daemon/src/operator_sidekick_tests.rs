@@ -135,7 +135,7 @@ fn llm_factory(url: String) -> smooth_operator::cast::LlmConfigFactory {
             api_key: "test-key".into(),
             model: "test-model".into(),
             max_tokens: 256,
-            temperature: 0.0,
+            temperature: smooth_policy::llm_params::AGENT_TEMPERATURE,
             retry_policy: smooth_operator::llm::RetryPolicy {
                 max_retries: 0,
                 ..smooth_operator::llm::RetryPolicy::default()
