@@ -293,6 +293,13 @@ pub fn suggest(key: &str) -> Option<&'static str> {
     if best.0 <= budget {
         return Some(best.1);
     }
+    // A typo of one segment: `sandbx` → `sandbox.enabled`.
+    if let Some(d) = REGISTRY
+        .iter()
+        .find(|d| d.key.split('.').any(|seg| levenshtein(&needle, seg) <= (seg.len() / 3).max(1)))
+    {
+        return Some(d.key);
+    }
     // `sandbox` → `sandbox.enabled`, `allowlist` → `egress.allowlist`.
     REGISTRY
         .iter()
@@ -596,8 +603,9 @@ impl SettingsFile {
         self.path.as_ref().map_or_else(|| "<settings>".to_owned(), |p| p.display().to_string())
     }
 
-    /// Remove a key. Returns whether it was present. Parent tables are kept
-    /// (with their comments) even if this leaves them empty.
+    /// Remove a key. Returns whether it was present. A parent table this
+    /// leaves empty is dropped too, unless it carries a comment (kept so a
+    /// hand-written note isn't lost).
     pub fn unset(&mut self, def: &SettingDef) -> bool {
         let segs: Vec<&str> = def.key.split('.').collect();
         let Some((leaf, parents)) = segs.split_last() else {
@@ -610,7 +618,35 @@ impl SettingsFile {
             };
             item = next;
         }
-        item.as_table_like_mut().and_then(|t| t.remove(leaf)).is_some()
+        let removed = item.as_table_like_mut().and_then(|t| t.remove(leaf)).is_some();
+        if removed {
+            self.prune_empty_parents(parents);
+        }
+        removed
+    }
+
+    /// Drop now-empty, comment-free parent tables, deepest first.
+    fn prune_empty_parents(&mut self, parents: &[&str]) {
+        for depth in (1..=parents.len()).rev() {
+            let (path, name) = (&parents[..depth - 1], parents[depth - 1]);
+            let mut holder: &mut Item = self.doc.as_item_mut();
+            for seg in path {
+                match holder.as_table_like_mut().and_then(|t| t.get_mut(seg)) {
+                    Some(next) => holder = next,
+                    None => return,
+                }
+            }
+            let Some(table) = holder.as_table_like_mut() else { return };
+            let prunable = table.get(name).is_some_and(|it| match it {
+                Item::Table(t) => t.is_empty() && !has_comment(t.decor()),
+                Item::Value(Value::InlineTable(t)) => t.is_empty(),
+                _ => false,
+            });
+            if !prunable {
+                return;
+            }
+            table.remove(name);
+        }
     }
 
     /// Dotted keys present in the file that aren't registered (typos, or keys
@@ -655,6 +691,11 @@ impl SettingsFile {
         self.exists = true;
         Ok(())
     }
+}
+
+fn has_comment(decor: &toml_edit::Decor) -> bool {
+    let text = |r: Option<&toml_edit::RawString>| r.and_then(toml_edit::RawString::as_str).is_some_and(|s| s.contains('#'));
+    text(decor.prefix()) || text(decor.suffix())
 }
 
 fn collect_leaves(table: &dyn toml_edit::TableLike, prefix: &str, out: &mut BTreeSet<String>) {
@@ -1029,6 +1070,8 @@ mod tests {
         let err = require_def("sandbox.enable").unwrap_err();
         assert!(err.to_string().contains("did you mean 'sandbox.enabled'"), "{err}");
         assert_eq!(suggest("sandbox"), Some("sandbox.enabled"));
+        assert_eq!(suggest("sandbx"), Some("sandbox.enabled"), "a typo of one segment");
+        assert_eq!(suggest("tailscle.serve"), Some("tailscale.serve"));
         assert_eq!(suggest("allowlist"), Some("egress.allowlist"));
         assert_eq!(suggest("auto-mode"), Some("auto_mode"));
         assert_eq!(suggest("totally.unrelated.thing"), None);
@@ -1108,9 +1151,25 @@ mod tests {
         assert!(!again.unset(def("tailscale.serve").unwrap()), "absent table");
         let text = again.to_toml_string();
         assert!(!text.contains("enabled = true"), "{text}");
-        assert!(text.contains("# why: corp laptop") || text.contains("[sandbox]"), "parent table kept: {text}");
+        assert!(!text.contains("[sandbox]"), "an emptied, comment-free parent table is dropped: {text}");
         assert!(text.contains("favourite = \"teal\"") && text.contains("url = \"wss://r/ws\""), "{text}");
         assert_eq!(again.get(sandbox), None);
+    }
+
+    #[test]
+    fn unset_prunes_empty_tables_but_keeps_commented_ones() {
+        let mut f = file("[egress]\nallowlist = [\"a.com\"]\n\n# relay notes: staging box\n[relay]\nurl = \"wss://s/ws\"\n\n[sandbox]\nenabled = true\n");
+        assert!(f.unset(def("egress.allowlist").unwrap()));
+        assert!(f.unset(def("relay.url").unwrap()));
+        let text = f.to_toml_string();
+        assert!(!text.contains("[egress]"), "{text}");
+        assert!(text.contains("# relay notes: staging box\n[relay]"), "a commented table survives: {text}");
+        assert!(text.contains("[sandbox]\nenabled = true"), "{text}");
+        // Inline and dotted parents prune too.
+        let mut f = file("relay = { url = \"wss://i/ws\" }\nsandbox.enabled = true\n");
+        assert!(f.unset(def("relay.url").unwrap()));
+        assert!(f.unset(def("sandbox.enabled").unwrap()));
+        assert_eq!(f.to_toml_string().trim(), "", "{}", f.to_toml_string());
     }
 
     #[test]

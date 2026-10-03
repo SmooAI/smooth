@@ -300,11 +300,15 @@ fn explain_text(r: &Resolved) -> String {
             "immediately".to_owned()
         }
     );
-    let example = d.default.map_or("<value>", |v| match v {
-        "true" => "false",
-        "false" => "true",
-        other => other,
-    });
+    // An example that actually changes something: flip a bool, pick a
+    // non-default enum value.
+    let example = match (d.kind, d.default) {
+        (_, Some("true")) => "false",
+        (_, Some("false")) => "true",
+        (settings::Kind::Enum(allowed), default) => allowed.iter().copied().find(|v| Some(*v) != default).unwrap_or("<value>"),
+        (_, Some(other)) => other,
+        (_, None) => "<value>",
+    };
     let _ = writeln!(out);
     let _ = writeln!(out, "  th settings set {} {example}", d.key);
     let _ = writeln!(out, "  th settings unset {}", d.key);
@@ -465,7 +469,9 @@ mod tests {
             assert!(text.contains(needle), "{needle:?} missing from:\n{text}");
         }
         let r = resolver(&[], "").resolve("auto_mode").unwrap();
-        assert!(explain_text(&r).contains("allowed     bypass, accept-edits, ask, deny"));
+        let text = explain_text(&r);
+        assert!(text.contains("allowed     bypass, accept-edits, ask, deny"));
+        assert!(text.contains("th settings set auto_mode accept-edits"), "the example changes the value: {text}");
     }
 
     #[test]
