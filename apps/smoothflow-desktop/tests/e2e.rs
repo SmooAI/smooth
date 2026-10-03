@@ -33,6 +33,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedReceiver;
+use smooth_flow_client::diff::{Base, LineKind};
+use smooth_flow_client::gate::CenterTab;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::Rect;
 use smooth_flow_client::SessionState;
@@ -155,6 +157,8 @@ struct Daemon {
     /// Held for its Drop: the scratch HOME, workspace and log go with it.
     _root: tempfile::TempDir,
     home: PathBuf,
+    /// The daemon's workspace (`SMOOTH_WORKSPACE`): where New Session opens.
+    ws: PathBuf,
     socket: String,
     child: Child,
     log_path: PathBuf,
@@ -188,6 +192,7 @@ impl Daemon {
             .env("SMOOTH_TAILSCALE_SERVE", "0")
             .env("SMOOTH_FLOW_HARNESS_DOCTOR", "0")
             .env("SMOOTH_WORKSPACE", &ws)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
             .env("TERM", "xterm-256color")
             .envs(extra.iter().copied())
@@ -200,6 +205,7 @@ impl Daemon {
         let mut d = Self {
             _root: root,
             home,
+            ws,
             socket,
             child,
             log_path,
@@ -585,4 +591,201 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
     assert!(app.core.dialog.is_none(), "no refusal: {:?}", app.core.dialog);
     assert_eq!(app.core.surfaces.focused_session(), None, "no pane still shows it");
     assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}
+
+// ── Diff (th-26f5b9) ────────────────────────────────────────────────────
+
+/// `git` in `dir`, isolated from the developer's config; panics on failure.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=sfd-e2e", "-c", "user.email=sfd-e2e@example.com", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `src/lib.rs`, twenty functions, with function `n` returning `ret`.
+fn lib_rs(n: u32, ret: &str) -> String {
+    (1..=20)
+        .map(|i| {
+            if i == n {
+                format!("pub fn f{i}() -> u32 {{ {ret} }}\n")
+            } else {
+                format!("pub fn f{i}() -> u32 {{ {i} }}\n")
+            }
+        })
+        .collect()
+}
+
+/// Make the daemon's workspace a repo on `main` with one commit.
+fn scratch_repo(d: &Daemon) -> PathBuf {
+    let ws = d.ws.clone();
+    std::fs::create_dir_all(ws.join("src")).expect("src");
+    std::fs::write(ws.join("src/lib.rs"), lib_rs(0, "")).expect("lib.rs");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "-A"]);
+    git(&ws, &["commit", "-q", "-m", "init"]);
+    ws
+}
+
+/// A shell in the scratch repo with its Diff tab open, and the first diff in.
+fn shell_with_diff(d: &Daemon, ws: &Path) -> (App, String) {
+    let mut app = connect(d);
+    let id = start_shell(&mut app, d);
+    let s = &app.core.sessions[&id];
+    assert_eq!(
+        Path::new(&s.worktree).canonicalize().ok(),
+        ws.canonicalize().ok(),
+        "the shell runs in the scratch repo: {s:?}"
+    );
+    assert_eq!(s.branch.as_deref(), Some("main"), "the row carries the branch, so Diff is enabled");
+    assert!(app.core.act(Action::ViewDiff).is_empty());
+    assert_eq!(app.core.center, CenterTab::Diff, "notice: {:?}", app.core.notice);
+    assert_eq!(app.core.diff.base, Base::Uncommitted, "a shell opens on Uncommitted");
+    app.wait(d, "the first diff", WAIT, |a| a.core.diff.diff.is_some() && !a.core.diff.loading());
+    (app, id)
+}
+
+/// Refresh and wait for the diff to settle on `files` files.
+fn refreshed(app: &mut App, d: &Daemon, files: usize) {
+    app.core.diff.request();
+    app.wait(d, &format!("a refreshed diff with {files} file(s)"), WAIT, |a| {
+        !a.core.diff.loading() && a.core.diff.diff.as_ref().is_some_and(|x| x.files.len() == files)
+    });
+}
+
+/// The Diff tab against a real engine: a shell in a git repo gets the
+/// structured diff of its uncommitted work — files in tree order, hunks with
+/// line numbers, word and syntax spans — and a hunk stages and unstages.
+#[test]
+fn the_diff_tab_shows_a_shells_uncommitted_work_and_stages_a_hunk() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    std::fs::write(ws.join("src/lib.rs"), lib_rs(5, "500")).expect("edit");
+    std::fs::write(ws.join("notes.md"), "# notes\n").expect("new file");
+    let (mut app, _id) = shell_with_diff(&d, &ws);
+    let diff = app.core.diff.diff.clone().expect("diff");
+    assert_eq!(diff.base, Base::Uncommitted);
+    assert_eq!(diff.legend.len(), 17, "the legend names every syntax kind");
+    assert_eq!((diff.added, diff.deleted), (2, 1), "{diff:#?}");
+    let paths: Vec<&str> = app.core.diff.tree.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(paths, ["src", "lib.rs", "notes.md"], "directories first");
+    let lib = diff.files.iter().find(|f| f.path == "src/lib.rs").expect("src/lib.rs");
+    assert_eq!(
+        (lib.status.as_str(), lib.added, lib.deleted, lib.language.as_deref()),
+        ("modified", 1, 1, Some("Rust"))
+    );
+    let h = &lib.hunks[0];
+    let del = h.lines.iter().find(|l| l.kind == LineKind::Del).expect("a deleted line");
+    let add = h.lines.iter().find(|l| l.kind == LineKind::Add).expect("an added line");
+    assert_eq!((del.old, add.new), (Some(5), Some(5)));
+    assert_eq!(add.text, "pub fn f5() -> u32 { 500 }");
+    assert!(!add.words.is_empty(), "the changed word is marked: {add:?}");
+    assert!(!add.syntax.is_empty(), "the engine highlighted the Rust: {add:?}");
+    assert!(!h.staged);
+    let notes = diff.files.iter().find(|f| f.path == "notes.md").expect("notes.md");
+    assert_eq!(notes.status, "added");
+    assert!(app.core.diff.rows.iter().any(|r| r.is_line()), "the body has lines to draw");
+
+    // `n` lands on the first hunk (src/lib.rs, tree order); `s` stages it.
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("s");
+    app.wait(&d, "the hunk to show as staged", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Staged a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().any(|f| f.path == "src/lib.rs" && f.hunks.first().is_some_and(|h| h.staged)))
+    });
+    // `s` on a staged hunk unstages it.
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("s");
+    app.wait(&d, "the hunk to be unstaged", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Unstaged a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().any(|f| f.path == "src/lib.rs" && f.hunks.first().is_some_and(|h| !h.staged)))
+    });
+}
+
+/// Revert, the way the user does it (`r`, then the confirmation): the real
+/// engine restores the file. Then a hunk that changed under the viewer is
+/// refused as `stale`: the refusal is shown verbatim, the file is left
+/// alone (no retry, no force), and the diff refreshes.
+#[test]
+fn reverting_a_hunk_restores_the_file_and_a_stale_hunk_is_refused() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    let lib = ws.join("src/lib.rs");
+    std::fs::write(&lib, lib_rs(5, "500")).expect("edit");
+    let (mut app, _id) = shell_with_diff(&d, &ws);
+    assert_eq!(app.core.diff.diff.as_ref().map(|x| x.files.len()), Some(1));
+
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("r");
+    let dialog = app.core.dialog.clone().expect("Revert asks first");
+    assert_eq!(dialog.cancel, "Cancel");
+    assert!(dialog.title.contains("src/lib.rs"), "{}", dialog.title);
+    let (_, revert) = dialog
+        .buttons
+        .into_iter()
+        .find(|(_, c)| matches!(c, Confirmed::DiffRevert { .. }))
+        .expect("a Revert button");
+    app.core.confirm(revert);
+    app.wait(&d, "the revert to land and the diff to empty", WAIT, |a| {
+        a.core.diff.status.as_deref() == Some("Reverted a hunk of src/lib.rs.")
+            && !a.core.diff.loading()
+            && a.core.diff.diff.as_ref().is_some_and(|x| x.files.is_empty())
+    });
+    assert_eq!(std::fs::read_to_string(&lib).expect("lib.rs"), lib_rs(0, ""), "the worktree is back at HEAD");
+
+    // The viewer holds a hunk; the file then changes under it (no
+    // flow.diff.changed: the engine didn't do it).
+    std::fs::write(&lib, lib_rs(5, "501")).expect("edit");
+    refreshed(&mut app, &d, 1);
+    std::fs::write(&lib, lib_rs(5, "777")).expect("edit under the viewer");
+    app.core.diff.cursor = None;
+    app.press("n");
+    app.press("r");
+    let dialog = app.core.dialog.clone().expect("Revert asks first");
+    let (_, revert) = dialog
+        .buttons
+        .into_iter()
+        .find(|(_, c)| matches!(c, Confirmed::DiffRevert { .. }))
+        .expect("a Revert button");
+    app.core.confirm(revert);
+    app.wait(&d, "the stale refusal, shown verbatim, then a refresh", WAIT, |a| {
+        a.core.diff.error
+            && a.core.diff.status.as_deref().is_some_and(|s| s.starts_with("stale:"))
+            && !a.core.diff.loading()
+            && a.core
+                .diff
+                .diff
+                .as_ref()
+                .is_some_and(|x| x.files.iter().flat_map(|f| &f.hunks).flat_map(|h| &h.lines).any(|l| l.text.contains("777")))
+    });
+    assert_eq!(
+        std::fs::read_to_string(&lib).expect("lib.rs"),
+        lib_rs(5, "777"),
+        "a refused revert touches nothing"
+    );
+    assert!(app.core.dialog.is_none());
 }

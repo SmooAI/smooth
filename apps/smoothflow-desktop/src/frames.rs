@@ -4,8 +4,11 @@
 use base64::Engine as _;
 use serde_json::{json, Value};
 use smooth_flow_client::attention::Attention;
+use smooth_flow_client::diff::Base;
 use smooth_flow_client::harness::Harness;
 use smooth_flow_client::Session;
+
+use crate::diff::{base_str, Payload};
 
 /// A session row plus the fields the shared `Session` doesn't carry.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,8 +61,27 @@ pub enum Inbound {
     /// refusal can be matched to the request that caused it.
     Error {
         reference: Option<u64>,
+        /// `stale`, `blocked`, `not_found`, … when the engine says.
+        code: Option<String>,
         message: String,
     },
+    /// `flow.diff` (th-26f5b9): the reply to a diff request — never
+    /// broadcast. `path` is set when it is one file's page.
+    Diff {
+        id: String,
+        base: Base,
+        path: Option<String>,
+        diff: Box<Payload>,
+    },
+    /// `flow.diff.result`: a hunk action or a review went through.
+    DiffResult {
+        id: String,
+        /// `revert` | `stage` | `unstage` | `review`.
+        action: String,
+        file: Option<String>,
+    },
+    /// `flow.diff.changed`: the session's diff may have moved; refetch.
+    DiffChanged(String),
 }
 
 /// Parse one text frame; `None` for types this client doesn't use or a frame
@@ -90,8 +112,21 @@ pub fn parse(text: &str) -> Option<Inbound> {
             seq: v.get("seq").and_then(Value::as_u64).unwrap_or(0),
             bytes: base64::engine::general_purpose::STANDARD.decode(v.get("data_b64")?.as_str()?).ok()?,
         }),
+        "flow.diff" => Some(Inbound::Diff {
+            id: v.get("id")?.as_str()?.to_string(),
+            base: serde_json::from_value(v.get("base")?.clone()).ok()?,
+            path: v.get("path").and_then(Value::as_str).map(str::to_string),
+            diff: Box::new(serde_json::from_value(v.get("diff")?.clone()).ok()?),
+        }),
+        "flow.diff.result" => Some(Inbound::DiffResult {
+            id: v.get("id")?.as_str()?.to_string(),
+            action: v.get("action")?.as_str()?.to_string(),
+            file: v.get("file").and_then(Value::as_str).map(str::to_string),
+        }),
+        "flow.diff.changed" => Some(Inbound::DiffChanged(v.get("id")?.as_str()?.to_string())),
         "flow.error" => Some(Inbound::Error {
             reference: v.get("ref").and_then(Value::as_u64),
+            code: v.pointer("/error/code").or_else(|| v.get("code")).and_then(Value::as_str).map(str::to_string),
             message: v
                 .pointer("/error/message")
                 .or_else(|| v.get("message"))
@@ -199,6 +234,38 @@ pub fn close(id: &str, close_pearl: bool, remove_worktree: bool, seq: u64) -> St
     .to_string()
 }
 
+/// `flow.diff` — ask for a session's diff against `base`; `path` asks for
+/// one file's hunks (a collapsed or budget-stubbed file). `seq` comes back
+/// as `ref` on a `flow.error`.
+#[must_use]
+pub fn diff(id: &str, base: Base, path: Option<&str>, seq: u64) -> String {
+    let mut v = json!({ "type": "flow.diff", "id": id, "base": base_str(base), "seq": seq });
+    if let Some(p) = path {
+        v["path"] = json!(p);
+    }
+    v.to_string()
+}
+
+/// `flow.diff.revert` — reverse one hunk in the worktree. Refused with
+/// `stale` when it no longer applies; never forced.
+#[must_use]
+pub fn diff_revert(id: &str, base: Base, hunk_id: &str, seq: u64) -> String {
+    json!({ "type": "flow.diff.revert", "id": id, "base": base_str(base), "hunk_id": hunk_id, "seq": seq }).to_string()
+}
+
+/// `flow.diff.stage` (or `.unstage`) — one hunk of the uncommitted diff.
+#[must_use]
+pub fn diff_stage(id: &str, hunk_id: &str, unstage: bool, seq: u64) -> String {
+    let t = if unstage { "flow.diff.unstage" } else { "flow.diff.stage" };
+    json!({ "type": t, "id": id, "base": "uncommitted", "hunk_id": hunk_id, "seq": seq }).to_string()
+}
+
+/// `flow.diff.review` — the pending comments, as one steer to the agent.
+#[must_use]
+pub fn diff_review(id: &str, base: Base, comments: &[Value], seq: u64) -> String {
+    json!({ "type": "flow.diff.review", "id": id, "base": base_str(base), "comments": comments, "seq": seq }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +306,7 @@ mod tests {
             parse(r#"{"type":"flow.error","error":{"message":"nope"}}"#),
             Some(Inbound::Error {
                 reference: None,
+                code: None,
                 message: "nope".into()
             })
         );
@@ -246,6 +314,7 @@ mod tests {
             parse(r#"{"type":"flow.error","ref":7,"code":"error","message":"branch b is not merged"}"#),
             Some(Inbound::Error {
                 reference: Some(7),
+                code: Some("error".into()),
                 message: "branch b is not merged".into()
             }),
             "the engine's flat error, with the request's seq echoed in ref"
@@ -311,6 +380,46 @@ mod tests {
             json!({ "type": "flow.close", "id": "fs-1", "close_pearl": true, "remove_worktree": false, "force": false, "seq": 3 }),
             "Close Out never forces"
         );
+    }
+
+    #[test]
+    fn reads_and_writes_the_diff_frames() {
+        let d = r#"{"channel":"flow","type":"flow.diff","id":"fs-1","base":"uncommitted","path":"a.rs",
+            "diff":{"base":"uncommitted","from":{"ref":"HEAD","label":"HEAD"},"to":{"ref":"","label":"worktree"},
+            "files":[{"path":"a.rs","status":"added","added":1,"deleted":0,"hunks":[{"id":"h","old_start":0,"old_lines":0,"new_start":1,"new_lines":1,
+            "lines":[{"kind":"add","new":1,"text":"x"}]}]}],"added":1,"deleted":0,"legend":[]}}"#;
+        let Some(Inbound::Diff { id, base, path, diff }) = parse(d) else {
+            panic!("diff")
+        };
+        assert_eq!((id.as_str(), base, path.as_deref()), ("fs-1", Base::Uncommitted, Some("a.rs")));
+        assert_eq!(diff.files[0].hunks[0].lines[0].new, Some(1));
+        assert_eq!(
+            parse(r#"{"type":"flow.diff.result","id":"fs-1","action":"revert","hunk_id":"h","file":"a.rs"}"#),
+            Some(Inbound::DiffResult {
+                id: "fs-1".into(),
+                action: "revert".into(),
+                file: Some("a.rs".into())
+            })
+        );
+        assert_eq!(parse(r#"{"type":"flow.diff.changed","id":"fs-1"}"#), Some(Inbound::DiffChanged("fs-1".into())));
+        assert_eq!(
+            parse(r#"{"type":"flow.diff","id":"fs-1","base":"main","diff":{}}"#),
+            None,
+            "an unknown base is unreadable"
+        );
+        let stale = parse(r#"{"type":"flow.error","ref":4294967296,"code":"stale","message":"stale: gone"}"#);
+        assert!(matches!(stale, Some(Inbound::Error { reference: Some(4_294_967_296), code: Some(ref c), .. }) if c == "stale"));
+
+        let v: Value = serde_json::from_str(&diff("fs-1", Base::Turn, None, 9)).unwrap_or_default();
+        assert_eq!(v, json!({ "type": "flow.diff", "id": "fs-1", "base": "turn", "seq": 9 }));
+        let v: Value = serde_json::from_str(&diff("fs-1", Base::Branch, Some("Cargo.lock"), 1)).unwrap_or_default();
+        assert_eq!(v["path"], "Cargo.lock");
+        let v: Value = serde_json::from_str(&diff_revert("fs-1", Base::Turn, "h", 2)).unwrap_or_default();
+        assert_eq!(v, json!({ "type": "flow.diff.revert", "id": "fs-1", "base": "turn", "hunk_id": "h", "seq": 2 }));
+        let v: Value = serde_json::from_str(&diff_stage("fs-1", "h", true, 3)).unwrap_or_default();
+        assert_eq!(v["type"], "flow.diff.unstage");
+        let v: Value = serde_json::from_str(&diff_review("fs-1", Base::Turn, &[json!({"file":"a","text":"t"})], 4)).unwrap_or_default();
+        assert_eq!(v["comments"][0]["text"], "t");
     }
 
     #[test]
