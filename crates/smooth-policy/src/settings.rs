@@ -17,7 +17,7 @@
 //!   unchanged; [`Resolver::resolve`] reports which source won.
 //!
 //! Call sites keep their own parsing. They swap `std::env::var("SMOOTH_X")`
-//! for [`raw`]`("x")`, which hands back the same string shape the env var
+//! for `raw("x")` ([`raw`]), which hands back the same string shape the env var
 //! carried (bools canonicalised to `true`/`false`, lists joined with `,`), so a
 //! migrated knob keeps its exact semantics and only gains the file.
 //!
@@ -451,10 +451,9 @@ pub fn settings_path() -> Option<PathBuf> {
 }
 
 fn settings_path_from(smooth_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    match smooth_home.filter(|p| !p.as_os_str().is_empty()) {
-        Some(dir) => Some(dir.join("settings.toml")),
-        None => home.map(|h| h.join(".smooth").join("settings.toml")),
-    }
+    smooth_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| home.map(|h| h.join(".smooth").join("settings.toml")), |dir| Some(dir.join("settings.toml")))
 }
 
 /// The settings file as an editable document. Loading a missing file gives an
@@ -855,12 +854,10 @@ impl Resolver {
             Some(Ok(t)) => (Some(t), None),
             Some(Err(e)) => (None, Some(e)),
         };
-        let (value, source) = if let Some(v) = &env_value {
-            (Some(v.clone()), Source::Env)
-        } else if let Some(t) = &file_value {
-            (Some(t.to_raw()), Source::File)
-        } else {
-            (def.default.map(ToOwned::to_owned), Source::Default)
+        let (value, source) = match (&env_value, &file_value) {
+            (Some(v), _) => (Some(v.clone()), Source::Env),
+            (None, Some(t)) => (Some(t.to_raw()), Source::File),
+            (None, None) => (def.default.map(ToOwned::to_owned), Source::Default),
         };
         Resolved {
             def,

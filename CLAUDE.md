@@ -353,8 +353,9 @@ Two layers always, a third opt-in, in the order a tool call meets them:
    fail-closed LLM-judge escalation on ambiguous hits; `post_call` redacts
    detected secrets out of the tool result in place.
 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — **opt-in, OFF by
-   default** (pearl th-efbab1). Turn it on with `SMOOTH_SANDBOX=1` in the
-   daemon's environment. Big Smooth is a personal agent that operates AS its
+   default** (pearl th-efbab1). Turn it on with `th settings set
+sandbox.enabled true` and restart Big Smooth (or `SMOOTH_SANDBOX=1` in the
+   daemon's environment, which wins over the file). Big Smooth is a personal agent that operates AS its
    user on the user's own machine, and the sandbox got in the way of exactly
    that: asked to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound
    kernel-denied behind the egress proxy) and git failed with "Operation not

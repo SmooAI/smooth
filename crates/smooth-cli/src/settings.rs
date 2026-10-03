@@ -17,7 +17,7 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
 use serde_json::{json, Value};
-use smooth_policy::settings::{self, Resolved, Resolver, SettingDef, SettingsFile, Source, REGISTRY, RESTART_HINT};
+use smooth_policy::settings::{self, Resolved, Resolver, SettingDef, SettingsFile, Source, RESTART_HINT};
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
@@ -125,7 +125,7 @@ pub fn cmd(cmd: Cmd) -> Result<()> {
             file.set(def, &typed)?;
             file.save()?;
             let env_value = std::env::var(def.env).ok();
-            let out = change_json(def, Some(typed.to_json()), file.path(), true, env_value.as_deref());
+            let out = change_json(def, Some(&typed.to_json()), file.path(), true, env_value.as_deref());
             if json {
                 print_json(&out);
             } else {
@@ -195,7 +195,7 @@ fn restart_hint_json(def: &SettingDef) -> Value {
 }
 
 /// The stable `--json` for `th settings list`.
-pub(crate) fn list_json(resolver: &Resolver) -> Value {
+pub fn list_json(resolver: &Resolver) -> Value {
     json!({
         "path": resolver.file().path().map(|p| p.display().to_string()),
         "exists": resolver.file().exists(),
@@ -206,7 +206,7 @@ pub(crate) fn list_json(resolver: &Resolver) -> Value {
 }
 
 /// The stable `--json` for `set` / `unset`.
-fn change_json(def: &SettingDef, value: Option<Value>, path: Option<&std::path::Path>, changed: bool, env_value: Option<&str>) -> Value {
+fn change_json(def: &SettingDef, value: Option<&Value>, path: Option<&std::path::Path>, changed: bool, env_value: Option<&str>) -> Value {
     json!({
         "key": def.key,
         "value": value,
@@ -364,6 +364,7 @@ fn warn_file_problems_for(resolver: &Resolver, r: &Resolved, json: bool) {
 mod tests {
     use super::*;
     use clap::Parser;
+    use smooth_policy::settings::REGISTRY;
 
     #[derive(Parser, Debug)]
     struct T {
@@ -424,7 +425,7 @@ mod tests {
     #[test]
     fn change_json_reports_restart_and_env_override() {
         let def = settings::def("sandbox.enabled").unwrap();
-        let j = change_json(def, Some(json!(true)), Some(std::path::Path::new("/h/.smooth/settings.toml")), true, Some("0"));
+        let j = change_json(def, Some(&json!(true)), Some(std::path::Path::new("/h/.smooth/settings.toml")), true, Some("0"));
         assert_eq!(j["restart_required"], true);
         assert_eq!(j["restart_hint"], RESTART_HINT);
         assert_eq!(j["env_override"], json!({ "env": "SMOOTH_SANDBOX", "value": "0" }));

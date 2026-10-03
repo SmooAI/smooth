@@ -59,6 +59,9 @@ use tokio::process::Command;
 /// leaves it off. Default **off** (pearl th-efbab1).
 pub const SANDBOX_ENV: &str = "SMOOTH_SANDBOX";
 
+/// The `th settings` key that maps to [`SANDBOX_ENV`] (pearl th-f95ecf).
+pub const SETTING_KEY: &str = "sandbox.enabled";
+
 /// Whether shell subprocesses get the kernel OS sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxMode {
@@ -74,10 +77,12 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
-    /// Resolve the mode from [`SANDBOX_ENV`] in this process's environment.
+    /// Resolve the mode from [`SANDBOX_ENV`] in this process's environment,
+    /// else `sandbox.enabled` in `~/.smooth/settings.toml` (`th settings set
+    /// sandbox.enabled true`, pearl th-f95ecf). The env var wins.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_env_value(std::env::var(SANDBOX_ENV).ok().as_deref())
+        Self::from_env_value(smooth_policy::settings::raw(SETTING_KEY).as_deref())
     }
 
     /// Pure core of [`from_env`](Self::from_env): `None` (unset) and anything
@@ -362,6 +367,7 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (literal \"{h}/.smooth/operator-token\")\n\
              \x20  (regex #\"/\\.smooth/operator-storage\\.db\")\n\
              \x20  (regex #\"/\\.smooth/schedules\\.db\")\n\
+             \x20  (literal \"{h}/.smooth/settings.toml\")\n\
              \x20  (subpath \"{h}/Library/LaunchAgents\"))\n"
         );
     }
@@ -439,6 +445,28 @@ fn is_secret_env_name(name: &str) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    /// th-f95ecf: `sandbox.enabled` in the settings file turns the sandbox on
+    /// through the same parser; `SMOOTH_SANDBOX` still wins over it.
+    #[test]
+    fn settings_file_feeds_the_sandbox_switch_with_env_winning() {
+        use smooth_policy::settings::{def, Resolver, SettingsFile};
+        assert_eq!(def(SETTING_KEY).map(|d| d.env), Some(SANDBOX_ENV));
+        let on = || SettingsFile::parse("[sandbox]\nenabled = true\n").unwrap();
+        let mode = |r: &Resolver| SandboxMode::from_env_value(r.raw(SETTING_KEY).as_deref());
+
+        assert_eq!(mode(&Resolver::new(|_| None, on())), SandboxMode::Enforced, "file turns it on");
+        assert_eq!(
+            mode(&Resolver::new(|n| (n == SANDBOX_ENV).then(|| "0".to_owned()), on())),
+            SandboxMode::PassThrough,
+            "env 0 beats file true"
+        );
+        assert_eq!(
+            mode(&Resolver::new(|n| (n == SANDBOX_ENV).then(|| "1".to_owned()), SettingsFile::empty())),
+            SandboxMode::Enforced
+        );
+        assert_eq!(mode(&Resolver::new(|_| None, SettingsFile::empty())), SandboxMode::PassThrough, "default off");
+    }
 
     #[cfg(target_os = "macos")]
     mod macos {
@@ -697,6 +725,37 @@ mod tests {
                 std::fs::read_to_string(smooth.join("schedules.db")).unwrap(),
                 "SMOOTH_SCHEDULE_SENTINEL_7b1e",
                 "{out2}"
+            );
+        }
+
+        /// th-f95ecf: `~/.smooth/settings.toml` holds `sandbox.enabled` itself,
+        /// so a sandboxed shell must not be able to rewrite it (and switch the
+        /// sandbox off at the next restart). Reading it stays allowed so
+        /// `th settings list` works in-sandbox.
+        #[tokio::test]
+        async fn settings_file_is_readable_but_not_writable_in_sandbox() {
+            let fake_home = tempfile::tempdir().unwrap();
+            let home = std::fs::canonicalize(fake_home.path()).unwrap();
+            let smooth = home.join(".smooth");
+            std::fs::create_dir_all(&smooth).unwrap();
+            let settings = smooth.join("settings.toml");
+            std::fs::write(&settings, "[sandbox]\nenabled = true\n").unwrap();
+
+            let ws = tempfile::tempdir().unwrap();
+            let mut policy = enforced(ws.path().to_path_buf());
+            policy.home = Some(home.clone());
+            let s = settings.display();
+            // Overwrite, rename-over (what `th settings set` itself does), and delete.
+            let (_c, out) = run(
+                &policy,
+                &format!("cat '{s}'; echo 'enabled = false' > '{s}' 2>&1; echo x > '{s}.new'; mv -f '{s}.new' '{s}' 2>&1; rm -f '{s}' 2>&1; echo DONE"),
+            )
+            .await;
+            assert!(out.contains("DONE") && out.contains("enabled = true"), "read allowed: {out}");
+            assert_eq!(
+                std::fs::read_to_string(&settings).unwrap(),
+                "[sandbox]\nenabled = true\n",
+                "write denied: {out}"
             );
         }
 

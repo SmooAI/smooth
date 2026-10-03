@@ -342,6 +342,7 @@ mod tests {
     /// th-f95ecf: `tailscale.serve = false` in the settings file opts out
     /// through the same core; the env var still wins.
     #[test]
+    #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
     fn settings_file_feeds_opt_out_with_env_winning() {
         use smooth_policy::settings::{Resolver, SettingsFile};
         assert_eq!(smooth_policy::settings::def(SETTING_KEY).unwrap().env, OPT_OUT_ENV);

@@ -4351,14 +4351,14 @@ fn doctor_sandbox_row(mode: smooth_tools::SandboxMode, platform_supported: bool)
     match (mode.is_requested(), platform_supported) {
         (false, _) => (
             "✓".green().bold().to_string(),
-            format!("off (default — agent tools run as you; {env}=1 in the daemon's env enables it)")
+            format!("off (default — agent tools run as you; `th settings set sandbox.enabled true` or {env}=1 in the daemon's env enables it)")
                 .dimmed()
                 .to_string(),
         ),
-        (true, true) => ("✓".green().bold().to_string(), format!("on ({env}=1, Seatbelt)").green().to_string()),
+        (true, true) => ("✓".green().bold().to_string(), "on (sandbox.enabled, Seatbelt)".green().to_string()),
         (true, false) => (
             "✗".red().bold().to_string(),
-            format!("{env}=1 but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED")
+            format!("sandbox.enabled is on ({env} / `th settings`) but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED")
                 .red()
                 .to_string(),
         ),
@@ -4376,6 +4376,7 @@ mod doctor_sandbox_row_tests {
             let (mark, msg) = doctor_sandbox_row(SandboxMode::PassThrough, supported);
             assert!(mark.contains('✓'), "{mark}");
             assert!(msg.contains("off (default") && msg.contains("SMOOTH_SANDBOX=1"), "{msg}");
+            assert!(msg.contains("th settings set sandbox.enabled true"), "{msg}");
         }
     }
 
