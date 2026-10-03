@@ -148,9 +148,11 @@ signal table) and the `PaneDeath` / `PaneMeta` types, which now live in
 
 The seam has two uses:
 
-- **A native host.** A future `PtyHost` (portable-pty + ConPTY +
-  libghostty-vt) can run sessions on Windows without tmux, and supervision
-  won't change. It isn't built yet.
+- **A native host.** `PtyHost` replaces tmux everywhere, not only on Windows
+  ([ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md), epic
+  th-ce4f88). A per-session `smooth-daemon flow-host` process owns the PTY and a
+  headless libghostty-vt, and attach becomes a `flow.replay` snapshot followed
+  by sequenced `flow.output`. Supervision won't change. It is in progress.
 - **Engine tests without tmux.** `host::fake::FakeHost` (test-only) keeps
   sessions in memory and records every call. With it, tests cover the
   supervisor against states a real pane only produces by timing: a pane
