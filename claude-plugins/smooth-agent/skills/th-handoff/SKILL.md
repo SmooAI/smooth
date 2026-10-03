@@ -58,7 +58,11 @@ Run `th pearls show <pearl> --handoff` and read the output. If the next session 
 Then give the user:
 
 - the pearl id;
-- the exact line to paste into a new session: `Resume from th pearls show <pearl> --handoff and continue.` (or `/th-handoff resume <pearl>`);
+- one copy-pasteable launch command for the harness they will open next, run from the main checkout (`git rev-parse --git-common-dir`'s parent):
+    - Claude Code: `cd <main checkout> && claude "/th-handoff resume <pearl>"`
+    - Codex: `cd <main checkout> && codex '$th-handoff resume <pearl>'`
+    - OpenCode: `cd <main checkout> && opencode --prompt "Use the th-handoff skill to resume <pearl>"`
+    - `th code` and any harness with no prompt argument: open it in the main checkout and run `/th-handoff resume <pearl>`, or the plain prompt `th pearls show <pearl> --handoff and continue`;
 - anything they must do before or right after switching, such as an expired login;
 - whether it is safe to close this session yet, which it isn't until every worker has confirmed its push.
 
