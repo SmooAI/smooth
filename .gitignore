@@ -10,6 +10,9 @@ node_modules/
 # Rust build
 target/
 
+# libghostty-vt build output (scripts/ghostty-vt/build-ghostty-vt.sh run by hand or in CI)
+/.ghostty-vt/
+
 # Turbo cache (leftover from TypeScript)
 .turbo/
 

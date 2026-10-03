@@ -153,6 +153,21 @@ The seam has two uses:
   th-ce4f88). A per-session `smooth-daemon flow-host` process owns the PTY and a
   headless libghostty-vt, and attach becomes a `flow.replay` snapshot followed
   by sequenced `flow.output`. Supervision won't change. It is in progress.
+
+    Its headless terminal is `crates/smooth-flow-vt` (th-5025fb): a safe
+    wrapper around libghostty-vt, built from the same pinned
+    `scripts/ghostty-vt/` script and lock as SmoothFlow Desktop. It covers what
+    tmux did for the engine: feed bytes, read the visible screen as text
+    (`capture-pane`), `alternate_on`, the cursor, the OSC title, bracketed paste
+    and DECCKM, and encode manifest key names (`Enter`, `C-c`, `Down`) and
+    pastes for the program's current input modes. It also makes the bounded
+    `flow.replay` snapshot. While a TUI holds the alternate screen, that
+    snapshot still carries the primary screen's history, cached at the instant
+    the TUI came up. The crate's module docs give the bounding policy and the
+    known libghostty-vt limits. `smooth-flow` takes it only behind the
+    `pty-host` feature (off by default) until `PtyHost` lands, so nothing that
+    ships today needs Zig to build.
+
 - **Engine tests without tmux.** `host::fake::FakeHost` (test-only) keeps
   sessions in memory and records every call. With it, tests cover the
   supervisor against states a real pane only produces by timing: a pane

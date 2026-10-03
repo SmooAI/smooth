@@ -5512,6 +5512,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "smooai-smooth-flow-vt",
  "smooai-smooth-tmux",
  "syntect",
  "sysinfo",
@@ -5530,6 +5531,15 @@ version = "0.68.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "smooai-smooth-flow-vt"
+version = "0.68.0"
+dependencies = [
+ "cc",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
 ]
 
 [[package]]

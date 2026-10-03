@@ -34,7 +34,7 @@ dirs-next = "2"
 urlencoding = "2"
 
 # Terminal state comes from libghostty-vt (th-872ea8): build.rs links the
-# static library scripts/build-ghostty-vt.sh builds and compiles the C bridge
+# static library ../../scripts/ghostty-vt/build-ghostty-vt.sh builds and compiles the C bridge
 # (csrc/smoothflow_vt.c) that src/ghostty.rs wraps.
 [build-dependencies]
 cc = "1"

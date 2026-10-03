@@ -52,8 +52,10 @@ jobs:
                   key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
                   restore-keys: ${{ runner.os }}-pnpm-store-
 
+            # llvm: llvm-objcopy for scripts/ghostty-vt/build-ghostty-vt.sh
+            # (libghostty-vt, which the workspace's crates/smooth-flow-vt links).
             - name: Install system dependencies
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
+              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler llvm
 
             - name: Setup Rust toolchain
               uses: dtolnay/rust-toolchain@stable
@@ -64,6 +66,18 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   cache-on-failure: true
+
+            # libghostty-vt for crates/smooth-flow-vt (th-5025fb); see the same
+            # steps in pr-checks.yml.
+            - name: Cache libghostty-vt
+              uses: actions/cache@v4
+              with:
+                  path: .ghostty-vt/out
+                  key: ghostty-vt-ws-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ghostty-vt/ghostty-vt.lock', 'scripts/ghostty-vt/build-ghostty-vt.sh') }}
+            - name: Build libghostty-vt
+              run: |
+                  echo "GHOSTTY_VT_WORK=$PWD/.ghostty-vt" >>"$GITHUB_ENV"
+                  GHOSTTY_VT_WORK="$PWD/.ghostty-vt" scripts/ghostty-vt/build-ghostty-vt.sh
 
             - name: Install dependencies
               run: pnpm install --no-frozen-lockfile

@@ -1,9 +1,12 @@
 //! Link libghostty-vt, SmoothFlow Desktop's terminal engine (th-872ea8).
 //!
-//! The static library comes from `scripts/build-ghostty-vt.sh` (pinned by
-//! `ghostty-vt.lock`), which this runs when the library for the target being
-//! compiled is missing; it is a no-op once built. `GHOSTTY_VT_DIR` points at
-//! a prebuilt `<dir>/{include,lib}` instead and skips the script.
+//! The static library comes from the repo's shared
+//! `scripts/ghostty-vt/build-ghostty-vt.sh` (pinned by the `ghostty-vt.lock`
+//! next to it, which `crates/smooth-flow-vt` builds from too), which this runs
+//! when the library for the target being compiled is missing; it is a no-op
+//! once built. Output lands in `.ghostty-vt/` here (`GHOSTTY_VT_WORK` moves
+//! it). `GHOSTTY_VT_DIR` points at a prebuilt `<dir>/{include,lib}` instead
+//! and skips the script.
 //! `csrc/smoothflow_vt.c`, the small C bridge `src/ghostty.rs` calls, is
 //! compiled against its headers.
 
@@ -19,8 +22,9 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=GHOSTTY_VT_DIR");
     println!("cargo:rerun-if-changed=csrc/smoothflow_vt.c");
-    println!("cargo:rerun-if-changed=ghostty-vt.lock");
-    println!("cargo:rerun-if-changed=scripts/build-ghostty-vt.sh");
+    let scripts = manifest.join("..").join("..").join("scripts").join("ghostty-vt");
+    println!("cargo:rerun-if-changed={}", scripts.join("ghostty-vt.lock").display());
+    println!("cargo:rerun-if-changed={}", scripts.join("build-ghostty-vt.sh").display());
 
     let dir = if let Some(dir) = env::var_os("GHOSTTY_VT_DIR") {
         PathBuf::from(dir)
@@ -28,14 +32,14 @@ fn main() {
         let work = env::var_os("GHOSTTY_VT_WORK").map_or_else(|| manifest.join(".ghostty-vt"), PathBuf::from);
         println!("cargo:rerun-if-env-changed=GHOSTTY_VT_WORK");
         let dir = work.join("out").join(&target);
-        build_with_script(&manifest, &target);
+        build_with_script(&scripts, &work, &target);
         dir
     };
     let lib_dir = dir.join("lib");
     let include = dir.join("include");
     assert!(
         lib_dir.join(lib_file).is_file() && include.join("ghostty").join("vt.h").is_file(),
-        "libghostty-vt for {target} is missing from {} — run apps/smoothflow-desktop/scripts/build-ghostty-vt.sh {target}",
+        "libghostty-vt for {target} is missing from {} — run scripts/ghostty-vt/build-ghostty-vt.sh {target}",
         dir.display()
     );
     println!("cargo:rerun-if-changed={}", lib_dir.join(lib_file).display());
@@ -65,8 +69,8 @@ fn main() {
 /// Run the pinned build script (idempotent: it exits at once when the stamp
 /// matches). Windows runs it under Git Bash, never WSL's `bash.exe`, which
 /// `System32` puts first on PATH.
-fn build_with_script(manifest: &Path, target: &str) {
-    let script = manifest.join("scripts").join("build-ghostty-vt.sh");
+fn build_with_script(scripts: &Path, work: &Path, target: &str) {
+    let script = scripts.join("build-ghostty-vt.sh");
     println!("cargo:rerun-if-env-changed=GHOSTTY_VT_BASH");
     let bash = env::var_os("GHOSTTY_VT_BASH").map_or_else(
         || {
@@ -83,7 +87,12 @@ fn build_with_script(manifest: &Path, target: &str) {
     // script copes with backslashes.
     let script_arg = script.to_string_lossy().replace('\\', "/");
     // The script's progress goes to stderr: cargo parses a build script's stdout.
-    let status = Command::new(&bash).arg(&script_arg).arg(target).stdout(std::io::stderr()).status();
+    let status = Command::new(&bash)
+        .arg(&script_arg)
+        .arg(target)
+        .env("GHOSTTY_VT_WORK", work.to_string_lossy().replace('\\', "/"))
+        .stdout(std::io::stderr())
+        .status();
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => panic!("{} {target} failed ({s})", script.display()),

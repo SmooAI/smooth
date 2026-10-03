@@ -232,4 +232,6 @@ one starts.
   license is GPL-3.0-or-later.
 - [SmoothFlow.md § The session host seam](../Architecture/SmoothFlow.md#session-host)
 - libghostty-vt `formatter.h` at the pinned commit in
-  `apps/smoothflow-desktop/ghostty-vt.lock`.
+  `scripts/ghostty-vt/ghostty-vt.lock` (moved from
+  `apps/smoothflow-desktop/` in th-5025fb, so the desktop and
+  `crates/smooth-flow-vt` share one pin).
