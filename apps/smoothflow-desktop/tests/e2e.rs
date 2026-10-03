@@ -596,7 +596,7 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
 /// The wheel against a real session (th-1977a8). The engine streams a
 /// `tmux attach` client, and tmux draws on the alternate screen, so by
 /// Ghostty's rules (the Mac's too) the wheel is arrow keys for the program —
-/// here the shell, which recalls its last command — and the viewport never
+/// here the shell — and the viewport never
 /// leaves the screen. History scrolling on the primary screen is covered by
 /// `terminal.rs` and `app_core.rs` unit tests.
 #[test]
@@ -619,8 +619,11 @@ fn the_wheel_over_a_tmux_session_is_arrow_keys() {
 
     let pane = app.core.surfaces.focused_pane();
     assert!(app.core.wheel(pane, 1.0, 0, 0));
-    app.wait(&d, "the wheel's Up arrow to recall the command", WAIT, |a| {
-        a.screen(&id).iter().filter(|l| l.contains(&cmd)).count() >= 2
+    // A line-editing shell recalls the command; one without (dash, CI's
+    // `sh`) echoes the raw `^[[A`. Either way the Up arrow reached it.
+    app.wait(&d, "the wheel's Up arrow to reach the shell", WAIT, |a| {
+        let screen = a.screen(&id);
+        screen.iter().filter(|l| l.contains(&cmd)).count() >= 2 || screen.iter().any(|l| l.contains("[A"))
     });
     assert!(app.core.terminals[&id].at_bottom(), "no history scrolled on the alternate screen");
 }
