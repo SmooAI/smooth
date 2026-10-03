@@ -1,6 +1,6 @@
 ---
 name: th-handoff
-description: Hand this agent session's work (Claude Code, Codex, OpenCode or th code) off to a fresh session without losing anything. Writes a durable handoff into a pearl (`th pearls checkpoint`), makes every live worker (subagent or other session) push its unpushed work and checkpoint the same pearl, re-reads the result, and tells the user the exact prompt to resume with. Invoke as `/th-handoff` (new handoff pearl), `/th-handoff <pearl-id>` (append to an existing one), or `/th-handoff resume <pearl-id>` (the receiving side). Use when the user says "hand off", "new session", "context is full", "switch accounts", or "pick this up later".
+description: Hand this agent session's work (Claude Code, Codex, OpenCode or th code) off to a fresh session without losing anything. Writes a durable handoff into a pearl (`th pearls checkpoint`), makes every live worker (subagent or other session) push its unpushed work and checkpoint the same pearl, re-reads the result, and tells the user the exact prompt to resume with. Invoke as `/th-handoff` (new handoff pearl), `/th-handoff <pearl-id>` (append to an existing one), or `/th-handoff resume [pearl-id]` (the receiving side; with no id it lists recent handoffs to pick from). Use when the user says "hand off", "new session", "context is full", "switch accounts", "pick this up later", or "what was I working on".
 ---
 
 # th-handoff — move a session's work to a new session
@@ -66,8 +66,9 @@ Then give the user:
 - anything they must do before or right after switching, such as an expired login;
 - whether it is safe to close this session yet, which it isn't until every worker has confirmed its push.
 
-## `/th-handoff resume <pearl-id>` — pick up
+## `/th-handoff resume [pearl-id]` — pick up
 
+0. **No id?** Find the handoff instead of guessing. `th pearls prime --in-progress --json` returns every in-progress pearl with its `checkpoints` (each has an `at` time) and `handoff` (worktree, branch, HEAD, dirty files, session id, next step). Keep the pearls that have checkpoints, newest `at` first; `--cwd .` narrows to the repo or worktree you're in. Show the user the top few as one line each (id, title, last checkpoint time, worktree and branch, the `next` step) and let them pick. If exactly one was checkpointed in the last day or so, propose it and confirm before resuming. If none have checkpoints, say so and offer `th pearls list --status=in_progress`. Never resume a pearl the user didn't pick.
 1. `th pearls show <pearl> --handoff` and read all of it, including the notes that workers appended.
 2. **Re-verify before acting.** The note is a snapshot. Re-check every PR, branch and worktree it names (`gh pr view`, `git status`); things merged, conflicted or moved while no one was watching.
 3. Claim the mail identity the note names (`th agent claim <handle>`) if it was used for coordination, read `th msg inbox`, and arm `/th-mail`.
