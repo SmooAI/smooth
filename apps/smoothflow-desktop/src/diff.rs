@@ -1239,7 +1239,8 @@ impl Viewer {
     }
 
     pub fn remove_comment(&mut self, index: usize) {
-        if let Some(list) = self.comments.get_mut(self.sid()) {
+        let sid = self.sid().to_string();
+        if let Some(list) = self.comments.get_mut(&sid) {
             if index < list.len() {
                 list.remove(index);
             }

@@ -388,11 +388,11 @@ mod tests {
             "diff":{"base":"uncommitted","from":{"ref":"HEAD","label":"HEAD"},"to":{"ref":"","label":"worktree"},
             "files":[{"path":"a.rs","status":"added","added":1,"deleted":0,"hunks":[{"id":"h","old_start":0,"old_lines":0,"new_start":1,"new_lines":1,
             "lines":[{"kind":"add","new":1,"text":"x"}]}]}],"added":1,"deleted":0,"legend":[]}}"#;
-        let Some(Inbound::Diff { id, base, path, diff }) = parse(d) else {
+        let Some(Inbound::Diff { id, base, path, diff: payload }) = parse(d) else {
             panic!("diff")
         };
         assert_eq!((id.as_str(), base, path.as_deref()), ("fs-1", Base::Uncommitted, Some("a.rs")));
-        assert_eq!(diff.files[0].hunks[0].lines[0].new, Some(1));
+        assert_eq!(payload.files[0].hunks[0].lines[0].new, Some(1));
         assert_eq!(
             parse(r#"{"type":"flow.diff.result","id":"fs-1","action":"revert","hunk_id":"h","file":"a.rs"}"#),
             Some(Inbound::DiffResult {
