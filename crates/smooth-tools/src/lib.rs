@@ -105,7 +105,7 @@ pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::{RecallTool, RememberTool};
 #[cfg(target_os = "macos")]
 pub use reminders::RemindersTool;
-pub use sandbox::{SandboxPolicy, SandboxedCommand};
+pub use sandbox::{SandboxMode, SandboxPolicy, SandboxedCommand, SANDBOX_ENV};
 pub use send_file::SendFileTool;
 pub use th::ThTool;
 pub use todo::TodoWriteTool;
@@ -124,9 +124,11 @@ pub fn register_default_tools(registry: &mut ToolRegistry, workspace: PathBuf) {
 
 /// Like [`register_default_tools`], but routes the `bash` tool's egress.
 ///
-/// With `proxy` set (`host:port`), the shell's network goes through that
-/// loopback proxy and direct off-box network is kernel-denied — so the proxy's
-/// exact-host allowlist is the only way out. `None` leaves egress unrestricted.
+/// With `proxy` set (`host:port`), the shell's `HTTP(S)_PROXY` point at that
+/// loopback proxy. Only with the opt-in kernel sandbox (`SMOOTH_SANDBOX=1`, on
+/// macOS) is direct off-box network also kernel-denied, making the proxy's
+/// exact-host allowlist the only way out; otherwise it is advisory. `None`
+/// leaves egress unrestricted.
 pub fn register_default_tools_with_proxy(registry: &mut ToolRegistry, workspace: PathBuf, proxy: Option<String>) {
     for tool in default_tools_with_proxy(workspace, proxy) {
         registry.register_arc(tool);

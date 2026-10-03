@@ -4,8 +4,8 @@
 that gates a Big Smooth release. It boots the operator's local flavor **in
 process** — wired the way `serve_local_flavor` wires it (the DenyPolicy-backed
 permission gate first, then Narc, the Plan/Auto `SessionModes` store shared with
-the `/api/session/mode` route, and the workspace-confined + OS-sandboxed tool
-provider) — then drives the **canonical WebSocket protocol** with a real client
+the `/api/session/mode` route, and the workspace-rooted tool provider, whose
+`bash` runs as the user unless `SMOOTH_SANDBOX=1` opts into the kernel sandbox) — then drives the **canonical WebSocket protocol** with a real client
 and asserts on the streamed events.
 
 It does NOT spawn the `smooth-daemon` binary: an in-process `LocalServer` avoids
@@ -35,8 +35,10 @@ SMOOTH_AGENT_E2E=1 SMOOAI_GATEWAY_KEY=<key> \
 ```
 
 `SMOOAI_GATEWAY_URL` defaults to `https://llm.smoo.ai/v1`; the model is
-`claude-haiku-4-5`. Run flow 3's file-write and flow 4's credential-read on a
-Mac so the kernel sandbox is real (Seatbelt is macOS-only).
+`claude-haiku-4-5`. Flow 4's credential-read must hold in the default posture
+(kernel sandbox off, pearl th-efbab1), where only the permission gate and Narc
+stand between the agent and `~/.ssh`. To also exercise the kernel layer, run it
+again on a Mac with `SMOOTH_SANDBOX=1` (Seatbelt is macOS-only).
 
 ## Why the pure/live split
 

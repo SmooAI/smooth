@@ -1155,11 +1155,11 @@ mod tests {
     #[test]
     fn brew_th_comes_first_even_when_another_th_installs() {
         let (_tmp, brew, bundle) = brew_and_bundle();
-        let got = queue_th_candidates(&bundle, &[brew.clone()]);
+        let got = queue_th_candidates(&bundle, std::slice::from_ref(&brew));
         assert_eq!(got[0], brew, "{got:?}");
         assert_eq!(got.len(), 2, "brew's link, then the installer's canonical path: {got:?}");
         // Installed BY brew's th: no duplicate of brew's link.
-        let got = queue_th_candidates(&brew, &[brew.clone()]);
+        let got = queue_th_candidates(&brew, std::slice::from_ref(&brew));
         assert_eq!(got[0], brew);
         assert_eq!(got.iter().filter(|p| **p == brew).count(), 1, "{got:?}");
     }
@@ -1169,16 +1169,16 @@ mod tests {
         let (tmp, brew, bundle) = brew_and_bundle();
         let local = bundle.parent().unwrap().display().to_string();
         let brew_dir = brew.parent().unwrap().display().to_string();
-        let (first, b) = th_shadowing_brew(&format!("{local}:{brew_dir}"), &[brew.clone()]).expect("shadowed");
+        let (first, b) = th_shadowing_brew(&format!("{local}:{brew_dir}"), std::slice::from_ref(&brew)).expect("shadowed");
         assert_eq!((first.as_path(), b.as_path()), (bundle.as_path(), brew.as_path()));
         let msg = shadowing_warning(&first, &b);
         assert!(msg.contains("Big Smooth.app") && msg.contains(&brew.display().to_string()), "{msg}");
         // Brew first: fine. A link that resolves to brew's keg: also fine.
-        assert_eq!(th_shadowing_brew(&format!("{brew_dir}:{local}"), &[brew.clone()]), None);
+        assert_eq!(th_shadowing_brew(&format!("{brew_dir}:{local}"), std::slice::from_ref(&brew)), None);
         let alias = tmp.path().join("alias");
         fs::create_dir_all(&alias).unwrap();
         std::os::unix::fs::symlink(&brew, alias.join("th")).unwrap();
-        assert_eq!(th_shadowing_brew(&format!("{}:{local}", alias.display()), &[brew.clone()]), None);
+        assert_eq!(th_shadowing_brew(&format!("{}:{local}", alias.display()), std::slice::from_ref(&brew)), None);
         // No brew th: nothing to shadow.
         assert_eq!(th_shadowing_brew(&local, &[tmp.path().join("nope/th")]), None);
     }

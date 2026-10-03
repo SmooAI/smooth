@@ -1,12 +1,13 @@
-//! `bash` — run a shell command, kernel-sandboxed.
+//! `bash` — run a shell command as the user (kernel sandbox opt-in).
 //!
-//! The subprocess is built **only** through [`SandboxedCommand`] (P0: there is
-//! no unsandboxed spawn path). On macOS the command runs inside a Seatbelt
-//! profile that confines filesystem writes to the workspace + temp and denies
-//! reads of `~/.ssh` / `~/.aws` / etc. On Linux the kernel sandbox is not yet
-//! implemented (bubblewrap+Landlock is TODO) and the command falls back to an
-//! unsandboxed shell with a loud warning — acceptable only for the
-//! single-trusted-user loopback daemon. See [`crate::sandbox`].
+//! The subprocess is built **only** through [`SandboxedCommand`] — the single
+//! spawn point where the sandbox mode and the env scrub are applied. By default
+//! (pearl th-efbab1) that is a plain user subprocess: Big Smooth is a personal
+//! agent acting as its user, and the sandbox broke `ssh` / `git fetch`. With
+//! `SMOOTH_SANDBOX=1` the command runs inside a Seatbelt profile on macOS that
+//! denies reads/writes of `~/.ssh` / `~/.aws` / etc. and git-hook re-entry (no
+//! kernel sandbox exists on Linux/Windows yet — th-08e05a). See
+//! [`crate::sandbox`].
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -25,9 +26,10 @@ const OUTPUT_CAP: usize = 50_000;
 pub struct BashTool {
     /// Working directory the command starts in.
     pub workspace: PathBuf,
-    /// When set (`host:port`), the shell's egress is forced through this
-    /// loopback proxy and direct off-box network is kernel-denied (see
-    /// [`crate::sandbox::SandboxPolicy::with_proxy`]). `None` = unrestricted.
+    /// When set (`host:port`), the shell's `HTTP(S)_PROXY` point at this
+    /// loopback proxy; with the opt-in sandbox on macOS, direct off-box network
+    /// is also kernel-denied (see [`crate::sandbox::SandboxPolicy::with_proxy`]).
+    /// `None` = unrestricted.
     pub proxy: Option<String>,
 }
 
@@ -68,9 +70,8 @@ impl Tool for BashTool {
         let timeout_secs = arguments.get("timeout").and_then(Value::as_u64);
 
         // Hard-deny circuit-breakers (rm -rf /, fork bombs, curl|sh, …) before we
-        // ever spawn. The kernel sandbox is still the load-bearing boundary; this
-        // is cheap defense-in-depth, and the only deny gate on the operator
-        // local-flavor path (which doesn't install the bespoke permission engine).
+        // ever spawn. Cheap defense-in-depth that holds whether or not the
+        // opt-in kernel sandbox is on.
         if crate::guard::is_circuit_breaker(&command) {
             return Ok(format!(
                 "BLOCKED: refused to run a circuit-breaker command (catastrophic — e.g. `rm -rf /`, fork bomb, `curl … | sh`): {command}"
@@ -84,7 +85,8 @@ impl Tool for BashTool {
             return Ok(format!("BLOCKED: a permission policy (deny) rule refused this command: {command}"));
         }
 
-        // The ONLY shell-spawn path: through the kernel sandbox (P0).
+        // The ONLY shell-spawn path: `SandboxedCommand`, which applies the
+        // sandbox mode (`SMOOTH_SANDBOX`, default off) and the env scrub.
         let mut policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
         if let Some(addr) = &self.proxy {
             policy = policy.with_proxy(addr.clone());
@@ -174,7 +176,8 @@ mod tests {
     #[tokio::test]
     async fn proxy_bash_tool_routes_egress_through_the_proxy() {
         // With a proxy configured, the tool's shell sees HTTP_PROXY pointing at
-        // it (the macos_profile also denies direct egress — see sandbox tests).
+        // it in either sandbox mode (enforced, the macos_profile also denies
+        // direct egress — see sandbox tests).
         let dir = tempfile::tempdir().unwrap();
         let tool = BashTool {
             workspace: dir.path().to_path_buf(),

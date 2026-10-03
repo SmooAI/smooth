@@ -161,8 +161,13 @@ pub enum MsgCommands {
         /// Whose inbox (defaults to the resolved handle).
         #[arg(long)]
         agent: Option<String>,
-        /// Only unread messages.
+        /// Include messages you've already acked. By default the inbox shows
+        /// only unread mail: re-listing handled mail cost every agent that
+        /// checked its inbox the whole history again (th-41028a).
         #[arg(long)]
+        all: bool,
+        /// Only unread messages. Now the default; kept so old scripts parse.
+        #[arg(long, hide = true)]
         unread: bool,
         /// Acknowledge the listed messages after showing them.
         #[arg(long)]
@@ -193,6 +198,10 @@ pub enum MsgCommands {
         /// Whose inbox (defaults to the resolved handle).
         #[arg(long)]
         agent: Option<String>,
+        /// Count only mail addressed to this agent by name, not broadcasts.
+        /// The Stop hook uses this: a broadcast shouldn't hold a session open.
+        #[arg(long)]
+        direct: bool,
     },
     /// Reply to a message (threads automatically).
     Reply {
@@ -737,7 +746,8 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
         }
         MsgCommands::Inbox {
             agent,
-            unread,
+            all,
+            unread: _,
             mark_read,
             limit,
             json,
@@ -748,6 +758,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             }
             let who = agent.unwrap_or_else(resolve_handle);
             let _ = s.touch(&who).await; // heartbeat (best-effort)
+            let unread = !all;
             let msgs = s.inbox(&who, unread, limit).await?;
             if json {
                 print_messages(&msgs, true)?;
@@ -777,10 +788,15 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 println!("{} acknowledged {}", "✓".green().bold(), ids.join(", ").dimmed());
             }
         }
-        MsgCommands::UnreadCount { agent } => {
+        MsgCommands::UnreadCount { agent, direct } => {
             let who = agent.unwrap_or_else(resolve_handle);
+            let n = if direct {
+                s.unread_direct_count(&who).await?
+            } else {
+                s.unread_count(&who).await?
+            };
             // Bare number, no decoration — the statusline hook embeds this.
-            println!("{}", s.unread_count(&who).await?);
+            println!("{n}");
         }
         MsgCommands::Reply {
             id,
@@ -906,6 +922,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
 pub async fn cmd_inbox() -> Result<()> {
     cmd_msg(MsgCommands::Inbox {
         agent: None,
+        all: false,
         unread: false,
         mark_read: false,
         limit: 50,
@@ -1106,6 +1123,7 @@ mod tests {
         assert!(
             cmd_msg(MsgCommands::Inbox {
                 agent: Some("someone".into()),
+                all: false,
                 unread: false,
                 mark_read: false,
                 limit: 50,
@@ -1233,6 +1251,22 @@ mod cli_tests {
         assert_eq!(kind.parse::<MessageKind>().unwrap(), MessageKind::Handoff);
         assert_eq!(priority, 3);
         assert!(no_push, "the SessionStart hook still passes --no-push; it must parse");
+    }
+
+    #[test]
+    fn inbox_defaults_to_unread_and_all_opts_into_history() {
+        assert!(matches!(
+            parse(&["th", "msg", "inbox"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::Inbox { all: false, .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["th", "msg", "inbox", "--all"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::Inbox { all: true, .. }
+            }
+        ));
     }
 
     #[test]
