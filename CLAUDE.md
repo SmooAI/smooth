@@ -372,6 +372,13 @@ Two layers always, a third opt-in, in the order a tool call meets them:
     [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
     which enumerates exactly what is exposed there.
 
+**Sidekicks** (`send_sidekick`) get the same first two layers. The engine
+builds a sidekick's registry fresh, without host hooks, so the daemon wraps
+each tool in the snapshot it hands the engine in the same hook chain, same
+instances, same order (`smooth-daemon/src/hooks/sidekick.rs`, th-8d1951). A
+sidekick's `Ask` reaches the user over the parent turn's approver; with no
+approver it fails closed.
+
 Removed with the microVM stack (2026-07, pearl th-f4a801; see git history):
 **Wonk** (per-VM access authority), Goalie's per-VM FUSE + iptables enforcement,
 and the "Big Smooth is READ-ONLY inside The Safehouse VM" isolation model.
