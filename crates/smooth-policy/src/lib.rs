@@ -9,6 +9,7 @@ pub mod auto_mode;
 pub mod ext_trust;
 pub mod family;
 pub mod llm_params;
+pub mod settings;
 pub mod smooth_alias;
 
 // ---------------------------------------------------------------------------

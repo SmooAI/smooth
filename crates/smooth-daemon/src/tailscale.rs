@@ -36,6 +36,9 @@ use serde::Deserialize;
 /// disables tailnet exposure entirely.
 const OPT_OUT_ENV: &str = "SMOOTH_TAILSCALE_SERVE";
 
+/// The `th settings` key that maps to [`OPT_OUT_ENV`] (th-f95ecf).
+const SETTING_KEY: &str = "tailscale.serve";
+
 /// Subset of `tailscale status --json` we care about.
 #[derive(Debug, Deserialize)]
 struct StatusJson {
@@ -164,8 +167,9 @@ impl TailscaleServe {
     /// errors to the caller.
     #[must_use]
     pub fn start(local_port: u16) -> Option<Self> {
-        if is_opted_out(std::env::var(OPT_OUT_ENV).ok().as_deref()) {
-            tracing::info!("{OPT_OUT_ENV} opt-out set; daemon stays loopback-only (no tailnet serve)");
+        // th-f95ecf: or `th settings set tailscale.serve false`; the env var wins.
+        if is_opted_out(smooth_policy::settings::raw(SETTING_KEY).as_deref()) {
+            tracing::info!("tailnet serve opted out ({OPT_OUT_ENV} / `th settings` {SETTING_KEY}); daemon stays loopback-only");
             return None;
         }
         if !available() {
@@ -333,6 +337,25 @@ mod tests {
         assert!(!is_opted_out(Some("true")));
         assert!(!is_opted_out(Some("")));
         assert!(!is_opted_out(Some("yes")));
+    }
+
+    /// th-f95ecf: `tailscale.serve = false` in the settings file opts out
+    /// through the same core; the env var still wins.
+    #[test]
+    fn settings_file_feeds_opt_out_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        assert_eq!(smooth_policy::settings::def(SETTING_KEY).unwrap().env, OPT_OUT_ENV);
+        let off = || SettingsFile::parse("[tailscale]\nserve = false\n").unwrap();
+        assert!(is_opted_out(Resolver::new(|_| None, off()).raw(SETTING_KEY).as_deref()));
+        // `set tailscale.serve off` stores a TOML bool → "false" → opted out.
+        assert!(is_opted_out(
+            Resolver::new(|_| None, SettingsFile::parse("tailscale.serve = \"off\"\n").unwrap())
+                .raw(SETTING_KEY)
+                .as_deref()
+        ));
+        let env_on = Resolver::new(|n| (n == OPT_OUT_ENV).then(|| "1".to_owned()), off());
+        assert!(!is_opted_out(env_on.raw(SETTING_KEY).as_deref()), "env beats the file");
+        assert!(!is_opted_out(Resolver::new(|_| None, SettingsFile::empty()).raw(SETTING_KEY).as_deref()));
     }
 
     #[test]

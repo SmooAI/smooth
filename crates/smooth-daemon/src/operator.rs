@@ -820,15 +820,25 @@ fn provision_local_token_at(path: &Path) -> Result<String> {
 /// Explicit model override (`SMOOTH_AGENT_MODEL`) — the highest-priority model
 /// selector. Wins over fast-mode and the providers routing. `None`/empty falls
 /// through to the routing default.
+/// Also `th settings set model …` (th-f95ecf; the env var wins over the file).
 fn model_override() -> Option<String> {
-    std::env::var("SMOOTH_AGENT_MODEL").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    model_override_from(smooth_policy::settings::raw("model"))
 }
 
-/// Whether **fast mode** is on (`SMOOTH_FAST_MODE`). Fast mode points Big Smooth
-/// at the gateway's `fast` routing slot (a snappy model) instead of `coding`.
-/// Treats unset / `0` / `false` / `no` / `off` as disabled.
+fn model_override_from(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// Whether **fast mode** is on (`SMOOTH_FAST_MODE`, or `th settings set
+/// fast_mode true`). Fast mode points Big Smooth at the gateway's `fast`
+/// routing slot (a snappy model) instead of `coding`. Treats unset / `0` /
+/// `false` / `no` / `off` as disabled.
 fn fast_mode_enabled() -> bool {
-    matches!(std::env::var("SMOOTH_FAST_MODE"), Ok(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+    fast_mode_from(smooth_policy::settings::raw("fast_mode").as_deref())
+}
+
+fn fast_mode_from(raw: Option<&str>) -> bool {
+    matches!(raw, Some(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
 }
 
 /// Read the LLM provider that `~/.smooth/providers.json` routes the given slot
@@ -1131,6 +1141,9 @@ deny = [
     "**/.smooth/operator-token",
     "**/.smooth/operator-storage.db*",
     "**/.smooth/schedules.db*",
+    # `th settings` (th-f95ecf): the sandbox / egress / permission-mode
+    # posture. Env-only before, so the agent couldn't change it; keep it so.
+    "**/.smooth/settings.toml",
 ]
 "#;
 
@@ -1152,8 +1165,13 @@ fn default_deny_policy() -> smooth_operator::deny_policy::DenyPolicy {
 /// `ask` / `accept-edits` / `deny`) — mirroring the env override the retired
 /// `AutoModeHook` honored.
 fn permission_mode() -> smooth_operator::permission::AutoMode {
-    match std::env::var("SMOOTH_AUTO_MODE") {
-        Ok(v) if !v.trim().is_empty() => smooth_operator::permission::AutoMode::from_env_value(Some(&v)),
+    // th-f95ecf: also `th settings set auto_mode …`; the env var wins.
+    permission_mode_from(smooth_policy::settings::raw("auto_mode"))
+}
+
+fn permission_mode_from(raw: Option<String>) -> smooth_operator::permission::AutoMode {
+    match raw {
+        Some(v) if !v.trim().is_empty() => smooth_operator::permission::AutoMode::from_env_value(Some(&v)),
         // th-946ba0: back to Bypass. The interim AcceptEdits default (th-be3f55)
         // made the gate ask for EVERY bash + unknown-category tool call — which,
         // for an assistant that lives in bash and custom tools, meant a constant
@@ -2455,6 +2473,8 @@ mod tests {
             "/home/me/.smooth/operator-storage.db",
             "/home/me/.smooth/schedules.db",
             "/home/me/.smooth/schedules.db-wal",
+            // th-f95ecf: the sandbox / egress / auto-mode posture.
+            "/home/me/.smooth/settings.toml",
         ] {
             assert!(policy.evaluate(&write_call(path)).is_some(), "deny policy must block write to: {path}");
         }
@@ -2488,24 +2508,47 @@ mod tests {
 
     #[test]
     fn permission_mode_defaults_to_bypass_and_honors_env() {
-        std::env::remove_var("SMOOTH_AUTO_MODE");
+        // Pure core: hermetic against the dev's own ~/.smooth/settings.toml.
+        let m = |v: Option<&str>| permission_mode_from(v.map(ToOwned::to_owned));
         assert_eq!(
-            permission_mode(),
+            m(None),
             AutoMode::Bypass,
             "unset → Bypass: benign runs unprompted; DenyPolicy + Narc gate the dangerous (th-946ba0)"
         );
-        std::env::set_var("SMOOTH_AUTO_MODE", "  ");
-        assert_eq!(permission_mode(), AutoMode::Bypass, "blank → the default (Bypass)");
-        std::env::set_var("SMOOTH_AUTO_MODE", "ask");
-        assert_eq!(permission_mode(), AutoMode::Ask, "explicit ask honored");
-        std::env::set_var("SMOOTH_AUTO_MODE", "deny");
-        assert_eq!(permission_mode(), AutoMode::DenyUnmatched, "explicit deny honored");
+        assert_eq!(m(Some("  ")), AutoMode::Bypass, "blank → the default (Bypass)");
+        assert_eq!(m(Some("ask")), AutoMode::Ask, "explicit ask honored");
+        assert_eq!(m(Some("deny")), AutoMode::DenyUnmatched, "explicit deny honored");
         // The stricter category-gating posture is still available on request.
-        std::env::set_var("SMOOTH_AUTO_MODE", "accept-edits");
-        assert_eq!(permission_mode(), AutoMode::AcceptEdits, "explicit accept-edits honored");
-        std::env::set_var("SMOOTH_AUTO_MODE", "bypass");
-        assert_eq!(permission_mode(), AutoMode::Bypass, "explicit bypass honored");
-        std::env::remove_var("SMOOTH_AUTO_MODE");
+        assert_eq!(m(Some("accept-edits")), AutoMode::AcceptEdits, "explicit accept-edits honored");
+        assert_eq!(m(Some("bypass")), AutoMode::Bypass, "explicit bypass honored");
+    }
+
+    /// th-f95ecf: the settings file feeds the same cores the env var always
+    /// did, and the legacy env var still wins over it.
+    #[test]
+    fn settings_file_feeds_mode_fast_mode_and_model_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        let file = || SettingsFile::parse("auto_mode = \"accept-edits\"\nfast_mode = true\nmodel = \"m-file\"\n").unwrap();
+        let from_file = Resolver::new(|_| None, file());
+        assert_eq!(permission_mode_from(from_file.raw("auto_mode")), AutoMode::AcceptEdits);
+        assert!(fast_mode_from(from_file.raw("fast_mode").as_deref()));
+        assert_eq!(model_override_from(from_file.raw("model")).as_deref(), Some("m-file"));
+
+        let env = |name: &str| match name {
+            "SMOOTH_AUTO_MODE" => Some("ask".to_owned()),
+            "SMOOTH_FAST_MODE" => Some("0".to_owned()),
+            "SMOOTH_AGENT_MODEL" => Some(" m-env ".to_owned()),
+            _ => None,
+        };
+        let from_env = Resolver::new(env, file());
+        assert_eq!(permission_mode_from(from_env.raw("auto_mode")), AutoMode::Ask);
+        assert!(!fast_mode_from(from_env.raw("fast_mode").as_deref()));
+        assert_eq!(model_override_from(from_env.raw("model")).as_deref(), Some("m-env"));
+
+        let neither = Resolver::new(|_| None, SettingsFile::empty());
+        assert_eq!(permission_mode_from(neither.raw("auto_mode")), AutoMode::Bypass);
+        assert!(!fast_mode_from(neither.raw("fast_mode").as_deref()));
+        assert_eq!(model_override_from(neither.raw("model")), None);
     }
 
     const SAMPLE_SKILL: &str =
@@ -2750,21 +2793,19 @@ mod tests {
             ("off", false),
             ("", false),
         ] {
-            std::env::set_var("SMOOTH_FAST_MODE", val);
-            assert_eq!(fast_mode_enabled(), want, "SMOOTH_FAST_MODE={val:?}");
+            assert_eq!(fast_mode_from(Some(val)), want, "SMOOTH_FAST_MODE={val:?}");
         }
-        std::env::remove_var("SMOOTH_FAST_MODE");
-        assert!(!fast_mode_enabled(), "unset is disabled");
+        assert!(!fast_mode_from(None), "unset is disabled");
     }
 
     #[test]
     fn model_override_trims_and_filters_empty() {
-        std::env::set_var("SMOOTH_AGENT_MODEL", "  groq-gpt-oss-20b  ");
-        assert_eq!(model_override().as_deref(), Some("groq-gpt-oss-20b"));
-        std::env::set_var("SMOOTH_AGENT_MODEL", "   ");
-        assert_eq!(model_override(), None, "blank override is ignored");
-        std::env::remove_var("SMOOTH_AGENT_MODEL");
-        assert_eq!(model_override(), None);
+        assert_eq!(
+            model_override_from(Some("  groq-gpt-oss-20b  ".to_owned())).as_deref(),
+            Some("groq-gpt-oss-20b")
+        );
+        assert_eq!(model_override_from(Some("   ".to_owned())), None, "blank override is ignored");
+        assert_eq!(model_override_from(None), None);
     }
 
     #[test]

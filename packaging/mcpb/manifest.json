@@ -196,6 +196,10 @@
         {
             "name": "remember",
             "description": "Save a note to local memory (kept in this workspace). Free — no sign-in."
+        },
+        {
+            "name": "settings_list",
+            "description": "List Smooth's machine settings (~/.smooth/settings.toml): every key's effective value, its source (env/file/default), default, legacy SMOOTH_* env var, description, and whether a change needs a Big Smooth restart. Read-only; change one with `th settings set <key> <value>`."
         }
     ],
     "compatibility": {

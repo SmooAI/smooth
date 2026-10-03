@@ -54,6 +54,8 @@ mod reclaim;
 mod reminders_setup;
 mod secret_input;
 mod service;
+/// `th settings` — ~/.smooth/settings.toml over the typed registry (pearl th-f95ecf).
+mod settings;
 mod smooai;
 mod statusline_setup;
 
@@ -550,6 +552,18 @@ enum Commands {
     Pkg {
         #[command(subcommand)]
         cmd: pkg::Cmd,
+    },
+    /// Machine settings for Smooth and Big Smooth (~/.smooth/settings.toml).
+    ///
+    /// One typed registry of knobs (sandbox, egress allowlist, permission
+    /// mode, model, relay, tailscale, …), each mapped to its legacy SMOOTH_*
+    /// env var. Precedence: env var > file > default. `list --json` is the
+    /// machine-readable view for agents. Pearl th-f95ecf. (Not `th config`,
+    /// which is the compat alias for `smoo config`.)
+    #[command(visible_alias = "setting")]
+    Settings {
+        #[command(subcommand)]
+        cmd: settings::Cmd,
     },
     /// Pearl tracking (built-in work-item tracker).
     ///
@@ -2247,6 +2261,7 @@ async fn main() -> Result<()> {
         Some(Commands::Harness { cmd }) => harness::cmd(cmd).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pkg { cmd }) => pkg::cmd(cmd),
+        Some(Commands::Settings { cmd }) => settings::cmd(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Agent { cmd }) => mail::cmd_agent(cmd).await,
         Some(Commands::Msg { cmd }) => mail::cmd_msg(cmd).await,

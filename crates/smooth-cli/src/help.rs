@@ -109,6 +109,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "System",
         &[
             ("doctor", "health check, auto-fix, guided setup"),
+            ("settings", "machine settings — sandbox, egress, model, relay, … (~/.smooth/settings.toml)"),
             ("service", "run Smooth as a background service"),
             ("audit", "tool-usage audit logs"),
             ("tailscale", "tailnet devices Smooth can see"),
@@ -193,6 +194,16 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ),
     ("harness", &["th harness enable all", "th harness doctor", "th harness status"]),
     ("pkg", &["th pkg install owner/repo --harness all", "th pkg status", "th pkg rm <name>"]),
+    (
+        "settings",
+        &[
+            "th settings list --json             # every knob: value, source (env/file/default), restart",
+            "th settings explain sandbox.enabled",
+            "th settings set sandbox.enabled true   # then: th down && th up",
+            "th settings set egress.allowlist defaults,github.com",
+            "th settings unset auto_mode",
+        ],
+    ),
 ];
 
 /// Render the custom top-level help. Called for bare `th --help` / `-h` /

@@ -197,6 +197,81 @@ takes a comma list or `all`; a harness that isn't installed is skipped with a
 note. M1 details (merge rules, `.mdc` rendering, the managed section
 contract): [`Harness-Packages.md`](Harness-Packages.md#m1--overlays-that-merge-instead-of-replace).
 
+### 1d. `th settings` — machine settings for Smooth (pearl th-f95ecf)
+
+Smooth's knobs used to be `SMOOTH_*` environment variables you could only find
+by reading code. `th settings` puts the user-facing ones in one machine-global
+file, `~/.smooth/settings.toml` (`$SMOOTH_HOME/settings.toml` when set), over a
+typed registry (`smooth_policy::settings::REGISTRY`) that the daemon and the
+tools read through. It is **not** `th config`: that spelling is the compat
+alias for `smoo config`, the Smoo AI platform config server.
+
+```bash
+th settings list [--json]            # every key: value, source (env/file/default), default, restart
+th settings show <key> [--json]      # alias: get. Plain stdout is just the value
+th settings set <key> <value> [--json]
+th settings unset <key> [--json]     # back to the default
+th settings explain <key> [--json]   # type, allowed values, env var, who reads it, how to apply
+th settings path [--json]
+th settings ai                       # the generated guide, for handing to an agent
+```
+
+| Key                | Type                                  | Default                  | Legacy env var            | Read by |
+| ------------------ | ------------------------------------- | ------------------------ | ------------------------- | ------- |
+| `auto_mode`        | enum: bypass, accept-edits, ask, deny | `bypass`                 | `SMOOTH_AUTO_MODE`        | daemon  |
+| `cloud_memory`     | bool                                  | `false`                  | `SMOOTH_CLOUD_MEMORY`     | daemon  |
+| `egress.allowlist` | list                                  | unset (no egress proxy)  | `SMOOTH_EGRESS_ALLOWLIST` | daemon  |
+| `fast_mode`        | bool                                  | `false`                  | `SMOOTH_FAST_MODE`        | daemon  |
+| `model`            | string                                | unset (routing decides)  | `SMOOTH_AGENT_MODEL`      | daemon  |
+| `relay.enabled`    | bool                                  | `true`                   | `SMOOTH_RELAY`            | daemon  |
+| `relay.url`        | string                                | `wss://relay.smoo.ai/ws` | `SMOOTH_RELAY_URL`        | daemon  |
+| `sandbox.enabled`  | bool                                  | `false`                  | `SMOOTH_SANDBOX`          | tools   |
+| `tailscale.serve`  | bool                                  | `true`                   | `SMOOTH_TAILSCALE_SERVE`  | daemon  |
+
+Every key today is read when Big Smooth starts, so `set` ends with
+`restart Big Smooth to apply: th down && th up`.
+
+The file is plain nested TOML; `set` writes through `toml_edit`, so comments
+and keys this build doesn't know survive, and it is written 0600:
+
+```toml
+# ~/.smooth/settings.toml
+auto_mode = "accept-edits"
+
+[sandbox]
+enabled = true # corp laptop
+
+[egress]
+allowlist = ["defaults", "corp.internal"]
+```
+
+Rules worth knowing:
+
+- **Precedence is env var > file > default.** The legacy env var still wins,
+  so `SMOOTH_SANDBOX=1 th up` and every bench/e2e recipe work unchanged. A
+  set-but-empty env var counts as set, exactly as before. The `env` source
+  shown by `th settings` reflects **your shell**; Big Smooth sees the env it
+  was launched with, and `set` warns when the key's env var is set in the
+  shell.
+- **Validation:** unknown keys are refused with a closest match (`sandbox` →
+  `sandbox.enabled`). Bools take true/false, 1/0, yes/no or on/off; lists take
+  comma-separated entries (`unset` turns a list off, an empty list is
+  refused). A hand-edited value of the wrong type is ignored (falls back to the
+  default) and reported by `list` / `show`; a malformed file is ignored by the
+  daemon, and `set` refuses to overwrite it.
+- **Secrets never go here.** Tokens, API keys and credentials stay env-only or
+  in their own 0600 stores. Internal path overrides (`SMOOTH_*_DB`, `*_FILE`)
+  and test hooks stay env-only too.
+- **Agents can read, not write, from MCP:** `th mcp serve` exposes a read-only
+  `settings_list` tool returning the same JSON as `th settings list --json`.
+  Big Smooth's own fs tools are denied `~/.smooth/settings.toml` (it holds the
+  sandbox and egress posture), and so is the opt-in kernel sandbox.
+- **Adding a key:** add a `SettingDef` to `REGISTRY` (sorted; a test enforces
+  it), swap the call site's `std::env::var("SMOOTH_X")` for
+  `smooth_policy::settings::raw("x")` (it returns the env-var string shape, so
+  the call site's parsing is unchanged), and add a test feeding the call
+  site's pure core through `Resolver::new(env, SettingsFile::parse(..))`.
+
 ---
 
 ## 2. Auth — how `auth.smoo.ai` works

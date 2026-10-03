@@ -126,7 +126,8 @@ pub fn status() -> ProviderStatus {
     status_from(
         std::env::var("SMOOAI_GATEWAY_URL").ok().as_deref(),
         std::env::var("SMOOAI_GATEWAY_KEY").ok().as_deref(),
-        std::env::var("SMOOTH_AGENT_MODEL").ok().as_deref(),
+        // `SMOOTH_AGENT_MODEL`, or `th settings set model …` (th-f95ecf).
+        smooth_policy::settings::raw("model").as_deref(),
         providers_path().as_deref(),
         BOOT_CONFIGURED.get().copied(),
     )

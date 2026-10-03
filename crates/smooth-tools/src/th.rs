@@ -119,6 +119,7 @@ impl Tool for ThTool {
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let args = parse_args(&arguments)?;
+        refuse_settings_writes(&args)?;
         let cwd = arguments
             .get("cwd")
             .and_then(Value::as_str)
@@ -196,6 +197,29 @@ fn accept_stdout(success: bool, stdout: &[u8]) -> Option<String> {
     (!stdout.trim().is_empty()).then_some(stdout)
 }
 
+/// Refuse `th settings set|unset` from the agent (pearl th-f95ecf).
+///
+/// `~/.smooth/settings.toml` holds Big Smooth's own security posture
+/// (`sandbox.enabled`, `egress.allowlist`, `auto_mode`). When those were env
+/// vars the agent could not change them; letting it flip them through this
+/// unsandboxed tool would let it talk its way out of the sandbox at the next
+/// restart. Reads (`list`/`show`/`explain`) stay allowed — the agent should
+/// propose the `th settings set …` command and let the user run it.
+fn refuse_settings_writes(args: &[String]) -> anyhow::Result<()> {
+    let mut words = args.iter().map(String::as_str).filter(|a| !a.starts_with('-'));
+    while let Some(w) = words.next() {
+        if matches!(w, "settings" | "setting") {
+            if let Some(verb @ ("set" | "unset")) = words.next() {
+                anyhow::bail!(
+                    "`th settings {verb}` changes Big Smooth's own machine settings (sandbox, egress, permission mode) and is not available to the agent. Ask the user to run it themselves: th settings {verb} …"
+                );
+            }
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Extract the required `args` array as a `Vec<String>`, rejecting non-string
 /// elements. At least one arg is required.
 fn parse_args(arguments: &Value) -> anyhow::Result<Vec<String>> {
@@ -246,6 +270,39 @@ mod tests {
     #[test]
     fn parse_args_rejects_missing() {
         assert!(parse_args(&json!({})).is_err());
+    }
+
+    #[test]
+    fn the_agent_cannot_write_machine_settings() {
+        let v = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for denied in [
+            &["settings", "set", "sandbox.enabled", "false"][..],
+            &["setting", "set", "auto_mode", "bypass"],
+            &["settings", "unset", "egress.allowlist"],
+            &["--profile", "settings", "set", "x", "y"],
+        ] {
+            let err = refuse_settings_writes(&v(denied)).unwrap_err();
+            assert!(err.to_string().contains("not available to the agent"), "{denied:?}: {err}");
+        }
+        for allowed in [
+            &["settings", "list", "--json"][..],
+            &["settings", "show", "sandbox.enabled"],
+            &["settings", "explain", "auto_mode"],
+            &["settings"],
+            &["pearls", "list"],
+            &["config", "set", "k", "v"],
+        ] {
+            assert!(refuse_settings_writes(&v(allowed)).is_ok(), "{allowed:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_settings_writes_before_spawning() {
+        let err = tool()
+            .execute(serde_json::json!({ "args": ["settings", "set", "sandbox.enabled", "false"] }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("th settings set"), "{err}");
     }
 
     #[test]

@@ -41,10 +41,11 @@ pub const DEFAULT_EGRESS_PROXY_ADDR: &str = "127.0.0.1:4419";
 /// session (personal scope needs a human identity); a Family AI subscription gate
 /// is a separate stream (th-74e0f8), not enforced here.
 ///
-/// Set `SMOOTH_CLOUD_MEMORY` to `1`/`true`/`yes`/`on` to enable.
+/// Set `SMOOTH_CLOUD_MEMORY` to `1`/`true`/`yes`/`on` (or `th settings set
+/// cloud_memory true`) to enable.
 #[must_use]
 pub fn cloud_memory_enabled() -> bool {
-    cloud_memory_enabled_inner(std::env::var("SMOOTH_CLOUD_MEMORY").ok().as_deref())
+    cloud_memory_enabled_inner(smooth_policy::settings::raw("cloud_memory").as_deref())
 }
 
 /// Pure core (no env read) so the truthiness policy is unit-testable.
@@ -207,9 +208,11 @@ pub struct EgressSetup {
 /// [`sandbox_posture`].
 /// The `defaults` token expands to [`DEFAULT_EGRESS_HOSTS`] (mergeable with your
 /// own hosts). `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
+/// The allowlist can also live in the settings file (`th settings set
+/// egress.allowlist defaults,github.com`, th-f95ecf); the env var wins.
 #[must_use]
 pub fn resolve_egress() -> Option<EgressSetup> {
-    resolve_egress_inner(std::env::var("SMOOTH_EGRESS_ALLOWLIST").ok(), std::env::var("SMOOTH_EGRESS_PROXY_ADDR").ok())
+    resolve_egress_inner(smooth_policy::settings::raw("egress.allowlist"), std::env::var("SMOOTH_EGRESS_PROXY_ADDR").ok())
 }
 
 /// Pure core (no env reads) so the parse/expand logic is unit-testable without
@@ -428,6 +431,35 @@ mod tests {
         // …and the `defaults` sentinel is NOT treated as a (rejected) host.
         assert!(setup.rejected.is_empty(), "sentinel must not surface as rejected: {:?}", setup.rejected);
         assert!(setup.allowlist.len() > DEFAULT_EGRESS_HOSTS.len());
+    }
+
+    /// th-f95ecf: the settings file feeds the same pure cores; the legacy env
+    /// var still wins.
+    #[test]
+    fn settings_file_feeds_cloud_memory_and_egress_with_env_winning() {
+        use smooth_policy::settings::{Resolver, SettingsFile};
+        let file = || SettingsFile::parse("cloud_memory = true\n[egress]\nallowlist = [\"defaults\", \"corp.internal\"]\n").unwrap();
+
+        let r = Resolver::new(|_| None, file());
+        assert!(cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()));
+        let setup = resolve_egress_inner(r.raw("egress.allowlist"), None).expect("file turns the boundary on");
+        assert!(setup.allowlist.is_allowed("corp.internal") && setup.allowlist.is_allowed("github.com"));
+        assert!(setup.rejected.is_empty());
+
+        let env = |name: &str| match name {
+            "SMOOTH_CLOUD_MEMORY" => Some("0".to_owned()),
+            "SMOOTH_EGRESS_ALLOWLIST" => Some("only.example".to_owned()),
+            _ => None,
+        };
+        let r = Resolver::new(env, file());
+        assert!(!cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()), "env 0 beats file true");
+        let setup = resolve_egress_inner(r.raw("egress.allowlist"), None).expect("env set");
+        assert!(setup.allowlist.is_allowed("only.example"));
+        assert!(!setup.allowlist.is_allowed("corp.internal"), "env replaces, not merges with, the file");
+
+        let r = Resolver::new(|_| None, SettingsFile::empty());
+        assert!(!cloud_memory_enabled_inner(r.raw("cloud_memory").as_deref()));
+        assert!(resolve_egress_inner(r.raw("egress.allowlist"), None).is_none(), "neither → boundary off");
     }
 
     #[test]
