@@ -433,17 +433,35 @@ fn fit_budget(files: &mut [DiffFile], single: bool, budget: usize) {
         }
         return;
     }
-    let mut used = 1024;
-    for f in files.iter_mut() {
-        let n = json_len(f);
-        if used + n > budget && !f.hunks.is_empty() {
+    // Every file appears in the listing at least as a stub, so reserve all the
+    // stubs up front and spend only what is left on hunks. Charging a stub only
+    // after a file failed to fit let a listing of many files grow well past the
+    // budget (th-b994a1) — and past iOS's WebSocket message limit once sealed.
+    let stubs: Vec<usize> = files.iter_mut().map(stub_len).collect();
+    let mut used = 1024 + stubs.iter().sum::<usize>();
+    for (f, stub) in files.iter_mut().zip(stubs) {
+        if f.hunks.is_empty() {
+            continue;
+        }
+        let extra = json_len(f).saturating_sub(stub);
+        if used + extra > budget {
             f.hunks.clear();
             f.hunks_omitted = Some(Omitted::Budget);
-            used += json_len(f);
         } else {
-            used += n;
+            used += extra;
         }
     }
+}
+
+/// The serialized size of `f` as a budget stub (no hunks, `hunks_omitted`
+/// set). Takes the hunks out and puts them back rather than cloning them.
+fn stub_len(f: &mut DiffFile) -> usize {
+    let hunks = std::mem::take(&mut f.hunks);
+    let omitted = f.hunks_omitted.replace(Omitted::Budget);
+    let n = json_len(f);
+    f.hunks = hunks;
+    f.hunks_omitted = omitted;
+    n
 }
 
 /// Find a hunk by id among raw files: `(file, hunk)`.
