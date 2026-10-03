@@ -220,15 +220,16 @@ pub fn kill(id: &str, resume: bool) -> String {
 /// pearl when `close_pearl`, and removes its worktree and branch when
 /// `remove_worktree` and the branch is merged and clean. It refuses a dirty or
 /// unmerged worktree with `flow.error` (`ref` = `seq`) and touches nothing.
-/// This client never sends `force`: a refusal is shown, not overridden.
+/// `force` overrides that; this client sends it only from the Force close
+/// button on a refusal, after the reason was read (spec §7).
 #[must_use]
-pub fn close(id: &str, close_pearl: bool, remove_worktree: bool, seq: u64) -> String {
+pub fn close(id: &str, close_pearl: bool, remove_worktree: bool, force: bool, seq: u64) -> String {
     json!({
         "type": "flow.close",
         "id": id,
         "close_pearl": close_pearl,
         "remove_worktree": remove_worktree,
-        "force": false,
+        "force": force,
         "seq": seq,
     })
     .to_string()
@@ -374,12 +375,13 @@ mod tests {
         assert_eq!(v, json!({ "type": "flow.approve", "id": "fs-1", "request_id": "r1", "decision": "deny" }));
         let v: Value = serde_json::from_str(&kill("fs-1", false)).unwrap_or_default();
         assert_eq!(v["type"], "flow.kill");
-        let v: Value = serde_json::from_str(&close("fs-1", true, false, 3)).unwrap_or_default();
+        let v: Value = serde_json::from_str(&close("fs-1", true, false, false, 3)).unwrap_or_default();
         assert_eq!(
             v,
             json!({ "type": "flow.close", "id": "fs-1", "close_pearl": true, "remove_worktree": false, "force": false, "seq": 3 }),
-            "Close Out never forces"
         );
+        let v: Value = serde_json::from_str(&close("fs-1", false, true, true, 4)).unwrap_or_default();
+        assert_eq!((v["force"].as_bool(), v["seq"].as_u64()), (Some(true), Some(4)));
     }
 
     #[test]

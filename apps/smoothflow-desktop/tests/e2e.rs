@@ -593,6 +593,141 @@ fn closing_out_a_shell_drops_it_from_the_fleet() {
     assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
 }
 
+/// Scrollback against a real shell (th-1977a8): a long output scrolls into
+/// libghostty-vt's history; the wheel and Shift+PageUp/Home move the
+/// viewport over it, new output leaves it there, and typing snaps it back to
+/// the live screen (and still reaches the shell).
+#[test]
+fn a_shell_scrolls_its_history_and_typing_snaps_back() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let mut app = connect(&d);
+    let id = start_shell(&mut app, &d);
+    app.wait(&d, "the shell to attach at 80x24", WAIT, |a| a.core.attached_size(&id) == Some((80, 24)));
+    app.wait(&d, "a prompt", WAIT, |a| a.screen(&id).iter().any(|l| !l.trim().is_empty()));
+    let n = nonce();
+    app.type_text(&format!("for i in $(seq 1 200); do echo sfd-{n}-$i; done"));
+    assert!(app.press("enter").is_empty());
+    let last = format!("sfd-{n}-200");
+    app.wait(&d, "200 lines of output", WAIT, |a| a.screen(&id).iter().any(|l| l.trim() == last));
+    let pane = app.core.surfaces.focused_pane();
+    let top = |a: &App| a.core.terminals[&id].line_text(0);
+    assert!(app.core.terminals[&id].at_bottom());
+    let before = app.core.terminals[&id].scrollbar();
+    assert!(before.total >= 200, "the output is in the history: {before:?}");
+
+    // The wheel: ten lines up, over the shell (no mouse tracking).
+    assert!(app.core.wheel(pane, 10.0, 0, 0));
+    assert_eq!(app.core.terminals[&id].scrollbar().below(), 10, "{:?}", app.core.terminals[&id].scrollbar());
+    // Shift+Home: the oldest line of the output is in view.
+    app.core.key(Key {
+        key: "home",
+        shift: true,
+        ..Key::default()
+    });
+    app.pump();
+    let first = format!("sfd-{n}-1");
+    assert!(
+        app.screen(&id).iter().any(|l| l.trim() == first),
+        "Shift+Home shows the top: {:?}",
+        app.screen(&id)
+    );
+    let at_top = top(&app);
+
+    // Output while scrolled back doesn't move the viewport.
+    app.type_text(&format!("echo sfd-{n}-tail"));
+    assert!(app.core.terminals[&id].at_bottom(), "typing snapped it back to the screen");
+    app.core.key(Key {
+        key: "pageup",
+        shift: true,
+        ..Key::default()
+    });
+    assert!(!app.core.terminals[&id].at_bottom());
+    let held = top(&app);
+    assert!(app.press("enter").is_empty(), "Enter still goes to the shell");
+    let tail = format!("sfd-{n}-tail");
+    app.wait(&d, "the echo to run", WAIT, |a| {
+        a.core.terminals[&id].at_bottom() && a.screen(&id).iter().any(|l| l.trim() == tail)
+    });
+    assert_ne!(held, at_top, "Shift+PageUp from the screen is not the top");
+}
+
+/// Close Out a shell in a dirty linked worktree (th-1977a8): the real engine
+/// refuses and touches nothing; the refusal offers Force close (Keep it is
+/// the default), and Force close removes the worktree and drops the row.
+#[test]
+fn a_refused_close_out_offers_force_and_force_removes_the_worktree() {
+    if !have_tmux() {
+        return;
+    }
+    let d = Daemon::boot(DaemonPath::Inherited, &[]);
+    let ws = scratch_repo(&d);
+    let wt = ws.with_file_name("ws-feature");
+    git(&ws, &["worktree", "add", "-q", "-b", "feature", wt.to_str().expect("utf-8 path")]);
+    std::fs::write(wt.join("scratch.txt"), "uncommitted\n").expect("dirty the worktree");
+
+    let mut app = connect(&d);
+    let fetches = app
+        .core
+        .run_effects(vec![smoothflow_desktop::sheet::Effect::Start(smoothflow_desktop::frames::NewSession {
+            kind: "shell".into(),
+            worktree: Some(wt.to_string_lossy().into_owned()),
+            ..Default::default()
+        })]);
+    assert!(fetches.is_empty());
+    app.wait(&d, "the shell in the worktree to open", WAIT, |a| a.core.surfaces.focused_session().is_some());
+    let id = app.core.surfaces.focused_session().map(str::to_string).expect("focused session");
+    let s = app.core.sessions[&id].clone();
+    assert!(smoothflow_desktop::app_core::has_own_worktree(&s), "a linked worktree is its own: {s:?}");
+
+    app.core.close_out(&id);
+    let ask = app.core.dialog.clone().expect("Close Out asks");
+    let close = ask.buttons[0].1.clone();
+    assert!(
+        matches!(
+            close,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: false,
+                ..
+            }
+        ),
+        "it offers to remove the worktree, unforced: {close:?}"
+    );
+    app.core.confirm(close);
+    app.wait(&d, "the engine's refusal", WAIT, |a| a.core.dialog.is_some());
+    let refusal = app.core.dialog.clone().expect("refusal");
+    assert!(
+        refusal.message.contains("uncommitted changes"),
+        "the engine's reason, verbatim: {}",
+        refusal.message
+    );
+    assert_eq!(refusal.cancel, "Keep it");
+    let (label, force) = refusal.buttons[0].clone();
+    assert_eq!(label, "Force close");
+    assert!(
+        matches!(
+            force,
+            Confirmed::CloseOut {
+                remove_worktree: true,
+                force: true,
+                ..
+            }
+        ),
+        "{force:?}"
+    );
+    assert!(wt.join("scratch.txt").is_file(), "nothing was touched");
+    assert!(app.core.sessions.contains_key(&id), "the row stays");
+
+    app.core.confirm(force);
+    app.wait(&d, "the forced close to drop the row", WAIT, |a| !a.core.sessions.contains_key(&id));
+    assert!(app.core.dialog.is_none(), "no second refusal: {:?}", app.core.dialog);
+    assert!(!wt.exists(), "force removed the worktree");
+    assert!(app.core.notice.as_deref().is_some_and(|n| n.starts_with("Closed out")), "{:?}", app.core.notice);
+}
+
 // ── Diff (th-26f5b9) ────────────────────────────────────────────────────
 
 /// `git` in `dir`, isolated from the developer's config; panics on failure.

@@ -161,9 +161,15 @@ Normative words: **must**, **should**, **may**.
     - **The engine can refuse.** A dirty or unmerged worktree (or an adopted
       session still running) is refused with nothing touched. The client
       shows the engine's reason verbatim and the row stays. Close Out never
-      sends `force` on its own; the Mac offers Force only in the refusal
-      sheet, after the reason has been read, and SmoothFlow Desktop doesn't
-      offer it yet.
+      sends `force` on its own.
+    - **Force is offered only after a refusal.** The refusal shows the reason
+      verbatim, says nothing was touched, and offers **Force close** beside
+      **Keep it**, which is the default (Enter/Esc). Force close resends the
+      refused request (same `close_pearl` and `remove_worktree`) with
+      `force: true`. It is never a checkbox armed before the reason exists. A
+      forced close that is refused anyway offers nothing further. The Mac
+      offers this on the Inbox card or in a sheet, and SmoothFlow Desktop in
+      the refusal dialog.
 - **Fan out** runs one prompt against N candidates, each with its own
   worktree and child pearl. **Pick winner** merges one and garbage-collects
   the others.
@@ -223,6 +229,20 @@ control.
   bytes written to the terminal in `seq` order. Input is `flow.input{data_b64}`
   (keyboard and mouse encodings, bracketed paste). Resize sends `flow.resize`.
   A late joiner gets a full redraw from the engine.
+- **Scrollback**, following Ghostty's rules:
+    - The wheel or trackpad scrolls the history. It sends the program mouse
+      reports instead when the program asked for them (1000/1002/1003: vim,
+      htop, Claude Code's TUI). On the alternate screen with alternate scroll
+      (1007, on by default) it sends arrow keys instead, `ESC O A` under
+      DECCKM. A fling sends at most 30 of either.
+    - Shift+PageUp/PageDown/Home/End page through the history and jump to its
+      top or bottom. On the alternate screen, which has no history, these keys
+      go to the program.
+    - Typing snaps a scrolled-back pane to the live screen. New output leaves
+      it where it is (Ghostty's `scroll-to-bottom = keystroke`).
+    - A scrolled-back pane shows how far back it is.
+- Faint (SGR 2) draws at reduced alpha, and strikethrough (SGR 9) draws as a
+  line, beside bold, italic, underline and inverse.
 - IME, selection and copy, links, scrollback search, and font size zoom.
 - Phones must render live `flow.output` in a real terminal. `flow.screen` text
   is for thumbnails and the fleet list only.
@@ -295,6 +315,10 @@ control.
   `surfaces.json`. They are additive; the existing six files are unchanged. A
   chord ending in a single `+` (`ctrl+`) names no key; `ctrl++` is Ctrl and +.
   SmoothFlow Desktop M2 is the first client to use them (th-9fd86d).
+- 2026-10-03: §10 scrollback and faint/strikethrough, written from Ghostty's
+  behaviour on the Mac, and §7 Force close after a refused Close Out.
+  SmoothFlow Desktop implements both (th-1977a8). The Mac already behaved
+  this way.
 - 2026-10-02: SmoothFlow Desktop parses VT with libghostty-vt instead of
   `alacritty_terminal` (th-872ea8). It links the same pinned manaflow-ai/ghostty
   commit as the Mac, iOS and Android apps, built from source with Zig on macOS,

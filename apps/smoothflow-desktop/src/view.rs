@@ -22,6 +22,9 @@ pub const FONT_SIZE: f32 = 13.0;
 
 pub const CENTER_TABS_HEIGHT: f32 = 28.0;
 
+/// How faint (SGR 2) text is drawn: the run's colour at this alpha.
+const FAINT_ALPHA: f32 = 0.5;
+
 pub const SURFACE: u32 = 0x181825;
 pub const BORDER: u32 = 0x313244;
 pub const MUTED: u32 = 0x7f849c;
@@ -294,7 +297,23 @@ impl Workspace {
                     this.surfaces.focus_pane(pane);
                     cx.notify();
                 }),
-            );
+            )
+            // Wheel and trackpad: the history, or the program's mouse
+            // reports / arrow keys (Ghostty's rules, `Core::wheel`).
+            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
+                let lines = f32::from(ev.delta.pixel_delta(px(m.height)).y) / m.height;
+                let (ox, oy) = this.pane_origin;
+                let cell = |at: f32, origin: f32, size: f32| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a clamped, non-negative cell index")]
+                    let i = ((at - origin - PANE_PADDING) / size).max(0.0) as usize;
+                    i
+                };
+                let col = cell(f32::from(ev.position.x), ox + x, m.width);
+                let row = cell(f32::from(ev.position.y), oy + y, m.height);
+                if this.wheel(pane, lines, col, row) {
+                    cx.notify();
+                }
+            }));
         if multi {
             el = el.border_1().border_color(hsla(if focused { ACCENT } else { BORDER }));
         }
@@ -321,7 +340,10 @@ impl Workspace {
             let mut text_runs = Vec::with_capacity(runs.len() + 1);
             for run in runs {
                 text.push_str(&run.text);
-                let color = hsla(run.fg);
+                let mut color = hsla(run.fg);
+                if run.faint {
+                    color.a = FAINT_ALPHA;
+                }
                 text_runs.push(TextRun {
                     len: run.text.len(),
                     font: Font {
@@ -336,7 +358,10 @@ impl Workspace {
                         color: Some(color),
                         wavy: false,
                     }),
-                    strikethrough: None,
+                    strikethrough: run.strike.then(|| StrikethroughStyle {
+                        thickness: px(1.0),
+                        color: Some(color),
+                    }),
                 });
             }
             if text.is_empty() {
@@ -353,6 +378,26 @@ impl Workspace {
             body = body.child(div().h(px(m.height)).whitespace_nowrap().child(StyledText::new(text).with_runs(text_runs)));
         }
         el = el.child(body);
+        // Scrolled back: a quiet note of how far, top right, until typing
+        // or Shift+End brings the screen back.
+        let below = term.scrollbar().below();
+        if below > 0 {
+            el = el.child(
+                div()
+                    .absolute()
+                    .top(px(4.0))
+                    .right(px(10.0))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(Hsla { a: 0.85, ..hsla(SURFACE) })
+                    .border_1()
+                    .border_color(hsla(BORDER))
+                    .text_xs()
+                    .text_color(hsla(SUBTLE))
+                    .child(format!("↑ {below} line{} back · Shift+End", if below == 1 { "" } else { "s" })),
+            );
+        }
         if !block {
             if let Some((row, col)) = screen.cursor {
                 #[allow(clippy::cast_precision_loss, reason = "small grid indices")]
@@ -655,6 +700,8 @@ impl Render for Workspace {
         };
         // A click may have moved the focus to a session the tab can't show.
         self.sync_center();
+        // Where the pane area starts in the window, for wheel positions.
+        self.pane_origin = (sidebar_w, top);
         let mut area = div().relative().flex_1().overflow_hidden();
         if self.center == CenterTab::Diff {
             // The terminals stay attached at their size while the Diff is up.
