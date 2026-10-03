@@ -23,6 +23,17 @@
 //! Released on shutdown, and only when it is still ours — a daemon that lost
 //! the claim must not delete the winner's file.
 //!
+//! **The app's engine outranks Big Smooth's (th-5069eb).** The SmoothFlow
+//! app's child daemon does NOT share Big Smooth's store: it runs its own
+//! `smoothflow-flow.db` and its own tmux socket. So "first live one wins" let
+//! a long-running Big Smooth keep `flow.addr`, and every hook, `th flow`
+//! call, MCP flow tool and SmoothFlow Desktop window then talked to an engine
+//! that had never heard of the app's sessions. A daemon launched by the app
+//! (`$SMOOTHFLOW_PARENT` set) is the *preferred* claimant: it takes the file
+//! even from a live holder. Big Smooth still never takes it from a live one,
+//! so the app keeps it until it quits and releases it, and the chain falls
+//! back to `daemon.addr`.
+//!
 //! The hook's discovery chain is `$SMOOTH_FLOW_ADDR` → `flow.addr` →
 //! `daemon.addr`, so nothing changes on a machine that only runs Big Smooth.
 
@@ -42,14 +53,25 @@ pub fn claimed(dir: &Path) -> Option<String> {
     (!s.is_empty()).then(|| s.to_owned())
 }
 
-/// The claim decision, pure over the facts: should `addr` take the file whose
-/// current contents are `existing`, given whether that address is `alive`?
+/// The env var the SmoothFlow app sets on the daemon it launches.
+pub const APP_PARENT_ENV: &str = "SMOOTHFLOW_PARENT";
+
+/// Whether this daemon was launched by the SmoothFlow app, and so is the
+/// preferred `flow.addr` claimant (th-5069eb).
 #[must_use]
-pub fn should_claim(existing: Option<&str>, addr: &str, alive: bool) -> bool {
+pub fn launched_by_app(parent: Option<&str>) -> bool {
+    parent.is_some_and(|p| !p.trim().is_empty())
+}
+
+/// The claim decision, pure over the facts: should `addr` take the file whose
+/// current contents are `existing`, given whether that address is `alive` and
+/// whether this daemon is the `preferred` (app-launched) claimant?
+#[must_use]
+pub fn should_claim(existing: Option<&str>, addr: &str, alive: bool, preferred: bool) -> bool {
     match existing.map(str::trim).filter(|s| !s.is_empty()) {
         None => true,
         Some(cur) if cur == addr => true,
-        Some(_) => !alive,
+        Some(_) => preferred || !alive,
     }
 }
 
@@ -74,13 +96,13 @@ pub fn release(dir: &Path, addr: &str) -> bool {
 
 /// Claim the file for `addr` if [`should_claim`] says so, probing the current
 /// occupant for liveness. Returns whether this daemon now owns it.
-pub async fn claim(dir: &Path, addr: &str) -> bool {
+pub async fn claim(dir: &Path, addr: &str, preferred: bool) -> bool {
     let existing = claimed(dir);
     let alive = match existing.as_deref() {
-        Some(cur) if cur != addr => crate::single_instance::probe_health(cur).await,
+        Some(cur) if cur != addr && !preferred => crate::single_instance::probe_health(cur).await,
         _ => false,
     };
-    if !should_claim(existing.as_deref(), addr, alive) {
+    if !should_claim(existing.as_deref(), addr, alive, preferred) {
         tracing::info!(
             addr,
             holder = existing.as_deref().unwrap_or("-"),
@@ -90,6 +112,11 @@ pub async fn claim(dir: &Path, addr: &str) -> bool {
     }
     match write(dir, addr) {
         Ok(p) => {
+            if preferred {
+                if let Some(prev) = existing.as_deref().filter(|cur| *cur != addr) {
+                    tracing::info!(addr, previous = prev, "SmoothFlow app engine takes flow.addr over from another daemon");
+                }
+            }
             tracing::info!(path = %p.display(), addr, "claimed flow.addr — harness hooks reach this flow engine");
             true
         }
@@ -107,27 +134,27 @@ mod tests {
 
     #[test]
     fn an_empty_or_missing_file_is_free() {
-        assert!(should_claim(None, "127.0.0.1:1", false));
-        assert!(should_claim(Some(""), "127.0.0.1:1", false));
-        assert!(should_claim(Some("   \n"), "127.0.0.1:1", false));
+        assert!(should_claim(None, "127.0.0.1:1", false, false));
+        assert!(should_claim(Some(""), "127.0.0.1:1", false, false));
+        assert!(should_claim(Some("   \n"), "127.0.0.1:1", false, false));
     }
 
     #[test]
     fn a_live_holder_keeps_the_claim() {
-        assert!(!should_claim(Some("127.0.0.1:8788"), "127.0.0.1:4400", true));
+        assert!(!should_claim(Some("127.0.0.1:8788"), "127.0.0.1:4400", true, false));
     }
 
     #[test]
     fn a_dead_holder_is_taken_over() {
-        assert!(should_claim(Some("127.0.0.1:8788"), "127.0.0.1:4400", false));
+        assert!(should_claim(Some("127.0.0.1:8788"), "127.0.0.1:4400", false, false));
     }
 
     #[test]
     fn our_own_address_is_always_reclaimed() {
         // A restart on the same port: the probe may even say "alive" (our own
         // dying listener), and we still rewrite it.
-        assert!(should_claim(Some("127.0.0.1:4400"), "127.0.0.1:4400", true));
-        assert!(should_claim(Some(" 127.0.0.1:4400 "), "127.0.0.1:4400", false));
+        assert!(should_claim(Some("127.0.0.1:4400"), "127.0.0.1:4400", true, false));
+        assert!(should_claim(Some(" 127.0.0.1:4400 "), "127.0.0.1:4400", false, false));
     }
 
     #[test]
@@ -149,14 +176,14 @@ mod tests {
         // Nothing listens on this port, so the `/health` probe fails and the
         // holder is stale.
         write(dir.path(), "127.0.0.1:1").unwrap();
-        assert!(claim(dir.path(), "127.0.0.1:4400").await);
+        assert!(claim(dir.path(), "127.0.0.1:4400", false).await);
         assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
     }
 
     #[tokio::test]
     async fn claim_takes_a_file_that_does_not_exist_yet() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(claim(dir.path(), "127.0.0.1:4400").await);
+        assert!(claim(dir.path(), "127.0.0.1:4400", false).await);
         assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
     }
 
@@ -203,11 +230,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (holder, server) = live_health_listener().await;
         write(dir.path(), &holder).unwrap();
-        assert!(!claim(dir.path(), "127.0.0.1:4400").await, "a live flow daemon keeps the hooks");
+        assert!(!claim(dir.path(), "127.0.0.1:4400", false).await, "a live flow daemon keeps the hooks");
         assert_eq!(claimed(dir.path()).as_deref(), Some(holder.as_str()), "the file is untouched");
         // …and the loser must not delete the winner's claim on ITS shutdown.
         assert!(!release(dir.path(), "127.0.0.1:4400"));
         assert_eq!(claimed(dir.path()).as_deref(), Some(holder.as_str()));
+        server.abort();
+    }
+
+    #[test]
+    fn the_app_engine_takes_the_file_even_from_a_live_holder() {
+        // th-5069eb: Big Smooth held flow.addr; the app's engine has its own
+        // store, so leaving it there sent every client to the wrong engine.
+        assert!(should_claim(Some("127.0.0.1:57043"), "127.0.0.1:51034", true, true));
+        assert!(should_claim(Some("127.0.0.1:57043"), "127.0.0.1:51034", false, true));
+        assert!(should_claim(None, "127.0.0.1:51034", false, true));
+    }
+
+    #[test]
+    fn only_a_non_blank_parent_marks_the_app_engine() {
+        assert!(launched_by_app(Some("ai.smoo.smoothflow")));
+        assert!(!launched_by_app(Some("  ")));
+        assert!(!launched_by_app(Some("")));
+        assert!(!launched_by_app(None));
+    }
+
+    #[tokio::test]
+    async fn the_app_engine_claims_over_a_live_big_smooth() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, server) = live_health_listener().await;
+        write(dir.path(), &holder).unwrap();
+        assert!(claim(dir.path(), "127.0.0.1:4400", true).await);
+        assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
+        // …and the displaced holder's shutdown must not delete the app's claim.
+        assert!(!release(dir.path(), &holder));
+        assert_eq!(claimed(dir.path()).as_deref(), Some("127.0.0.1:4400"));
         server.abort();
     }
 
@@ -218,7 +275,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ours, server) = live_health_listener().await;
         write(dir.path(), &ours).unwrap();
-        assert!(claim(dir.path(), &ours).await);
+        assert!(claim(dir.path(), &ours, false).await);
         assert_eq!(claimed(dir.path()).as_deref(), Some(ours.as_str()));
         server.abort();
     }
