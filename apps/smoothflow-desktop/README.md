@@ -101,9 +101,10 @@ flow engine runs inside WSL2 until the native PTY host lands (th-2fbc9c).
 ## libghostty-vt
 
 The terminal engine is libghostty-vt, Ghostty's VT parser and screen as a C
-library, linked statically. Ghostty publishes no binaries, so
-`scripts/build-ghostty-vt.sh` builds it from source, pinned by
-`ghostty-vt.lock`: the manaflow-ai/ghostty commit (the same one
+library, linked statically. Ghostty publishes no binaries, so the repo's
+`scripts/ghostty-vt/build-ghostty-vt.sh` builds it from source, pinned by
+the `ghostty-vt.lock` next to it (shared with the daemon's headless terminal,
+`crates/smooth-flow-vt`): the manaflow-ai/ghostty commit (the same one
 `apps/smoothflow/scripts/ghosttykit.lock` and the Android app pin) and the Zig
 release (sha256-checked, fetched from community mirrors before ziglang.org).
 It runs `zig build -Demit-lib-vt -Doptimize=ReleaseFast` for the Rust target

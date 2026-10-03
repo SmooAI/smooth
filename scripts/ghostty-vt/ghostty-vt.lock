@@ -1,8 +1,10 @@
-# libghostty-vt for SmoothFlow Desktop's terminals (th-872ea8), built from source
-# by scripts/build-ghostty-vt.sh. ghostty_sha is the SAME manaflow-ai/ghostty commit
-# as apps/smoothflow/scripts/ghosttykit.lock (Mac + iOS) and the Android app's
-# ghostty-vt.lock: every SmoothFlow client parses VT with the same Ghostty.
-# Bump them together.
+# libghostty-vt for every Rust consumer of Ghostty's VT parser, built from source
+# by build-ghostty-vt.sh (next to this file): SmoothFlow Desktop's terminals
+# (apps/smoothflow-desktop, th-872ea8) and the daemon's headless session
+# terminal (crates/smooth-flow-vt, th-5025fb). ghostty_sha is the SAME
+# manaflow-ai/ghostty commit as apps/smoothflow/scripts/ghosttykit.lock (Mac +
+# iOS) and the Android app's ghostty-vt.lock: every SmoothFlow client parses VT
+# with the same Ghostty the daemon snapshots with. Bump them together.
 ghostty_repo=https://github.com/manaflow-ai/ghostty.git
 ghostty_sha=abd40f6e472d57f2d4bb182004bb5f3fac8df961
 # That commit's build.zig.zon minimum_zig_version. sha256s from ziglang.org/download/index.json.
