@@ -272,6 +272,26 @@ fn budget_stubs_files_in_order() {
 }
 
 #[test]
+fn budget_is_a_hard_cap_with_many_files() {
+    // th-b994a1: stubs used to be charged only after a file missed the
+    // budget, so hundreds of files pushed the frame far past it.
+    let d = repo();
+    let p = d.path();
+    for i in 0..600 {
+        let body: String = (0..20).map(|j| format!("file {i} line {j} with some text\n")).collect();
+        std::fs::write(p.join(format!("f{i:04}.txt")), body).unwrap();
+    }
+    let (files, _) = raw(p, &resolve(p, DiffBase::Uncommitted, &[]).unwrap()).unwrap();
+    let budget = 128 * 1024;
+    let diff = build(&files, false, &HashSet::new(), None, budget);
+    assert_eq!(diff.files.len(), 600, "every file is listed");
+    assert!(diff.files.iter().any(|f| f.hunks_omitted.is_none()), "some files still carry hunks");
+    assert!(diff.files.iter().any(|f| f.hunks_omitted == Some(Omitted::Budget)), "the rest are stubs");
+    let len = serde_json::to_vec(&diff).unwrap().len();
+    assert!(len <= budget, "frame {len} B exceeds the {budget} B budget");
+}
+
+#[test]
 fn review_message_quotes_each_location() {
     let d = repo();
     let p = d.path();
