@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.66.3
+
+### Patch Changes
+
+- 6fc4a0b: SmoothFlow diff: the 512 KiB frame budget is now a hard cap. Every file's summary stub is reserved up front, so a listing with hundreds of changed files no longer grows past the budget (and past what a phone can receive over the relay) (th-b994a1).
+
 ## 0.66.2
 
 ### Patch Changes
