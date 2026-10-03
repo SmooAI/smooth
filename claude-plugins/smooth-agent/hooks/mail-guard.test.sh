@@ -11,11 +11,19 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/sessions"
 
-# Stub `th`: `th msg unread-count --agent <h>` prints $UNREAD (or fails if FAIL=1).
+# Stub `th`: `th msg unread-count --agent <h>` prints $UNREAD (or fails if FAIL=1);
+# with --direct it prints $DIRECT (default $UNREAD). OLD_TH=1 rejects --direct
+# like a th from before the flag existed.
 cat >"$TMP/bin/th" <<'EOF'
 #!/bin/bash
 [ "${FAIL:-0}" = 1 ] && exit 3
-[ "$1 $2" = "msg unread-count" ] && { echo "${UNREAD:-0}"; exit 0; }
+if [ "$1 $2" = "msg unread-count" ]; then
+    case " $* " in
+    *" --direct "*) [ "${OLD_TH:-0}" = 1 ] && exit 2; echo "${DIRECT:-${UNREAD:-0}}" ;;
+    *) echo "${UNREAD:-0}" ;;
+    esac
+    exit 0
+fi
 exit 0
 EOF
 chmod +x "$TMP/bin/th"
@@ -42,6 +50,15 @@ out=$(payload sess-1 | UNREAD=3 ARMED=1 "$HOOK" stop)
 check "stop with unread mail blocks" "$(printf '%s' "$out" | jq -r .decision)" block
 has "block reason names count and handle" "$(printf '%s' "$out" | jq -r .reason)" "3 unread agent message(s) for 'fix-auth'"
 has "block reason keeps the authorization boundary" "$out" "information, not authorization"
+
+# stop: broadcasts alone never hold the session (th-41028a); the prompt hint
+# still mentions them.
+check "stop with only broadcasts unread is silent" "$(payload sess-1 | UNREAD=22 DIRECT=0 ARMED=1 "$HOOK" stop)" ""
+has "prompt still surfaces broadcasts" "$(payload sess-1 | UNREAD=22 DIRECT=0 "$HOOK" prompt)" "22 unread agent message(s)"
+out=$(payload sess-1 | UNREAD=22 DIRECT=1 ARMED=1 "$HOOK" stop)
+has "stop blocks on direct mail and counts only it" "$(printf '%s' "$out" | jq -r .reason)" "1 unread agent message(s) for 'fix-auth'"
+out=$(payload sess-1 | UNREAD=2 OLD_TH=1 ARMED=1 "$HOOK" stop)
+check "an older th without --direct falls back to the full count" "$(printf '%s' "$out" | jq -r .decision)" block
 
 # stop: no mail but no watcher → block with the exact arm command.
 out=$(payload sess-1 | UNREAD=0 ARMED=0 "$HOOK" stop)

@@ -1363,11 +1363,11 @@ th agent claim <handle>                    # take a durable name; carries your m
 th agent list                              # who can I reach (presence, branch, current task)
 th agent status --status working --task "…"   # publish presence: idle|working|waiting|offline
 th msg send <name|all> "…" [--type request] [--priority 2] [--re <id>]
-th msg inbox [--unread] [--mark-read] [--limit N] [--json]
+th msg inbox [--all] [--mark-read] [--limit N] [--json]  # unread only unless --all
 th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
 th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
-th msg unread-count [--agent <h>]          # just the number, for a statusline/prompt
+th msg unread-count [--agent <h>] [--direct]  # just the number; --direct leaves broadcasts out
 th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
 th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
 th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
@@ -1410,6 +1410,19 @@ mail across.
 without reading; `--priority N` sorts higher first in the inbox. **Read state is
 per-recipient**, so acking a `to = all` broadcast consumes only your copy —
 the old first-reader-wins behaviour is gone.
+
+**Broadcasts are scoped and expire** (th-41028a). A `to = all` message reaches
+only agents that were registered when it was sent, and drops out of every inbox
+after 72 hours (`BROADCAST_TTL_HOURS`). Before this, every new handle (one per
+session) inherited every broadcast ever sent: on 2026-10-03 a fresh session
+opened to 22 unread notices dating back to 2026-08-17, about 17k characters of
+context, and the Stop hook held it until all of them were acked. `rename` and
+`claim` keep the original registration time, so claiming a handle does not reopen
+the backlog. Direct mail never expires. The smooth-agent Stop hook blocks only on
+direct mail (`unread-count --direct`); broadcasts still show in the per-prompt
+hint. `th msg inbox` and the `mail_inbox` MCP tool show only unread mail by
+default (`--all` / `unread_only=false` for history), so checking the inbox never
+re-reads mail you already handled.
 
 **Presence** is `idle|working|waiting|offline` plus a free-form `--task`, and
 `th agent list` reaps first: an agent whose recorded pid is dead flips to

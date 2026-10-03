@@ -207,7 +207,8 @@ pub struct MailInboxArgs {
     /// Whose inbox. Defaults to $SMOOTH_AGENT_HANDLE on this server.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// Only messages you have not acked yet. Default false.
+    /// Only messages you have not acked yet. Default true: already-handled
+    /// mail is context you paid for once (th-41028a). Pass false for history.
     #[serde(default)]
     pub unread_only: Option<bool>,
 }
@@ -783,7 +784,7 @@ impl SmoothMcp {
     /// MCP error if the handle can't be resolved or the query fails.
     #[tool(
         name = "mail_inbox",
-        description = "Read your agent mail: messages sent to you plus broadcasts, highest priority first. \
+        description = "Read your unread agent mail (pass unread_only=false for history): messages sent to you plus recent broadcasts, highest priority first. \
             Check it at natural breakpoints — after finishing a step, before going idle, and before starting something another agent may already own. \
             Reading is NOT acking: call mail_ack once you have actually handled a message, so nothing is lost if you are interrupted.",
         annotations(read_only_hint = true)
@@ -793,7 +794,7 @@ impl SmoothMcp {
         let who = resolve_agent_id(a.agent_id.as_deref())?;
         let store = open_mail_store()?;
         let _ = store.touch(&who); // heartbeat, best-effort
-        let msgs = store.inbox(&who, a.unread_only.unwrap_or(false), 50).map_err(mail_err)?;
+        let msgs = store.inbox(&who, a.unread_only.unwrap_or(true), 50).map_err(mail_err)?;
         if msgs.is_empty() {
             return Ok(format!("Inbox for `{who}` is empty."));
         }
@@ -1608,7 +1609,13 @@ mod tests {
         )
         .await;
         call("agent_identity", json!({ "agent_id": "bob", "name": "reviewer", "continue_from": "bob" })).await;
-        let moved = call("mail_inbox", json!({ "agent_id": "reviewer" })).await;
+        // Default is unread-only (th-41028a): the acked message is history now.
+        let unread = call("mail_inbox", json!({ "agent_id": "reviewer" })).await;
+        assert!(
+            unread.contains("second") && !unread.contains("please review"),
+            "default view is unread-only: {unread}"
+        );
+        let moved = call("mail_inbox", json!({ "agent_id": "reviewer", "unread_only": false })).await;
         assert!(moved.contains("second") && moved.contains("please review"), "rename must carry mail: {moved}");
         // SMOODEV-3356: and the session that was `bob` now resolves to `reviewer`.
         assert_eq!(std::fs::read_to_string(sessions.join("sess-bob")).expect("read"), "reviewer");
