@@ -734,7 +734,14 @@ that some LIVE flow engine is reachable. The claim rule (`flow_addr`):
 - no file, or one naming an address that no longer answers `/health` → claim it;
 - a file naming a live daemon → leave it (that daemon serves the hooks);
 - our own address → rewrite it (a restart on the same port);
-- released on shutdown, and only when it is still ours.
+- the SmoothFlow app's engine (`$SMOOTHFLOW_PARENT` set) takes it even from a
+  live holder (th-5069eb). The app launches its daemon with its own
+  `smoothflow-flow.db` and tmux socket, so the stores are **not** shared in
+  practice: a long-running Big Smooth holding the file sent hooks, `th flow`,
+  the MCP flow tools and SmoothFlow Desktop to an engine that had never heard
+  of the app's sessions;
+- released on shutdown (Ctrl-C or SIGTERM, which is how the app stops its
+  daemon), and only when it is still ours.
 
 Discovery chain, in `th flow hook` and the OpenCode plugin alike:
 `$SMOOTH_FLOW_ADDR` → `~/.smooth/flow.addr` → `~/.smooth/daemon.addr`. Nothing
