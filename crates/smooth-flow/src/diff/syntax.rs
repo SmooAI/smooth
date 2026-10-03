@@ -29,6 +29,15 @@ fn set() -> &'static SyntaxSet {
     SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
+/// Load the syntax set and the scope table now. Both load lazily, and the
+/// first load takes long enough to eat most of [`super::HIGHLIGHT_BUDGET`],
+/// so a fresh engine's first diff came back with no syntax spans
+/// (th-35271b). [`super::build`] calls this before it starts the clock.
+pub fn warm() {
+    let _ = set();
+    let _ = table();
+}
+
 /// Scope prefix → kind, most specific first. The first scope on the stack
 /// (innermost outward) with any match decides.
 fn table() -> &'static [(Scope, TokenKind)] {
@@ -187,6 +196,15 @@ impl Highlighter {
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_is_idempotent_and_leaves_highlighting_working() {
+        warm();
+        warm();
+        let rs = syntax_for("src/a.rs").expect("rust syntax");
+        let spans = Highlighter::new(rs).line("fn main() {}");
+        assert!(!spans.is_empty(), "highlighting works after warm()");
+    }
 
     fn kinds(path: &str, line: &str) -> Vec<(String, &'static str)> {
         let mut h = Highlighter::new(syntax_for(path).unwrap());
