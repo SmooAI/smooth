@@ -28,6 +28,30 @@ use uuid::Uuid;
 /// Recipient name used for broadcast messages.
 pub const BROADCAST: &str = "all";
 
+/// How long a broadcast stays in anyone's inbox. Broadcasts are machine-wide
+/// notices ("disk is full", "migration slot is free"); a week-old one is
+/// noise, and every session that read it paid for it in context.
+pub const BROADCAST_TTL_HOURS: i64 = 72;
+
+/// The `WHERE` fragment selecting what `?1` may see: direct mail, plus
+/// broadcasts sent after `?1` registered and inside [`BROADCAST_TTL_HOURS`].
+///
+/// Without the registration bound, every new handle (one per session) inherited
+/// every broadcast ever sent: on 2026-10-03 a fresh session opened to 22 unread
+/// notices dating back to 2026-08-17, and the Stop hook held it until they were
+/// all acked (pearl th-41028a). `rename` keeps `registered_at`, so claiming a
+/// handle doesn't reopen the backlog. An unregistered reader gets the TTL only.
+///
+/// The cutoff is inlined as a literal: it is our own RFC3339 rendering of
+/// `Utc::now()`, never input, and it compares as text against `created_at`.
+fn visible_to_agent_sql() -> String {
+    let cutoff = (Utc::now() - chrono::Duration::hours(BROADCAST_TTL_HOURS)).to_rfc3339();
+    format!(
+        "(m.to_agent = ?1 OR (m.to_agent = '{BROADCAST}' AND m.created_at >= '{cutoff}' \
+           AND m.created_at >= COALESCE((SELECT a.registered_at FROM agents a WHERE a.name = ?1), '')))"
+    )
+}
+
 /// Presence state an agent publishes for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -583,11 +607,12 @@ impl MailStore {
     pub fn inbox(&self, agent: &str, unread_only: bool, limit: usize) -> Result<Vec<MailMessage>> {
         let agent = agent.trim();
         let unread = if unread_only { "AND r.read_at IS NULL" } else { "" };
+        let visible = visible_to_agent_sql();
         let sql = format!(
             "SELECT {MSG_COLS}, r.read_at
              FROM messages m
              LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
-             WHERE (m.to_agent = ?1 OR m.to_agent = '{BROADCAST}') AND m.from_agent != ?1 {unread}
+             WHERE {visible} AND m.from_agent != ?1 {unread}
              ORDER BY m.priority DESC, m.seq ASC
              LIMIT ?2"
         );
@@ -618,11 +643,12 @@ impl MailStore {
         let agent = agent.trim();
         let from = from.map(str::trim);
         let kind = kind.map(MessageKind::as_str);
+        let visible = visible_to_agent_sql();
         let sql = format!(
             "SELECT {MSG_COLS}, r.read_at
              FROM messages m
              LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
-             WHERE (m.to_agent = ?1 OR m.to_agent = '{BROADCAST}') AND m.from_agent != ?1
+             WHERE {visible} AND m.from_agent != ?1
                AND m.seq > ?2
                AND (?3 IS NULL OR m.from_agent = ?3)
                AND (?4 IS NULL OR m.type = ?4)
@@ -721,12 +747,30 @@ impl MailStore {
     /// # Errors
     /// Returns an error if the query fails.
     pub fn unread_count(&self, agent: &str) -> Result<usize> {
+        let visible = visible_to_agent_sql();
         let n: i64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM messages m
                  LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
-                 WHERE (m.to_agent = ?1 OR m.to_agent = '{BROADCAST}') AND m.from_agent != ?1 AND r.read_at IS NULL"
+                 WHERE {visible} AND m.from_agent != ?1 AND r.read_at IS NULL"
             ),
+            params![agent.trim()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// How many unread messages were addressed to `agent` by name, leaving
+    /// broadcasts out. This is what may hold a session open: a broadcast is
+    /// an FYI, while direct mail is someone waiting on this agent.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn unread_direct_count(&self, agent: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages m
+             LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
+             WHERE m.to_agent = ?1 AND m.from_agent != ?1 AND r.read_at IS NULL",
             params![agent.trim()],
             |r| r.get(0),
         )?;
@@ -1004,6 +1048,72 @@ mod tests {
         // Still visible unfiltered, each with its own read_at.
         assert!(s.inbox("bob", false, 50).unwrap()[0].read_at.is_some());
         assert!(s.inbox("carol", false, 50).unwrap()[0].read_at.is_some());
+    }
+
+    /// Move a message's `created_at` back by `hours`, so ordering against a
+    /// registration or the TTL never depends on two clock reads differing.
+    fn backdate(s: &MailStore, id: &str, hours: i64) {
+        let ts = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        s.conn.execute("UPDATE messages SET created_at = ?1 WHERE id = ?2", params![ts, id]).unwrap();
+    }
+
+    #[test]
+    fn a_new_agent_does_not_inherit_older_broadcasts() {
+        let (_t, s) = store();
+        let old = s.send("alice", BROADCAST, "disk is full", MessageKind::Note, 0, None).unwrap();
+        backdate(&s, &old, 1);
+        reg(&s, "late");
+        assert_eq!(s.unread_count("late").unwrap(), 0, "sent before 'late' registered");
+        assert!(s.inbox("late", false, 50).unwrap().is_empty());
+        assert!(s.inbox_since("late", 0, None, None, 50).unwrap().is_empty());
+
+        let new = s.send("alice", BROADCAST, "migration slot free", MessageKind::Note, 0, None).unwrap();
+        assert_eq!(s.unread_count("late").unwrap(), 1);
+        assert_eq!(s.inbox("late", true, 50).unwrap()[0].id, new);
+    }
+
+    #[test]
+    fn rename_keeps_the_registration_bound() {
+        let (_t, s) = store();
+        reg(&s, "cc-placeholder");
+        let before = s.send("alice", BROADCAST, "from before", MessageKind::Note, 0, None).unwrap();
+        backdate(&s, &before, 1);
+        // Re-registering an existing name must not move registered_at forward
+        // or back: the bound is the first registration.
+        let after = s.send("alice", BROADCAST, "from after", MessageKind::Note, 0, None).unwrap();
+        s.rename("cc-placeholder", "real-task").unwrap();
+        reg(&s, "real-task");
+        let ids: Vec<_> = s.inbox("real-task", true, 50).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, [after]);
+    }
+
+    #[test]
+    fn broadcasts_expire_but_direct_mail_does_not() {
+        let (_t, s) = store();
+        let stale = s.send("alice", BROADCAST, "old notice", MessageKind::Note, 0, None).unwrap();
+        let direct = s.send("alice", "bob", "still waiting on you", MessageKind::Request, 0, None).unwrap();
+        backdate(&s, &stale, BROADCAST_TTL_HOURS + 1);
+        backdate(&s, &direct, BROADCAST_TTL_HOURS + 1);
+        let ids: Vec<_> = s.inbox("bob", true, 50).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, [direct]);
+        assert_eq!(s.unread_count("bob").unwrap(), 1);
+
+        let fresh = s.send("alice", BROADCAST, "new notice", MessageKind::Note, 0, None).unwrap();
+        backdate(&s, &fresh, BROADCAST_TTL_HOURS - 1);
+        assert_eq!(s.unread_count("bob").unwrap(), 2);
+    }
+
+    #[test]
+    fn unread_direct_count_leaves_broadcasts_out() {
+        let (_t, s) = store();
+        s.send("alice", BROADCAST, "fyi", MessageKind::Note, 0, None).unwrap();
+        assert_eq!(s.unread_direct_count("bob").unwrap(), 0);
+        let id = s.send("alice", "bob", "need you", MessageKind::Request, 0, None).unwrap();
+        s.send("bob", "bob", "self-note", MessageKind::Note, 0, None).unwrap();
+        assert_eq!(s.unread_direct_count("bob").unwrap(), 1, "own sends never count");
+        assert_eq!(s.unread_count("bob").unwrap(), 2);
+        s.ack("bob", &id).unwrap();
+        assert_eq!(s.unread_direct_count("bob").unwrap(), 0);
     }
 
     #[test]
