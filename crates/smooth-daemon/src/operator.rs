@@ -22,17 +22,19 @@
 //!
 //! - `SMOOTH_LOCAL_TOKEN` — the auth token (else auto-generated at
 //!   `~/.smooth/operator-token`).
-//! - `SMOOTH_WORKSPACE` — the dir the sandboxed fs/shell tools are confined to
-//!   (else the daemon's cwd).
+//! - `SMOOTH_WORKSPACE` — the dir the fs/shell tools are rooted at (else the
+//!   daemon's cwd).
+//! - `SMOOTH_SANDBOX` — `1`/`true`/`yes`/`on` opts `bash` (and CLI plugins)
+//!   into the kernel OS sandbox (Seatbelt on macOS). **Off by default** (pearl
+//!   th-efbab1): Big Smooth is a personal agent acting as its user, and the
+//!   sandbox broke `ssh` / `git fetch`. See `smooth_tools::sandbox`.
 //! - `SMOOTH_AGENT_CONFIRM_TOOLS` — **inherited from the operator**:
 //!   comma-separated tool-name substrings that require human confirmation
 //!   (write-confirmation HITL). Because the daemon *runs the operator*, setting
 //!   e.g. `SMOOTH_AGENT_CONFIRM_TOOLS=bash` makes every `bash` call park and emit
 //!   `write_confirmation_required`, which the served widget renders as an
-//!   approve/deny prompt — the "ask" half of the permission model, for free. The
-//!   kernel sandbox + egress allowlist remain the load-bearing boundary; this is
-//!   defense-in-depth. (Content-aware hard-deny circuit-breakers — `rm -rf /` and
-//!   friends — need a host `ToolHook` seam in the operator; see pearl th-1f694a.)
+//!   approve/deny prompt — the "ask" half of the permission model, for free.
+//!   (Content-aware hard-deny circuit-breakers — `rm -rf /` and friends — need a host `ToolHook` seam in the operator; see pearl th-1f694a.)
 //!   The daemon ALWAYS adds [`CONFIRM_TOOLS`] to whatever this var sets, so the
 //!   `calendar_delete` gate can be widened from the env but never disarmed.
 //! - `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` — the LLM gateway (read by the
@@ -125,11 +127,11 @@ use smooai_client_shared::auth::storage::CredentialsStore;
 use smooth_policy::family::FamilyConfig;
 use smooth_tools::SessionCwd;
 
-/// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
-/// set on every turn (the operator's `#68` injection seam): the
-/// workspace-confined fs/grep set + an OS-sandboxed `bash` whose egress routes
-/// through the goalie proxy. This is where the daemon's kernel-enforced security
-/// re-homes onto the operator's per-turn registry.
+/// A [`ToolProvider`] that hands the operator the daemon's tool set on every
+/// turn (the operator's `#68` injection seam): the workspace-rooted fs/grep set
+/// plus `bash`, which runs as the user unless the opt-in kernel sandbox
+/// (`SMOOTH_SANDBOX=1`) is on, with egress pointed at the goalie proxy when one
+/// is configured. (The type keeps its historical name.)
 struct SandboxedToolProvider {
     /// The session-scoped cwd store. The workspace root every conversation
     /// falls back to is `cwd.root()`; a `/cd` or `cd` tool call narrows it.
@@ -387,7 +389,7 @@ impl ToolProvider for SandboxedToolProvider {
         // plus this session's workspace `.smooth/plugins/`, project shadowing
         // global. Registered HERE — on the per-turn registry — so each plugin
         // sits behind the permission gate and Narc like a built-in, and its
-        // command runs in the same kernel sandbox `bash` does.
+        // command goes through the same spawn point (and sandbox mode) `bash` does.
         //
         // ponytail: the two manifest dirs are re-scanned per turn rather than
         // cached at startup. That's two readdirs over a handful of tiny files,
@@ -439,18 +441,18 @@ impl ToolProvider for SandboxedToolProvider {
         // investigation stays out of the parent's context window (the
         // context-window win of Claude Code's Task tool). Built from the
         // engine's built-in cast + a snapshot of THIS turn's tool set (so the
-        // sidekick inherits the same kernel-sandboxed fs/grep/bash instances,
+        // sidekick inherits the same fs/grep/bash instances (and sandbox mode),
         // filtered down to its role's clearance) + the daemon's gateway as the
         // sidekick's LLM. Registered LAST so the snapshot it filters never
         // contains `send_sidekick` itself — no recursive dispatch.
         //
-        // ponytail: sidekick sub-calls still hit the load-bearing kernel
-        // sandbox (the tool Arcs are shared) but NOT the daemon's userspace
-        // deny-policy/narc hooks — those live on the LocalServer's per-turn
-        // registry, not the sidekick's inner one. Acceptable defense-in-depth
-        // gap for a first cut (the kernel layer is the load-bearing one); wire
-        // those onto the sidekick registry via the engine's hook seam if it
-        // grows teeth.
+        // ponytail: sidekick sub-calls share the tool Arcs (so the same opt-in
+        // kernel sandbox, when on, and `bash`'s built-in circuit-breaker +
+        // deny-rule gates) but NOT the daemon's userspace deny-policy/narc
+        // hooks — those live on the LocalServer's per-turn registry, not the
+        // sidekick's inner one. With the sandbox off by default (th-efbab1)
+        // that gap matters more; wire those hooks onto the sidekick registry
+        // via the engine's hook seam (pearl th-8d1951).
         if allow_sidekick {
             if let Some(factory) = gateway_llm_factory() {
                 let mut snapshot = smooth_operator::tool::ToolRegistry::new();
@@ -503,9 +505,10 @@ impl ToolProvider for SandboxedToolProvider {
     }
 }
 
-/// The local flavor's tool provider — the daemon's kernel-sandboxed tool set.
+/// The local flavor's tool provider — the daemon's tool set.
 ///
-/// Workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`,
+/// Workspace-rooted fs/grep + `bash` (kernel-sandboxed only with the opt-in
+/// `SMOOTH_SANDBOX=1`) with egress pointed at `proxy`,
 /// plus the `cd` tool. Confinement follows the conversation's session cwd
 /// (defaulting to `workspace`). Exposed so an integration/e2e test can install
 /// it on a `LocalServer` exactly the way [`serve_local_flavor`] does.
@@ -1095,9 +1098,9 @@ deny = [
     # local WS endpoint — reading it lets a tool reconnect as the owner
     # principal outside this conversation's permission mode — and
     # `schedules.db` makes that persistent, the same primitive as the
-    # LaunchAgents entry above. The kernel sandbox denies these too, but only
-    # for `bash`; the fs tools (`read_file`/`write_file`) reach them through
-    # this list alone.
+    # LaunchAgents entry above. The opt-in kernel sandbox denies these too, but
+    # only for `bash` and only when on; the fs tools (`read_file`/`write_file`)
+    # reach them through this list alone.
     "**/.smooth/operator-token",
     "**/.smooth/operator-storage.db*",
     "**/.smooth/schedules.db*",
@@ -1231,10 +1234,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // daemon going to `http://127.0.0.1:0`.
     let addr = resolve_ephemeral_port(addr)?;
     let token = provision_local_token()?;
-    // The local flavor's tools: the workspace-confined fs/grep set + an
-    // OS-sandboxed `bash` whose egress is routed through the goalie proxy (when
-    // SMOOTH_EGRESS_ALLOWLIST is configured). This is where the daemon's
-    // kernel-enforced security re-homes onto the operator's tool registry.
+    // The local flavor's tools: the workspace-confined fs/grep set + `bash`,
+    // which runs as the user by default and kernel-sandboxed only with the
+    // opt-in SMOOTH_SANDBOX=1 (pearl th-efbab1); its egress is pointed at the
+    // goalie proxy when SMOOTH_EGRESS_ALLOWLIST is configured.
     let workspace = workspace_dir();
     // Discover skills once at agent-build time and fold their index into the
     // persona (progressive disclosure — the agent `read_file`s a SKILL.md body
@@ -1243,6 +1246,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // The permission gate + the receiving ends the server bridges (th-be3f55).
     let (permission_gate, host_approver) = permission_hook_with_approver();
     let egress_proxy = crate::start_egress_proxy();
+    // One line stating the tool posture: sandbox on/off, allowlist a boundary
+    // or advisory. Off is the default and is NOT a warning.
+    crate::config::log_sandbox_posture(egress_proxy.as_deref());
     // Keep the signed-in Smoo AI session alive. The access token lives ~1h;
     // without this the daemon holds a dead token and every api.smoo.ai call
     // 401s until a human re-runs sign-in (th-cbf613).
@@ -1250,7 +1256,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     tracing::info!(
         workspace = %workspace.display(),
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
-        "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
+        "local-flavor tools wired (per-turn via ToolProvider)",
     );
     // Durable local storage: the operator local flavor is in-memory by default,
     // which loses every conversation/session on restart. Inject a sqlite-backed

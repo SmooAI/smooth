@@ -1,62 +1,133 @@
 //! Kernel-enforced sandboxing for shell subprocesses (EPIC th-c89c2a Phase 3
-//! Slice 2 — the enforcement boundary the permission engine only *expresses*).
+//! Slice 2) — **opt-in, off by default** (pearl th-efbab1).
 //!
-//! The security architecture's load-bearing layer: a reasoning agent can talk
-//! its way past a userspace permission check, but it cannot talk its way past
-//! the kernel. So `bash` is run inside an OS sandbox that confines filesystem
-//! **writes** to the workspace (+ session temp) — additionally denying writes
-//! to `.git/hooks` and `.git/config` (either would re-enter execution outside
-//! the sandbox via a hook or `core.hooksPath`) — and **denies reads** of the
-//! operator's credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-//! `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`) —
-//! including the daemon's *own* secrets and state in `~/.smooth`
-//! (`providers.json`'s LLM key, the `auth/` JWT, the `operator-token` WS
-//! bearer, `operator-storage.db`, `schedules.db`), so a sandboxed tool can't
-//! exfil what drives it or schedule itself a second turn.
+//! # Default: pass-through (the agent runs as you)
 //!
-//! With a proxy configured ([`SandboxPolicy::with_proxy`]), the sandbox also
-//! becomes the **egress boundary**: `HTTP(S)_PROXY` point at the loopback goalie
-//! proxy and direct outbound network is kernel-denied except to loopback, so
-//! off-box traffic must pass the proxy's exact-host allowlist — a tool that
-//! ignores the proxy vars simply can't connect out.
+//! Big Smooth is a personal agent operating AS its user on the user's own
+//! machine. With the sandbox on, the very things a personal agent is asked to
+//! do broke: `ssh smoo-hub` timed out (direct outbound kernel-denied behind the
+//! egress proxy) and `git fetch` failed with "Operation not permitted" on
+//! `~/.ssh/known_hosts` (credential-store read-deny). So by default
+//! ([`SandboxMode::PassThrough`]) a [`SandboxedCommand`] is a normal user
+//! subprocess: no Seatbelt profile, the user's env / `HOME` / `SSH_AUTH_SOCK` /
+//! `PATH` inherited. Safety in that posture is the two userspace layers — the
+//! permission gate (deny-policy circuit-breakers) and Narc — which are
+//! unaffected by this switch.
 //!
-//! **P0 — non-bypassable.** A [`SandboxedCommand`] is the *only* way `bash`
-//! builds its subprocess. There is no constructor that yields a plain
-//! `Command`, so no tool call / prompt can spawn an unsandboxed shell.
+//! # Opt-in: enforced (`SMOOTH_SANDBOX=1`)
 //!
-//! Platform status:
+//! Set [`SANDBOX_ENV`] (`SMOOTH_SANDBOX`) to `1`/`true`/`yes`/`on` and `bash`
+//! (and CLI-wrapper plugins) run inside an OS sandbox that keeps the
+//! guarantees a fully-hijacked shell must not get past: no writes to
+//! `.git/hooks` / `.git/config` (either would re-enter execution outside the
+//! sandbox via a hook or `core.hooksPath`) and **no reads** of the operator's
+//! credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.config/gcloud`,
+//! `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`) — including the daemon's
+//! *own* secrets and state in `~/.smooth` (`providers.json`'s LLM key, the
+//! `auth/` JWT, the `operator-token` WS bearer, `operator-storage.db`,
+//! `schedules.db`), so a sandboxed tool can't exfil what drives it or schedule
+//! itself a second turn.
+//!
+//! With a proxy configured ([`SandboxPolicy::with_proxy`]) an enforced sandbox
+//! also becomes the **egress boundary**: `HTTP(S)_PROXY` point at the loopback
+//! goalie proxy and direct outbound network is kernel-denied except to
+//! loopback, so off-box traffic must pass the proxy's exact-host allowlist. In
+//! pass-through mode the proxy variables are still set, but nothing stops a
+//! tool that ignores them — the allowlist is **advisory**.
+//!
+//! **Single spawn point.** A [`SandboxedCommand`] is the *only* way `bash`
+//! builds its subprocess — there is no constructor that yields a plain
+//! `Command` around it — so the mode decided here (and the secret-env scrub)
+//! applies to every shell the agent gets. Pass-through is a mode of this type,
+//! not a bypass of it.
+//!
+//! Platform status of the enforced mode:
 //! - **macOS**: Seatbelt via `sandbox-exec` with a generated profile. Enforced.
 //! - **Linux**: NOT YET (bubblewrap + Landlock + seccomp is TODO, th-08e05a).
 //! - **Windows**: NOT YET (AppContainer / Job Object + restricted token is TODO,
 //!   th-08e05a). The shell there is `cmd /C`, run with the operator's own token.
 //!
-//! On both non-macOS platforms the shell falls back to **unsandboxed** with a
-//! loud warning. Only [`scrub_secret_env`] and the userspace layers (permission
-//! gate + Narc) still apply — see `docs/Architecture/Windows-Security-Posture.md`
-//! for what that leaves exposed. Acceptable only for the single-trusted-user
-//! loopback daemon; tracked for hardening.
+//! Requesting the sandbox on a non-macOS platform logs a loud warning and runs
+//! the shell unsandboxed — see `docs/Architecture/Windows-Security-Posture.md`.
 
 use std::path::PathBuf;
 
 use tokio::process::Command;
 
+/// The env var that opts into the kernel OS sandbox: `1`/`true`/`yes`/`on`
+/// (case-insensitive) enables it; unset, empty, or `0`/`false`/`no`/`off`
+/// leaves it off. Default **off** (pearl th-efbab1).
+pub const SANDBOX_ENV: &str = "SMOOTH_SANDBOX";
+
+/// Whether shell subprocesses get the kernel OS sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    /// **Default.** A normal user subprocess: no kernel profile, the user's
+    /// env inherited (minus the daemon's own config). The agent can
+    /// do whatever the user can — `ssh`, `git fetch`, read `~/.ssh/known_hosts`.
+    #[default]
+    PassThrough,
+    /// Opt-in (`SMOOTH_SANDBOX=1`): the kernel sandbox (Seatbelt on macOS) with
+    /// credential-store read/write denies, git re-entry denies, the full
+    /// secret-env scrub, and — with a proxy — kernel-forced egress.
+    Enforced,
+}
+
+impl SandboxMode {
+    /// Resolve the mode from [`SANDBOX_ENV`] in this process's environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_env_value(std::env::var(SANDBOX_ENV).ok().as_deref())
+    }
+
+    /// Pure core of [`from_env`](Self::from_env): `None` (unset) and anything
+    /// unrecognized resolve to the default, [`PassThrough`](Self::PassThrough).
+    #[must_use]
+    pub fn from_env_value(raw: Option<&str>) -> Self {
+        raw.and_then(Self::parse).unwrap_or_default()
+    }
+
+    /// Parse a raw switch value. `None` means unrecognized (a typo) — callers
+    /// that log startup posture use it to warn rather than silently guess.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(Self::Enforced),
+            "" | "0" | "false" | "no" | "off" => Some(Self::PassThrough),
+            _ => None,
+        }
+    }
+
+    /// Whether the kernel sandbox was asked for (independent of whether this
+    /// platform can actually enforce it — see [`SandboxPolicy::is_enforced`]).
+    #[must_use]
+    pub const fn is_requested(self) -> bool {
+        matches!(self, Self::Enforced)
+    }
+}
+
 /// What the sandbox confines a shell subprocess to.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
-    /// The only directory tree writes are permitted in (besides temp).
+    /// The workspace the shell runs in.
     pub workspace: PathBuf,
-    /// The operator's home, whose credential dirs are read-denied.
+    /// The operator's home, whose credential dirs are read-denied (enforced
+    /// mode only).
     pub home: Option<PathBuf>,
-    /// When set (`host:port`), the shell's egress is forced through this
-    /// loopback proxy: `HTTP(S)_PROXY` point at it, and the kernel sandbox
-    /// **denies direct outbound network** except to loopback — so the proxy
-    /// (the goalie egress allowlist) is the only path off-box, not bypassable.
+    /// When set (`host:port`), the shell's egress is pointed at this loopback
+    /// proxy via `HTTP(S)_PROXY`. In [`SandboxMode::Enforced`] on macOS the
+    /// kernel also **denies direct outbound network** except to loopback, so
+    /// the proxy (the goalie egress allowlist) is the only path off-box; in
+    /// pass-through mode the variables are advisory.
     pub proxy: Option<String>,
+    /// Pass-through (default) or kernel-enforced. [`for_workspace`](Self::for_workspace)
+    /// resolves it from [`SANDBOX_ENV`].
+    pub mode: SandboxMode,
 }
 
 impl SandboxPolicy {
-    /// Build a policy confining writes to `workspace`, resolving the operator's
-    /// home for the credential-deny rules.
+    /// Build a policy for `workspace`, resolving the operator's home for the
+    /// credential-deny rules and the mode from [`SANDBOX_ENV`] (default off).
     ///
     /// Uses `dirs_next::home_dir()` rather than `$HOME` directly: `HOME` is not
     /// set on Windows (it's `%USERPROFILE%`), so an env read silently yielded
@@ -67,71 +138,87 @@ impl SandboxPolicy {
             workspace,
             home: dirs_next::home_dir(),
             proxy: None,
+            mode: SandboxMode::from_env(),
         }
     }
 
-    /// Route the shell's egress through the loopback proxy at `addr`
-    /// (`host:port`): sets `HTTP(S)_PROXY` and denies direct outbound network.
+    /// Point the shell's egress at the loopback proxy at `addr` (`host:port`):
+    /// sets `HTTP(S)_PROXY`, and — enforced mode only — denies direct outbound.
     #[must_use]
     pub fn with_proxy(mut self, addr: impl Into<String>) -> Self {
         self.proxy = Some(addr.into());
         self
     }
 
-    /// Whether this build actually enforces a kernel sandbox for shell commands.
+    /// Override the mode resolved from the environment (tests, embedders).
     #[must_use]
-    pub fn is_enforced() -> bool {
+    pub const fn with_mode(mut self, mode: SandboxMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Whether this build has a kernel sandbox to apply at all (macOS only today).
+    #[must_use]
+    pub const fn platform_supported() -> bool {
         cfg!(target_os = "macos")
+    }
+
+    /// Whether shells built from THIS policy actually run in a kernel sandbox:
+    /// the sandbox was requested and the platform can enforce it.
+    #[must_use]
+    pub const fn is_enforced(&self) -> bool {
+        self.mode.is_requested() && Self::platform_supported()
     }
 }
 
 /// A shell command routed through the single sandbox-application point.
 ///
 /// The wrapped [`Command`] can only be obtained via [`shell`](Self::shell), so
-/// there is no path that BYPASSES this type. That is not the same as "always
-/// sandboxed", and the difference matters (pearl th-db25d4 item 11):
+/// there is no path that BYPASSES this type — the mode and the env scrub decided
+/// here apply to every shell. That is not the same as "always sandboxed", and
+/// the difference matters (pearls th-db25d4 item 11, th-efbab1):
 ///
 /// | | FS confinement | egress deny |
 /// |---|---|---|
-/// | macOS | `sandbox-exec` + SBPL | kernel `(deny network-outbound)` |
-/// | Linux | **none** (bubblewrap + Landlock TODO, th-08e05a) | **none** — proxy env vars only |
-/// | Windows | **none** (AppContainer/Job Object TODO, th-08e05a) | **none** — proxy env vars only |
-///
-/// Off macOS the env scrubbing in [`shell`](Self::shell) is real, and both
-/// non-macOS `build` implementations log `bash is running UNSANDBOXED` — but
-/// the FS and network confinement are absent, so the proxy allowlist is
-/// ADVISORY: a tool that ignores `HTTP_PROXY` egresses anywhere it likes.
-/// smoo-hub runs Linux, so this is the deployed posture, not a hypothetical.
+/// | pass-through (default, every OS) | **none** — runs as the user | **none** — proxy env vars only, if configured |
+/// | enforced, macOS | `sandbox-exec` + SBPL | kernel `(deny network-outbound)` |
+/// | enforced, Linux | **none** (bubblewrap + Landlock TODO, th-08e05a) | **none** — proxy env vars only |
+/// | enforced, Windows | **none** (AppContainer/Job Object TODO, th-08e05a) | **none** — proxy env vars only |
 ///
 /// [`SandboxPolicy::is_enforced`] is the runtime answer; branch on it rather
 /// than assuming.
 pub struct SandboxedCommand(Command);
 
 impl SandboxedCommand {
-    /// Build a sandboxed shell invocation of `command` under `policy` — `sh -c`
-    /// on Unix, `cmd /C` on Windows (see [`build`]).
+    /// Build a shell invocation of `command` under `policy` — `sh -c` on Unix,
+    /// `cmd /C` on Windows — kernel-sandboxed when `policy.mode` is
+    /// [`SandboxMode::Enforced`] and the platform supports it.
     ///
-    /// As well as the kernel FS confinement, the child env is **scrubbed** of
-    /// secret-named variables (the daemon's own `SMOOTH_API_KEY` /
-    /// `SMOOTH_DAEMON_TOKEN`, provider `*_API_KEY`s, `*_TOKEN`/`*_SECRET`/…), so
-    /// a read-only-classified `env`/`printenv` can't dump what drives the agent.
-    /// Applied here at the single spawn point, so there is no unscrubbed path.
+    /// The child env is scrubbed at this single spawn point. Pass-through
+    /// strips only the daemon's own config (`SMOOTH_*`, the gateway key, WS bearer,
+    /// …) — the user's own credentials (`SSH_AUTH_SOCK`, `GITHUB_TOKEN`,
+    /// `AWS_*`) are inherited, because the agent acts as the user. Enforced
+    /// mode strips every secret-named variable (`*_TOKEN`, `*_SECRET`,
+    /// `*_API_KEY`, …) so a read-only-classified `env`/`printenv` can't dump
+    /// them.
     #[must_use]
     pub fn shell(policy: &SandboxPolicy, command: &str) -> Self {
         let mut cmd = build(policy, command);
-        scrub_secret_env(&mut cmd);
+        match policy.mode {
+            SandboxMode::Enforced => scrub_secret_env(&mut cmd),
+            SandboxMode::PassThrough => scrub_daemon_env(&mut cmd),
+        }
         if let Some(addr) = &policy.proxy {
-            // Force HTTP(S) egress through the loopback proxy.
+            // Point HTTP(S) egress at the loopback proxy.
             //
-            // How binding this is depends on the platform, and the comment
-            // here used to claim the strong version everywhere (pearl
-            // th-db25d4 item 11). On macOS the kernel network-deny in
-            // `macos_profile` makes it non-optional — direct off-box connects
-            // fail, so a tool ignoring these vars cannot reach the network at
-            // all. On Linux and Windows there is no kernel deny, so these
-            // variables are a REQUEST: honoured by well-behaved HTTP clients,
-            // ignored by anything that opens its own socket. Treat the egress
-            // allowlist as advisory off macOS.
+            // How binding this is depends on the mode and platform (pearl
+            // th-db25d4 item 11). Enforced on macOS, the kernel network-deny
+            // in `macos_profile` makes it non-optional — direct off-box
+            // connects fail, so a tool ignoring these vars cannot reach the
+            // network at all. Everywhere else (pass-through, or enforced on
+            // Linux/Windows) there is no kernel deny, so these variables are a
+            // REQUEST: honoured by well-behaved HTTP clients, ignored by
+            // anything that opens its own socket (`ssh`, raw TCP).
             let url = format!("http://{addr}");
             for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
                 cmd.env(key, &url);
@@ -144,19 +231,61 @@ impl SandboxedCommand {
     }
 
     /// Take the underlying command to configure stdio / cwd / spawn. The
-    /// sandbox wrapping is already baked in.
+    /// sandbox wrapping (if any) is already baked in.
     #[must_use]
     pub fn into_command(self) -> Command {
         self.0
     }
 }
 
-#[cfg(target_os = "macos")]
+/// The one place the mode becomes a process shape.
 fn build(policy: &SandboxPolicy, command: &str) -> Command {
+    match policy.mode {
+        SandboxMode::PassThrough => plain_shell(command),
+        SandboxMode::Enforced => enforced_shell(policy, command),
+    }
+}
+
+/// The platform's own interpreter with no kernel profile: `sh -c` on Unix.
+#[cfg(not(target_os = "windows"))]
+fn plain_shell(command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd
+}
+
+/// Windows has no `sh` — the shell is `cmd /C`.
+///
+/// `cmd` is the one interpreter guaranteed present on every Windows host;
+/// PowerShell startup is ~10x slower and its default execution policy can
+/// refuse to run at all. Model-authored `bash` snippets that use POSIX syntax
+/// will fail here — that is visible in the tool output (a `cmd` error), which
+/// the agent can react to, unlike a silently missing binary.
+#[cfg(target_os = "windows")]
+fn plain_shell(command: &str) -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.arg("/C").arg(command);
+    cmd
+}
+
+#[cfg(target_os = "macos")]
+fn enforced_shell(policy: &SandboxPolicy, command: &str) -> Command {
     let profile = macos_profile(policy);
     let mut cmd = Command::new("/usr/bin/sandbox-exec");
     cmd.arg("-p").arg(profile).arg("sh").arg("-c").arg(command);
     cmd
+}
+
+/// The sandbox was explicitly requested but this platform has no kernel
+/// sandbox yet: say so loudly on every spawn, then run the plain shell.
+#[cfg(not(target_os = "macos"))]
+fn enforced_shell(policy: &SandboxPolicy, command: &str) -> Command {
+    let _ = policy;
+    tracing::warn!(
+        "{SANDBOX_ENV} is on but bash is running UNSANDBOXED: kernel sandbox not yet implemented on this platform \
+         (Linux: bubblewrap+Landlock, Windows: AppContainer/Job Object — th-08e05a). See docs/Architecture/Windows-Security-Posture.md"
+    );
+    plain_shell(command)
 }
 
 /// Generate a Seatbelt (SBPL) profile: allow-by-default, but confine writes to
@@ -251,46 +380,39 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
     p
 }
 
-/// Windows: no kernel sandbox yet, and no `sh` — the shell is `cmd /C`.
-///
-/// `cmd` is the one interpreter guaranteed present on every Windows host;
-/// PowerShell startup is ~10x slower and its default execution policy can
-/// refuse to run at all. Model-authored `bash` snippets that use POSIX syntax
-/// will fail here — that is visible in the tool output (a `cmd` error), which
-/// the agent can react to, unlike a silently missing binary.
-#[cfg(target_os = "windows")]
-fn build(policy: &SandboxPolicy, command: &str) -> Command {
-    let _ = policy;
-    tracing::warn!(
-        "bash is running UNSANDBOXED: kernel sandbox not yet implemented on Windows \
-         (AppContainer/Job Object is TODO, th-08e05a). See docs/Architecture/Windows-Security-Posture.md"
-    );
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C").arg(command);
-    cmd
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn build(policy: &SandboxPolicy, command: &str) -> Command {
-    let _ = policy;
-    tracing::warn!("bash is running UNSANDBOXED: kernel sandbox not yet implemented on this platform (Linux: bubblewrap+Landlock is TODO, th-08e05a)");
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
-    cmd
-}
-
-/// Remove secret-bearing variables from the child's inherited environment, so a
-/// tool can't read the daemon's own credentials out of its process env. This is
-/// platform-independent (it also matters on Linux, where the FS sandbox is not
-/// yet in place) and runs at the single [`SandboxedCommand::shell`] spawn point.
+/// Enforced mode: remove every secret-bearing variable from the child's
+/// inherited environment, so a tool can't read credentials out of its process
+/// env. Platform-independent (it also applies where the FS sandbox is not yet
+/// in place) and runs at the single [`SandboxedCommand::shell`] spawn point.
 fn scrub_secret_env(cmd: &mut Command) {
+    scrub_env_where(cmd, is_secret_env_name);
+}
+
+/// Pass-through mode: remove only the daemon's OWN configuration (`SMOOTH_*`
+/// and the gateway key — its LLM credentials, WS bearer, egress/workspace
+/// knobs), which is not the user's
+/// env and would otherwise leak into transcripts and nested `th` calls. The
+/// user's own credentials stay, because the agent acts as the user.
+fn scrub_daemon_env(cmd: &mut Command) {
+    scrub_env_where(cmd, is_daemon_env_name);
+}
+
+fn scrub_env_where(cmd: &mut Command, strip: fn(&str) -> bool) {
     for (name, _) in std::env::vars_os() {
         if let Some(name) = name.to_str() {
-            if is_secret_env_name(name) {
+            if strip(name) {
                 cmd.env_remove(name);
             }
         }
     }
+}
+
+/// Whether an environment variable is the daemon's own configuration: every
+/// `SMOOTH_*` knob, plus the LLM gateway key the daemon reads under the
+/// platform's `SMOOAI_` prefix.
+fn is_daemon_env_name(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    u.starts_with("SMOOTH_") || u == "SMOOAI_GATEWAY_KEY"
 }
 
 /// Whether an environment variable name looks like it carries a secret. Matched
@@ -300,7 +422,7 @@ fn scrub_secret_env(cmd: &mut Command) {
 /// from the agent's shell, while a miss would leak a real credential.
 fn is_secret_env_name(name: &str) -> bool {
     let u = name.to_ascii_uppercase();
-    u.starts_with("SMOOTH_")
+    is_daemon_env_name(&u)
         || u.contains("SECRET")
         || u.contains("TOKEN")
         || u.contains("PASSWORD")
@@ -322,6 +444,12 @@ mod tests {
     mod macos {
         use super::*;
 
+        /// The opt-in sandbox, set explicitly so these tests don't depend on
+        /// the `SMOOTH_SANDBOX` value of whoever runs them.
+        fn enforced(workspace: PathBuf) -> SandboxPolicy {
+            SandboxPolicy::for_workspace(workspace).with_mode(SandboxMode::Enforced)
+        }
+
         async fn run(policy: &SandboxPolicy, cmd: &str) -> (i32, String) {
             use std::process::Stdio;
             let out = SandboxedCommand::shell(policy, cmd)
@@ -339,7 +467,7 @@ mod tests {
         #[tokio::test]
         async fn write_inside_workspace_is_allowed() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             let (code, _out) = run(&policy, "echo hi > inside.txt && cat inside.txt").await;
             assert_eq!(code, 0, "writing inside the workspace should succeed");
             assert!(dir.path().join("inside.txt").exists());
@@ -348,7 +476,7 @@ mod tests {
         #[tokio::test]
         async fn home_writes_allowed_but_crown_jewels_denied() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             let home = std::env::var("HOME").unwrap();
             // Personal-assistant posture: a benign $HOME write (a dotfile-style
             // path) now SUCCEEDS — an assistant that can't touch ~/.zshrc is useless.
@@ -370,7 +498,7 @@ mod tests {
         #[tokio::test]
         async fn reading_ssh_keys_is_denied() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             // Whether or not ~/.ssh exists, the sandbox must refuse to read it.
             let (_code, out) = run(&policy, "cat ~/.ssh/id_rsa ~/.ssh/id_ed25519 2>&1; echo DONE").await;
             assert!(out.contains("DONE"));
@@ -380,7 +508,7 @@ mod tests {
         #[tokio::test]
         async fn writing_git_hooks_or_config_is_denied() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             // A postinstall script trying to plant a hook or repoint core.hooksPath
             // must fail — both would later execute OUTSIDE the sandbox.
             let (_c, out) = run(
@@ -402,7 +530,7 @@ mod tests {
             // workspace subpath — prove it holds in an unrelated repo.
             let dir = tempfile::tempdir().unwrap();
             let other = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             let hook = other.path().join(".git/hooks/post-checkout");
             let cfg = other.path().join(".git/config");
             let (_c, out) = run(
@@ -423,7 +551,7 @@ mod tests {
         #[tokio::test]
         async fn reading_cloud_and_registry_creds_is_denied() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             // The exfil targets beyond ~/.ssh: cloud + registry + netrc creds.
             let (_c, out) = run(
                 &policy,
@@ -447,7 +575,7 @@ mod tests {
             std::env::set_var("SMOOTH_API_KEY", "LEAK_SENTINEL_a91c");
             std::env::set_var("MY_SERVICE_TOKEN", "LEAK_SENTINEL_b22d");
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             let (_c, out) = run(&policy, "env; echo DONE").await;
             std::env::remove_var("SMOOTH_API_KEY");
             std::env::remove_var("MY_SERVICE_TOKEN");
@@ -460,7 +588,7 @@ mod tests {
         #[tokio::test]
         async fn proxy_policy_injects_http_proxy_env() {
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
+            let policy = enforced(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
             let (code, out) = run(&policy, "echo P=$HTTP_PROXY,$HTTPS_PROXY,$NO_PROXY").await;
             assert_eq!(code, 0, "command runs: {out}");
             assert!(
@@ -475,7 +603,7 @@ mod tests {
             // the profile and nothing runs. A clean exit proves the generated
             // profile (FS rules + network rules) is valid SBPL.
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
+            let policy = enforced(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
             let (code, out) = run(&policy, "echo sandbox-ok").await;
             assert_eq!(code, 0, "proxy-policy profile must be valid SBPL and run: {out}");
             assert!(out.contains("sandbox-ok"), "{out}");
@@ -495,7 +623,7 @@ mod tests {
             std::fs::write(&sentinel, "SMOOTH_SECRET_SENTINEL_4f3a").unwrap();
 
             let dir = tempfile::tempdir().unwrap();
-            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let policy = enforced(dir.path().to_path_buf());
             let (_c, out) = run(&policy, "cat ~/.smooth/auth/smooth-sandbox-sentinel.json 2>&1; echo DONE").await;
 
             // Clean up our sentinel (and the dir only if we created it).
@@ -537,7 +665,7 @@ mod tests {
             }
 
             let ws = tempfile::tempdir().unwrap();
-            let mut policy = SandboxPolicy::for_workspace(ws.path().to_path_buf());
+            let mut policy = enforced(ws.path().to_path_buf());
             policy.home = Some(home.clone());
             let s = smooth.display();
 
@@ -571,6 +699,25 @@ mod tests {
                 "{out2}"
             );
         }
+
+        /// The other half of the th-efbab1 regression: with the sandbox opted
+        /// IN, the exact read that broke `git fetch` stays kernel-denied.
+        #[tokio::test]
+        async fn enforced_mode_still_denies_reading_ssh_under_a_fake_home() {
+            let (_guard, fake_home, known_hosts) = fake_home_with_known_hosts();
+            let ws = tempfile::tempdir().unwrap();
+            let mut policy = enforced(ws.path().to_path_buf());
+            policy.home = Some(fake_home.clone());
+            let (_c, out) = run(&policy, &format!("cat '{}' 2>&1; echo DONE", known_hosts.display())).await;
+            assert!(out.contains("DONE"));
+            assert!(!out.contains(KNOWN_HOSTS_SENTINEL), "enforced sandbox must deny ~/.ssh reads: {out}");
+        }
+
+        #[tokio::test]
+        async fn enforced_policy_reports_enforced_on_macos() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(enforced(dir.path().to_path_buf()).is_enforced());
+        }
     }
 
     #[test]
@@ -594,6 +741,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn daemon_env_names_are_only_the_daemons_own() {
+        for name in ["SMOOTH_API_KEY", "SMOOTH_DAEMON_TOKEN", "smooth_workspace", "SMOOAI_GATEWAY_KEY"] {
+            assert!(is_daemon_env_name(name), "{name} is daemon config");
+        }
+        // The user's own credentials survive pass-through: the agent acts as them.
+        for name in ["SSH_AUTH_SOCK", "GITHUB_TOKEN", "AWS_ACCESS_KEY_ID", "OPENAI_API_KEY", "PATH", "HOME"] {
+            assert!(!is_daemon_env_name(name), "{name} is the user's, not the daemon's");
+        }
+    }
+
     /// Cross-platform: the home used for the credential-deny rules must come
     /// from `dirs_next`, not `$HOME` — `HOME` is unset on Windows, so an env
     /// read yielded `None` and dropped every deny rule (see `for_workspace`).
@@ -612,8 +770,8 @@ mod tests {
     async fn non_macos_shell_uses_the_platform_interpreter() {
         use std::process::Stdio;
         let dir = tempfile::tempdir().unwrap();
-        let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
-        // `echo hi` is valid in sh, cmd, and under sandbox-exec alike.
+        let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf()).with_mode(SandboxMode::PassThrough);
+        // `echo hi` is valid in sh and cmd alike.
         let out = SandboxedCommand::shell(&policy, "echo hi")
             .into_command()
             .current_dir(dir.path())
@@ -623,5 +781,128 @@ mod tests {
             .await
             .expect("the platform shell must exist and spawn");
         assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
+    }
+
+    #[cfg(unix)]
+    const KNOWN_HOSTS_SENTINEL: &str = "smoo-hub ssh-ed25519 KNOWN_HOSTS_SENTINEL_efbab1";
+
+    /// A temp HOME holding `.ssh/known_hosts` — the file `git fetch` failed on.
+    /// Returns the guard, the canonical home (Seatbelt matches resolved paths)
+    /// and the file.
+    #[cfg(unix)]
+    fn fake_home_with_known_hosts() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let known_hosts = home.join(".ssh").join("known_hosts");
+        std::fs::write(&known_hosts, KNOWN_HOSTS_SENTINEL).unwrap();
+        (dir, home, known_hosts)
+    }
+
+    #[test]
+    fn mode_is_off_by_default_and_opt_in() {
+        assert_eq!(SandboxMode::default(), SandboxMode::PassThrough);
+        assert_eq!(SandboxMode::from_env_value(None), SandboxMode::PassThrough, "unset = off");
+        for on in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert_eq!(SandboxMode::from_env_value(Some(on)), SandboxMode::Enforced, "{on:?} should enable");
+            assert!(SandboxMode::from_env_value(Some(on)).is_requested());
+        }
+        for off in ["", "0", "false", "no", "off", "OFF"] {
+            assert_eq!(SandboxMode::from_env_value(Some(off)), SandboxMode::PassThrough, "{off:?} should disable");
+        }
+        // A typo is not silently treated as "on" — it resolves to the default,
+        // and `parse` reports it so startup can warn.
+        assert_eq!(SandboxMode::parse("enabled"), None);
+        assert_eq!(SandboxMode::from_env_value(Some("enabled")), SandboxMode::PassThrough);
+    }
+
+    #[test]
+    fn is_enforced_needs_both_the_switch_and_platform_support() {
+        let pass = SandboxPolicy::for_workspace(PathBuf::from("/ws")).with_mode(SandboxMode::PassThrough);
+        assert!(!pass.is_enforced(), "pass-through is never enforced");
+        let on = SandboxPolicy::for_workspace(PathBuf::from("/ws")).with_mode(SandboxMode::Enforced);
+        assert_eq!(
+            on.is_enforced(),
+            cfg!(target_os = "macos"),
+            "SMOOTH_SANDBOX=1 resolves to Seatbelt on macOS only"
+        );
+        assert_eq!(SandboxPolicy::platform_supported(), cfg!(target_os = "macos"));
+    }
+
+    /// The th-efbab1 regression: Brent asked Big Smooth to `ssh smoo-hub` and
+    /// `git fetch`; git died with "Operation not permitted" on
+    /// `~/.ssh/known_hosts`. With the default (pass-through) mode the shell
+    /// runs as the user and can read it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pass_through_reads_ssh_under_a_temp_home() {
+        use std::process::Stdio;
+        let (_guard, fake_home, _known_hosts) = fake_home_with_known_hosts();
+        let ws = tempfile::tempdir().unwrap();
+        let mut policy = SandboxPolicy::for_workspace(ws.path().to_path_buf()).with_mode(SandboxMode::PassThrough);
+        policy.home = Some(fake_home.clone());
+        let out = SandboxedCommand::shell(&policy, "cat \"$HOME/.ssh/known_hosts\"")
+            .into_command()
+            .env("HOME", &fake_home)
+            .current_dir(ws.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "pass-through read must succeed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains(KNOWN_HOSTS_SENTINEL), "{stdout}");
+    }
+
+    /// Pass-through inherits the user's own credentials (the agent acts as the
+    /// user — `gh`, `aws`, `ssh-agent` must work) but still strips the daemon's
+    /// own `SMOOTH_*` config, and sets no proxy vars when no proxy is set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pass_through_keeps_user_env_but_strips_daemon_config() {
+        use std::process::Stdio;
+        std::env::set_var("SMOOTH_PT_DAEMON_SENTINEL", "DAEMON_SENTINEL_efbab1");
+        std::env::set_var("PT_USER_TOKEN_SENTINEL", "USER_SENTINEL_efbab1");
+        let ws = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy::for_workspace(ws.path().to_path_buf()).with_mode(SandboxMode::PassThrough);
+        let out = SandboxedCommand::shell(&policy, "env")
+            .into_command()
+            .current_dir(ws.path())
+            .stdout(Stdio::piped())
+            .output()
+            .await
+            .unwrap();
+        std::env::remove_var("SMOOTH_PT_DAEMON_SENTINEL");
+        std::env::remove_var("PT_USER_TOKEN_SENTINEL");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("USER_SENTINEL_efbab1"), "user credentials are inherited: {stdout}");
+        assert!(!stdout.contains("DAEMON_SENTINEL_efbab1"), "daemon SMOOTH_* config is stripped: {stdout}");
+        // No proxy forced without one configured (the marker `shell` adds when
+        // it sets the proxy vars is absent, unless the user's own env has it).
+        if std::env::var("NO_PROXY").as_deref() != Ok("localhost,127.0.0.1,::1") {
+            assert!(!stdout.contains("NO_PROXY=localhost,127.0.0.1,::1"), "no proxy forced: {stdout}");
+        }
+    }
+
+    /// With an egress proxy configured but the sandbox off, the proxy vars are
+    /// still set (advisory) — the allowlist is a request, not a boundary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pass_through_with_proxy_sets_advisory_proxy_env() {
+        use std::process::Stdio;
+        let ws = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy::for_workspace(ws.path().to_path_buf())
+            .with_mode(SandboxMode::PassThrough)
+            .with_proxy("127.0.0.1:3128");
+        assert!(!policy.is_enforced());
+        let out = SandboxedCommand::shell(&policy, "echo P=$HTTPS_PROXY")
+            .into_command()
+            .current_dir(ws.path())
+            .stdout(Stdio::piped())
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("P=http://127.0.0.1:3128"));
     }
 }

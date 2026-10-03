@@ -3597,7 +3597,7 @@ fn print_explainer() {
         "th up".bright_cyan(),
         "— start the".dimmed(),
         gradient::smooth(),
-        "platform (sandboxed)".dimmed()
+        "platform".dimmed()
     );
     println!(
         "  {}  {} {} {}",
@@ -4163,8 +4163,11 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         }
     }
 
-    // 8. Sandboxes (built-in via microsandbox crate)
-    println!("  {} Sandboxes: {}", "✓".green().bold(), "built-in (microsandbox)".green());
+    // 8. Tool sandbox. The microsandbox row this replaced was stale (removed
+    // th-f4a801); the kernel sandbox is opt-in and off by default (th-efbab1).
+    // Read from THIS shell's env — the daemon only sees it if launched with it.
+    let (mark, msg) = doctor_sandbox_row(smooth_tools::SandboxMode::from_env(), smooth_tools::SandboxPolicy::platform_supported());
+    println!("  {mark} Tool sandbox: {msg}");
 
     // 10. Workspace on a TCC-gated external volume (macOS). If the daemon's
     // workspace lives under /Volumes it needs Full Disk Access, or every fs op
@@ -4323,6 +4326,51 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
     }
 
     Ok(pending)
+}
+
+/// The `th doctor` tool-sandbox row: `(mark, message)`. Off is the default and
+/// healthy (the agent runs as you, pearl th-efbab1); asking for the sandbox on
+/// a platform without one is the only failure.
+fn doctor_sandbox_row(mode: smooth_tools::SandboxMode, platform_supported: bool) -> (String, String) {
+    let env = smooth_tools::SANDBOX_ENV;
+    match (mode.is_requested(), platform_supported) {
+        (false, _) => (
+            "✓".green().bold().to_string(),
+            format!("off (default — agent tools run as you; {env}=1 in the daemon's env enables it)")
+                .dimmed()
+                .to_string(),
+        ),
+        (true, true) => ("✓".green().bold().to_string(), format!("on ({env}=1, Seatbelt)").green().to_string()),
+        (true, false) => (
+            "✗".red().bold().to_string(),
+            format!("{env}=1 but this platform has no kernel sandbox yet (th-08e05a) — tools run UNSANDBOXED")
+                .red()
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod doctor_sandbox_row_tests {
+    use super::doctor_sandbox_row;
+    use smooth_tools::SandboxMode;
+
+    #[test]
+    fn off_is_the_healthy_default_everywhere() {
+        for supported in [true, false] {
+            let (mark, msg) = doctor_sandbox_row(SandboxMode::PassThrough, supported);
+            assert!(mark.contains('✓'), "{mark}");
+            assert!(msg.contains("off (default") && msg.contains("SMOOTH_SANDBOX=1"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn on_reports_seatbelt_or_the_missing_platform_support() {
+        let (mark, msg) = doctor_sandbox_row(SandboxMode::Enforced, true);
+        assert!(mark.contains('✓') && msg.contains("Seatbelt"), "{msg}");
+        let (mark, msg) = doctor_sandbox_row(SandboxMode::Enforced, false);
+        assert!(mark.contains('✗') && msg.contains("UNSANDBOXED"), "{msg}");
+    }
 }
 
 /// `th doctor --onboard` — the guided first-run flow (pearl th-ba764e). Runs the

@@ -23,7 +23,7 @@ smooth/
 ├── crates/
 │   ├── smooth-cli/          # Binary `th` — clap entry point (57 top-level commands)
 │   ├── smooth-daemon/       # Binary + lib — Big Smooth: the always-on personal-agent daemon
-│   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the kernel OS sandbox
+│   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the opt-in kernel OS sandbox
 │   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
 │   ├── smooth-goalie/       # Library + bin — HTTP forward proxy = the egress boundary
 │   ├── smooth-pearls/       # Library — SQLite pearl tracker, memories, agent mail
@@ -48,9 +48,9 @@ smooth/
 - **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 57 top-level commands (59 enum variants: `web-search` is hidden, `admin` is behind the non-default `admin` feature). Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
 - **smooth-daemon** (`crates/smooth-daemon/`): **Big Smooth.** The always-on, single-tenant personal-agent daemon (EPIC th-c89c2a). It hosts smooth-operator's `LocalServer` in-process — canonical WS protocol, no bespoke agent loop — with durable SQLite storage, scheduled/proactive turns, web push, tailnet exposure, and the security hooks. `th daemon` runs it directly; `th up` also launches it.
 - **smooth-operator**: the agent engine (LLM client, agent loop, tool registry + hooks, conversation, checkpointing, cast, permissions, `DenyPolicy`). **It is not in this workspace** — it's a git/crates.io dependency from the separate `SmooAI/smooth-operator` repo. Don't look for `crates/smooth-operator/`.
-- **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` runs only inside `sandbox.rs`'s kernel OS sandbox. `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
+- **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` spawns only through `sandbox.rs`'s `SandboxedCommand`, which runs it as the user by default and inside the kernel OS sandbox when `SMOOTH_SANDBOX=1` (§4). `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox even when it is on, because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
 - **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults, plus `auto_mode` (permission modes/allow-lists), `ext_trust`, and `smooth_alias`.
-- **smooth-goalie** (`crates/smooth-goalie/`): HTTP forward proxy with an exact-host allowlist and JSON-lines audit logging. **Repurposed, not removed** — the microVM-era in-VM/Wonk-delegating mode is dead code paths; what the daemon actually uses is `AuditLogger` + `run_proxy_local` from `start_egress_proxy` (`crates/smooth-daemon/src/lib.rs`), making it the daemon's **egress boundary**. Enabled by `SMOOTH_EGRESS_ALLOWLIST`; the sandbox points `HTTP(S)_PROXY` at it and kernel-denies direct outbound.
+- **smooth-goalie** (`crates/smooth-goalie/`): HTTP forward proxy with an exact-host allowlist and JSON-lines audit logging. **Repurposed, not removed** — the microVM-era in-VM/Wonk-delegating mode is dead code paths; what the daemon actually uses is `AuditLogger` + `run_proxy_local` from `start_egress_proxy` (`crates/smooth-daemon/src/lib.rs`), making it the daemon's **egress boundary**. Enabled by `SMOOTH_EGRESS_ALLOWLIST`; `bash` gets `HTTP(S)_PROXY` pointed at it, and only with the opt-in kernel sandbox (`SMOOTH_SANDBOX=1`, macOS) is direct outbound kernel-denied — otherwise the allowlist is advisory.
 - **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). One machine-global SQLite db, `~/.smooth/pearls.db`, rows scoped by canonical project root (pearl th-d3e842). Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `MemoryStore`, `Registry`. Agent mail + the agent roster live in a sibling SQLite file, `~/.smooth/mail.db` (`MailStore`, [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)). No Dolt, no external binary — rusqlite is bundled.
 - **smooth-cast** (`crates/smooth-cast/`): the coding-harness specifics the published generic engine dropped — `coding_workflow` (the `th code` outer loop), `skills` discovery, the four harness cast roles (fixer / oracle / chief / intent_classifier), and field-preserving `providers.json` editing.
 - **smooth-code** (`crates/smooth-code/`): `th code` — ratatui AI coding TUI: streaming chat, tool calls, file browser, git, sessions, model picker, extensions.
@@ -316,8 +316,9 @@ own routes through the engine's `serve_routes` seam. Entry point:
 
 There is no per-task worker process. A message arrives on the operator's
 canonical WebSocket, the engine runs the turn in-process, and tools execute
-against the host filesystem through `smooth-tools` — `bash` inside the kernel
-sandbox, egress through the goalie proxy. Events stream back over the same
+against the host filesystem through `smooth-tools` — `bash` as the user (or
+inside the opt-in kernel sandbox), egress pointed at the goalie proxy when one
+is configured. Events stream back over the same
 canonical WS to every client (`th code`, the web SPA, SDK clients).
 
 > **microVM sandboxed dispatch removed 2026-07 (pearl th-f4a801).** Big Smooth
@@ -331,7 +332,7 @@ canonical WS to every client (`th code`, the web SPA, SDK clients).
 
 ### Security Architecture
 
-Three layers, in the order a tool call meets them:
+Two layers always, a third opt-in, in the order a tool call meets them:
 
 1. **Permission gate** — the engine's `permission::PermissionHook`, built in
    `smooth-daemon/src/operator::permission_hook`, layered with the daemon's
@@ -343,22 +344,32 @@ Three layers, in the order a tool call meets them:
    detectors (secret exfiltration, prompt injection, dangerous shell ops) with
    fail-closed LLM-judge escalation on ambiguous hits; `post_call` redacts
    detected secrets out of the tool result in place.
-3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — the load-bearing
-   layer, because an agent can talk its way past a userspace check but not past
-   the kernel. `bash` subprocesses get filesystem **writes** confined to the
-   workspace (plus explicit denies on `.git/hooks` and `.git/config`) and
-   **reads** denied on credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-   `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`, and the daemon's own
-   `~/.smooth` secrets). With a proxy configured it is also the **egress
+3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — **opt-in, OFF by
+   default** (pearl th-efbab1). Turn it on with `SMOOTH_SANDBOX=1` in the
+   daemon's environment. Big Smooth is a personal agent that operates AS its
+   user on the user's own machine, and the sandbox got in the way of exactly
+   that: asked to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound
+   kernel-denied behind the egress proxy) and git failed with "Operation not
+   permitted" on `~/.ssh/known_hosts` (credential-store read-deny). So by
+   default `bash` is a normal user subprocess — the user's env, `HOME`,
+   `SSH_AUTH_SOCK` and `PATH`, minus only the daemon's own config (`SMOOTH_*`, `SMOOAI_GATEWAY_KEY`) — and
+   layers 1 and 2 are the safety net. When on, `bash` subprocesses get
+   **reads and writes** denied on credential stores (`~/.ssh`, `~/.aws`,
+   `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`, and the
+   daemon's own `~/.smooth` secrets), write denies on `.git/hooks` /
+   `.git/config` in every repo and `~/Library/LaunchAgents`, and the full
+   secret-env scrub. With a proxy configured it is then also the **egress
    boundary**: direct outbound is kernel-denied except loopback, so traffic must
-   pass goalie's exact-host allowlist. `SandboxedCommand` is the only way `bash`
-   builds a subprocess — there is no plain-`Command` constructor.
+   pass goalie's exact-host allowlist. With the sandbox off, a configured
+   allowlist still runs and still sets `HTTP(S)_PROXY`, but it is **advisory**.
+   The daemon logs one startup line stating which posture it is in.
+   `SandboxedCommand` is the only way `bash` builds a subprocess either way:
+   pass-through is a mode of that type, not a second spawn path.
 
-    ⚠️ **macOS only.** Layer 3 is Seatbelt-backed and exists nowhere else
-    (th-08e05a). On Linux and Windows `bash` runs unsandboxed with a startup
-    warning — layers 1 and 2 still apply, but they are userspace, and the egress
-    allowlist drops from a boundary to a suggestion. Before shipping a Windows
-    build read [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
+    ⚠️ **macOS only.** The enforced mode is Seatbelt-backed and exists nowhere
+    else (th-08e05a). `SMOOTH_SANDBOX=1` on Linux or Windows logs a warning and
+    runs `bash` unsandboxed. Before shipping a Windows build read
+    [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
     which enumerates exactly what is exposed there.
 
 Removed with the microVM stack (2026-07, pearl th-f4a801; see git history):
