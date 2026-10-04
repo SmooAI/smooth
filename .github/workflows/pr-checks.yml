@@ -219,9 +219,15 @@ jobs:
                   RUST_MIN_STACK: 8388608
                   LANG: C.UTF-8
 
+            # smooth-flow with its tests and the test-support host binary; the
+            # daemon's lib and bin (the `flow-host` subcommand). Like the main
+            # Clippy step, not the daemon's test targets, which carry an
+            # existing clippy::all deny (hooks/sidekick.rs, th-896d64).
             - name: Clippy (pty-host)
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
-              run: cargo clippy -p smooai-smooth-flow -p smooai-smooth-daemon --features smooai-smooth-flow/pty-host,smooai-smooth-daemon/pty-host --all-targets
+              run: |
+                  cargo clippy -p smooai-smooth-flow --features pty-host --all-targets
+                  cargo clippy -p smooai-smooth-daemon --features pty-host
 
             # One report per PR — publishing from both legs would double every
             # entry in the check summary.
