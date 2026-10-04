@@ -79,6 +79,9 @@ and its pure `detect` heuristics stay shared.
       sessions up by tmux name.
     - Following cmux's model, the host carries no daemon-local state, so any
       daemon can adopt it.
+    - The IPC protocol (framing, versioned hello, messages, record fields,
+      auth, adoption) is specified in
+      [SmoothFlow-Session-Host.md](../Architecture/SmoothFlow-Session-Host.md).
 2. **The host is the parent.** It `wait()`s on the agent, so the exit code is
    exact. The `sh` exit-code wrapper, the exit files, `pane_dead`, the
    `run-shell` nudge and the 3 s "unknown" fallback are all deleted. A dead
@@ -224,6 +227,12 @@ one starts.
       th-e19c22 closes.
 
 ## References
+
+- Specs written from this decision (th-c61966):
+  [SmoothFlow.md § Replay](../Architecture/SmoothFlow.md#replay) (the
+  `flow.replay` frame, per-session `seq`, chunking and capability) and
+  [SmoothFlow-Session-Host.md](../Architecture/SmoothFlow-Session-Host.md)
+  (the daemon ⇄ `flow-host` IPC protocol).
 
 - th-e19c22 comment (2026-10-03): the cmux, Orca and herdr survey, with file
   references. The local clones are in `~/dev/refs/{cmux,orca}`; herdr is

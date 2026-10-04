@@ -8,7 +8,7 @@ The engine (`smooth-flow` crate, hosted in smooth-daemon) is the ONLY state hold
 
 - **Own WebSocket**, not the operator's canonical WS: `GET /api/flow/ws` on the daemon (axum upgrade, mounted via `serve_routes` in `crates/smooth-daemon/src/operator.rs`). The daemon cannot intercept the engine's WS, so flow is a sibling channel. Same loopback origin, same `~/.smooth/daemon.addr` discovery.
 - **HTTP** siblings for one-shot calls: `GET /api/flow/sessions`, `POST /api/flow/sessions`, `POST /api/flow/sessions/{id}/input`, `POST /api/flow/sessions/{id}/resize`, `POST /api/flow/sessions/{id}/approve`, `POST /api/flow/sessions/{id}/kill`, `POST /api/flow/hooks` (see Hooks), and the phone-pairing set (th-d98fde): `POST /api/flow/pair` (mint a QR → `{pairing_id, url, code, device, label, expires_at, relay_enabled}`), `GET /api/flow/pair/{id}` (`{state: pending|paired|expired|unknown, …}`), `GET /api/flow/pairings`, `DELETE /api/flow/pairings/{device}` — the mock answers all four (a scan "happens" on the third poll).
-- **Relay** (phones): the relay envelope stays `{to, frame}`. A frame carrying `"channel":"flow"` is routed by the daemon's relay bridge (`crates/smooth-daemon/src/relay.rs`) to the flow WS handler instead of the operator loopback WS. No `channel` ⇒ operator WS (unchanged, backward compatible). Phones NEVER receive raw scrollback: only `flow.output` deltas capped at 16 KiB per frame and `flow.screen` snapshots on demand.
+- **Relay** (phones): the relay envelope stays `{to, frame}`. A frame carrying `"channel":"flow"` is routed by the daemon's relay bridge (`crates/smooth-daemon/src/relay.rs`) to the flow WS handler instead of the operator loopback WS. No `channel` ⇒ operator WS (unchanged, backward compatible). Phones NEVER receive raw scrollback: only `flow.output` deltas capped at 16 KiB per frame, `flow.screen` snapshots on demand, and (th-c61966) a bounded `flow.replay` (≤256 KiB) on attach, split into ≤16 KiB parts.
 - Every frame is one JSON object: `{"channel":"flow","type":"<name>", ...fields}`. Unknown types are ignored, never fatal.
 
 ## Session model (SQLite, `~/.smooth/flow.db`, WAL)
@@ -38,10 +38,11 @@ Timestamps: UTC RFC3339 text, compared with Rust `Utc::now()` literals, never SQ
 
 ## Frames, engine → clients (broadcast to every flow WS)
 
-- `flow.hello` `{daemon:{version, machine_label, home?}, sessions:[Session]}` — on connect; `Session` = the row above minus pid_start, plus `unread:bool`.
-- `flow.session` `{session: Session}` — any change (state, attention, title, branch, pearl).
+- `flow.hello` `{daemon:{version, machine_label, home?}, sessions:[Session], capabilities?:[string]}` — on connect; `Session` = the row above minus pid_start, plus `unread:bool`. `capabilities` (th-c61966) lists optional protocol features; `"replay"` means attaches open with `flow.replay`. Absent = none.
+- `flow.session` `{session: Session}` — any change (state, attention, title, branch, pearl). (th-c61966) `Session.host` is `"pty"` or `"tmux"`; absent = tmux.
 - `flow.session.removed` `{id}`
-- `flow.output` `{id, seq:u64, data_b64}` — raw PTY bytes; **only sent to clients that `flow.attach`ed** that id. Desktop feeds it straight into the ghostty surface. Phones get it only while attached, throttled to 30 fps and ≤16 KiB/frame.
+- `flow.output` `{id, seq:u64, data_b64}` — raw PTY bytes; **only sent to clients that `flow.attach`ed** that id. Desktop feeds it straight into the ghostty surface. Phones get it only while attached, throttled to 30 fps and ≤16 KiB/frame. `seq` is per session (th-c61966): the same bytes carry the same `seq` on every client, across reconnects. The relay's chunks of one coalesced run share their last engine `seq`.
+- `flow.replay` `{id, cols, rows, seq:u64, data_b64, reason, part?, parts?}` (th-c61966) — a VT snapshot (screen, history, modes, cursor) current through `seq`, sent to attached clients only: on a `replay:true` attach, after the client lagged, after every resize (to every attached client), and when the session moves to a new host. Client: reset to a fresh `cols`×`rows` terminal, feed `data_b64`, then apply only `flow.output` with `seq` > the replay's; buffer output while a replay is awaited; the latest replay always wins. `part`/`parts` (relay only, ≤16 KiB each) — render nothing until every part has arrived; a gap ⇒ re-attach. Empty `data_b64` (a tmux-host session, followed by a forced tmux redraw; or a snapshot where nothing fit) still resets. The session host answers DA/DSR queries itself, so for a session with `host:"pty"` clients must not send their own query replies as `flow.input`. Full rules: `docs/Architecture/SmoothFlow.md#replay`; shared logic + vectors: `smooth_flow_client::replay`, `spec/vectors/replay.json`.
 - `flow.screen` `{id, cols, rows, text}` — plain-text snapshot of the visible pane (from tmux capture), reply to `flow.snapshot`. This is what the phone renders when not streaming.
 - `flow.attention` `{id, attention}` — emitted in addition to `flow.session` so notifications can key on it.
 - `flow.fanout` `{fan_out: FanOut, candidates:[Session]}`
@@ -49,7 +50,7 @@ Timestamps: UTC RFC3339 text, compared with Rust `Utc::now()` literals, never SQ
 
 ## Frames, client → engine
 
-- `flow.attach` `{id, cols, rows}` / `flow.detach` `{id}` — subscribe to output; attach also sets the PTY size.
+- `flow.attach` `{id, cols, rows, replay?:bool, replay_max_bytes?}` / `flow.detach` `{id}` — subscribe to output; attach also sets the PTY size. `replay:true` (th-c61966) asks for `flow.replay`; without it an engine that has a snapshot sends it as one `flow.output` prefixed with `ESC c ESC[3J`, so old clients still see the screen.
 - `flow.input` `{id, data_b64}`
 - `flow.resize` `{id, cols, rows}`
 - `flow.snapshot` `{id}`

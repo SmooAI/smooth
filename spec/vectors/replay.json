@@ -1,0 +1,966 @@
+{
+  "spec": "SmoothFlow-Client-Spec §10 replay ordering",
+  "cases": [
+    {
+      "name": "attach, replay, then newer output",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 5,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 6,
+            "data": "a"
+          },
+          {
+            "type": "flow.output",
+            "seq": 7,
+            "data": "b"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "a"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ]
+        ],
+        "baseline": 5,
+        "waiting": false
+      }
+    },
+    {
+      "name": "outputs before the replay are held; the covered ones drop",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.output",
+            "seq": 4,
+            "data": "old"
+          },
+          {
+            "type": "flow.output",
+            "seq": 5,
+            "data": "covered"
+          },
+          {
+            "type": "flow.output",
+            "seq": 6,
+            "data": "new"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 5,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 7,
+            "data": "next"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            },
+            {
+              "op": "write",
+              "data": "new"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "next"
+            }
+          ]
+        ],
+        "baseline": 5,
+        "waiting": false
+      }
+    },
+    {
+      "name": "output at or below the replay's seq drops",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 9,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 9,
+            "data": "x"
+          },
+          {
+            "type": "flow.output",
+            "seq": 3,
+            "data": "y"
+          },
+          {
+            "type": "flow.output",
+            "seq": 10,
+            "data": "z"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [],
+          [],
+          [
+            {
+              "op": "write",
+              "data": "z"
+            }
+          ]
+        ],
+        "baseline": 9,
+        "waiting": false
+      }
+    },
+    {
+      "name": "a later replay resets again, even with a lower seq",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 50,
+            "cols": 80,
+            "rows": 24,
+            "data": "A"
+          },
+          {
+            "type": "flow.output",
+            "seq": 51,
+            "data": "a"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 2,
+            "cols": 80,
+            "rows": 24,
+            "data": "B"
+          },
+          {
+            "type": "flow.output",
+            "seq": 3,
+            "data": "b"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "A"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "a"
+            }
+          ],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "B"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ]
+        ],
+        "baseline": 2,
+        "waiting": false
+      }
+    },
+    {
+      "name": "lag resync mid-stream: the replay replaces the screen",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 1,
+            "cols": 80,
+            "rows": 24,
+            "data": "A"
+          },
+          {
+            "type": "flow.output",
+            "seq": 2,
+            "data": "a"
+          },
+          {
+            "type": "flow.output",
+            "seq": 3,
+            "data": "b"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 40,
+            "cols": 80,
+            "rows": 24,
+            "data": "B"
+          },
+          {
+            "type": "flow.output",
+            "seq": 39,
+            "data": "late"
+          },
+          {
+            "type": "flow.output",
+            "seq": 41,
+            "data": "c"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "A"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "a"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "B"
+            }
+          ],
+          [],
+          [
+            {
+              "op": "write",
+              "data": "c"
+            }
+          ]
+        ],
+        "baseline": 40,
+        "waiting": false
+      }
+    },
+    {
+      "name": "a chunked replay renders only when complete",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "AB",
+            "part": 0,
+            "parts": 3
+          },
+          {
+            "type": "flow.output",
+            "seq": 8,
+            "data": "x"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "CD",
+            "part": 1,
+            "parts": 3
+          },
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "E",
+            "part": 2,
+            "parts": 3
+          },
+          {
+            "type": "flow.output",
+            "seq": 9,
+            "data": "y"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "ABCDE"
+            },
+            {
+              "op": "write",
+              "data": "x"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "y"
+            }
+          ]
+        ],
+        "baseline": 7,
+        "waiting": false
+      }
+    },
+    {
+      "name": "a new part 0 discards an incomplete replay",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "old",
+            "part": 0,
+            "parts": 2
+          },
+          {
+            "type": "flow.replay",
+            "seq": 9,
+            "cols": 80,
+            "rows": 24,
+            "data": "N",
+            "part": 0,
+            "parts": 2
+          },
+          {
+            "type": "flow.replay",
+            "seq": 9,
+            "cols": 80,
+            "rows": 24,
+            "data": "EW",
+            "part": 1,
+            "parts": 2
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "NEW"
+            }
+          ]
+        ],
+        "baseline": 9,
+        "waiting": false
+      }
+    },
+    {
+      "name": "a missing part resyncs; re-attach waits for a new replay",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "A",
+            "part": 0,
+            "parts": 3
+          },
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "C",
+            "part": 2,
+            "parts": 3
+          },
+          {
+            "type": "flow.output",
+            "seq": 8,
+            "data": "x"
+          },
+          {
+            "type": "attach"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 8,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 9,
+            "data": "y"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [
+            {
+              "op": "resync",
+              "reason": "replay_gap"
+            }
+          ],
+          [],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "y"
+            }
+          ]
+        ],
+        "baseline": 8,
+        "waiting": false
+      }
+    },
+    {
+      "name": "a part from another replay is a gap",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "A",
+            "part": 0,
+            "parts": 2
+          },
+          {
+            "type": "flow.replay",
+            "seq": 8,
+            "cols": 80,
+            "rows": 24,
+            "data": "B",
+            "part": 1,
+            "parts": 2
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [
+            {
+              "op": "resync",
+              "reason": "replay_gap"
+            }
+          ]
+        ],
+        "baseline": null,
+        "waiting": true
+      }
+    },
+    {
+      "name": "part beyond parts is malformed",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "A",
+            "part": 3,
+            "parts": 3
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "resync",
+              "reason": "replay_malformed"
+            }
+          ]
+        ],
+        "baseline": null,
+        "waiting": true
+      }
+    },
+    {
+      "name": "zero parts is malformed",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 7,
+            "cols": 80,
+            "rows": 24,
+            "data": "A",
+            "part": 0,
+            "parts": 0
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "resync",
+              "reason": "replay_malformed"
+            }
+          ]
+        ],
+        "baseline": null,
+        "waiting": true
+      }
+    },
+    {
+      "name": "relay-split chunks share a seq and all apply",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 1,
+            "cols": 80,
+            "rows": 24,
+            "data": ""
+          },
+          {
+            "type": "flow.output",
+            "seq": 4,
+            "data": "a"
+          },
+          {
+            "type": "flow.output",
+            "seq": 4,
+            "data": "b"
+          },
+          {
+            "type": "flow.output",
+            "seq": 4,
+            "data": "c"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "a"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "c"
+            }
+          ]
+        ],
+        "baseline": 1,
+        "waiting": false
+      }
+    },
+    {
+      "name": "an empty replay (tmux host) resets, then output streams",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 0,
+            "cols": 80,
+            "rows": 24,
+            "data": ""
+          },
+          {
+            "type": "flow.output",
+            "seq": 1,
+            "data": "redraw"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "redraw"
+            }
+          ]
+        ],
+        "baseline": 0,
+        "waiting": false
+      }
+    },
+    {
+      "name": "an old engine sends no replay: arrival order",
+      "input": {
+        "expect_replay": false,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.output",
+            "seq": 3,
+            "data": "a"
+          },
+          {
+            "type": "flow.output",
+            "seq": 1,
+            "data": "b"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 5,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 5,
+            "data": "x"
+          },
+          {
+            "type": "flow.output",
+            "seq": 6,
+            "data": "y"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "write",
+              "data": "a"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [],
+          [
+            {
+              "op": "write",
+              "data": "y"
+            }
+          ]
+        ],
+        "baseline": 5,
+        "waiting": false
+      }
+    },
+    {
+      "name": "too much held output resyncs",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 4,
+        "frames": [
+          {
+            "type": "flow.output",
+            "seq": 1,
+            "data": "abc"
+          },
+          {
+            "type": "flow.output",
+            "seq": 2,
+            "data": "de"
+          },
+          {
+            "type": "attach"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 2,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "flow.output",
+            "seq": 3,
+            "data": "f"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [],
+          [
+            {
+              "op": "resync",
+              "reason": "buffer_overflow"
+            }
+          ],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "f"
+            }
+          ]
+        ],
+        "baseline": 2,
+        "waiting": false
+      }
+    },
+    {
+      "name": "re-attach forgets the baseline",
+      "input": {
+        "expect_replay": true,
+        "max_pending_bytes": 1024,
+        "frames": [
+          {
+            "type": "flow.replay",
+            "seq": 5,
+            "cols": 80,
+            "rows": 24,
+            "data": "S"
+          },
+          {
+            "type": "attach"
+          },
+          {
+            "type": "flow.output",
+            "seq": 6,
+            "data": "a"
+          },
+          {
+            "type": "flow.replay",
+            "seq": 6,
+            "cols": 80,
+            "rows": 24,
+            "data": "T"
+          },
+          {
+            "type": "flow.output",
+            "seq": 7,
+            "data": "b"
+          }
+        ]
+      },
+      "expected": {
+        "actions": [
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "S"
+            }
+          ],
+          [],
+          [],
+          [
+            {
+              "op": "reset",
+              "cols": 80,
+              "rows": 24
+            },
+            {
+              "op": "write",
+              "data": "T"
+            }
+          ],
+          [
+            {
+              "op": "write",
+              "data": "b"
+            }
+          ]
+        ],
+        "baseline": 6,
+        "waiting": false
+      }
+    }
+  ]
+}
