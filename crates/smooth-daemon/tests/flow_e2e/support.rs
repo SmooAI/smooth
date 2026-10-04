@@ -1,10 +1,15 @@
 //! The e2e rig: a REAL `smooth-daemon` per test on an ephemeral port, fully
 //! isolated from the developer's Big Smooth — its own `$HOME` (so
-//! `~/.smooth/{daemon.addr,operator-token,flow.db}` and `~/.smooth/harnesses/`
-//! are throwaway), its own tmux server (`tmux -L flow-e2e-<pid>-<n>`), no
-//! single-instance lock, no `tailscale serve`, no relay, no gateway
-//! credentials. `fake-agent` and its four manifests are installed into that
-//! HOME so the engine launches it the way it launches any harness.
+//! `~/.smooth/{daemon.addr,operator-token,flow.db}`, `~/.smooth/harnesses/`
+//! and `~/.smooth/flow-hosts/` are throwaway), its own tmux server (`tmux -L
+//! flow-e2e-<pid>-<n>`), no single-instance lock, no `tailscale serve`, no
+//! relay, no gateway credentials. `fake-agent` and its four manifests are
+//! installed into that HOME so the engine launches it the way it launches any
+//! harness.
+//!
+//! Every scenario runs on both session hosts ([`Host`], th-dc9822): tmux, and
+//! the engine-owned PTY host (`SMOOTH_FLOW_HOST=pty`, ADR-011) when the daemon
+//! was built with `pty-host`.
 //!
 //! Everything here is driven the way real clients drive it: HTTP + the flow
 //! WS for the apps, the `th` binary for the CLI, `POST /api/flow/hooks` for
@@ -35,6 +40,25 @@ pub const WAIT: Duration = Duration::from_secs(30);
 pub const TICK: Duration = Duration::from_secs(2);
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Which session host the daemon under test launches sessions on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// `tmux -L <private socket>`.
+    Tmux,
+    /// One `smooth-daemon flow-host` per session (ADR-011, th-dc9822).
+    Pty,
+}
+
+impl Host {
+    /// The `SMOOTH_FLOW_HOST` value.
+    pub const fn env(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Pty => "pty",
+        }
+    }
+}
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
@@ -85,9 +109,10 @@ pub fn skip(why: &str) -> bool {
     false
 }
 
-/// tmux + bash + curl — what the rig and `fake-agent` need.
-pub fn prereqs() -> bool {
-    if !have("tmux", "-V") {
+/// bash + curl — what the rig and `fake-agent` need — and tmux for the
+/// tmux host.
+pub fn prereqs(host: Host) -> bool {
+    if host == Host::Tmux && !have("tmux", "-V") {
         return skip("tmux is not installed");
     }
     if !have("bash", "--version") {
@@ -100,8 +125,8 @@ pub fn prereqs() -> bool {
 }
 
 /// Prereqs plus a `th` binary.
-pub fn prereqs_with_th() -> bool {
-    prereqs() && (th_bin().is_some() || skip("no `th` binary: build smooai-smooth-cli or set SMOOTH_TH_BIN"))
+pub fn prereqs_with_th(host: Host) -> bool {
+    prereqs(host) && (th_bin().is_some() || skip("no `th` binary: build smooai-smooth-cli or set SMOOTH_TH_BIN"))
 }
 
 /// The real `~/.smooth/daemon.addr` of the user running this suite —
@@ -143,21 +168,27 @@ pub struct Daemon {
     pub addr: String,
     pub token: String,
     pub socket: String,
+    /// The host new sessions run on.
+    pub host: Host,
     child: Child,
     log_path: PathBuf,
     http: reqwest::Client,
+    /// The daemon's `PATH` and extra environment, for [`Self::restart`].
+    path: std::ffi::OsString,
+    env: Vec<(String, String)>,
+    boots: u32,
 }
 
 impl Daemon {
     /// Boot. Panics (with the daemon log) when it doesn't come up.
-    pub async fn boot() -> Self {
-        Self::boot_with(None, &[]).await
+    pub async fn boot(host: Host) -> Self {
+        Self::boot_with(host, None, &[]).await
     }
 
     /// [`Self::boot`] with the daemon's `PATH` replaced by `path` (no rig
     /// bin dir, no inherited `PATH` — a Finder-launched app's environment)
     /// and `env` added on top.
-    pub async fn boot_with(path: Option<&str>, env: &[(&str, &str)]) -> Self {
+    pub async fn boot_with(host: Host, path: Option<&str>, env: &[(&str, &str)]) -> Self {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let root = tempfile::Builder::new().prefix("flow-e2e-").tempdir().expect("tempdir");
         let home = root.path().join("home");
@@ -165,10 +196,6 @@ impl Daemon {
         let socket = format!("flow-e2e-{}-{n}", std::process::id());
         install_fixtures(&home);
         git_init(&ws);
-
-        let log_path = root.path().join("daemon.log");
-        let log = std::fs::File::create(&log_path).expect("daemon log");
-        let err = log.try_clone().expect("daemon log");
         let path = path.map_or_else(
             || {
                 let mut path = home.join(".local").join("bin").into_os_string();
@@ -180,60 +207,9 @@ impl Daemon {
             },
             std::ffi::OsString::from,
         );
-        let mut cmd = Command::new(daemon_bin());
-        cmd.args(["operator", "--addr", "127.0.0.1:0", "--tmux-socket", &socket])
-            .env_clear()
-            .env("PATH", &path)
-            .env("HOME", &home)
-            .env("TMPDIR", root.path())
-            .env("SMOOTH_ALLOW_SECOND_DAEMON", "1")
-            .env("SMOOTH_RELAY", "0")
-            .env("SMOOTH_TAILSCALE_SERVE", "0")
-            // th-51bf88: no background `--version` of whatever CLIs the host has.
-            .env("SMOOTH_FLOW_HARNESS_DOCTOR", "0")
-            .env("SMOOTH_WORKSPACE", &ws)
-            .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
-            .env("TERM", "xterm-256color")
-            .current_dir(&ws)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(err));
-        if let Some(th) = th_bin() {
-            cmd.env("SMOOTH_TH_BIN", th);
-        }
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn().expect("spawn smooth-daemon");
-
-        // A second instance (SMOOTH_ALLOW_SECOND_DAEMON) deliberately does NOT
-        // advertise itself in ~/.smooth/daemon.addr (#546: SmoothFlow's
-        // daemon must never repoint `th` at itself). The bound port is on the
-        // daemon's own "listening" log line; the rig then writes daemon.addr
-        // in ITS home so `th flow` / `th harness` find this daemon.
-        let addr_file = home.join(".smooth").join("daemon.addr");
-        let token_file = home.join(".smooth").join("operator-token");
-        let start = Instant::now();
-        let addr = loop {
-            if let Some(status) = child.try_wait().expect("try_wait") {
-                panic!(
-                    "smooth-daemon exited during boot ({status}):\n{}",
-                    std::fs::read_to_string(&log_path).unwrap_or_default()
-                );
-            }
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            if let Some(addr) = listening_addr(&log) {
-                break addr;
-            }
-            assert!(
-                start.elapsed() < BOOT_TIMEOUT,
-                "smooth-daemon did not report a listening address within {BOOT_TIMEOUT:?}:\n{log}"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        std::fs::write(&addr_file, format!("{addr}\n")).expect("write the rig's daemon.addr");
-        let token = std::fs::read_to_string(&token_file).expect("operator-token").trim().to_string();
-        assert!(!token.is_empty(), "empty operator-token");
+        let env: Vec<(String, String)> = env.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+        let log_path = root.path().join("daemon.log");
+        let (child, addr, token) = spawn_daemon(root.path(), &socket, host, &path, &env, &log_path).await;
         let http = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().expect("reqwest");
         let d = Self {
             root,
@@ -242,22 +218,57 @@ impl Daemon {
             addr,
             token,
             socket,
+            host,
             child,
             log_path,
             http,
+            path,
+            env,
+            boots: 1,
         };
-        // The router is merged into the operator server; once the address is
-        // advertised it is listening, but poll the flow route anyway.
+        d.wait_routes().await;
+        d
+    }
+
+    /// The router is merged into the operator server; once the address is
+    /// advertised it is listening, but poll the flow route anyway.
+    async fn wait_routes(&self) {
+        let start = Instant::now();
         loop {
-            if let Ok(r) = d.http.get(d.url("/api/flow/sessions")).header("x-smooth-token", &d.token).send().await {
+            if let Ok(r) = self.http.get(self.url("/api/flow/sessions")).header("x-smooth-token", &self.token).send().await {
                 if r.status().is_success() {
                     break;
                 }
             }
-            assert!(start.elapsed() < BOOT_TIMEOUT, "flow routes never answered:\n{}", d.log());
+            assert!(start.elapsed() < BOOT_TIMEOUT, "flow routes never answered:\n{}", self.log());
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        d
+    }
+
+    /// Kill the daemon with SIGKILL (a crash: nothing cleaned up) and boot a
+    /// new one on the same HOME, tmux socket and environment. Sessions must
+    /// survive it.
+    pub async fn restart(&mut self) {
+        self.crash();
+        self.boot_again().await;
+    }
+
+    /// SIGKILL the daemon and leave it down.
+    pub fn crash(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Boot a new daemon in this rig's world after [`Self::crash`].
+    pub async fn boot_again(&mut self) {
+        self.boots += 1;
+        let log_path = self.root.path().join(format!("daemon.{}.log", self.boots));
+        let (child, addr, token) = spawn_daemon(self.root.path(), &self.socket, self.host, &self.path, &self.env, &log_path).await;
+        self.child = child;
+        self.addr = addr;
+        self.token = token;
+        self.log_path = log_path;
+        self.wait_routes().await;
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -536,6 +547,45 @@ impl Daemon {
         smooth_flow::FlowStore::open(&self.home.join(".smooth").join("flow.db")).expect("open flow.db")
     }
 
+    /// Where this daemon's session hosts keep their records.
+    pub fn hosts_dir(&self) -> PathBuf {
+        self.home.join(".smooth").join("flow-hosts")
+    }
+
+    /// Is session `id`'s terminal still there — the tmux session on the
+    /// rig's server, or the session host's record?
+    pub fn session_present(&self, id: &str) -> bool {
+        match self.host {
+            Host::Tmux => Command::new("tmux")
+                .args(["-L", &self.socket, "has-session", "-t", id])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success()),
+            Host::Pty => self.hosts_dir().join(format!("{id}.json")).is_file(),
+        }
+    }
+
+    /// Wait until session `id`'s terminal is gone (a host releases itself
+    /// just after the engine stores the exit).
+    pub async fn wait_session_gone(&self, id: &str, timeout: Duration) {
+        let start = Instant::now();
+        while self.session_present(id) {
+            assert!(start.elapsed() < timeout, "session {id}'s terminal is still there after {timeout:?}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Session `id`'s host record (pty only), as JSON.
+    pub fn host_record(&self, id: &str) -> Option<Value> {
+        let raw = std::fs::read(self.hosts_dir().join(format!("{id}.json"))).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    /// The host process of session `id` (pty only): its record's `pid`.
+    pub fn host_pid(&self, id: &str) -> Option<u32> {
+        self.host_record(id)?["pid"].as_u64().and_then(|p| u32::try_from(p).ok())
+    }
+
     /// Is `pid` alive?
     pub fn pid_alive(pid: u32) -> bool {
         Command::new("kill")
@@ -560,11 +610,96 @@ impl Drop for Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = Command::new("tmux").args(["-L", &self.socket, "kill-server"]).output();
+        // Session hosts outlive their daemon by design (ADR-011): end them,
+        // as `kill-server` does for tmux.
+        kill_hosts(&self.hosts_dir());
         if std::thread::panicking() {
             eprintln!("--- daemon log ({}) ---\n{}", self.log_path.display(), tail(&self.log(), 60));
         }
     }
 }
+
+/// Start a daemon in the rig's world at `root` (`home`, `ws` inside it) and
+/// wait for its address. Returns the child, its `host:port` and its token.
+async fn spawn_daemon(root: &Path, socket: &str, host: Host, path: &std::ffi::OsStr, env: &[(String, String)], log_path: &Path) -> (Child, String, String) {
+    let home = root.join("home");
+    let ws = root.join("ws");
+    let log = std::fs::File::create(log_path).expect("daemon log");
+    let err = log.try_clone().expect("daemon log");
+    let mut cmd = Command::new(daemon_bin());
+    cmd.args(["operator", "--addr", "127.0.0.1:0", "--tmux-socket", socket])
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("TMPDIR", root)
+        .env("SMOOTH_ALLOW_SECOND_DAEMON", "1")
+        .env("SMOOTH_RELAY", "0")
+        .env("SMOOTH_TAILSCALE_SERVE", "0")
+        // th-51bf88: no background `--version` of whatever CLIs the host has.
+        .env("SMOOTH_FLOW_HARNESS_DOCTOR", "0")
+        .env("SMOOTH_FLOW_HOST", host.env())
+        .env("SMOOTH_WORKSPACE", &ws)
+        .env("RUST_LOG", "info,smooth_flow=debug,smooth_daemon::flow_route=debug")
+        .env("TERM", "xterm-256color")
+        .current_dir(&ws)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err));
+    if let Some(th) = th_bin() {
+        cmd.env("SMOOTH_TH_BIN", th);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn smooth-daemon");
+
+    // A second instance (SMOOTH_ALLOW_SECOND_DAEMON) deliberately does NOT
+    // advertise itself in ~/.smooth/daemon.addr (#546: SmoothFlow's daemon
+    // must never repoint `th` at itself). The bound port is on the daemon's
+    // own "listening" log line; the rig then writes daemon.addr in ITS home
+    // so `th flow` / `th harness` find this daemon.
+    let addr_file = home.join(".smooth").join("daemon.addr");
+    let token_file = home.join(".smooth").join("operator-token");
+    let start = Instant::now();
+    let addr = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!(
+                "smooth-daemon exited during boot ({status}):\n{}",
+                std::fs::read_to_string(log_path).unwrap_or_default()
+            );
+        }
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        if let Some(addr) = listening_addr(&log) {
+            break addr;
+        }
+        assert!(
+            start.elapsed() < BOOT_TIMEOUT,
+            "smooth-daemon did not report a listening address within {BOOT_TIMEOUT:?}:\n{log}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    std::fs::write(&addr_file, format!("{addr}\n")).expect("write the rig's daemon.addr");
+    let token = std::fs::read_to_string(&token_file).expect("operator-token").trim().to_string();
+    assert!(!token.is_empty(), "empty operator-token");
+    (child, addr, token)
+}
+
+/// End every session host whose record is in `dir`.
+#[cfg(feature = "pty-host")]
+pub fn kill_hosts(dir: &Path) {
+    use smooth_flow::session_host::{adopt, record};
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for p in entries.flatten().map(|e| e.path()) {
+        if p.extension().is_some_and(|x| x == "json") {
+            if let Ok(rec) = record::read_record(&p) {
+                adopt::kill_host(dir, &rec, Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "pty-host"))]
+pub const fn kill_hosts(_dir: &Path) {}
 
 /// A flow WS client: `hello` consumed, frames read with a deadline.
 pub struct Ws {

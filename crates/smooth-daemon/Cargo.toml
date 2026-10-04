@@ -108,9 +108,10 @@ chacha20poly1305 = "0.10"
 
 [features]
 # th-e4aef9 (ADR-011): the `flow-host` subcommand, the SmoothFlow session
-# host. Pulls in smooth-flow's `pty-host`, and with it the Zig-built
-# libghostty-vt, so it stays off by default until PtyHost ships (th-dc9822)
-# and the release workflows build libghostty-vt.
+# host, and (th-dc9822) the engine's `PtyHost` on it (`SMOOTH_FLOW_HOST=pty`).
+# Pulls in smooth-flow's `pty-host`, and with it the Zig-built libghostty-vt.
+# Off by default so a plain `cargo build` needs no Zig; the shipped daemons
+# (desktop-publish.yml, smoothflow-publish.yml) build with it.
 pty-host = ["smooth-flow/pty-host"]
 
 [dev-dependencies]

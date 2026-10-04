@@ -2,9 +2,10 @@
 
 > Epic th-ce4f88, spec pearl th-c61966. Decision:
 > [ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md). Engine and
-> client wire: [SmoothFlow.md](SmoothFlow.md). Status: **the host is implemented**
-> (th-e4aef9, Unix; Windows is th-2b32a6). The engine does not use it yet:
-> `PtyHost` is th-dc9822. [Implementation notes](#implementation) lists where
+> client wire: [SmoothFlow.md](SmoothFlow.md). Status: **implemented on Unix**
+> (the host th-e4aef9, the engine's `PtyHost` th-dc9822; Windows is
+> th-2b32a6). Sessions use it with `SMOOTH_FLOW_HOST=pty`; tmux stays the
+> default until th-68234b. [Implementation notes](#implementation) lists where
 > the code lives and what the build settled that this spec left open.
 
 Every SmoothFlow session on the `pty` host runs under its own
@@ -321,10 +322,12 @@ Built in th-e4aef9. The code:
 | Adoption (`adopt`), protocol-less kill (`kill_host`)   | `crates/smooth-flow/src/session_host/adopt.rs`                                               |
 | `smooth-daemon flow-host --id <id>` (hidden)           | `crates/smooth-daemon/src/main.rs`, behind the daemon's `pty-host` feature                   |
 | Test-support binary `smooth-flow-host`, protocol tests | `crates/smooth-flow/src/bin/smooth-flow-host.rs`, `crates/smooth-flow/tests/session_host.rs` |
+| `PtyHost`, the engine's side (th-dc9822)               | `crates/smooth-flow/src/pty_host.rs`, tested by `crates/smooth-flow/tests/pty_host.rs`       |
 
 All of it is behind the `pty-host` feature (smooth-flow's, forwarded by
 smooth-daemon's), which is off by default: it builds libghostty-vt with Zig.
-The shipped daemon gains the subcommand when `PtyHost` lands (th-dc9822).
+The shipped daemons are built with it (desktop-publish.yml and
+smoothflow-publish.yml, th-dc9822).
 
 What the build decided:
 
@@ -384,6 +387,31 @@ What the build decided:
   adoption aren't built. The named pipe with an owner-only DACL needs Win32
   calls the workspace's `unsafe` ban rules out without a vetted wrapper
   (th-2b32a6).
+
+What `PtyHost` (th-dc9822) settled on the daemon's side:
+
+- **One connection per session, kept open** whether or not a client is
+  attached; it is how the exit, overruns and the output stream arrive. It is
+  re-made on demand: after a `Closed` event, or a request that times out or
+  hits a dead socket (that one request is retried once on a fresh
+  connection). There is no 10 s ping loop: supervision talks to every live
+  session every 2 s anyway, and a request's 10 s timeout is the dead-peer
+  check. A closed connection is never taken as a death; only a host process
+  that is gone (`pid` + `pid_start`) is.
+- **Spawn.** `env` is the daemon's environment minus `TMUX`/`TMUX_PANE`, plus
+  the launch's (the manifest's `launch.env`, the flow id, the hook token
+  file, the pane `PATH`). The size is 120×40 until the first attach sets it.
+  `seq_start` is the session's last `seq` + 1, remembered across relaunches,
+  and taken from `hello` after an adoption.
+- **Release waits for the host to go**: up to 3 s, then the host is killed
+  without the protocol. A relaunch spawns a new host under the same id,
+  which refuses while the old one lives.
+- **Files of a dead host** are only removed while the record on disk is still
+  that host's (same `pid` and `pid_start`), so a relaunch's new record can't
+  be deleted by the old host's cleanup.
+- **The pid** the engine records is the child's (`child_pid`), so liveness and
+  the duplicate-resume guard look at the agent, as they did at tmux's
+  wrapper.
 
 ## Testing
 

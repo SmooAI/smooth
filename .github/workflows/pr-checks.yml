@@ -211,13 +211,27 @@ jobs:
             # Zig-built libghostty-vt above), so the plain Test step never
             # compiles it. Both legs: Linux runs the real-process protocol
             # tests; Windows proves the stub and the shared protocol build.
+            #
+            # th-dc9822: PtyHost and the engine on it (smooth-flow's
+            # tests/pty_host.rs), and the flow e2e suite's pty half: every
+            # scenario's `::pty::` twin plus the pty-only `restart` scenarios,
+            # against a daemon built with the feature. The `tmux::` half ran in
+            # the plain Test step. The example is rebuilt with the feature so
+            # its e2e twin hosts sessions on pty too (Linux: the suite is unix
+            # only).
             - name: Test (pty-host)
               if: steps.gate.outputs.run == 'true'
               shell: bash
-              run: cargo nextest run -p smooai-smooth-flow -p smooai-smooth-daemon --features smooai-smooth-flow/pty-host,smooai-smooth-daemon/pty-host -E 'package(smooai-smooth-flow) | binary(flow_host)'
+              run: |
+                  if [ "$RUNNER_OS" = Linux ]; then
+                      cargo build -p smooai-smooth-daemon --examples --features pty-host
+                  fi
+                  cargo nextest run -p smooai-smooth-flow -p smooai-smooth-daemon --features smooai-smooth-flow/pty-host,smooai-smooth-daemon/pty-host \
+                      -E 'package(smooai-smooth-flow) | binary(flow_host) | (binary(flow_e2e) & test(/(^|::)pty::|^restart::/))'
               env:
                   RUST_MIN_STACK: 8388608
                   LANG: C.UTF-8
+                  SMOOTH_E2E_STRICT: ${{ runner.os == 'Linux' && '1' || '0' }}
 
             # smooth-flow with its tests and the test-support host binary; the
             # daemon's lib and bin (the `flow-host` subcommand). Like the main

@@ -2,23 +2,23 @@
 //! app) runs with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. Homebrew's tmux is in
 //! `/opt/homebrew/bin`, so every session it created sat in `starting`
 //! forever — no pid, no detail, nothing logged. These boot the daemon in
-//! exactly that environment.
+//! exactly that environment. On the pty host (th-dc9822) the no-tmux case
+//! is the opposite proof: sessions run without tmux at all.
 
 use std::path::Path;
 
 use serde_json::json;
 
-use crate::support::{prereqs, state, Daemon, WAIT};
+use crate::support::{prereqs, state, Daemon, Host, WAIT};
 
 /// What launchd hands an app started from Finder.
 const FINDER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-#[tokio::test]
-async fn a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_path() {
-    if !prereqs() {
+async fn a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_path(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot_with(Some(FINDER_PATH), &[]).await;
+    let d = Daemon::boot_with(host, Some(FINDER_PATH), &[]).await;
     let log = d.log();
     assert!(log.contains("flow: tmux resolved"), "the daemon names its tmux at boot:\n{log}");
 
@@ -34,7 +34,8 @@ async fn a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_pat
     let tmux_dir = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"]
         .into_iter()
         .find(|dir| Path::new(dir).join("tmux").is_file())
-        .expect("prereqs found a tmux");
+        // The pty host needs no tmux; the system dirs are on every pane PATH.
+        .unwrap_or("/usr/bin");
     let mut ws = d.ws().await;
     ws.attach(&id, 200, 40).await;
     ws.wait_for("first flow.output", WAIT, |v| v["type"] == "flow.output" && v["id"] == id).await;
@@ -59,14 +60,23 @@ async fn a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_pat
     d.kill(&id, false).await;
 }
 
-#[tokio::test]
-async fn with_no_tmux_a_launch_fails_dead_with_the_reason_not_stuck_starting() {
-    if !prereqs() {
+async fn with_no_tmux_a_launch_fails_dead_with_the_reason_not_stuck_starting(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot_with(Some(FINDER_PATH), &[("SMOOTH_TMUX_BIN", "/nonexistent/th-9f6814/tmux")]).await;
+    let d = Daemon::boot_with(host, Some(FINDER_PATH), &[("SMOOTH_TMUX_BIN", "/nonexistent/th-9f6814/tmux")]).await;
     assert!(d.log().contains("flow: no tmux"), "the daemon warns at boot:\n{}", d.log());
     let mut ws = d.ws().await;
+    if host == Host::Pty {
+        // ADR-011: the engine-owned PTY host needs no tmux at all.
+        let s = d.new_session("shell", None).await;
+        let id = s["id"].as_str().unwrap().to_string();
+        let live = d.wait_state(&id, "idle", WAIT).await;
+        assert!(live["pid"].as_u64().is_some() && live["attention"].is_null(), "{live}");
+        assert_eq!(live["host"], "pty");
+        d.kill(&id, false).await;
+        return;
+    }
 
     let (status, v) = d.post("/api/flow/sessions", json!({ "kind": "shell", "worktree": d.ws })).await;
     assert_ne!(status, 200, "the creator hears the failure: {v}");
@@ -92,3 +102,8 @@ async fn with_no_tmux_a_launch_fails_dead_with_the_reason_not_stuck_starting() {
     let log = d.log();
     assert!(log.contains("session launch failed") && log.contains("WARN"), "logged at WARN:\n{log}");
 }
+
+crate::on_both_hosts!(
+    a_finder_launched_daemon_finds_tmux_off_path_and_panes_get_a_usable_path,
+    with_no_tmux_a_launch_fails_dead_with_the_reason_not_stuck_starting
+);

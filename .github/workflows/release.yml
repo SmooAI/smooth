@@ -111,6 +111,18 @@ jobs:
                   # 2026-09-24, so no release has shipped since.
                   RUST_MIN_STACK: 8388608
 
+            # th-dc9822: the pty-host half, as in pr-checks.yml — the session
+            # host, PtyHost and the engine on it, and the flow e2e suite's pty
+            # twins. The shipped daemons are built with this feature.
+            - name: Test (pty-host)
+              run: |
+                  cargo build -p smooai-smooth-daemon --examples --features pty-host
+                  cargo test -p smooai-smooth-flow --features pty-host
+                  cargo test -p smooai-smooth-daemon --features pty-host --test flow_host --test flow_e2e -- pty:: restart::
+              env:
+                  RUST_MIN_STACK: 8388608
+                  LANG: C.UTF-8
+
             - name: Build
               run: cargo build --release -p smooai-smooth-cli
 

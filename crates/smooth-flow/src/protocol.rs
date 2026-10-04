@@ -29,7 +29,20 @@ pub struct CandidateSpec {
 #[serde(tag = "type")]
 pub enum ClientFrame {
     #[serde(rename = "flow.attach")]
-    Attach { id: String, cols: u16, rows: u16 },
+    Attach {
+        id: String,
+        cols: u16,
+        rows: u16,
+        /// Additive (th-c61966): the client handles `flow.replay`. Without it
+        /// a session with a snapshot gets it as one legacy `flow.output`
+        /// ([`ServerFrame::into_legacy_output`]).
+        #[serde(default)]
+        replay: bool,
+        /// Additive (th-c61966): the client's budget for one replay; clamped
+        /// by [`replay_budget`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_max_bytes: Option<usize>,
+    },
     #[serde(rename = "flow.detach")]
     Detach { id: String },
     #[serde(rename = "flow.input")]
@@ -285,6 +298,24 @@ pub enum ServerFrame {
     SessionRemoved { id: String },
     #[serde(rename = "flow.output")]
     Output { id: String, seq: u64, data_b64: String },
+    /// Additive (th-c61966, sent since th-dc9822): a VT snapshot of a
+    /// session's terminal, current through output `seq`. A client resets to
+    /// a fresh `cols`×`rows` terminal, feeds `data_b64`, and then applies
+    /// only output whose `seq` is greater. Only attached clients get it.
+    #[serde(rename = "flow.replay")]
+    Replay {
+        id: String,
+        cols: u16,
+        rows: u16,
+        seq: u64,
+        data_b64: String,
+        reason: ReplayReason,
+        /// Only on a chunked replay (the relay); absent = part 0 of 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parts: Option<u32>,
+    },
     #[serde(rename = "flow.screen")]
     Screen { id: String, cols: u16, rows: u16, text: String },
     #[serde(rename = "flow.attention")]
@@ -379,14 +410,68 @@ impl ServerFrame {
         }
     }
 
-    /// The session id an output frame targets, if this is one.
+    /// The session id an output (or replay) frame targets, if this is one:
+    /// those go only to clients attached to that session.
     #[must_use]
     pub fn output_session(&self) -> Option<&str> {
         match self {
-            Self::Output { id, .. } => Some(id),
+            Self::Output { id, .. } | Self::Replay { id, .. } => Some(id),
             _ => None,
         }
     }
+
+    /// A `flow.replay` as the one `flow.output` an attach without
+    /// `replay: true` gets (SmoothFlow.md § Replay, engine rule 5): `ESC c
+    /// ESC[3J` (reset, clear history) and then the snapshot, at the
+    /// snapshot's `seq`. An old client resets and draws the screen from it.
+    /// Any other frame comes back unchanged.
+    #[must_use]
+    pub fn into_legacy_output(self) -> Self {
+        use base64::Engine as _;
+        match self {
+            Self::Replay { id, seq, data_b64, .. } => {
+                let b64 = base64::engine::general_purpose::STANDARD;
+                let mut data = LEGACY_REPLAY_PREFIX.to_vec();
+                data.extend(b64.decode(data_b64).unwrap_or_default());
+                Self::Output {
+                    id,
+                    seq,
+                    data_b64: b64.encode(data),
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+/// Why a `flow.replay` was sent. Informative: clients treat every replay
+/// the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayReason {
+    /// The client attached.
+    Attach,
+    /// The client (or the engine, from its host) fell behind.
+    Lag,
+    /// The session's geometry changed.
+    Resize,
+    /// The session moved to a new host process (Kill & Resume, a crash resume).
+    Host,
+}
+
+/// What a legacy attach's snapshot output starts with: RIS, then erase the
+/// scrollback.
+pub const LEGACY_REPLAY_PREFIX: &[u8] = b"\x1bc\x1b[3J";
+
+/// The default replay budget when a client names none.
+pub const REPLAY_DEFAULT_BYTES: usize = 1024 * 1024;
+const REPLAY_MIN_BYTES: usize = 64 * 1024;
+const REPLAY_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// A client's `replay_max_bytes`, clamped to 64 KiB … 4 MiB (default 1 MiB).
+#[must_use]
+pub fn replay_budget(asked: Option<usize>) -> usize {
+    asked.map_or(REPLAY_DEFAULT_BYTES, |b| b.clamp(REPLAY_MIN_BYTES, REPLAY_MAX_BYTES))
 }
 
 /// Parse a wire string back into a server frame (clients + tests).
@@ -599,6 +684,7 @@ mod tests {
             exit_code: None,
             unread: false,
             adopted: false,
+            host: crate::host::HostKind::Tmux,
         }
     }
 
@@ -609,6 +695,15 @@ mod tests {
                 id: "a".into(),
                 cols: 80,
                 rows: 24,
+                replay: false,
+                replay_max_bytes: None,
+            },
+            ClientFrame::Attach {
+                id: "a".into(),
+                cols: 80,
+                rows: 24,
+                replay: true,
+                replay_max_bytes: Some(262_144),
             },
             ClientFrame::Detach { id: "a".into() },
             ClientFrame::Input {
@@ -942,6 +1037,26 @@ mod tests {
                 seq: 3,
                 data_b64: "aGk=".into(),
             },
+            ServerFrame::Replay {
+                id: "x".into(),
+                cols: 120,
+                rows: 40,
+                seq: 812,
+                data_b64: "aGk=".into(),
+                reason: ReplayReason::Attach,
+                part: None,
+                parts: None,
+            },
+            ServerFrame::Replay {
+                id: "x".into(),
+                cols: 80,
+                rows: 24,
+                seq: 9,
+                data_b64: String::new(),
+                reason: ReplayReason::Resize,
+                part: Some(1),
+                parts: Some(3),
+            },
             ServerFrame::Screen {
                 id: "x".into(),
                 cols: 80,
@@ -994,6 +1109,83 @@ mod tests {
         };
         assert_eq!(o.output_session(), Some("x"));
         assert_eq!(ServerFrame::SessionRemoved { id: "x".into() }.output_session(), None);
+        let r = ServerFrame::Replay {
+            id: "y".into(),
+            cols: 1,
+            rows: 1,
+            seq: 0,
+            data_b64: String::new(),
+            reason: ReplayReason::Lag,
+            part: None,
+            parts: None,
+        };
+        assert_eq!(r.output_session(), Some("y"), "a replay goes only to attached clients too");
+    }
+
+    /// th-c61966: an attach without `replay` is the v0 frame and defaults to
+    /// legacy; `replay_max_bytes` is clamped.
+    #[test]
+    fn attach_replay_fields_are_additive() {
+        let v0 = parse_client_frame(r#"{"channel":"flow","type":"flow.attach","id":"x","cols":80,"rows":24}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v0,
+            ClientFrame::Attach {
+                id: "x".into(),
+                cols: 80,
+                rows: 24,
+                replay: false,
+                replay_max_bytes: None
+            }
+        );
+        let wire = serde_json::to_value(&v0).unwrap();
+        assert!(wire.get("replay_max_bytes").is_none(), "unset budget is omitted: {wire}");
+        assert_eq!(replay_budget(None), REPLAY_DEFAULT_BYTES);
+        assert_eq!(replay_budget(Some(1)), 64 * 1024);
+        assert_eq!(replay_budget(Some(usize::MAX)), 4 * 1024 * 1024);
+        assert_eq!(replay_budget(Some(300_000)), 300_000);
+    }
+
+    /// Engine rule 5: a legacy attach gets the snapshot as one output,
+    /// prefixed with RIS + clear-scrollback, at the snapshot's seq.
+    #[test]
+    fn a_replay_becomes_one_legacy_output() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let r = ServerFrame::Replay {
+            id: "x".into(),
+            cols: 80,
+            rows: 24,
+            seq: 41,
+            data_b64: b64.encode(b"screen"),
+            reason: ReplayReason::Attach,
+            part: None,
+            parts: None,
+        };
+        match r.into_legacy_output() {
+            ServerFrame::Output { id, seq, data_b64 } => {
+                assert_eq!((id.as_str(), seq), ("x", 41));
+                assert_eq!(b64.decode(data_b64).unwrap(), b"\x1bc\x1b[3Jscreen");
+            }
+            other => panic!("{other:?}"),
+        }
+        let o = ServerFrame::SessionRemoved { id: "x".into() };
+        assert_eq!(o.clone().into_legacy_output(), o, "other frames pass through");
+        let wire = serde_json::to_value(ServerFrame::Replay {
+            id: "x".into(),
+            cols: 1,
+            rows: 1,
+            seq: 1,
+            data_b64: String::new(),
+            reason: ReplayReason::Host,
+            part: None,
+            parts: None,
+        })
+        .unwrap();
+        assert_eq!(wire["type"], "flow.replay");
+        assert_eq!(wire["reason"], "host");
+        assert!(wire.get("part").is_none() && wire.get("parts").is_none(), "unchunked = no part fields: {wire}");
     }
 
     #[test]

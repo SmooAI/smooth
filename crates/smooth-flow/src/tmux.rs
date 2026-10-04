@@ -31,8 +31,8 @@ const HISTORY_LIMIT: &str = "50000";
 
 /// `PANE_WIDTH`/`PANE_HEIGHT` from smooth-tmux are tuned for scraping; a
 /// flow session is sized by its first attaching client, so start modest.
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 40;
+pub(crate) const DEFAULT_COLS: u16 = 120;
+pub(crate) const DEFAULT_ROWS: u16 = 40;
 
 /// The default socket for NEW sessions.
 ///

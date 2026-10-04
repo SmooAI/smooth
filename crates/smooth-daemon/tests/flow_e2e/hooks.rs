@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::support::{prereqs, prereqs_with_th, sid, state, th_bin, Daemon, Ws, WAIT};
+use crate::support::{prereqs, prereqs_with_th, sid, state, th_bin, Daemon, Host, Ws, WAIT};
 
 /// The next `flow.event` for `id` whose text contains `needle`.
 async fn expect_event(ws: &mut Ws, id: &str, kind: &str, needle: &str) -> Value {
@@ -17,12 +17,11 @@ async fn expect_event(ws: &mut Ws, id: &str, kind: &str, needle: &str) -> Value 
     .await
 }
 
-#[tokio::test]
-async fn hooks_contract_per_event() {
-    if !prereqs() {
+async fn hooks_contract_per_event(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let mut ws = d.ws().await;
     // A live agent that just sits at its prompt — the hooks below are what
     // ITS hook script would post, with its pre-assigned id.
@@ -127,12 +126,11 @@ async fn hooks_contract_per_event() {
     d.kill(&id, false).await;
 }
 
-#[tokio::test]
-async fn permission_request_long_polls_until_approved_each_decision_shape() {
-    if !prereqs() {
+async fn permission_request_long_polls_until_approved_each_decision_shape(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let s = d.new_session("fake-agent", None).await;
     let id = s["id"].as_str().unwrap().to_string();
     let agent = s["agent_session_id"].as_str().unwrap().to_string();
@@ -199,12 +197,11 @@ async fn permission_request_long_polls_until_approved_each_decision_shape() {
     d.kill(&id, false).await;
 }
 
-#[tokio::test]
-async fn hooks_answer_without_the_daemon_token_and_everything_else_is_gated() {
-    if !prereqs() {
+async fn hooks_answer_without_the_daemon_token_and_everything_else_is_gated(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     assert_eq!(d.get_unauthed("/api/flow/sessions").await, 401);
     assert_eq!(d.get_unauthed("/api/flow/harnesses").await, 401);
     assert_eq!(d.get_unauthed("/api/flow/sessions/fs-nope/snapshot").await, 401);
@@ -234,12 +231,11 @@ async fn hooks_answer_without_the_daemon_token_and_everything_else_is_gated() {
 /// session's token, with another session's token, or with a token from
 /// before a resume moves nothing, and a forged PermissionRequest is answered
 /// at once rather than held open for someone to approve.
-#[tokio::test]
-async fn forged_hooks_move_nothing_on_a_live_session() {
-    if !prereqs() {
+async fn forged_hooks_move_nothing_on_a_live_session(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let a = d.new_session("fake-agent", None).await;
     let b = d.new_session("fake-agent", None).await;
     let (a_id, a_agent) = (a["id"].as_str().unwrap().to_string(), a["agent_session_id"].as_str().unwrap().to_string());
@@ -279,12 +275,11 @@ async fn forged_hooks_move_nothing_on_a_live_session() {
 /// smooth-agent plugin's wiring) drives a SmoothFlow session end to end —
 /// token-bound state from every event, and the PermissionRequest long-poll
 /// relaying SmoothFlow's decision back to the harness on stdout.
-#[tokio::test]
-async fn native_th_flow_hook_drives_state_and_the_permission_long_poll() {
-    if !prereqs_with_th() {
+async fn native_th_flow_hook_drives_state_and_the_permission_long_poll(host: Host) {
+    if !prereqs_with_th(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // `th` on the pane's PATH, where an installed th would be. It finds this
     // daemon through the rig's ~/.smooth/daemon.addr, like any hook.
     std::os::unix::fs::symlink(th_bin().unwrap(), d.home.join(".local").join("bin").join("th")).expect("link th");
@@ -324,3 +319,11 @@ async fn native_th_flow_hook_drives_state_and_the_permission_long_poll() {
     let log = d.agent_log();
     assert!(log.contains(r#"hook PermissionRequest via th → {"hookSpecificOutput""#), "{log}");
 }
+
+crate::on_both_hosts!(
+    hooks_contract_per_event,
+    permission_request_long_polls_until_approved_each_decision_shape,
+    hooks_answer_without_the_daemon_token_and_everything_else_is_gated,
+    forged_hooks_move_nothing_on_a_live_session,
+    native_th_flow_hook_drives_state_and_the_permission_long_poll
+);

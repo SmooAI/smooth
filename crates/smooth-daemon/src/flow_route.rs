@@ -17,7 +17,7 @@
 //! approvable permission request. See `smooth_flow::hook_auth`. Every hook
 //! reply is still a 200: the hook script must never block the harness.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use smooth_flow::diff::{DiffBase, HunkAction, ReviewComment};
 use smooth_flow::protocol::{client_seq, parse_client_frame, CandidateSpec};
-use smooth_flow::{ClientFrame, Decision, Engine, HookCaller, HookEvent, HookReply, NewRequest, ServerFrame, SessionKind};
+use smooth_flow::{ClientFrame, Decision, Engine, HookCaller, HookEvent, HookReply, NewRequest, ReplayReason, ServerFrame, SessionKind};
 
 /// Route error: status + `{"error": …}` body (small, so clippy's
 /// `result_large_err` stays quiet).
@@ -96,13 +96,16 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
 /// # Errors
 /// When the flow store cannot be opened.
 pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<String>) -> anyhow::Result<(Router, Engine)> {
-    let engine = Engine::open(smooth_flow::EngineConfig {
+    let mut cfg = smooth_flow::EngineConfig {
         daemon_url,
         harness_doctor: harness_doctor_enabled(std::env::var("SMOOTH_FLOW_HARNESS_DOCTOR").ok().as_deref()),
         // th-145e6b: the New Session picker searches every checkout in $HOME.
         repo_root: dirs_next::home_dir(),
         ..smooth_flow::EngineConfig::new(workspace)
-    })?;
+    };
+    cfg.pty_host = pty_host(&cfg.host.default_socket());
+    let engine = Engine::open(cfg)?;
+    tracing::info!(host = %engine.new_session_host(), "flow: new sessions run on this host (SMOOTH_FLOW_HOST)");
     // th-9f6814: say at boot which tmux sessions will run under — or that
     // there is none, which otherwise only surfaces at the first launch.
     match smooth_flow::tmux::tmux_path() {
@@ -113,6 +116,32 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
     engine.rescan_repos(false);
     drop(spawn_supervisor(engine.clone()));
     Ok((flow_router(engine.clone(), Some(token)), engine))
+}
+
+/// The engine-owned PTY host (ADR-011, th-dc9822).
+///
+/// It runs this binary's own `flow-host` subcommand, one process per session,
+/// owned by `owner` (the tmux host's identity, so a row is supervised by the
+/// same daemon whichever host it runs on). It adopts the hosts a previous
+/// daemon left running when the engine opens.
+#[cfg(all(unix, feature = "pty-host"))]
+#[must_use]
+pub fn pty_host(owner: &str) -> Option<Arc<dyn smooth_flow::SessionHost>> {
+    match std::env::current_exe() {
+        Ok(exe) => Some(Arc::new(smooth_flow::PtyHost::for_daemon(owner, exe))),
+        Err(e) => {
+            tracing::warn!(error = %e, "flow: cannot locate this binary; no pty session host");
+            None
+        }
+    }
+}
+
+/// This build has no PTY session host (the `pty-host` feature is off, or
+/// Windows: th-2b32a6).
+#[cfg(not(all(unix, feature = "pty-host")))]
+#[must_use]
+pub fn pty_host(_owner: &str) -> Option<Arc<dyn smooth_flow::SessionHost>> {
+    None
 }
 
 /// Whether the daemon runs the harness doctor for the pickers' degraded
@@ -677,7 +706,7 @@ async fn ws_upgrade(State(st): State<FlowState>, headers: HeaderMap, Query(q): Q
 /// only for attached ids) while handling client frames.
 async fn ws_session(mut socket: WebSocket, engine: Engine) {
     let mut rx = engine.subscribe();
-    let mut attached: HashSet<String> = HashSet::new();
+    let mut attached = Attachments::default();
     let hello = match engine.hello() {
         Ok(h) => h,
         Err(e) => ServerFrame::error(None, "internal", e.to_string()),
@@ -689,17 +718,28 @@ async fn ws_session(mut socket: WebSocket, engine: Engine) {
         tokio::select! {
             ev = rx.recv() => match ev {
                 Ok(frame) => {
-                    if let Some(id) = frame.output_session() {
-                        if !attached.contains(id) {
-                            continue;
-                        }
-                    }
+                    let Some(frame) = attached.outgoing(frame) else { continue };
                     if socket.send(Message::Text(frame.to_wire().into())).await.is_err() {
                         break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!(dropped = n, "flow ws client lagged; output frames dropped");
+                    // Rule 2 (SmoothFlow.md § Replay): resync every session
+                    // that has a snapshot instead of leaving a silent gap. A
+                    // tmux session has none; its gap stays (as before).
+                    tracing::debug!(dropped = n, "flow ws client lagged; resyncing attached sessions");
+                    let mut gone = false;
+                    for (id, budget) in attached.budgets() {
+                        let frame = run(&engine, move |e| e.replay(&id, budget, ReplayReason::Lag)).await;
+                        let Some(frame) = frame.ok().flatten().and_then(|f| attached.outgoing(f)) else { continue };
+                        if socket.send(Message::Text(frame.to_wire().into())).await.is_err() {
+                            gone = true;
+                            break;
+                        }
+                    }
+                    if gone {
+                        break;
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
@@ -718,14 +758,82 @@ async fn ws_session(mut socket: WebSocket, engine: Engine) {
             }
         }
     }
-    for id in attached {
+    for id in attached.ids() {
         engine.detach(&id);
+    }
+}
+
+/// One WS client's attachments (th-dc9822): how each session was attached,
+/// and the `seq` of the last replay it got, below which output is stale.
+#[derive(Debug, Default)]
+struct Attachments(HashMap<String, Attached>);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Attached {
+    /// The client handles `flow.replay` (`flow.attach{replay:true}`).
+    replay: bool,
+    /// Its `replay_max_bytes`.
+    budget: Option<usize>,
+    /// The latest replay's `seq`: output at or below it is already in it.
+    baseline: Option<u64>,
+}
+
+impl Attachments {
+    fn insert(&mut self, id: String, replay: bool, budget: Option<usize>) {
+        self.0.insert(
+            id,
+            Attached {
+                replay,
+                budget,
+                baseline: None,
+            },
+        );
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        self.0.remove(id).is_some()
+    }
+
+    fn ids(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+
+    fn budgets(&self) -> Vec<(String, Option<usize>)> {
+        self.0.iter().map(|(id, a)| (id.clone(), a.budget)).collect()
+    }
+
+    /// What this client is sent for `frame`, if anything.
+    ///
+    /// - Output and replays go only to clients attached to their session.
+    /// - Output a replay already covers (`seq` ≤ its `seq`) is dropped:
+    ///   the engine subscribes before it snapshots, so some arrives after.
+    /// - A client that didn't ask for replays gets an attach or lag replay
+    ///   as one legacy `flow.output` (engine rule 5), and no resize or host
+    ///   replay: its terminal follows the program's own redraw, as before.
+    fn outgoing(&mut self, frame: ServerFrame) -> Option<ServerFrame> {
+        let Some(id) = frame.output_session() else { return Some(frame) };
+        let a = self.0.get_mut(id)?;
+        match frame {
+            ServerFrame::Output { seq, .. } if a.baseline.is_some_and(|b| seq <= b) => None,
+            ServerFrame::Replay { seq, reason, .. } => {
+                if a.replay {
+                    a.baseline = Some(seq);
+                    Some(frame)
+                } else if matches!(reason, ReplayReason::Attach | ReplayReason::Lag) {
+                    a.baseline = Some(seq);
+                    Some(frame.into_legacy_output())
+                } else {
+                    None
+                }
+            }
+            other => Some(other),
+        }
     }
 }
 
 /// Handle one client frame; returns the direct replies (errors, screens,
 /// the created session). Broadcast side effects go through the engine.
-async fn handle_client_text(engine: &Engine, text: &str, attached: &mut HashSet<String>) -> Vec<ServerFrame> {
+async fn handle_client_text(engine: &Engine, text: &str, attached: &mut Attachments) -> Vec<ServerFrame> {
     let r#ref = client_seq(text);
     let frame = match parse_client_frame(text) {
         Ok(Some(f)) => f,
@@ -758,17 +866,46 @@ async fn run<T: Send + 'static>(engine: &Engine, f: impl FnOnce(Engine) -> anyho
 }
 
 #[allow(clippy::too_many_lines, reason = "one arm per client frame type; splitting it scatters the protocol")]
-async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut HashSet<String>) -> anyhow::Result<Vec<ServerFrame>> {
+async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachments) -> anyhow::Result<Vec<ServerFrame>> {
     match frame {
-        ClientFrame::Attach { id, cols, rows } => {
+        ClientFrame::Attach {
+            id,
+            cols,
+            rows,
+            replay,
+            replay_max_bytes,
+        } => {
+            // Rule 1: subscribed (the broadcast is this client's already)
+            // before the snapshot is taken.
+            let was = attached.0.get(&id).copied();
+            attached.insert(id.clone(), replay, replay_max_bytes);
             let sid = id.clone();
-            run(engine, move |e| e.attach(&sid, cols, rows)).await?;
-            attached.insert(id.clone());
+            if let Err(e) = run(engine, move |e| e.attach(&sid, cols, rows)).await {
+                match was {
+                    Some(a) => {
+                        attached.0.insert(id, a);
+                    }
+                    None => {
+                        attached.remove(&id);
+                    }
+                }
+                return Err(e);
+            }
+            let mut out = Vec::new();
+            // th-dc9822: a session with a snapshot (the pty host) opens with
+            // it — `flow.replay`, or one legacy `flow.output`.
+            let sid = id.clone();
+            match run(engine, move |e| e.replay(&sid, replay_max_bytes, ReplayReason::Attach)).await {
+                Ok(Some(frame)) => out.extend(attached.outgoing(frame)),
+                Ok(None) => {}
+                Err(e) => tracing::debug!(session = %id, error = %e, "flow: attach replay failed"),
+            }
             // th-d33afa: replay the buffered event stream so a phone's Chat
             // tab isn't empty for what happened before it looked.
             let sid = id.clone();
-            let replay = run(engine, move |e| e.events(&sid)).await?;
-            Ok(replay.into_iter().map(|event| ServerFrame::Event { id: id.clone(), event }).collect())
+            let events = run(engine, move |e| e.events(&sid)).await?;
+            out.extend(events.into_iter().map(|event| ServerFrame::Event { id: id.clone(), event }));
+            Ok(out)
         }
         ClientFrame::Detach { id } => {
             if attached.remove(&id) {
@@ -961,6 +1098,8 @@ mod tests {
             harness_doctor: false,
             repo_root: None,
             host: smooth_flow::host::default_host(),
+            pty_host: None,
+            new_host: smooth_flow::HostKind::Tmux,
         })
         .unwrap()
     }
@@ -1074,6 +1213,83 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    fn output(id: &str, seq: u64) -> ServerFrame {
+        ServerFrame::Output {
+            id: id.into(),
+            seq,
+            data_b64: String::new(),
+        }
+    }
+
+    fn replay(id: &str, seq: u64, reason: ReplayReason) -> ServerFrame {
+        ServerFrame::Replay {
+            id: id.into(),
+            cols: 80,
+            rows: 24,
+            seq,
+            data_b64: base64::engine::general_purpose::STANDARD.encode(b"snap"),
+            reason,
+            part: None,
+            parts: None,
+        }
+    }
+
+    /// th-dc9822: a replay-capable attach gets replays and drops output the
+    /// replay covers; a legacy attach gets attach/lag replays as one prefixed
+    /// output and no resize/host replays; unattached sessions get nothing.
+    #[test]
+    fn attachments_route_replays_by_what_the_client_asked_for() {
+        let mut a = Attachments::default();
+        a.insert("new".into(), true, Some(256 * 1024));
+        a.insert("old".into(), false, None);
+        assert!(a.outgoing(output("nobody", 1)).is_none(), "not attached");
+        assert!(matches!(
+            a.outgoing(ServerFrame::SessionRemoved { id: "x".into() }),
+            Some(ServerFrame::SessionRemoved { .. })
+        ));
+        // Before any replay every output passes.
+        assert!(a.outgoing(output("new", 3)).is_some());
+
+        // replay:true — forwarded as is, and it becomes the baseline.
+        assert!(matches!(
+            a.outgoing(replay("new", 10, ReplayReason::Attach)),
+            Some(ServerFrame::Replay { seq: 10, .. })
+        ));
+        assert!(a.outgoing(output("new", 9)).is_none(), "covered by the replay");
+        assert!(a.outgoing(output("new", 10)).is_none(), "covered by the replay");
+        assert!(a.outgoing(output("new", 11)).is_some());
+        // The latest replay is the baseline even when lower (a new host).
+        assert!(a.outgoing(replay("new", 2, ReplayReason::Host)).is_some());
+        assert!(a.outgoing(output("new", 3)).is_some());
+        assert!(a.outgoing(replay("new", 20, ReplayReason::Resize)).is_some());
+
+        // Legacy — the attach replay is one output with the reset prefix.
+        match a.outgoing(replay("old", 7, ReplayReason::Attach)) {
+            Some(ServerFrame::Output { seq: 7, data_b64, .. }) => {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap();
+                assert_eq!(bytes, b"\x1bc\x1b[3Jsnap");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(a.outgoing(output("old", 7)).is_none(), "covered by the snapshot it already drew");
+        assert!(a.outgoing(output("old", 8)).is_some());
+        assert!(
+            a.outgoing(replay("old", 9, ReplayReason::Resize)).is_none(),
+            "an old client never sees a resize replay"
+        );
+        assert!(a.outgoing(replay("old", 9, ReplayReason::Host)).is_none());
+        assert!(matches!(
+            a.outgoing(replay("old", 12, ReplayReason::Lag)),
+            Some(ServerFrame::Output { seq: 12, .. })
+        ));
+
+        assert!(a.remove("old"));
+        assert!(!a.remove("old"));
+        assert!(a.outgoing(output("old", 99)).is_none());
+        assert_eq!(a.budgets(), vec![("new".to_string(), Some(256 * 1024))]);
+        assert_eq!(a.ids(), vec!["new".to_string()]);
     }
 
     #[test]

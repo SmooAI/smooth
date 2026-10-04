@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': minor
+---
+
+SmoothFlow `PtyHost` (th-dc9822, ADR-011 phase 4): `SMOOTH_FLOW_HOST=pty` runs new sessions each under its own `smooth-daemon flow-host` instead of tmux. Exit codes come from the host's `wait` (no wrapper, no "unknown after 3 s"), pastes are bracketed only when the program set mode 2004, manifest keys follow DECCKM and Kitty flags, and scraping reads the host's VT. Sessions survive a daemon crash or restart: the next daemon adopts their hosts, settles exits that happened while it was down, and leaves hosts with no row of its own running. Each row records its `host` (a new `sessions.host` column, also on the wire `Session`), so live tmux sessions finish on tmux; tmux stays the default. On `pty` sessions an attach opens with `flow.replay` (or, for clients that don't ask for it, the snapshot as one `ESC c ESC[3J`-prefixed `flow.output`), and lag, resizes and relaunches resync attached clients. The shipped daemons are now built with the `pty-host` feature, and the flow e2e suite runs every scenario on both hosts.

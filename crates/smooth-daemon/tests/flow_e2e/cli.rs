@@ -3,14 +3,13 @@
 
 use serde_json::json;
 
-use crate::support::{prereqs_with_th, state, Daemon, WAIT};
+use crate::support::{prereqs_with_th, state, Daemon, Host, WAIT};
 
-#[tokio::test]
-async fn th_flow_json_against_the_live_daemon() {
-    if !prereqs_with_th() {
+async fn th_flow_json_against_the_live_daemon(host: Host) {
+    if !prereqs_with_th(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let ws = d.ws.to_string_lossy().into_owned();
 
     // ls on an empty engine: a confirmed empty read, in both renderings.
@@ -119,14 +118,13 @@ async fn th_flow_json_against_the_live_daemon() {
     d.th_json(&["flow", "kill", &sh, "--json"]);
 }
 
-#[tokio::test]
-async fn th_without_a_daemon_says_so_in_two_lines() {
-    if !prereqs_with_th() {
+async fn th_without_a_daemon_says_so_in_two_lines(host: Host) {
+    if !prereqs_with_th(host) {
         return;
     }
     // A HOME with no advertisement at all: boot a rig, then delete both
     // files `th flow` reads — flow.addr first, then daemon.addr (th-1efb59).
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     for f in ["flow.addr", "daemon.addr"] {
         let _ = std::fs::remove_file(d.home.join(".smooth").join(f));
     }
@@ -140,3 +138,5 @@ async fn th_without_a_daemon_says_so_in_two_lines() {
     let v = d.th_json(&["harness", "list", "--json"]);
     assert_eq!(v["source"], "local");
 }
+
+crate::on_both_hosts!(th_flow_json_against_the_live_daemon, th_without_a_daemon_says_so_in_two_lines);

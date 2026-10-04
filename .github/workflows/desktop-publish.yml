@@ -76,6 +76,22 @@ jobs:
                   pnpm install --no-frozen-lockfile
                   pnpm build
 
+            # libghostty-vt for the daemon's session host (crates/smooth-flow-vt,
+            # th-5025fb), which the shipped daemon links since th-dc9822 (the
+            # `pty-host` feature). Same cache and script as pr-checks.yml. With
+            # no cache hit the script builds it from source (pinned Zig, a few
+            # minutes); the crate's build.rs would run the same script if this
+            # step were skipped, so a cold release still builds.
+            - name: Cache libghostty-vt
+              uses: actions/cache@v4
+              with:
+                  path: .ghostty-vt/out
+                  key: ghostty-vt-ws-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ghostty-vt/ghostty-vt.lock', 'scripts/ghostty-vt/build-ghostty-vt.sh') }}
+            - name: Build libghostty-vt
+              run: |
+                  echo "GHOSTTY_VT_WORK=$PWD/.ghostty-vt" >>"$GITHUB_ENV"
+                  GHOSTTY_VT_WORK="$PWD/.ghostty-vt" scripts/ghostty-vt/build-ghostty-vt.sh
+
             - name: Build smooth-daemon + th (release)
               # OPENSSL_STATIC: web-push → ece/curl → openssl-sys otherwise links
               # /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib dynamically, and the
@@ -85,7 +101,9 @@ jobs:
                   OPENSSL_STATIC: '1'
               run: |
                   export OPENSSL_DIR="$(brew --prefix openssl@3)"
-                  cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli
+                  # pty-host: the engine-owned PTY session host (ADR-011,
+                  # th-dc9822) — the `flow-host` subcommand and PtyHost.
+                  cargo build --release -p smooai-smooth-daemon -p smooai-smooth-cli --features smooai-smooth-daemon/pty-host
 
             # A shipped binary may only depend on system dylibs; anything under
             # /opt/homebrew or /usr/local exists on the runner, not on the user's Mac.

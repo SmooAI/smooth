@@ -22,6 +22,8 @@ pub mod pane_path;
 pub mod proc;
 pub mod protocol;
 pub mod pty;
+#[cfg(all(unix, feature = "pty-host"))]
+pub mod pty_host;
 pub mod repos;
 pub mod scrape;
 #[cfg(feature = "pty-host")]
@@ -32,9 +34,11 @@ pub mod vocab;
 
 pub use engine::{Engine, EngineConfig, HookReply, NewRequest};
 pub use hook_auth::HookCaller;
-pub use host::{SessionHost, SessionRef, TmuxHost};
+pub use host::{HostKind, SessionHost, SessionRef, TmuxHost};
 pub use infer::{infer, Inferred};
-pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ServerFrame};
+pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ReplayReason, ServerFrame};
+#[cfg(all(unix, feature = "pty-host"))]
+pub use pty_host::PtyHost;
 /// The session host's headless terminal, for callers (and tests) that
 /// replay its snapshots.
 #[cfg(feature = "pty-host")]
