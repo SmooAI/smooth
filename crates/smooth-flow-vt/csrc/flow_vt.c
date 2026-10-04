@@ -267,6 +267,14 @@ int fvt_mode(FvtTerm *t, uint16_t value, int ansi) {
     return on ? 1 : 0;
 }
 
+/// The Kitty keyboard flags the program has pushed (0: legacy encoding).
+int fvt_kitty_flags(FvtTerm *t) {
+    if (!t) return 0;
+    uint8_t kitty = 0;
+    if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &kitty) != GHOSTTY_SUCCESS) return 0;
+    return kitty;
+}
+
 /// The OSC 0/2 title, borrowed until the next call on `t`; length 0 when unset.
 const uint8_t *fvt_title(FvtTerm *t, size_t *len) {
     if (!len) return NULL;

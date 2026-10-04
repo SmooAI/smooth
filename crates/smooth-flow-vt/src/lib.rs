@@ -281,6 +281,20 @@ impl Vt {
         self.term.mode(1, false) == Some(true)
     }
 
+    /// A DEC private mode (`CSI ? n h`): `Some(on)`, or `None` for a mode
+    /// libghostty-vt does not know. The session host reports mouse tracking
+    /// (9, 1000, 1002, 1003), its encoding (1005, 1006, 1015, 1016) and
+    /// alternate scroll (1007) this way.
+    pub fn dec_mode(&mut self, mode: u16) -> Option<bool> {
+        self.term.mode(mode, false)
+    }
+
+    /// The Kitty keyboard protocol flags the program pushed; 0 is the legacy
+    /// encoding.
+    pub fn kitty_keyboard_flags(&mut self) -> u8 {
+        self.term.kitty_flags()
+    }
+
     /// No escape sequence or UTF-8 character is half-parsed: a snapshot taken
     /// now can be followed by the next output bytes on a fresh terminal.
     pub fn stream_is_ground(&mut self) -> bool {

@@ -82,6 +82,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TccCmd,
     },
+    /// Run one SmoothFlow session host (ADR-011, th-e4aef9): the agent's
+    /// PTY, its parent and its headless terminal, serving the daemon over a
+    /// private socket. Started by the flow engine with the spawn request on
+    /// stdin; not for interactive use. See
+    /// docs/Architecture/SmoothFlow-Session-Host.md.
+    #[cfg(feature = "pty-host")]
+    #[command(hide = true)]
+    FlowHost {
+        /// The flow session id (`fs-` + 8 hex).
+        #[arg(long)]
+        id: String,
+    },
 }
 
 /// The EventKit grants — macOS treats them as separate permissions with
@@ -135,6 +147,14 @@ enum ScheduleCmd {
 // NOT `#[tokio::main]`: in menu-bar mode AppKit must own the main thread, so we
 // build the runtime explicitly (the same multi-thread shape the macro builds).
 fn main() -> ExitCode {
+    let cmd = Cli::parse().cmd.unwrap_or(Cmd::Run);
+    // The session host is its own small process: no tracing (its stdio goes
+    // to /dev/null once it is ready, and it must not write into the daemon's
+    // rotating log), no auth, no tokio. It never returns on success.
+    #[cfg(feature = "pty-host")]
+    if let Cmd::FlowHost { id } = &cmd {
+        return smooth_flow::session_host::server::run(id);
+    }
     init_tracing();
     // Pearl th-16b0ca: resolve the active auth profile and export
     // SMOOAI_USER_AUTH_FILE / SMOOAI_AUTH_FILE, exactly as `th` does at
@@ -145,7 +165,6 @@ fn main() -> ExitCode {
     // to reads — the daemon looked logged in while `th` did not. `init` won't
     // clobber values already set, so inheriting from `th up` still wins.
     smooth_policy::auth_paths::init(None);
-    let cmd = Cli::parse().cmd.unwrap_or(Cmd::Run);
 
     // Menu-bar mode (macOS, opt-in via SMOOTH_MENUBAR) wraps ONLY the
     // long-running server commands: the tokio server runs on a background
@@ -226,6 +245,9 @@ async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Permissions { cmd } => cmd_permissions(&cmd),
         #[cfg(target_os = "macos")]
         Cmd::Tcc { cmd } => cmd_tcc(cmd),
+        // Dispatched in `main` before the runtime starts.
+        #[cfg(feature = "pty-host")]
+        Cmd::FlowHost { .. } => anyhow::bail!("flow-host runs outside the async runtime"),
     }
 }
 

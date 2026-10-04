@@ -54,6 +54,15 @@ two-face = { version = "0.4", default-features = false, features = ["syntect-fan
 # (the daemon, `th`, their release builds) should need that before it is used.
 smooth-flow-vt = { workspace = true, optional = true }
 
+# th-e4aef9: the session host's error types.
+thiserror.workspace = true
+
+# th-e4aef9: the session host (behind `pty-host`): setsid, umask, the peer's
+# uid on its socket, waitpid for the child's exact status, killpg for a tree
+# kill — all safe wrappers, since the workspace forbids `unsafe`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "socket", "user"], optional = true }
+
 [target.'cfg(windows)'.dependencies]
 # th-64d4ab: process liveness and start time without `ps`.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
@@ -61,10 +70,23 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 [features]
 # th-5025fb: the engine-owned PTY session host (ADR-011). Pulls in
 # smooth-flow-vt and with it the libghostty-vt build. Off by default for now.
-pty-host = ["dep:smooth-flow-vt"]
+pty-host = ["dep:smooth-flow-vt", "dep:nix"]
 # th-8b3918: expose `host::fake::FakeHost` (the in-memory session host) to
 # other crates' tests. Never enabled in a shipped build.
 test-util = []
+
+# The session host as its own binary, only for this crate's integration
+# tests (they can't build smooth-daemon, whose `flow-host` subcommand is what
+# ships). th-e4aef9.
+[[bin]]
+name = "smooth-flow-host"
+path = "src/bin/smooth-flow-host.rs"
+required-features = ["pty-host"]
+
+[[test]]
+name = "session_host"
+path = "tests/session_host.rs"
+required-features = ["pty-host"]
 
 [lints]
 workspace = true

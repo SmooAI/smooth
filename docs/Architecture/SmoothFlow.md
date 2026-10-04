@@ -22,7 +22,7 @@ dumb view.
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | Engine crate (store, tmux glue, PTY, supervision)          | `crates/smooth-flow/`                                                                |
 | Session host seam (`SessionHost`, `TmuxHost`)              | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
-| Engine-owned PTY host (`flow-host`) IPC (ADR-011)          | [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md) (specified, th-c61966)      |
+| Engine-owned PTY host (`flow-host`) IPC (ADR-011)          | [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md) (host built, th-e4aef9)     |
 | Daemon transport (`/api/flow/*`, WS, hooks long-poll)      | `crates/smooth-daemon/src/flow_route.rs`                                             |
 | Relay routing of `channel:"flow"` envelopes + phone caps   | `crates/smooth-daemon/src/relay.rs`                                                  |
 | End-to-end encryption + phone pairing (th-d98fde)          | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
@@ -155,7 +155,9 @@ The seam has two uses:
   headless libghostty-vt, and attach becomes a `flow.replay` snapshot followed
   by sequenced `flow.output` ([Replay](#replay)). The daemon ⇄ host protocol
   is [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md). Supervision
-  won't change. It is in progress.
+  won't change. The host process is built
+  (`crates/smooth-flow/src/session_host/`, th-e4aef9); `PtyHost` (th-dc9822)
+  is next.
 
     Its headless terminal is `crates/smooth-flow-vt` (th-5025fb): a safe
     wrapper around libghostty-vt, built from the same pinned

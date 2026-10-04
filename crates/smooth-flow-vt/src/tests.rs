@@ -664,6 +664,26 @@ fn cursor_title_and_modes() {
     assert!(!t.bracketed_paste() && !t.cursor_keys_application());
 }
 
+/// The session host's `screen` answer reports these (th-e4aef9).
+#[test]
+fn dec_modes_and_kitty_flags() {
+    let mut t = vt(20, 5);
+    assert_eq!(t.dec_mode(1000), Some(false));
+    assert_eq!(t.dec_mode(1006), Some(false));
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    t.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1007h");
+    assert_eq!(t.dec_mode(1002), Some(true));
+    assert_eq!(t.dec_mode(1006), Some(true));
+    assert_eq!(t.dec_mode(1007), Some(true));
+    assert_eq!(t.dec_mode(1003), Some(false));
+    assert_eq!(t.dec_mode(65_000), None, "a mode libghostty-vt does not know");
+    // Push Kitty flags (disambiguate + report events), then pop them.
+    t.feed(b"\x1b[>3u");
+    assert_eq!(t.kitty_keyboard_flags(), 3);
+    t.feed(b"\x1b[<u");
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+}
+
 #[test]
 fn snapshot_carries_the_title() {
     let mut t = vt(20, 5);
