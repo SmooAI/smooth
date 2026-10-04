@@ -206,6 +206,23 @@ jobs:
                   # honors this for every test thread — one knob, whole class.
                   RUST_MIN_STACK: 8388608
 
+            # th-e4aef9: the SmoothFlow session host (`smooth-daemon flow-host`)
+            # lives behind the off-by-default `pty-host` feature (it links the
+            # Zig-built libghostty-vt above), so the plain Test step never
+            # compiles it. Both legs: Linux runs the real-process protocol
+            # tests; Windows proves the stub and the shared protocol build.
+            - name: Test (pty-host)
+              if: steps.gate.outputs.run == 'true'
+              shell: bash
+              run: cargo nextest run -p smooai-smooth-flow -p smooai-smooth-daemon --features smooai-smooth-flow/pty-host,smooai-smooth-daemon/pty-host -E 'package(smooai-smooth-flow) | binary(flow_host)'
+              env:
+                  RUST_MIN_STACK: 8388608
+                  LANG: C.UTF-8
+
+            - name: Clippy (pty-host)
+              if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
+              run: cargo clippy -p smooai-smooth-flow -p smooai-smooth-daemon --features smooai-smooth-flow/pty-host,smooai-smooth-daemon/pty-host --all-targets
+
             # One report per PR — publishing from both legs would double every
             # entry in the check summary.
             - name: Publish test report

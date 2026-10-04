@@ -106,6 +106,13 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
 
+[features]
+# th-e4aef9 (ADR-011): the `flow-host` subcommand, the SmoothFlow session
+# host. Pulls in smooth-flow's `pty-host`, and with it the Zig-built
+# libghostty-vt, so it stays off by default until PtyHost ships (th-dc9822)
+# and the release workflows build libghostty-vt.
+pty-host = ["smooth-flow/pty-host"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # th-8b3918: the flow tools' tests drive a real engine on smooth-flow's
@@ -120,6 +127,12 @@ tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 # Collect response bodies in the `/search` router tests.
 http-body-util.workspace = true
+
+# th-e4aef9: the shipped `flow-host` subcommand, end to end.
+[[test]]
+name = "flow_host"
+path = "tests/flow_host.rs"
+required-features = ["pty-host"]
 
 [lints]
 workspace = true

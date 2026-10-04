@@ -24,6 +24,8 @@ pub mod protocol;
 pub mod pty;
 pub mod repos;
 pub mod scrape;
+#[cfg(feature = "pty-host")]
+pub mod session_host;
 pub mod store;
 pub mod tmux;
 pub mod vocab;
@@ -33,4 +35,8 @@ pub use hook_auth::HookCaller;
 pub use host::{SessionHost, SessionRef, TmuxHost};
 pub use infer::{infer, Inferred};
 pub use protocol::{ClientFrame, CloseOutcome, DaemonInfo, Decision, HookEvent, ServerFrame};
+/// The session host's headless terminal, for callers (and tests) that
+/// replay its snapshots.
+#[cfg(feature = "pty-host")]
+pub use smooth_flow_vt as vt;
 pub use store::{Attention, FanOut, FlowStore, Session, SessionKind, SessionState};

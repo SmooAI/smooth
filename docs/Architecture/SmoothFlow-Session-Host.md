@@ -2,8 +2,10 @@
 
 > Epic th-ce4f88, spec pearl th-c61966. Decision:
 > [ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md). Engine and
-> client wire: [SmoothFlow.md](SmoothFlow.md). Status: **specified, not yet
-> built** (implementation is th-e4aef9 and th-dc9822).
+> client wire: [SmoothFlow.md](SmoothFlow.md). Status: **the host is implemented**
+> (th-e4aef9, Unix; Windows is th-2b32a6). The engine does not use it yet:
+> `PtyHost` is th-dc9822. [Implementation notes](#implementation) lists where
+> the code lives and what the build settled that this spec left open.
 
 Every SmoothFlow session on the `pty` host runs under its own
 `smooth-daemon flow-host` process. The host owns the PTY master, is the
@@ -88,9 +90,11 @@ with a single JSON object on stdin, then closes stdin:
   its detail, as tmux launch failures do today.
 - `env` is the complete environment. If it has no UTF-8 `LANG`/`LC_ALL`, the
   host sets `LANG=en_US.UTF-8` (the blank-glyph lesson from tmux).
-- `seq_start` is where this host's output `seq` begins. A relaunch (Kill &
-  Resume, crash resume) passes the previous host's final `seq` + 1, so a
-  session's `seq` keeps rising across hosts. Clients don't depend on that
+- `seq_start` is the `seq` the host reports before its first output (in
+  `hello` and in a snapshot), so its first `output` is `seq_start + 1`. A
+  relaunch (Kill & Resume, crash resume) passes the previous host's final
+  `seq` + 1, so a session's `seq` keeps rising across hosts, and the new
+  host's first replay is newer than every output of the old one. Clients don't depend on that
   (the latest replay is always their baseline), but logs and debugging do.
 
 ## Host record (`<id>.json`)
@@ -102,7 +106,7 @@ with a single JSON object on stdin, then closes stdin:
     "id": "fs-1a2b3c4d",
     "host_version": "0.52.0",
     "pid": 41234,
-    "pid_start": "Sat Oct  3 17:40:12 2026",
+    "pid_start": 1791049212,
     "child_pid": 41235,
     "socket": "/Users/me/.smooth/flow-hosts/fs-1a2b3c4d.sock",
     "token": "<64 hex>",
@@ -117,8 +121,10 @@ with a single JSON object on stdin, then closes stdin:
 - `v` is the record schema; `protocol` is the IPC version this host speaks
   (fixed for its lifetime).
 - `pid` + `pid_start` are the liveness index, the same pair the engine stores
-  for tmux panes today (`ps -o lstart=` on Unix, the process creation time on
-  Windows), so a recycled pid can't pass for the host.
+  for tmux panes today, so a recycled pid can't pass for the host.
+  `pid_start` is epoch seconds (`smooth_flow::proc::start_time`: `ps -o
+lstart=` parsed on Unix, the process creation time on Windows), the unit
+  of `sessions.pid_start`.
 - `owner` is the creating daemon's ownership identity (th-4f7866), so only
   that daemon's supervision adopts it.
 - `exit` is `null` while the child runs. When it exits the host rewrites the
@@ -192,7 +198,7 @@ The daemon pings every 10 s and treats 3 missed pongs as a dead connection
 | ---------- | -------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `input`    | —                                            | bytes      | Written to the PTY as-is (keyboard and mouse encodings from a client's `flow.input`).                                                                                                                                              |
 | `paste`    | —                                            | UTF-8 text | Encoded by `Vt::encode_paste`: wrapped in `ESC[200~ … ESC[201~` when the VT has mode 2004 on, else with newlines sent as CRs. ESC, NUL, DEL and similar control bytes become spaces either way, so a paste can't end itself early. |
-| `key`      | `name`, `repeat?`                            | —          | A manifest key name (`Enter`, `C-c`, `Right`, `S-Tab`, …) encoded through libghostty-vt's key encoder under the VT's current cursor-key mode (DECCKM) and Kitty keyboard flags. Unknown names answer `error`.                      |
+| `key`      | `name`, `repeat?`, `req?`                    | —          | A manifest key name (`Enter`, `C-c`, `Right`, `S-Tab`, …) encoded through libghostty-vt's key encoder under the VT's current cursor-key mode (DECCKM) and Kitty keyboard flags. Unknown names answer `error`.                      |
 | `resize`   | `req`, `cols`, `rows`                        | —          | Resizes the PTY (SIGWINCH) and the VT. Answered `resized{req, seq, changed}`; `changed` is false when the size was already that.                                                                                                   |
 | `snapshot` | `req`, `max_bytes`                           | —          | Answered `snapshot{req, seq, cols, rows, alternate, fidelity}` with the VT snapshot in the body.                                                                                                                                   |
 | `screen`   | `req`                                        | —          | Answered `screen{req, seq, cols, rows, alternate_on, cursor_x, cursor_y, title, modes}` with the visible screen as plain text in the body (formatter `PLAIN`). This replaces `capture-pane` for state scraping.                    |
@@ -302,7 +308,84 @@ is what makes any daemon able to adopt any of its owner's hosts.
 | kill / tree kill                 | `kill`                                                                                 |
 | liveness                         | the connection plus `pid` / `pid_start`                                                |
 
-## Testing (when built)
+## Implementation notes {#implementation}
+
+Built in th-e4aef9. The code:
+
+| Piece                                                  | Where                                                                                        |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Framing, messages, version negotiation, spawn request  | `crates/smooth-flow/src/session_host/protocol.rs`                                            |
+| Host record, private dir, socket path                  | `crates/smooth-flow/src/session_host/record.rs`                                              |
+| The host process (`server::run`)                       | `crates/smooth-flow/src/session_host/server.rs`                                              |
+| `spawn_host`, `HostClient`                             | `crates/smooth-flow/src/session_host/client.rs`                                              |
+| Adoption (`adopt`), protocol-less kill (`kill_host`)   | `crates/smooth-flow/src/session_host/adopt.rs`                                               |
+| `smooth-daemon flow-host --id <id>` (hidden)           | `crates/smooth-daemon/src/main.rs`, behind the daemon's `pty-host` feature                   |
+| Test-support binary `smooth-flow-host`, protocol tests | `crates/smooth-flow/src/bin/smooth-flow-host.rs`, `crates/smooth-flow/tests/session_host.rs` |
+
+All of it is behind the `pty-host` feature (smooth-flow's, forwarded by
+smooth-daemon's), which is off by default: it builds libghostty-vt with Zig.
+The shipped daemon gains the subcommand when `PtyHost` lands (th-dc9822).
+
+What the build decided:
+
+- **Threads, not async.** The engine's `SessionHost` seam is synchronous, so
+  host and client are blocking std I/O with threads, like `pty.rs`. In the
+  host one thread reads the PTY (feed, write `take_replies`, assign `seq`,
+  queue, all under one lock), one is the PTY's only writer (input, pastes,
+  keys and VT replies all go through its channel, so nothing blocks on a
+  child that isn't reading), one `waitpid`s the child, and each connection
+  has a reader and a writer.
+- **The writer-drop hazard** (th-6d8f84). portable-pty's writer sends `\n` +
+  `VEOF` when dropped, and here the child is the agent. The host never drops
+  it: the process exits through `process::exit`, which runs no destructors,
+  and only once the child has exited. A killed host closes the master, which
+  hangs the child up without typing anything.
+- **Exit.** `waitpid` on the child gives the exact code or signal. After it
+  the host waits at most 2 s for the PTY's EOF: a background grandchild can
+  hold the PTY open forever, and its later output still flows, with `seq`
+  still rising past the `exit`'s.
+- **Snapshots wait for a sequence boundary.** A snapshot taken when the last
+  chunk ended mid-escape (`Vt::stream_is_ground` false) would let the next
+  `output` begin with the tail of that escape on a fresh terminal. The host
+  answers it after the next chunk that ends at a boundary, or after 500 ms,
+  so a program that stops mid-sequence can't stall an attach.
+- **`key` takes an optional `req`** (additive). With one the host answers
+  `ok{req}` or `error{req, code:"unknown_key"}`, so the engine learns about a
+  bad key name synchronously. `repeat` is capped at 1000.
+- **Overrun.** The chunk that crosses the bound is dropped with the queue
+  (`through_seq` is its `seq`). Answers are never dropped, and a later
+  `overrun` replaces a still-queued earlier one rather than piling up. The
+  spawn request's optional `max_queue_bytes` sets the bound (tests use it).
+- **Timeouts.** A connection must complete `hello` within 5 s. A daemon that
+  doesn't read for 30 s is dropped, since its stream is then mid-frame.
+- **Malformed input.** A frame over a limit is answered `frame_too_large` and
+  closed. A header that isn't a JSON object with a string `type`, or a first
+  message that isn't a valid `hello`, is answered `bad_request` and closed. A
+  known type with bad fields is answered `bad_request` and the connection
+  stays, as with `unknown_type`.
+- **Environment.** `TERM=xterm-256color` is added when `env` has no `TERM`.
+  The UTF-8 check reads `LC_ALL`, then `LC_CTYPE`, then `LANG`.
+- **Spawn safety.** The id must be `fs-` and 8 lowercase hex and the token 64
+  lowercase hex, so neither can name a path. A spawn for an id whose recorded
+  host is alive is refused. A stale socket is only removed if it is a socket.
+  Setup failures remove what they created.
+- **Kill.** The SIGKILL escalation fires only while the child is unreaped:
+  until then its pid, and so its process group id, can't be reused.
+- **Adoption** returns one `Found` per record: `Live`, `Stale` (deleted;
+  settle the row from `exit`), `Held` (version), `Unreachable` (alive but the
+  connection failed; left running), `Foreign` or `Unreadable`. A record whose
+  `id` doesn't match its file name is unreadable, and a stale record's socket
+  is only deleted when it is a socket named `<id>.sock`, so a tampered record
+  can't get another file removed. `kill_host` ends a held host without the
+  protocol.
+- **The host writes no logs.** Its stdio goes to `/dev/null` after the ready
+  line, and it never opens the daemon's rotating log.
+- **Windows.** `server::run` answers `ready:false`, and the client and
+  adoption aren't built. The named pipe with an owner-only DACL needs Win32
+  calls the workspace's `unsafe` ban rules out without a vetted wrapper
+  (th-2b32a6).
+
+## Testing
 
 - Round-trip every message through the framing, including both size limits
   and a body split across reads.

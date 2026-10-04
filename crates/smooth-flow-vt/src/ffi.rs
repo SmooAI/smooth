@@ -23,6 +23,7 @@ extern "C" {
     fn fvt_geometry(t: *mut FvtTerm, cx: *mut u16, cy: *mut u16, cols: *mut u16, rows: *mut u16);
     fn fvt_scrollback_rows(t: *mut FvtTerm) -> usize;
     fn fvt_mode(t: *mut FvtTerm, value: u16, ansi: i32) -> i32;
+    fn fvt_kitty_flags(t: *mut FvtTerm) -> i32;
     fn fvt_title(t: *mut FvtTerm, len: *mut usize) -> *const u8;
     fn fvt_is_ground(t: *mut FvtTerm) -> i32;
     fn fvt_reply(t: *const FvtTerm, len: *mut usize) -> *const u8;
@@ -151,6 +152,12 @@ impl Term {
             0 => Some(false),
             _ => None,
         }
+    }
+
+    /// The Kitty keyboard flags in effect (0 when the program pushed none).
+    pub fn kitty_flags(&mut self) -> u8 {
+        // SAFETY: the handle is live.
+        u8::try_from(unsafe { fvt_kitty_flags(self.raw.as_ptr()) }).unwrap_or(0)
     }
 
     /// The OSC 0/2 title bytes (empty when unset).
