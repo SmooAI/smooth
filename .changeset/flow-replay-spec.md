@@ -1,5 +1,0 @@
----
-'@smooai/smooth': patch
----
-
-SmoothFlow: specify `flow.replay` and the session-host protocol (th-c61966, epic th-ce4f88). An attach on an engine-owned PTY session will open with a VT snapshot (screen, history, modes, cursor) current through a per-session `seq`, and clients apply only output newer than it, so scrollback works and a lagging client resyncs instead of silently losing bytes. The spec covers the frame, the `replay` capability in `flow.hello` and `flow.attach`, the lag and every-resize resync rules, a forced tmux redraw after the empty replay a tmux-host session sends, the host answering DA/DSR itself (so clients stop replying on `pty` sessions, marked by a new `Session.host`), ≤16 KiB relay chunking that phones never render partially, and the daemon ⇄ `smooth-daemon flow-host` IPC (socket and record files, versioned framed hello, input/paste/key/resize/snapshot/screen/kill/release, exact exit status, adoption on boot). `smooth-flow-client` gains the shared ordering logic (`replay::ReplayOrder`) and a new `spec/vectors/replay.json`; the existing vector files are unchanged.
