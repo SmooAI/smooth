@@ -1,5 +1,16 @@
 # @smooai/smooth
 
+## 0.69.0
+
+### Minor Changes
+
+- 619a009: New `smooth-flow-vt` crate (th-5025fb, ADR-011 phase 2): the SmoothFlow session host's headless libghostty-vt terminal. It feeds pty output, reads the visible screen as text (what `tmux capture-pane` gave), reports `alternate_on`, the cursor, the OSC title, bracketed paste and DECCKM, and encodes manifest key names and pastes for the program's current input modes. It also produces the bounded VT replay snapshot a client applies on attach. While a TUI holds the alternate screen, that snapshot keeps the primary screen's history, and it puts back the blank bottom rows that libghostty-vt's formatter leaves out. The libghostty-vt build script and pin moved from `apps/smoothflow-desktop/` to `scripts/ghostty-vt/`, shared by the desktop app and the new crate. `smooth-flow` takes the crate only behind the off-by-default `pty-host` feature. PR CI and the release job now build libghostty-vt (cached on the lock and the script).
+- 7e79063: New `th settings`: one machine settings file (`~/.smooth/settings.toml`) for Smooth's user-facing knobs, so you no longer find a `SMOOTH_*` env var by reading the code. A typed registry in `smooth-policy` names each key, its type, default, legacy env var, reader and whether a change needs a Big Smooth restart; `th settings list | show | set | unset | explain | path` (all with `--json`) reads and writes it, refusing unknown keys with a closest match and validating values. Precedence is legacy env var > file > default, so every existing `SMOOTH_*` launch recipe still works. First keys: `sandbox.enabled`, `egress.allowlist`, `auto_mode`, `fast_mode`, `model` (`SMOOTH_AGENT_MODEL`), `relay.enabled`, `relay.url`, `tailscale.serve` and `cloud_memory`. `th mcp serve` gains a read-only `settings_list` tool. Because the file now carries Big Smooth's own security posture, the agent cannot write it: its fs tools are denied `~/.smooth/settings.toml` and its `th` tool refuses `th settings set|unset`.
+
+### Patch Changes
+
+- 0d1514f: SmoothFlow: specify `flow.replay` and the session-host protocol (th-c61966, epic th-ce4f88). An attach on an engine-owned PTY session will open with a VT snapshot (screen, history, modes, cursor) current through a per-session `seq`, and clients apply only output newer than it, so scrollback works and a lagging client resyncs instead of silently losing bytes. The spec covers the frame, the `replay` capability in `flow.hello` and `flow.attach`, the lag and every-resize resync rules, a forced tmux redraw after the empty replay a tmux-host session sends, the host answering DA/DSR itself (so clients stop replying on `pty` sessions, marked by a new `Session.host`), ≤16 KiB relay chunking that phones never render partially, and the daemon ⇄ `smooth-daemon flow-host` IPC (socket and record files, versioned framed hello, input/paste/key/resize/snapshot/screen/kill/release, exact exit status, adoption on boot). `smooth-flow-client` gains the shared ordering logic (`replay::ReplayOrder`) and a new `spec/vectors/replay.json`; the existing vector files are unchanged.
+
 ## 0.68.0
 
 ### Minor Changes
