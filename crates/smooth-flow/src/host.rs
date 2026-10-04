@@ -67,6 +67,125 @@ pub enum PaneDeath {
     /// process yet: it has not reaped it (th-7ff336). This is NOT an exit.
     /// Ask again.
     Unreaped,
+    /// Dead, and nobody will ever know how: a `pty` session host that died
+    /// before recording its child's exit (ADR-011). Settles at once as
+    /// "exit status unknown", never resumed.
+    Unknown,
+}
+
+/// Which host a session runs on (ADR-011): the row's `host` column, and the
+/// `host` field of the wire `Session`. A row without one (every row from
+/// before th-dc9822) is on tmux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostKind {
+    /// A `tmux -L <socket>` server ([`TmuxHost`]).
+    #[default]
+    Tmux,
+    /// A per-session `smooth-daemon flow-host` process (`PtyHost`, th-dc9822).
+    Pty,
+}
+
+/// `SMOOTH_FLOW_HOST` picks the host NEW sessions launch on (ADR-011
+/// §Migration). Rows already launched stay on theirs.
+pub const HOST_ENV: &str = "SMOOTH_FLOW_HOST";
+
+impl HostKind {
+    /// The column / wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::Pty => "pty",
+        }
+    }
+
+    /// Parse the column / env spelling (case-insensitive, trimmed). `None`
+    /// for anything else.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tmux" => Some(Self::Tmux),
+            "pty" => Some(Self::Pty),
+            _ => None,
+        }
+    }
+
+    /// The host `$SMOOTH_FLOW_HOST` asks for; tmux when it is unset, empty
+    /// or unknown (an unknown value is logged, not fatal).
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_env_value(std::env::var(HOST_ENV).ok().as_deref())
+    }
+
+    /// [`Self::from_env`] over an explicit value (pure, for tests).
+    #[must_use]
+    pub fn from_env_value(v: Option<&str>) -> Self {
+        v.map(str::trim).filter(|v| !v.is_empty()).map_or(Self::Tmux, |v| {
+            Self::parse(v).unwrap_or_else(|| {
+                tracing::warn!(value = %v, "{HOST_ENV} is not `pty` or `tmux`; using tmux");
+                Self::Tmux
+            })
+        })
+    }
+}
+
+impl std::fmt::Display for HostKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A VT snapshot of a session's terminal (the `flow.replay` payload): feed
+/// `data` to a fresh `cols`×`rows` terminal and it shows the session as of
+/// output `seq`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub data: Vec<u8>,
+}
+
+/// Something a host tells the engine unasked, from its own threads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostNotice {
+    /// The host dropped output for session `name` (the engine fell behind):
+    /// every attached client needs a fresh replay.
+    Overrun { name: String },
+    /// Session `name`'s process exited; supervision can settle it now
+    /// rather than at the next tick.
+    Exited { name: String },
+}
+
+/// The engine's sink for [`HostNotice`]s. Called from a host's own threads:
+/// it must not call back into the host synchronously.
+pub type HostNotify = Arc<dyn Fn(HostNotice) + Send + Sync>;
+
+/// What a host found of the sessions a previous daemon left running
+/// ([`SessionHost::adopt_existing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Adopted {
+    /// Connected again; its output stream is back.
+    Live { name: String },
+    /// Its host was dead; the session reads dead with this status until the
+    /// engine settles it.
+    Settled { name: String, death: PaneDeath },
+    /// Alive, but speaking no protocol this daemon speaks. Left running; the
+    /// row gets attention `held` with `reason`.
+    Held { name: String, reason: String },
+    /// Alive but unreachable right now (left running; retried on use).
+    Unreachable { name: String, reason: String },
+}
+
+impl Adopted {
+    /// The session the report is about.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Live { name } | Self::Settled { name, .. } | Self::Held { name, .. } | Self::Unreachable { name, .. } => name,
+        }
+    }
 }
 
 /// What to run in a new session.
@@ -139,6 +258,11 @@ impl AttachStream for PtyAttach {
 /// cheap to call from any thread; the engine calls them from supervision
 /// ticks and request handlers alike.
 pub trait SessionHost: Send + Sync {
+    /// Which kind of host this is; recorded on every row it launches.
+    fn kind(&self) -> HostKind {
+        HostKind::Tmux
+    }
+
     /// Whether this host can run sessions on this machine at all.
     fn available(&self) -> bool;
 
@@ -240,6 +364,31 @@ pub trait SessionHost: Send + Sync {
 
     /// End `pid` and its descendants: ask, wait up to `grace`, then force.
     fn kill_process_tree(&self, pid: u32, grace: Duration);
+
+    /// A VT snapshot of the session's terminal for `flow.replay`, at most
+    /// `max_bytes`. `None`: this host has none (tmux redraws instead).
+    ///
+    /// # Errors
+    /// When the session is gone.
+    fn snapshot(&self, _s: &SessionRef, _max_bytes: usize) -> Result<Option<Snapshot>> {
+        Ok(None)
+    }
+
+    /// Where to send [`HostNotice`]s. Called once, when the engine opens.
+    fn set_notify(&self, _notify: HostNotify) {}
+
+    /// Re-attach to every session a previous daemon (same
+    /// [`Self::default_socket`]) left running, and report each. Called once,
+    /// when the engine opens. tmux needs nothing: its sessions are found by
+    /// name on every call.
+    fn adopt_existing(&self) -> Vec<Adopted> {
+        Vec::new()
+    }
+
+    /// Stop tracking session `s` without touching it: it isn't this
+    /// daemon's (no row in its store), so it is left running for whoever
+    /// owns it.
+    fn forget(&self, _s: &SessionRef) {}
 }
 
 impl std::fmt::Debug for dyn SessionHost {
@@ -380,7 +529,9 @@ pub mod fake {
 
     use anyhow::{anyhow, bail};
 
-    use super::{Arc, AtomicU64, AttachStream, Duration, Launch, OnOutput, PaneDeath, PaneMeta, Path, Result, SessionHost, SessionRef};
+    use super::{
+        Adopted, Arc, AtomicU64, AttachStream, Duration, HostKind, Launch, OnOutput, PaneDeath, PaneMeta, Path, Result, SessionHost, SessionRef, Snapshot,
+    };
 
     /// Pids the fake hands out start here: far above any real pid_max, and
     /// never signalled anyway — process calls stay in memory.
@@ -408,6 +559,10 @@ pub mod fake {
         recorded: HashMap<(PathBuf, u32), i32>,
         next_pid: u32,
         calls: Vec<String>,
+        /// What [`SessionHost::adopt_existing`] reports (then empties).
+        adoptions: Vec<Adopted>,
+        /// Snapshots taken so far; each one's `seq`.
+        snapshots: u64,
     }
 
     /// The fake's one namespace.
@@ -416,11 +571,24 @@ pub mod fake {
     #[derive(Default)]
     pub struct FakeHost {
         state: Mutex<State>,
+        kind: HostKind,
     }
 
     impl FakeHost {
         pub fn new() -> Arc<Self> {
             Arc::new(Self::default())
+        }
+
+        /// A fake that reports itself as `kind`. A `pty` fake answers
+        /// [`SessionHost::snapshot`] with the screen text, as a real
+        /// `PtyHost` answers with its VT state.
+        pub fn with_kind(kind: HostKind) -> Arc<Self> {
+            Arc::new(Self { kind, ..Self::default() })
+        }
+
+        /// What the next [`SessionHost::adopt_existing`] reports.
+        pub fn set_adoptions(&self, found: Vec<Adopted>) {
+            self.st().adoptions = found;
         }
 
         fn st(&self) -> std::sync::MutexGuard<'_, State> {
@@ -471,6 +639,10 @@ pub mod fake {
     }
 
     impl SessionHost for FakeHost {
+        fn kind(&self) -> HostKind {
+            self.kind
+        }
+
         fn available(&self) -> bool {
             true
         }
@@ -587,6 +759,31 @@ pub mod fake {
                 f.death = Some(PaneDeath::Signal(15));
             }
         }
+
+        fn snapshot(&self, s: &SessionRef, _max_bytes: usize) -> Result<Option<Snapshot>> {
+            if self.kind != HostKind::Pty {
+                return Ok(None);
+            }
+            let (screen, (cols, rows)) = self.with(s, |f| (f.screen.clone(), f.size))?;
+            self.log(format!("snapshot {}", s.name));
+            let mut st = self.st();
+            st.snapshots += 1;
+            Ok(Some(Snapshot {
+                seq: st.snapshots,
+                cols,
+                rows,
+                data: screen.into_bytes(),
+            }))
+        }
+
+        fn adopt_existing(&self) -> Vec<Adopted> {
+            std::mem::take(&mut self.st().adoptions)
+        }
+
+        fn forget(&self, s: &SessionRef) {
+            self.log(format!("forget {}", s.name));
+            self.st().sessions.remove(s);
+        }
     }
 
     /// An attach stream that records what was typed and its size.
@@ -656,6 +853,25 @@ mod tests {
         std::fs::write(tmux::exit_file(&prefix, 42), "7\n").unwrap();
         assert_eq!(TmuxHost.recorded_exit(&prefix, 42), Some(7));
         assert_eq!(TmuxHost.recorded_exit(&prefix, 43), None, "another launch's pid never answers");
+    }
+
+    #[test]
+    fn host_kind_parses_the_env_and_column_spellings() {
+        assert_eq!(HostKind::from_env_value(None), HostKind::Tmux, "default: tmux");
+        assert_eq!(HostKind::from_env_value(Some("")), HostKind::Tmux);
+        assert_eq!(HostKind::from_env_value(Some(" PTY ")), HostKind::Pty);
+        assert_eq!(HostKind::from_env_value(Some("tmux")), HostKind::Tmux);
+        assert_eq!(HostKind::from_env_value(Some("zellij")), HostKind::Tmux, "unknown: tmux, not fatal");
+        assert_eq!(HostKind::parse("pty"), Some(HostKind::Pty));
+        assert_eq!(HostKind::parse("nope"), None);
+        for k in [HostKind::Tmux, HostKind::Pty] {
+            assert_eq!(HostKind::parse(k.as_str()), Some(k));
+            assert_eq!(serde_json::to_value(k).unwrap(), k.as_str());
+            assert_eq!(k.to_string(), k.as_str());
+        }
+        assert_eq!(TmuxHost.kind(), HostKind::Tmux, "the seam's default");
+        assert!(TmuxHost.snapshot(&SessionRef::new("s", "n"), 1).unwrap().is_none(), "tmux keeps no snapshot");
+        assert!(TmuxHost.adopt_existing().is_empty());
     }
 
     #[test]

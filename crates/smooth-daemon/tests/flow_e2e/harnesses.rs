@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::support::{prereqs, prereqs_with_th, skip, state, Daemon, WAIT};
+use crate::support::{prereqs, prereqs_with_th, skip, state, Daemon, Host, WAIT};
 
 fn names(v: &Value) -> Vec<String> {
     v.as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap().to_string()).collect()
@@ -23,12 +23,11 @@ fn by_name<'a>(v: &'a Value, name: &str) -> &'a Value {
 
 /// Every state source the engine supports, one fake-agent flavour each:
 /// what `Session.state_source` reads once the harness has done a turn.
-#[tokio::test]
-async fn harness_matrix_state_source_per_manifest() {
-    if !prereqs() {
+async fn harness_matrix_state_source_per_manifest(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let (status, v) = d.get("/api/flow/harnesses").await;
     assert_eq!(status, 200);
     let rows = &v["harnesses"];
@@ -76,12 +75,11 @@ async fn harness_matrix_state_source_per_manifest() {
     assert!(v["error"].as_str().unwrap().contains("th harness list"), "{v}");
 }
 
-#[tokio::test]
-async fn harness_prefs_sort_and_hide_reach_every_picker() {
-    if !prereqs_with_th() {
+async fn harness_prefs_sort_and_hide_reach_every_picker(host: Host) {
+    if !prereqs_with_th(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let ws0 = d.ws().await;
     let before = names(&ws0.hello["harnesses"]);
     assert_eq!(
@@ -146,12 +144,11 @@ async fn harness_prefs_sort_and_hide_reach_every_picker() {
     let _ = ws0;
 }
 
-#[tokio::test]
-async fn th_harness_add_installs_a_custom_manifest_the_engine_launches() {
-    if !prereqs_with_th() {
+async fn th_harness_add_installs_a_custom_manifest_the_engine_launches(host: Host) {
+    if !prereqs_with_th(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // A custom manifest: the hooks fake-agent under a new name, from a file
     // outside ~/.smooth (what a user would `th harness add`).
     let base = std::fs::read_to_string(d.home.join(".smooth/harnesses/fake-agent.toml")).unwrap();
@@ -217,9 +214,8 @@ async fn th_harness_add_installs_a_custom_manifest_the_engine_launches() {
 /// through its built-in manifest, assert the launch shape and the state
 /// source the engine reads, then kill it. No credentials are needed: the
 /// engine's side of the contract holds before the CLI ever talks to a model.
-#[tokio::test]
-async fn real_harnesses_launch_through_their_manifests() {
-    if !prereqs() {
+async fn real_harnesses_launch_through_their_manifests(host: Host) {
+    if !prereqs(host) {
         return;
     }
     if !std::env::var("SMOOTH_E2E_REAL_HARNESSES").is_ok_and(|v| !v.is_empty() && v != "0") {
@@ -228,7 +224,7 @@ async fn real_harnesses_launch_through_their_manifests() {
         eprintln!("[skip] SMOOTH_E2E_REAL_HARNESSES is not set — real claude/opencode/codex/th-code launches are opt-in");
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // th code refuses to boot without LLM providers (`th model login`); the
     // real ones on this machine, copied into the rig's HOME, let it come up
     // and report its first turn natively. Absent, th code is skipped.
@@ -292,3 +288,10 @@ async fn real_harnesses_launch_through_their_manifests() {
     eprintln!("real harness matrix (kind, state, source): {matrix:?}");
     assert!(!matrix.is_empty(), "SMOOTH_E2E_REAL_HARNESSES is set but no real harness is installed");
 }
+
+crate::on_both_hosts!(
+    harness_matrix_state_source_per_manifest,
+    harness_prefs_sort_and_hide_reach_every_picker,
+    th_harness_add_installs_a_custom_manifest_the_engine_launches,
+    real_harnesses_launch_through_their_manifests
+);

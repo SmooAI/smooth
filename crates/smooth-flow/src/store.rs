@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use crate::host::HostKind;
 use crate::protocol::{EventKind, FlowEvent};
 
 /// Where the flow database lives: `$SMOOTH_FLOW_DB`, else `~/.smooth/flow.db`.
@@ -263,6 +264,13 @@ pub struct Session {
     /// not ours to perform; the engine only tracks its state and context.
     #[serde(default)]
     pub adopted: bool,
+    /// The host the session runs on (ADR-011, th-dc9822): the `host` column,
+    /// `tmux` for rows from before it. A row is always driven by the host it
+    /// was launched on, so live tmux sessions finish on tmux after
+    /// `SMOOTH_FLOW_HOST` flips. On the wire it decides whether a client
+    /// answers terminal queries itself (Client Spec §10).
+    #[serde(default)]
+    pub host: HostKind,
 }
 
 /// A fan-out: N candidate sessions racing one prompt.
@@ -294,6 +302,8 @@ pub struct NewSession {
     pub fan_out_id: Option<String>,
     /// See [`Session::adopted`] — only [`crate::engine::Engine::hook`] sets it.
     pub adopted: bool,
+    /// See [`Session::host`]; `None` writes NULL, which reads as tmux.
+    pub host: Option<HostKind>,
 }
 
 /// Mint a session id: `fs-` + 8 hex.
@@ -398,7 +408,8 @@ impl FlowStore {
                  tmux_socket      TEXT,
                  state_source     TEXT NOT NULL DEFAULT 'inferred',
                  owner            TEXT,
-                 adopted          INTEGER NOT NULL DEFAULT 0
+                 adopted          INTEGER NOT NULL DEFAULT 0,
+                 host             TEXT
              );
              CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_session_id);
              CREATE INDEX IF NOT EXISTS sessions_fanout_idx ON sessions(fan_out_id);
@@ -494,6 +505,14 @@ impl FlowStore {
             conn.execute("ALTER TABLE sessions ADD COLUMN hook_token_hash TEXT", [])
                 .context("add hook_token_hash")?;
         }
+        // th-dc9822 (ADR-011): which host the row runs on; NULL = tmux.
+        let has_host = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'host'")?
+            .exists([])
+            .context("probe host column")?;
+        if !has_host {
+            conn.execute("ALTER TABLE sessions ADD COLUMN host TEXT", []).context("add host")?;
+        }
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
@@ -576,6 +595,7 @@ impl FlowStore {
             exit_code: row.get("exit_code")?,
             unread: row.get::<_, i64>("unread")? != 0,
             adopted: row.get::<_, i64>("adopted")? != 0,
+            host: row.get::<_, Option<String>>("host")?.as_deref().and_then(HostKind::parse).unwrap_or_default(),
         })
     }
 
@@ -591,8 +611,8 @@ impl FlowStore {
         self.conn
             .execute(
                 "INSERT INTO sessions (id, kind, title, project, worktree, branch, pearl_id, agent_session_id, argv, tmux_session,
-                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner, adopted)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14, ?15)",
+                                       state, fan_out_id, created_at, updated_at, tmux_socket, owner, adopted, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'starting', ?11, ?12, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     id,
                     kind.as_str(),
@@ -609,6 +629,7 @@ impl FlowStore {
                     new.tmux_socket,
                     new.owner,
                     i64::from(new.adopted),
+                    new.host.map(HostKind::as_str),
                 ],
             )
             .context("insert session")?;
@@ -1196,6 +1217,7 @@ mod tests {
         assert_eq!(st.get("fs-old").unwrap().unwrap().tmux_socket, None);
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "inferred", "th-5c5457 column migrated too");
         assert_eq!(st.get("fs-old").unwrap().unwrap().owner, None, "th-4f7866 column migrated too");
+        assert_eq!(st.get("fs-old").unwrap().unwrap().host, HostKind::Tmux, "th-dc9822: no host column = tmux");
         st.set_state_source("fs-old", "hooks").unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "hooks");
         let st2 = FlowStore::open(&path).unwrap(); // idempotent
@@ -1211,6 +1233,34 @@ mod tests {
         let s = st2.get(&s.id).unwrap().unwrap();
         assert_eq!(s.tmux_socket.as_deref(), Some("smoothflow"));
         assert_eq!(s.owner.as_deref(), Some("smooth-flow"), "the creating daemon is recorded");
+        assert_eq!(s.host, HostKind::Tmux, "no host given = tmux");
+        let p = st2
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                host: Some(HostKind::Pty),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(st2.get(&p.id).unwrap().unwrap().host, HostKind::Pty, "the host is recorded");
+        let wire = serde_json::to_value(st2.get(&p.id).unwrap().unwrap()).unwrap();
+        assert_eq!(wire["host"], "pty", "flow.session carries the host (Client Spec §3)");
+    }
+
+    /// th-dc9822: an unknown `host` value (a newer engine's) reads as tmux
+    /// rather than failing the row.
+    #[test]
+    fn an_unknown_host_value_reads_as_tmux() {
+        let st = FlowStore::open_in_memory().unwrap();
+        let s = st
+            .create(NewSession {
+                project: "/p".into(),
+                worktree: "/p".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        st.conn.execute("UPDATE sessions SET host = 'zellij' WHERE id = ?1", params![s.id]).unwrap();
+        assert_eq!(st.get(&s.id).unwrap().unwrap().host, HostKind::Tmux);
     }
 
     #[test]

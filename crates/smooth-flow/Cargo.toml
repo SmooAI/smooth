@@ -49,9 +49,8 @@ syntect = { version = "5.3", default-features = false, features = ["parsing", "r
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 
 # th-5025fb (ADR-011): the session host's headless libghostty-vt. Optional,
-# behind `pty-host`, until PtyHost lands (th-dc9822): the crate builds
-# libghostty-vt with a pinned Zig, and nothing that builds smooth-flow today
-# (the daemon, `th`, their release builds) should need that before it is used.
+# behind `pty-host`: the crate builds libghostty-vt with a pinned Zig. The
+# shipped daemons turn it on (th-dc9822); `th` and plain dev builds don't.
 smooth-flow-vt = { workspace = true, optional = true }
 
 # th-e4aef9: the session host's error types.
@@ -68,8 +67,9 @@ nix = { version = "0.29", default-features = false, features = ["fs", "process",
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [features]
-# th-5025fb: the engine-owned PTY session host (ADR-011). Pulls in
-# smooth-flow-vt and with it the libghostty-vt build. Off by default for now.
+# th-5025fb: the engine-owned PTY session host (ADR-011) and `PtyHost`
+# (th-dc9822). Pulls in smooth-flow-vt and with it the libghostty-vt build.
+# Off by default; the release workflows build the daemon with it.
 pty-host = ["dep:smooth-flow-vt", "dep:nix"]
 # th-8b3918: expose `host::fake::FakeHost` (the in-memory session host) to
 # other crates' tests. Never enabled in a shipped build.
@@ -86,6 +86,12 @@ required-features = ["pty-host"]
 [[test]]
 name = "session_host"
 path = "tests/session_host.rs"
+required-features = ["pty-host"]
+
+# th-dc9822: PtyHost and the engine on it, against real session hosts.
+[[test]]
+name = "pty_host"
+path = "tests/pty_host.rs"
 required-features = ["pty-host"]
 
 [lints]

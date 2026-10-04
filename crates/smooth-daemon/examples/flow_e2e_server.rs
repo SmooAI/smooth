@@ -38,12 +38,14 @@ async fn main() -> anyhow::Result<()> {
     }
     // `home` (harness manifests) and `daemon_url` follow the defaults: $HOME —
     // the caller points it at a throwaway dir — and none.
-    let engine = smooth_flow::Engine::open(smooth_flow::EngineConfig {
+    let mut cfg = smooth_flow::EngineConfig {
         db_path: db,
         version: "e2e".into(),
         machine_label: "flow-e2e".into(),
         ..smooth_flow::EngineConfig::new(workspace.clone())
-    })?;
+    };
+    cfg.pty_host = pty_host(&cfg.host.default_socket());
+    let engine = smooth_flow::Engine::open(cfg)?;
     drop(smooth_daemon::flow_route::spawn_supervisor(engine.clone()));
     let router = smooth_daemon::flow_route::flow_router(engine, token);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -52,4 +54,21 @@ async fn main() -> anyhow::Result<()> {
     println!("listening on {bound}");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// `SMOOTH_FLOW_HOST=pty` (th-dc9822): this example has no `flow-host`
+/// subcommand, so its sessions are hosted by the `smooth-daemon` cargo built
+/// beside it (`target/<profile>/examples/..`).
+#[cfg(all(unix, feature = "pty-host"))]
+fn pty_host(owner: &str) -> Option<std::sync::Arc<dyn smooth_flow::SessionHost>> {
+    let exe = std::env::current_exe().ok()?;
+    let daemon = exe.parent()?.parent()?.join("smooth-daemon");
+    daemon
+        .is_file()
+        .then(|| std::sync::Arc::new(smooth_flow::PtyHost::for_daemon(owner, daemon)) as std::sync::Arc<dyn smooth_flow::SessionHost>)
+}
+
+#[cfg(not(all(unix, feature = "pty-host")))]
+fn pty_host(_owner: &str) -> Option<std::sync::Arc<dyn smooth_flow::SessionHost>> {
+    None
 }

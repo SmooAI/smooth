@@ -17,20 +17,49 @@ lane has its own page, [SmoothFlow-Testing-macOS.md](SmoothFlow-Testing-macOS.md
 
 ## The layers
 
-| Layer          | Where                                             | Boots                                       | Proves                                                                           | Runtime                   |
-| -------------- | ------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------- |
-| engine unit    | `crates/smooth-flow/src/*` (`#[cfg(test)]`)       | nothing (a live shell when tmux is present) | store, frames, hook table, reset parser, guard, backoff, manifests, scrape rules | ~3 s                      |
-| route unit     | `crates/smooth-daemon/src/flow_route.rs`          | the axum router in-process                  | auth gate, WS hello/errors, hook long-poll over a socket, harness prefs routes   | ~2 s                      |
-| **engine e2e** | `crates/smooth-daemon/tests/flow_e2e/`            | **a real `smooth-daemon` per test**         | everything below                                                                 | **~70 s wall** (24 tests) |
-| macOS UI       | `apps/smoothflow/UITests`                         | the built app + `flow_e2e_server`           | the shell renders and drives the engine's states                                 | ~10 min (mac runner)      |
-| phones         | `apps/smoothflow-mobile/{ios,android}` unit tests | nothing                                     | frame codec + reducer                                                            | seconds                   |
+| Layer          | Where                                             | Boots                                       | Proves                                                                           | Runtime                                     |
+| -------------- | ------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------- |
+| engine unit    | `crates/smooth-flow/src/*` (`#[cfg(test)]`)       | nothing (a live shell when tmux is present) | store, frames, hook table, reset parser, guard, backoff, manifests, scrape rules | ~3 s                                        |
+| route unit     | `crates/smooth-daemon/src/flow_route.rs`          | the axum router in-process                  | auth gate, WS hello/errors, hook long-poll over a socket, harness prefs routes   | ~2 s                                        |
+| **engine e2e** | `crates/smooth-daemon/tests/flow_e2e/`            | **a real `smooth-daemon` per test**         | everything below                                                                 | **~2 min wall** (61 tests: 29 per host + 3) |
+| macOS UI       | `apps/smoothflow/UITests`                         | the built app + `flow_e2e_server`           | the shell renders and drives the engine's states                                 | ~10 min (mac runner)                        |
+| phones         | `apps/smoothflow-mobile/{ios,android}` unit tests | nothing                                     | frame codec + reducer                                                            | seconds                                     |
 
 ## The engine e2e suite
 
 `cargo nextest run -p smooai-smooth-daemon --test flow_e2e` (nextest runs
 each test in its own process, so each has its own daemon). Skips — or fails,
-with `SMOOTH_E2E_STRICT=1`, which CI sets — when `tmux`, `bash`, `curl` or the
-`th` binary is missing. `#![cfg(unix)]`: Windows compiles it empty.
+with `SMOOTH_E2E_STRICT=1`, which CI sets — when `tmux` (tmux host only),
+`bash`, `curl` or the `th` binary is missing. `#![cfg(unix)]`: Windows compiles
+it empty.
+
+### Both session hosts (th-dc9822)
+
+Every scenario below is an `async fn name(host: Host)` registered with
+`on_both_hosts!`, which makes two tests of it: `<file>::tmux::<name>` boots
+the daemon with `SMOOTH_FLOW_HOST=tmux`, and `<file>::pty::<name>` with
+`SMOOTH_FLOW_HOST=pty`, the engine-owned PTY host
+([ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md)). The `pty`
+twins exist only when the daemon is built with `--features pty-host`. Where a
+scenario asserted tmux itself, its twin asserts the session host instead
+(`Daemon::session_present`: the tmux session, or the host's record):
+
+- `shell.rs`: after `flow.kill` the host's record is gone, not the tmux
+  session.
+- `isolation.rs`: the session host recorded itself under the rig's HOME, never
+  the real `~/.smooth/flow-hosts`; dropping the rig ends the host process (hosts
+  outlive their daemon by design, so the rig kills them as `kill-server` does
+  for tmux); the example server hosts its sessions on pty too.
+- `finder_env.rs`: with no tmux at all, a `pty` session still launches and
+  runs.
+
+`restart.rs` holds the pty-only scenarios, the reason the host exists:
+
+| Test                                                                    | Asserts                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a_running_session_survives_a_daemon_crash_and_is_adopted`              | SIGKILL the daemon, boot another on the same HOME: same pid, still idle; a `replay:true` attach gets `flow.replay` holding the old screen, a legacy attach one `ESC c ESC[3J`-prefixed output; new output's `seq` is above the replay's; kill releases the host |
+| `an_exit_while_the_daemon_is_down_is_settled_exactly`                   | the child exits with 5 while no daemon runs; the next daemon settles the row `dead`, exit 5, from the host, and releases it                                                                                                                                     |
+| `a_relaunch_continues_the_sessions_seq_and_replays_to_attached_clients` | Kill & Resume: an attached replay client gets `flow.replay{reason:"host"}` with a higher `seq`, a new host process, the old one released, and the resumed agent's output                                                                                        |
 
 | File           | Test                                                                 | Asserts                                                                                                                                                                                                                                                                                                                                                                          |
 | -------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -98,8 +127,8 @@ only "painted + pid live + the launch shape" is asserted for them.
 Waits: `wait_state` / `wait_until` / `wait_screen` poll every 250 ms with a
 30 s cap (`WAIT`) and fail with the row, the pane, fake-agent's log and the
 daemon log tail. `Ws::wait_for` drains frames until a predicate matches.
-Dropping the rig SIGTERMs the daemon, kills its tmux server and prints the
-daemon log when the test is panicking.
+Dropping the rig SIGTERMs the daemon, kills its tmux server and its session
+hosts, and prints the daemon log when the test is panicking.
 
 ### fake-agent
 
@@ -156,6 +185,9 @@ CARGO_TARGET_DIR=$HOME/.cargo/target-e2e \
 # one test, with the daemon log on failure:
 CARGO_TARGET_DIR=$HOME/.cargo/target-e2e \
   cargo nextest run -p smooai-smooth-daemon --test flow_e2e agent_that_dies --no-capture
+# both hosts (the pty twins and restart.rs need the feature; Zig-built libghostty-vt):
+CARGO_TARGET_DIR=$HOME/.cargo/target-e2e \
+  cargo nextest run -p smooai-smooth-daemon --features pty-host --test flow_e2e
 # the real CLIs installed here, through their manifests:
 SMOOTH_E2E_REAL_HARNESSES=1 cargo nextest run -p smooai-smooth-daemon --test flow_e2e real_harnesses
 ```
@@ -171,12 +203,18 @@ never reads or writes your `~/.smooth`; `isolation.rs` proves it every run.
 other system packages and `SMOOTH_E2E_STRICT=1` makes a skip a failure. The
 suite runs inside the normal `cargo nextest run --profile ci`; nextest builds
 `th` and `smooth-daemon` first, and the `cargo build --examples` step builds
-`flow_e2e_server` for the example test. Windows compiles the crate empty.
+`flow_e2e_server` for the example test. That run is the `tmux::` half. The
+`Test (pty-host)` step rebuilds the daemon and the example with `pty-host`
+and runs the `::pty::` twins and `restart::` (the filter
+`binary(flow_e2e) & test(/(^|::)pty::|^restart::/)`), also strict. Windows
+compiles the crate empty.
 
 ## Adding a scenario
 
-1. Boot a rig: `let d = Daemon::boot().await;` after `if !prereqs() { return; }`
-   (`prereqs_with_th()` when the test runs `th`).
+1. Write `async fn name(host: Host)`, boot a rig with
+   `let d = Daemon::boot(host).await;` after `if !prereqs(host) { return; }`
+   (`prereqs_with_th(host)` when the test runs `th`), and add `name` to the
+   file's `crate::on_both_hosts!(…)` so it runs on both hosts.
 2. Drive it the way a client would — `d.ws()` for frames, `d.post` /
    `d.get` for the HTTP siblings, `d.th(&[…])` for the CLI, `d.hook(…)` for
    what a hook script posts. Steer fake-agent with `d.send(id, "/work x")`.

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::support::{prereqs, state, Daemon, WAIT};
+use crate::support::{prereqs, state, Daemon, Host, WAIT};
 
 fn lines(file: &Value) -> Vec<String> {
     file["hunks"]
@@ -36,12 +36,11 @@ fn paths(diff: &Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
-async fn diff_by_turn_revert_stale_and_review() {
-    if !prereqs() {
+async fn diff_by_turn_revert_stale_and_review(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // fake-agent writes its own log into the worktree; keep it out of the diff.
     std::fs::write(d.ws.join(".git").join("info").join("exclude"), ".fake-agent*\n").unwrap();
     let mut ws = d.ws().await;
@@ -130,3 +129,5 @@ async fn diff_by_turn_revert_stale_and_review() {
     let e = ws.wait_for("blocked error", WAIT, |v| v["type"] == "flow.error" && v["ref"] == 5).await;
     assert_eq!(e["code"], "blocked", "{e}");
 }
+
+crate::on_both_hosts!(diff_by_turn_revert_stale_and_review);

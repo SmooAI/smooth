@@ -5,8 +5,9 @@
 > against; change it only by agreement with the engine lane.
 
 SmoothFlow is Big Smooth's session manager: agents (Claude Code, Codex,
-OpenCode) and plain shells run under one long-lived tmux server, their PTY
-bytes stream to whichever surface is looking (desktop, `th flow attach`, a
+OpenCode) and plain shells run under one long-lived tmux server (or, with
+`SMOOTH_FLOW_HOST=pty`, each under its own session host process; see
+[Process model](#process-model)), their PTY bytes stream to whichever surface is looking (desktop, `th flow attach`, a
 phone), harness hooks drive their state, and a supervision tick keeps them
 alive across crashes and usage limits. The engine — the `smooth-flow` crate,
 hosted inside `smooth-daemon` — is the **only state holder**. Every shell is a
@@ -23,6 +24,7 @@ dumb view.
 | Engine crate (store, tmux glue, PTY, supervision)          | `crates/smooth-flow/`                                                                |
 | Session host seam (`SessionHost`, `TmuxHost`)              | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
 | Engine-owned PTY host (`flow-host`) IPC (ADR-011)          | [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md) (host built, th-e4aef9)     |
+| `PtyHost` — the engine on `flow-host` (th-dc9822)          | `crates/smooth-flow/src/pty_host.rs` — see [the pty host](#pty-host)                 |
 | Daemon transport (`/api/flow/*`, WS, hooks long-poll)      | `crates/smooth-daemon/src/flow_route.rs`                                             |
 | Relay routing of `channel:"flow"` envelopes + phone caps   | `crates/smooth-daemon/src/relay.rs`                                                  |
 | End-to-end encryption + phone pairing (th-d98fde)          | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
@@ -112,7 +114,7 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   generation). One bridge means one geometry: the latest attach or resize wins,
   as with tmux's `window-size latest`, so the phone and the Mac take turns
   rather than sizing to the smaller one (th-87cbca).
-- **Disposing a bridge must never type into the pane.** `portable-pty`'s unix
+- **Disposing a bridge must never type into the pane (tmux host).** `portable-pty`'s unix
   writer writes `\n` + `VEOF` into the PTY when dropped. Our child is a
   raw-mode tmux client, so those arrive in the pane as a blank line and `^D`,
   and a login shell at its prompt prints `logout` and exits. `close()` only
@@ -120,6 +122,70 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine
   the signal: a plain last-client detach could end the user's shell. The writer
   is held by the reader thread and released only after `child.wait()`, when
   there is no client left to forward the bytes.
+
+### On the pty host (th-dc9822) {#pty-host}
+
+`SMOOTH_FLOW_HOST=pty` puts new sessions on `PtyHost`
+(`crates/smooth-flow/src/pty_host.rs`) instead of tmux
+([ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md)):
+
+```
+Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine ──► PtyHost
+                                                                       │ one HostClient per session (Unix socket)
+                         smooth-daemon flow-host --id fs-1a2b3c4d ◄────┤   (setsid; outlives the daemon)
+                           └── claude --session-id <uuid> …   (its child, on the host's PTY)
+                         smooth-daemon flow-host --id fs-9e8f7a6b ◄────┘
+                           └── zsh -l
+```
+
+- **Selection.** `SMOOTH_FLOW_HOST=pty|tmux` (default `tmux`) picks the host
+  for NEW sessions; `EngineConfig::new_host` is the same knob in code. The
+  row's `host` column records where it runs, and a row is always driven by
+  the host it was launched on: live tmux sessions finish on tmux after the
+  env flips, and a resume relaunches on the row's host. A daemon without the
+  `pty-host` feature (or on Windows, th-2b32a6) has no pty host: it says so
+  at boot, launches on tmux, and leaves `pty` rows alone (one warning each).
+- **Ownership is unchanged.** `PtyHost` reports the tmux host's socket name
+  as its `default_socket`, and writes it as each host record's `owner`, so
+  a row is supervised by the same daemon whichever host runs it.
+- **No wrapper, exact exits.** The host is the agent's parent and `wait`s on
+  it. `exit_status` is the host's `exit` (`code`, else `signal`); a host
+  that died before recording one reads as `PaneDeath::Unknown`, which settles
+  at once as "exit status unknown" and is never resumed. The exit files,
+  `pane_dead`, the `run-shell` nudge and the 3 s fallback are tmux-only. A
+  `pty` row whose host and record are both gone settles as unknown too,
+  where a vanished tmux session is resumed.
+- **A dead session stays readable** (tmux's `remain-on-exit`): the host
+  lingers after its child exits, so the engine reads the status and final
+  screen, then `kill_session` sends `release` and waits for the host to go
+  (a relaunch spawns a new host under the same id, which the old one would
+  block).
+- **Daemon restart.** When the engine opens, `PtyHost::adopt_existing`
+  reconnects to every live host this daemon owns and settles the dead ones
+  from their records. The engine reconciles that with `flow.db`: a host with
+  no live row of ours is logged and left running (another daemon's db, a
+  test), a finished row's lingering host is released, and a host on a
+  protocol this daemon doesn't speak parks its row with attention `held`. A
+  host found later by name (the first supervision tick after a restart, a
+  record that appeared since) is adopted the same way, lazily.
+- **Streaming is a subscription, not a client process.** Each session keeps
+  one `HostClient` connection whether or not anyone is attached. A bridge
+  (`flow.attach`) subscribes to its output by session id, so it survives a
+  relaunch, and the clients that were attached keep streaming from the new
+  host. Output carries the host's `seq`, which continues across hosts
+  (`seq_start`) and daemon restarts.
+- **Input.** `flow.input` bytes go to the PTY as they are. `flow.send` and
+  pastes are the host's `paste` (`Vt::encode_paste`: bracketed only when the
+  program set mode 2004), then `key{Enter}`. Manifest keys go through the
+  host's key encoder, so they honour DECCKM and Kitty keyboard flags; a name
+  the encoder doesn't know is typed literally, as `tmux send-keys` did.
+- **Scraping** reads the host's `screen` answer: the visible text (what
+  `capture-pane -p` printed), `alternate_on`, `cursor_y` and the OSC title.
+  `smooth_tmux::detect` and the manifests' rules are unchanged.
+- **Kill.** `kill_process_tree` on a session's pid is the host's `kill`
+  (SIGTERM to the child's process group, SIGKILL after the grace) and waits
+  for its `exit`.
+- **Replays** are what this host adds to attach: see [Replay](#replay).
 
 ### The session host seam (th-64d4ab) {#session-host}
 
@@ -140,8 +206,13 @@ launched in plus the flow session id. The host's `default_socket()` is also
 the ownership identity supervision filters on (th-4f7866).
 
 `TmuxHost` is the default, set by `EngineConfig::new`. Every method delegates
-unchanged to `tmux.rs`, `pty.rs` and `proc.rs`, so everything above in this
-section still describes what runs. Two things stay in the engine as plain
+unchanged to `tmux.rs`, `pty.rs` and `proc.rs`. `EngineConfig::pty_host`
+adds the [pty host](#pty-host), and the engine routes each row to its own
+host (`Engine::host_for`). th-dc9822 added the seam's host-neutral extras,
+each a no-op on tmux: `kind` (the row's `host` value), `snapshot` (the
+`flow.replay` payload), `set_notify` (a host's overrun and exit notices),
+`adopt_existing` (re-attach after a restart) and `forget` (leave another
+daemon's session alone). Two things stay in the engine as plain
 helpers rather than host calls, because they are data rather than host
 operations: `PaneExit::describe`'s `tmux::signal_name` (this platform's
 signal table) and the `PaneDeath` / `PaneMeta` types, which now live in
@@ -155,9 +226,10 @@ The seam has two uses:
   headless libghostty-vt, and attach becomes a `flow.replay` snapshot followed
   by sequenced `flow.output` ([Replay](#replay)). The daemon ⇄ host protocol
   is [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md). Supervision
-  won't change. The host process is built
-  (`crates/smooth-flow/src/session_host/`, th-e4aef9); `PtyHost` (th-dc9822)
-  is next.
+  didn't change. The host process (`crates/smooth-flow/src/session_host/`,
+  th-e4aef9) and `PtyHost` on it ([pty host](#pty-host), th-dc9822) are
+  built; tmux stays the default until the e2e suite has run green on both
+  for a release (th-68234b flips it).
 
     Its headless terminal is `crates/smooth-flow-vt` (th-5025fb): a safe
     wrapper around libghostty-vt, built from the same pinned
@@ -170,8 +242,9 @@ The seam has two uses:
     snapshot still carries the primary screen's history, cached at the instant
     the TUI came up. The crate's module docs give the bounding policy and the
     known libghostty-vt limits. `smooth-flow` takes it only behind the
-    `pty-host` feature (off by default) until `PtyHost` lands, so nothing that
-    ships today needs Zig to build.
+    `pty-host` feature (off by default, so `th` and plain dev builds need no
+    Zig); the shipped daemons (Big Smooth.app, SmoothFlow.app) are built
+    with it.
 
 - **Engine tests without tmux.** `host::fake::FakeHost` (test-only) keeps
   sessions in memory and records every call. With it, tests cover the
@@ -219,7 +292,8 @@ sessions(id TEXT PK,             -- "fs-" + 8 hex
          attention,              -- JSON {reason, detail, resume_at, request_id}
          fan_out_id, created_at, updated_at, ended_at, exit_code, unread,
          tmux_socket,            -- the `tmux -L` server the session lives on (v0.1)
-         state_source)           -- hooks | native | inferred (th-5c5457 / th-0f6126)
+         state_source,           -- hooks | native | inferred (th-5c5457 / th-0f6126)
+         host)                   -- tmux | pty; NULL (older rows) = tmux (th-dc9822)
 fan_outs(id TEXT PK, prompt, base_commit, pearl_id, created_at, winner_session_id)
 events(session_id, seq, at, kind, text, PK(session_id, seq))  -- last 200 per session (v0.1)
 config(key TEXT PK, value)      -- harness_prefs = {order, hidden} (th-0f6126)
@@ -262,6 +336,18 @@ defaults to the daemon's workspace).
 A client attaching to a session gets a **snapshot of the terminal** followed
 by **sequenced live bytes**, instead of tmux's redraw. The snapshot carries
 the session's scrollback, so client-side scrollback works.
+
+> **What the engine sends today (th-dc9822).** For `pty` sessions: rules 1–5
+> below (`Engine::replay`, `flow_route`'s per-client `Attachments`). A
+> `replay: true` attach gets `flow.replay`, a legacy attach the snapshot as
+> one prefixed `flow.output`; a lagging WS client gets a replay per attached
+> `pty` session; a geometry change (coalesced over 50 ms), a host `overrun`
+> and a relaunch broadcast a replay to the session's attached clients, which
+> a legacy client gets only for `lag` (its own terminal follows the
+> program's redraw otherwise); output a client's latest replay covers is
+> dropped. Not yet, all in th-cbb0af: `flow.hello.capabilities` (so no
+> client expects a replay yet), rule 6 for tmux sessions, the relay's
+> chunking and 256 KiB phone budget, and the clients.
 
 ### The frame
 
@@ -961,8 +1047,9 @@ same brand-new harness session into two rows.
 4. Duplicate-resume guard: a 60 s claim on the agent session id plus pid
    liveness, and any other live row owning the same id. A held id raises
    attention `held` with the holder pid instead of launching.
-5. Exit code 0 is unproven unless the PTY (`#{pane_dead_status}`) or the pane
-   wrapper's exit file reported it. An exit nobody can read is **unknown**:
+5. Exit code 0 is unproven unless the PTY (`#{pane_dead_status}`), the pane
+   wrapper's exit file, or (on the pty host) the session host's `wait`
+   reported it. An exit nobody can read is **unknown**:
    `dead`, attention `crashed` with "exit status unknown", and never resumed.
 6. Engine, tmux server and agents are spawned by the app (or its LaunchAgent)
    so TCC grants attribute to it. `th flow` connects; it never launches the
@@ -1101,10 +1188,21 @@ fixture (`SMOOTH_E2E_WRITE_FIXTURE=1` rewrites it). All live tests name a
 private tmux socket per call (`tmux_socket` on the request) so they never
 touch a running daemon's sessions.
 
+The pty host: `crates/smooth-flow/tests/pty_host.rs` (`--features pty-host`)
+drives `PtyHost` against real `smooth-flow-host` processes — exact exit codes
+and signals, keys under DECCKM, paste bracketed only under mode 2004, VT
+meta, attach streams with rising `seq`, tree kill, adoption by a second
+`PtyHost` (including an exit while nobody was connected, and a host killed
+with SIGKILL) — and the engine on it: launch, send, scrape → needs you →
+approve keys, crash resume with `seq` continuing, kill, and a restarted
+engine adopting its running session while leaving another's alone.
+
 End to end (th-8e3087): `crates/smooth-daemon/tests/flow_e2e` boots a REAL
 `smooth-daemon` per test — its own HOME, port, tmux server — and drives it the
 way the apps, `th flow` and a harness's hook script do, with `fake-agent`
-installed through a manifest in the four state-source flavours. The full
+installed through a manifest in the four state-source flavours. Every
+scenario runs on both hosts (th-dc9822), and `restart.rs` crashes the daemon
+under live `pty` sessions. The full
 strategy (what runs where, the fake-agent contract, runtimes, the CI split) is
 [SmoothFlow-Testing.md](../Engineering/SmoothFlow-Testing.md); the macOS UI
 lane is [SmoothFlow-Testing-macOS.md](../Engineering/SmoothFlow-Testing-macOS.md).

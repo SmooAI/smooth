@@ -1,19 +1,19 @@
 //! Shell sessions over the flow WS: new → attach → input echo → resize →
 //! snapshot → kill, plus the two ways a shell ends on its own (exit 0 is
-//! `done`, a non-zero exit is `dead` — rule 5: the PTY's own report).
+//! `done`, a non-zero exit is `dead` — rule 5: the PTY's own report, or on
+//! the pty host the session host's `wait`).
 
 use std::time::Duration;
 
 use serde_json::json;
 
-use crate::support::{prereqs, state, unb64, Daemon, TICK, WAIT};
+use crate::support::{prereqs, state, unb64, Daemon, Host, TICK, WAIT};
 
-#[tokio::test]
-async fn shell_lifecycle_new_attach_input_resize_snapshot_kill() {
-    if !prereqs() {
+async fn shell_lifecycle_new_attach_input_resize_snapshot_kill(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let mut ws = d.ws().await;
     assert_eq!(ws.hello["sessions"], json!([]), "a fresh daemon has no sessions");
     assert!(
@@ -38,6 +38,7 @@ async fn shell_lifecycle_new_attach_input_resize_snapshot_kill() {
     assert_eq!(s["state_source"], "inferred");
     assert!(s["pid"].as_u64().is_some(), "{s}");
     assert_eq!(s["tmux_socket"], d.socket, "the row records the private tmux server");
+    assert_eq!(s["host"], host.env(), "the row records the host it runs on (th-dc9822)");
 
     // attach → the PTY bridge streams output only to attached clients. The
     // first frame (the redrawn pane) proves the bridge is up before typing.
@@ -96,11 +97,8 @@ async fn shell_lifecycle_new_attach_input_resize_snapshot_kill() {
         })
         .await;
     assert!(killed["session"]["ended_at"].is_string(), "{killed}");
-    let alive = std::process::Command::new("tmux")
-        .args(["-L", &d.socket, "has-session", "-t", &id])
-        .output()
-        .unwrap();
-    assert!(!alive.status.success(), "tmux session should be gone after kill");
+    // The tmux session, or the session host and its record, gone.
+    assert!(!d.session_present(&id), "the session's terminal should be gone after kill");
     // Input to a dead session is an error object, not a hang.
     ws2.send(json!({"type":"flow.input","id":id,"data_b64":"aGk=","seq":42})).await;
     let err = ws2.wait_for("flow.error", WAIT, |v| v["type"] == "flow.error").await;
@@ -111,12 +109,11 @@ async fn shell_lifecycle_new_attach_input_resize_snapshot_kill() {
     assert_eq!(status, 200, "killing a done session is idempotent");
 }
 
-#[tokio::test]
-async fn shell_that_exits_is_done_and_a_failing_command_is_dead() {
-    if !prereqs() {
+async fn shell_that_exits_is_done_and_a_failing_command_is_dead(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let mut ws = d.ws().await;
 
     // exit 0 by itself → done with exit_code 0 (rule 5: the PTY reported it).
@@ -159,3 +156,8 @@ async fn shell_that_exits_is_done_and_a_failing_command_is_dead() {
     let frames = ws.collect(Duration::from_secs(1)).await;
     assert!(!frames.iter().any(|f| f["type"] == "flow.output" && f["id"] == id2), "{frames:?}");
 }
+
+crate::on_both_hosts!(
+    shell_lifecycle_new_attach_input_resize_snapshot_kill,
+    shell_that_exits_is_done_and_a_failing_command_is_dead
+);

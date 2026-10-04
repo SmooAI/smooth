@@ -8,17 +8,16 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::support::{local_clock_in, prereqs, state, Daemon, TICK, WAIT};
+use crate::support::{local_clock_in, prereqs, state, Daemon, Host, TICK, WAIT};
 
 /// Rule 2's first backoff (`RESUME_BACKOFF_BASE · 2^0`) plus a tick.
 const FIRST_RESUME: Duration = Duration::from_secs(5 + 2 + 2);
 
-#[tokio::test]
-async fn agent_transitions_working_idle_needs_you_done() {
-    if !prereqs() {
+async fn agent_transitions_working_idle_needs_you_done(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let mut ws = d.ws().await;
 
     let s = d.new_session("fake-agent", Some("/work first")).await;
@@ -124,12 +123,11 @@ async fn agent_transitions_working_idle_needs_you_done() {
     assert_eq!(state(&d.session(&id).await), "done");
 }
 
-#[tokio::test]
-async fn agent_question_notification_needs_you_and_steer_answers_it() {
-    if !prereqs() {
+async fn agent_question_notification_needs_you_and_steer_answers_it(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let s = d.new_session("fake-agent", Some("/ask which branch?")).await;
     let id = s["id"].as_str().unwrap().to_string();
     let q = d.wait_state(&id, "needs_you", WAIT).await;
@@ -144,12 +142,11 @@ async fn agent_question_notification_needs_you_and_steer_answers_it() {
     d.wait_state(&id, "done", WAIT).await;
 }
 
-#[tokio::test]
-async fn agent_usage_limit_is_scheduled_from_the_banner() {
-    if !prereqs() {
+async fn agent_usage_limit_is_scheduled_from_the_banner(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let s = d.new_session("fake-agent", Some("/work warm; /limit 11:59pm")).await;
     let id = s["id"].as_str().unwrap().to_string();
     let limited = d.wait_state(&id, "limited", WAIT).await;
@@ -174,12 +171,11 @@ async fn agent_usage_limit_is_scheduled_from_the_banner() {
 
 /// Slow (~90 s): the banner names a time ~1 min out; the supervisor presses
 /// Enter when it passes and the session is working again.
-#[tokio::test]
-async fn agent_usage_limit_resume_fires_when_the_window_passes() {
-    if !prereqs() {
+async fn agent_usage_limit_resume_fires_when_the_window_passes(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // Minute resolution + "at least one minute out": ~70–130 s from now.
     let at = local_clock_in(75);
     let s = d.new_session("fake-agent", Some(&format!("/work warm; /limit {at}"))).await;
@@ -200,12 +196,11 @@ async fn agent_usage_limit_resume_fires_when_the_window_passes() {
     d.kill(&id, false).await;
 }
 
-#[tokio::test]
-async fn agent_that_dies_is_resumed_with_its_session_id() {
-    if !prereqs() {
+async fn agent_that_dies_is_resumed_with_its_session_id(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let mut ws = d.ws().await;
     let s = d.new_session("fake-agent", Some("/work once; /crash 2")).await;
     let id = s["id"].as_str().unwrap().to_string();
@@ -259,12 +254,11 @@ async fn agent_that_dies_is_resumed_with_its_session_id() {
 }
 
 /// Slow (~45 s): three failed resumes (5 s + 10 s + 20 s backoff) → dead.
-#[tokio::test]
-async fn agent_that_keeps_crashing_is_dead_after_three_resumes() {
-    if !prereqs() {
+async fn agent_that_keeps_crashing_is_dead_after_three_resumes(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     // The start-up script runs on every launch — fresh and resumed — so each
     // relaunch dies the same way.
     d.write_script(&d.ws.clone(), &["/crash 3"]);
@@ -285,12 +279,11 @@ async fn agent_that_keeps_crashing_is_dead_after_three_resumes() {
     assert_eq!(state(&d.session(&id).await), "dead");
 }
 
-#[tokio::test]
-async fn learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches() {
-    if !prereqs() {
+async fn learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     std::fs::write(d.ws.join(".fake-agent-session-id"), "learned-abc-123\n").unwrap();
     let s = d.new_session("fake-agent-learned", Some("/work bind")).await;
     let id = s["id"].as_str().unwrap().to_string();
@@ -328,12 +321,11 @@ async fn learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches
 /// engine never binds an id twice), so the second row is real — a live
 /// `fake-agent-learned` process — and the shared id is written to its row
 /// the way a stale or foreign db row would carry it.
-#[tokio::test]
-async fn duplicate_resume_guard_holds_when_a_live_pid_owns_the_session() {
-    if !prereqs() {
+async fn duplicate_resume_guard_holds_when_a_live_pid_owns_the_session(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     std::fs::write(d.ws.join(".fake-agent-session-id"), "shared-s1\n").unwrap();
     let a = d.new_session("fake-agent-learned", Some("/work a")).await;
     let a_id = a["id"].as_str().unwrap().to_string();
@@ -368,12 +360,11 @@ async fn duplicate_resume_guard_holds_when_a_live_pid_owns_the_session() {
     d.kill(&a_id, false).await;
 }
 
-#[tokio::test]
-async fn native_harness_reports_its_own_turns() {
-    if !prereqs() {
+async fn native_harness_reports_its_own_turns(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let s = d.new_session("fake-agent-native", Some("/work n1")).await;
     let id = s["id"].as_str().unwrap().to_string();
     let idle = d
@@ -411,12 +402,11 @@ async fn native_harness_reports_its_own_turns() {
     assert!(d.agent_log().contains("hook bye → {}"));
 }
 
-#[tokio::test]
-async fn scrape_harness_state_is_inferred_from_the_pane() {
-    if !prereqs() {
+async fn scrape_harness_state_is_inferred_from_the_pane(host: Host) {
+    if !prereqs(host) {
         return;
     }
-    let d = Daemon::boot().await;
+    let d = Daemon::boot(host).await;
     let s = d.new_session("fake-agent-scrape", Some("/work s1")).await;
     let id = s["id"].as_str().unwrap().to_string();
     // The "working" marker is on screen for FAKE_AGENT_WORK_SECS (5 s).
@@ -464,3 +454,16 @@ async fn scrape_harness_state_is_inferred_from_the_pane() {
     );
     d.kill(&id, false).await;
 }
+
+crate::on_both_hosts!(
+    agent_transitions_working_idle_needs_you_done,
+    agent_question_notification_needs_you_and_steer_answers_it,
+    agent_usage_limit_is_scheduled_from_the_banner,
+    agent_usage_limit_resume_fires_when_the_window_passes,
+    agent_that_dies_is_resumed_with_its_session_id,
+    agent_that_keeps_crashing_is_dead_after_three_resumes,
+    learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches,
+    duplicate_resume_guard_holds_when_a_live_pid_owns_the_session,
+    native_harness_reports_its_own_turns,
+    scrape_harness_state_is_inferred_from_the_pane
+);
