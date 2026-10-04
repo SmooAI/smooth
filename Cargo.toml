@@ -238,6 +238,8 @@ smooth-tmux = { version = "0.72.1", path = "crates/smooth-tmux", package = "smoo
 smooth-flow = { version = "0.72.1", path = "crates/smooth-flow", package = "smooai-smooth-flow" }
 # The SmoothFlow session host's headless libghostty-vt (th-5025fb, ADR-011).
 smooth-flow-vt = { version = "0.72.1", path = "crates/smooth-flow-vt", package = "smooai-smooth-flow-vt" }
+# Client logic every SmoothFlow client shares (replay ordering, pane trees, …).
+smooth-flow-client = { version = "0.72.1", path = "crates/smooth-flow-client", package = "smooai-smooth-flow-client" }
 smooth-api-client = { version = "0.72.1", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
 # Chat-first Big Smooth daemon on the smooth-operator LocalServer engine (th-7225f9).
 smooth-daemon = { version = "0.72.1", path = "crates/smooth-daemon", package = "smooai-smooth-daemon" }

@@ -523,6 +523,34 @@ pub fn kill_server(socket: &str) {
     let _ = tmux(socket, &["kill-server"]);
 }
 
+/// Engine rule 6 (SmoothFlow.md § Replay): make the attach client on `tty`
+/// redraw its whole screen, so the redraw streams out as new output. `tty:
+/// None` refreshes every client of `session`. `Ok(false)` when no client of
+/// `session` is on that tty yet: one still connecting draws the whole
+/// screen when it lands, which is newer output too.
+///
+/// # Errors
+/// When tmux is missing or refuses.
+pub fn refresh_client(socket: &str, session: &str, tty: Option<&str>) -> Result<bool> {
+    let listed = tmux_ok(socket, &["list-clients", "-t", session, "-F", "#{client_tty}"])?;
+    let targets = refresh_targets(&listed, tty);
+    for t in &targets {
+        tmux_ok(socket, &["refresh-client", "-t", t])?;
+    }
+    Ok(!targets.is_empty())
+}
+
+/// The clients [`refresh_client`] refreshes, from `list-clients`' ttys.
+#[must_use]
+pub fn refresh_targets(listed: &str, tty: Option<&str>) -> Vec<String> {
+    listed
+        .lines()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && tty.is_none_or(|want| want == *t))
+        .map(str::to_string)
+        .collect()
+}
+
 /// `tmux attach` argv for the PTY bridge — the whole reason the socket is
 /// stable.
 #[must_use]
@@ -690,6 +718,15 @@ mod tests {
         );
         let err = check_program("/nonexistent/claude", &[]).unwrap_err().to_string();
         assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn refresh_targets_pick_the_bridge_client_or_every_client() {
+        let listed = "/dev/ttys003\n/dev/ttys012\n\n";
+        assert_eq!(refresh_targets(listed, Some("/dev/ttys012")), vec!["/dev/ttys012".to_string()]);
+        assert!(refresh_targets(listed, Some("/dev/ttys099")).is_empty(), "a client not registered yet");
+        assert_eq!(refresh_targets(listed, None).len(), 2, "no tty: every client of the session");
+        assert!(refresh_targets("", None).is_empty());
     }
 
     #[test]

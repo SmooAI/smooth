@@ -228,6 +228,18 @@ pub trait AttachStream: Send + Sync {
     /// Flow clients currently counted onto this stream (engine bookkeeping,
     /// kept with the stream so a lookup and its count share one lock).
     fn clients(&self) -> &AtomicU64;
+
+    /// The `seq` of the latest output this stream delivered; 0 before any.
+    /// What a tmux session's empty `flow.replay` carries (engine rule 6).
+    fn last_seq(&self) -> u64 {
+        0
+    }
+
+    /// The name the host knows this client by (tmux: the attach client's
+    /// tty), for [`SessionHost::redraw`].
+    fn client_name(&self) -> Option<String> {
+        None
+    }
 }
 
 impl AttachStream for PtyAttach {
@@ -249,6 +261,14 @@ impl AttachStream for PtyAttach {
 
     fn clients(&self) -> &AtomicU64 {
         &self.clients
+    }
+
+    fn last_seq(&self) -> u64 {
+        Self::last_seq(self)
+    }
+
+    fn client_name(&self) -> Option<String> {
+        self.tty().map(str::to_string)
     }
 }
 
@@ -374,6 +394,17 @@ pub trait SessionHost: Send + Sync {
         Ok(None)
     }
 
+    /// Engine rule 6: make the host redraw `stream`'s whole screen, so the
+    /// redraw arrives as output newer than [`AttachStream::last_seq`]. For a
+    /// host without snapshots (tmux), this is how a client that joins an
+    /// existing stream gets the screen. A no-op on a host with snapshots.
+    ///
+    /// # Errors
+    /// When the host refuses.
+    fn redraw(&self, _s: &SessionRef, _stream: &dyn AttachStream) -> Result<()> {
+        Ok(())
+    }
+
     /// Where to send [`HostNotice`]s. Called once, when the engine opens.
     fn set_notify(&self, _notify: HostNotify) {}
 
@@ -492,6 +523,13 @@ impl SessionHost for TmuxHost {
 
     fn kill_process_tree(&self, pid: u32, grace: Duration) {
         proc::kill_tree(pid, grace);
+    }
+
+    fn redraw(&self, s: &SessionRef, stream: &dyn AttachStream) -> Result<()> {
+        if !tmux::refresh_client(&s.socket, &s.name, stream.client_name().as_deref())? {
+            tracing::debug!(session = %s.name, "flow: the bridge's tmux client hasn't registered yet; its attach draws the screen");
+        }
+        Ok(())
     }
 }
 
@@ -776,6 +814,11 @@ pub mod fake {
             }))
         }
 
+        fn redraw(&self, s: &SessionRef, stream: &dyn AttachStream) -> Result<()> {
+            self.log(format!("redraw {} after seq {}", s.name, stream.last_seq()));
+            Ok(())
+        }
+
         fn adopt_existing(&self) -> Vec<Adopted> {
             std::mem::take(&mut self.st().adoptions)
         }
@@ -793,6 +836,8 @@ pub mod fake {
         pub size: Mutex<(u16, u16)>,
         closed: AtomicBool,
         clients: AtomicU64,
+        /// What [`AttachStream::last_seq`] reports.
+        pub seq: AtomicU64,
     }
 
     impl AttachStream for FakeAttach {
@@ -819,6 +864,10 @@ pub mod fake {
 
         fn clients(&self) -> &AtomicU64 {
             &self.clients
+        }
+
+        fn last_seq(&self) -> u64 {
+            self.seq.load(Ordering::Relaxed)
         }
     }
 }

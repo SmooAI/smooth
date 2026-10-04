@@ -19,10 +19,20 @@ use owo_colors::OwoColorize;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
+use smooth_flow_client::replay::{Action as ReplayAction, Frame as ReplayFrame, ReplayOrder};
+
 use crate::gradient::paint;
 
 /// Ctrl-\ — detaches `th flow attach`.
 const DETACH_BYTE: u8 = 0x1c;
+
+/// What `th flow attach` holds while it waits for a replay before it
+/// re-attaches (spec §10, "bound the buffer").
+const ATTACH_PENDING_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a replay's reset writes to the local terminal: RIS, then erase the
+/// scrollback, so the replay draws on a clean terminal.
+const TERMINAL_RESET: &[u8] = b"\x1bc\x1b[3J";
 
 #[derive(Debug, Subcommand)]
 pub enum FlowCommands {
@@ -960,13 +970,26 @@ async fn attach_session(id: &str) -> Result<()> {
         .await
         .context("flow WS connect failed\n  → is Big Smooth running? (th up)")?;
     let (mut sink, mut source) = ws.split();
+    // th-8dbb42: the engine says first whether it replays (`flow.hello`).
+    let hello = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(msg)) = source.next().await {
+            if let Message::Text(t) = msg {
+                let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                if v.get("type").and_then(Value::as_str) == Some("flow.hello") {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+    .context("the flow engine sent no hello")?;
+    let mut order = ReplayOrder::new(engine_replays(&hello), ATTACH_PENDING_MAX_BYTES);
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    sink.send(Message::Text(
-        json!({"channel":"flow","type":"flow.attach","id":id,"cols":cols,"rows":rows})
-            .to_string()
-            .into(),
-    ))
-    .await?;
+    let attach = json!({"channel":"flow","type":"flow.attach","id":id,"cols":cols,"rows":rows,"replay":true}).to_string();
+    sink.send(Message::Text(attach.clone().into())).await?;
     eprintln!("{} attached to {id} — Ctrl-\\ to detach", paint("●", |g| g.bold().to_string()));
     crossterm::terminal::enable_raw_mode().context("enable raw mode")?;
     let raw_guard = RawGuard;
@@ -1014,16 +1037,18 @@ async fn attach_session(id: &str) -> Result<()> {
             msg = source.next() => {
                 let Some(Ok(Message::Text(t))) = msg else { break };
                 let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
-                match v.get("type").and_then(Value::as_str) {
-                    Some("flow.output") if v.get("id").and_then(Value::as_str) == Some(id) => {
-                        if let Some(b) = v.get("data_b64").and_then(Value::as_str) {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b) {
-                                let mut stdout = std::io::stdout();
-                                let _ = stdout.write_all(&bytes);
-                                let _ = stdout.flush();
-                            }
-                        }
+                if let Some(frame) = stream_frame(&v, id) {
+                    // A terminal: the replay's bytes and the output pass straight through.
+                    let (bytes, resync) = render(order.on_frame(frame));
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(&bytes);
+                    let _ = stdout.flush();
+                    if resync && sink.send(Message::Text(attach.clone().into())).await.is_err() {
+                        break;
                     }
+                    continue;
+                }
+                match v.get("type").and_then(Value::as_str) {
                     Some("flow.error") => {
                         drop(raw_guard);
                         bail!("{}", v.get("message").and_then(Value::as_str).unwrap_or("engine error"));
@@ -1041,9 +1066,87 @@ async fn attach_session(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `flow.hello` advertises `replay` (absent on older engines).
+fn engine_replays(hello: &Value) -> bool {
+    hello
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|c| c.iter().any(|c| c.as_str() == Some("replay")))
+}
+
+/// Session `id`'s `flow.output` or `flow.replay` as a replay-ordering frame.
+fn stream_frame(v: &Value, id: &str) -> Option<ReplayFrame> {
+    if v.get("id").and_then(Value::as_str) != Some(id) {
+        return None;
+    }
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(v.get("data_b64").and_then(Value::as_str).unwrap_or_default())
+        .unwrap_or_default();
+    let seq = v.get("seq").and_then(Value::as_u64).unwrap_or(0);
+    let num = |k: &str| v.get(k).and_then(Value::as_u64);
+    match v.get("type").and_then(Value::as_str)? {
+        "flow.output" => Some(ReplayFrame::Output { seq, data }),
+        "flow.replay" => Some(ReplayFrame::Replay {
+            seq,
+            cols: num("cols").and_then(|n| u16::try_from(n).ok()).unwrap_or(80),
+            rows: num("rows").and_then(|n| u16::try_from(n).ok()).unwrap_or(24),
+            part: num("part").and_then(|n| u32::try_from(n).ok()),
+            parts: num("parts").and_then(|n| u32::try_from(n).ok()),
+            data,
+        }),
+        _ => None,
+    }
+}
+
+/// The bytes the replay ordering asks the local terminal for (a reset is
+/// RIS plus clear-scrollback), and whether to re-attach.
+fn render(actions: Vec<ReplayAction>) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut resync = false;
+    for a in actions {
+        match a {
+            ReplayAction::Reset { .. } => out.extend_from_slice(TERMINAL_RESET),
+            ReplayAction::Write { data } => out.extend(data),
+            ReplayAction::Resync { .. } => resync = true,
+        }
+    }
+    (out, resync)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
+    /// th-8dbb42: `th flow attach` resets on a replay, drops the output it
+    /// covers, passes the rest straight through, and re-attaches on a gap.
+    #[test]
+    fn attach_applies_replays_and_the_seq_rule() {
+        assert!(engine_replays(&json!({"type":"flow.hello","capabilities":["replay"]})));
+        assert!(!engine_replays(&json!({"type":"flow.hello"})), "an older engine");
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+        let out = |seq: u64, s: &str| json!({"type":"flow.output","id":"fs-1","seq":seq,"data_b64":b64(s)});
+        let mut order = ReplayOrder::new(true, 1024);
+        let mut feed = |v: Value| render(order.on_frame(stream_frame(&v, "fs-1").unwrap()));
+        // Held until the replay, then only what it doesn't cover.
+        assert_eq!(feed(out(4, "old")), (Vec::new(), false));
+        assert_eq!(feed(out(6, "new")), (Vec::new(), false));
+        let (bytes, resync) = feed(json!({"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":5,"data_b64":b64("SCREEN"),"reason":"attach"}));
+        assert!(!resync);
+        assert_eq!(bytes, [TERMINAL_RESET, b"SCREEN", b"new"].concat());
+        assert_eq!(feed(out(5, "stale")), (Vec::new(), false));
+        assert_eq!(feed(out(7, "live")), (b"live".to_vec(), false));
+        // An empty replay (a tmux session) is a reset, and the redraw follows.
+        assert_eq!(
+            feed(json!({"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":0,"data_b64":"","reason":"attach"})),
+            (TERMINAL_RESET.to_vec(), false)
+        );
+        assert_eq!(feed(out(1, "redraw")), (b"redraw".to_vec(), false));
+        // A part with no part 0 before it: re-attach.
+        let (_, resync) = feed(json!({"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":9,"data_b64":"","part":1,"parts":2}));
+        assert!(resync);
+        // Another session's frames and non-stream frames are not ours.
+        assert!(stream_frame(&json!({"type":"flow.output","id":"fs-2","seq":1,"data_b64":""}), "fs-1").is_none());
+        assert!(stream_frame(&json!({"type":"flow.session","id":"fs-1"}), "fs-1").is_none());
+    }
 
     /// th-1efb59: the skill is a real skill (frontmatter an agent's loader
     /// accepts) and names every flow MCP tool, so a new tool can't ship

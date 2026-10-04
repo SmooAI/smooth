@@ -5371,6 +5371,7 @@ dependencies = [
  "smooai-smooth-code",
  "smooai-smooth-diver",
  "smooai-smooth-flow",
+ "smooai-smooth-flow-client",
  "smooai-smooth-menubar",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",

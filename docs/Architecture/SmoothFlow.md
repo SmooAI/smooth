@@ -274,7 +274,9 @@ The seam has two uses:
   `"channel":"flow"` is bridged to `/api/flow/ws` by a second per-phone
   loopback bridge; no `channel` ⇒ operator WS, unchanged. Outbound
   `flow.output` to a phone is coalesced to ~30 fps and split into ≤16 KiB
-  frames (`relay::OutputCoalescer`); phones never receive raw scrollback.
+  frames that keep the engine's `seq` (`relay::OutputCoalescer`); a
+  `flow.replay` goes out at once in ≤16 KiB parts, at most 256 KiB in all
+  ([Replay § Relay](#replay)). Phones never receive raw scrollback.
   A **paired** phone's frames are end-to-end encrypted — see
   [End-to-end encryption](#end-to-end-encryption).
 - Every frame is one JSON object `{"channel":"flow","type":"<name>", …}`.
@@ -337,17 +339,20 @@ A client attaching to a session gets a **snapshot of the terminal** followed
 by **sequenced live bytes**, instead of tmux's redraw. The snapshot carries
 the session's scrollback, so client-side scrollback works.
 
-> **What the engine sends today (th-dc9822).** For `pty` sessions: rules 1–5
-> below (`Engine::replay`, `flow_route`'s per-client `Attachments`). A
-> `replay: true` attach gets `flow.replay`, a legacy attach the snapshot as
-> one prefixed `flow.output`; a lagging WS client gets a replay per attached
-> `pty` session; a geometry change (coalesced over 50 ms), a host `overrun`
-> and a relaunch broadcast a replay to the session's attached clients, which
-> a legacy client gets only for `lag` (its own terminal follows the
-> program's redraw otherwise); output a client's latest replay covers is
-> dropped. Not yet, all in th-cbb0af: `flow.hello.capabilities` (so no
-> client expects a replay yet), rule 6 for tmux sessions, the relay's
-> chunking and 256 KiB phone budget, and the clients.
+> **What the engine sends today (th-dc9822, th-8dbb42).** All seven rules
+> below. `flow.hello.capabilities` is `["replay"]` (`engine::CAPABILITIES`).
+> For `pty` sessions (`Engine::replay`, `flow_route`'s per-client
+> `Attachments`), a `replay: true` attach gets `flow.replay`, a legacy attach
+> the snapshot as one prefixed `flow.output`; a lagging WS client gets a
+> replay per attached session; a geometry change (coalesced over 50 ms), a
+> host `overrun` and a relaunch broadcast a replay to the session's attached
+> clients, which a legacy client gets only for `lag` (its own terminal
+> follows the program's redraw otherwise); output a client's latest replay
+> covers is dropped. A tmux session answers a replay client's attach and lag
+> with rule 6 (`Engine::client_replay`). The relay chunks replays and caps a
+> phone's budget at 256 KiB (`relay::OutputCoalescer`). `th flow attach`
+> applies replays; the Mac, desktop, mock and phone clients follow in
+> th-7e46cd and th-af3efb.
 
 ### The frame
 
@@ -406,7 +411,9 @@ the bridge:
   last engine frame, and the chunks of one run **share** that `seq`. So on
   the wire a session's `seq` is non-decreasing, and clients never compare one
   output's `seq` with another's, only with the replay's.
-- On the tmux host `seq` stays what it is today, a counter per bridge.
+- On the tmux host `seq` stays a counter per bridge. It starts at 1, so a
+  bridge's empty replay at `seq` 0 (rule 6, before any output) precedes all
+  of its output.
 
 ### Engine rules
 
@@ -439,6 +446,12 @@ the bridge:
    would leave it blank until the pane next changed. The replay's `seq` is
    the bridge's last `seq` before the refresh is requested, so the redraw
    arrives as newer output. The client's logic is the same for both hosts.
+   The bridge's client is found by its tty: `tmux::refresh_client` lists
+   the session's clients (`#{client_tty}`), keeps the one on the bridge
+   PTY's slave tty, then runs `refresh-client -t <tty>`. A client still
+   connecting isn't listed yet; its attach draws the whole screen anyway,
+   after the replay's `seq`. A lag resync on a tmux session does the same
+   for a replay client. A legacy client on tmux gets no replay, as before.
 7. **Terminal queries are answered by the host.** On the `pty` host the
    session's headless VT answers device-attribute and status queries (DA,
    DSR, …): the host writes `Vt::take_replies` back to the PTY. Clients
@@ -485,16 +498,22 @@ and `spec/vectors/replay.json`. In short:
 ### Relay (phones)
 
 - The relay bridge sets `replay_max_bytes` to at most **256 KiB** on a phone's
-  `flow.attach` before it reaches the engine.
+  `flow.attach` before it reaches the engine (absent ⇒ 256 KiB; a smaller
+  ask is kept).
 - The phone-side `OutputCoalescer` keeps the engine `seq` (it no longer
   numbers frames itself; see above).
 - A `flow.replay` larger than 16 KiB of data is split into parts of at most
   16 KiB each: identical frames except `data_b64`, with `part` = 0 … `parts`−1
-  and `parts` the total. The coalescer first **discards** any output it is
-  holding for that session (all of it is covered by the replay), then sends
-  every part, in order and back to back (not paced by the 30 fps tick), and
-  sends no output for that session between parts. Each part is sealed as an
-  ordinary end-to-end encrypted data frame.
+  and `parts` the total. One that fits in 16 KiB (an empty one included)
+  goes out unchanged, without `part`/`parts`. The coalescer first
+  **discards** the output it is holding for that session that the replay
+  covers (`seq` ≤ the replay's), then sends every part, in order and back
+  to back (not paced by the 30 fps tick), and sends no output for that
+  session between parts. Held output with a higher `seq` stays held for the
+  next tick: a broadcast replay (resize, host, overrun) can follow output
+  the snapshot was taken before, and the phone would apply that output
+  anyway. Each part is sealed as an ordinary end-to-end encrypted data
+  frame.
 - A phone buffers parts until it has all of them; a new `part: 0` discards an
   incomplete set. It renders nothing from a partial replay.
 

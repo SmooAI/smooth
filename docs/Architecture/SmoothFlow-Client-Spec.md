@@ -384,6 +384,13 @@ control.
   New vector file `replay.json`; the others are unchanged. Spec only so far
   (th-c61966, epic th-ce4f88); every client implements it in th-cbb0af.
 
+- 2026-10-04: the engine advertises `replay` in `flow.hello.capabilities`
+  (th-8dbb42): both hosts now answer a `replay: true` attach, the tmux host
+  with an empty replay and a forced redraw. The relay keeps the engine's
+  `seq` on output, splits replays into ≤16 KiB parts and asks for at most
+  256 KiB per replay for phones. `th flow attach` applies replays with
+  `ReplayOrder`. No rule in §10 changed.
+
 ## 14. Diff
 
 The Diff tab is a native review viewer over the engine's structured diff

@@ -51,6 +51,11 @@ const KILL_GRACE: Duration = Duration::from_secs(3);
 /// How long a dead pane may report no exit status before the supervisor
 /// settles for [`PaneExit::Unknown`] (th-7ff336).
 const EXIT_STATUS_WAIT: Duration = Duration::from_secs(3);
+/// What `flow.hello.capabilities` advertises. `replay`: every `replay: true`
+/// attach opens with a `flow.replay`, on both hosts (th-8dbb42; SmoothFlow.md
+/// § Replay).
+pub const CAPABILITIES: &[&str] = &["replay"];
+
 /// Replays asked for within this window (a resize drag, an overrun burst)
 /// coalesce into one (SmoothFlow.md § Replay, engine rule 3).
 const REPLAY_COALESCE: Duration = Duration::from_millis(50);
@@ -1326,6 +1331,7 @@ impl Engine {
             daemon: self.inner.info.clone(),
             sessions: self.list()?,
             harnesses: self.harnesses(false)?,
+            capabilities: CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
         })
     }
 
@@ -1894,6 +1900,54 @@ impl Engine {
             rows: snap.rows,
             seq: snap.seq,
             data_b64: base64::engine::general_purpose::STANDARD.encode(&snap.data),
+            reason,
+            part: None,
+            parts: None,
+        }))
+    }
+
+    /// The replay one client gets on `flow.attach` (rule 1) or after it
+    /// lagged (rule 2). `client_replays`: it attached with `replay: true`.
+    ///
+    /// A host with snapshots (`pty`) answers with [`Self::replay`]. A tmux
+    /// session has none, so a replay client gets rule 6 instead: an empty
+    /// `flow.replay` at the bridge's last `seq`, and then tmux redraws the
+    /// bridge's whole screen, which streams out as newer output. Without
+    /// the redraw, a client joining a bridge that is already up would reset
+    /// to a blank screen and stay blank until the program next drew. A
+    /// legacy client on tmux gets nothing, as before.
+    ///
+    /// # Errors
+    /// When the session is unknown or its host can't be reached.
+    pub fn client_replay(&self, id: &str, max_bytes: Option<usize>, reason: ReplayReason, client_replays: bool) -> Result<Option<ServerFrame>> {
+        if let Some(frame) = self.replay(id, max_bytes, reason)? {
+            return Ok(Some(frame));
+        }
+        if !client_replays {
+            return Ok(None);
+        }
+        let s = self.require(id)?;
+        let host = self.host_for(&s)?;
+        if host.kind() != HostKind::Tmux {
+            return Ok(None);
+        }
+        let Some(stream) = self.lock_ptys().get(id).filter(|b| !b.pty.is_closed()).map(|b| b.pty.clone()) else {
+            // No bridge, no stream to resync.
+            return Ok(None);
+        };
+        let pane = self.pane(&s)?;
+        let (cols, rows) = host.size(&pane).unwrap_or((tmux::DEFAULT_COLS, tmux::DEFAULT_ROWS));
+        // Read before the redraw is asked for, so all of the redraw is newer.
+        let seq = stream.last_seq();
+        if let Err(e) = host.redraw(&pane, stream.as_ref()) {
+            tracing::debug!(session = %id, error = %e, "flow: tmux redraw for a replay failed");
+        }
+        Ok(Some(ServerFrame::Replay {
+            id: id.to_string(),
+            cols,
+            rows,
+            seq,
+            data_b64: String::new(),
             reason,
             part: None,
             parts: None,
@@ -5528,6 +5582,17 @@ quiet_ms = 300
         }
     }
 
+    /// th-8dbb42: both hosts answer a replay attach, so the hello says so.
+    #[test]
+    fn hello_advertises_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        match e.hello().unwrap() {
+            ServerFrame::Hello { capabilities, .. } => assert_eq!(capabilities, ["replay"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn harness_prefs_persist_order_and_hide() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6288,6 +6353,101 @@ quiet_ms = 300
         let (t, _) = two_host_engine(&tmp.path().join("t"), HostKind::Tmux, &pty);
         let ts = fake_shell(&t, tmp.path(), &["sh"]);
         assert!(t.replay(&ts.id, None, ReplayReason::Attach).unwrap().is_none());
+    }
+
+    /// Rule 6 (th-8dbb42): a tmux session answers a replay client with an
+    /// empty replay at the bridge's last `seq`, then has tmux redraw the
+    /// bridge. A legacy client, or a session nobody attached, gets nothing.
+    #[test]
+    fn tmux_sessions_answer_a_replay_client_with_an_empty_replay_and_a_redraw() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = fake_shell(&e, tmp.path(), &["sh"]);
+        let redraws = || host.calls().into_iter().filter(|c| c.starts_with("redraw")).collect::<Vec<_>>();
+        assert!(e.client_replay(&s.id, None, ReplayReason::Attach, true).unwrap().is_none(), "no bridge yet");
+        e.attach(&s.id, 100, 30).unwrap();
+        assert!(e.client_replay(&s.id, None, ReplayReason::Attach, false).unwrap().is_none(), "a legacy client");
+        assert!(redraws().is_empty(), "{:?}", host.calls());
+        for reason in [ReplayReason::Attach, ReplayReason::Lag] {
+            let Some(ServerFrame::Replay {
+                seq,
+                cols,
+                rows,
+                data_b64,
+                reason: got,
+                part,
+                parts,
+                ..
+            }) = e.client_replay(&s.id, Some(262_144), reason, true).unwrap()
+            else {
+                panic!("a replay client gets a replay on tmux too")
+            };
+            assert_eq!((seq, cols, rows, got), (0, 100, 30, reason));
+            assert!(data_b64.is_empty() && part.is_none() && parts.is_none());
+        }
+        assert_eq!(redraws(), vec![format!("redraw {} after seq 0", s.id); 2]);
+        // The broadcast replays (resize, host) stay pty-only.
+        assert!(e.replay(&s.id, None, ReplayReason::Resize).unwrap().is_none());
+    }
+
+    /// Rule 6, live: a second client joining a bridge that is already up,
+    /// on a quiet screen, ends with the current screen. The empty replay
+    /// carries the bridge's last `seq`, and tmux's redraw arrives above it.
+    /// Without the refresh nothing would arrive at all. Private socket;
+    /// skips when tmux is missing.
+    #[test]
+    fn live_tmux_replay_attach_to_an_existing_bridge_redraws_the_screen() {
+        if !tmux::tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-r6-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        let s = cat_session(&e, tmp.path(), &sock);
+        let mut rx = e.subscribe();
+        e.attach(&s.id, 100, 30).unwrap();
+        assert!(wait_output(&mut rx, &s.id, "FLOW-READY").contains("FLOW-READY"));
+        e.input(&s.id, b"RULE-SIX-MARK\n").unwrap();
+        assert!(wait_output(&mut rx, &s.id, "RULE-SIX-MARK").contains("RULE-SIX-MARK"));
+        assert_eq!(wait_clients(&sock, &s.id, |n| n == 1).len(), 1, "one bridge");
+        // Let the screen go quiet, so anything later is the redraw.
+        let mut quiet = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while quiet.elapsed() < Duration::from_millis(500) && Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(_) => quiet = Instant::now(),
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+
+        // The second client: same size (no resize redraw), same bridge.
+        let mut rx2 = e.subscribe();
+        e.attach(&s.id, 100, 30).unwrap();
+        assert_eq!(tmux_clients(&sock, &s.id).len(), 1, "the second client shares the bridge");
+        let Some(ServerFrame::Replay { seq, data_b64, .. }) = e.client_replay(&s.id, None, ReplayReason::Attach, true).unwrap() else {
+            panic!("a replay client gets an empty replay on tmux")
+        };
+        assert!(data_b64.is_empty());
+        assert!(seq >= 1, "the bridge had streamed output: {seq}");
+        let mut newer = String::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !(newer.contains("FLOW-READY") && newer.contains("RULE-SIX-MARK")) {
+            match rx2.try_recv() {
+                Ok(ServerFrame::Output { id, seq: got, data_b64 }) if id == s.id && got > seq => {
+                    newer.push_str(&String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap()));
+                }
+                Err(broadcast::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
+                Ok(_) | Err(_) => {}
+            }
+        }
+        assert!(
+            newer.contains("FLOW-READY") && newer.contains("RULE-SIX-MARK"),
+            "the redraw after the replay carries the whole screen: {newer:?}"
+        );
+        e.detach(&s.id);
+        e.detach(&s.id);
+        tmux::kill_server(&sock);
     }
 
     /// Adoption at open: an orphan host is forgotten (left running), a held
