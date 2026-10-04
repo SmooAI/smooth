@@ -19,6 +19,7 @@ use crate::gate::Gate;
 use crate::harness::{self, Harness, Health};
 use crate::keymap::{Action, Chord, Keymap, Platform};
 use crate::pane::{Direction, Rect, Tab};
+use crate::replay::{self, ReplayOrder};
 use crate::session::{Session, SessionState};
 use crate::surfaces::Surfaces;
 use crate::title;
@@ -682,6 +683,200 @@ fn diff_vectors() -> Value {
     file("SmoothFlow-Client-Spec §14 Diff viewer", &cases)
 }
 
+/// One step of a `replay.json` script, written as the vector shows it: data
+/// is text, so the files stay readable; clients feed its UTF-8 bytes.
+enum Step {
+    Attach,
+    Output(u64, &'static str),
+    Replay(u64, Option<(u32, u32)>, &'static str),
+}
+
+/// The `replay.json` scripts: name, `expect_replay`, `max_pending_bytes`, steps.
+/// Every replay in them is 80×24.
+#[allow(
+    clippy::type_complexity,
+    clippy::too_many_lines,
+    reason = "a table of vector scripts: one row per case, and naming the tuple buys nothing"
+)]
+fn replay_scripts() -> Vec<(&'static str, bool, usize, Vec<Step>)> {
+    use Step::{Attach, Output, Replay};
+    vec![
+        (
+            "attach, replay, then newer output",
+            true,
+            1024,
+            vec![Replay(5, None, "S"), Output(6, "a"), Output(7, "b")],
+        ),
+        (
+            "outputs before the replay are held; the covered ones drop",
+            true,
+            1024,
+            vec![
+                Output(4, "old"),
+                Output(5, "covered"),
+                Output(6, "new"),
+                Replay(5, None, "S"),
+                Output(7, "next"),
+            ],
+        ),
+        (
+            "output at or below the replay's seq drops",
+            true,
+            1024,
+            vec![Replay(9, None, "S"), Output(9, "x"), Output(3, "y"), Output(10, "z")],
+        ),
+        (
+            "a later replay resets again, even with a lower seq",
+            true,
+            1024,
+            vec![Replay(50, None, "A"), Output(51, "a"), Replay(2, None, "B"), Output(3, "b")],
+        ),
+        (
+            "lag resync mid-stream: the replay replaces the screen",
+            true,
+            1024,
+            vec![
+                Replay(1, None, "A"),
+                Output(2, "a"),
+                Output(3, "b"),
+                Replay(40, None, "B"),
+                Output(39, "late"),
+                Output(41, "c"),
+            ],
+        ),
+        (
+            "a chunked replay renders only when complete",
+            true,
+            1024,
+            vec![
+                Replay(7, Some((0, 3)), "AB"),
+                Output(8, "x"),
+                Replay(7, Some((1, 3)), "CD"),
+                Replay(7, Some((2, 3)), "E"),
+                Output(9, "y"),
+            ],
+        ),
+        (
+            "a new part 0 discards an incomplete replay",
+            true,
+            1024,
+            vec![Replay(7, Some((0, 2)), "old"), Replay(9, Some((0, 2)), "N"), Replay(9, Some((1, 2)), "EW")],
+        ),
+        (
+            "a missing part resyncs; re-attach waits for a new replay",
+            true,
+            1024,
+            vec![
+                Replay(7, Some((0, 3)), "A"),
+                Replay(7, Some((2, 3)), "C"),
+                Output(8, "x"),
+                Attach,
+                Replay(8, None, "S"),
+                Output(9, "y"),
+            ],
+        ),
+        (
+            "a part from another replay is a gap",
+            true,
+            1024,
+            vec![Replay(7, Some((0, 2)), "A"), Replay(8, Some((1, 2)), "B")],
+        ),
+        ("part beyond parts is malformed", true, 1024, vec![Replay(7, Some((3, 3)), "A")]),
+        ("zero parts is malformed", true, 1024, vec![Replay(7, Some((0, 0)), "A")]),
+        (
+            "relay-split chunks share a seq and all apply",
+            true,
+            1024,
+            vec![Replay(1, None, ""), Output(4, "a"), Output(4, "b"), Output(4, "c")],
+        ),
+        (
+            "an empty replay (tmux host) resets, then output streams",
+            true,
+            1024,
+            vec![Replay(0, None, ""), Output(1, "redraw")],
+        ),
+        (
+            "an old engine sends no replay: arrival order",
+            false,
+            1024,
+            vec![Output(3, "a"), Output(1, "b"), Replay(5, None, "S"), Output(5, "x"), Output(6, "y")],
+        ),
+        (
+            "too much held output resyncs",
+            true,
+            4,
+            vec![Output(1, "abc"), Output(2, "de"), Attach, Replay(2, None, "S"), Output(3, "f")],
+        ),
+        (
+            "re-attach forgets the baseline",
+            true,
+            1024,
+            vec![Replay(5, None, "S"), Attach, Output(6, "a"), Replay(6, None, "T"), Output(7, "b")],
+        ),
+    ]
+}
+
+/// `replay.json`: which terminal bytes a client applies around `flow.replay`.
+/// Every replay in the scripts is 80×24.
+fn replay_vectors() -> Value {
+    use Step::{Attach, Output, Replay};
+    let scripts = replay_scripts();
+    let text = |d: &[u8]| String::from_utf8_lossy(d).into_owned();
+    let mut cases = Vec::new();
+    for (name, expect_replay, max_pending_bytes, steps) in scripts {
+        let mut o = ReplayOrder::new(expect_replay, max_pending_bytes);
+        let mut frames = Vec::new();
+        let mut actions = Vec::new();
+        for step in steps {
+            let (frame, did) = match step {
+                Attach => {
+                    o.on_attach();
+                    (json!({ "type": "attach" }), Vec::new())
+                }
+                Output(seq, data) => (
+                    json!({ "type": "flow.output", "seq": seq, "data": data }),
+                    o.on_frame(replay::Frame::Output {
+                        seq,
+                        data: data.as_bytes().to_vec(),
+                    }),
+                ),
+                Replay(seq, chunk, data) => {
+                    let mut f = json!({ "type": "flow.replay", "seq": seq, "cols": 80, "rows": 24, "data": data });
+                    if let Some((part, parts)) = chunk {
+                        f["part"] = json!(part);
+                        f["parts"] = json!(parts);
+                    }
+                    let did = o.on_frame(replay::Frame::Replay {
+                        seq,
+                        cols: 80,
+                        rows: 24,
+                        part: chunk.map(|c| c.0),
+                        parts: chunk.map(|c| c.1),
+                        data: data.as_bytes().to_vec(),
+                    });
+                    (f, did)
+                }
+            };
+            frames.push(frame);
+            actions.push(
+                did.iter()
+                    .map(|a| match a {
+                        replay::Action::Reset { cols, rows } => json!({ "op": "reset", "cols": cols, "rows": rows }),
+                        replay::Action::Write { data } => json!({ "op": "write", "data": text(data) }),
+                        replay::Action::Resync { reason } => json!({ "op": "resync", "reason": reason }),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        cases.push(case(
+            name,
+            json!({ "expect_replay": expect_replay, "max_pending_bytes": max_pending_bytes, "frames": frames }),
+            json!({ "actions": actions, "baseline": o.baseline(), "waiting": o.is_waiting() }),
+        ));
+    }
+    file("SmoothFlow-Client-Spec §10 replay ordering", &cases)
+}
+
 /// Every vector file, by name.
 #[must_use]
 pub fn all() -> Vec<(&'static str, Value)> {
@@ -697,6 +892,7 @@ pub fn all() -> Vec<(&'static str, Value)> {
         ("attention.json", attention_vectors()),
         ("surfaces.json", surfaces_vectors()),
         ("diff.json", diff_vectors()),
+        ("replay.json", replay_vectors()),
     ]
 }
 

@@ -51,6 +51,7 @@ Normative words: **must**, **should**, **may**.
     - `state`: one of `starting | working | idle | needs_you | limited | done | dead`
     - `attention`: `{reason, detail, request_id, resume_at}`
     - `unread`, `exit_code`, `state_source` (`hooks | native | inferred`)
+    - `host`: `pty | tmux` (absent from older engines, meaning `tmux`; th-c61966). Only the terminal-query rule (§10) reads it.
     - `done` and `dead` are terminal.
 - **Attention reasons:** `permission` and `question` (approvable only when they
   carry a `request_id`), `usage_limit` (with `resume_at`), `crashed`, `held`, `unknown`.
@@ -225,10 +226,51 @@ control.
   launchd/Finder launch has no `LANG`, which turned every Nerd Font glyph into
   `_`. Bundle a Nerd Font, and the default theme is Catppuccin Mocha, from
   Ghostty theme files.
-- Attach sends `flow.attach{cols,rows}`. Output is `flow.output{seq,data_b64}`,
-  bytes written to the terminal in `seq` order. Input is `flow.input{data_b64}`
-  (keyboard and mouse encodings, bracketed paste). Resize sends `flow.resize`.
-  A late joiner gets a full redraw from the engine.
+- Attach sends `flow.attach{cols,rows,replay:true}`. Output is
+  `flow.output{seq,data_b64}`. Input is `flow.input{data_b64}` (keyboard and
+  mouse encodings, bracketed paste). Resize sends `flow.resize`.
+- **Replay** ([SmoothFlow.md § Replay](SmoothFlow.md#replay), th-c61966). An
+  engine that advertises `replay` in `flow.hello.capabilities` opens every
+  attach with `flow.replay{cols,rows,seq,data_b64}`: a VT snapshot, history
+  included, current through `seq`. A client must:
+    - **Wait for it.** While a replay is expected (the engine advertised it and
+      the client attached with `replay: true`) and hasn't arrived, buffer
+      `flow.output`. Bound the buffer; on overflow, re-attach.
+    - **Reset, then apply.** On a complete replay, replace the terminal with a
+      fresh one at the replay's `cols`×`rows`: screen, history, modes,
+      selection and scroll position all go. Feed the replay's bytes, then the
+      buffered outputs whose `seq` is greater than the replay's, in arrival
+      order. Drop the rest.
+    - **Drop stale output.** After that, drop every `flow.output` whose `seq` is
+      ≤ the latest replay's and apply the others in arrival order. Never
+      compare two outputs' `seq`s: the relay's chunks of one run share a
+      `seq`, and all of them apply.
+    - **Let the latest replay win.** A later replay (after a lag, a resize, a
+      relaunch, or a re-attach) resets again, even when its `seq` is lower
+      than the previous one's.
+    - **Never render a partial replay.** A chunked replay (`part`, `parts`)
+      applies only once every part has arrived in order. A new `part: 0`
+      discards an incomplete one. A gap or a malformed part means re-send
+      `flow.attach` and wait again.
+    - **Accept the empty replay.** A tmux-host session answers with an empty
+      replay, and the engine then forces tmux to redraw; reset, and the
+      redraw that follows draws the screen. A snapshot too big for its budget
+      can also come back empty: show the blank screen and keep streaming.
+    - **Don't reflow from memory.** Every resize is followed by a fresh
+      replay at the new size, and the snapshot keeps rows as laid out. What
+      the terminal shows after a resize is that replay.
+    - **Don't answer terminal queries on a `pty` session.** For a session whose
+      `host` is `pty`, discard the replies your terminal generates to DA,
+      DSR and similar queries, and never send them as `flow.input`: the
+      session host already answered, and a second answer reaches the program
+      as stray input. SmoothFlow Desktop and the phones answer them today;
+      they must stop for `pty` sessions. `tmux` sessions, and rows with no
+      `host`, keep today's behaviour.
+    - Against an engine without the capability, expect no replay: apply
+      output in arrival order, as before. A `flow.replay` that arrives anyway
+      is honoured.
+    - The shared logic is `smooth_flow_client::replay::ReplayOrder`; every
+      client replays `spec/vectors/replay.json`.
 - **Scrollback**, following Ghostty's rules:
     - The wheel or trackpad scrolls the history. It sends the program mouse
       reports instead when the program asked for them (1000/1002/1003: vim,
@@ -241,10 +283,12 @@ control.
     - Typing snaps a scrolled-back pane to the live screen. New output leaves
       it where it is (Ghostty's `scroll-to-bottom = keystroke`).
     - A scrolled-back pane shows how far back it is.
-    - Live sessions stream a `tmux attach` client, and tmux draws on the
-      alternate screen. On every client today, the wheel over a live session
-      therefore sends arrow keys, and the client's own history stays empty.
-      The session's real history is in tmux (`history-limit`).
+    - Sessions on the tmux host stream a `tmux attach` client, and tmux draws
+      on the alternate screen. The wheel over one therefore sends arrow keys,
+      and the client's own history stays empty; the session's real history
+      is in tmux (`history-limit`). Sessions on the engine-owned PTY host
+      (ADR-011) stay on the primary screen, and the replay brings their
+      history, so the wheel scrolls it like any local terminal.
 - Faint (SGR 2) draws at reduced alpha, and strikethrough (SGR 9) draws as a
   line, beside bold, italic, underline and inverse.
 - IME, selection and copy, links, scrollback search, and font size zoom.
@@ -272,7 +316,9 @@ control.
       `expandedPath`, `moved`), keymap parsing and conflicts, the harness
       picker's label, default and degraded, fleet grouping and counts, and
       (§14) the Diff viewer's side-by-side pairing, file tree, navigation
-      order, collapsed state, viewed keys, default base and keys.
+      order, collapsed state, viewed keys, default base and keys, and (§10)
+      the replay ordering: which output bytes apply around a `flow.replay`
+      (`replay.json`).
 - **Scenarios.** A shared list of UI scenarios, each run by every client's UI
   test harness against the mock flow server:
     - new session in a picked directory
@@ -283,7 +329,9 @@ control.
     - degraded harness badge
     - the phone's pairing path
 - **Mock server:** `apps/smoothflow/mock` and `smoothflow-mobile/mock` gain a
-  fixture for every new frame or field.
+  fixture for every new frame or field. For replay that means: advertise
+  `replay`, answer a `replay: true` attach with a `flow.replay` (and a chunked
+  one for phones), then sequenced output with a stale `seq` mixed in.
 - **UI tests run in CI only.** They never run on a developer's Mac, where
   macOS UI automation asks for a password.
 
@@ -328,6 +376,13 @@ control.
   commit as the Mac, iOS and Android apps, built from source with Zig on macOS,
   Linux and Windows, and answers DA/DSR queries with `flow.input` as the phones
   do. Every SmoothFlow client now runs Ghostty's terminal.
+
+- 2026-10-03: §10 replay — `flow.replay` opens every attach on an engine that
+  advertises `replay`: reset, apply the snapshot, then only output newer than
+  its `seq`. `seq` is per session, a lag or a resize brings a fresh
+  replay, and phones get it in ≤16 KiB parts that render only once complete.
+  New vector file `replay.json`; the others are unchanged. Spec only so far
+  (th-c61966, epic th-ce4f88); every client implements it in th-cbb0af.
 
 ## 14. Diff
 

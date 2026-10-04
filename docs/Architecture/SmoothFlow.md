@@ -22,6 +22,7 @@ dumb view.
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | Engine crate (store, tmux glue, PTY, supervision)          | `crates/smooth-flow/`                                                                |
 | Session host seam (`SessionHost`, `TmuxHost`)              | `crates/smooth-flow/src/host.rs` — see [host](#session-host)                         |
+| Engine-owned PTY host (`flow-host`) IPC (ADR-011)          | [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md) (specified, th-c61966)      |
 | Daemon transport (`/api/flow/*`, WS, hooks long-poll)      | `crates/smooth-daemon/src/flow_route.rs`                                             |
 | Relay routing of `channel:"flow"` envelopes + phone caps   | `crates/smooth-daemon/src/relay.rs`                                                  |
 | End-to-end encryption + phone pairing (th-d98fde)          | `crates/smooth-daemon/src/flow_e2e.rs`, `flow_pair_route.rs`                         |
@@ -152,7 +153,9 @@ The seam has two uses:
   ([ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md), epic
   th-ce4f88). A per-session `smooth-daemon flow-host` process owns the PTY and a
   headless libghostty-vt, and attach becomes a `flow.replay` snapshot followed
-  by sequenced `flow.output`. Supervision won't change. It is in progress.
+  by sequenced `flow.output` ([Replay](#replay)). The daemon ⇄ host protocol
+  is [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md). Supervision
+  won't change. It is in progress.
 
     Its headless terminal is `crates/smooth-flow-vt` (th-5025fb): a safe
     wrapper around libghostty-vt, built from the same pinned
@@ -227,11 +230,13 @@ real signals).
 
 ## Frames
 
-Engine → clients (broadcast; `flow.output` only to clients that attached
-the id): `flow.hello`, `flow.session`, `flow.session.removed`, `flow.output`,
-`flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`, (v0.1)
-`flow.event`, `flow.handoff`, (th-0f6126) `flow.harnesses`, and (th-26f5b9)
-`flow.diff.changed` — plus the direct replies `flow.diff` and `flow.diff.result`.
+Engine → clients (broadcast; `flow.output` and `flow.replay` only to clients
+that attached the id): `flow.hello`, `flow.session`, `flow.session.removed`,
+`flow.output`, `flow.screen`, `flow.attention`, `flow.fanout`, `flow.error`,
+(v0.1) `flow.event`, `flow.handoff`, (th-0f6126) `flow.harnesses`,
+(th-26f5b9) `flow.diff.changed` — plus the direct replies `flow.diff` and
+`flow.diff.result` — and (th-c61966) `flow.replay`, see
+[Replay](#replay).
 
 Clients → engine: `flow.attach`, `flow.detach`, `flow.input`, `flow.resize`,
 `flow.snapshot`, `flow.new`, `flow.send`, `flow.approve`, `flow.kill`,
@@ -244,6 +249,173 @@ Field-level shapes are the types in `crates/smooth-flow/src/protocol.rs`
 (`ClientFrame`, `ServerFrame`), which the round-trip tests pin. One additive
 field: `flow.fanout.new` accepts `project` (the main checkout to fan out from;
 defaults to the daemon's workspace).
+
+## Replay and per-session `seq` (th-c61966) {#replay}
+
+> Specified for the engine-owned PTY host
+> ([ADR-011](../Decisions/ADR-011-smoothflow-engine-owned-ptys.md); the
+> daemon ⇄ host protocol is [SmoothFlow-Session-Host.md](SmoothFlow-Session-Host.md)).
+> Additive: nothing here changes what an old client or an old engine does.
+
+A client attaching to a session gets a **snapshot of the terminal** followed
+by **sequenced live bytes**, instead of tmux's redraw. The snapshot carries
+the session's scrollback, so client-side scrollback works.
+
+### The frame
+
+```json
+{
+    "channel": "flow",
+    "type": "flow.replay",
+    "id": "fs-1a2b3c4d",
+    "cols": 120,
+    "rows": 40,
+    "seq": 812,
+    "data_b64": "G1s/MTA0OWgb…",
+    "reason": "attach",
+    "part": 0,
+    "parts": 1
+}
+```
+
+- `data_b64` is a VT byte stream (libghostty-vt's formatter output: screen,
+  history, cursor, SGR, modes, scrolling region, charsets, keyboard modes)
+  that rebuilds the session's terminal when fed to a **fresh** terminal of
+  `cols`×`rows`. It is current through output `seq`: it contains the effect
+  of every `flow.output` with `seq` ≤ this one and none after.
+- It is bounded by a byte budget, and degrades in this order
+  (`smooth_flow_vt::Fidelity`): everything (screen and all history); else the
+  full screen plus the newest history rows that fit; else the visible
+  screen's plain text and cursor (no colours, no modes); else nothing. An
+  empty replay is still a reset, so the client shows a blank screen, never a
+  corrupt one, and the live stream carries on from there.
+- On the alternate screen the replay also carries the primary screen and its
+  history (cached when the TUI came up), so leaving the TUI shows them. The
+  alt screen gets the budget first and the cached primary the rest, by the
+  same order.
+- Rows go out as laid out: soft wraps are not rejoined. A client never
+  reflows old wraps itself, because every resize is followed by a fresh
+  replay at the new size.
+- `data_b64` may be empty. That is still a replay: reset, and what follows
+  draws the screen (a tmux-host session, or a snapshot where nothing fit).
+- `reason` is `attach`, `lag`, `resize` or `host` (the session moved to a new
+  host process, e.g. Kill & Resume). It is informative; clients treat every
+  replay the same.
+- `part` / `parts` are present only on a chunked replay (the relay, below).
+  Absent means part 0 of 1.
+
+### `seq` is per session
+
+`flow.output.seq` is a property of the **session**, not of the connection or
+the bridge:
+
+- On the `pty` host it is the host's output counter. It survives daemon
+  restarts, WS reconnects and relay reconnects, and every client attached to
+  the session sees the same `seq` for the same bytes. A relaunch continues it
+  (`seq_start`).
+- It rises by at least 1 per engine output frame. The relay's coalescer
+  (below) keeps the engine's `seq`: a merged run carries the `seq` of its
+  last engine frame, and the chunks of one run **share** that `seq`. So on
+  the wire a session's `seq` is non-decreasing, and clients never compare one
+  output's `seq` with another's, only with the replay's.
+- On the tmux host `seq` stays what it is today, a counter per bridge.
+
+### Engine rules
+
+1. **On `flow.attach`** from a client that declared `replay: true`, the engine
+   subscribes the client to the session's output first, then takes a
+   snapshot, then sends `flow.replay`. Outputs the snapshot covers may already
+   be queued on either side of it; the client sorts that out by `seq`.
+2. **On lag.** When a WS subscriber falls behind the broadcast
+   (`RecvError::Lagged`, today a silent drop), the engine sends that
+   subscriber a fresh `flow.replay` (`reason: "lag"`) for every session it has
+   attached, before any further output. The host's `overrun` does the same
+   for every attached client.
+3. **On every resize.** Every `flow.resize`, and every `flow.attach` that sets
+   the session's size, is followed by a `flow.replay` at the new size to
+   **every** client attached to the session (one geometry per session, latest
+   wins, as now). Resizes within 50 ms coalesce into one replay. The snapshot
+   keeps rows as laid out, so this replay, not the client's own reflow, is
+   what the client ends up showing.
+4. **On a new host** (Kill & Resume, crash resume), every attached client gets
+   `flow.replay{reason:"host"}`.
+5. **Legacy attaches.** A `flow.attach` without `replay: true` gets the same
+   snapshot as an ordinary `flow.output` with `seq` = the snapshot's and
+   `ESC c ESC[3J` (reset, clear history) before the snapshot bytes. An old
+   client therefore sees the screen on a `pty` session and still works.
+6. **tmux-host sessions** get an empty `flow.replay` on a `replay: true`
+   attach, and the engine then **forces a full redraw** on the bridge's tmux
+   client (`tmux refresh-client -t <that client>`), so the client always ends
+   with the current screen. This matters when the attach joins an existing
+   bridge (a second client, a relay reconnect): with no redraw, the reset
+   would leave it blank until the pane next changed. The replay's `seq` is
+   the bridge's last `seq` before the refresh is requested, so the redraw
+   arrives as newer output. The client's logic is the same for both hosts.
+7. **Terminal queries are answered by the host.** On the `pty` host the
+   session's headless VT answers device-attribute and status queries (DA,
+   DSR, …): the host writes `Vt::take_replies` back to the PTY. Clients
+   therefore must not answer them too (see Client rules).
+
+### Client rules
+
+Normative text, and the shared logic every client replays, are in the
+[Client Spec §10](SmoothFlow-Client-Spec.md#10-terminal-requirements-all-clients)
+and `spec/vectors/replay.json`. In short:
+
+- Expect a replay when `flow.hello.capabilities` contains `"replay"` and you
+  attached with `replay: true`. Until it arrives, **buffer** output.
+- On a complete replay: reset to a fresh `cols`×`rows` terminal (screen,
+  history, modes, selection, scroll position), feed the data, then apply the
+  buffered outputs whose `seq` is greater than the replay's, dropping the
+  rest.
+- After that, drop any output whose `seq` ≤ the latest replay's and apply the
+  others in arrival order. The **latest** replay is always the baseline, even
+  if its `seq` is lower than the one before it.
+- **Never render a partial replay.** A gap in `part` (or a malformed one)
+  means re-send `flow.attach` and wait for a new replay.
+- **Don't answer terminal queries on a `pty` session.** A client's terminal
+  generates replies to DA/DSR and similar queries in the output it parses.
+  For a session whose `host` is `pty`, the client must discard them and never
+  send them as `flow.input`; the host has already answered, and a second
+  answer reaches the program as stray input. For `tmux` sessions (and rows
+  without `host`, from older engines) clients keep today's behaviour.
+
+### Capability
+
+- `flow.session` gains `host`: `"pty"` or `"tmux"` (absent from older
+  engines, which means tmux). It is the row's `host` column (ADR-011
+  §Migration) and decides the query rule above.
+- `flow.hello` gains `capabilities: ["replay"]` (an array of strings; absent
+  on older engines, which means none). A client that sees no `replay` keeps
+  today's behaviour: apply outputs in arrival order and expect no replay.
+- `flow.attach` gains `replay: true` (default `false`) and an optional
+  `replay_max_bytes` (the client's budget for one replay; the engine clamps it
+  to 64 KiB … 4 MiB, default 1 MiB).
+- A client must still accept a `flow.replay` it didn't ask for, and must
+  ignore one for a session it hasn't attached.
+
+### Relay (phones)
+
+- The relay bridge sets `replay_max_bytes` to at most **256 KiB** on a phone's
+  `flow.attach` before it reaches the engine.
+- The phone-side `OutputCoalescer` keeps the engine `seq` (it no longer
+  numbers frames itself; see above).
+- A `flow.replay` larger than 16 KiB of data is split into parts of at most
+  16 KiB each: identical frames except `data_b64`, with `part` = 0 … `parts`−1
+  and `parts` the total. The coalescer first **discards** any output it is
+  holding for that session (all of it is covered by the replay), then sends
+  every part, in order and back to back (not paced by the 30 fps tick), and
+  sends no output for that session between parts. Each part is sealed as an
+  ordinary end-to-end encrypted data frame.
+- A phone buffers parts until it has all of them; a new `part: 0` discards an
+  incomplete set. It renders nothing from a partial replay.
+
+### Snapshot vs replay
+
+`flow.screen` (the reply to `flow.snapshot`) stays what it is: plain text of
+the visible screen for thumbnails, the fleet list and Big Smooth's tools. It
+never feeds a terminal. On the `pty` host it comes from the host's `screen`
+query instead of `capture-pane`.
 
 ## v0.1 additions (th-d33afa) — what the phones needed
 

@@ -18,6 +18,7 @@ pub mod gate;
 pub mod harness;
 pub mod keymap;
 pub mod pane;
+pub mod replay;
 pub mod session;
 pub mod surfaces;
 pub mod title;
