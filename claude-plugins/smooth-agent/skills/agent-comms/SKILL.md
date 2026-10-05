@@ -23,7 +23,7 @@ foreground poll.
 | identity | `agent_identity` | `th agent claim <name>`                       |
 | presence | `agent_status`   | `th agent status --status working --task "…"` |
 | roster   | `agent_list`     | `th agent list`                               |
-| read     | `mail_inbox`     | `th msg inbox --agent <h>`                    |
+| read     | `mail_inbox`     | `th msg inbox --brief --agent <h>`            |
 | send     | `mail_send`      | `th msg send <to\|all> <body…> --from <h>`    |
 | ack      | `mail_ack`       | `th msg ack <id>… --agent <h>`                |
 

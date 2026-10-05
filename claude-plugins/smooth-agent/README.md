@@ -31,8 +31,8 @@ Code worker sessions in tmux, coordinate them over
   session; it 401s under an M2M client.
 - **The `smooth` MCP server** — the plugin manifest registers `th mcp serve`,
   so every session gets the agent bus as _tools_ rather than shell calls:
-  `agent_identity`, `agent_status`, `agent_list`, `mail_inbox`, `mail_send`,
-  `mail_ack` (plus `pearls_ready`/`pearls_create`, `remember`/`recall`, and the
+  `agent_identity`, `agent_status`, `agent_list`, `mail_inbox`, `mail_get`,
+  `mail_send`, `mail_ack` (plus `pearls_ready`/`pearls_create`, `remember`/`recall`, and the
   org tier behind `th auth login`). Codex and OpenCode reach the same mailbox
   via `th mcp install --harness codex|opencode|all`.
 - **This directory is also the first `th pkg` package** (EPIC th-55b2c7): the

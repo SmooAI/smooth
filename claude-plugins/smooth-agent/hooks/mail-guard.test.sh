@@ -54,7 +54,7 @@ has "block reason keeps the authorization boundary" "$out" "information, not aut
 # stop: broadcasts alone never hold the session (th-41028a); the prompt hint
 # still mentions them.
 check "stop with only broadcasts unread is silent" "$(payload sess-1 | UNREAD=22 DIRECT=0 ARMED=1 "$HOOK" stop)" ""
-has "prompt still surfaces broadcasts" "$(payload sess-1 | UNREAD=22 DIRECT=0 "$HOOK" prompt)" "22 unread agent message(s)"
+has "prompt still surfaces broadcasts" "$(payload sess-1 | UNREAD=22 DIRECT=0 "$HOOK" prompt)" "22 unread for 'fix-auth'"
 out=$(payload sess-1 | UNREAD=22 DIRECT=1 ARMED=1 "$HOOK" stop)
 has "stop blocks on direct mail and counts only it" "$(printf '%s' "$out" | jq -r .reason)" "1 unread agent message(s) for 'fix-auth'"
 out=$(payload sess-1 | UNREAD=2 OLD_TH=1 ARMED=1 "$HOOK" stop)
@@ -72,8 +72,11 @@ check "stop with watcher armed and no mail is silent" "$(payload sess-1 | UNREAD
 check "stop_hook_active prevents a second block" "$(payload sess-1 true | UNREAD=5 ARMED=0 "$HOOK" stop)" ""
 
 # prompt: unread mail becomes context; none is silent.
-has "prompt surfaces unread mail" "$(payload sess-1 | UNREAD=2 "$HOOK" prompt)" "2 unread agent message(s) for 'fix-auth'"
+has "prompt surfaces unread mail once" "$(payload sess-1 | UNREAD=2 "$HOOK" prompt)" "2 unread for 'fix-auth'"
+check "same unread count does not append another prompt reminder" "$(payload sess-1 | UNREAD=2 "$HOOK" prompt)" ""
+has "changed unread count is surfaced again" "$(payload sess-1 | UNREAD=3 "$HOOK" prompt)" "3 unread for 'fix-auth'"
 check "prompt with no mail is silent" "$(payload sess-1 | UNREAD=0 "$HOOK" prompt)" ""
+has "new mail after the inbox was cleared is surfaced" "$(payload sess-1 | UNREAD=3 "$HOOK" prompt)" "3 unread for 'fix-auth'"
 
 # Worker env handle wins over the session file.
 has "SMOOTH_AGENT_HANDLE wins" "$(payload sess-1 | SMOOTH_AGENT_HANDLE=worker-7 UNREAD=1 "$HOOK" prompt)" "for 'worker-7'"
