@@ -1507,6 +1507,14 @@ fn handle_input_mode(
                                     .conversation_id()
                                     .or(conversation_id)
                                     .ok_or_else(|| anyhow::anyhow!("daemon did not provide a conversation id"))?;
+                                let caps = client.capabilities().await;
+                                if !caps.has(smooth_policy::daemon::CAP_SESSION_WORKSPACES) {
+                                    let owner = smooth_policy::daemon::owner();
+                                    anyhow::bail!(
+                                        "{}",
+                                        smooth_policy::daemon::missing_capability_message(&caps, smooth_policy::daemon::CAP_SESSION_WORKSPACES, &owner)
+                                    );
+                                }
                                 let user_path = std::env::var("PATH").unwrap_or_default();
                                 client.open_workspace(&cid, &path.to_string_lossy(), true, &user_path).await?;
                                 Ok::<_, anyhow::Error>(cid)
@@ -1928,6 +1936,49 @@ fn read_hook_token(path: &std::path::Path) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// Register the launch directory as this conversation's workspace, if the
+/// daemon supports per-session workspaces (ADR-012). A daemon without the
+/// `session.workspaces` capability (the Big Smooth app's bundled daemon can be
+/// older than `th`) gets a one-time warning naming the version that adds it,
+/// and the turn carries on in the daemon's own workspace.
+async fn register_launch_workspace(
+    client: &crate::client::BigSmoothClient,
+    conversation_id: &str,
+    launch_dir: &std::path::Path,
+    state: &Arc<Mutex<AppState>>,
+) -> anyhow::Result<()> {
+    use smooth_policy::daemon::CAP_SESSION_WORKSPACES;
+
+    let caps = client.capabilities().await;
+    let supported = caps.has(CAP_SESSION_WORKSPACES);
+    {
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+        if !supported && !s.workspace_capability_warned {
+            s.workspace_capability_warned = true;
+            s.add_message(ChatMessage::system(missing_workspaces_message(&caps, launch_dir)));
+        }
+        s.daemon_caps = Some(caps);
+    }
+    if supported {
+        let user_path = std::env::var("PATH").unwrap_or_default();
+        client
+            .open_workspace(conversation_id, &launch_dir.to_string_lossy(), false, &user_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Could not open the th code launch directory as a workspace: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The warning for a daemon without per-session workspaces.
+fn missing_workspaces_message(caps: &smooth_policy::daemon::DaemonCapabilities, launch_dir: &std::path::Path) -> String {
+    let owner = smooth_policy::daemon::owner();
+    format!(
+        "⚠ {} Until then, file tools use the daemon's own workspace, which may not include {}.",
+        smooth_policy::daemon::missing_capability_message(caps, smooth_policy::daemon::CAP_SESSION_WORKSPACES, &owner),
+        launch_dir.display()
+    )
+}
+
 /// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
 /// execution happens in the daemon (as the user, unless its opt-in
@@ -1964,13 +2015,7 @@ async fn run_agent_streaming(
         .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
     // Remember whatever the server bound us to, so the next turn resumes it.
     if let Some(cid) = client.conversation_id() {
-        let user_path = std::env::var("PATH").unwrap_or_default();
-        client
-            .open_workspace(&cid, &launch_dir.to_string_lossy(), false, &user_path)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("Could not open the th code launch directory as a workspace: {e}. Update/restart Big Smooth with `th up`, then retry.")
-            })?;
+        register_launch_workspace(&client, &cid, &launch_dir, &state).await?;
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.conversation_id = Some(cid);
     }

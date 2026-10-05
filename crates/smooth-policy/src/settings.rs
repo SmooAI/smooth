@@ -148,6 +148,18 @@ pub const REGISTRY: &[SettingDef] = &[
         component: "daemon",
         apply: Apply::RestartBigSmooth,
     },
+    // ADR-012: with Big Smooth.app installed, `th` defers to the app's daemon
+    // (launching the app if needed). This lets a headless or dev setup run its own.
+    SettingDef {
+        key: "daemon.prefer_own",
+        kind: Kind::Bool,
+        default: Some("false"),
+        default_note: "",
+        env: "SMOOTH_PREFER_OWN_DAEMON",
+        description: "Let `th up` / `th code` start their own daemon even when Big Smooth.app is installed (headless or dev setups)",
+        component: "th",
+        apply: Apply::Immediate,
+    },
     SettingDef {
         key: "egress.allowlist",
         kind: Kind::List,

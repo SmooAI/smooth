@@ -1519,6 +1519,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // faces can show a real name at idle instead of "unknown"
                 // (pearl th-7630a7). Name only; credentials never leave.
                 .merge(crate::mode_route::mode_router())
+                // GET /api/capabilities — version + capability names, so faces
+                // feature-detect instead of assuming a lockstep release (the
+                // app bundles its daemon on its own cadence; ADR-012).
+                .merge(crate::capabilities_route::capabilities_router())
                 // GET /api/llm/provider — does this daemon have model creds, and
                 // if not, the two ways to get some (th-473294). `th harness add
                 // --agentic` asks before driving a turn. Name + host only.

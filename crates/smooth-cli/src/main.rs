@@ -2352,6 +2352,49 @@ fn advertised_daemon_addr() -> Option<(String, u16)> {
     Some((addr, port))
 }
 
+/// `th up` when Big Smooth.app owns the daemon (ADR-012): launch the app if
+/// it isn't running, then wait for its daemon to advertise itself.
+async fn up_via_app(bundle: &std::path::Path, running: bool) -> Result<()> {
+    println!();
+    if running {
+        println!(
+            "  {} Big Smooth.app owns the daemon on this Mac and is running. Waiting for its daemon…",
+            "●".cyan()
+        );
+    } else {
+        println!("  {} Big Smooth.app owns the daemon on this Mac. Launching it…", "●".cyan());
+        smooth_policy::daemon::launch_app(bundle).with_context(|| format!("launching {}", bundle.display()))?;
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        if let Some((addr, port)) = advertised_daemon_addr() {
+            if daemon_health::probe(port).await.is_up() {
+                println!();
+                println!(
+                    "  {} {} {}",
+                    "●".green(),
+                    gradient::smooth(),
+                    format!("is running in Big Smooth.app at {addr}").green()
+                );
+                println!();
+                println!("    {}  {}", "Web UI".dimmed(), format!("http://{addr}").cyan().bold());
+                println!("    {}  {}", "Stop  ".dimmed(), "quit the Big Smooth app".dimmed());
+                println!(
+                    "    {}  {}",
+                    "Own   ".dimmed(),
+                    "th settings set daemon.prefer_own true  (run th's own daemon instead)".dimmed()
+                );
+                println!();
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    anyhow::bail!(
+        "Big Smooth.app's daemon did not come up within 30 seconds. Open the app and check its menu, or run `th settings set daemon.prefer_own true` to let th run its own daemon."
+    )
+}
+
 async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
@@ -2427,6 +2470,13 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
                 println!();
                 return Ok(());
             }
+        }
+        // ADR-012: with Big Smooth.app installed, the app owns this machine's
+        // daemon. Launch it instead of starting a CLI daemon that would take
+        // the single-instance lock and lose the app's TCC grants.
+        // `daemon.prefer_own` (or SMOOTH_ALLOW_SECOND_DAEMON) opts out.
+        if let smooth_policy::daemon::DaemonOwner::App { bundle, running } = smooth_policy::daemon::owner() {
+            return up_via_app(&bundle, running).await;
         }
         // Check if already running
         let pid_path = pid_file_path();

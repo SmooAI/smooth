@@ -31,6 +31,7 @@
 
 pub mod add_harness;
 pub mod auth_login;
+pub mod capabilities_route;
 pub mod ci_queue_route;
 pub mod cloud_memory;
 pub mod config;
