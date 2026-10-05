@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.72.0
+
+### Minor Changes
+
+- dba013c: Bound agent-mail previews in harness inboxes and background watchers, with explicit full-message retrieval on demand.
+
 ## 0.71.1
 
 ### Patch Changes
