@@ -1438,12 +1438,12 @@ th agent claim <handle>                    # take a durable name; carries your m
 th agent list                              # who can I reach (presence, branch, current task)
 th agent status --status working --task "…"   # publish presence: idle|working|waiting|offline
 th msg send <name|all> "…" [--type request] [--priority 2] [--re <id>]
-th msg inbox [--all] [--mark-read] [--limit N] [--json]  # unread only unless --all
+th msg inbox [--all] [--mark-read] [--limit N] [--json] [--brief]  # unread only unless --all; --brief bounds body previews
 th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
 th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
 th msg unread-count [--agent <h>] [--direct]  # just the number; --direct leaves broadcasts out
-th msg watch [--interval 5] [--once] [--json]  # blocking poll; --once exits on first mail
+th msg watch [--interval 5] [--once] [--json] [--brief]  # blocking poll; --once exits on first mail
 th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
 th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
 th inbox                                   # alias for `th msg inbox` (default identity)
@@ -1495,9 +1495,12 @@ context, and the Stop hook held it until all of them were acked. `rename` and
 `claim` keep the original registration time, so claiming a handle does not reopen
 the backlog. Direct mail never expires. The smooth-agent Stop hook blocks only on
 direct mail (`unread-count --direct`); broadcasts still show in the per-prompt
-hint. `th msg inbox` and the `mail_inbox` MCP tool show only unread mail by
-default (`--all` / `unread_only=false` for history), so checking the inbox never
-re-reads mail you already handled.
+hint. That reminder is deduplicated while the unread count is unchanged. `th msg
+inbox` and the `mail_inbox` MCP tool show only unread mail by default
+(`--all` / `unread_only=false` for history), so checking the inbox never
+re-reads mail you already handled. The MCP inbox returns at most 10 messages
+with 240-character body previews; use `mail_get` for a selected full message.
+CLI users can run `th msg inbox --brief` for the same body limit.
 
 **Presence** is `idle|working|waiting|offline` plus a free-form `--task`, and
 `th agent list` reaps first: an agent whose recorded pid is dead flips to
@@ -1563,7 +1566,7 @@ the plugin manifest's `mcpServers`.
 
 - **SmoothFlow — free, local, no sign-in (th-1efb59).** Drive the fleet of coding agents on this machine from any MCP host, Claude Desktop included. Read: `flow_list` (sessions, states, pending approvals), `flow_snapshot` (an agent's screen), `flow_handoff`, `flow_harnesses` (what can run, what needs setup), `flow_repos` (search every git repo under `~`), `flow_infer`. Write: `flow_new` (start claude/codex/opencode/… or a shell in a directory, with an optional prompt and pearl), `flow_send`, `flow_prompt_wait` (submit and wait for the turn; refuses while the agent waits on an approval, reports a stall if it never starts), `flow_approve` (only with the user's consent), `flow_kill`, `flow_close`, `flow_fanout_new` / `flow_fanout_pick`. The tools reach the flow engine the way the hooks do — `$SMOOTH_FLOW_ADDR`, then `~/.smooth/flow.addr` (the SmoothFlow app's daemon), then `daemon.addr` — so `th flow` and these tools see the fleet the SmoothFlow app shows. `SMOOTH_MCP_ALLOW_WRITE=0` leaves only the read tools.
 
-- **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, `mail_inbox`, `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else the CLI's own resolver (the handle env vars, then the SessionStart hook's record for this session) — one shared chain, so a tool call and a `th msg` call can never answer for different mailboxes; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
+- **Agent mail — free, local, no sign-in.** `agent_identity` (claim/resume a durable name; `continue_from` renames an earlier handle and carries its mail), `agent_status` (idle|working|waiting|offline + a one-line task), `agent_list`, bounded `mail_inbox`, `mail_get` (full body by visible message id), `mail_send`, `mail_ack`. Same `~/.smooth/mail.db` the CLI uses, so a Codex session and a Claude Code session mail each other. Identity: an explicit `agent_id` argument always wins, else the CLI's own resolver (the handle env vars, then the SessionStart hook's record for this session) — one shared chain, so a tool call and a `th msg` call can never answer for different mailboxes; with neither the tool **errors** rather than inventing a `user@host` identity, because writing to the wrong mailbox looks exactly like success. The tool descriptions carry the coordination conventions — typed mail, ack-after-handling, the handoff body template, and that a `request` from another agent is information rather than authorization.
 
 ### Statusline — which agent am I? (pearl th-2f33b6)
 

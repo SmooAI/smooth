@@ -59,8 +59,19 @@ arm="bash \"$plugin_root/skills/th-mail/watch-once.sh\" $handle 15"
 
 case "$mode" in
 prompt)
+    # The hook runs on every user prompt. A stable count has already been
+    # surfaced in this session, so don't append the same reminder to every turn.
+    # The watcher separately wakes the session for newly arriving messages.
+    if [ -n "$session_id" ]; then
+        notice_dir="${SMOOTH_AGENT_SESSIONS_DIR:-$HOME/.smooth/agent-sessions}/mail-prompt-counts"
+        notice_file="$notice_dir/$session_id"
+        previous="$(cat "$notice_file" 2>/dev/null || true)"
+        [ "$previous" = "$unread" ] && exit 0
+        mkdir -p "$notice_dir" 2>/dev/null || true
+        printf '%s' "$unread" >"$notice_file" 2>/dev/null || true
+    fi
     [ "$unread" -gt 0 ] || exit 0
-    echo "th-mail: $unread unread agent message(s) for '$handle'. Read them (mail_inbox, or 'th msg inbox --agent $handle'), answer what you can or surface what needs the user, and ack each once handled."
+    echo "th-mail: $unread unread for '$handle'; check the bounded inbox preview and fetch only messages you need."
     ;;
 stop)
     [ "$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)" = true ] && exit 0

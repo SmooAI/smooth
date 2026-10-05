@@ -17,8 +17,9 @@ description: Bring this Claude Code session online as a `th` agent and listen fo
 
 1. **Read your handle first:** `th agent whoami` (`--json` to parse). The SessionStart hook already registered you, under a placeholder like `cc-<repo>-<sid4>` unless you were launched with one.
 2. **Claim a task-meaningful handle:** `th agent claim <handle>` — it renames you and carries your mail across. Use `claim`, never `th agent register --name <something-else>`: registering a different name gives this session a _second_ mailbox that nobody watches, which `register` now refuses without `--force`.
-3. **Show current mail** so nothing already waiting is missed:
-   `th msg inbox` (surface any unread to the user)
+3. **Scan current mail** so nothing already waiting is missed:
+   `th msg inbox --brief` (surface bounded previews; fetch only selected full
+   bodies with `th msg thread <id>`)
 4. **Arm the background watcher** — run with `run_in_background: true`:
    `bash "${CLAUDE_PLUGIN_ROOT}/skills/th-mail/watch-once.sh" <handle> 15`
    (args: handle — pass the one from step 1/2, poll-interval-secs; optional 3rd = max lifetime secs, default 24h)
@@ -27,9 +28,10 @@ description: Bring this Claude Code session online as a `th` agent and listen fo
 ### When the watcher background task completes (you get re-invoked)
 
 1. Read the task's output. `[]` **with exit 0** → timed out, just **re-arm** and continue. A **non-zero exit** means the mail store failed (full disk, unreadable `~/.smooth/mail.db`): your mail state is _unknown_, not empty — say so and fix it rather than re-arming into the same failure.
-2. Otherwise, for each message:
-    - **Surface it** concisely: from, type, body, thread id.
-    - **Triage & respond**: answer what you can (`th msg reply <msg-id> --from <handle> --body "..."`, or `th msg send <sender> "..." --from <handle>`); surface and ask when it needs the user's decision. `th msg thread <id>` gets the full conversation.
+2. Otherwise, for each bounded preview:
+    - **Surface it** concisely: from, type, preview, thread id.
+    - **Fetch only what you need**: `th msg thread <id>` gets the full message/thread; MCP users can call `mail_get(message_id)`.
+    - **Triage & respond**: answer what you can (`th msg reply <msg-id> --from <handle> --body "..."`, or `th msg send <sender> "..." --from <handle>`); surface and ask when it needs the user's decision.
 3. **Acknowledge:** `th msg ack --all --agent <handle>` (or `th msg ack <id>…`) so you don't re-raise it. Acks are **per-recipient** — acking a broadcast consumes only your copy, never anyone else's.
 4. **Re-arm** the watcher and **return to your primary task.**
 
@@ -53,5 +55,5 @@ Kill the background watcher task (via the harness's background-task controls), t
 - **`--pull` / `--no-pull` / `--no-push` are dead flags.** They still parse (so old scripts don't break) and print a deprecation note, but they do nothing: the mailbox is machine-local, there is no remote to sync and no write lock to contend for. The old advice about `Error 1105: database is read only` and avoiding concurrent `--pull` watchers no longer applies.
 - **Don't double-arm:** keep exactly one watcher background task alive.
 - **`th msg inbox` vs `th inbox`:** this skill is `th msg` (agent-to-agent mail). `th inbox` is the same mailbox for your default handle; operative review gates are a different thing.
-- **MCP tools do the same thing without shelling out.** If `th mcp install --harness claude-code` has been run (or you're using this plugin's bundled `smooth` MCP server), `agent_identity` / `agent_status` / `agent_list` / `mail_inbox` / `mail_send` / `mail_ack` are available as tools. They hit the same `~/.smooth/mail.db`. Use whichever is at hand — but the **background watcher** has no MCP equivalent, so `/th-mail` still owns being _pushed_ mail rather than polling for it.
+- **MCP tools do the same thing without shelling out.** If `th mcp install --harness claude-code` has been run (or you're using this plugin's bundled `smooth` MCP server), `agent_identity` / `agent_status` / `agent_list` / `mail_inbox` / `mail_get` / `mail_send` / `mail_ack` are available as tools. `mail_inbox` returns at most 10 messages with 240-character previews by default; fetch selected full bodies with `mail_get`. They hit the same `~/.smooth/mail.db`. Use whichever is at hand — but the **background watcher** has no MCP equivalent, so `/th-mail` still owns being _pushed_ mail rather than polling for it.
 - **Cloud sync is optional.** Everything above works with no Smoo account. `th agent backend set cloud` (see `th agent backend status`) moves the mailbox to api.smoo.ai so agents on _different machines_ share it; that one is a paid feature with a 14-day trial. Nothing local depends on it.

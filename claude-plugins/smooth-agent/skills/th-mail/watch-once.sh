@@ -26,7 +26,7 @@ AGENT="${1:-${SMOOTH_AGENT:-}}"
 INTERVAL="${2:-15}"
 MAX="${3:-86400}"
 
-flags=(--once --json --peek --cursor --limit 20 --interval "$INTERVAL")
+flags=(--once --json --brief --peek --cursor --limit 20 --interval "$INTERVAL")
 if [ -n "$AGENT" ]; then
     flags+=(--agent "$AGENT")
 fi

@@ -176,6 +176,9 @@ pub enum MsgCommands {
         limit: usize,
         #[arg(long)]
         json: bool,
+        /// Omit full bodies; show bounded previews (useful for agent context).
+        #[arg(long)]
+        brief: bool,
         /// Deprecated no-op.
         #[arg(long, hide = true)]
         pull: bool,
@@ -233,6 +236,9 @@ pub enum MsgCommands {
         /// Print messages as a JSON array (implies machine consumption).
         #[arg(long)]
         json: bool,
+        /// Omit full bodies; show bounded previews (useful for background agents).
+        #[arg(long)]
+        brief: bool,
         /// Only surface messages from this sender (e.g. another agent you're
         /// coordinating with). Applies in both normal and `--peek` mode.
         #[arg(long)]
@@ -387,7 +393,16 @@ fn deprecated(flag: &str) {
 
 // ── Rendering ──────────────────────────────────────────────────────
 
-fn print_message(m: &MailMessage) {
+const BODY_PREVIEW_CHARS: usize = 240;
+
+fn preview_body(body: &str, max_chars: usize) -> (&str, bool) {
+    match body.char_indices().nth(max_chars) {
+        Some((end, _)) => (&body[..end], true),
+        None => (body, false),
+    }
+}
+
+fn print_message(m: &MailMessage, brief: bool) {
     let when = m.created_at.format("%Y-%m-%d %H:%M").to_string();
     let unread = if m.read_at.is_none() {
         "●".yellow().to_string()
@@ -409,17 +424,44 @@ fn print_message(m: &MailMessage) {
         m.to_agent.green(),
         when.dimmed(),
     );
-    for line in m.body.lines() {
+    let (body, truncated) = if brief {
+        preview_body(&m.body, BODY_PREVIEW_CHARS)
+    } else {
+        (m.body.as_str(), false)
+    };
+    for line in body.lines() {
         println!("    {line}");
+    }
+    if truncated {
+        println!("    … (preview only; fetch full body with `th msg thread {}`)", m.id);
     }
 }
 
-fn print_messages(msgs: &[MailMessage], json: bool) -> Result<()> {
-    if json {
+fn print_messages(msgs: &[MailMessage], json: bool, brief: bool) -> Result<()> {
+    if json && brief {
+        let summaries: Vec<_> = msgs
+            .iter()
+            .map(|m| {
+                let (preview, truncated) = preview_body(&m.body, BODY_PREVIEW_CHARS);
+                serde_json::json!({
+                    "id": m.id,
+                    "from_agent": m.from_agent,
+                    "to_agent": m.to_agent,
+                    "thread_id": m.thread_id,
+                    "kind": m.kind,
+                    "priority": m.priority,
+                    "created_at": m.created_at,
+                    "preview": preview,
+                    "truncated": truncated,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
+    } else if json {
         println!("{}", serde_json::to_string_pretty(msgs)?);
     } else {
         for m in msgs {
-            print_message(m);
+            print_message(m, brief);
         }
     }
     Ok(())
@@ -757,6 +799,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             mark_read,
             limit,
             json,
+            brief,
             pull,
         } => {
             if pull {
@@ -767,12 +810,12 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let unread = !all;
             let msgs = s.inbox(&who, unread, limit).await?;
             if json {
-                print_messages(&msgs, true)?;
+                print_messages(&msgs, true, brief)?;
             } else if msgs.is_empty() {
                 println!("{}", format!("Inbox for {who} is empty{}.", if unread { " (no unread)" } else { "" }).dimmed());
             } else {
                 println!("{}", format!("{} message(s) for {who}:", msgs.len()).bold());
-                print_messages(&msgs, false)?;
+                print_messages(&msgs, false, brief)?;
             }
             if mark_read {
                 for m in &msgs {
@@ -828,13 +871,14 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             };
             let thread = s.thread(m.thread_root()).await?;
             println!("{}", format!("Thread {} ({} message(s)):", m.thread_root(), thread.len()).bold());
-            print_messages(&thread, false)?;
+            print_messages(&thread, false, false)?;
         }
         MsgCommands::Watch {
             agent,
             interval,
             once,
             json,
+            brief,
             from,
             kind,
             peek,
@@ -877,7 +921,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                     let _ = s.touch(&who).await;
                     match s.inbox_since(&who, watermark, from.as_deref(), kind, limit.clamp(1, 200)).await {
                         Ok(msgs) if !msgs.is_empty() => {
-                            print_messages(&msgs, json)?;
+                            print_messages(&msgs, json, brief)?;
                             // Advance the watermark past everything just seen, so
                             // no message is emitted twice — without touching read
                             // state.
@@ -903,7 +947,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                     Ok(msgs) => {
                         let msgs: Vec<MailMessage> = msgs.into_iter().filter(|m| filter(m)).collect();
                         if !msgs.is_empty() {
-                            print_messages(&msgs, json)?;
+                            print_messages(&msgs, json, brief)?;
                             if once {
                                 // Leave the mail UNREAD: the caller decides when it
                                 // has actually been handled (`th msg ack`), so a
@@ -942,6 +986,7 @@ pub async fn cmd_inbox() -> Result<()> {
         mark_read: false,
         limit: 50,
         json: false,
+        brief: false,
         pull: false,
     })
     .await
@@ -1143,6 +1188,7 @@ mod tests {
                 mark_read: false,
                 limit: 50,
                 json: false,
+                brief: false,
                 pull: false,
             })
             .await
@@ -1191,6 +1237,32 @@ mod cli_tests {
 
     fn parse(args: &[&str]) -> TestCli {
         TestCli::try_parse_from(args).expect("parse")
+    }
+
+    #[test]
+    fn brief_preview_is_character_bounded_without_splitting_utf8() {
+        let body = "é".repeat(BODY_PREVIEW_CHARS + 1);
+        let (preview, truncated) = preview_body(&body, BODY_PREVIEW_CHARS);
+        assert!(truncated);
+        assert_eq!(preview.chars().count(), BODY_PREVIEW_CHARS);
+        assert!(preview.is_char_boundary(preview.len()));
+        assert_eq!(preview_body("short", BODY_PREVIEW_CHARS), ("short", false));
+    }
+
+    #[test]
+    fn inbox_and_watcher_accept_brief_mode() {
+        assert!(matches!(
+            parse(&["th", "msg", "inbox", "--brief"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::Inbox { brief: true, .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["th", "msg", "watch", "--once", "--json", "--brief"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::Watch { brief: true, .. }
+            }
+        ));
     }
 
     #[test]
