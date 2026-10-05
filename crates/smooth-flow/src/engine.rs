@@ -4272,7 +4272,12 @@ mod tests {
         let s = done_row(&e, &project, &project, None, Some("th-abc123"));
         let out = e.close(&s.id, true, false, false).unwrap();
         assert_eq!(out.pearl_closed.as_deref(), Some("th-abc123"));
-        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "pearls close th-abc123");
+        // Only the close calls: session creation in concurrently running tests
+        // (`infer::gather` → `pearls prime`) also reads the process-global
+        // `SMOOTH_TH_BIN` without `TH_BIN_LOCK` and can land in this log (th-fe1235).
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        let closes: Vec<&str> = log_text.lines().filter(|l| l.starts_with("pearls close")).collect();
+        assert_eq!(closes, ["pearls close th-abc123"]);
         assert!(e.get(&s.id).unwrap().is_none());
 
         // No pearl on the row: nothing to close, still removed.
