@@ -426,6 +426,9 @@ pub enum Absorbed {
     Now(Vec<String>),
 }
 
+/// One session's held output: each engine frame's `seq` and bytes, in order.
+type HeldRuns = Vec<(u64, Vec<u8>)>;
+
 /// The phone-side throttle. Pure.
 ///
 /// - `flow.output` bytes are held per session between ticks and re-emitted as
@@ -435,9 +438,6 @@ pub enum Absorbed {
 /// - A `flow.replay` goes out at once, split into ≤16 KiB parts
 ///   (`part`/`parts`), after the output it covers (held, `seq` ≤ its) is
 ///   dropped. Held output newer than the replay stays held for the next tick.
-/// One session's held output: each engine frame's `seq` and bytes, in order.
-type HeldRuns = Vec<(u64, Vec<u8>)>;
-
 #[derive(Default)]
 pub struct OutputCoalescer {
     /// Per session, in arrival order.
@@ -788,7 +788,7 @@ fn phone_flow_actions(guard: &mut FlowGuard, frame_text: &str) -> Vec<Action> {
         .into_iter()
         .map(|a| match a {
             Action::ToEngine(text) => Action::ToEngine(cap_phone_replay_budget(text)),
-            other => other,
+            to_phone @ Action::ToPhone(_) => to_phone,
         })
         .collect()
 }
@@ -1845,7 +1845,7 @@ mod tests {
         assert_eq!(c.absorb(&out_frame("fs-1", 9, b"NEW")), Absorbed::Held);
         assert_eq!(c.absorb(&out_frame("fs-2", 3, b"other")), Absorbed::Held);
         // 2.5 parts of distinguishable bytes.
-        let data: Vec<u8> = (0..PHONE_OUTPUT_MAX_BYTES * 5 / 2).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0..PHONE_OUTPUT_MAX_BYTES * 5 / 2).map(|i| u8::try_from(i % 251).unwrap()).collect();
         let Absorbed::Now(parts) = c.absorb(&replay_frame("fs-1", 5, &data)) else {
             panic!("a replay is sent now")
         };

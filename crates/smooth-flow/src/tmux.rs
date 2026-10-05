@@ -524,8 +524,10 @@ pub fn kill_server(socket: &str) {
 }
 
 /// Engine rule 6 (SmoothFlow.md § Replay): make the attach client on `tty`
-/// redraw its whole screen, so the redraw streams out as new output. `tty:
-/// None` refreshes every client of `session`. `Ok(false)` when no client of
+/// redraw its whole screen.
+///
+/// The redraw streams out as new output. `tty: None` refreshes every client
+/// of `session`. `Ok(false)` when no client of
 /// `session` is on that tty yet: one still connecting draws the whole
 /// screen when it lands, which is newer output too.
 ///
