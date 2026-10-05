@@ -411,6 +411,10 @@ impl MailStore {
                  agent      TEXT NOT NULL,
                  read_at    TEXT NOT NULL,
                  PRIMARY KEY (message_id, agent)
+             );
+             CREATE TABLE IF NOT EXISTS mail_watch_offsets (
+                 agent      TEXT PRIMARY KEY,
+                 last_seq   INTEGER NOT NULL DEFAULT 0
              );",
         )
         .context("apply mail schema")?;
@@ -495,6 +499,7 @@ impl MailStore {
         tx.execute("UPDATE messages SET to_agent = ?1 WHERE to_agent = ?2", params![new, old])?;
         tx.execute("UPDATE messages SET from_agent = ?1 WHERE from_agent = ?2", params![new, old])?;
         tx.execute("UPDATE message_reads SET agent = ?1 WHERE agent = ?2", params![new, old])?;
+        tx.execute("UPDATE mail_watch_offsets SET agent = ?1 WHERE agent = ?2", params![new, old])?;
         tx.commit().context("commit rename")?;
         Ok(())
     }
@@ -673,6 +678,32 @@ impl MailStore {
     /// Returns an error if the query fails.
     pub fn max_seq(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM messages", [], |r| r.get(0))?)
+    }
+
+    /// Return the durable watcher position for an agent (zero on first use).
+    ///
+    /// # Errors
+    /// Returns an error if the offset cannot be read or initialized.
+    pub fn watch_offset(&self, agent: &str) -> Result<i64> {
+        let agent = agent.trim();
+        self.conn
+            .execute("INSERT OR IGNORE INTO mail_watch_offsets (agent, last_seq) VALUES (?1, 0)", [agent])?;
+        Ok(self
+            .conn
+            .query_row("SELECT last_seq FROM mail_watch_offsets WHERE agent = ?1", [agent], |r| r.get(0))?)
+    }
+
+    /// Advance an agent's durable watcher position monotonically.
+    ///
+    /// # Errors
+    /// Returns an error if the offset cannot be stored.
+    pub fn advance_watch_offset(&self, agent: &str, seq: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mail_watch_offsets (agent, last_seq) VALUES (?1, ?2)
+             ON CONFLICT(agent) DO UPDATE SET last_seq = MAX(last_seq, excluded.last_seq)",
+            params![agent.trim(), seq],
+        )?;
+        Ok(())
     }
 
     /// Messages sent by `agent`, newest first.
@@ -954,6 +985,22 @@ mod tests {
 
         // Peeking never marks anything read.
         assert_eq!(s.unread_count("me").unwrap(), 4, "inbox_since must not ack");
+    }
+
+    #[test]
+    fn watcher_offset_persists_and_only_moves_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let s = MailStore::open(&path).unwrap();
+        s.register("me", "test", None, dir.path()).unwrap();
+        assert_eq!(s.watch_offset("me").unwrap(), 0);
+        s.advance_watch_offset("me", 17).unwrap();
+        s.advance_watch_offset("me", 9).unwrap();
+        drop(s);
+        let reopened = MailStore::open(&path).unwrap();
+        assert_eq!(reopened.watch_offset("me").unwrap(), 17);
+        reopened.rename("me", "renamed").unwrap();
+        assert_eq!(reopened.watch_offset("renamed").unwrap(), 17);
     }
 
     #[test]

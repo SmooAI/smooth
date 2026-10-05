@@ -211,6 +211,9 @@ pub struct MailInboxArgs {
     /// mail is context you paid for once (th-41028a). Pass false for history.
     #[serde(default)]
     pub unread_only: Option<bool>,
+    /// Maximum number of messages to include (1–50; default 10).
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Arguments for `mail_send`.
@@ -803,7 +806,7 @@ impl SmoothMcp {
     /// MCP error if the handle can't be resolved or the query fails.
     #[tool(
         name = "mail_inbox",
-        description = "Read your unread agent mail (pass unread_only=false for history): messages sent to you plus recent broadcasts, highest priority first. \
+        description = "Read up to 10 unread agent messages by default (set limit up to 50; pass unread_only=false for history): messages sent to you plus recent broadcasts, highest priority first. \
             Check it at natural breakpoints — after finishing a step, before going idle, and before starting something another agent may already own. \
             Reading is NOT acking: call mail_ack once you have actually handled a message, so nothing is lost if you are interrupted.",
         annotations(read_only_hint = true)
@@ -813,13 +816,19 @@ impl SmoothMcp {
         let who = resolve_agent_id(a.agent_id.as_deref())?;
         let store = open_mail_store()?;
         let _ = store.touch(&who); // heartbeat, best-effort
-        let msgs = store.inbox(&who, a.unread_only.unwrap_or(true), 50).map_err(mail_err)?;
+        let limit = a.limit.unwrap_or(10).clamp(1, 50);
+        let mut msgs = store.inbox(&who, a.unread_only.unwrap_or(true), limit + 1).map_err(mail_err)?;
         if msgs.is_empty() {
             return Ok(format!("Inbox for `{who}` is empty."));
         }
+        let has_more = msgs.len() > limit;
+        msgs.truncate(limit);
         let mut out = format!("{} message(s) for `{who}`:\n", msgs.len());
         for m in &msgs {
             let _ = write!(out, "{}", render_message(m));
+        }
+        if has_more {
+            let _ = write!(out, "\nMore messages remain. Handle and acknowledge these, then call mail_inbox again.");
         }
         Ok(out.trim_end().to_string())
     }

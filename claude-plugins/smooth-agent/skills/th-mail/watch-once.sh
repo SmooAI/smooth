@@ -17,15 +17,16 @@
 #                                                state is unknown; it is NOT
 #                                                "no mail" (pearl th-ad0701).
 #
-# It does NOT acknowledge anything: the main agent consumes via
-# `th msg inbox --unread --mark-read` (or `th msg ack`) after surfacing, so
-# nothing is lost if a watcher cycle's output is missed.
+# The saved cursor prevents replaying an already surfaced batch on each re-arm.
+# It does NOT acknowledge anything: the main agent reads and acknowledges via
+# `th msg inbox` / `th msg ack` after handling; messages remain recoverable as
+# unread mail if the watcher output is missed.
 
 AGENT="${1:-${SMOOTH_AGENT:-}}"
 INTERVAL="${2:-15}"
 MAX="${3:-86400}"
 
-flags=(--once --json --interval "$INTERVAL")
+flags=(--once --json --peek --cursor --limit 20 --interval "$INTERVAL")
 if [ -n "$AGENT" ]; then
     flags+=(--agent "$AGENT")
 fi
