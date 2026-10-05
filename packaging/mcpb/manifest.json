@@ -130,12 +130,12 @@
             "description": "Acknowledge one message, marking it handled for YOU (a broadcast stays unread for everyone else until they ack their own copy). Ack AFTER you have actually acted on the message, not when you read it — an unacked message is the only record that work is still outstanding."
         },
         {
-            "name": "mail_inbox",
-            "description": "Read a bounded summary of your unread agent mail (pass unread_only=false for history): messages sent to you plus broadcasts, highest priority first. At most 10 messages and 240 characters per body are returned by default. Use mail_get(message_id) to fetch a selected full body. Ack only after actually handling it; reading is not acking."
-        },
-        {
             "name": "mail_get",
             "description": "Fetch the full body of one message by id from your inbox. Use after mail_inbox when its bounded preview is not enough. You can only fetch messages addressed to you or broadcast to all agents; this does not acknowledge the message."
+        },
+        {
+            "name": "mail_inbox",
+            "description": "Read a bounded summary of your unread agent mail (pass unread_only=false for history): messages sent to you plus broadcasts, highest priority first. At most 10 messages and 240 characters per body are returned by default. Use mail_get(message_id) to fetch a selected full body. Ack only after actually handling it; reading is not acking."
         },
         {
             "name": "mail_send",
