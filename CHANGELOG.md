@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.72.1
+
+### Patch Changes
+
+- 1c03d20: Improve `th code` worktree access, shell PATH inheritance, failure diagnostics, and queued/steered turns. Explain the shell sandbox posture and separate the conversation, composer, and task checklist in the web UI.
+
 ## 0.72.0
 
 ### Minor Changes
