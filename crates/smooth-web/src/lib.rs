@@ -20,7 +20,8 @@ struct WebAssets;
 /// Create the web UI router.
 ///
 /// Serves embedded static files from the Vite build.
-/// Unknown paths fall back to index.html (SPA routing).
+/// Unknown paths fall back to index.html (SPA routing), except `/api/*`,
+/// which gets a JSON 404 (ADR-012).
 pub fn web_router() -> Router {
     web_router_with_token(None)
 }
@@ -47,6 +48,13 @@ pub fn web_router_with_token(token: Option<&str>) -> Router {
 pub(crate) async fn serve_web(State(index): State<Option<Arc<String>>>, uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
 
+    // An API route nothing else matched is a missing route, not a client-side
+    // page. Serving index.html with 200 here made old daemons look like they
+    // had every new endpoint, and `th code` read that as success (ADR-012).
+    if path == "api" || path.starts_with("api/") {
+        return api_not_found(uri.path());
+    }
+
     // Exact asset match first — but route `index.html` itself through the
     // (possibly token-injected) index path below so it never bypasses injection.
     if !path.is_empty() && path != "index.html" {
@@ -61,6 +69,11 @@ pub(crate) async fn serve_web(State(index): State<Option<Arc<String>>>, uri: axu
         Some(html) => Html((*html).clone()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// The JSON 404 for an unknown `/api/*` path.
+fn api_not_found(path: &str) -> Response {
+    (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": "not_found", "path": path }))).into_response()
 }
 
 /// Read `index.html` from the embedded assets and, when `token` is `Some`, inject
@@ -191,6 +204,33 @@ mod tests {
                 "index served at {path} must carry the injected token: {text}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_api_routes_are_a_json_404_not_the_spa() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let app = web_router_with_token(Some("tok"));
+        for (method, path) in [("POST", "/api/session/workspaces"), ("GET", "/api/nope"), ("GET", "/api")] {
+            let req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_eq!(
+                res.headers().get(header::CONTENT_TYPE).map(|v| v.to_str().unwrap()),
+                Some("application/json"),
+                "{method} {path}"
+            );
+            let body = res.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(json["error"], "not_found");
+            assert_eq!(json["path"], path);
+        }
+        // A page whose name merely starts with "api" is still a client route.
+        let res = app.oneshot(Request::builder().uri("/apiary").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]

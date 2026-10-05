@@ -498,16 +498,40 @@ impl BigSmoothClient {
         self.conversation_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Open and select a repository for this conversation. Calling this is the
-    /// user's explicit workspace grant; the daemon keeps the grant scoped to
-    /// this conversation and the normal filesystem tools remain confined to it.
-    pub async fn open_workspace(&self, conversation_id: &str, path: &str, select: bool, user_path: &str) -> anyhow::Result<()> {
-        let mut url = format!("{}/api/session/workspaces", self.url);
+    /// `{base}{path}`, with the local token as a query parameter when there is one.
+    fn api_url(&self, path: &str) -> String {
+        let mut url = format!("{}{path}", self.url);
         if let Some(token) = local_token() {
             url.push_str(&format!("?token={}", percent_encode_token(&token)));
         }
+        url
+    }
+
+    /// What the daemon can do (`GET /api/capabilities`, ADR-012). Never fails:
+    /// a daemon that predates the endpoint (404, or an old SPA fallback serving
+    /// HTML with 200) or one that can't be reached reports no capabilities, so
+    /// every gated feature degrades instead of being assumed.
+    pub async fn capabilities(&self) -> smooth_policy::daemon::DaemonCapabilities {
+        let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() else {
+            return smooth_policy::daemon::DaemonCapabilities::default();
+        };
+        match client.get(self.api_url("/api/capabilities")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => smooth_policy::daemon::DaemonCapabilities::default(),
+        }
+    }
+
+    /// Open and select a repository for this conversation. Calling this is the
+    /// user's explicit workspace grant; the daemon keeps the grant scoped to
+    /// this conversation and the normal filesystem tools remain confined to it.
+    ///
+    /// Check [`Self::capabilities`] for `session.workspaces` first. As a second
+    /// line of defense, a reply that isn't the route's JSON (an old daemon's
+    /// SPA fallback answers any path with HTML and 200) is an error, not a
+    /// success.
+    pub async fn open_workspace(&self, conversation_id: &str, path: &str, select: bool, user_path: &str) -> anyhow::Result<()> {
         let response = reqwest::Client::new()
-            .post(url)
+            .post(self.api_url("/api/session/workspaces"))
             .json(&serde_json::json!({ "session": conversation_id, "path": path, "select": select, "user_path": user_path }))
             .send()
             .await?;
@@ -515,6 +539,13 @@ impl BigSmoothClient {
             let status = response.status();
             let detail = response.text().await.unwrap_or_default();
             anyhow::bail!("could not open workspace (HTTP {status}): {detail}");
+        }
+        let reply: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("the daemon does not support per-session workspaces (its reply was not JSON)"))?;
+        if reply.get("cwd").and_then(serde_json::Value::as_str).is_none() {
+            anyhow::bail!("the daemon does not support per-session workspaces (unexpected reply: {reply})");
         }
         Ok(())
     }
@@ -867,7 +898,7 @@ impl BigSmoothClient {
     }
 
     /// Ensure Big Smooth is running, starting it if needed.
-    async fn ensure_server(&self) -> anyhow::Result<()> {
+    async fn ensure_server(&mut self) -> anyhow::Result<()> {
         // A live socket at the target address IS the readiness signal for an
         // externally-managed engine. The polyglot smooth-operator LocalServers
         // (go/ts/python/dotnet) serve `/ws` but no `/health`, so the HTTP probe
@@ -893,6 +924,32 @@ impl BigSmoothClient {
 
         if client.get(&health_url).send().await.is_ok_and(|r| r.status().is_success()) {
             return Ok(());
+        }
+
+        // ADR-012: with Big Smooth.app installed, the app owns the machine's
+        // daemon. Start the app rather than a competing CLI daemon that would
+        // take the single-instance lock and lose the app's TCC grants. Only
+        // when this client is aimed at the discovered daemon (daemon.addr, or
+        // the default :4400): an explicit SMOOTH_URL or any other address
+        // names a specific server (a bench engine, a remote box, a test).
+        let explicit_url = std::env::var("SMOOTH_URL").is_ok_and(|u| !u.trim().is_empty());
+        let discovered = self.url == crate::headless::daemon_url() || autostart_serves(&self.url);
+        if !explicit_url && discovered {
+            if let smooth_policy::daemon::DaemonOwner::App { bundle, running } = smooth_policy::daemon::owner() {
+                if !running {
+                    tracing::info!(app = %bundle.display(), "Big Smooth app owns the daemon and is not running; launching it (ADR-012)");
+                    smooth_policy::daemon::launch_app(&bundle).map_err(|e| {
+                        anyhow::anyhow!("Big Smooth.app owns the daemon on this Mac but could not be launched ({e}). Open it from Finder, or run `th settings set daemon.prefer_own true` to let th run its own daemon.")
+                    })?;
+                }
+                if let Some(url) = wait_for_advertised_daemon(&client, Duration::from_secs(30)).await {
+                    self.url = url;
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "Big Smooth.app owns the daemon on this Mac, but its daemon did not come up within 30 seconds. Open the app and retry, or run `th settings set daemon.prefer_own true` to let th run its own daemon."
+                );
+            }
         }
 
         // Try to start Big Smooth — only when we are aimed at the port `th up`
@@ -923,6 +980,20 @@ impl BigSmoothClient {
 
         anyhow::bail!("Big Smooth failed to start within 10 seconds")
     }
+}
+
+/// Poll the advertised daemon (`~/.smooth/daemon.addr`, which the app's daemon
+/// rewrites when it starts) until its `/health` answers. Returns its base URL.
+async fn wait_for_advertised_daemon(client: &reqwest::Client, within: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        let url = crate::headless::daemon_url();
+        if client.get(format!("{url}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            return Some(url);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    None
 }
 
 /// Whether `th up` (loopback, port 4400) would satisfy a client aimed at `url`.
@@ -1219,6 +1290,59 @@ mod tests {
         // Trailing slash stripped
         let client2 = BigSmoothClient::new("http://localhost:4400/");
         assert_eq!(client2.url, "http://localhost:4400");
+    }
+
+    /// A loopback HTTP server that answers every request with `response`
+    /// (status line + headers + body). Stands in for daemons of different ages.
+    async fn mock_daemon(response: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0_u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    const SPA_200: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 33\r\nconnection: close\r\n\r\n<!doctype html><html>spa</html>\n\n";
+    const JSON_404: &str =
+        "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: 21\r\nconnection: close\r\n\r\n{\"error\":\"not_found\"}";
+    const CAPS_200: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 58\r\nconnection: close\r\n\r\n{\"version\":\"0.73.0\",\"capabilities\":[\"session.workspaces\"]}";
+
+    /// ADR-012 / th-db89de: a pre-capabilities daemon whose SPA fallback
+    /// answers every path with HTML and 200 must read as "no capabilities",
+    /// and a workspace POST to it must fail, not silently succeed.
+    #[tokio::test]
+    async fn an_old_daemons_spa_fallback_reads_as_no_capabilities() {
+        let client = BigSmoothClient::new(&mock_daemon(SPA_200).await);
+        let caps = client.capabilities().await;
+        assert!(!caps.has(smooth_policy::daemon::CAP_SESSION_WORKSPACES));
+        assert!(caps.version.is_empty(), "no version from an HTML body");
+        let err = client.open_workspace("conv-1", "/tmp", true, "/usr/bin").await.unwrap_err().to_string();
+        assert!(err.contains("does not support per-session workspaces"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_json_404_or_no_daemon_reads_as_no_capabilities() {
+        let client = BigSmoothClient::new(&mock_daemon(JSON_404).await);
+        assert_eq!(client.capabilities().await, smooth_policy::daemon::DaemonCapabilities::default());
+        assert!(client.open_workspace("conv-1", "/tmp", true, "").await.is_err());
+        // Nothing listening on port 1.
+        let gone = BigSmoothClient::new("http://127.0.0.1:1");
+        assert_eq!(gone.capabilities().await, smooth_policy::daemon::DaemonCapabilities::default());
+    }
+
+    #[tokio::test]
+    async fn a_current_daemon_advertises_its_capabilities() {
+        let client = BigSmoothClient::new(&mock_daemon(CAPS_200).await);
+        let caps = client.capabilities().await;
+        assert_eq!(caps.version, "0.73.0");
+        assert!(caps.has(smooth_policy::daemon::CAP_SESSION_WORKSPACES));
     }
 
     /// th-9d4b09: auto-start only when `th up`'s :4400 is what we are aimed at.

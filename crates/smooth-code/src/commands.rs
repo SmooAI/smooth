@@ -265,11 +265,12 @@ fn cmd_quit(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
 #[allow(clippy::unnecessary_wraps)]
 fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let status = format!(
-        "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}\nCLI log: {}\nDaemon log: {}\nTUI debug log: {}\nTool error log: {}",
+        "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}\nDaemon: {}\nCLI log: {}\nDaemon log: {}\nTUI debug log: {}\nTool error log: {}",
         state.model_label(),
         state.total_tokens,
         state.messages.len(),
         state.session_id,
+        daemon_summary(state.daemon_caps.as_ref()),
         dirs_next::home_dir().unwrap_or_default().join(".smooth/log/th.log").display(),
         dirs_next::home_dir().unwrap_or_default().join(".smooth/smooth.log").display(),
         dirs_next::home_dir().unwrap_or_default().join(".smooth/logs/smooth-code.log").display(),
@@ -279,6 +280,15 @@ fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput
             .display(),
     );
     Ok(CommandOutput::Message(status))
+}
+
+/// The `/status` daemon line: version and capabilities (ADR-012).
+fn daemon_summary(caps: Option<&smooth_policy::daemon::DaemonCapabilities>) -> String {
+    match caps {
+        None => "not contacted yet (send a message first)".to_string(),
+        Some(c) if c.capabilities.is_empty() => format!("{} · no capabilities reported", c.version_label()),
+        Some(c) => format!("{} · capabilities: {}", c.version_label(), c.capabilities.join(", ")),
+    }
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -752,6 +762,7 @@ mod tests {
             CommandOutput::Message(msg) => {
                 assert!(msg.contains("Model:"));
                 assert!(msg.contains("Tokens used:"));
+                assert!(msg.contains("Daemon: not contacted yet"), "{msg}");
                 assert!(msg.contains("CLI log: "));
                 assert!(msg.contains(".smooth/log/th.log"));
                 assert!(msg.contains("Daemon log: "));
@@ -763,6 +774,17 @@ mod tests {
             }
             other => panic!("Expected Message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn daemon_summary_reports_version_and_capabilities() {
+        let old = smooth_policy::daemon::DaemonCapabilities::default();
+        assert!(daemon_summary(Some(&old)).contains("predates capability reporting"));
+        assert!(daemon_summary(Some(&old)).contains("no capabilities reported"));
+        let cur = smooth_policy::daemon::DaemonCapabilities::current("0.73.0");
+        let line = daemon_summary(Some(&cur));
+        assert!(line.starts_with("0.73.0 · capabilities: "), "{line}");
+        assert!(line.contains("session.workspaces"), "{line}");
     }
 
     #[test]

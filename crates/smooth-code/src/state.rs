@@ -342,6 +342,12 @@ pub struct AppState {
     /// remember nothing across turns (pearl th-255d2a). Carrying the id here
     /// keeps every turn appending to one conversation.
     pub conversation_id: Option<String>,
+    /// What the connected daemon reported from `GET /api/capabilities`
+    /// (ADR-012). `None` until the first turn connects.
+    pub daemon_caps: Option<smooth_policy::daemon::DaemonCapabilities>,
+    /// Whether this session already said the daemon lacks per-session
+    /// workspaces, so the warning shows once rather than every turn.
+    pub workspace_capability_warned: bool,
     /// Chat message history.
     pub messages: Vec<ChatMessage>,
     /// Number of leading messages that have already been flushed into
@@ -501,6 +507,8 @@ impl AppState {
             session_id: Uuid::new_v4().to_string(),
             session_title: None,
             conversation_id: None,
+            daemon_caps: None,
+            workspace_capability_warned: false,
             messages: Vec::new(),
             committed_count: 0,
             input_scroll: 0,

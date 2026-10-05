@@ -216,20 +216,22 @@ th settings path [--json]
 th settings ai                       # the generated guide, for handing to an agent
 ```
 
-| Key                | Type                                  | Default                  | Legacy env var            | Read by |
-| ------------------ | ------------------------------------- | ------------------------ | ------------------------- | ------- |
-| `auto_mode`        | enum: bypass, accept-edits, ask, deny | `bypass`                 | `SMOOTH_AUTO_MODE`        | daemon  |
-| `cloud_memory`     | bool                                  | `false`                  | `SMOOTH_CLOUD_MEMORY`     | daemon  |
-| `egress.allowlist` | list                                  | unset (no egress proxy)  | `SMOOTH_EGRESS_ALLOWLIST` | daemon  |
-| `fast_mode`        | bool                                  | `false`                  | `SMOOTH_FAST_MODE`        | daemon  |
-| `model`            | string                                | unset (routing decides)  | `SMOOTH_AGENT_MODEL`      | daemon  |
-| `relay.enabled`    | bool                                  | `true`                   | `SMOOTH_RELAY`            | daemon  |
-| `relay.url`        | string                                | `wss://relay.smoo.ai/ws` | `SMOOTH_RELAY_URL`        | daemon  |
-| `sandbox.enabled`  | bool                                  | `false`                  | `SMOOTH_SANDBOX`          | tools   |
-| `tailscale.serve`  | bool                                  | `true`                   | `SMOOTH_TAILSCALE_SERVE`  | daemon  |
+| Key                 | Type                                  | Default                  | Legacy env var             | Read by |
+| ------------------- | ------------------------------------- | ------------------------ | -------------------------- | ------- |
+| `auto_mode`         | enum: bypass, accept-edits, ask, deny | `bypass`                 | `SMOOTH_AUTO_MODE`         | daemon  |
+| `cloud_memory`      | bool                                  | `false`                  | `SMOOTH_CLOUD_MEMORY`      | daemon  |
+| `daemon.prefer_own` | bool                                  | `false`                  | `SMOOTH_PREFER_OWN_DAEMON` | th      |
+| `egress.allowlist`  | list                                  | unset (no egress proxy)  | `SMOOTH_EGRESS_ALLOWLIST`  | daemon  |
+| `fast_mode`         | bool                                  | `false`                  | `SMOOTH_FAST_MODE`         | daemon  |
+| `model`             | string                                | unset (routing decides)  | `SMOOTH_AGENT_MODEL`       | daemon  |
+| `relay.enabled`     | bool                                  | `true`                   | `SMOOTH_RELAY`             | daemon  |
+| `relay.url`         | string                                | `wss://relay.smoo.ai/ws` | `SMOOTH_RELAY_URL`         | daemon  |
+| `sandbox.enabled`   | bool                                  | `false`                  | `SMOOTH_SANDBOX`           | tools   |
+| `tailscale.serve`   | bool                                  | `true`                   | `SMOOTH_TAILSCALE_SERVE`   | daemon  |
 
-Every key today is read when Big Smooth starts, so `set` ends with
-`restart Big Smooth to apply: th down && th up`.
+Every key except `daemon.prefer_own` is read when Big Smooth starts, so `set`
+ends with `restart Big Smooth to apply: th down && th up`. `daemon.prefer_own`
+is read by `th` itself the next time it would start a daemon (see §1e).
 
 The file is plain nested TOML; `set` writes through `toml_edit`, so comments
 and keys this build doesn't know survive, and it is written 0600:
@@ -271,6 +273,51 @@ Rules worth knowing:
   `smooth_policy::settings::raw("x")` (it returns the env-var string shape, so
   the call site's parsing is unchanged), and add a test feeding the call
   site's pure core through `Resolver::new(env, SettingsFile::parse(..))`.
+
+### 1e. Who runs the daemon, and mixed versions (ADR-012)
+
+There is one Big Smooth daemon per machine. Which program provides it depends on
+whether the desktop app is installed. A live daemon at the address in
+`~/.smooth/daemon.addr` is always used, whoever started it. These rules apply
+only when nothing is serving yet:
+
+| Big Smooth.app (`~/Applications` or `/Applications`) | What `th up` / `th code` do                         |
+| ---------------------------------------------------- | --------------------------------------------------- |
+| not installed (Linux, servers, CLI-only Macs)        | start `th`'s own daemon, as before                  |
+| installed and running                                | wait for the app's daemon; never start a second one |
+| installed, not running                               | launch the app (`open`), then use its daemon        |
+| any, with `daemon.prefer_own` set                    | start `th`'s own daemon (headless Macs, dev setups) |
+
+`th settings set daemon.prefer_own true` (or `SMOOTH_PREFER_OWN_DAEMON=1`) opts
+out. `SMOOTH_ALLOW_SECOND_DAEMON=1` implies it. An explicit `SMOOTH_URL` is
+always used as-is. `th up --foreground` and `th daemon` run a daemon in the
+current process regardless.
+
+The app bundles its own daemon and updates on its own schedule, so it can be
+older than `th`. Clients don't assume a matching version. The daemon reports
+what it can do:
+
+```bash
+curl -s http://$(cat ~/.smooth/daemon.addr)/api/capabilities
+# {"version":"0.73.0","capabilities":["session.cwd","session.mode","session.workspaces"]}
+```
+
+`th code` checks this on every turn. When a capability is missing, only that
+feature turns off, and `th code` says which version adds it and where to update:
+from the app menu when the app owns the daemon, `brew upgrade th` when `th`
+does. A daemon older than the endpoint reports no capabilities. `/status` shows
+the daemon's version and capabilities. Unknown `/api/*` routes return a JSON 404
+rather than the web UI.
+
+| Capability           | Gates                                                  | Since  |
+| -------------------- | ------------------------------------------------------ | ------ |
+| `session.cwd`        | `/cd`, `/pwd`                                          | 0.73.0 |
+| `session.mode`       | Plan/Auto toggle (shift+tab)                           | 0.73.0 |
+| `session.workspaces` | launch-repo registration, `/workspace add`, shell PATH | 0.73.0 |
+
+Adding a capability: add it to `smooth_policy::daemon::CAPABILITIES` with the
+version that first ships it, then gate the client feature on
+`DaemonCapabilities::has`.
 
 ---
 

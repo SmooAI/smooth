@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod auth_paths;
 pub mod auto_mode;
+pub mod daemon;
 pub mod ext_trust;
 pub mod family;
 pub mod llm_params;
