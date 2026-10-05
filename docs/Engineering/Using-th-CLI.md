@@ -1697,7 +1697,7 @@ th flow new --kind opencode --prompt "…"                 # opencode --prompt; 
 th flow new --kind codex --prompt "…"                    # codex <prompt>; state is scraped (VIA inferred) until ~/.codex/hooks.json posts hooks
 th flow new --kind th-code --prompt "…"                  # th code in the pane; the prompt is pasted once the TUI is up; VIA native (th code reports its own turns)
 th flow new --kind <name> …                              # any harness manifest — th harness list
-th flow attach <id>                                      # raw-mode stream; Ctrl-\ detaches (session keeps running)
+th flow attach <id>                                      # raw-mode stream (opens with the engine's replay); Ctrl-\ detaches (session keeps running)
 th flow send <id> "also add a regression test"           # steer: bracketed-paste + Enter into the prompt
 th flow inbox                                            # sessions that need you or finished unread
 th flow approve <id> [--decision allow|deny|allow_session] [--request <id>]

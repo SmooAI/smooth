@@ -40,7 +40,12 @@ pub struct PtyAttach {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: WriterSlot,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The next output's `seq`. Starts at 1, so an empty `flow.replay` at
+    /// [`Self::last_seq`] 0 precedes every output of this bridge (engine
+    /// rule 6).
     seq: AtomicU64,
+    /// The PTY's slave tty: the name tmux knows this client by.
+    tty: Option<String>,
     /// Set by the reader thread once the child has exited.
     exited: Arc<AtomicBool>,
     /// Number of flow clients currently attached through this PTY.
@@ -74,11 +79,16 @@ impl PtyAttach {
         let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer: WriterSlot = Arc::new(Mutex::new(Some(pair.master.take_writer().context("take pty writer")?)));
         let exited = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let tty = pair.master.tty_name().map(|p| p.to_string_lossy().into_owned());
+        #[cfg(not(unix))]
+        let tty = None;
         let this = Arc::new(Self {
             master: Mutex::new(pair.master),
             writer: writer.clone(),
             killer: Mutex::new(killer),
-            seq: AtomicU64::new(0),
+            seq: AtomicU64::new(1),
+            tty,
             exited: exited.clone(),
             clients: AtomicU64::new(0),
         });
@@ -142,6 +152,19 @@ impl PtyAttach {
         self.seq.load(Ordering::Relaxed)
     }
 
+    /// The `seq` of the latest output delivered; 0 before any.
+    #[must_use]
+    pub fn last_seq(&self) -> u64 {
+        self.next_seq().saturating_sub(1)
+    }
+
+    /// The tty the attach client runs on (`/dev/ttys012`), which is its
+    /// tmux client name. `None` where the platform can't say.
+    #[must_use]
+    pub fn tty(&self) -> Option<&str> {
+        self.tty.as_deref()
+    }
+
     /// Whether the attach client has exited (the reader thread saw it go).
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -178,12 +201,15 @@ mod tests {
         // PTY geometry reached the child.
         let pty = PtyAttach::spawn(&["sh".into(), "-c".into(), "stty size; cat".into()], 80, 24, on_output).unwrap();
         let mut collected = Vec::new();
+        let mut first = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !String::from_utf8_lossy(&collected).contains("24 80") {
-            if let Ok((_, b)) = rx.recv_timeout(Duration::from_millis(200)) {
+            if let Ok((s, b)) = rx.recv_timeout(Duration::from_millis(200)) {
+                first.get_or_insert(s);
                 collected.extend(b);
             }
         }
+        assert_eq!(first, Some(1), "a bridge's first output is seq 1 (0 is the empty replay's)");
         assert!(String::from_utf8_lossy(&collected).contains("24 80"), "{}", String::from_utf8_lossy(&collected));
         pty.resize(100, 30).unwrap();
         pty.write(b"hello-pty\n").unwrap();
@@ -197,7 +223,9 @@ mod tests {
         }
         assert!(String::from_utf8_lossy(&collected).contains("hello-pty"));
         assert!(seqs.windows(2).all(|w| w[1] > w[0]), "seq is monotonic: {seqs:?}");
-        assert!(pty.next_seq() > 0);
+        assert_eq!(pty.last_seq() + 1, pty.next_seq());
+        #[cfg(unix)]
+        assert!(pty.tty().is_some_and(|t| t.starts_with("/dev/")), "{:?}", pty.tty());
         pty.close();
         // EOF marker: an empty chunk arrives after the child dies.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

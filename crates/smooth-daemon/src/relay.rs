@@ -32,8 +32,9 @@
 //! `"channel":"flow"` is bridged to the daemon's flow WS (`/api/flow/ws`)
 //! instead of the operator WS — a second loopback bridge per phone. No
 //! `channel` ⇒ operator, unchanged. Outbound `flow.output` to a phone is
-//! coalesced to ~30 fps and split into ≤16 KiB frames; phones never see raw
-//! scrollback.
+//! coalesced to ~30 fps and split into ≤16 KiB frames that keep the engine's
+//! `seq`; a `flow.replay` goes out at once in ≤16 KiB parts, and a phone's
+//! `flow.attach` asks for at most a 256 KiB replay (th-8dbb42).
 //!
 //! **End-to-end encryption (th-d98fde).** A paired phone's flow frames are
 //! sealed on the phone and opened here — the relay brokers ciphertext only.
@@ -409,33 +410,74 @@ pub const PHONE_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 /// Phone cap on output frame rate (~30 fps).
 pub const PHONE_OUTPUT_TICK: Duration = Duration::from_millis(33);
 
-/// Coalesces `flow.output` bytes per session between ticks and re-emits them
-/// as ≤[`PHONE_OUTPUT_MAX_BYTES`] frames — the phone-side throttle. Pure.
+/// Phone cap on one replay (SmoothFlow.md § Replay, Relay): the relay sets a
+/// phone's `flow.attach` `replay_max_bytes` to at most this, so a replay is
+/// at most 16 parts.
+pub const PHONE_REPLAY_MAX_BYTES: usize = 256 * 1024;
+
+/// What [`OutputCoalescer::absorb`] did with an engine frame.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Absorbed {
+    /// Not output or a replay: forward it as is.
+    Pass,
+    /// Output, held for the next tick.
+    Held,
+    /// A `flow.replay`: send these frames now, in order, back to back.
+    Now(Vec<String>),
+}
+
+/// One session's held output: each engine frame's `seq` and bytes, in order.
+type HeldRuns = Vec<(u64, Vec<u8>)>;
+
+/// The phone-side throttle. Pure.
+///
+/// - `flow.output` bytes are held per session between ticks and re-emitted as
+///   ≤[`PHONE_OUTPUT_MAX_BYTES`] frames. A merged run keeps the engine's
+///   `seq`: every chunk carries the `seq` of the run's last engine frame
+///   (SmoothFlow.md § Replay, "`seq` is per session").
+/// - A `flow.replay` goes out at once, split into ≤16 KiB parts
+///   (`part`/`parts`), after the output it covers (held, `seq` ≤ its) is
+///   dropped. Held output newer than the replay stays held for the next tick.
 #[derive(Default)]
 pub struct OutputCoalescer {
-    pending: Vec<(String, Vec<u8>)>,
-    seq: u64,
+    /// Per session, in arrival order.
+    pending: Vec<(String, HeldRuns)>,
 }
 
 impl OutputCoalescer {
-    /// Absorb one wire frame. Returns `false` (untouched) when it is not a
-    /// `flow.output`, so the caller forwards it as-is.
-    pub fn absorb(&mut self, frame_text: &str) -> bool {
-        let Ok(v) = serde_json::from_str::<Value>(frame_text) else { return false };
-        if v.get("type").and_then(Value::as_str) != Some("flow.output") {
-            return false;
+    /// Absorb one engine wire frame.
+    pub fn absorb(&mut self, frame_text: &str) -> Absorbed {
+        let Ok(v) = serde_json::from_str::<Value>(frame_text) else {
+            return Absorbed::Pass;
+        };
+        let ty = v.get("type").and_then(Value::as_str);
+        let Some(id) = v.get("id").and_then(Value::as_str) else {
+            return Absorbed::Pass;
+        };
+        let seq = v.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        let data = || {
+            v.get("data_b64")
+                .and_then(Value::as_str)
+                .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+        };
+        match ty {
+            Some("flow.output") => {
+                let bytes = data().unwrap_or_default();
+                match self.pending.iter_mut().find(|(i, _)| i == id) {
+                    Some((_, runs)) => runs.push((seq, bytes)),
+                    None => self.pending.push((id.to_string(), vec![(seq, bytes)])),
+                }
+                Absorbed::Held
+            }
+            Some("flow.replay") => {
+                if let Some((_, runs)) = self.pending.iter_mut().find(|(i, _)| i == id) {
+                    runs.retain(|(s, _)| *s > seq);
+                }
+                self.pending.retain(|(_, runs)| !runs.is_empty());
+                Absorbed::Now(data().map_or_else(|| vec![frame_text.to_string()], |bytes| replay_parts(&v, &bytes, frame_text)))
+            }
+            _ => Absorbed::Pass,
         }
-        let Some(id) = v.get("id").and_then(Value::as_str) else { return false };
-        let bytes = v
-            .get("data_b64")
-            .and_then(Value::as_str)
-            .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
-            .unwrap_or_default();
-        match self.pending.iter_mut().find(|(i, _)| i == id) {
-            Some((_, buf)) => buf.extend(bytes),
-            None => self.pending.push((id.to_string(), bytes)),
-        }
-        true
     }
 
     /// True when a tick would emit something.
@@ -447,15 +489,16 @@ impl OutputCoalescer {
     /// Drain everything as wire frames, chunked to the byte cap.
     pub fn drain(&mut self) -> Vec<String> {
         let mut out = Vec::new();
-        for (id, buf) in self.pending.drain(..) {
+        for (id, runs) in self.pending.drain(..) {
+            let seq = runs.last().map_or(0, |(s, _)| *s);
+            let buf: Vec<u8> = runs.into_iter().flat_map(|(_, b)| b).collect();
             for chunk in buf.chunks(PHONE_OUTPUT_MAX_BYTES) {
-                self.seq += 1;
                 out.push(
                     json!({
                         "channel": "flow",
                         "type": "flow.output",
                         "id": id,
-                        "seq": self.seq,
+                        "seq": seq,
                         "data_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk),
                     })
                     .to_string(),
@@ -464,6 +507,43 @@ impl OutputCoalescer {
         }
         out
     }
+}
+
+/// A replay as the frames a phone gets: unchanged when its data fits one
+/// frame, else parts of ≤[`PHONE_OUTPUT_MAX_BYTES`] that differ only in
+/// `data_b64`, `part` and `parts`.
+fn replay_parts(frame: &Value, data: &[u8], frame_text: &str) -> Vec<String> {
+    if data.len() <= PHONE_OUTPUT_MAX_BYTES {
+        return vec![frame_text.to_string()];
+    }
+    let chunks: Vec<&[u8]> = data.chunks(PHONE_OUTPUT_MAX_BYTES).collect();
+    let parts = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(part, chunk)| {
+            let mut v = frame.clone();
+            v["data_b64"] = json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk));
+            v["part"] = json!(part);
+            v["parts"] = json!(parts);
+            v.to_string()
+        })
+        .collect()
+}
+
+/// A phone's `flow.attach` with its replay budget capped at
+/// [`PHONE_REPLAY_MAX_BYTES`] (absent ⇒ the cap). Every other frame comes back
+/// unchanged, byte for byte.
+fn cap_phone_replay_budget(frame_text: String) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(&frame_text) else {
+        return frame_text;
+    };
+    if v.get("type").and_then(Value::as_str) != Some("flow.attach") {
+        return frame_text;
+    }
+    let asked = v.get("replay_max_bytes").and_then(Value::as_u64).and_then(|b| usize::try_from(b).ok());
+    v["replay_max_bytes"] = json!(asked.map_or(PHONE_REPLAY_MAX_BYTES, |b| b.min(PHONE_REPLAY_MAX_BYTES)));
+    v.to_string()
 }
 
 /// Wrap an operator frame (raw text from the loopback WS) into a relay envelope
@@ -700,6 +780,19 @@ fn outbound_frames(flow: &mut Option<FlowGuard>, text: &str) -> Vec<String> {
     }
 }
 
+/// Phone → engine through the guard, with every `flow.attach` held to the
+/// phone replay budget.
+fn phone_flow_actions(guard: &mut FlowGuard, frame_text: &str) -> Vec<Action> {
+    guard
+        .inbound(frame_text)
+        .into_iter()
+        .map(|a| match a {
+            Action::ToEngine(text) => Action::ToEngine(cap_phone_replay_budget(text)),
+            to_phone @ Action::ToPhone(_) => to_phone,
+        })
+        .collect()
+}
+
 /// Why an inbound pump stopped: the loopback sink is gone (rebuild the bridge)
 /// or the relay out-channel is gone (the supervisor is rebuilding everything).
 enum PumpEnd {
@@ -756,7 +849,7 @@ fn spawn_bridge_with(
         let mut tick = tokio::time::interval(PHONE_OUTPUT_TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let actions_for = |flow: &mut Option<FlowGuard>, f: String| match flow.as_mut() {
-            Some(guard) => guard.inbound(&f),
+            Some(guard) => phone_flow_actions(guard, &f),
             None => vec![Action::ToEngine(alias_legacy_interrupt(f))],
         };
         // The frame that opened this bridge (a phone's `flow.pair` / `flow.e2e.open`
@@ -796,13 +889,23 @@ fn spawn_bridge_with(
                 },
                 msg = source.next() => match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if throttle_output && coalescer.absorb(&text) {
-                            continue;
-                        }
-                        for wire in outbound_frames(&mut flow, &text) {
-                            if let Some(envelope) = wrap_out(&device, &wire) {
-                                if out.send(envelope).is_err() {
-                                    break 'pump; // relay connection gone; supervisor rebuilds
+                        let frames = if throttle_output {
+                            match coalescer.absorb(&text) {
+                                Absorbed::Held => continue,
+                                // A replay's parts go out back to back: nothing
+                                // else is sent until the last one is queued.
+                                Absorbed::Now(parts) => parts,
+                                Absorbed::Pass => vec![text.to_string()],
+                            }
+                        } else {
+                            vec![text.to_string()]
+                        };
+                        for frame in frames {
+                            for wire in outbound_frames(&mut flow, &frame) {
+                                if let Some(envelope) = wrap_out(&device, &wire) {
+                                    if out.send(envelope).is_err() {
+                                        break 'pump; // relay connection gone; supervisor rebuilds
+                                    }
                                 }
                             }
                         }
@@ -1681,43 +1784,138 @@ mod tests {
         assert!(flow_ws_url(4400, "t k").ends_with("/api/flow/ws?token=t%20k"));
     }
 
+    fn out_frame(id: &str, seq: u64, data: &[u8]) -> String {
+        json!({"channel":"flow","type":"flow.output","id":id,"seq":seq,"data_b64":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)})
+            .to_string()
+    }
+
+    fn replay_frame(id: &str, seq: u64, data: &[u8]) -> String {
+        json!({"channel":"flow","type":"flow.replay","id":id,"cols":80,"rows":24,"seq":seq,"reason":"attach","data_b64":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)}).to_string()
+    }
+
+    fn decode(frame: &str) -> (Value, Vec<u8>) {
+        let v: Value = serde_json::from_str(frame).unwrap();
+        let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, v["data_b64"].as_str().unwrap()).unwrap();
+        (v, data)
+    }
+
     #[test]
     fn output_coalescer_caps_frame_size_and_merges_chunks() {
         let mut c = OutputCoalescer::default();
-        assert!(
-            !c.absorb(r#"{"channel":"flow","type":"flow.session","session":{}}"#),
+        assert_eq!(
+            c.absorb(r#"{"channel":"flow","type":"flow.session","session":{}}"#),
+            Absorbed::Pass,
             "non-output passes through"
+        );
+        assert_eq!(
+            c.absorb(r#"{"channel":"flow","type":"flow.event","id":"fs-1","kind":"user","text":"x"}"#),
+            Absorbed::Pass
         );
         assert!(c.is_empty());
         let big = vec![b'x'; PHONE_OUTPUT_MAX_BYTES + 10];
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &big);
-        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-1","seq":1,"data_b64":b64}).to_string()));
-        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-1","seq":2,"data_b64":"YWI="}).to_string()));
-        assert!(c.absorb(&json!({"channel":"flow","type":"flow.output","id":"fs-2","seq":1,"data_b64":"eg=="}).to_string()));
+        assert_eq!(c.absorb(&out_frame("fs-1", 1, &big)), Absorbed::Held);
+        assert_eq!(c.absorb(&out_frame("fs-1", 2, b"ab")), Absorbed::Held);
+        assert_eq!(c.absorb(&out_frame("fs-2", 7, b"z")), Absorbed::Held);
         assert!(!c.is_empty());
         let frames = c.drain();
         assert!(c.is_empty());
         assert_eq!(frames.len(), 3, "fs-1 = 16 KiB + 12 bytes, fs-2 = 1 byte: {}", frames.len());
-        let decoded: Vec<(String, Vec<u8>)> = frames
-            .iter()
-            .map(|f| {
-                let v: Value = serde_json::from_str(f).unwrap();
-                assert_eq!(v["type"], "flow.output");
-                assert_eq!(v["channel"], "flow");
-                (
-                    v["id"].as_str().unwrap().to_string(),
-                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, v["data_b64"].as_str().unwrap()).unwrap(),
-                )
-            })
-            .collect();
+        let decoded: Vec<(Value, Vec<u8>)> = frames.iter().map(|f| decode(f)).collect();
+        for (v, _) in &decoded {
+            assert_eq!(v["type"], "flow.output");
+            assert_eq!(v["channel"], "flow");
+        }
         assert_eq!(decoded[0].1.len(), PHONE_OUTPUT_MAX_BYTES);
         assert_eq!(decoded[1].1.len(), 12, "the 10-byte tail merged with the 2-byte follow-up");
-        assert_eq!(decoded[2], ("fs-2".to_string(), b"z".to_vec()));
-        let seqs: Vec<u64> = frames
-            .iter()
-            .map(|f| serde_json::from_str::<Value>(f).unwrap()["seq"].as_u64().unwrap())
-            .collect();
-        assert!(seqs.windows(2).all(|w| w[1] > w[0]));
+        assert_eq!((decoded[2].0["id"].as_str(), decoded[2].1.as_slice()), (Some("fs-2"), b"z".as_slice()));
+        // th-8dbb42: no renumbering. The chunks of one run share the seq of
+        // its last engine frame; another session keeps its own.
+        let seqs: Vec<u64> = decoded.iter().map(|(v, _)| v["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, [2, 2, 7]);
+    }
+
+    /// th-8dbb42: a replay goes out at once in ≤16 KiB parts, in order, all
+    /// alike but for the data and `part`; the held output it covers is
+    /// dropped, and held output newer than it stays for the next tick.
+    #[test]
+    fn output_coalescer_splits_a_replay_and_drops_the_output_it_covers() {
+        let mut c = OutputCoalescer::default();
+        assert_eq!(c.absorb(&out_frame("fs-1", 4, b"old")), Absorbed::Held);
+        assert_eq!(c.absorb(&out_frame("fs-1", 5, b"older")), Absorbed::Held);
+        assert_eq!(c.absorb(&out_frame("fs-1", 9, b"NEW")), Absorbed::Held);
+        assert_eq!(c.absorb(&out_frame("fs-2", 3, b"other")), Absorbed::Held);
+        // 2.5 parts of distinguishable bytes.
+        let data: Vec<u8> = (0..PHONE_OUTPUT_MAX_BYTES * 5 / 2).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let Absorbed::Now(parts) = c.absorb(&replay_frame("fs-1", 5, &data)) else {
+            panic!("a replay is sent now")
+        };
+        assert_eq!(parts.len(), 3);
+        let mut joined = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            let (v, bytes) = decode(p);
+            assert!(bytes.len() <= PHONE_OUTPUT_MAX_BYTES, "part {i}: {}", bytes.len());
+            assert_eq!((v["part"].as_u64(), v["parts"].as_u64()), (Some(i as u64), Some(3)));
+            assert_eq!(
+                (v["type"].as_str(), v["id"].as_str(), v["seq"].as_u64()),
+                (Some("flow.replay"), Some("fs-1"), Some(5))
+            );
+            assert_eq!(
+                (v["cols"].as_u64(), v["rows"].as_u64(), v["reason"].as_str()),
+                (Some(80), Some(24), Some("attach"))
+            );
+            joined.extend(bytes);
+        }
+        assert_eq!(joined, data, "the parts concatenate to the replay");
+        // Held output: fs-1's 4 and 5 are in the replay and gone; its 9 and
+        // fs-2's stay.
+        let rest: Vec<(Value, Vec<u8>)> = c.drain().iter().map(|f| decode(f)).collect();
+        assert_eq!(rest.len(), 2);
+        assert_eq!(
+            (rest[0].0["id"].as_str(), rest[0].0["seq"].as_u64(), rest[0].1.as_slice()),
+            (Some("fs-1"), Some(9), b"NEW".as_slice())
+        );
+        assert_eq!((rest[1].0["id"].as_str(), rest[1].1.as_slice()), (Some("fs-2"), b"other".as_slice()));
+
+        // A replay that fits one frame goes out unchanged, without part/parts.
+        assert_eq!(c.absorb(&out_frame("fs-3", 1, b"gone")), Absorbed::Held);
+        let small = replay_frame("fs-3", 1, &[b'y'; PHONE_OUTPUT_MAX_BYTES]);
+        assert_eq!(c.absorb(&small), Absorbed::Now(vec![small.clone()]));
+        assert!(c.is_empty(), "the covered output went with it");
+        // An empty one (a tmux session's) too.
+        let empty = replay_frame("fs-3", 0, b"");
+        assert_eq!(c.absorb(&empty), Absorbed::Now(vec![empty.clone()]));
+    }
+
+    /// th-8dbb42: a phone's attach asks for at most 256 KiB of replay; every
+    /// other frame reaches the engine untouched.
+    #[test]
+    fn phone_attaches_are_held_to_the_phone_replay_budget() {
+        let budget = |f: &str| serde_json::from_str::<Value>(&cap_phone_replay_budget(f.to_string())).unwrap()["replay_max_bytes"].as_u64();
+        assert_eq!(
+            budget(r#"{"channel":"flow","type":"flow.attach","id":"fs-1","cols":80,"rows":24,"replay":true}"#),
+            Some(262_144)
+        );
+        assert_eq!(
+            budget(r#"{"channel":"flow","type":"flow.attach","id":"fs-1","replay":true,"replay_max_bytes":4194304}"#),
+            Some(262_144)
+        );
+        assert_eq!(
+            budget(r#"{"channel":"flow","type":"flow.attach","id":"fs-1","replay":true,"replay_max_bytes":70000}"#),
+            Some(70_000)
+        );
+        let input = r#"{"channel":"flow","type":"flow.input","id":"fs-1","data_b64":"aGk="}"#;
+        assert_eq!(cap_phone_replay_budget(input.to_string()), input);
+        assert_eq!(cap_phone_replay_budget("not json".into()), "not json");
+        // Through the guard: an unpaired phone's plaintext attach.
+        let mut guard = FlowGuard::new("phone-1", Arc::new(pairing_state()));
+        let actions = phone_flow_actions(
+            &mut guard,
+            r#"{"channel":"flow","type":"flow.attach","id":"fs-1","cols":80,"rows":24,"replay":true}"#,
+        );
+        match actions.as_slice() {
+            [Action::ToEngine(t)] => assert_eq!(serde_json::from_str::<Value>(t).unwrap()["replay_max_bytes"], 262_144),
+            other => panic!("{:?}", other.len()),
+        }
     }
 
     #[test]
@@ -2248,6 +2446,50 @@ mod tests {
         let v: Value = serde_json::from_str(&wire[0]).unwrap();
         assert_eq!(v["n"], 2);
         assert!(v.get("data_b64").is_none(), "nothing readable in the clear: {v}");
+    }
+
+    /// th-8dbb42: a paired phone gets each replay part sealed as an ordinary
+    /// data frame, numbered in order, and its encrypted attach still has the
+    /// phone budget applied once opened.
+    #[test]
+    fn paired_phone_gets_replay_parts_sealed_in_order() {
+        let (mut guard, _st, pairing_key) = paired_guard();
+        let actions = guard.inbound(&json!({"channel":"flow","v":1,"type":"flow.e2e.open","salt":b64(&PHONE_SALT)}).to_string());
+        let Action::ToPhone(open_reply) = &actions[0] else { panic!() };
+        let v: Value = serde_json::from_str(open_reply).unwrap();
+        let daemon_salt: [u8; 16] = unb64(v["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+        let session_key = derive_session_key(&pairing_key, &PHONE_SALT, &daemon_salt);
+        let ct = seal(
+            &session_key,
+            DIR_PHONE_TO_DAEMON,
+            1,
+            br#"{"channel":"flow","type":"flow.attach","id":"fs-1","cols":80,"rows":24,"replay":true}"#,
+        )
+        .unwrap();
+        match phone_flow_actions(&mut guard, &json!({"channel":"flow","v":1,"n":1,"ct":b64(&ct)}).to_string()).as_slice() {
+            [Action::ToEngine(t)] => assert_eq!(serde_json::from_str::<Value>(t).unwrap()["replay_max_bytes"], 262_144),
+            other => panic!("{}", other.len()),
+        }
+        let data = vec![b'r'; PHONE_OUTPUT_MAX_BYTES * 2 + 1];
+        let Absorbed::Now(parts) = OutputCoalescer::default().absorb(&replay_frame("fs-1", 3, &data)) else {
+            panic!()
+        };
+        assert_eq!(parts.len(), 3);
+        let mut joined = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let wire = guard.outbound(part);
+            assert_eq!(wire.len(), 1);
+            let v: Value = serde_json::from_str(&wire[0]).unwrap();
+            assert!(v.get("data_b64").is_none() && v.get("part").is_none(), "sealed: {v}");
+            // Nothing was buffered before the open, so the parts are n = 1, 2, 3.
+            let n = v["n"].as_u64().unwrap();
+            assert_eq!(n, i as u64 + 1);
+            let pt = open(&session_key, DIR_DAEMON_TO_PHONE, n, &unb64(v["ct"].as_str().unwrap()).unwrap()).unwrap();
+            let (inner, bytes) = decode(std::str::from_utf8(&pt).unwrap());
+            assert_eq!((inner["part"].as_u64(), inner["parts"].as_u64()), (Some(i as u64), Some(3)));
+            joined.extend(bytes);
+        }
+        assert_eq!(joined, data);
     }
 
     #[test]

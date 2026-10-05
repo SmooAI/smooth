@@ -724,13 +724,14 @@ async fn ws_session(mut socket: WebSocket, engine: Engine) {
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Rule 2 (SmoothFlow.md § Replay): resync every session
-                    // that has a snapshot instead of leaving a silent gap. A
-                    // tmux session has none; its gap stays (as before).
+                    // Rule 2 (SmoothFlow.md § Replay): resync every attached
+                    // session instead of leaving a silent gap. A tmux session
+                    // has no snapshot: a replay client gets rule 6 (an empty
+                    // replay, then tmux redraws); a legacy one keeps its gap.
                     tracing::debug!(dropped = n, "flow ws client lagged; resyncing attached sessions");
                     let mut gone = false;
-                    for (id, budget) in attached.budgets() {
-                        let frame = run(&engine, move |e| e.replay(&id, budget, ReplayReason::Lag)).await;
+                    for (id, a) in attached.all() {
+                        let frame = run(&engine, move |e| e.client_replay(&id, a.budget, ReplayReason::Lag, a.replay)).await;
                         let Some(frame) = frame.ok().flatten().and_then(|f| attached.outgoing(f)) else { continue };
                         if socket.send(Message::Text(frame.to_wire().into())).await.is_err() {
                             gone = true;
@@ -798,8 +799,8 @@ impl Attachments {
         self.0.keys().cloned().collect()
     }
 
-    fn budgets(&self) -> Vec<(String, Option<usize>)> {
-        self.0.iter().map(|(id, a)| (id.clone(), a.budget)).collect()
+    fn all(&self) -> Vec<(String, Attached)> {
+        self.0.iter().map(|(id, a)| (id.clone(), *a)).collect()
     }
 
     /// What this client is sent for `frame`, if anything.
@@ -893,9 +894,11 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
             }
             let mut out = Vec::new();
             // th-dc9822: a session with a snapshot (the pty host) opens with
-            // it — `flow.replay`, or one legacy `flow.output`.
+            // it — `flow.replay`, or one legacy `flow.output`. th-8dbb42: a
+            // tmux session opens a replay client's stream with an empty
+            // replay and a redraw (rule 6).
             let sid = id.clone();
-            match run(engine, move |e| e.replay(&sid, replay_max_bytes, ReplayReason::Attach)).await {
+            match run(engine, move |e| e.client_replay(&sid, replay_max_bytes, ReplayReason::Attach, replay)).await {
                 Ok(Some(frame)) => out.extend(attached.outgoing(frame)),
                 Ok(None) => {}
                 Err(e) => tracing::debug!(session = %id, error = %e, "flow: attach replay failed"),
@@ -1288,7 +1291,9 @@ mod tests {
         assert!(a.remove("old"));
         assert!(!a.remove("old"));
         assert!(a.outgoing(output("old", 99)).is_none());
-        assert_eq!(a.budgets(), vec![("new".to_string(), Some(256 * 1024))]);
+        let all = a.all();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].0.as_str(), all[0].1.replay, all[0].1.budget), ("new", true, Some(256 * 1024)));
         assert_eq!(a.ids(), vec!["new".to_string()]);
     }
 

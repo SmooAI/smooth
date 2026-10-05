@@ -157,7 +157,52 @@ async fn shell_that_exits_is_done_and_a_failing_command_is_dead(host: Host) {
     assert!(!frames.iter().any(|f| f["type"] == "flow.output" && f["id"] == id2), "{frames:?}");
 }
 
+/// th-8dbb42: the engine advertises `replay`, and a second client that
+/// attaches with `replay: true` to a session another client is already
+/// streaming ends with the current screen: the replay (pty) or the redraw
+/// tmux is made to send after its empty replay (rule 6). The screen is quiet
+/// when it attaches, so nothing else would draw it.
+async fn replay_attach_to_a_streaming_session_shows_the_current_screen(host: Host) {
+    if !prereqs(host) {
+        return;
+    }
+    let d = Daemon::boot(host).await;
+    let mut ws = d.ws().await;
+    assert_eq!(ws.hello["capabilities"], json!(["replay"]), "{}", ws.hello);
+    let s = d.new_session("shell", None).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    d.wait_state(&id, "idle", WAIT).await;
+    ws.attach(&id, 100, 30).await;
+    ws.wait_for("first flow.output", WAIT, |v| v["type"] == "flow.output" && v["id"] == id).await;
+    let marker = format!("REPLAY-E2E-{}", std::process::id());
+    ws.input(&id, &format!("echo {marker}\r")).await;
+    ws.wait_output(&id, &marker, WAIT).await;
+    // Quiet: everything the shell printed has streamed.
+    let _ = ws.collect(Duration::from_millis(700)).await;
+
+    let mut ws2 = d.ws().await;
+    ws2.send(json!({"type":"flow.attach","id":id,"cols":100,"rows":30,"replay":true})).await;
+    let replay = ws2.wait_for("flow.replay", WAIT, |v| v["type"] == "flow.replay" && v["id"] == id).await;
+    assert_eq!(replay["reason"], "attach", "{replay}");
+    assert!(replay.get("part").is_none(), "the WS never chunks: {replay}");
+    let base = replay["seq"].as_u64().unwrap();
+    let mut screen = unb64(replay["data_b64"].as_str().unwrap());
+    if host == Host::Tmux {
+        assert!(screen.is_empty(), "a tmux replay is empty: {replay}");
+    }
+    let deadline = std::time::Instant::now() + WAIT;
+    while !screen.contains(&marker) && std::time::Instant::now() < deadline {
+        let Some(f) = ws2.next(Duration::from_secs(2)).await else { continue };
+        if f["type"] == "flow.output" && f["id"] == id {
+            assert!(f["seq"].as_u64().unwrap() > base, "output the replay covers is never sent: {f}");
+            screen.push_str(&unb64(f["data_b64"].as_str().unwrap_or("")));
+        }
+    }
+    assert!(screen.contains(&marker), "the second client never got the current screen: {screen:?}");
+}
+
 crate::on_both_hosts!(
     shell_lifecycle_new_attach_input_resize_snapshot_kill,
-    shell_that_exits_is_done_and_a_failing_command_is_dead
+    shell_that_exits_is_done_and_a_failing_command_is_dead,
+    replay_attach_to_a_streaming_session_shows_the_current_screen
 );

@@ -287,6 +287,11 @@ pub enum ServerFrame {
         /// user's order, hidden ones dropped.
         #[serde(default)]
         harnesses: Vec<HarnessInfo>,
+        /// Additive (th-8dbb42): what this engine does beyond v0. `replay`:
+        /// a `flow.attach{replay:true}` opens with a `flow.replay`. Absent on
+        /// older engines, which means none.
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     /// Additive (th-0f6126): the visible harness list changed
     /// (`PUT /api/flow/harnesses/prefs`); same shape as `flow.hello.harnesses`.
@@ -1028,6 +1033,7 @@ mod tests {
                     origin: "builtin".into(),
                     health: None,
                 }],
+                capabilities: vec!["replay".into()],
             },
             ServerFrame::Harnesses { harnesses: vec![] },
             ServerFrame::Session { session: session() },
@@ -1120,6 +1126,17 @@ mod tests {
             parts: None,
         };
         assert_eq!(r.output_session(), Some("y"), "a replay goes only to attached clients too");
+    }
+
+    /// th-8dbb42: an older engine's `flow.hello` has no `capabilities`, which
+    /// parses as none.
+    #[test]
+    fn hello_capabilities_default_to_none() {
+        let old = r#"{"channel":"flow","type":"flow.hello","daemon":{"version":"0.69.0","machine_label":"m"},"sessions":[]}"#;
+        match parse_server_frame(old).unwrap() {
+            ServerFrame::Hello { capabilities, .. } => assert!(capabilities.is_empty()),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// th-c61966: an attach without `replay` is the v0 frame and defaults to

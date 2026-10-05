@@ -22,6 +22,9 @@ admin = []
 [dependencies]
 smooth-tmux.workspace = true
 smooth-flow.workspace = true
+# th-8dbb42: `th flow attach` orders output around `flow.replay` with the
+# same shared logic every SmoothFlow client replays (spec §10).
+smooth-flow-client.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 smooth-code.workspace = true
