@@ -252,6 +252,12 @@ pub enum MsgCommands {
         /// message's seq as a durable watermark across restarts.
         #[arg(long)]
         since: Option<i64>,
+        /// Persist the watcher position between invocations (for one-shot hooks).
+        #[arg(long)]
+        cursor: bool,
+        /// Maximum messages emitted per poll. Use a small value for agent hooks.
+        #[arg(long, default_value = "20")]
+        limit: usize,
         /// Deprecated no-op.
         #[arg(long, hide = true)]
         no_pull: bool,
@@ -833,6 +839,8 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             kind,
             peek,
             since,
+            cursor,
+            limit,
             no_pull,
             pull,
         } => {
@@ -846,6 +854,9 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 None => None,
             };
             let filter = |m: &MailMessage| from.as_deref().is_none_or(|f| m.from_agent == f) && kind.is_none_or(|k| m.kind == k);
+            if cursor && (!once || !peek || from.is_some() || kind.is_some() || since.is_some()) {
+                bail!("--cursor requires --once --peek and cannot be combined with --from, --type, or --since");
+            }
             if !once && !json {
                 let scope = from.as_deref().map(|f| format!(" from {f}")).unwrap_or_default();
                 let how = if peek { "peeking" } else { "watching" };
@@ -857,19 +868,23 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             // consumer reacts without consuming. Start at the newest message
             // (only new mail) unless `--since` pins an earlier watermark.
             if peek {
-                let mut watermark = match since {
-                    Some(s0) => s0,
-                    None => s.max_seq(&who).await?,
+                let mut watermark = match (cursor, since) {
+                    (true, _) => s.watch_offset(&who)?,
+                    (_, Some(s0)) => s0,
+                    _ => s.max_seq(&who).await?,
                 };
                 loop {
                     let _ = s.touch(&who).await;
-                    match s.inbox_since(&who, watermark, from.as_deref(), kind, 200).await {
+                    match s.inbox_since(&who, watermark, from.as_deref(), kind, limit.clamp(1, 200)).await {
                         Ok(msgs) if !msgs.is_empty() => {
                             print_messages(&msgs, json)?;
                             // Advance the watermark past everything just seen, so
                             // no message is emitted twice — without touching read
                             // state.
                             watermark = msgs.iter().map(|m| m.seq).max().unwrap_or(watermark);
+                            if cursor {
+                                s.advance_watch_offset(&who, watermark)?;
+                            }
                             if once {
                                 return Ok(());
                             }
@@ -884,7 +899,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
 
             loop {
                 let _ = s.touch(&who).await;
-                match s.inbox(&who, true, 200).await {
+                match s.inbox(&who, true, limit.clamp(1, 200)).await {
                     Ok(msgs) => {
                         let msgs: Vec<MailMessage> = msgs.into_iter().filter(|m| filter(m)).collect();
                         if !msgs.is_empty() {

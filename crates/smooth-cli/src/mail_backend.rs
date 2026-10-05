@@ -495,6 +495,23 @@ impl Mail {
         }
     }
 
+    /// Durable per-machine watcher offset. Cloud mail keeps its cursor in the
+    /// local SQLite store; sequence offsets are independent on each machine.
+    pub fn watch_offset(&self, agent: &str) -> Result<i64> {
+        match self {
+            Self::Sqlite(s) => Ok(s.watch_offset(agent)?),
+            Self::Cloud(_) => Ok(MailStore::open_default()?.watch_offset(agent)?),
+        }
+    }
+
+    /// Advance the durable local watcher offset after printing a batch.
+    pub fn advance_watch_offset(&self, agent: &str, seq: i64) -> Result<()> {
+        match self {
+            Self::Sqlite(s) => Ok(s.advance_watch_offset(agent, seq)?),
+            Self::Cloud(_) => Ok(MailStore::open_default()?.advance_watch_offset(agent, seq)?),
+        }
+    }
+
     /// # Errors
     /// Propagates store/API failures.
     pub async fn get_message(&self, id: &str) -> Result<Option<MailMessage>> {

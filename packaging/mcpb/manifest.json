@@ -131,7 +131,7 @@
         },
         {
             "name": "mail_inbox",
-            "description": "Read your unread agent mail (pass unread_only=false for history): messages sent to you plus recent broadcasts, highest priority first. Check it at natural breakpoints — after finishing a step, before going idle, and before starting something another agent may already own. Reading is NOT acking: call mail_ack once you have actually handled a message, so nothing is lost if you are interrupted."
+            "description": "Read up to 10 unread agent messages by default (set limit up to 50; pass unread_only=false for history): messages sent to you plus recent broadcasts, highest priority first. Check it at natural breakpoints — after finishing a step, before going idle, and before starting something another agent may already own. Reading is NOT acking: call mail_ack once you have actually handled a message, so nothing is lost if you are interrupted."
         },
         {
             "name": "mail_send",
