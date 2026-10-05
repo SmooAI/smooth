@@ -409,12 +409,16 @@ pub fn preview_height(state: &AppState, width: u16, max: u16) -> u16 {
 /// Layout regions for the inline viewport.
 ///
 /// The viewport is laid out top-to-bottom: an optional preview region
-/// for the in-flight assistant message, a single-row status bar, and
-/// the input box at the bottom.
+/// for the in-flight assistant message, a single-row status bar, the
+/// input box, and the optional task checklist below it.
 pub struct InlineRegions {
+    /// Blank rows above the preview/status controls; cleared each frame so
+    /// content from a previous layout cannot linger there.
+    pub spacer: Option<Rect>,
     pub preview: Option<Rect>,
     pub status: Rect,
     pub input: Rect,
+    pub todos: Option<Rect>,
 }
 
 /// Rows the input box needs to show `text_rows` rows of text, plus its
@@ -435,21 +439,51 @@ pub fn input_height(text_rows: u16, cap: u16) -> u16 {
 /// never hide the streaming answer entirely (pearl th-958e2e).
 #[must_use]
 pub fn compute_regions(area: Rect, preview_h: u16, input_h: u16) -> InlineRegions {
+    compute_regions_with_todos(area, preview_h, input_h, 0)
+}
+
+/// Height of the compact task panel: border/title, up to five tasks, and a
+/// summary row when more items remain. Zero tasks reserve no rows.
+#[must_use]
+pub fn todo_panel_height(todo_count: usize) -> u16 {
+    if todo_count == 0 {
+        return 0;
+    }
+    let shown = todo_count.min(5);
+    let summary = usize::from(todo_count > shown);
+    u16::try_from(shown + summary + 2).unwrap_or(u16::MAX)
+}
+
+/// Compute regions while reserving `todos_h` rows for the task checklist
+/// below the composer. The preview yields space to the checklist first; the
+/// composer keeps its minimum height. Any unused preview space becomes a
+/// spacer above the status/input controls so they remain at the viewport bottom.
+#[must_use]
+pub fn compute_regions_with_todos(area: Rect, preview_h: u16, input_h: u16, todos_h: u16) -> InlineRegions {
     const STATUS_H: u16 = 1;
     const MIN_INPUT_H: u16 = 3;
 
-    // Never let the box push the status bar (or itself) out of the viewport.
-    let ceiling = area.height.saturating_sub(STATUS_H + if preview_h > 0 { 1 } else { 0 });
+    let todos_h = todos_h.min(area.height.saturating_sub(MIN_INPUT_H + STATUS_H));
+    // Keep one preview row when a preview is wanted; if the viewport is too
+    // short, the composer and task panel take priority over the preview.
+    let ceiling = area.height.saturating_sub(STATUS_H + todos_h + if preview_h > 0 { 1 } else { 0 });
     let input_h = input_h.clamp(MIN_INPUT_H, ceiling.max(MIN_INPUT_H));
 
-    let bottom_h = input_h + STATUS_H;
+    let bottom_h = input_h + STATUS_H + todos_h;
     let available_top = area.height.saturating_sub(bottom_h);
     let actual_preview = preview_h.min(available_top);
+    let spacer_h = available_top.saturating_sub(actual_preview);
 
+    let spacer = (spacer_h > 0).then_some(Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: spacer_h,
+    });
     let preview = if actual_preview > 0 {
         Some(Rect {
             x: area.x,
-            y: area.y,
+            y: area.y + spacer_h,
             width: area.width,
             height: actual_preview,
         })
@@ -458,17 +492,29 @@ pub fn compute_regions(area: Rect, preview_h: u16, input_h: u16) -> InlineRegion
     };
     let status = Rect {
         x: area.x,
-        y: area.y + actual_preview,
+        y: area.y + available_top,
         width: area.width,
         height: STATUS_H,
     };
     let input = Rect {
         x: area.x,
-        y: area.y + actual_preview + STATUS_H,
+        y: status.y + STATUS_H,
         width: area.width,
         height: input_h,
     };
-    InlineRegions { preview, status, input }
+    let todos = (todos_h > 0).then_some(Rect {
+        x: area.x,
+        y: input.y + input.height,
+        width: area.width,
+        height: todos_h,
+    });
+    InlineRegions {
+        spacer,
+        preview,
+        status,
+        input,
+        todos,
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +579,8 @@ mod tests {
         let area = Rect::new(0, 0, 80, 8);
         let r = compute_regions(area, 0, input_height(1, crate::composer::MAX_TEXT_ROWS));
         assert!(r.preview.is_none());
+        assert_eq!(r.spacer.expect("idle spacer").height, 4);
+        assert!(r.todos.is_none());
         assert_eq!(r.status.height, 1);
         assert_eq!(r.input.height, 3);
         // status sits directly above input
@@ -545,9 +593,30 @@ mod tests {
         let r = compute_regions(area, 4, input_height(1, crate::composer::MAX_TEXT_ROWS));
         let preview = r.preview.expect("preview should be present");
         assert_eq!(preview.height, 4);
-        assert_eq!(preview.y, 0);
-        assert_eq!(r.status.y, 4);
-        assert_eq!(r.input.y, 5);
+        assert_eq!(preview.y, 4, "unused rows stay above the bottom-aligned controls");
+        assert_eq!(r.status.y, 8);
+        assert_eq!(r.input.y, 9);
+        assert_eq!(r.input.y + r.input.height, area.y + area.height);
+    }
+
+    #[test]
+    fn todo_panel_height_is_bounded_and_empty_lists_take_no_space() {
+        assert_eq!(todo_panel_height(0), 0);
+        assert_eq!(todo_panel_height(1), 3);
+        assert_eq!(todo_panel_height(5), 7);
+        assert_eq!(todo_panel_height(6), 8, "sixth row summarizes the remaining tasks");
+    }
+
+    #[test]
+    fn task_panel_is_below_input_and_takes_space_from_preview() {
+        let area = Rect::new(0, 0, 80, 14);
+        let r = compute_regions_with_todos(area, 5, input_height(1, crate::composer::MAX_TEXT_ROWS), 6);
+        let preview = r.preview.expect("preview should keep the remaining top rows");
+        let todos = r.todos.expect("task list should have a region");
+        assert_eq!(r.input.y + r.input.height, todos.y, "task panel follows the composer");
+        assert_eq!(todos.y + todos.height, area.y + area.height, "task panel ends at the viewport bottom");
+        assert_eq!(preview.height + r.status.height + r.input.height + todos.height, area.height);
+        assert_eq!(preview.height, 4, "preview yields one row to the requested task panel");
     }
 
     #[test]
@@ -586,7 +655,8 @@ mod tests {
         // exactly — an overlap is the out-of-buffer panic (th-paste-crash).
         for r in [short, tall] {
             let preview_h = r.preview.map_or(0, |p| p.height);
-            assert_eq!(preview_h + r.status.height + r.input.height, area.height);
+            let todos_h = r.todos.map_or(0, |t| t.height);
+            assert_eq!(preview_h + r.status.height + r.input.height + todos_h, area.height);
             assert_eq!(r.status.y, area.y + preview_h);
             assert_eq!(r.input.y, r.status.y + r.status.height);
         }

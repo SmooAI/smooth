@@ -13,7 +13,7 @@
 //! root when unset) for `/pwd`.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,23 @@ struct GetCwdQuery {
     session: String,
 }
 
+#[derive(Deserialize)]
+struct AddWorkspaceBody {
+    #[serde(default)]
+    session: String,
+    path: String,
+    #[serde(default)]
+    select: bool,
+    #[serde(default)]
+    user_path: String,
+}
+
+#[derive(Clone)]
+struct WorkspaceState {
+    cwd: SessionCwd,
+    token: Option<String>,
+}
+
 #[derive(Serialize)]
 struct CwdReply {
     cwd: String,
@@ -45,26 +62,67 @@ struct CwdReply {
 
 /// `POST /api/session/cwd` — set the conversation's cwd. 400 with the error
 /// message when the path escapes the root / doesn't exist / isn't a directory.
-async fn set_cwd(State(cwd): State<SessionCwd>, Json(body): Json<SetCwdBody>) -> Result<Json<CwdReply>, (StatusCode, String)> {
-    let resolved = cwd.set(&body.session, &body.path).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+async fn set_cwd(State(state): State<WorkspaceState>, Json(body): Json<SetCwdBody>) -> Result<Json<CwdReply>, (StatusCode, String)> {
+    let resolved = state.cwd.set(&body.session, &body.path).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(CwdReply {
         cwd: resolved.display().to_string(),
-        root: cwd.root().display().to_string(),
+        root: state.cwd.root().display().to_string(),
     }))
 }
 
 /// `GET /api/session/cwd?session=…` — the conversation's current cwd (root when
 /// unset), for `/pwd`.
-async fn get_cwd(State(cwd): State<SessionCwd>, Query(q): Query<GetCwdQuery>) -> Json<CwdReply> {
+async fn get_cwd(State(state): State<WorkspaceState>, Query(q): Query<GetCwdQuery>) -> Json<CwdReply> {
     Json(CwdReply {
-        cwd: cwd.get(&q.session).display().to_string(),
-        root: cwd.root().display().to_string(),
+        cwd: state.cwd.get(&q.session).display().to_string(),
+        root: state.cwd.root().display().to_string(),
     })
 }
 
+/// `POST /api/session/workspaces` explicitly opens a directory for one session
+/// and selects it as that conversation's current working directory.
+async fn add_workspace(
+    State(state): State<WorkspaceState>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<AddWorkspaceBody>,
+) -> Result<Json<CwdReply>, (StatusCode, String)> {
+    if !crate::flow_route::authorized(state.token.as_deref(), &headers, &query) {
+        return Err((StatusCode::UNAUTHORIZED, "missing or invalid local token".into()));
+    }
+    if body.session.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a conversation session id is required".into()));
+    }
+    if body.user_path.len() > 16_384 {
+        return Err((StatusCode::BAD_REQUEST, "user PATH exceeds the 16 KiB limit".into()));
+    }
+    if !body.user_path.is_empty() {
+        state.cwd.set_user_path(&body.session, &body.user_path);
+    }
+    let root = state
+        .cwd
+        .add_session_root(&body.session, std::path::Path::new(&body.path))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let resolved = if body.select {
+        state
+            .cwd
+            .set(&body.session, root.to_str().unwrap_or_default())
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    } else {
+        state.cwd.get(&body.session)
+    };
+    Ok(Json(CwdReply {
+        cwd: resolved.display().to_string(),
+        root: state.cwd.root().display().to_string(),
+    }))
+}
+
 /// The `/api/session/cwd` router, backed by the shared [`SessionCwd`] store.
-pub fn cwd_router(cwd: SessionCwd) -> Router {
-    Router::new().route("/api/session/cwd", post(set_cwd).get(get_cwd)).with_state(cwd)
+pub fn cwd_router(cwd: SessionCwd, token: Option<String>) -> Router {
+    Router::new()
+        .route("/api/session/cwd", post(set_cwd).get(get_cwd))
+        .route("/api/session/workspaces", post(add_workspace))
+        .with_state(WorkspaceState { cwd, token })
 }
 
 #[cfg(test)]
@@ -78,7 +136,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Router) {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("repo")).unwrap();
-        let router = cwd_router(SessionCwd::new(tmp.path().to_path_buf()));
+        let router = cwd_router(SessionCwd::new(tmp.path().to_path_buf()), None);
         (tmp, router)
     }
 
@@ -129,5 +187,75 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap().display().to_string();
         assert_eq!(json["cwd"], root);
         assert_eq!(json["root"], root);
+    }
+
+    #[tokio::test]
+    async fn explicitly_opens_a_workspace_for_one_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join("primary");
+        let secondary = tmp.path().join("secondary");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&secondary).unwrap();
+        let router = cwd_router(SessionCwd::new(primary.clone()), None);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/session/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"session":"conv-1", "path":secondary, "select":true}).to_string()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/session/cwd")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"session":"conv-2", "path":secondary}).to_string()))
+            .unwrap();
+        assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authenticated_workspace_open_records_the_callers_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join("primary");
+        let secondary = tmp.path().join("secondary");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&secondary).unwrap();
+        let cwd = SessionCwd::new(primary);
+        let router = cwd_router(cwd.clone(), Some("secret-token".into()));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/session/workspaces?token=secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "session":"conv-1",
+                    "path":secondary,
+                    "select":true,
+                    "user_path":"/user/bin:/usr/bin"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(cwd.user_path("conv-1").unwrap(), std::ffi::OsString::from("/user/bin:/usr/bin"));
+    }
+
+    #[tokio::test]
+    async fn adding_a_workspace_requires_the_local_daemon_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join("primary");
+        let secondary = tmp.path().join("secondary");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&secondary).unwrap();
+        let router = cwd_router(SessionCwd::new(primary), Some("secret-token".into()));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/session/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"session":"conv-1", "path":secondary}).to_string()))
+            .unwrap();
+        assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -114,10 +114,17 @@ impl CommandRegistry {
         self.register("quit", "Exit the TUI", Box::new(cmd_quit));
 
         // /status
-        self.register("status", "Show system status (tokens, cost, model)", Box::new(cmd_status));
+        self.register("status", "Show system status, model, workspace, and diagnostic log paths", Box::new(cmd_status));
+        self.register("environment", "Explain workspace and shell access limits", Box::new(cmd_environment));
 
         // /compact
         self.register("compact", "Trigger context compaction", Box::new(cmd_compact));
+
+        self.register(
+            "workspace",
+            "Open another repository for this session: /workspace add <directory>",
+            Box::new(cmd_workspace),
+        );
 
         // /git
         self.register(
@@ -258,19 +265,53 @@ fn cmd_quit(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
 #[allow(clippy::unnecessary_wraps)]
 fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let status = format!(
-        "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}",
+        "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}\nCLI log: {}\nDaemon log: {}\nTUI debug log: {}\nTool error log: {}",
         state.model_label(),
         state.total_tokens,
         state.messages.len(),
         state.session_id,
+        dirs_next::home_dir().unwrap_or_default().join(".smooth/log/th.log").display(),
+        dirs_next::home_dir().unwrap_or_default().join(".smooth/smooth.log").display(),
+        dirs_next::home_dir().unwrap_or_default().join(".smooth/logs/smooth-code.log").display(),
+        dirs_next::home_dir()
+            .unwrap_or_default()
+            .join(".smooth/logs/smooth-code-tool-errors.jsonl")
+            .display(),
     );
     Ok(CommandOutput::Message(status))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_environment(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let sandbox_enabled = smooth_policy::settings::get_bool("sandbox.enabled");
+    #[cfg(target_os = "macos")]
+    let kernel = if sandbox_enabled {
+        "enabled: macOS Seatbelt denies selected credential-store reads and Git hook/config writes. It is not a full workspace filesystem jail; bash still has the OS access allowed by those deny rules."
+    } else {
+        "disabled (default): bash runs with the daemon user's OS permissions and is not confined to the workspace."
+    };
+    #[cfg(not(target_os = "macos"))]
+    let kernel = if sandbox_enabled {
+        "requested but unsupported on this platform: bash runs with the daemon user's OS permissions and is not confined to the workspace."
+    } else {
+        "disabled (default): bash runs with the daemon user's OS permissions and is not confined to the workspace."
+    };
+    let text = format!(
+        "Launch workspace: {}\nFile tools: confined to this repo and repositories you explicitly open with /workspace add <directory>.\nShell: runs as the daemon user, starts in the selected workspace, and receives this th code session's PATH plus common developer tool paths.\nConfigured sandbox posture: {kernel}\nThis reflects the setting visible to th code; an already-running daemon may have started with a different environment. Sandbox settings are read when Big Smooth starts. Change with `th settings set sandbox.enabled true` (macOS only).",
+        state.working_dir.display(),
+    );
+    Ok(CommandOutput::Message(text))
 }
 
 #[allow(clippy::unnecessary_wraps)]
 fn cmd_compact(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
     // Placeholder — real compaction would summarise older messages.
     Ok(CommandOutput::Message("Context compaction triggered (not yet implemented).".to_string()))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_workspace(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    Ok(CommandOutput::Message("Usage: /workspace add <directory>".into()))
 }
 
 fn cmd_git(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
@@ -711,6 +752,30 @@ mod tests {
             CommandOutput::Message(msg) => {
                 assert!(msg.contains("Model:"));
                 assert!(msg.contains("Tokens used:"));
+                assert!(msg.contains("CLI log: "));
+                assert!(msg.contains(".smooth/log/th.log"));
+                assert!(msg.contains("Daemon log: "));
+                assert!(msg.contains(".smooth/smooth.log"));
+                assert!(msg.contains("TUI debug log: "));
+                assert!(msg.contains(".smooth/logs/smooth-code.log"));
+                assert!(msg.contains("Tool error log: "));
+                assert!(msg.contains("smooth-code-tool-errors.jsonl"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn environment_explains_workspace_and_shell_access() {
+        let mut state = AppState::new(PathBuf::from("/tmp/project"));
+        let reg = CommandRegistry::new();
+        let output = reg.execute("environment", "", &mut state).expect("environment exists").expect("handler ok");
+        match output {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("/tmp/project"));
+                assert!(msg.contains("/workspace add <directory>"));
+                assert!(msg.contains("daemon user"));
+                assert!(msg.contains("not confined to the workspace") || msg.contains("not a full workspace filesystem jail"));
             }
             other => panic!("Expected Message, got {other:?}"),
         }

@@ -138,7 +138,9 @@ mod tests {
 
         // Nested joins (not "a/b") so the separator is native — on Windows a
         // literal `/` here wouldn't match the backslashes the tool emits.
-        let written_path = dir.path().join(ARTIFACT_DIR).join("report.html");
+        // `resolve_workspace_path` canonicalizes the workspace on macOS, where
+        // `tempfile` may return a `/var` alias for its canonical `/private/var` path.
+        let written_path = dir.path().canonicalize().unwrap().join(ARTIFACT_DIR).join("report.html");
         // Content round-trips.
         assert_eq!(tokio::fs::read_to_string(&written_path).await.unwrap(), html);
         // Result carries the absolute path and a clickable file:// URL.

@@ -1,31 +1,29 @@
-//! Workspace path confinement — the security floor for every filesystem tool.
+//! Workspace path confinement for filesystem tools.
 //!
 //! Every tool that touches the filesystem MUST route user-supplied paths
-//! through [`resolve_workspace_path`] so a prompt-injected agent can't read or
-//! write outside the workspace. The confinement is **lexical** (no
-//! `canonicalize`): we never follow symlinks (an attacker could symlink
-//! `workspace/link → /etc` and write through it) and we don't require the path
-//! to exist (writes target new files).
-//!
-//! NOTE: this is a defense-in-depth layer, not the whole story. Per EPIC
-//! th-c89c2a, the load-bearing boundary is the kernel OS-sandbox added in Phase
-//! 3; this lexical check is the cheap first gate.
+//! through [`resolve_workspace_path`]. Lexical traversal is rejected, and
+//! existing path components are canonicalized to prevent symlinks from
+//! escaping the selected workspace. Nonexistent write targets are checked
+//! against their nearest existing ancestor. This is distinct from the `bash`
+//! subprocess sandbox; that has platform-specific protections and does not
+//! replace this per-tool root check.
 
 use std::path::{Component, Path, PathBuf};
 
 /// Resolve `rel` against the workspace `base`, confining the result to `base`.
 ///
 /// Accepts a relative path (joined onto `base`) OR an absolute path that
-/// lexically resolves **inside** `base`. Rejects empty paths and any path —
-/// relative or absolute — that escapes `base` after collapsing `.` / `..`.
+/// resolves inside `base`. Rejects empty paths and any path — relative or
+/// absolute — that escapes `base` after collapsing `.` / `..` or following
+/// existing symlinks.
 ///
 /// Absolute-within-workspace is allowed because the agent naturally emits
 /// absolute paths when the user names one (e.g. `~/dev/smooai/x` →
 /// `/Users/you/dev/smooai/x`); rejecting them outright made tool-using turns
 /// flail and give up (th-c89c2a). Confinement is unchanged: an absolute path
-/// outside `base` still fails the `starts_with` check, exactly as a relative
-/// `../escape` does. The lexical (no-`canonicalize`) rule and the kernel
-/// OS-sandbox remain the load-bearing symlink boundary.
+/// outside `base` still fails the containment check, exactly as a relative
+/// `../escape` does. Existing components are canonicalized, so the returned
+/// path is the resolved one (e.g. `/private/var/...` for a macOS `/var` path).
 ///
 /// # Errors
 /// Returns an error if `rel` is empty or escapes the workspace.
@@ -43,13 +41,51 @@ pub fn resolve_workspace_path(base: &Path, rel: &str) -> anyhow::Result<PathBuf>
 
     if !normalized.starts_with(&base_norm) {
         anyhow::bail!(
-            "path `{rel}` is outside the workspace (resolved to {}, which is not under {})",
-            normalized.display(),
+            "path `{rel}` is outside the configured workspace root `{}`; filesystem tools cannot cross that boundary. To work across repositories, use `/workspace add <directory>` in th code",
             base_norm.display()
         );
     }
 
-    Ok(normalized)
+    ensure_path_stays_within(&base_norm, &normalized)
+}
+
+/// Validate existing path components without requiring the final target to
+/// exist. Canonicalizing the nearest existing ancestor catches both symlink
+/// reads and writes through a symlink to an external directory.
+fn ensure_path_stays_within(base: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    // A workspace that doesn't exist on disk has no components a symlink
+    // could hide in, so the lexical check already decided containment.
+    // (Walking up instead would reach a drive root that canonicalizes to a
+    // `\\?\` verbatim path on Windows and never matches the base.)
+    let Ok(canonical_base) = base.canonicalize() else {
+        return Ok(path.to_path_buf());
+    };
+    let mut ancestor = path.to_path_buf();
+    let mut missing = Vec::new();
+
+    loop {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            let resolved = missing.iter().rev().fold(canonical, |resolved, part| resolved.join(part));
+            if resolved.starts_with(&canonical_base) {
+                return Ok(resolved);
+            }
+            anyhow::bail!("path resolves outside the configured workspace root `{}`", canonical_base.display());
+        }
+
+        if let Ok(metadata) = std::fs::symlink_metadata(&ancestor) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("path traverses a symlink that cannot be resolved inside the workspace");
+            }
+        }
+
+        let Some(name) = ancestor.file_name() else {
+            anyhow::bail!("cannot resolve path ancestry inside the workspace");
+        };
+        missing.push(name.to_os_string());
+        if !ancestor.pop() {
+            anyhow::bail!("cannot resolve path ancestry inside the workspace");
+        }
+    }
 }
 
 /// Collapse `.` and `..` components lexically. Does NOT follow symlinks or
@@ -103,6 +139,19 @@ mod tests {
         assert!(resolve_workspace_path(&base(), "").is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_for_existing_and_new_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).unwrap();
+
+        for path in ["link/secret.txt", "link/new-file.txt"] {
+            assert!(resolve_workspace_path(workspace.path(), path).is_err(), "{path}");
+        }
+    }
+
     #[test]
     fn allows_absolute_path_inside_workspace() {
         // The agent naturally emits absolute paths when the user names one.
@@ -123,6 +172,7 @@ mod tests {
         for abs in ["/etc/passwd", "//x", "/work", "/work/spaceother"] {
             let err = resolve_workspace_path(&base(), abs).unwrap_err();
             assert!(err.to_string().contains("outside"), "{abs}: {err}");
+            assert!(err.to_string().contains("/workspace add"), "{abs}: {err}");
         }
     }
 

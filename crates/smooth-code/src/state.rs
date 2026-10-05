@@ -1,5 +1,6 @@
 //! Centralized application state for the coding TUI.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -449,6 +450,11 @@ pub struct AppState {
     pub should_quit: bool,
     /// Whether the agent is currently processing a request.
     pub thinking: bool,
+    /// Messages submitted while a turn is running. Dispatched in order when
+    /// the active turn finishes, so Enter queues instead of silently blocking.
+    pub queued_messages: VecDeque<(String, Vec<String>)>,
+    /// Sends an in-band cancel request to the active agent turn for steering.
+    pub cancel_turn_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// Current frame index for the braille spinner animation.
     pub spinner_frame: usize,
     /// File tree for the sidebar browser.
@@ -521,6 +527,8 @@ impl AppState {
             phrase_idx: 0,
             should_quit: false,
             thinking: false,
+            queued_messages: VecDeque::new(),
+            cancel_turn_tx: None,
             spinner_frame: 0,
             file_tree,
             autocomplete: AutocompleteState::default(),
@@ -577,6 +585,8 @@ impl AppState {
             self.agent_pinned = true;
         }
         self.thinking = false;
+        self.queued_messages.clear();
+        self.cancel_turn_tx = None;
     }
 
     /// Start a fresh conversation in place, keeping the working dir,
@@ -593,6 +603,8 @@ impl AppState {
         self.total_tokens = 0;
         self.total_cost_usd = 0.0;
         self.thinking = false;
+        self.queued_messages.clear();
+        self.cancel_turn_tx = None;
     }
 
     /// What to call the model in the UI — the whole truth and nothing but.

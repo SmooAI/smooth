@@ -41,6 +41,12 @@
 //! applies to every shell the agent gets. Pass-through is a mode of this type,
 //! not a bypass of it.
 //!
+//! Workspace boundary note: this Seatbelt profile is not a workspace-wide
+//! filesystem jail. Bash runs with the selected working directory, while
+//! filesystem tools enforce their configured workspace roots in `path.rs`
+//! and `cwd.rs`. Without an enforced network rule, shell network access is
+//! governed by the user environment and any configured proxy variables.
+//!
 //! Platform status of the enforced mode:
 //! - **macOS**: Seatbelt via `sandbox-exec` with a generated profile. Enforced.
 //! - **Linux**: NOT YET (bubblewrap + Landlock + seccomp is TODO, th-08e05a).

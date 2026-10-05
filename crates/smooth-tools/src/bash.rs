@@ -31,6 +31,8 @@ pub struct BashTool {
     /// is also kernel-denied (see [`crate::sandbox::SandboxPolicy::with_proxy`]).
     /// `None` = unrestricted.
     pub proxy: Option<String>,
+    /// PATH from the attached coding client, when available.
+    pub user_path: Option<std::ffi::OsString>,
 }
 
 #[async_trait]
@@ -92,7 +94,13 @@ impl Tool for BashTool {
             policy = policy.with_proxy(addr.clone());
         }
         let mut cmd = crate::sandbox::SandboxedCommand::shell(&policy, &command).into_command();
-        cmd.current_dir(&self.workspace)
+        // Daemons started by launchd often inherit a minimal PATH, while the
+        // user's development tools are installed through mise/Homebrew. Keep
+        // the daemon PATH and add only standard user tool directories so
+        // `node`, `pnpm`, and similar commands resolve inside the shell too.
+        let inherited_path = self.user_path.clone().or_else(|| std::env::var_os("PATH"));
+        cmd.env("PATH", tool_path(inherited_path.as_deref(), dirs_next::home_dir().as_deref()))
+            .current_dir(&self.workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -113,6 +121,26 @@ impl Tool for BashTool {
         let stderr = truncate(&String::from_utf8_lossy(&output.stderr));
         Ok(format!("exit code: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"))
     }
+}
+
+/// The caller's PATH first, so its ordering (a mise-pinned `node` over
+/// Homebrew's) wins, then common tool and system directories as fallbacks.
+fn tool_path(current: Option<&std::ffi::OsStr>, home: Option<&std::path::Path>) -> std::ffi::OsString {
+    let mut paths: Vec<std::path::PathBuf> = current.map(|c| std::env::split_paths(c).collect()).unwrap_or_default();
+    let mut fallbacks = Vec::new();
+    if let Some(home) = home {
+        fallbacks.push(home.join(".local/share/mise/shims"));
+        fallbacks.push(home.join(".local/bin"));
+    }
+    fallbacks.extend(["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(std::path::PathBuf::from));
+    #[cfg(unix)]
+    fallbacks.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].into_iter().map(std::path::PathBuf::from));
+    for dir in fallbacks {
+        if !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| current.map_or_else(std::ffi::OsString::new, std::ffi::OsStr::to_os_string))
 }
 
 fn truncate(s: &str) -> String {
@@ -137,8 +165,43 @@ mod tests {
         let tool = BashTool {
             workspace: dir.path().to_path_buf(),
             proxy: None,
+            user_path: None,
         };
         (dir, tool)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn developer_tool_path_adds_mise_and_preserves_daemon_path() {
+        let path = tool_path(Some(std::ffi::OsStr::new("/usr/bin:/bin")), Some(std::path::Path::new("/Users/test")));
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert!(parts.contains(&std::path::PathBuf::from("/Users/test/.local/share/mise/shims")));
+        assert!(parts.contains(&std::path::PathBuf::from("/usr/bin")));
+        assert!(parts.contains(&std::path::PathBuf::from("/bin")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn caller_path_order_wins_over_fallbacks() {
+        let path = tool_path(Some(std::ffi::OsStr::new("/mise/node/bin:/usr/bin")), None);
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert_eq!(parts[0], std::path::PathBuf::from("/mise/node/bin"));
+        assert_eq!(
+            parts.iter().filter(|p| p.as_path() == std::path::Path::new("/usr/bin")).count(),
+            1,
+            "deduped: {parts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_receives_path_from_the_attached_coding_session() {
+        let (dir, mut tool) = tool();
+        tool.user_path = Some(std::ffi::OsString::from("/user/toolchain/bin"));
+        let out = tool.execute(json!({"command": "printf '%s' \"$PATH\""})).await.unwrap();
+        assert!(out.contains("exit code: 0"), "{out}");
+        assert!(out.contains("/user/toolchain/bin"), "the caller PATH reaches the shell: {out}");
+        assert!(dir.path().is_dir());
     }
 
     #[tokio::test]
@@ -182,6 +245,7 @@ mod tests {
         let tool = BashTool {
             workspace: dir.path().to_path_buf(),
             proxy: Some("127.0.0.1:3128".into()),
+            user_path: None,
         };
         let out = tool.execute(json!({"command": "echo PROXY=$HTTP_PROXY"})).await.unwrap();
         assert!(out.contains("exit code: 0"), "{out}");

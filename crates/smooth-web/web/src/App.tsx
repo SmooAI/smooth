@@ -393,7 +393,6 @@ export default function App() {
                                     />
                                     <div className="presence-rule shrink-0" />
                                     <main className="flex min-h-0 flex-1 flex-col">
-                                        <TodoPanel todos={todos} />
                                         <ApprovalDeck approvals={approvals} respond={respond} />
                                         <Conversation messages={messages} approvals={approvals} onAcceptPlan={acceptPlan} onRevisePlan={revisePlan} />
                                     </main>
@@ -408,6 +407,7 @@ export default function App() {
                                     sessionCostUsd={sessionCostUsd}
                                 />
                             )}
+                            {inConversation && <div className="presence-rule shrink-0 mt-2 mb-3" aria-hidden="true" />}
                             <Composer
                                 onSend={sendMessage}
                                 disabled={state === 'connecting' || state === 'offline'}
@@ -423,6 +423,7 @@ export default function App() {
                                 onToggleSessionMode={toggleSessionMode}
                                 focusRef={composerFocus}
                             />
+                            {inConversation && <TodoPanel todos={todos} />}
                         </>
                     )}
                 </div>
@@ -774,14 +775,14 @@ function PlanCard({ plan, onAccept, onRevise }: { plan: string; onAccept: () => 
     );
 }
 
-// The agent's live checklist (the `todos` directive) — a lightweight panel that
-// sits above the transcript and is replaced wholesale each turn.
+// The agent's live checklist (the `todos` directive) — a lightweight panel below
+// the composer so it never obscures the text field, replaced wholesale each turn.
 const TODO_GLYPH: Record<TodoItem['status'], string> = { completed: '✔', in_progress: '▶', pending: '○' };
 function TodoPanel({ todos }: { todos: TodoItem[] }) {
     if (!todos.length) return null;
     const done = todos.filter((t) => t.status === 'completed').length;
     return (
-        <div className="mt-3 rounded-2xl border border-border bg-panel/70 p-3 backdrop-blur">
+        <div className="mx-1 mt-2 mb-2 max-h-32 shrink-0 overflow-y-auto rounded-2xl border border-border bg-panel/70 p-3 backdrop-blur">
             <div className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-wide text-(--color-muted-foreground) uppercase">
                 <ListChecks size={13} className="text-(--color-th-teal)" /> Plan · {done}/{todos.length}
             </div>

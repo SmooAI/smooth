@@ -132,6 +132,9 @@ pub enum ServerEvent {
         task_id: String,
         message: String,
     },
+    TaskCancelled {
+        task_id: String,
+    },
     PearlCreated {
         id: String,
         title: String,
@@ -295,6 +298,7 @@ fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
                 completion_tokens: u.get("completionTokens").and_then(serde_json::Value::as_u64).unwrap_or(0),
             }),
         }),
+        "cancelled" => Some(ServerEvent::TaskCancelled { task_id: TURN_ID.to_string() }),
         "error" => Some(ServerEvent::Error {
             message: smooth_cast::wire::error_message(v),
             request_id: v.get("requestId").and_then(serde_json::Value::as_str).map(str::to_string),
@@ -356,7 +360,7 @@ fn stringify(v: Option<&serde_json::Value>) -> String {
 ///
 /// `None` means "nothing to send" (e.g. a turn was requested before the
 /// session id arrived — the caller buffers instead).
-fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id: &str) -> Option<serde_json::Value> {
+fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id: &str, active_request_id: Option<&str>) -> Option<serde_json::Value> {
     match event {
         ClientEvent::TaskStart { message, model, images, .. } => {
             let sid = session_id?;
@@ -379,9 +383,12 @@ fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id:
             Some(frame)
         }
         ClientEvent::Ping => Some(serde_json::json!({ "action": "ping", "requestId": request_id })),
-        // The canonical protocol has no cancel/steer verb yet; dropping beats
-        // sending a frame the server will reject as unknown.
-        ClientEvent::TaskCancel { .. } | ClientEvent::Steer { .. } => None,
+        ClientEvent::TaskCancel { .. } => Some(serde_json::json!({
+            "action": "cancel",
+            "requestId": active_request_id?,
+            "sessionId": session_id?,
+        })),
+        ClientEvent::Steer { .. } => None,
     }
 }
 
@@ -404,7 +411,7 @@ async fn heartbeat_loop(tx: mpsc::UnboundedSender<String>, connected: Arc<Atomic
             break;
         }
         let request_id = format!("hb-{}", next_request.fetch_add(1, Ordering::Relaxed));
-        let Some(frame) = to_canonical_frame(&ClientEvent::Ping, None, &request_id) else {
+        let Some(frame) = to_canonical_frame(&ClientEvent::Ping, None, &request_id, None) else {
             break;
         };
         if tx.send(frame.to_string()).is_err() {
@@ -489,6 +496,27 @@ impl BigSmoothClient {
     #[must_use]
     pub fn conversation_id(&self) -> Option<String> {
         self.conversation_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Open and select a repository for this conversation. Calling this is the
+    /// user's explicit workspace grant; the daemon keeps the grant scoped to
+    /// this conversation and the normal filesystem tools remain confined to it.
+    pub async fn open_workspace(&self, conversation_id: &str, path: &str, select: bool, user_path: &str) -> anyhow::Result<()> {
+        let mut url = format!("{}/api/session/workspaces", self.url);
+        if let Some(token) = local_token() {
+            url.push_str(&format!("?token={}", percent_encode_token(&token)));
+        }
+        let response = reqwest::Client::new()
+            .post(url)
+            .json(&serde_json::json!({ "session": conversation_id, "path": path, "select": select, "user_path": user_path }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            anyhow::bail!("could not open workspace (HTTP {status}): {detail}");
+        }
+        Ok(())
     }
 
     /// Connect to Big Smooth over WebSocket.
@@ -752,7 +780,10 @@ impl BigSmoothClient {
         if let Some(mut source) = self.event_rx.take() {
             tokio::spawn(async move {
                 while let Some(event) = source.recv().await {
-                    let is_terminal = matches!(event, ServerEvent::TaskComplete { .. } | ServerEvent::TaskError { .. });
+                    let is_terminal = matches!(
+                        event,
+                        ServerEvent::TaskComplete { .. } | ServerEvent::TaskError { .. } | ServerEvent::TaskCancelled { .. }
+                    );
                     if tx.send(event).is_err() {
                         break;
                     }
@@ -800,9 +831,9 @@ impl BigSmoothClient {
     pub async fn send(&self, event: &ClientEvent) -> anyhow::Result<()> {
         let session = self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let request_id = format!("turn-{}", self.next_request.fetch_add(1, Ordering::Relaxed));
-        let Some(frame) = to_canonical_frame(event, session.as_deref(), &request_id) else {
-            // Nothing the canonical protocol carries (cancel/steer), or no
-            // session yet — drop rather than send a frame the server rejects.
+        let active_request = self.turn_request.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(frame) = to_canonical_frame(event, session.as_deref(), &request_id, active_request.as_deref()) else {
+            // Steer has no server action; cancel needs an active request and session.
             return Ok(());
         };
         if matches!(event, ClientEvent::TaskStart { .. }) {
@@ -1305,12 +1336,15 @@ mod tests {
         let received2 = rx.recv().await.expect("receive turn");
         assert!(received2.contains(r#""action":"send_message""#), "canonical turn frame: {received2}");
         assert!(received2.contains("sess-test"), "carries the session id: {received2}");
+        let turn_frame: serde_json::Value = serde_json::from_str(&received2).expect("turn frame JSON");
 
-        // Cancel has no canonical verb — it must NOT put a bogus frame on the
-        // wire, so nothing further arrives.
+        // Cancel names the exact active request so the server stops this turn.
         let cancel = ClientEvent::TaskCancel { task_id: "t-42".into() };
         client.send(&cancel).await.expect("send cancel");
-        assert!(rx.try_recv().is_err(), "cancel must not invent a wire frame");
+        let cancel_frame: serde_json::Value = serde_json::from_str(&rx.recv().await.expect("cancel frame")).expect("cancel JSON");
+        assert_eq!(cancel_frame["action"], "cancel");
+        assert_eq!(cancel_frame["sessionId"], "sess-test");
+        assert_eq!(cancel_frame["requestId"], turn_frame["requestId"]);
     }
 
     /// Regression (pearl th-6dd202): `th code` connected with NO auth while the
@@ -1670,6 +1704,14 @@ mod canonical_protocol_tests {
         }
     }
 
+    #[test]
+    fn cancelled_frame_terminates_the_tui_turn() {
+        assert!(matches!(
+            translate_frame(&json!({"type":"cancelled", "requestId":"turn-5"})),
+            Some(ServerEvent::TaskCancelled { .. })
+        ));
+    }
+
     /// A turn is `send_message` carrying the session id — and is withheld
     /// entirely until the handshake supplies one.
     #[test]
@@ -1683,14 +1725,14 @@ mod canonical_protocol_tests {
             prior_messages: vec![],
             images: vec![],
         };
-        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
+        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1", None).expect("frame");
         assert_eq!(frame["action"], "send_message");
         assert_eq!(frame["sessionId"], "sess-9");
         assert_eq!(frame["message"], "hi");
         assert_eq!(frame["model"], "smooth-coding");
         assert_eq!(frame["requestId"], "turn-1");
         // No session yet -> nothing goes on the wire.
-        assert!(to_canonical_frame(&ev, None, "turn-2").is_none());
+        assert!(to_canonical_frame(&ev, None, "turn-2", None).is_none());
         // Text-only turn: no `images` key at all — wire parity with the web
         // composer, which omits the field rather than sending [].
         assert!(frame.get("images").is_none());
@@ -1707,17 +1749,19 @@ mod canonical_protocol_tests {
             prior_messages: vec![],
             images: vec!["data:image/png;base64,AAAA".into()],
         };
-        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
+        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1", None).expect("frame");
         // Engine UserImage shape: `{ url }` objects, not bare strings (bare
         // strings fail-soft-drop and the model never sees the image).
         assert_eq!(frame["images"][0]["url"], "data:image/png;base64,AAAA");
     }
 
     #[test]
-    fn cancel_and_steer_are_not_invented_on_the_wire() {
+    fn cancel_uses_the_active_request_and_steer_is_deferred_to_cancel_then_send() {
         let cancel = ClientEvent::TaskCancel { task_id: "t".into() };
-        assert!(to_canonical_frame(&cancel, Some("s"), "r").is_none());
-        let ping = to_canonical_frame(&ClientEvent::Ping, Some("s"), "r-1").expect("ping");
+        assert!(to_canonical_frame(&cancel, Some("s"), "r", None).is_none());
+        let frame = to_canonical_frame(&cancel, Some("s"), "r-cancel", Some("turn-7")).expect("cancel");
+        assert_eq!(frame, serde_json::json!({"action":"cancel", "requestId":"turn-7", "sessionId":"s"}));
+        let ping = to_canonical_frame(&ClientEvent::Ping, Some("s"), "r-1", None).expect("ping");
         assert_eq!(ping["action"], "ping");
     }
 }
