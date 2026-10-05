@@ -1048,12 +1048,9 @@ async fn attach_session(id: &str) -> Result<()> {
                     }
                     continue;
                 }
-                match v.get("type").and_then(Value::as_str) {
-                    Some("flow.error") => {
-                        drop(raw_guard);
-                        bail!("{}", v.get("message").and_then(Value::as_str).unwrap_or("engine error"));
-                    }
-                    _ => {}
+                if v.get("type").and_then(Value::as_str) == Some("flow.error") {
+                    drop(raw_guard);
+                    bail!("{}", v.get("message").and_then(Value::as_str).unwrap_or("engine error"));
                 }
             }
         }

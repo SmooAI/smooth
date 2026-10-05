@@ -435,10 +435,13 @@ pub enum Absorbed {
 /// - A `flow.replay` goes out at once, split into ≤16 KiB parts
 ///   (`part`/`parts`), after the output it covers (held, `seq` ≤ its) is
 ///   dropped. Held output newer than the replay stays held for the next tick.
+/// One session's held output: each engine frame's `seq` and bytes, in order.
+type HeldRuns = Vec<(u64, Vec<u8>)>;
+
 #[derive(Default)]
 pub struct OutputCoalescer {
-    /// Per session, in arrival order: each held engine frame's `seq` and bytes.
-    pending: Vec<(String, Vec<(u64, Vec<u8>)>)>,
+    /// Per session, in arrival order.
+    pending: Vec<(String, HeldRuns)>,
 }
 
 impl OutputCoalescer {
