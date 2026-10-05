@@ -123,16 +123,22 @@ impl Tool for BashTool {
     }
 }
 
+/// The caller's PATH first, so its ordering (a mise-pinned `node` over
+/// Homebrew's) wins, then common tool and system directories as fallbacks.
 fn tool_path(current: Option<&std::ffi::OsStr>, home: Option<&std::path::Path>) -> std::ffi::OsString {
-    let mut paths = vec![std::path::PathBuf::from("/opt/homebrew/bin"), std::path::PathBuf::from("/usr/local/bin")];
-    #[cfg(unix)]
-    paths.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].into_iter().map(std::path::PathBuf::from));
+    let mut paths: Vec<std::path::PathBuf> = current.map(|c| std::env::split_paths(c).collect()).unwrap_or_default();
+    let mut fallbacks = Vec::new();
     if let Some(home) = home {
-        paths.push(home.join(".local/bin"));
-        paths.push(home.join(".local/share/mise/shims"));
+        fallbacks.push(home.join(".local/share/mise/shims"));
+        fallbacks.push(home.join(".local/bin"));
     }
-    if let Some(current) = current {
-        paths.extend(std::env::split_paths(current));
+    fallbacks.extend(["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(std::path::PathBuf::from));
+    #[cfg(unix)]
+    fallbacks.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].into_iter().map(std::path::PathBuf::from));
+    for dir in fallbacks {
+        if !paths.contains(&dir) {
+            paths.push(dir);
+        }
     }
     std::env::join_paths(paths).unwrap_or_else(|_| current.map_or_else(std::ffi::OsString::new, std::ffi::OsStr::to_os_string))
 }
@@ -164,6 +170,7 @@ mod tests {
         (dir, tool)
     }
 
+    #[cfg(unix)]
     #[test]
     fn developer_tool_path_adds_mise_and_preserves_daemon_path() {
         let path = tool_path(Some(std::ffi::OsStr::new("/usr/bin:/bin")), Some(std::path::Path::new("/Users/test")));
@@ -173,6 +180,20 @@ mod tests {
         assert!(parts.contains(&std::path::PathBuf::from("/bin")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn caller_path_order_wins_over_fallbacks() {
+        let path = tool_path(Some(std::ffi::OsStr::new("/mise/node/bin:/usr/bin")), None);
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert_eq!(parts[0], std::path::PathBuf::from("/mise/node/bin"));
+        assert_eq!(
+            parts.iter().filter(|p| p.as_path() == std::path::Path::new("/usr/bin")).count(),
+            1,
+            "deduped: {parts:?}"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_receives_path_from_the_attached_coding_session() {
         let (dir, mut tool) = tool();

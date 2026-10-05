@@ -1548,7 +1548,7 @@ fn handle_input_mode(
                             let skills = crate::commands::available_skills(state);
                             if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
                                 if state.thinking {
-                                    state.input_insert_str(&format!("/{name} {args}").trim());
+                                    state.input_insert_str(format!("/{name} {args}").trim());
                                     return;
                                 }
                                 let source_label = skill.source.label();
