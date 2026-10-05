@@ -1,22 +1,22 @@
-//! Session-scoped current working directory, confined under a fixed root.
+//! Session-scoped current working directory, confined under explicit roots.
 //!
-//! Big Smooth boots with a broad workspace root (`SMOOTH_WORKSPACE`, e.g.
-//! `~/dev`). This lets a *conversation* scope itself to a subdirectory at
-//! runtime — a `/cd` from the web UI (via the daemon's `/api/session/cwd`
-//! route) or the agent's own `cd` tool — so the file tools operate under that
-//! narrower directory for the rest of the conversation.
+//! Big Smooth boots with one workspace root (`SMOOTH_WORKSPACE`) and may be
+//! given additional, explicit roots via `SMOOTH_WORKSPACES`. A conversation
+//! defaults to the primary root and can `/cd` to an allowed directory using
+//! the web UI route or the agent's `cd` tool.
 //!
 //! The store is keyed by the operator's per-turn `conversation_id` (threaded
 //! through `ToolProviderContext`), so two conversations get independent cwds
 //! and a conversation's cwd survives across turns. Unset ⇒ the root.
 //!
 //! **Confinement is load-bearing.** A cwd can only ever be an *existing
-//! directory under the root* — `set` canonicalizes the target and the root and
-//! rejects anything that isn't lexically AND canonically inside the root, so
+//! directory under an allowed root* — `set` canonicalizes the target and
+//! rejects anything that isn't lexically and canonically inside an allowed root, so
 //! `..` traversal and symlink escapes both fail. `/cd /` or `/cd ~someone-else`
-//! can never point Big Smooth outside its sandbox.
+//! can never point Big Smooth outside its configured workspace roots.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +28,11 @@ use crate::path::lexical_normalize;
 #[derive(Clone)]
 pub struct SessionCwd {
     root: PathBuf,
+    /// Operator-configured roots shared by sessions (primary + explicit env config).
+    allowed_roots: Arc<Mutex<Vec<PathBuf>>>,
+    /// Roots explicitly opened from a coding client, scoped to one conversation.
+    session_roots: Arc<Mutex<HashMap<String, Vec<PathBuf>>>>,
+    session_paths: Arc<Mutex<HashMap<String, OsString>>>,
     map: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
@@ -42,9 +47,67 @@ impl SessionCwd {
         // exist yet (canonicalize borrows first, so the `Err` arm can move it).
         let root = root.canonicalize().unwrap_or(root);
         Self {
+            allowed_roots: Arc::new(Mutex::new(vec![root.clone()])),
+            session_roots: Arc::new(Mutex::new(HashMap::new())),
+            session_paths: Arc::new(Mutex::new(HashMap::new())),
             root,
             map: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Explicitly allow another workspace for sessions that need to inspect
+    /// sibling repositories. The directory must exist when it is configured.
+    pub fn add_root(&mut self, root: &Path) -> anyhow::Result<()> {
+        let canonical = canonical_directory(root)?;
+        let mut roots = self.allowed_roots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+        Ok(())
+    }
+
+    /// Add a directory to one conversation after the user explicitly opens it.
+    pub fn add_session_root(&self, session: &str, root: &Path) -> anyhow::Result<PathBuf> {
+        let canonical = canonical_directory(root)?;
+        {
+            let mut session_roots = self.session_roots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let roots = session_roots.entry(session.to_string()).or_default();
+            if !roots.contains(&canonical) {
+                roots.push(canonical.clone());
+            }
+        }
+        // On the first turn (or after a daemon restart), initialize the cwd to
+        // the repository the user launched th code from. Preserve an explicit
+        // `/cd` selection on later turns.
+        let mut cwd = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cwd.entry(session.to_string()).or_insert_with(|| canonical.clone());
+        Ok(canonical)
+    }
+
+    fn roots_for(&self, session: &str) -> Vec<PathBuf> {
+        let mut roots = self.allowed_roots.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if let Some(extra) = self.session_roots.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(session) {
+            roots.extend(extra.iter().cloned());
+        }
+        roots
+    }
+
+    /// Record the attached user's PATH for shell tools in this conversation.
+    pub fn set_user_path(&self, session: &str, path: &str) {
+        self.session_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.to_string(), OsString::from(path));
+    }
+
+    /// The attached user's PATH, when this conversation came from th code.
+    #[must_use]
+    pub fn user_path(&self, session: &str) -> Option<OsString> {
+        self.session_paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .cloned()
     }
 
     /// The workspace root — the cwd every session falls back to.
@@ -69,13 +132,10 @@ impl SessionCwd {
         self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(session);
     }
 
-    /// Resolve `path` and, if it is an existing directory confined under the
-    /// root, set it as the session's cwd. Relative paths resolve against the
-    /// session's current cwd; absolute paths are taken as-is. An empty path or
-    /// `~` resets to the root. Returns the resolved (canonical) cwd.
+    /// Resolve `path` and set it as the session's cwd if it belongs to a root.
     ///
     /// # Errors
-    /// The path escapes the root, doesn't exist, or isn't a directory.
+    /// The path escapes all configured roots, doesn't exist, or isn't a directory.
     pub fn set(&self, session: &str, path: &str) -> anyhow::Result<PathBuf> {
         let trimmed = path.trim();
         if trimmed.is_empty() || trimmed == "~" {
@@ -83,8 +143,6 @@ impl SessionCwd {
             return Ok(self.root.clone());
         }
 
-        // 1. Lexical gate: resolve against the current cwd, collapse `.`/`..`,
-        //    and require the result to be under the root before we touch disk.
         let current = self.get(session);
         let requested = Path::new(trimmed);
         let joined = if requested.is_absolute() {
@@ -93,21 +151,15 @@ impl SessionCwd {
             current.join(requested)
         };
         let normalized = lexical_normalize(&joined);
-        if !normalized.starts_with(&self.root) {
-            anyhow::bail!("path `{trimmed}` is outside the workspace root {}", self.root.display());
-        }
-
-        // 2. Canonical gate (load-bearing): the target must exist, be a
-        //    directory, and — after following symlinks — STILL be under the
-        //    root. This is what defeats a symlink pointing out of the sandbox.
+        let roots = self.roots_for(session);
         let canonical = normalized
             .canonicalize()
             .map_err(|_| anyhow::anyhow!("directory does not exist: {}", normalized.display()))?;
+        if !roots.iter().any(|root| canonical.starts_with(root)) {
+            anyhow::bail!("path `{trimmed}` resolves outside this session's opened workspaces; use /workspace add <path> first");
+        }
         if !canonical.is_dir() {
             anyhow::bail!("not a directory: {}", canonical.display());
-        }
-        if !canonical.starts_with(&self.root) {
-            anyhow::bail!("path `{trimmed}` resolves outside the workspace root {}", self.root.display());
         }
 
         self.map
@@ -116,6 +168,16 @@ impl SessionCwd {
             .insert(session.to_string(), canonical.clone());
         Ok(canonical)
     }
+}
+
+fn canonical_directory(root: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot add workspace root `{}`: {e}", root.display()))?;
+    if !canonical.is_dir() {
+        anyhow::bail!("workspace root is not a directory: {}", canonical.display());
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -131,6 +193,27 @@ mod tests {
         std::fs::write(tmp.path().join("f.txt"), "x").unwrap();
         let cwd = SessionCwd::new(tmp.path().to_path_buf());
         (tmp, cwd)
+    }
+
+    #[test]
+    fn can_cd_to_an_explicitly_allowed_external_workspace() {
+        let (_primary, cwd) = fixture();
+        let sibling = tempfile::tempdir().unwrap();
+        let mut cwd = cwd;
+        cwd.add_root(sibling.path()).unwrap();
+        let resolved = cwd.set("s1", sibling.path().to_str().unwrap()).unwrap();
+        assert_eq!(resolved, sibling.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn explicitly_opened_root_is_scoped_to_its_conversation() {
+        let (_primary, cwd) = fixture();
+        let sibling = tempfile::tempdir().unwrap();
+        cwd.add_session_root("s1", sibling.path()).unwrap();
+        assert_eq!(cwd.get("s1"), sibling.path().canonicalize().unwrap(), "opening a workspace sets the first cwd");
+        assert!(cwd.set("s1", sibling.path().to_str().unwrap()).is_ok());
+        assert!(cwd.set("s2", sibling.path().to_str().unwrap()).is_err());
+        assert_eq!(cwd.get("s2"), cwd.root());
     }
 
     #[test]

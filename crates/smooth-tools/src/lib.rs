@@ -5,9 +5,10 @@
 //! ([`register_default_tools`]).
 //!
 //! Every filesystem tool routes user paths through
-//! [`path::resolve_workspace_path`] — the security floor that confines reads
-//! and writes to the workspace. (Per EPIC th-c89c2a the load-bearing boundary
-//! is the kernel OS-sandbox added in Phase 3; this is the cheap first gate.)
+//! [`path::resolve_workspace_path`] — the per-tool boundary for reads and
+//! writes to configured workspace roots. `bash` has separate platform-specific
+//! protections; on macOS Seatbelt protects selected credential and Git paths,
+//! but does not jail all shell filesystem access to the workspace.
 //!
 //! Build-out:
 //! - Slice A: read-only tools — `read_file`, `list_files`, `grep`.
@@ -143,6 +144,12 @@ pub fn register_default_tools_with_proxy(registry: &mut ToolRegistry, workspace:
 /// [`register_default_tools_with_proxy`].
 #[must_use]
 pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Vec<Arc<dyn Tool>> {
+    default_tools_with_proxy_and_path(workspace, proxy, None)
+}
+
+/// Build default tools with a PATH inherited from an attached local coding client.
+#[must_use]
+pub fn default_tools_with_proxy_and_path(workspace: PathBuf, proxy: Option<String>, user_path: Option<std::ffi::OsString>) -> Vec<Arc<dyn Tool>> {
     #[allow(unused_mut, reason = "only the macOS arm below pushes onto it")]
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFileTool { workspace: workspace.clone() }) as Arc<dyn Tool>,
@@ -167,7 +174,7 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         Arc::new(WeatherTool),
         // Self-contained HTML report/artifact tool (Claude Code Artifacts style).
         Arc::new(ArtifactTool { workspace: workspace.clone() }),
-        Arc::new(BashTool { workspace, proxy }),
+        Arc::new(BashTool { workspace, proxy, user_path }),
     ];
     // th-ecdf4d: the device's real position, which `get_weather` prefers over
     // its IP guess. Registered even when the TCC grant is missing — the tool
@@ -240,6 +247,7 @@ mod tests {
         let bash = BashTool {
             workspace: PathBuf::from("/tmp"),
             proxy: Some("127.0.0.1:4419".into()),
+            user_path: None,
         };
         assert_eq!(bash.proxy.as_deref(), Some("127.0.0.1:4419"));
     }

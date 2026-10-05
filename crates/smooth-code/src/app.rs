@@ -42,6 +42,154 @@ fn tui_debug(msg: impl AsRef<str>) {
     let _ = writeln!(f, "[{ts}] {}", msg.as_ref());
 }
 
+/// Persist a compact record for failed tool calls. Unlike the opt-in UI
+/// diagnostics above, tool failures are always recorded: this is the evidence
+/// needed to explain a failed turn after the TUI exits. Store only identifiers,
+/// tool name, duration, and a bounded category — never arguments or result text.
+fn tui_tool_error(session_id: &str, task_id: &str, tool_name: &str, duration_ms: Option<u64>, result: &str) {
+    tui_error_record(session_id, task_id, tool_name, duration_ms, result, "tool_error");
+}
+
+fn tui_turn_error(session_id: &str, result: &str) {
+    tui_error_record(session_id, "", "session", None, result, "turn_error");
+}
+
+fn tui_error_record(session_id: &str, task_id: &str, tool_name: &str, duration_ms: Option<u64>, result: &str, event: &str) {
+    let Some(home) = dirs_next::home_dir() else { return };
+    let log_dir = home.join(".smooth").join("logs");
+    let record = ToolErrorRecord {
+        session_id,
+        task_id,
+        tool_name,
+        duration_ms,
+        result,
+        event,
+    };
+    let _ = append_error_record(&log_dir, record);
+}
+
+struct ToolErrorRecord<'a> {
+    session_id: &'a str,
+    task_id: &'a str,
+    tool_name: &'a str,
+    duration_ms: Option<u64>,
+    result: &'a str,
+    event: &'a str,
+}
+
+fn append_error_record(log_dir: &std::path::Path, record: ToolErrorRecord<'_>) -> std::io::Result<()> {
+    std::fs::create_dir_all(log_dir)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("smooth-code-tool-errors.jsonl"))?;
+    let entry = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "session_id": record.session_id,
+        "task_id": record.task_id,
+        "tool": record.tool_name,
+        "event": record.event,
+        "duration_ms": record.duration_ms,
+        "error_kind": tui_tool_error_kind(record.result),
+    });
+    if let Ok(line) = serde_json::to_string(&entry) {
+        writeln!(file, "{line}")?;
+    }
+    Ok(())
+}
+
+/// Classify common failures without persisting paths, commands, or tool output.
+fn tui_tool_error_kind(result: &str) -> &'static str {
+    let lower = result.to_ascii_lowercase();
+    if lower.contains("outside the workspace") || lower.contains("outside workspace") || lower.contains("outside the configured workspace") {
+        "outside_workspace"
+    } else if lower.contains("blocked by hook") {
+        "blocked_by_hook"
+    } else if lower.contains("blocked by policy") {
+        "blocked_by_policy"
+    } else if lower.contains("permission denied") {
+        "permission_denied"
+    } else if lower.contains("no such file") || lower.contains("not found") {
+        "not_found"
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timed_out"
+    } else {
+        "tool_error"
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "test setup and assertions")]
+mod tui_tool_error_tests {
+    use super::{append_error_record, tui_tool_error_kind, ToolErrorRecord};
+
+    #[test]
+    fn classifies_workspace_errors_without_retaining_the_path() {
+        let result = "error: path `/Users/brent/dev/refs/opencode` is outside the workspace root";
+        assert_eq!(tui_tool_error_kind(result), "outside_workspace");
+    }
+
+    #[test]
+    fn classifies_common_tool_failures() {
+        assert_eq!(tui_tool_error_kind("permission denied"), "permission_denied");
+        assert_eq!(tui_tool_error_kind("error: blocked by hook: rejected"), "blocked_by_hook");
+        assert_eq!(tui_tool_error_kind("blocked by policy: command"), "blocked_by_policy");
+        assert_eq!(tui_tool_error_kind("No such file or directory"), "not_found");
+        assert_eq!(tui_tool_error_kind("command timed out"), "timed_out");
+        assert_eq!(tui_tool_error_kind("unclassified failure"), "tool_error");
+    }
+
+    #[test]
+    fn persisted_tool_error_is_jsonl_and_excludes_paths_and_result_text() {
+        let dir = tempfile::tempdir().expect("temporary log directory");
+        append_error_record(
+            dir.path(),
+            ToolErrorRecord {
+                session_id: "session-1",
+                task_id: "task-2",
+                tool_name: "read_file",
+                duration_ms: Some(17),
+                result: "error: /Users/brent/private.txt is outside the workspace",
+                event: "tool_error",
+            },
+        )
+        .expect("append error record");
+
+        let log = std::fs::read_to_string(dir.path().join("smooth-code-tool-errors.jsonl")).expect("read JSONL");
+        let record: serde_json::Value = serde_json::from_str(log.trim()).expect("one JSON object per line");
+        assert_eq!(record["session_id"], "session-1");
+        assert_eq!(record["task_id"], "task-2");
+        assert_eq!(record["tool"], "read_file");
+        assert_eq!(record["error_kind"], "outside_workspace");
+        assert!(!log.contains("/Users/brent/private.txt"));
+        assert!(!log.contains("outside the workspace"));
+    }
+
+    #[test]
+    fn persisted_turn_failure_uses_a_safe_category() {
+        let dir = tempfile::tempdir().expect("temporary log directory");
+        append_error_record(
+            dir.path(),
+            ToolErrorRecord {
+                session_id: "session-1",
+                task_id: "",
+                tool_name: "session",
+                duration_ms: None,
+                result: "Cannot connect to Big Smooth at http://127.0.0.1:7337: token=secret",
+                event: "turn_error",
+            },
+        )
+        .expect("append turn error record");
+
+        let log = std::fs::read_to_string(dir.path().join("smooth-code-tool-errors.jsonl")).expect("read JSONL");
+        let record: serde_json::Value = serde_json::from_str(log.trim()).expect("one JSON object per line");
+        assert_eq!(record["event"], "turn_error");
+        assert_eq!(record["error_kind"], "tool_error");
+        assert!(!log.contains("127.0.0.1"));
+        assert!(!log.contains("secret"));
+    }
+}
+
 /// Write the running cumulative `total_cost_usd` to the path in
 /// `SMOOTH_BENCH_COST_SIDECAR` (or do nothing when unset). The bench
 /// reads this on task completion to avoid scraping the TUI's status
@@ -459,7 +607,32 @@ fn event_loop(
         // Drain all pending agent events without blocking
         while let Ok(agent_event) = event_rx.try_recv() {
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            let finished = matches!(
+                &agent_event,
+                AgentEvent::Completed { .. } | AgentEvent::StreamingComplete | AgentEvent::Error { .. } | AgentEvent::MaxIterationsReached { .. }
+            );
+            if finished {
+                s.cancel_turn_tx = None;
+            }
+            if let AgentEvent::Error { message } = &agent_event {
+                tui_turn_error(&s.session_id, message);
+            }
             handle_agent_event(&mut s, agent_event);
+            if finished && !s.queued_messages.is_empty() {
+                let (message, images) = s.queued_messages.pop_front().expect("queue checked non-empty");
+                let agent = s.agent_name.clone();
+                let queued = s.queued_messages.len();
+                s.add_message(ChatMessage::system(format!("Sending queued message · {queued} remaining")));
+                s.add_message(ChatMessage::user(&message));
+                s.thinking = true;
+                let tx = event_tx.clone();
+                let state_for = Arc::clone(state);
+                tokio::spawn(async move {
+                    if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent), state_for, images).await {
+                        let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+                    }
+                });
+            }
         }
 
         // Poll for terminal events with 50ms timeout for responsive streaming UI
@@ -575,7 +748,7 @@ fn event_loop(
                     }
                     // Ctrl-chorded keys are commands, not text — don't let
                     // them fall through to the input handler as characters.
-                    if !matches!(key.code, KeyCode::Char('c')) {
+                    if !matches!(key.code, KeyCode::Char('c') | KeyCode::Enter) {
                         continue;
                     }
                 }
@@ -1083,11 +1256,11 @@ fn accept_autocomplete(state: &mut AppState) {
     state.autocomplete.deactivate();
 }
 
-/// Would submitting `input` right now dispatch a SECOND concurrent agent turn?
+/// Last-resort check for a second concurrent agent turn.
 ///
-/// Only [`InputKind::Normal`] reaches the agent; slash commands and `!shell`
-/// run locally, so they stay usable while a turn is in flight. Pure so the
-/// guard is testable without a terminal (pearl th-426791).
+/// Normal messages and attachment-only sends are queued before this guard;
+/// slash commands and `!shell` run locally and stay usable during a turn.
+/// Pure so the guard is testable without a terminal (pearl th-426791).
 ///
 /// `ponytail:` an unknown `/name` that resolves to a *skill* also dispatches a
 /// turn, and isn't blocked here — deciding that needs the skill registry, and
@@ -1095,6 +1268,10 @@ fn accept_autocomplete(state: &mut AppState) {
 /// skill branch if it ever bites.
 fn blocks_second_turn(input: &str, turn_in_flight: bool) -> bool {
     turn_in_flight && matches!(parse_input(input), InputKind::Normal(text) if !text.is_empty())
+}
+
+fn should_queue_input(input: &str, has_attachments: bool) -> bool {
+    matches!(parse_input(input), InputKind::Normal(text) if !text.is_empty()) || (has_attachments && input.trim().is_empty())
 }
 
 /// Handle key events in input mode.
@@ -1217,6 +1394,25 @@ fn handle_input_mode(
     }
 
     match key.code {
+        KeyCode::Enter if state.thinking && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let has_attachments = !state.attachments.is_empty();
+            let input = state.take_input();
+            if !should_queue_input(&input, has_attachments) {
+                return;
+            }
+            let message = match parse_input(&input) {
+                InputKind::Normal(message) => message.to_string(),
+                _ => return,
+            };
+            let images = state.attachments.drain(..).map(|attachment| attachment.data_url).collect();
+            state.queued_messages.push_front((message, images));
+            let cancel_sent = state.cancel_turn_tx.as_ref().is_some_and(|tx| tx.send(()).is_ok());
+            if cancel_sent {
+                state.add_message(ChatMessage::system("Steering: stopping the current turn, then sending this first."));
+            } else {
+                state.add_message(ChatMessage::system("No active turn control yet; this message is queued next."));
+            }
+        }
         KeyCode::Enter if state.pending_plan.is_some() => {
             // A proposed plan owns the next Enter. An empty draft ACCEPTS:
             // switch the conversation to Auto (locally + on the daemon) and
@@ -1257,6 +1453,17 @@ fn handle_input_mode(
             // dispatch *before* `take_input`, so the draft stays in the box and
             // the keystroke costs nothing. Slash commands and `!shell` are
             // handled locally, so they stay live while Big Smooth works.
+            let has_queued_content = should_queue_input(&state.input, !state.attachments.is_empty());
+            if state.thinking && has_queued_content {
+                let input = state.take_input();
+                let message = match parse_input(&input) {
+                    InputKind::Normal(message) => message.to_string(),
+                    _ => String::new(),
+                };
+                let images = state.attachments.drain(..).map(|attachment| attachment.data_url).collect();
+                state.queued_messages.push_back((message, images));
+                return;
+            }
             if blocks_second_turn(&state.input, state.thinking) {
                 return;
             }
@@ -1267,6 +1474,57 @@ fn handle_input_mode(
 
             match parse_input(&input) {
                 InputKind::SlashCommand { name, args } => {
+                    if name == "workspace" {
+                        let Some(path) = args.trim().strip_prefix("add ").map(str::trim).filter(|p| !p.is_empty()) else {
+                            state.add_message(ChatMessage::system("Usage: /workspace add <directory>"));
+                            return;
+                        };
+                        let path = if path == "~" || path.starts_with("~/") {
+                            dirs_next::home_dir().unwrap_or_default().join(path.strip_prefix("~/").unwrap_or(""))
+                        } else {
+                            std::path::PathBuf::from(path)
+                        };
+                        let path = match path.canonicalize() {
+                            Ok(path) if path.is_dir() => path,
+                            Ok(path) => {
+                                state.add_message(ChatMessage::system(format!("Workspace is not a directory: {}", path.display())));
+                                return;
+                            }
+                            Err(error) => {
+                                state.add_message(ChatMessage::system(format!("Cannot open workspace: {error}")));
+                                return;
+                            }
+                        };
+                        let (conversation_id, url) = (state.conversation_id.clone(), crate::headless::daemon_url());
+                        let state_for_workspace = Arc::clone(&state_arc);
+                        state.add_message(ChatMessage::system(format!("Opening workspace {}…", path.display())));
+                        tokio::spawn(async move {
+                            let mut client = crate::client::BigSmoothClient::new(&url);
+                            client.resume_conversation(conversation_id.as_deref());
+                            let result = async {
+                                client.connect().await?;
+                                let cid = client
+                                    .conversation_id()
+                                    .or(conversation_id)
+                                    .ok_or_else(|| anyhow::anyhow!("daemon did not provide a conversation id"))?;
+                                let user_path = std::env::var("PATH").unwrap_or_default();
+                                client.open_workspace(&cid, &path.to_string_lossy(), true, &user_path).await?;
+                                Ok::<_, anyhow::Error>(cid)
+                            }
+                            .await;
+                            let mut s = state_for_workspace.lock().unwrap_or_else(|e| e.into_inner());
+                            match result {
+                                Ok(cid) => {
+                                    s.conversation_id = Some(cid);
+                                    s.working_dir = path.clone();
+                                    s.file_tree = crate::files::FileTree::from_dir(&path).ok();
+                                    s.add_message(ChatMessage::system(format!("Workspace opened for this session: {}", path.display())));
+                                }
+                                Err(error) => s.add_message(ChatMessage::system(format!("Could not open workspace: {error}"))),
+                            }
+                        });
+                        return;
+                    }
                     match command_registry.execute(name, args, state) {
                         Some(Ok(CommandOutput::Message(msg))) => {
                             state.add_message(ChatMessage::system(msg));
@@ -1289,6 +1547,10 @@ fn handle_input_mode(
                             // the normal agent path.
                             let skills = crate::commands::available_skills(state);
                             if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
+                                if state.thinking {
+                                    state.input_insert_str(&format!("/{name} {args}").trim());
+                                    return;
+                                }
                                 let source_label = skill.source.label();
                                 state.add_message(ChatMessage::system(format!("✦ Invoking skill: {} (from {})", skill.name, source_label)));
                                 let user_request = if args.trim().is_empty() {
@@ -1685,20 +1947,30 @@ async fn run_agent_streaming(
 
     let url = crate::headless::daemon_url();
     let mut client = BigSmoothClient::new(&url);
+    let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel();
+    state.lock().unwrap_or_else(|e| e.into_inner()).cancel_turn_tx = Some(cancel_tx);
     // Resume this TUI session's conversation. A client is built per turn, so
     // without this the daemon opens a fresh conversation every message and the
     // agent starts from zero each time — tell it your name, and the next turn
     // it has never heard of you (pearl th-255d2a). `None` on the first turn.
-    {
+    let launch_dir = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         client.resume_conversation(s.conversation_id.as_deref());
-    }
+        s.working_dir.clone()
+    };
     client
         .connect()
         .await
         .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
     // Remember whatever the server bound us to, so the next turn resumes it.
     if let Some(cid) = client.conversation_id() {
+        let user_path = std::env::var("PATH").unwrap_or_default();
+        client
+            .open_workspace(&cid, &launch_dir.to_string_lossy(), false, &user_path)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Could not open the th code launch directory as a workspace: {e}. Update/restart Big Smooth with `th up`, then retry.")
+            })?;
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.conversation_id = Some(cid);
     }
@@ -1715,7 +1987,7 @@ async fn run_agent_streaming(
     }
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
 
-    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    let cwd = Some(launch_dir.to_string_lossy().to_string());
     // th-0f6126: launched by the SmoothFlow engine? Report our own turn
     // boundaries — that is what makes the `th-code` harness's state NATIVE
     // (no hook install, no pane scraping).
@@ -1749,7 +2021,18 @@ async fn run_agent_streaming(
     let mut pending: HashMap<String, VecDeque<(String, std::time::Instant, String)>> = HashMap::new();
     let mut next_id: u64 = 0;
 
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => event,
+            cancel = cancel_rx.recv() => {
+                if cancel.is_some() {
+                    client.cancel_task("th-code-turn").await?;
+                    continue;
+                }
+                None
+            }
+        };
+        let Some(event) = event else { break };
         let agent_event = match event {
             ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
             // Pearl th-486bd0: iteration boundary — reset the
@@ -1796,12 +2079,14 @@ async fn run_agent_streaming(
                 })
             }
             ServerEvent::ToolCallComplete {
+                task_id,
                 tool_name,
                 result,
                 is_error,
                 duration_ms,
                 ..
             } => {
+                let session_id = state.lock().unwrap_or_else(|e| e.into_inner()).session_id.clone();
                 let mut resolved = duration_ms;
                 if let Some(q) = pending.get_mut(&tool_name) {
                     if let Some((id, started, _)) = q.pop_front() {
@@ -1818,6 +2103,9 @@ async fn run_agent_streaming(
                             }
                         }
                     }
+                }
+                if is_error {
+                    tui_tool_error(&session_id, &task_id, &tool_name, resolved, &result);
                 }
                 Some(AgentEvent::ToolCallComplete {
                     iteration: 0,
@@ -1853,6 +2141,21 @@ async fn run_agent_streaming(
             ServerEvent::TaskError { message, .. } => {
                 flow.report("turn_end").await;
                 let _ = tx.send(AgentEvent::Error { message });
+                break;
+            }
+            ServerEvent::TaskCancelled { .. } => {
+                flow.report("turn_end").await;
+                let _ = tx.send(AgentEvent::Completed {
+                    agent_id: "task".into(),
+                    iterations: 0,
+                    cost_usd: 0.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    cost_estimated: false,
+                    usage_estimated: false,
+                    response_id: None,
+                });
                 break;
             }
             ServerEvent::NarcAlert {
@@ -1931,7 +2234,15 @@ async fn run_agent_streaming(
 
 #[cfg(test)]
 mod second_turn_guard_tests {
-    use super::blocks_second_turn;
+    use super::{blocks_second_turn, should_queue_input};
+
+    #[test]
+    fn ordinary_messages_queue_and_local_commands_do_not() {
+        assert!(should_queue_input("check another thing", false));
+        assert!(should_queue_input("", true));
+        assert!(!should_queue_input("/help", true));
+        assert!(!should_queue_input("!git status", false));
+    }
 
     #[test]
     fn nothing_is_blocked_while_idle() {

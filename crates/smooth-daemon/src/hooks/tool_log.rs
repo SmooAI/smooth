@@ -32,7 +32,6 @@ const STALE_AFTER: Duration = Duration::from_secs(3600);
 /// Longest error category logged. The category is the text before the first
 /// `:` of an error result (`error`, `blocked by hook`, `unknown tool`), never
 /// the detail after it.
-const MAX_ERROR_KIND: usize = 32;
 
 #[derive(Default)]
 pub struct ToolLogHook {
@@ -76,18 +75,49 @@ fn arg_keys(call: &ToolCall) -> String {
         .unwrap_or_default()
 }
 
-/// The leading category of an error result: text before the first `:`, capped.
-/// Never the detail, which can quote arguments back.
+/// A safe, bounded category for an error result. Known failure phrases get a
+/// stable label even when the tool wraps them in a generic `error:` prefix;
+/// never log the detail, which can contain paths or echo user data.
 fn error_kind(content: &str) -> String {
-    let head = content.split(':').next().unwrap_or("").trim();
-    head.chars().take(MAX_ERROR_KIND).collect()
+    let lower = content.to_ascii_lowercase();
+    let known = [
+        ("outside the workspace", "outside_workspace"),
+        ("outside the configured workspace", "outside_workspace"),
+        ("outside workspace", "outside_workspace"),
+        ("permission denied", "permission_denied"),
+        ("no such file or directory", "not_found"),
+        ("not found", "not_found"),
+        ("timed out", "timed_out"),
+        ("timeout", "timed_out"),
+        ("unknown tool", "unknown tool"),
+        ("blocked by hook", "blocked_by_hook"),
+        ("blocked by policy", "blocked_by_policy"),
+    ];
+    if let Some((_, category)) = known.iter().find(|(needle, _)| lower.contains(needle)) {
+        return (*category).to_string();
+    }
+    "tool_error".to_string()
+}
+
+fn sandbox_scope(tool: &str) -> &'static str {
+    if tool != "bash" {
+        "not_applicable"
+    } else if smooth_tools::SandboxMode::from_env().is_requested() {
+        if smooth_tools::SandboxPolicy::platform_supported() {
+            "macos_seatbelt_denylist"
+        } else {
+            "requested_but_unsupported"
+        }
+    } else {
+        "pass_through"
+    }
 }
 
 #[async_trait]
 impl ToolHook for ToolLogHook {
     async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
         self.mark_start(call, Instant::now());
-        tracing::info!(tool = %call.name, call_id = %call.id, args = %arg_keys(call), "tool call started");
+        tracing::info!(tool = %call.name, call_id = %call.id, args = %arg_keys(call), sandbox = sandbox_scope(&call.name), "tool call started");
         Ok(())
     }
 
@@ -99,6 +129,7 @@ impl ToolHook for ToolLogHook {
             tracing::info!(
                 tool = %call.name,
                 call_id = %call.id,
+                sandbox = sandbox_scope(&call.name),
                 duration_ms,
                 outcome = "error",
                 error_kind = %error_kind(&result.content),
@@ -108,6 +139,7 @@ impl ToolHook for ToolLogHook {
             tracing::info!(
                 tool = %call.name,
                 call_id = %call.id,
+                sandbox = sandbox_scope(&call.name),
                 duration_ms,
                 outcome = "ok",
                 result_bytes = result.content.len(),
@@ -159,10 +191,18 @@ mod tests {
 
     #[test]
     fn error_kind_keeps_the_category_and_drops_the_detail() {
-        assert_eq!(error_kind("blocked by hook: narc flagged sk-live-abc123"), "blocked by hook");
-        assert_eq!(error_kind("error: sending timed out after 30s"), "error");
+        assert_eq!(error_kind("blocked by hook: narc flagged sk-live-abc123"), "blocked_by_hook");
+        assert_eq!(error_kind("error: sending timed out after 30s"), "timed_out");
         assert_eq!(error_kind("unknown tool: frobnicate"), "unknown tool");
-        assert!(error_kind(&"x".repeat(200)).chars().count() <= MAX_ERROR_KIND);
+        assert_eq!(error_kind(&"x".repeat(200)), "tool_error");
+    }
+
+    #[test]
+    fn error_kind_identifies_workspace_boundary_without_logging_paths() {
+        let detail = "error: path `/Users/brent/dev/refs/opencode` is outside the workspace root /Users/brent/dev/smooai/smooth";
+        let category = error_kind(detail);
+        assert_eq!(category, "outside_workspace");
+        assert!(!category.contains("/Users"));
     }
 
     #[tokio::test]

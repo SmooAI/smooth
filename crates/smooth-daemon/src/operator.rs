@@ -22,8 +22,10 @@
 //!
 //! - `SMOOTH_LOCAL_TOKEN` — the auth token (else auto-generated at
 //!   `~/.smooth/operator-token`).
-//! - `SMOOTH_WORKSPACE` — the dir the fs/shell tools are rooted at (else the
-//!   daemon's cwd).
+//! - `SMOOTH_WORKSPACE` — the primary filesystem-tool root (else the daemon's
+//!   cwd); shell commands start in the selected session cwd.
+//! - `SMOOTH_WORKSPACES` — additional explicit filesystem roots, separated
+//!   like `PATH`; a conversation can `/cd` between these and its primary root.
 //! - `SMOOTH_SANDBOX` — `1`/`true`/`yes`/`on` opts `bash` (and CLI plugins)
 //!   into the kernel OS sandbox (Seatbelt on macOS). **Off by default** (pearl
 //!   th-efbab1): Big Smooth is a personal agent acting as its user, and the
@@ -190,7 +192,7 @@ struct SandboxedToolProvider {
 /// (`write_file`, `edit_file`, `bash`, `th`, `create_skill`, `send_file`,
 /// `remember`, calendar/reminders/imessage/contacts, plugins, MCP,
 /// `send_sidekick`, `notify`) never reaches the model, regardless of auto-mode or
-/// principal. Read/list/grep stay confined to `SMOOTH_WORKSPACE`; `web_search`/
+/// principal. Read/list/grep stay confined to the configured workspace roots; `web_search`/
 /// `crawl` stay behind the egress allowlist — so a reviewer sees a working agent
 /// that cannot touch the host. NB: no `contacts` (macOS personal data) even
 /// though Plan mode allows it — a reviewer must not read the host's address book.
@@ -264,7 +266,7 @@ impl ToolProvider for SandboxedToolProvider {
         // + the turn's conversation id, which only the provider has.
         let session = ctx.conversation_id.clone().unwrap_or_default();
         let dir = self.cwd.get(&session);
-        let mut tools = smooth_tools::default_tools_with_proxy(dir.clone(), self.proxy.clone());
+        let mut tools = smooth_tools::default_tools_with_proxy_and_path(dir.clone(), self.proxy.clone(), self.cwd.user_path(&session));
         tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session.clone(), dir.clone())) as Arc<dyn Tool>);
         // Durable cross-session memory: `remember` writes, `recall` reads — both
         // over the same shared backend, injected here (not in the generic
@@ -1344,8 +1346,21 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let memory = storage.memory();
     // One session-cwd store, shared by the tool provider (per-turn tool
     // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
-    // `/cd`). Rooted at the workspace; every conversation defaults to it.
-    let session_cwd = SessionCwd::new(workspace.clone());
+    // `/cd`). Conversations default to this workspace. Additional roots are
+    // explicit in SMOOTH_WORKSPACES, so sibling-repo reads work without
+    // silently widening every daemon to the full home or dev directory.
+    let mut session_cwd = SessionCwd::new(workspace.clone());
+    if let Some(extra_roots) = std::env::var_os("SMOOTH_WORKSPACES") {
+        for root in std::env::split_paths(&extra_roots) {
+            if root.as_os_str().is_empty() {
+                tracing::warn!("ignoring empty SMOOTH_WORKSPACES entry");
+                continue;
+            }
+            if let Err(error) = session_cwd.add_root(&root) {
+                tracing::warn!(path = %root.display(), %error, "ignoring invalid SMOOTH_WORKSPACES entry");
+            }
+        }
+    }
     // One per-conversation mode store (th-c1b589), shared by the tool provider
     // (Plan-mode read-only filter) and the `/api/session/mode` route (the faces'
     // shift+tab / Plan-Auto toggle). Every conversation defaults to Auto.
@@ -1515,7 +1530,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 .merge(crate::auth_login::auth_router())
                 // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
                 // a conversation's cwd in the SAME store the tool provider reads.
-                .merge(crate::cwd_route::cwd_router(session_cwd))
+                .merge(crate::cwd_route::cwd_router(session_cwd, Some(token.clone())))
                 // GET/POST /api/session/mode — the faces' Plan/Auto toggle
                 // (shift+tab in th code). Sets/reads a conversation's mode in the
                 // SAME store the tool provider's Plan-mode filter reads (th-c1b589).

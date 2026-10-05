@@ -31,7 +31,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let input_h = crate::inline::input_height(input_text_rows, text_cap);
     let max_preview = area.height.saturating_sub(input_h + 1).max(1);
     let preview_h = crate::inline::preview_height(state, area.width, max_preview);
-    let regions = crate::inline::compute_regions(area, preview_h, input_h);
+    let todos_h = crate::inline::todo_panel_height(state.todos.len());
+    let regions = crate::inline::compute_regions_with_todos(area, preview_h, input_h, todos_h);
+
+    if let Some(spacer) = regions.spacer {
+        frame.render_widget(Clear, spacer);
+    }
 
     if let Some(preview_rect) = regions.preview {
         let lines = crate::inline::viewport_preview_lines(state);
@@ -63,8 +68,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_input(frame, state, regions.input);
     render_status(frame, state, regions.status);
 
-    if !state.todos.is_empty() {
-        render_todos(frame, state, area);
+    if let Some(todos_area) = regions.todos {
+        render_todos(frame, state, todos_area);
     }
 
     if state.autocomplete.active && !state.autocomplete.results.is_empty() {
@@ -524,10 +529,17 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     // obvious place to type. Stays orange even when the chat panel
     // is focused — there's only one thing to do in this surface
     // (type) and we want it findable at a glance.
-    // While a turn is in flight Enter won't dispatch a second one (th-426791) —
-    // say so, because a swallowed keystroke otherwise reads as a broken input.
-    let label = if state.thinking { "Working… send paused " } else { "Message " };
-    let mut title_spans = vec![Span::styled(" ▶ ", theme::title()), Span::styled(label, theme::title())];
+    // Enter queues a follow-up message while a turn is in flight.
+    let label = if state.thinking {
+        if state.queued_messages.is_empty() {
+            "Working… Enter queues · Ctrl+Enter steers".to_string()
+        } else {
+            format!("Working… {} queued · Enter queues · Ctrl+Enter steers", state.queued_messages.len())
+        }
+    } else {
+        "Message".to_string()
+    };
+    let mut title_spans = vec![Span::styled(" ▶ ", theme::title()), Span::styled(format!("{label} "), theme::title())];
     // Staged attachments ride the border title — one span, no layout math,
     // and the growing input box stays untouched (pearl th-d16f7c).
     if !state.attachments.is_empty() {
@@ -676,51 +688,52 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the live task checklist (the `todos` directive) as a small boxed
-/// panel anchored top-right. Redrawn from `state.todos` each frame, so a fresh
-/// `todos` directive that replaced the vec shows up immediately.
-///
-/// Glyphs: ✔ completed (green) · ▶ in_progress (amber) · ○ pending (muted).
+/// Render the live task checklist after the input box so it never covers the
+/// text the user is writing. The viewport reserves a bounded panel and lets
+/// the streaming preview yield rows when the checklist is visible.
 fn render_todos(frame: &mut Frame, state: &AppState, area: Rect) {
-    let width = 52u16.min(area.width.saturating_sub(2));
-    if width < 12 || area.height < 4 {
-        return; // too small to render a usable panel
+    if area.width < 12 || area.height < 3 {
+        return;
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let rows = state.todos.len().min(usize::from(u16::MAX) - 3) as u16;
-    // +2 border, +1 title padding; cap to the frame.
-    let height = (rows + 2).min(area.height.saturating_sub(1)).max(3);
 
-    // Top-right anchor — out of the way of the composer at the bottom.
-    let [row] = Layout::vertical([Constraint::Length(height)]).flex(Flex::Start).areas(area);
-    let [panel] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::End).areas(row);
-
-    frame.render_widget(Clear, panel);
+    frame.render_widget(Clear, area);
     let done = state.todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
     let block = Block::default()
-        .title(Span::styled(format!(" Tasks ({done}/{}) ", state.todos.len()), theme::title()))
+        .title(Span::styled(
+            format!(" Tasks ({done}/{}) ", state.todos.len()),
+            theme::muted().add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
-        .border_style(theme::panel_border(true));
-    let inner = block.inner(panel);
-    frame.render_widget(block, panel);
+        .border_style(theme::panel_border(false));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
 
-    let lines: Vec<Line<'_>> = state
+    let max_rows = usize::from(inner.height);
+    let show_more = state.todos.len() > max_rows;
+    let item_limit = if show_more && max_rows > 0 { max_rows - 1 } else { max_rows };
+    let mut lines: Vec<Line<'_>> = state
         .todos
         .iter()
+        .take(item_limit)
         .map(|t| {
             let (glyph, glyph_style, text_style) = match t.status {
-                TodoStatus::Completed => (
-                    "\u{2714}",
-                    Style::default().fg(theme::SMOO_GREEN),
-                    theme::muted().add_modifier(Modifier::CROSSED_OUT),
+                TodoStatus::Completed => ("\u{2714}", theme::success(), theme::muted().add_modifier(Modifier::CROSSED_OUT)),
+                TodoStatus::InProgress => (
+                    "\u{25b6}",
+                    Style::default().fg(theme::th_gradient_color(0, 1)),
+                    Style::default().fg(theme::th_gradient_color(0, 1)),
                 ),
-                TodoStatus::InProgress => ("\u{25b6}", Style::default().fg(theme::SMOO_ORANGE), Style::default().fg(theme::SMOO_ORANGE)),
-                TodoStatus::Pending => ("\u{25cb}", theme::muted(), theme::status_style()),
+                TodoStatus::Pending => ("\u{25cb}", theme::muted(), theme::muted()),
             };
             Line::from(vec![Span::styled(format!("{glyph} "), glyph_style), Span::styled(t.text.clone(), text_style)])
         })
         .collect();
-
+    if show_more {
+        lines.push(Line::from(Span::styled(format!("… {} more", state.todos.len() - item_limit), theme::muted())));
+    }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1081,5 +1094,34 @@ mod glow_tests {
         // underflowing — this is the case that would otherwise panic.
         assert_eq!(status_gap(4, 1, "left", "right"), 0);
         assert_eq!(status_gap(0, 1, "left", "right"), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test assertion setup")]
+mod inline_todo_layout_tests {
+    use std::path::PathBuf;
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use super::render;
+    use crate::state::{AppState, TodoItem, TodoStatus};
+
+    #[test]
+    fn live_task_panel_is_drawn_below_the_composer() {
+        let mut state = AppState::new(PathBuf::from("/tmp/project"));
+        state.todos = vec![TodoItem {
+            text: "inspect the workspace".into(),
+            status: TodoStatus::InProgress,
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_with = |needle: &str| (0..14u16).find(|&y| (0..80u16).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains(needle));
+        let composer_row = row_with("Message").expect("composer title should render");
+        let tasks_row = row_with("Tasks (0/1)").expect("task panel title should render");
+        assert!(tasks_row > composer_row + 2, "task panel must follow the complete composer box");
+        assert!(row_with("inspect the workspace").is_some(), "task text remains visible");
     }
 }
