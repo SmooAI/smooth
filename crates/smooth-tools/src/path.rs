@@ -22,8 +22,8 @@ use std::path::{Component, Path, PathBuf};
 /// `/Users/you/dev/smooai/x`); rejecting them outright made tool-using turns
 /// flail and give up (th-c89c2a). Confinement is unchanged: an absolute path
 /// outside `base` still fails the containment check, exactly as a relative
-/// `../escape` does. Symlinks are resolved only for containment validation;
-/// the returned path remains the lexical path for user-facing tool output.
+/// `../escape` does. Existing components are canonicalized, so the returned
+/// path is the resolved one (e.g. `/private/var/...` for a macOS `/var` path).
 ///
 /// # Errors
 /// Returns an error if `rel` is empty or escapes the workspace.
@@ -53,7 +53,13 @@ pub fn resolve_workspace_path(base: &Path, rel: &str) -> anyhow::Result<PathBuf>
 /// exist. Canonicalizing the nearest existing ancestor catches both symlink
 /// reads and writes through a symlink to an external directory.
 fn ensure_path_stays_within(base: &Path, path: &Path) -> anyhow::Result<PathBuf> {
-    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    // A workspace that doesn't exist on disk has no components a symlink
+    // could hide in, so the lexical check already decided containment.
+    // (Walking up instead would reach a drive root that canonicalizes to a
+    // `\\?\` verbatim path on Windows and never matches the base.)
+    let Ok(canonical_base) = base.canonicalize() else {
+        return Ok(path.to_path_buf());
+    };
     let mut ancestor = path.to_path_buf();
     let mut missing = Vec::new();
 
