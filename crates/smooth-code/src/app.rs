@@ -1224,6 +1224,13 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
                 let source_label = skill.source.label();
                 commands.push((skill.name.clone(), format!("[skill:{source_label}] {}", skill.description)));
             }
+            // Pearl th-11edd3: the popup completes the command WORD only.
+            // Once whitespace follows it the rest is argument text, and a
+            // completion must never rewrite that.
+            if query.chars().any(char::is_whitespace) || !command_trigger_allowed(&state.input, state.autocomplete.trigger_pos) {
+                state.autocomplete.deactivate();
+                return;
+            }
             state.autocomplete.update_command_query(&query, &commands);
         }
     }
@@ -1237,6 +1244,22 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
     }
 }
 
+/// Whether a `/` typed at byte `slash_pos` of `input` may open the command
+/// popup. It must start a word (so the separators inside `/a/b/c` don't), and
+/// it must not sit in the arguments of a leading slash command: in
+/// `/workspace add /Users/x/smooth` the later slashes are path text, and
+/// accepting `/smooth-operator` there would open the wrong repo (pearl th-11edd3).
+fn command_trigger_allowed(input: &str, slash_pos: usize) -> bool {
+    let Some(before) = input.get(..slash_pos) else {
+        return false;
+    };
+    if before.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+        return false;
+    }
+    let leading = before.trim_start();
+    leading.is_empty() || !leading.starts_with('/')
+}
+
 /// Accept the currently selected autocomplete result: replace
 /// `input[trigger_pos..cursor]` with the suggestion's insert text
 /// and close the popup.
@@ -1248,6 +1271,13 @@ fn accept_autocomplete(state: &mut AppState) {
     let start = state.autocomplete.trigger_pos;
     let end = state.input_cursor.min(state.input.len());
     if start > end {
+        state.autocomplete.deactivate();
+        return;
+    }
+    // A command completion replaces only the command word, never argument text.
+    if state.autocomplete.kind == crate::autocomplete::CompletionKind::Command
+        && (state.input.get(start..end).is_none_or(|word| word.chars().any(char::is_whitespace)) || !command_trigger_allowed(&state.input, start))
+    {
         state.autocomplete.deactivate();
         return;
     }
@@ -1746,7 +1776,7 @@ fn handle_input_mode(
                     state.autocomplete.activate_files(trigger_pos);
                     refresh_autocomplete(state, command_registry, &state_arc);
                 }
-                '/' => {
+                '/' if command_trigger_allowed(&state.input, trigger_pos) => {
                     state.autocomplete.activate_commands(trigger_pos);
                     refresh_autocomplete(state, command_registry, &state_arc);
                 }
@@ -2533,5 +2563,81 @@ mod exec_mode_tests {
         std::fs::write(&p, "\n").unwrap();
         assert_eq!(read_hook_token(&p), None);
         assert_eq!(read_hook_token(&tmp.path().join("missing")), None);
+    }
+}
+
+#[cfg(test)]
+mod slash_popup_argument_tests {
+    use std::sync::{Arc, Mutex};
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc;
+
+    use super::{accept_autocomplete, command_trigger_allowed, handle_input_mode};
+    use crate::commands::{CommandOutput, CommandRegistry};
+    use crate::state::AppState;
+
+    fn registry_with_smooth_operator() -> CommandRegistry {
+        let mut registry = CommandRegistry::new();
+        registry.register("smooth-operator", "skill", Box::new(|_, _| Ok(CommandOutput::Message(String::new()))));
+        registry
+    }
+
+    fn type_text(state: &mut AppState, registry: &CommandRegistry, text: &str) {
+        let arc = Arc::new(Mutex::new(AppState::new(std::env::temp_dir())));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for c in text.chars() {
+            handle_input_mode(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+                state,
+                Arc::clone(&arc),
+                tx.clone(),
+                registry,
+            );
+        }
+    }
+
+    #[test]
+    fn trigger_only_starts_a_command_word_outside_command_arguments() {
+        assert!(command_trigger_allowed("/", 0));
+        assert!(command_trigger_allowed("use /", 4));
+        assert!(!command_trigger_allowed("a/", 1));
+        assert!(!command_trigger_allowed("/workspace add /", 15));
+        assert!(!command_trigger_allowed("/workspace add /Users/x/", 23));
+    }
+
+    /// Pearl th-11edd3: the path's last segment `smooth` used to pop
+    /// `/smooth-operator`, and Enter rewrote the path to the wrong repo.
+    #[test]
+    fn a_path_argument_never_opens_the_command_popup() {
+        let registry = registry_with_smooth_operator();
+        let mut state = AppState::new(std::env::temp_dir());
+        let typed = "/workspace add /Users/x/dev/smooai/smooth";
+        type_text(&mut state, &registry, typed);
+        assert!(!state.autocomplete.active, "popup still open on argument text");
+        assert_eq!(state.input, typed);
+    }
+
+    #[test]
+    fn accept_never_replaces_argument_text() {
+        let registry = registry_with_smooth_operator();
+        let mut state = AppState::new(std::env::temp_dir());
+        type_text(&mut state, &registry, "/workspace add ~/smooth");
+        // Force a stale popup onto the argument, as an earlier build could.
+        state.autocomplete.activate_commands(15);
+        state.autocomplete.update_command_query("smooth", &registry.list_commands());
+        accept_autocomplete(&mut state);
+        assert_eq!(state.input, "/workspace add ~/smooth");
+        assert!(!state.autocomplete.active);
+    }
+
+    #[test]
+    fn the_command_word_still_completes() {
+        let registry = registry_with_smooth_operator();
+        let mut state = AppState::new(std::env::temp_dir());
+        type_text(&mut state, &registry, "/smoo");
+        assert!(state.autocomplete.active);
+        accept_autocomplete(&mut state);
+        assert_eq!(state.input, "/smooth-operator");
     }
 }
