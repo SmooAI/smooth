@@ -1451,7 +1451,7 @@ If you hit one of these workarounds and there's no `smoo admin` for it yet, **fi
 
 See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls create / list / ready / show / update / close`. Always prefer this over `TodoWrite` or ad-hoc markdown.
 
-**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file. A plain open (any `th pearls` verb, or the `th prime` SessionStart hook) only registers the project when its root is a git repo other than `/` or `$HOME`, so scratch dirs never show up in `th pearls projects` — `th pearls init` is the explicit opt-in for anything else (th-92e046).
+**One SQLite database, every project (pearl th-d3e842).** Pearls live in `~/.smooth/pearls.db` (`$SMOOTH_PEARLS_DB` overrides), each row tagged with its canonical project root. `th pearls` resolves the project from the cwd as the **main checkout** even inside a linked git worktree, so a pearl created in a worktree is the same pearl you see from `main` — the "pearls created in worktrees vanish" failure is gone, as are the Dolt-era single-writer wedges (`database is read only`), the 0.7s cold start, and the `NOW()` timezone skew. `th pearls init` just ensures the db exists and registers the project (idempotent); `th db path` prints the file. `th prime` lists at most 10 ready pearls (`--ready-limit N` or `$TH_PRIME_READY_LIMIT`; 0 hides the list) and ends with `… +N more`. A plain open (any `th pearls` verb, or the `th prime` SessionStart hook) only registers the project when its root is a git repo other than `/` or `$HOME`, so scratch dirs never show up in `th pearls projects` — `th pearls init` is the explicit opt-in for anything else (th-92e046).
 
 **Legacy `.smooth/dolt` stores.** The Dolt shim and `th pearls migrate-from-dolt` were deleted in pearl th-c6ba83. A machine that still has one must migrate with th ≤ 0.42.x before upgrading — see the History section of [Pearls](../Architecture/Pearls.md).
 
@@ -1489,8 +1489,8 @@ th msg inbox [--all] [--mark-read] [--limit N] [--json] [--brief]  # unread only
 th msg ack <id>… | th msg ack --all        # per-recipient read state (alias: `th msg read`)
 th msg reply <id> --body "…"               # threads automatically
 th msg thread <id>                         # whole conversation
-th msg unread-count [--agent <h>] [--direct]  # just the number; --direct leaves broadcasts out
-th msg watch [--interval 5] [--once] [--json] [--brief]  # blocking poll; --once exits on first mail
+th msg unread-count [--agent <h>] [--direct|--wake]  # just the number; --direct leaves broadcasts out, --wake leaves broadcast notes/results out
+th msg watch [--interval 5] [--once] [--json] [--brief] [--wake]  # blocking poll; --once exits on first mail; --wake ignores broadcast notes/results
 th msg watch --from <agent> [--type <kind>]    # only surface mail from one sender / of one type
 th msg watch --peek [--since <seq>]            # non-consuming: track by seq, never ack (machine consumers)
 th inbox                                   # alias for `th msg inbox` (default identity)
@@ -1540,9 +1540,18 @@ session) inherited every broadcast ever sent: on 2026-10-03 a fresh session
 opened to 22 unread notices dating back to 2026-08-17, about 17k characters of
 context, and the Stop hook held it until all of them were acked. `rename` and
 `claim` keep the original registration time, so claiming a handle does not reopen
-the backlog. Direct mail never expires. The smooth-agent Stop hook blocks only on
-direct mail (`unread-count --direct`); broadcasts still show in the per-prompt
-hint. That reminder is deduplicated while the unread count is unchanged. `th msg
+the backlog. Direct mail never expires.
+
+**What wakes an agent.** Direct mail of any type, plus broadcast
+`request|handoff|cancel`. Broadcast `note`s and `result`s are FYIs: they stay
+readable in `th msg inbox` but never end the th-mail watcher (`watch --wake`)
+and never count toward the per-prompt unread hint (`unread-count --wake`). The
+smooth-agent Stop hook blocks only on direct mail (`unread-count --direct`), at
+most once per distinct count per session, and never just because no watcher is
+armed — that used to force an extra turn on almost every stop. The unarmed
+reminder is one line of prompt context, at most once per session (the
+SessionStart line counts as it). The per-prompt hint is deduplicated while the
+count is unchanged. `th msg
 inbox` and the `mail_inbox` MCP tool show only unread mail by default
 (`--all` / `unread_only=false` for history), so checking the inbox never
 re-reads mail you already handled. The MCP inbox returns at most 10 messages

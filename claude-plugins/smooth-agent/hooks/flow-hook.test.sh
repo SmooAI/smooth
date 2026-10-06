@@ -287,6 +287,7 @@ echo "$*" >>"$TH_LOG"
 case "$*" in
     *"prime --in-progress"*"--json"*) cat "$TH_PACKETS_JSON" ;;
     *"prime --in-progress"*) cat "$TH_PACKETS_TXT" ;;
+    "pearls show "*" --handoff") printf '## %s — T\nnext: ship\n%s\n' "$3" "${TH_PACKET_PAD:-}" ;;
     *"checkpoint"*) exit 0 ;;
 esac
 exit 0
@@ -314,6 +315,7 @@ if [ "$rc" = 0 ] && [ -z "$out" ] && ! grep -q checkpoint "$TH_LOG"; then ok "Pr
 out=$(printf '{"cwd":"%s"}' "$WT" | TH="$TMP/no-such-th" bash "$HERE/precompact-checkpoint.sh" 2>&1); expect "PreCompact without th → silent exit 0" 0 $? "$out"
 
 echo "handoff-context.sh:"
+echo '[{"pearl":{"id":"th-aaaaaa"}}]' >"$TH_PACKETS_JSON"
 out=$(printf '{"cwd":"%s","source":"compact"}' "$WT" | bash "$HERE/handoff-context.sh" 2>/dev/null); rc=$?
 ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null)
 if [ "$rc" = 0 ] && [ "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEventName')" = "SessionStart" ] && printf '%s' "$ctx" | grep -q 'th-aaaaaa' && printf '%s' "$ctx" | grep -q 'next: ship'; then
@@ -321,9 +323,42 @@ if [ "$rc" = 0 ] && [ "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEve
 else
     bad "SessionStart packet — rc=$rc out='$out'"
 fi
-printf 'No in-progress pearls for this worktree.\n' >"$TH_PACKETS_TXT"
+echo '[]' >"$TH_PACKETS_JSON"
 out=$(printf '{"cwd":"%s"}' "$WT" | bash "$HERE/handoff-context.sh" 2>&1); expect "SessionStart with no matching pearls prints nothing" 0 $? "$out"
 out=$(printf '{"cwd":"%s"}' "$WT" | TH="$TMP/no-such-th" bash "$HERE/handoff-context.sh" 2>&1); expect "SessionStart without th → silent exit 0" 0 $? "$out"
+
+# More than SMOOTH_HANDOFF_MAX relevant pearls → capped, with a "+N more" line;
+# each packet is cut to SMOOTH_HANDOFF_PACKET_CHARS.
+echo '[{"pearl":{"id":"th-000001"}},{"pearl":{"id":"th-000002"}},{"pearl":{"id":"th-000003"}},{"pearl":{"id":"th-000004"}},{"pearl":{"id":"th-000005"}}]' >"$TH_PACKETS_JSON"
+ctx=$(printf '{"cwd":"%s"}' "$WT" | TH_PACKET_PAD="$(printf 'x%.0s' $(seq 1 3000))" bash "$HERE/handoff-context.sh" 2>/dev/null | jq -r '.hookSpecificOutput.additionalContext')
+if printf '%s' "$ctx" | grep -q 'th-000003' && ! printf '%s' "$ctx" | grep -q '## th-000004' && printf '%s' "$ctx" | grep -q '+2 more' \
+    && printf '%s' "$ctx" | grep -q 'truncated — th pearls show th-000001 --handoff' && [ "${#ctx}" -lt 6000 ]; then
+    ok "SessionStart caps packets (3) and packet size, naming the rest"
+else
+    bad "SessionStart cap — ${#ctx} chars"
+fi
+
+# PRIMARY checkout: matching by worktree alone pulls in every pearl ever
+# checkpointed there, so only this session's pearls (or the branch's) count.
+PRIMARY="$TMP/primary"; mkdir -p "$PRIMARY"; git -C "$PRIMARY" init -q -b main
+LINKED="$TMP/linked"; git -C "$PRIMARY" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && git -C "$PRIMARY" worktree add -q -b th-cccccc-fix "$LINKED"
+echo '[{"pearl":{"id":"th-aaaaaa"},"handoff":{"agent_session_id":"sid-mine"}},{"pearl":{"id":"th-bbbbbb"},"handoff":{"agent_session_id":"sid-other"}},{"pearl":{"id":"th-cccccc"},"handoff":{}}]' >"$TH_PACKETS_JSON"
+ctx=$(printf '{"cwd":"%s","session_id":"sid-mine"}' "$PRIMARY" | bash "$HERE/handoff-context.sh" 2>/dev/null | jq -r '.hookSpecificOutput.additionalContext')
+if printf '%s' "$ctx" | grep -q '## th-aaaaaa' && ! printf '%s' "$ctx" | grep -q 'th-bbbbbb' && ! printf '%s' "$ctx" | grep -q 'th-cccccc'; then
+    ok "primary checkout: only the pearl this session checkpointed"
+else
+    bad "primary checkout filter — ctx='$ctx'"
+fi
+out=$(printf '{"cwd":"%s","session_id":"sid-new"}' "$PRIMARY" | bash "$HERE/handoff-context.sh" 2>&1); expect "primary checkout, fresh session → nothing" 0 $? "$out"
+: >"$TH_LOG"
+printf '{"cwd":"%s","session_id":"sid-new"}' "$PRIMARY" | bash "$HERE/precompact-checkpoint.sh" >/dev/null 2>&1
+if ! grep -q checkpoint "$TH_LOG"; then ok "primary checkout, fresh session → PreCompact stamps nothing"; else bad "PreCompact stamped foreign pearls:"; sed 's/^/       /' "$TH_LOG"; fi
+ctx=$(printf '{"cwd":"%s","session_id":"sid-x"}' "$LINKED" | bash "$HERE/handoff-context.sh" 2>/dev/null | jq -r '.hookSpecificOutput.additionalContext')
+if printf '%s' "$ctx" | grep -q '## th-aaaaaa' && printf '%s' "$ctx" | grep -q '## th-cccccc'; then
+    ok "linked worktree: every pearl matched for it is relevant"
+else
+    bad "linked worktree — ctx='$ctx'"
+fi
 
 echo "th-curl-hint.sh:"
 out=$(printf '{"tool_name":"Bash","tool_input":{"command":"curl -s -X POST http://127.0.0.1:8899/api/flow/hooks -d {}"}}' | bash "$HERE/th-curl-hint.sh" 2>&1); expect "loopback daemon URL is not nagged" 0 $? "$out"

@@ -38,6 +38,12 @@ check() { # description, want-exit, want-stdout, [args…]
 stub_th 'echo "[{\"id\":\"msg-1\"}]"'
 check 'mail is passed through, exit 0' 0 '[{"id":"msg-1"}]' agent 1 5
 
+# --- --wake: passed through, and dropped for a th that predates it ---------
+stub_th 'case " $* " in *" --wake "*) echo "[{\"id\":\"woke\"}]" ;; *) echo "[]" ;; esac'
+check 'watcher asks for wake-worthy mail only' 0 '[{"id":"woke"}]' agent 1 5
+stub_th 'case " $* " in *" --wake "*) echo "error: unexpected argument --wake" >&2; exit 2 ;; *) echo "[{\"id\":\"old\"}]" ;; esac'
+check 'an older th without --wake still watches' 0 '[{"id":"old"}]' agent 1 5
+
 # --- the lifetime cap ------------------------------------------------------
 # `th msg watch --once` blocks until mail arrives; the reaper kills it. A signal
 # death (128+n) is a genuine timeout: "[]", exit 0.

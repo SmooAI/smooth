@@ -630,7 +630,11 @@ enum Commands {
     ///
     /// For Claude Code SessionStart / PreCompact hooks; the `th` equivalent
     /// of `bd prime`.
-    Prime,
+    Prime {
+        /// Max ready pearls to list (default 10, or `$TH_PRIME_READY_LIMIT`).
+        #[arg(long)]
+        ready_limit: Option<usize>,
+    },
     /// System health check and auto-fix
     Doctor {
         /// Initialize ~/.smooth/ as a git repo (backup/sync config).
@@ -2287,7 +2291,7 @@ async fn main() -> Result<()> {
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
         Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
-        Some(Commands::Prime) => cmd_prime(),
+        Some(Commands::Prime { ready_limit }) => cmd_prime(ready_limit),
         Some(Commands::Project { cmd }) => cmd_project(cmd),
     }
 }
@@ -7363,6 +7367,11 @@ fn extract_placeholders(template: &str) -> Vec<String> {
     out
 }
 
+/// Default cap on the "Ready to work" list in `th prime`. The primer is
+/// injected on every session start / resume / compact, so a repo with
+/// hundreds of ready pearls must not dump them all into context.
+const PRIME_READY_LIMIT_DEFAULT: usize = 10;
+
 /// Print a markdown context block for Claude Code SessionStart /
 /// PreCompact hooks. Mirrors what `bd prime` did for beads.
 ///
@@ -7371,25 +7380,31 @@ fn extract_placeholders(template: &str) -> Vec<String> {
 /// (first run in a repo, no store yet, etc.), the live section
 /// is silently omitted — the static primer alone still gives Claude
 /// enough to operate.
-fn cmd_prime() -> Result<()> {
+fn cmd_prime(ready_limit: Option<usize>) -> Result<()> {
     // Static rules primer.
     print!("{}", include_str!("../prompts/prime.md"));
+
+    let ready_limit = ready_limit
+        .or_else(|| std::env::var("TH_PRIME_READY_LIMIT").ok().and_then(|v| v.trim().parse().ok()))
+        .unwrap_or(PRIME_READY_LIMIT_DEFAULT);
 
     // Live snapshot — best effort. Use the current `th` executable so
     // we stay consistent even when multiple `th` copies are on PATH.
     let exe = std::env::current_exe().ok();
     if let Some(exe) = exe {
         // Scheduled pearls that have come due "speak up" first (pearl th-01aa6a).
-        prime_pearls_section(&exe, "due", "\u{23F0} Scheduled & due", 20);
-        prime_pearls_section(&exe, "ready", "Ready to work", 40);
+        prime_pearls_section(&exe, "due", "\u{23F0} Scheduled & due", 10);
+        if ready_limit > 0 {
+            prime_pearls_section(&exe, "ready", "Ready to work", ready_limit);
+        }
     }
 
     Ok(())
 }
 
 /// Run `th pearls <sub>` and, if it produced output, print it as a fenced
-/// markdown section under `heading` (capped to `cap` lines). Best-effort:
-/// a missing/empty store just skips the section.
+/// markdown section under `heading`. Best-effort: a missing/empty store
+/// just skips the section.
 fn prime_pearls_section(exe: &std::path::Path, sub: &str, heading: &str, cap: usize) {
     let Ok(out) = std::process::Command::new(exe)
         .args(["pearls", sub])
@@ -7402,22 +7417,70 @@ fn prime_pearls_section(exe: &std::path::Path, sub: &str, heading: &str, cap: us
     if !out.status.success() {
         return;
     }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let trimmed = s.trim();
+    if let Some(section) = format_prime_section(&String::from_utf8_lossy(&out.stdout), sub, heading, cap) {
+        print!("{section}");
+    }
+}
+
+/// Render one `th prime` section from `th pearls <sub>` output, keeping at
+/// most `cap` pearl rows. The `… Issues (…):` header line is dropped (the
+/// markdown heading replaces it) and the overflow is summarised as one
+/// `… +N more` line instead of being listed.
+fn format_prime_section(raw: &str, sub: &str, heading: &str, cap: usize) -> Option<String> {
+    let trimmed = raw.trim();
     // "No pearls due." / "No ready issues." — nothing to surface.
     if trimmed.is_empty() || trimmed.starts_with("No ") {
-        return;
+        return None;
     }
-    println!("\n## {heading}\n");
-    println!("```");
-    for (i, line) in trimmed.lines().enumerate() {
-        if i >= cap {
-            println!("... (truncated; run `th pearls {sub}` for the full list)");
-            break;
+    let rows: Vec<&str> = trimmed.lines().filter(|l| !l.trim().is_empty() && !l.trim_end().ends_with(':')).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut out = format!("\n## {heading}\n\n```\n");
+    for line in rows.iter().take(cap) {
+        out.push_str(line.trim_start());
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    if rows.len() > cap {
+        out.push_str(&format!("… +{} more — run `th pearls {sub}`\n", rows.len() - cap));
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod prime_tests {
+    use super::format_prime_section;
+
+    fn ready_output(n: usize) -> String {
+        let mut s = String::from("Ready Issues (open, no blockers):\n");
+        for i in 0..n {
+            s.push_str(&format!("  ○ th-{i:06x} ● P2 pearl number {i}\n"));
         }
-        println!("{line}");
+        s
     }
-    println!("```");
+
+    #[test]
+    fn caps_rows_and_summarises_the_rest() {
+        let out = format_prime_section(&ready_output(40), "ready", "Ready to work", 10).unwrap();
+        assert_eq!(out.matches("pearl number").count(), 10);
+        assert!(out.contains("… +30 more — run `th pearls ready`"));
+        assert!(!out.contains("Ready Issues"), "header line is replaced by the heading");
+    }
+
+    #[test]
+    fn no_overflow_line_when_under_cap() {
+        let out = format_prime_section(&ready_output(3), "ready", "Ready to work", 10).unwrap();
+        assert_eq!(out.matches("pearl number").count(), 3);
+        assert!(!out.contains("more —"));
+    }
+
+    #[test]
+    fn empty_and_none_outputs_are_skipped() {
+        assert!(format_prime_section("", "ready", "Ready to work", 10).is_none());
+        assert!(format_prime_section("No ready issues.", "ready", "Ready to work", 10).is_none());
+        assert!(format_prime_section("Ready Issues (open, no blockers):\n", "ready", "Ready to work", 10).is_none());
+    }
 }
 
 /// `th skills` — list / show skills discovered from every source.

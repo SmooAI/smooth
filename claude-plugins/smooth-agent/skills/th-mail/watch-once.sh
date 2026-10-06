@@ -30,17 +30,28 @@ flags=(--once --json --brief --peek --cursor --limit 20 --interval "$INTERVAL")
 if [ -n "$AGENT" ]; then
     flags+=(--agent "$AGENT")
 fi
+# Only mail that should wake an agent ends the watch: direct mail and broadcast
+# request/handoff/cancel. Broadcast notes stay readable via `th msg inbox`.
+wake=(--wake)
 
 # `th msg watch --once` blocks until mail arrives; the outer timeout is the
 # lifetime cap. No `timeout` binary on stock macOS, so background + wait.
-th msg watch "${flags[@]}" &
-watcher=$!
-( sleep "$MAX"; kill "$watcher" 2>/dev/null ) &
-reaper=$!
+run_watch() {
+    th msg watch "${flags[@]}" ${wake[@]+"${wake[@]}"} &
+    watcher=$!
+    ( sleep "$MAX"; kill "$watcher" 2>/dev/null ) &
+    reaper=$!
 
-wait "$watcher"
-status=$?
-kill "$reaper" 2>/dev/null
+    wait "$watcher"
+    status=$?
+    kill "$reaper" 2>/dev/null
+}
+run_watch
+# Exit 2 is clap rejecting an argument: a th older than --wake. Retry without it.
+if [ "$status" -eq 2 ] && [ "${#wake[@]}" -gt 0 ]; then
+    wake=()
+    run_watch 2>/dev/null
+fi
 
 # 0 => mail was printed. Killed by the lifetime cap (any signal, 128+n) => the
 # watcher timed out with nothing, which is genuinely "no mail".

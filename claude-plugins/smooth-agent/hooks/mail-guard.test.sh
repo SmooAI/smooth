@@ -12,14 +12,15 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/sessions"
 
 # Stub `th`: `th msg unread-count --agent <h>` prints $UNREAD (or fails if FAIL=1);
-# with --direct it prints $DIRECT (default $UNREAD). OLD_TH=1 rejects --direct
-# like a th from before the flag existed.
+# with --direct it prints $DIRECT (default $UNREAD), with --wake $WAKE (default
+# $UNREAD). OLD_TH=1 rejects --direct and --wake like a th from before them.
 cat >"$TMP/bin/th" <<'EOF'
 #!/bin/bash
 [ "${FAIL:-0}" = 1 ] && exit 3
 if [ "$1 $2" = "msg unread-count" ]; then
     case " $* " in
     *" --direct "*) [ "${OLD_TH:-0}" = 1 ] && exit 2; echo "${DIRECT:-${UNREAD:-0}}" ;;
+    *" --wake "*) [ "${OLD_TH:-0}" = 1 ] && exit 2; echo "${WAKE:-${UNREAD:-0}}" ;;
     *) echo "${UNREAD:-0}" ;;
     esac
     exit 0
@@ -33,7 +34,7 @@ cat >"$TMP/bin/fake-pgrep" <<'EOF'
 [ "${ARMED:-0}" = 1 ]
 EOF
 chmod +x "$TMP/bin/fake-pgrep"
-printf 'fix-auth' >"$TMP/sessions/sess-1"
+for s in sess-1 sess-2 sess-3 sess-4 sess-5 sess-6; do printf 'fix-auth' >"$TMP/sessions/$s"; done
 
 export PATH="$TMP/bin:$PATH" PGREP="$TMP/bin/fake-pgrep" SMOOTH_AGENT_SESSIONS_DIR="$TMP/sessions" CLAUDE_PLUGIN_ROOT="/plug"
 unset SMOOTH_AGENT_HANDLE SMOOTH_AGENT SMOOTH_MAIL_WATCH CLAUDE_CODE_ENTRYPOINT
@@ -60,10 +61,30 @@ has "stop blocks on direct mail and counts only it" "$(printf '%s' "$out" | jq -
 out=$(payload sess-1 | UNREAD=2 OLD_TH=1 ARMED=1 "$HOOK" stop)
 check "an older th without --direct falls back to the full count" "$(printf '%s' "$out" | jq -r .decision)" block
 
-# stop: no mail but no watcher → block with the exact arm command.
-out=$(payload sess-1 | UNREAD=0 ARMED=0 "$HOOK" stop)
-check "stop with no watcher blocks" "$(printf '%s' "$out" | jq -r .decision)" block
-has "arm command uses the plugin root and handle" "$(printf '%s' "$out" | jq -r .reason)" 'bash "/plug/skills/th-mail/watch-once.sh" fix-auth 15'
+# stop: an unarmed watcher with no mail NEVER blocks (it forced 182 extra
+# turns in ten days) — not even the first time.
+check "stop with no watcher and no mail is silent" "$(payload sess-2 | UNREAD=0 ARMED=0 "$HOOK" stop)" ""
+check "stop with no watcher and only broadcasts is silent" "$(payload sess-2 | UNREAD=9 DIRECT=0 ARMED=0 "$HOOK" stop)" ""
+
+# stop: direct mail with no watcher blocks, and the reason carries the arm command.
+out=$(payload sess-3 | UNREAD=1 ARMED=0 "$HOOK" stop)
+has "unarmed direct-mail block includes the arm command" "$(printf '%s' "$out" | jq -r .reason)" 'bash "/plug/skills/th-mail/watch-once.sh" fix-auth 15'
+# ...but the same unread count never blocks this session twice.
+check "same direct count does not block again" "$(payload sess-3 | UNREAD=1 ARMED=0 "$HOOK" stop)" ""
+check "cleared inbox is silent" "$(payload sess-3 | UNREAD=0 ARMED=0 "$HOOK" stop)" ""
+out=$(payload sess-3 | UNREAD=1 ARMED=1 "$HOOK" stop)
+check "new direct mail after clearing blocks again" "$(printf '%s' "$out" | jq -r .decision)" block
+
+# prompt: broadcast notes/results never count toward the nudge (--wake).
+check "prompt ignores broadcast notes" "$(payload sess-4 | UNREAD=7 WAKE=0 ARMED=1 "$HOOK" prompt)" ""
+has "prompt counts only wake-worthy mail" "$(payload sess-4 | UNREAD=7 WAKE=2 ARMED=1 "$HOOK" prompt)" "2 unread for 'fix-auth'"
+has "an older th without --wake falls back to the full count" "$(payload sess-4 | UNREAD=5 OLD_TH=1 ARMED=1 "$HOOK" prompt)" "5 unread for 'fix-auth'"
+
+# prompt: the unarmed nag is non-blocking context, at most once per session.
+has "unarmed prompt nags with the arm command" "$(payload sess-5 | UNREAD=0 ARMED=0 "$HOOK" prompt)" 'bash "/plug/skills/th-mail/watch-once.sh" fix-auth 15'
+check "the unarmed nag is not repeated" "$(payload sess-5 | UNREAD=0 ARMED=0 "$HOOK" prompt)" ""
+mkdir -p "$TMP/sessions/mail-arm-nagged" && printf 1 >"$TMP/sessions/mail-arm-nagged/sess-6"
+check "no nag when session start already gave the instruction" "$(payload sess-6 | UNREAD=0 ARMED=0 "$HOOK" prompt)" ""
 
 # stop: no mail and a watcher armed → allow (no output).
 check "stop with watcher armed and no mail is silent" "$(payload sess-1 | UNREAD=0 ARMED=1 "$HOOK" stop)" ""
@@ -71,13 +92,16 @@ check "stop with watcher armed and no mail is silent" "$(payload sess-1 | UNREAD
 # stop: never loops — stop_hook_active=true always allows.
 check "stop_hook_active prevents a second block" "$(payload sess-1 true | UNREAD=5 ARMED=0 "$HOOK" stop)" ""
 
-# prompt: unread mail becomes context; none is silent.
+# prompt: unread mail becomes context; none is silent. (ARMED=1 keeps the
+# once-per-session unarmed nag out of these assertions.)
+export ARMED=1
 has "prompt surfaces unread mail once" "$(payload sess-1 | UNREAD=2 "$HOOK" prompt)" "2 unread for 'fix-auth'"
 check "same unread count does not append another prompt reminder" "$(payload sess-1 | UNREAD=2 "$HOOK" prompt)" ""
 has "changed unread count is surfaced again" "$(payload sess-1 | UNREAD=3 "$HOOK" prompt)" "3 unread for 'fix-auth'"
 check "prompt with no mail is silent" "$(payload sess-1 | UNREAD=0 "$HOOK" prompt)" ""
 has "new mail after the inbox was cleared is surfaced" "$(payload sess-1 | UNREAD=3 "$HOOK" prompt)" "3 unread for 'fix-auth'"
 
+unset ARMED
 # Worker env handle wins over the session file.
 has "SMOOTH_AGENT_HANDLE wins" "$(payload sess-1 | SMOOTH_AGENT_HANDLE=worker-7 UNREAD=1 "$HOOK" prompt)" "for 'worker-7'"
 

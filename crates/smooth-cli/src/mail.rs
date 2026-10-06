@@ -205,6 +205,11 @@ pub enum MsgCommands {
         /// The Stop hook uses this: a broadcast shouldn't hold a session open.
         #[arg(long)]
         direct: bool,
+        /// Count only mail that should wake an agent: direct mail plus
+        /// broadcast request/handoff/cancel. Broadcast notes and results
+        /// are left out.
+        #[arg(long, conflicts_with = "direct")]
+        wake: bool,
     },
     /// Reply to a message (threads automatically).
     Reply {
@@ -264,6 +269,11 @@ pub enum MsgCommands {
         /// Maximum messages emitted per poll. Use a small value for agent hooks.
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Only surface mail that should wake an agent: direct mail plus
+        /// broadcast request/handoff/cancel. Broadcast notes and results stay
+        /// unread in the inbox but never end a `--once` watch.
+        #[arg(long)]
+        wake: bool,
         /// Deprecated no-op.
         #[arg(long, hide = true)]
         no_pull: bool,
@@ -837,10 +847,12 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 println!("{} acknowledged {}", "✓".green().bold(), ids.join(", ").dimmed());
             }
         }
-        MsgCommands::UnreadCount { agent, direct } => {
+        MsgCommands::UnreadCount { agent, direct, wake } => {
             let who = agent.unwrap_or_else(resolve_handle);
             let n = if direct {
                 s.unread_direct_count(&who).await?
+            } else if wake {
+                s.unread_wake_count(&who).await?
             } else {
                 s.unread_count(&who).await?
             };
@@ -885,6 +897,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             since,
             cursor,
             limit,
+            wake,
             no_pull,
             pull,
         } => {
@@ -897,7 +910,7 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 Some(k) => Some(k.parse()?),
                 None => None,
             };
-            let filter = |m: &MailMessage| from.as_deref().is_none_or(|f| m.from_agent == f) && kind.is_none_or(|k| m.kind == k);
+            let filter = |m: &MailMessage| from.as_deref().is_none_or(|f| m.from_agent == f) && kind.is_none_or(|k| m.kind == k) && (!wake || m.wakes());
             if cursor && (!once || !peek || from.is_some() || kind.is_some() || since.is_some()) {
                 bail!("--cursor requires --once --peek and cannot be combined with --from, --type, or --since");
             }
@@ -921,16 +934,20 @@ pub async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                     let _ = s.touch(&who).await;
                     match s.inbox_since(&who, watermark, from.as_deref(), kind, limit.clamp(1, 200)).await {
                         Ok(msgs) if !msgs.is_empty() => {
-                            print_messages(&msgs, json, brief)?;
                             // Advance the watermark past everything just seen, so
                             // no message is emitted twice — without touching read
-                            // state.
+                            // state. Under --wake the skipped FYIs move it too, so
+                            // they never re-trigger the watcher.
                             watermark = msgs.iter().map(|m| m.seq).max().unwrap_or(watermark);
                             if cursor {
                                 s.advance_watch_offset(&who, watermark)?;
                             }
-                            if once {
-                                return Ok(());
+                            let msgs: Vec<MailMessage> = msgs.into_iter().filter(|m| !wake || m.wakes()).collect();
+                            if !msgs.is_empty() {
+                                print_messages(&msgs, json, brief)?;
+                                if once {
+                                    return Ok(());
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -1397,6 +1414,22 @@ mod cli_tests {
             parse(&["th", "msg", "ack", "--all"]).cmd,
             TestCommands::Msg {
                 cmd: MsgCommands::Ack { all: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn wake_flags_parse_on_watch_and_unread_count() {
+        assert!(matches!(
+            parse(&["th", "msg", "watch", "--once", "--peek", "--cursor", "--wake"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::Watch { wake: true, .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["th", "msg", "unread-count", "--wake"]).cmd,
+            TestCommands::Msg {
+                cmd: MsgCommands::UnreadCount { wake: true, direct: false, .. }
             }
         ));
     }
