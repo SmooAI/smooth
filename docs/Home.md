@@ -52,26 +52,31 @@ One process, one operative per task. The microVM sandbox stack was removed in Ju
 
 ## Architecture
 
-| Page                                   | Description                                                   |
-| -------------------------------------- | ------------------------------------------------------------- |
-| [[Architecture/Architecture-Overview]] | Top-level diagram + control flow                              |
-| [[Architecture/The-Cast]]              | Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver |
-| [[Architecture/Dispatch]]              | How a task flows from chat to an operative and back           |
-| [[Architecture/Operatives]]            | The agent runtime, the operative binary, tool surface         |
-| [[Architecture/Security-Model]]        | Narc surveillance today; auto-mode + kernel sandbox planned   |
-| [[Architecture/Pearls]]                | The work-item tracker (one SQLite db, all projects)           |
-| [[Architecture/Data-Storage]]          | pearls.db, ~/.smooth, audit                                   |
-| [[Architecture/Extension-System]]      | SEP — the planned extension protocol                          |
-| [[Architecture/Daemon-Direction]]      | Where Big Smooth is headed (epic `th-c89c2a`)                 |
+| Page                                         | Description                                                   |
+| -------------------------------------------- | ------------------------------------------------------------- |
+| [[Architecture/Architecture-Overview]]       | Top-level diagram + control flow                              |
+| [[Architecture/The-Cast]]                    | Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver |
+| [[Architecture/Dispatch]]                    | How a task flows from chat to an operative and back           |
+| [[Architecture/Operatives]]                  | The agent runtime, the operative binary, tool surface         |
+| [[Architecture/Security-Model]]              | Narc surveillance today; auto-mode + kernel sandbox planned   |
+| [[Architecture/Pearls]]                      | The work-item tracker (one SQLite db, all projects)           |
+| [[Architecture/Data-Storage]]                | pearls.db, ~/.smooth, audit                                   |
+| [[Architecture/Extension-System]]            | SEP — the planned extension protocol                          |
+| [[Architecture/Daemon-Direction]]            | Where Big Smooth is headed (epic `th-c89c2a`)                 |
+| [[Architecture/Workspace-Crates]]            | What each workspace crate owns                                |
+| [[Architecture/Daemon-Modules-and-Security]] | smooth-daemon modules, dispatch, security layers              |
+| [[Architecture/Data-Layout]]                 | On-disk layout + pearl/Jira reference                         |
 
 ---
 
 ## Engineering
 
-| Page                           | Description                   |
-| ------------------------------ | ----------------------------- |
-| [[Engineering/Build-Workflow]] | `cargo`, `pnpm install:th`    |
-| [[Engineering/Bench-Harness]]  | `th bench`, scoring, The Line |
+| Page                                 | Description                                            |
+| ------------------------------------ | ------------------------------------------------------ |
+| [[Engineering/Build-Workflow]]       | `cargo`, `pnpm install:th`                             |
+| [[Engineering/Bench-Harness]]        | `th bench`, scoring, The Line                          |
+| [[Engineering/th-CLI-Daily-Driver]]  | `th`/`smoo` daily reference, adding a subcommand       |
+| [[Engineering/Dev-Loop-and-Landing]] | Build/test/style, oxfmt, changesets, landing checklist |
 
 ---
 
