@@ -2,8 +2,9 @@
 # smooth-agent PreCompact hook (pearl th-9483e8).
 #
 # Right before the harness compacts the context, snapshot the handoff state of
-# every in_progress pearl that belongs to this session's worktree (recorded
-# worktree == cwd's repo, or the pearl id is in the branch name) with
+# every in_progress pearl that belongs to this session (relevant-pearls.sh: in
+# a linked worktree, its pearls; in the primary checkout, only the ones this
+# session checkpointed or whose id is in the branch name) with
 # `th pearls checkpoint <id> --auto`. The post-compaction SessionStart
 # (handoff-context.sh) reads it back so the session resumes cold.
 #
@@ -21,7 +22,8 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -n "$cwd" ] || cwd="$PWD"
 [ -d "$cwd" ] || exit 0
 
-ids="$(cd "$cwd" && "$TH" pearls prime --in-progress --cwd "$cwd" --json 2>/dev/null | jq -r '.[].pearl.id' 2>/dev/null || true)"
+. "$(dirname "${BASH_SOURCE[0]}")/relevant-pearls.sh"
+ids="$(relevant_pearl_ids "$cwd" "$session_id")"
 for id in $ids; do
     (cd "$cwd" && "$TH" pearls checkpoint "$id" --auto --cwd "$cwd" ${session_id:+--session-id "$session_id"} >/dev/null 2>&1) || true
 done

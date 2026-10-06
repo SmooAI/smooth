@@ -118,6 +118,12 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// Whether a BROADCAST of this kind wakes agents (see [`MailMessage::wakes`]).
+    #[must_use]
+    pub const fn wakes_as_broadcast(self) -> bool {
+        matches!(self, Self::Request | Self::Handoff | Self::Cancel)
+    }
+
     /// The wire/storage spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -207,6 +213,15 @@ impl MailMessage {
     #[must_use]
     pub fn thread_root(&self) -> &str {
         self.thread_id.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Should this message wake an idle agent? Anything addressed to it by
+    /// name does, and so does a broadcast that asks for action
+    /// (request/handoff/cancel). Broadcast notes and results are FYIs: they
+    /// stay readable in the inbox but never wake a watcher or nudge a session.
+    #[must_use]
+    pub fn wakes(&self) -> bool {
+        self.to_agent != BROADCAST || self.kind.wakes_as_broadcast()
     }
 }
 
@@ -807,6 +822,27 @@ impl MailStore {
         )?;
         Ok(usize::try_from(n).unwrap_or(0))
     }
+
+    /// How many unread messages should wake `agent` (see
+    /// [`MailMessage::wakes`]): direct mail plus broadcast
+    /// request/handoff/cancel. Broadcast notes and results are left out.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn unread_wake_count(&self, agent: &str) -> Result<usize> {
+        let visible = visible_to_agent_sql();
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM messages m
+                 LEFT JOIN message_reads r ON r.message_id = m.id AND r.agent = ?1
+                 WHERE {visible} AND m.from_agent != ?1 AND r.read_at IS NULL
+                   AND (m.to_agent = ?1 OR m.type IN ('request', 'handoff', 'cancel'))"
+            ),
+            params![agent.trim()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
 }
 
 #[cfg(test)]
@@ -1161,6 +1197,21 @@ mod tests {
         assert_eq!(s.unread_count("bob").unwrap(), 2);
         s.ack("bob", &id).unwrap();
         assert_eq!(s.unread_direct_count("bob").unwrap(), 0);
+    }
+
+    #[test]
+    fn unread_wake_count_skips_broadcast_notes_and_results() {
+        let (_t, s) = store();
+        reg(&s, "bob");
+        s.send("alice", BROADCAST, "fyi", MessageKind::Note, 0, None).unwrap();
+        s.send("alice", BROADCAST, "done", MessageKind::Result, 0, None).unwrap();
+        assert_eq!(s.unread_wake_count("bob").unwrap(), 0, "broadcast notes/results never wake");
+        assert_eq!(s.unread_count("bob").unwrap(), 2, "but stay readable as unread");
+        s.send("alice", BROADCAST, "anyone?", MessageKind::Request, 0, None).unwrap();
+        s.send("alice", "bob", "direct fyi", MessageKind::Note, 0, None).unwrap();
+        assert_eq!(s.unread_wake_count("bob").unwrap(), 2, "broadcast request + direct note wake");
+        let inbox = s.inbox("bob", true, 10).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.wakes()).count(), 2, "MailMessage::wakes agrees with the count");
     }
 
     #[test]

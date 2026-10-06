@@ -164,7 +164,7 @@ mod tests {
     }
 
     impl FakeTool {
-        fn new(name: &'static str, output: &str) -> (Arc<dyn Tool>, Arc<Mutex<Vec<serde_json::Value>>>) {
+        fn build(name: &'static str, output: &str) -> (Arc<dyn Tool>, Arc<Mutex<Vec<serde_json::Value>>>) {
             let calls = Arc::new(Mutex::new(Vec::new()));
             let tool = Self {
                 name,
@@ -246,7 +246,7 @@ mod tests {
                 block: false,
             }),
         ];
-        let (tool, calls) = FakeTool::new("bash", "out");
+        let (tool, calls) = FakeTool::build("bash", "out");
         let registry = hooked_registry([&tool], &hooks);
 
         let res = registry.execute(&call("bash", serde_json::json!({ "command": "ls" }))).await;
@@ -271,7 +271,7 @@ mod tests {
                 block: false,
             }),
         ];
-        let (tool, calls) = FakeTool::new("bash", "out");
+        let (tool, calls) = FakeTool::build("bash", "out");
         let registry = hooked_registry([&tool], &hooks);
 
         let res = registry.execute(&call("bash", serde_json::json!({ "command": "ls" }))).await;
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn wrapper_preserves_schema_and_flags() {
-        let (tool, _) = FakeTool::new("grep", "x");
+        let (tool, _) = FakeTool::build("grep", "x");
         let wrapped = HookedTool::new(Arc::clone(&tool), Arc::from(Vec::new()));
         assert_eq!(wrapped.schema().name, "grep");
         assert!(wrapped.is_read_only());
@@ -328,8 +328,8 @@ mod tests {
             log: Arc::clone(&log),
             block: true,
         })];
-        let (a, a_calls) = FakeTool::new("read_file", "a");
-        let (b, b_calls) = FakeTool::new("write_file", "b");
+        let (a, a_calls) = FakeTool::build("read_file", "a");
+        let (b, b_calls) = FakeTool::build("write_file", "b");
         let registry = hooked_registry([&a, &b], &hooks);
         // Pulling a tool OUT of the registry (what the engine's sidekick builder
         // does) yields the wrapper, not the raw tool.

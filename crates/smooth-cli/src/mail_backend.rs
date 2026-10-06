@@ -574,6 +574,18 @@ impl Mail {
         }
     }
 
+    /// Unread mail that should wake `agent`: direct mail plus broadcast
+    /// request/handoff/cancel (see `MailMessage::wakes`).
+    ///
+    /// # Errors
+    /// Propagates store/API failures.
+    pub async fn unread_wake_count(&self, agent: &str) -> Result<usize> {
+        match self {
+            Self::Sqlite(s) => s.unread_wake_count(agent),
+            Self::Cloud(_) => Ok(self.inbox(agent, true, 200).await?.iter().filter(|m| m.wakes()).count()),
+        }
+    }
+
     /// # Errors
     /// Propagates store/API failures.
     pub async fn unread_count(&self, agent: &str) -> Result<usize> {
