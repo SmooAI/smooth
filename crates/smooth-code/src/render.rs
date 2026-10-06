@@ -1154,7 +1154,10 @@ mod inline_todo_layout_tests {
         state.thinking = false;
         state.sync_turn_clock();
         let idle = screen(&state);
-        assert!(!idle.iter().any(|r| r.contains("thinking ·") || r.contains('\u{2593}')), "hidden when idle: {idle:#?}");
+        assert!(
+            !idle.iter().any(|r| r.contains("thinking ·") || r.contains('\u{2593}')),
+            "hidden when idle: {idle:#?}"
+        );
         assert_eq!(idle.iter().position(|r| r.contains("Message")), Some(composer_row), "the input box never moved");
     }
 }
