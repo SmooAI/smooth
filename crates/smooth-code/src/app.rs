@@ -600,6 +600,7 @@ fn event_loop(
             crate::inline::flush_to_scrollback(&mut s, terminal)?;
             // Advance spinner each frame for animation
             s.advance_spinner();
+            s.sync_turn_clock();
             terminal.draw(|f| render::render(f, &s))?;
             sync_mouse_capture(&s, &mut mouse_captured);
         }

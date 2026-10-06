@@ -315,6 +315,17 @@ rather than the web UI.
 | `session.mode`       | Plan/Auto toggle (shift+tab)                           | 0.73.0 |
 | `session.workspaces` | launch-repo registration, `/workspace add`, shell PATH | 0.73.0 |
 
+**Reading the `th code` transcript.** Your turns are a block: a coral `▌` bar
+down the left edge, a `❯` prompt glyph, and bold text; Big Smooth's replies are
+plain prose under his `Smooth:` label. Tool calls are indented and dim, so the
+answer is what stands out. The shapes carry the difference on their own, so it
+survives `NO_COLOR`. While a turn runs, a three-row animated Big Smooth sits
+above the status bar with what he is doing (`thinking`, `running bash`,
+`writing`) and the elapsed time. It animates at 5 fps, only borrows rows from the
+streaming preview (never the input box), and disappears when the turn ends. It
+is off under `NO_COLOR` and under reduced motion: `TH_REDUCED_MOTION=1` (or
+`SMOOTH_REDUCED_MOTION=1`).
+
 Adding a capability: add it to `smooth_policy::daemon::CAPABILITIES` with the
 version that first ships it, then gate the client feature on
 `DaemonCapabilities::has`.

@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let max_preview = area.height.saturating_sub(input_h + 1).max(1);
     let preview_h = crate::inline::preview_height(state, area.width, max_preview);
     let todos_h = crate::inline::todo_panel_height(state.todos.len());
-    let regions = crate::inline::compute_regions_with_todos(area, preview_h, input_h, todos_h);
+    let regions = crate::inline::compute_regions_with_avatar(area, preview_h, input_h, todos_h, crate::avatar::rows_wanted(state));
 
     if let Some(spacer) = regions.spacer {
         frame.render_widget(Clear, spacer);
@@ -63,6 +63,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, preview_rect);
+    }
+
+    if let Some(avatar_rect) = regions.avatar {
+        frame.render_widget(Clear, avatar_rect);
+        frame.render_widget(Paragraph::new(crate::avatar::state_lines(state)), avatar_rect);
     }
 
     render_input(frame, state, regions.input);
@@ -1123,5 +1128,33 @@ mod inline_todo_layout_tests {
         let tasks_row = row_with("Tasks (0/1)").expect("task panel title should render");
         assert!(tasks_row > composer_row + 2, "task panel must follow the complete composer box");
         assert!(row_with("inspect the workspace").is_some(), "task text remains visible");
+    }
+
+    fn screen(state: &AppState) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..14u16).map(|y| (0..80u16).map(|x| buffer[(x, y)].symbol()).collect()).collect()
+    }
+
+    #[test]
+    fn working_avatar_shows_during_a_turn_and_is_gone_after() {
+        let mut state = AppState::new(PathBuf::from("/tmp/project"));
+        state.avatar_motion = true;
+        state.thinking = true;
+        state.sync_turn_clock();
+        let busy = screen(&state);
+        let status_row = busy.iter().position(|r| r.contains("fixer")).expect("status bar");
+        let composer_row = busy.iter().position(|r| r.contains("Working")).expect("composer");
+        let avatar_row = busy.iter().position(|r| r.contains("thinking · 0s")).expect("avatar beside its activity");
+        assert_eq!(avatar_row + 2, status_row, "the 3-row avatar ends directly above the status bar");
+        assert!(busy[avatar_row].contains('\u{2593}'), "avatar art renders: {:?}", busy[avatar_row]);
+        assert_eq!(composer_row, status_row + 1, "composer stays directly under the status bar");
+
+        state.thinking = false;
+        state.sync_turn_clock();
+        let idle = screen(&state);
+        assert!(!idle.iter().any(|r| r.contains("thinking ·") || r.contains('\u{2593}')), "hidden when idle: {idle:#?}");
+        assert_eq!(idle.iter().position(|r| r.contains("Message")), Some(composer_row), "the input box never moved");
     }
 }
