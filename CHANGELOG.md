@@ -1,5 +1,19 @@
 # @smooai/smooth
 
+## 0.74.0
+
+### Minor Changes
+
+- c764f4d: Cut the context the smooth-agent plugin and `th prime` inject into every session.
+
+  - `th prime` lists at most 10 ready pearls (`--ready-limit N` / `$TH_PRIME_READY_LIMIT`), ending with `… +N more`, and the workflow primer is a terse rules block instead of a long command reference.
+  - The compact/resume handoff hook only injects pearls this session is actually on: in the primary checkout, the ones it checkpointed or whose id is in the branch name (it used to inject every pearl ever checkpointed there). At most 3 packets, each capped. PreCompact applies the same filter, so it no longer stamps every pearl with the session id.
+  - `mail-guard.sh stop` no longer blocks a session just because no mail watcher is armed; it blocks only for unread direct mail, once per distinct count. The unarmed reminder is one line of prompt context, once per session.
+  - Broadcast `note`/`result` messages no longer wake the th-mail watcher or count toward the unread hint: new `th msg watch --wake` and `th msg unread-count --wake` (direct mail plus broadcast request/handoff/cancel).
+  - SessionStart registration prints one line.
+
+- 6f1170a: `th code`: your turns are now a distinct block in the transcript — a coral `▌` accent bar, a `❯` prompt glyph and bold text — instead of a "You:" label that looked like the agent's. Tool-call lines are indented and dim so the answer stands out. While a turn runs, a small animated Big Smooth (from the splash avatar) sits above the status bar with the current activity and elapsed time; it hides when the turn ends, never takes rows from the input box, and is off under `NO_COLOR` or `TH_REDUCED_MOTION=1` / `SMOOTH_REDUCED_MOTION=1`.
+
 ## 0.73.2
 
 ### Patch Changes
