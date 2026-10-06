@@ -10,6 +10,7 @@ pub mod app;
 pub mod attachments;
 // ponytail: narc TUI removed with the old-cast crate; re-home onto the new engine's NarcHook later (th-3119e3)
 pub mod autocomplete;
+pub mod avatar;
 pub mod client;
 pub mod commands;
 pub mod composer;

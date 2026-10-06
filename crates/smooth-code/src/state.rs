@@ -463,6 +463,13 @@ pub struct AppState {
     pub cancel_turn_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// Current frame index for the braille spinner animation.
     pub spinner_frame: usize,
+    /// When the in-flight turn started — `Some` exactly while
+    /// [`Self::thinking`]. Kept by [`Self::sync_turn_clock`] on every tick;
+    /// drives the working avatar's elapsed timer and animation frame.
+    pub turn_started: Option<std::time::Instant>,
+    /// Whether the animated working avatar may run. Off under `NO_COLOR` or
+    /// a reduced-motion setting (see [`crate::avatar::motion_allowed`]).
+    pub avatar_motion: bool,
     /// File tree for the sidebar browser.
     pub file_tree: Option<FileTree>,
     /// Autocomplete state for @ references.
@@ -538,6 +545,8 @@ impl AppState {
             queued_messages: VecDeque::new(),
             cancel_turn_tx: None,
             spinner_frame: 0,
+            turn_started: None,
+            avatar_motion: crate::avatar::motion_allowed_from_env(),
             file_tree,
             autocomplete: AutocompleteState::default(),
             pearls: Vec::new(),
@@ -838,6 +847,17 @@ impl AppState {
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % Self::SPINNER_FRAMES.len();
         self.phrase_idx = self.phrase_idx.wrapping_add(1);
+    }
+
+    /// Start the turn clock when a turn begins and drop it when the turn
+    /// ends. `thinking` is flipped from many places; reconciling here, once
+    /// per tick, keeps every one of them correct without touching them.
+    pub fn sync_turn_clock(&mut self) {
+        match (self.thinking, self.turn_started) {
+            (true, None) => self.turn_started = Some(std::time::Instant::now()),
+            (false, Some(_)) => self.turn_started = None,
+            _ => {}
+        }
     }
 
     /// Get the current spinner character.

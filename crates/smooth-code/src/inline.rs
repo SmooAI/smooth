@@ -57,9 +57,8 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     // up on screen, it should read like the logo. User and System
     // labels stay flat-styled since they're not brand surfaces.
     match msg.role {
-        ChatRole::User => {
-            lines.push(Line::from(Span::styled("You:", theme::user_label())));
-        }
+        // A user turn is a block, not a label: see `user_block` below.
+        ChatRole::User => {}
         ChatRole::Assistant => {
             let mut spans: Vec<Span<'static>> = theme::smooth_wordmark();
             spans.push(Span::styled(":", theme::assistant_label()));
@@ -220,10 +219,13 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
             ""
         };
 
+        // Indented and dim: the tool calls are the work, the prose below
+        // them is the answer, and the answer is what should stand out.
         lines.push(Line::from(vec![
+            Span::raw(TOOL_INDENT),
             Span::styled(format!("{icon} "), icon_style),
-            Span::styled(format!("{}{header_args}", tc.tool_name), theme::muted()),
-            Span::raw(format!(" ── {status_label}{collapse_indicator}")),
+            Span::styled(format!("{}{header_args}", tc.tool_name), theme::tool_line()),
+            Span::styled(format!(" ── {status_label}{collapse_indicator}"), theme::tool_line()),
         ]));
 
         if let Some(diff) = diff_lines {
@@ -233,7 +235,7 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
             if has_nonempty_output {
                 if let Some(ref output) = tc.output {
                     for output_line in output.lines() {
-                        lines.push(Line::from(Span::styled(format!("  │ {output_line}"), style)));
+                        lines.push(Line::from(Span::styled(format!("{TOOL_INDENT}  │ {output_line}"), style)));
                     }
                 }
             } else if is_error {
@@ -242,7 +244,7 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
                 // serialization gap. Surface a hint inline rather than
                 // leaving the user with a silent ✗.
                 lines.push(Line::from(Span::styled(
-                    "  │ (no error message captured — daemon may be stale; try `th down && th up`)".to_string(),
+                    format!("{TOOL_INDENT}  │ (no error message captured — daemon may be stale; try `th down && th up`)"),
                     style,
                 )));
             }
@@ -257,12 +259,38 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         lines.push(Line::from(""));
     }
 
+    if msg.role == ChatRole::User {
+        content_lines = user_block(content_lines);
+    }
     lines.append(&mut content_lines);
 
     // Trailing blank line keeps consecutive messages visually separated
     // both in the viewport preview and in scrollback.
     lines.push(Line::from(""));
     lines
+}
+
+/// Left indent for tool-call lines, so they sit under the assistant label.
+const TOOL_INDENT: &str = "  ";
+
+/// Turn the user's content lines into the user-turn block: a coral `▌`
+/// accent bar down the left edge, a `❯` prompt glyph on the first row (the
+/// rest align under it), and the text in bold default foreground. Same idea
+/// as Claude Code / Codex — you can find your own turns by shape alone, so it
+/// still works under `NO_COLOR`.
+fn user_block(content: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    content
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            Line::from(vec![
+                Span::styled("\u{258c}", theme::user_accent()),
+                Span::styled(if i == 0 { " \u{276f} " } else { "   " }, theme::user_accent()),
+                Span::styled(text, theme::user_text()),
+            ])
+        })
+        .collect()
 }
 
 /// Push every finalized message that's still in `state.messages` past
@@ -416,6 +444,8 @@ pub struct InlineRegions {
     /// content from a previous layout cannot linger there.
     pub spacer: Option<Rect>,
     pub preview: Option<Rect>,
+    /// The working avatar ([`crate::avatar`]), directly above the status bar.
+    pub avatar: Option<Rect>,
     pub status: Rect,
     pub input: Rect,
     pub todos: Option<Rect>,
@@ -460,6 +490,16 @@ pub fn todo_panel_height(todo_count: usize) -> u16 {
 /// spacer above the status/input controls so they remain at the viewport bottom.
 #[must_use]
 pub fn compute_regions_with_todos(area: Rect, preview_h: u16, input_h: u16, todos_h: u16) -> InlineRegions {
+    compute_regions_with_avatar(area, preview_h, input_h, todos_h, 0)
+}
+
+/// [`compute_regions_with_todos`] plus `avatar_h` rows for the working
+/// avatar between the preview and the status bar. The avatar only ever
+/// takes rows from the top area (spacer, then preview) — never from the
+/// composer or the checklist — and is dropped whole rather than squashed
+/// when it would leave a wanted preview with no row.
+#[must_use]
+pub fn compute_regions_with_avatar(area: Rect, preview_h: u16, input_h: u16, todos_h: u16, avatar_h: u16) -> InlineRegions {
     const STATUS_H: u16 = 1;
     const MIN_INPUT_H: u16 = 3;
 
@@ -470,7 +510,13 @@ pub fn compute_regions_with_todos(area: Rect, preview_h: u16, input_h: u16, todo
     let input_h = input_h.clamp(MIN_INPUT_H, ceiling.max(MIN_INPUT_H));
 
     let bottom_h = input_h + STATUS_H + todos_h;
-    let available_top = area.height.saturating_sub(bottom_h);
+    let top = area.height.saturating_sub(bottom_h);
+    let avatar_h = if avatar_h > 0 && top >= avatar_h + u16::from(preview_h > 0) {
+        avatar_h
+    } else {
+        0
+    };
+    let available_top = top - avatar_h;
     let actual_preview = preview_h.min(available_top);
     let spacer_h = available_top.saturating_sub(actual_preview);
 
@@ -490,9 +536,15 @@ pub fn compute_regions_with_todos(area: Rect, preview_h: u16, input_h: u16, todo
     } else {
         None
     };
-    let status = Rect {
+    let avatar = (avatar_h > 0).then_some(Rect {
         x: area.x,
         y: area.y + available_top,
+        width: area.width,
+        height: avatar_h,
+    });
+    let status = Rect {
+        x: area.x,
+        y: area.y + available_top + avatar_h,
         width: area.width,
         height: STATUS_H,
     };
@@ -511,6 +563,7 @@ pub fn compute_regions_with_todos(area: Rect, preview_h: u16, input_h: u16, todo
     InlineRegions {
         spacer,
         preview,
+        avatar,
         status,
         input,
         todos,
@@ -522,12 +575,51 @@ mod tests {
     use super::*;
     use crate::state::ChatMessage;
 
+    fn plain(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+    }
+
     #[test]
-    fn message_lines_user_emits_label_then_content() {
-        let msg = ChatMessage::user("hello");
+    fn user_turn_is_a_barred_block_with_a_prompt_glyph() {
+        let msg = ChatMessage::user("hello\nsecond line");
         let lines = message_lines(&msg);
-        assert!(lines[0].spans.iter().any(|s| s.content.contains("You")));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("hello"))));
+        assert_eq!(
+            plain(&lines),
+            vec!["\u{258c} \u{276f} hello", "\u{258c}   second line", ""],
+            "bar + ❯ + aligned continuation, then a blank before the reply"
+        );
+        // Shape, not just hue: the bar and glyph stand alone under NO_COLOR,
+        // and the text is bold where the assistant's prose is plain.
+        assert!(lines[0].spans[2].style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        assert_eq!(lines[0].spans[0].style, theme::user_accent());
+        assert!(!plain(&lines).iter().any(|l| l.contains("You:")), "no flat label any more");
+    }
+
+    #[test]
+    fn assistant_turn_does_not_wear_the_user_block() {
+        let lines = message_lines(&ChatMessage::assistant("hi there"));
+        assert!(plain(&lines).iter().all(|l| !l.starts_with('\u{258c}')), "{:?}", plain(&lines));
+    }
+
+    #[test]
+    fn tool_lines_are_indented_and_dim() {
+        let mut msg = ChatMessage::assistant("answer");
+        let mut tc = crate::state::ToolCallState::new("t1", "bash", &serde_json::json!({"command": "ls"}));
+        tc.status = ToolStatus::Done;
+        tc.output = Some("a.txt".into());
+        tc.collapsed = false;
+        msg.tool_calls.push(tc);
+        let lines = message_lines(&msg);
+        let text = plain(&lines);
+        let header = lines.iter().zip(&text).find(|(_, t)| t.contains("bash(")).map(|(l, _)| l).expect("tool header");
+        assert!(text.iter().any(|t| t.starts_with("  ✓ bash(")), "indented header: {text:?}");
+        assert!(text.iter().any(|t| t.starts_with("    │ a.txt")), "output indented under it: {text:?}");
+        assert!(header.spans[2].style.add_modifier.contains(ratatui::style::Modifier::DIM));
+        let answer = lines.iter().find(|l| plain(std::slice::from_ref(l))[0].contains("answer")).unwrap();
+        assert!(
+            answer.spans.iter().all(|s| !s.style.add_modifier.contains(ratatui::style::Modifier::DIM)),
+            "the answer is not dimmed"
+        );
     }
 
     #[test]
@@ -674,6 +766,31 @@ mod tests {
     }
 
     /// Regions must stay inside the viewport even when it is absurdly short.
+    #[test]
+    fn avatar_takes_rows_from_the_preview_never_the_input() {
+        let area = Rect::new(0, 0, 80, 14);
+        let without = compute_regions_with_avatar(area, 10, 3, 0, 0);
+        let with = compute_regions_with_avatar(area, 10, 3, 0, 3);
+        assert!(without.avatar.is_none());
+        let avatar = with.avatar.expect("room for the avatar");
+        assert_eq!(avatar.height, 3);
+        assert_eq!(with.input, without.input, "input box is untouched");
+        assert_eq!(with.status, without.status, "status bar stays put");
+        assert_eq!(avatar.y + avatar.height, with.status.y, "avatar sits directly above the status bar");
+        assert_eq!(with.preview.unwrap().height, without.preview.unwrap().height - 3, "preview yields the rows");
+    }
+
+    #[test]
+    fn avatar_is_dropped_whole_when_there_is_no_room() {
+        // 3 input + 1 status leaves 2 top rows: not enough for a 3-row avatar.
+        let r = compute_regions_with_avatar(Rect::new(0, 0, 80, 6), 0, 3, 0, 3);
+        assert!(r.avatar.is_none());
+        // Room for the avatar but a wanted preview must keep one row.
+        let r = compute_regions_with_avatar(Rect::new(0, 0, 80, 7), 5, 3, 0, 3);
+        assert!(r.avatar.is_none());
+        assert_eq!(r.preview.unwrap().height, 3);
+    }
+
     #[test]
     fn regions_never_escape_a_tiny_viewport() {
         for height in 1..=16u16 {

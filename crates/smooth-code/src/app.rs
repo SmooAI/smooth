@@ -600,6 +600,7 @@ fn event_loop(
             crate::inline::flush_to_scrollback(&mut s, terminal)?;
             // Advance spinner each frame for animation
             s.advance_spinner();
+            s.sync_turn_clock();
             terminal.draw(|f| render::render(f, &s))?;
             sync_mouse_capture(&s, &mut mouse_captured);
         }
@@ -2489,11 +2490,13 @@ mod duration_truth_tests {
         assert_eq!(resolve_duration_ms(Some(7), started), 7);
     }
 
-    /// A tool that genuinely finished within the same millisecond reports 0 —
-    /// that's a measurement, not the old hardcoded placeholder.
+    /// A tool that finished immediately reports its (tiny) measured time, not
+    /// the old hardcoded placeholder. Bounded rather than `== 0`: a loaded CI
+    /// runner (Windows especially) can deschedule the thread for a few ms.
     #[test]
     fn instant_tool_reports_zero_from_measurement() {
-        assert_eq!(resolve_duration_ms(None, Instant::now()), 0);
+        let ms = resolve_duration_ms(None, Instant::now());
+        assert!(ms < 1_000, "an instant tool should measure near zero, got {ms}");
     }
 }
 

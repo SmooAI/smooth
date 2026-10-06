@@ -172,6 +172,29 @@ pub fn user_label() -> Style {
     Style::default().fg(SMOO_WHITE).add_modifier(Modifier::BOLD)
 }
 
+/// The accent bar and `❯` prompt glyph that mark a user turn.
+///
+/// Coral is "where the user acts" — the same hue as the composer
+/// the text came from — and the bar/glyph SHAPE carries the distinction on
+/// its own under `NO_COLOR`.
+pub fn user_accent() -> Style {
+    Style::default().fg(CORAL).add_modifier(Modifier::BOLD)
+}
+
+/// The user's own words in the transcript.
+///
+/// The terminal's default foreground (readable on light and dark) in bold, so a user turn reads as
+/// distinct from the assistant's plain prose even with color stripped.
+pub fn user_text() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// Tool-call header text: dim, so the work reads as subordinate to the
+/// answer it produced.
+pub fn tool_line() -> Style {
+    muted().add_modifier(Modifier::DIM)
+}
+
 /// Style for assistant message labels ("Smooth").
 ///
 /// This is Big Smooth speaking, so it wears the face. Use
