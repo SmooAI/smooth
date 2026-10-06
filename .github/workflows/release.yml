@@ -467,3 +467,36 @@ jobs:
                   GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_deploy -o IdentitiesOnly=yes" \
                       git push origin main
                   echo "✓ tap bumped to ${VERSION}"
+
+    # ADR-012: the app ships on its own cadence — whenever desktop/package.json's
+    # version is bumped past what the OTA feed serves. desktop-publish.yml's
+    # `push: tags` trigger never fires for these releases: the tag is created with
+    # GITHUB_TOKEN, and GITHUB_TOKEN events don't start other workflows.
+    # workflow_dispatch is the documented exception, so dispatch it from here.
+    desktop-ota:
+        name: Publish desktop app (when bumped)
+        needs: [version, release]
+        if: needs.version.outputs.should_release == 'true'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            actions: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: main
+
+            - name: Dispatch desktop-publish if the app version is new
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  APP_VER="$(node -p "require('./desktop/package.json').version")"
+                  TAG="v$(node -p "require('./package.json').version")"
+                  LIVE_VER="$(curl -fsSL https://downloads.smoo.ai/bigsmooth/latest-mac.yml | sed -n 's/^version: *//p' | head -1 || true)"
+                  echo "app ${APP_VER} · live ${LIVE_VER:-unknown} · tag ${TAG}"
+                  if [[ -n "$LIVE_VER" && "$LIVE_VER" == "$APP_VER" ]]; then
+                      echo "▸ OTA feed already serves ${APP_VER} — nothing to publish"
+                      exit 0
+                  fi
+                  gh workflow run desktop-publish.yml -R "$GITHUB_REPOSITORY" -f tag="$TAG"
+                  echo "✓ dispatched desktop-publish for ${TAG} (app ${APP_VER})"
