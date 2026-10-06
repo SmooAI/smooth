@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository. It holds the hard rules and core commands; detail lives in the `docs/` vault ([`docs/Home.md`](docs/Home.md)) behind one-line pointers.
 
 **Use Context7 MCP server for up-to-date library documentation.**
 
@@ -10,580 +10,106 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary** (`th`) that coordinates Smooth Operators (AI agents). Zero runtime dependencies.
 
-> **microVM stack removed 2026-07 (pearl th-f4a801).** Big Smooth used to dispatch tasks into per-task microsandbox microVMs (a per-VM cast of Wonk/Goalie/Narc/Scribe). All of it — the VMs, the `smooth-operative` worker binary, the `smooth-bigsmooth` / `smooth-narc` / `smooth-scribe` / `smooth-archivist` crates — is gone. Big Smooth today **is** `smooth-daemon`, and the agent engine is the external `smooth-operator` crate (its own repo, SmooAI/smooth-operator). Git history at the removal PR has the VM path if it ever needs resurrecting; [ADR-004](docs/Decisions/ADR-004-remove-microvm-sandbox-stack.md) is the record.
+- Big Smooth **is** `smooth-daemon`. The agent engine is the external `smooth-operator` crate (repo SmooAI/smooth-operator) — **not in this workspace**; don't look for `crates/smooth-operator/`.
+- The microVM stack (per-task VMs, `smooth-operative`, `smooth-bigsmooth`/`narc`/`scribe`/`archivist` crates) was removed 2026-07 (pearl th-f4a801, [ADR-004](docs/Decisions/ADR-004-remove-microvm-sandbox-stack.md)).
 
----
+## 1. Workspace
 
-## 1. Workspace Structure
+`ls crates/` is the source of truth. Per-crate detail: [`docs/Architecture/Workspace-Crates.md`](docs/Architecture/Workspace-Crates.md).
 
-Fourteen crates. `ls crates/` is the source of truth; this list is kept in sync with it.
+| Crate               | Role                                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------------- |
+| `smooth-cli`        | Binary `th` — clap entry point; platform subcommands in `src/smooai/`, admin `src/admin/` |
+| `smooth-daemon`     | Big Smooth — always-on personal-agent daemon hosting smooth-operator's `LocalServer`      |
+| `smooth-tools`      | Agent tools (fs/grep/bash/…) + the opt-in kernel OS sandbox (`sandbox.rs`)                |
+| `smooth-policy`     | Policy types, TOML parsing, auto-mode, ext trust, settings registry, auth paths           |
+| `smooth-goalie`     | HTTP forward proxy = the daemon's egress boundary                                         |
+| `smooth-pearls`     | SQLite pearl tracker (`~/.smooth/pearls.db`), memories, agent mail (`~/.smooth/mail.db`)  |
+| `smooth-cast`       | Coding-harness bits the published engine dropped (`th code` loop, skills, cast roles)     |
+| `smooth-code`       | `th code` ratatui coding TUI                                                              |
+| `smooth-diver`      | Pearl lifecycle manager + Jira sync                                                       |
+| `smooth-flow`       | SmoothFlow engine: sessions under tmux, PTY streaming, supervision, fan-out               |
+| `smooth-tmux`       | tmux driver (drives Claude Code for `th claude`)                                          |
+| `smooth-api-client` | Generated api.smoo.ai client + auth wrapper                                               |
+| `smooth-web`        | Embedded Vite SPA (`web/`, React + TS) via rust-embed                                     |
 
-```
-smooth/
-├── crates/
-│   ├── smooth-cli/          # Binary `th` — clap entry point (58 top-level commands)
-│   ├── smooth-daemon/       # Binary + lib — Big Smooth: the always-on personal-agent daemon
-│   ├── smooth-tools/        # Library — agent tools (fs/grep/bash) + the opt-in kernel OS sandbox
-│   ├── smooth-policy/       # Library — policy types, TOML parsing, auto-mode, ext trust
-│   ├── smooth-goalie/       # Library + bin — HTTP forward proxy = the egress boundary
-│   ├── smooth-pearls/       # Library — SQLite pearl tracker, memories, agent mail
-│   ├── smooth-cast/         # Library — coding-harness bits the published engine dropped
-│   ├── smooth-code/         # Library — `th code` ratatui coding TUI
-│   ├── smooth-diver/        # Library — pearl lifecycle manager + Jira sync
-│   ├── smooth-flow/         # Library — SmoothFlow engine: sessions under tmux, PTY streaming, supervision, fan-out
-│   ├── smooth-tmux/         # Library — tmux driver (drives Claude Code for `th claude`)
-│   ├── smooth-api-client/   # Library — generated api.smoo.ai client + auth wrapper
-│   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
-│       └── web/             # React + Vite source (TypeScript)
-├── apps/
-│   └── smoothflow/          # macOS app (Swift/AppKit + libghostty) — the SmoothFlow fleet console; docs/Architecture/SmoothFlow-macOS.md
-├── Cargo.toml               # Workspace root
-├── rustfmt.toml             # Format: 160 width, field init shorthand
-├── install.sh               # Curl installer
-└── .claude/hooks/           # Worktree enforcement
-```
+Also: `apps/smoothflow/` (macOS SmoothFlow app), `rustfmt.toml` (160 width), `install.sh`.
 
-### Key Crates
+## 2. Using `th`
 
-- **smooth-cli** (`crates/smooth-cli/`): the `th` binary. clap entry point in `src/main.rs`, 58 top-level commands (60 enum variants: `web-search` is hidden, `admin` is behind the non-default `admin` feature). Platform (api.smoo.ai) subcommands live in `src/smooai/`; cross-org admin in `src/admin/`.
-- **smooth-daemon** (`crates/smooth-daemon/`): **Big Smooth.** The always-on, single-tenant personal-agent daemon (EPIC th-c89c2a). It hosts smooth-operator's `LocalServer` in-process — canonical WS protocol, no bespoke agent loop — with durable SQLite storage, scheduled/proactive turns, web push, tailnet exposure, and the security hooks. `th daemon` runs it directly; `th up` also launches it.
-- **smooth-operator**: the agent engine (LLM client, agent loop, tool registry + hooks, conversation, checkpointing, cast, permissions, `DenyPolicy`). **It is not in this workspace** — it's a git/crates.io dependency from the separate `SmooAI/smooth-operator` repo. Don't look for `crates/smooth-operator/`.
-- **smooth-tools** (`crates/smooth-tools/`): the reusable agent tool surface the daemon registers — `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, `bash`, `cd`, `crawl`, `web_search`, `knowledge_search`, `remember`, `th`, `create_skill`, and (macOS only) `calendar`. Every filesystem path goes through `path::resolve_workspace_path`; `bash` spawns only through `sandbox.rs`'s `SandboxedCommand`, which runs it as the user by default and inside the kernel OS sandbox when `SMOOTH_SANDBOX=1` (§4). `calendar` is the one documented exception (pearl th-94cc4a): it shells `ical` **outside** the sandbox even when it is on, because seatbelt blocks EventKit's XPC/mach lookups — argv-only, fixed binary, verb allowlist (reads + `add`/`update`/`delete`), still Narc-visible. Setup: `th doctor --setup-calendar`.
-- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults, plus `auto_mode` (permission modes/allow-lists), `ext_trust`, and `smooth_alias`.
-- **smooth-goalie** (`crates/smooth-goalie/`): HTTP forward proxy with an exact-host allowlist and JSON-lines audit logging. **Repurposed, not removed** — the microVM-era in-VM/Wonk-delegating mode is dead code paths; what the daemon actually uses is `AuditLogger` + `run_proxy_local` from `start_egress_proxy` (`crates/smooth-daemon/src/lib.rs`), making it the daemon's **egress boundary**. Enabled by `SMOOTH_EGRESS_ALLOWLIST`; `bash` gets `HTTP(S)_PROXY` pointed at it, and only with the opt-in kernel sandbox (`SMOOTH_SANDBOX=1`, macOS) is direct outbound kernel-denied — otherwise the allowlist is advisory.
-- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). One machine-global SQLite db, `~/.smooth/pearls.db`, rows scoped by canonical project root (pearl th-d3e842). Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `MemoryStore`, `Registry`. Agent mail + the agent roster live in a sibling SQLite file, `~/.smooth/mail.db` (`MailStore`, [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)). No Dolt, no external binary — rusqlite is bundled.
-- **smooth-cast** (`crates/smooth-cast/`): the coding-harness specifics the published generic engine dropped — `coding_workflow` (the `th code` outer loop), `skills` discovery, the four harness cast roles (fixer / oracle / chief / intent_classifier), and field-preserving `providers.json` editing.
-- **smooth-code** (`crates/smooth-code/`): `th code` — ratatui AI coding TUI: streaming chat, tool calls, file browser, git, sessions, model picker, extensions.
-- **smooth-diver** (`crates/smooth-diver/`): Pearl Diver — pearl lifecycle (create on dispatch, close on completion, sub-pearls, deps/labels/costs) plus the bidirectional Jira client.
-- **smooth-tmux** (`crates/smooth-tmux/`): dependency-light tmux driver (per-driver socket isolation, bracketed-paste send, full scrollback capture) — how `th claude` supervises Claude Code. Also carries `detect` (the Claude Code pane-state heuristics), shared by `th claude` and SmoothFlow.
-- **smooth-flow** (`crates/smooth-flow/`): **SmoothFlow** (epic th-6ac036). Agent/shell sessions run under one long-lived `tmux -L smooth-flow` server (they outlive the daemon), PTY bytes stream to attached clients via a `portable-pty` on `tmux attach`, Claude Code hooks drive state, a supervision tick resumes crashes / schedules usage-limit resumes / guards duplicate resumes, and fan-out races N worktrees. SQLite at `~/.smooth/flow.db`. Hosted by smooth-daemon (`/api/flow/*`); `th flow` is the CLI. See [`docs/Architecture/SmoothFlow.md`](docs/Architecture/SmoothFlow.md).
-- **smooth-api-client** (`crates/smooth-api-client/`): api.smoo.ai client generated at build time by progenitor from `openapi.json`, plus the auth wrapper (token store, bearer middleware, refresh-on-401).
-- **smooth-web** (`crates/smooth-web/`): rust-embed serves the compiled Vite SPA.
-- Removed 2026-07 (pearl th-f4a801, in git history): **smooth-bigsmooth** (its role is now smooth-daemon), **smooth-operative** (the per-task worker binary), **smooth-narc** (re-homed as `smooth-daemon/src/hooks/narc.rs`), **smooth-scribe**, **smooth-archivist**, **smooth-wonk**, **smooth-bootstrap-bill**, **smooth-host-stub**, **smooth-credential-helper**.
+`th` is **the** CLI across smooth and smooai — reach for it before `curl`, the web app, or Supabase Studio. Every subcommand has `--help`; appending `ai` to a command path (`smoo org ai`) prints a markdown guide. Interface contract: [`docs/Engineering/CLI-Spec.md`](docs/Engineering/CLI-Spec.md) (read before adding/reshaping a command). Daily-driver reference (auth, every subtree, `smoo api` vs `smoo admin`, the add-a-subcommand checklist, the `th-curl-hint` hook): [`docs/Engineering/th-CLI-Daily-Driver.md`](docs/Engineering/th-CLI-Daily-Driver.md); exhaustive: [`docs/Engineering/Using-th-CLI.md`](docs/Engineering/Using-th-CLI.md).
 
----
+- Everything that talks to smoo.ai lives under **`smoo <resource> <verb>`** (= `th smoo …`). `smoo auth` is the ONE identity surface; sessions live in `~/.config/smooth/auth/`. Provider (LLM) creds are separate: `~/.smooth/providers.json`.
+- `th attest <check>… | --all` — run the repo's `scripts/ci/<name>.sh` and credit passes as `ci-attest/<check>` statuses. Run it **instead of `git push`**.
+- `th ci-queue run --lock cargo -- <cmd…>` — run heavy checks through the machine-wide queue (exit 75 = no slot).
+- `th harness enable claude-code|codex|opencode|cursor|all` (idempotent; doubles as update) · `th pkg install <source>` · `th settings list|set` (NOT `th config`, which is `smoo config`).
+- `th jira sync [--dry-run] [--pull] [--push]` — reconcile-only by default.
+- Gaps in `th` are pearls: friction → `th pearls create --type=task --priority=3`; overriding the same curl hint twice → file a pearl for the wrapper.
 
-## 1a. Using `th` — The Daily-Driver Reference
-
-> **Full doc**: [`docs/Engineering/Using-th-CLI.md`](docs/Engineering/Using-th-CLI.md). The bullets below are the muscle-memory summary; everything below covers what the binary built from this repo can do for you and how to extend it.
-
-`th` is **the** CLI we use across smooth and smooai. Reach for it before `curl`, before the web app, before Supabase Studio. Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting, and appending `ai` to any command path (`smoo org ai`) prints a generated markdown guide. The interface contract lives in [`docs/Engineering/CLI-Spec.md`](docs/Engineering/CLI-Spec.md) — read it before adding or reshaping a command.
-
-> 📣 **The `smoo` namespace (pearl th-fc32d9).** `th` is two products in one
-> binary: the standalone local agent tool (pearls, worktrees, mail, daemon,
-> attest, code — no account needed) and the Smoo AI platform CLI. Everything
-> that talks to smoo.ai now lives under **`th smoo <resource> <verb>`**, and a
-> `smoo → th` symlink (installed by `pnpm install:th` and install.sh) makes
-> **`smoo <resource> <verb>`** the customer-facing spelling via argv[0]
-> dispatch. The old top-level spellings (`smoo api …`, `smoo auth …`, `smoo config`,
-> `smoo crm`, …) still parse as hidden compat aliases, so the snippets below all
-> work — but write new docs/skills with the `smoo` spelling. Bare `th agent`
-> stays the machine-local mailbox registry; platform agents are `smoo agents`
-> (singular aliased inside the namespace).
-
-### Auth — `auth.smoo.ai` and what to expect from login
-
-> **`smoo auth` is the ONE Smoo AI identity surface.** The old `th api login` / `logout` / `whoami` verbs were removed (pearl th-16b0ca) — two spellings for one identity was actively confusing, and only `smoo auth` understands auth profiles. The `smoo api <resource>` verbs stay; they aren't auth.
-
-- `smoo auth login` — the **user** browser flow by default on a TTY (`smoo.ai/cli-login`, Supabase session). `--no-browser` for an email + password prompt; `--m2m` to authenticate a service account via OAuth2 `client_credentials` at `https://auth.smoo.ai/token`.
-- M2M credential resolution order: `--client-id`/`--client-secret` flags → `SMOOAI_CLIENT_ID`/`SMOOAI_CLIENT_SECRET` env → interactive prompt. Mint the pair in the web app (Org Settings → API Keys) — the secret is shown **once**.
-- `smoo auth whoami` shows both sessions (user + M2M), the active org, expiry, and which file each came from. `smoo auth logout [--m2m|--all]` clears them.
-- `smoo auth profile` manages named profiles — each bundles a user + M2M session so one host can hold several identities. Select per-command with `--profile <name>` / `SMOOAI_PROFILE`, or set the default with `smoo auth profile use <name>`.
-- **Sessions live under `~/.config/smooth/auth/`** (XDG), in `profiles/<name>/{smooai-user.json,smooai.json}` for named profiles or directly in `auth/` for the default. `~/.smooth/auth/` is the pre-SMOODEV-1739 legacy tree, kept only as a migration backup — nothing should read it.
-- Profile resolution lives in `smooth_policy::auth_paths` and is called by **both** `th` and `smooth-daemon` at startup, so the daemon reads the same credentials as the `th` tool it shells out to regardless of how it was launched (th-16b0ca).
-- `smoo auth login` is **not** LLM-provider auth. Provider creds (`~/.smooth/providers.json`) are a separate system — see `th cast models` / `th model`.
-
-### The high-leverage subtrees
+## 3. Build, Test, Format, Lint
 
 ```bash
-# Smoo platform — replaces every curl to api.smoo.ai (smoo == th smoo)
-smoo api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing|workflows
-smoo auth login|whoami|logout|profile · smoo agents|crm|work|workflows|config|orgs|knowledge|files|testing|branding
-smoo analytics|campaigns|drip|audiences|forms|gbp|search-console|sheets|workforce   # MCP-parity batch (th-739bb1…)
-
-# White-label an org — theme + logos (logo re-hosted from a path OR a remote URL).
-# `enable` is the live switch and refuses a theme that fails WCAG AA contrast.
-smoo branding show|from-url|set|enable|disable|preview|clear
-
-# Cross-org admin (planned — pearl th-feebd2, blocked on th-abc4e2)
-smoo admin onboard-customer / mint-key / set-secret / org list|show
-
-# Jira — replaces curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" .../rest/api/3/...
-# sync is reconcile-only by default (close pearls done in Jira, transition
-# Jira tickets whose pearls are all closed); creating anything is opt-in:
-# --pull (Jira→pearls), --push (pearls→Jira), --dry-run previews the plan.
-# Config = env vars: JIRA_URL, JIRA_PROJECT, JIRA_EMAIL, JIRA_API_TOKEN.
-th jira sync [--dry-run] [--pull] [--push] / status
-
-# Pearls (the only spelling — no `th issues` / `th beads` aliases)
-th pearls create / ready / list / show / update / close / push / pull
-
-# Run a repo's CI checks here (or on a build box) and credit the passes as
-# `ci-attest/<check>` commit statuses, so the workflow skips those rows.
-# Run it INSTEAD of `git push`. Checks are the repo's own scripts/ci/<name>.sh —
-# `th attest` knows nothing about any particular repo's checks. Three outcomes:
-# pass → success, fail → failure, COULD-NOT-RUN (exit 97) → nothing posted,
-# because a status is a claim about the COMMIT, not about your laptop.
-th attest <check>… | --all | --status | --no-push | --remote <host> | --local
-
-# Run a heavy check (typecheck, clippy, a test suite) through the machine-wide
-# queue: N kernel-flock slots per class, FIFO, held while memory/swap/load/disk
-# are under pressure, `nice` priority. Exit 75 = no slot within --max-wait.
-# `--lock cargo` = one job per cargo target dir (auto for a bare `cargo …`);
-# a job holding a lock never runs at background QoS (priority inversion).
-# `th attest`'s local checks already go through it (SMOODEV-3355).
-th ci-queue run [--class heavy|light] [--lock NAME] [--qos Q] [--label L] [--timeout S] [--max-wait S] -- <cmd…> / status [--json]
-
-# Coding harnesses. The manifests SmoothFlow launches (built-in claude /
-# opencode / codex / th-code + ~/.smooth/harnesses + th pkg packages;
-# docs/Engineering/Harness-Manifests.md) — list/show/add, and sort/hide
-# what every picker offers (th-0f6126) …
-th harness list [--all] [--json] / show <name> / add <path|owner/repo> / hide|unhide <name> / order <name…>
-# … and this machine's toolbox setup for Claude Code / Codex / OpenCode /
-# Cursor: MCP server, smooth-agent plugin, shared skills, statusline; for
-# Codex also the SmoothFlow hooks in ~/.codex/hooks.json + ~/.smooth in the
-# sandbox's writable_roots (th-4ad334). enable is idempotent and doubles as
-# the update command.
-th harness enable claude-code|codex|opencode|cursor|all / status / disable
-
-# SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux
-th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
-th flow fanout new / pick
-
-# Install an agent package (skills, rules, MCP, hooks) into every harness from
-# ONE Claude-plugin-layout source: path, owner/repo[/subdir][#ref], or a
-# marketplace.json. Native output per harness + provenance in
-# ~/.smooth/pkg/index.toml so rm/status are exact. hooks.json overlays are
-# KEY-MERGED (never replace, never translated), rules render as Cursor .mdc
-# and as a managed <!-- th-pkg:<name> --> section in Codex/OpenCode AGENTS.md
-# (M1, th-6ad314). `th harness enable` is sugar for installing smooth-agent.
-# Spec: docs/Engineering/Harness-Packages.md
-th pkg install <source> [--harness all|claude-code,codex,opencode,cursor] / list / status [name] / rm <name> / init [dir]
-
-# Machine settings — ~/.smooth/settings.toml over a typed registry of the
-# user-facing SMOOTH_* knobs (sandbox.enabled, egress.allowlist, auto_mode,
-# model, fast_mode, relay.*, tailscale.serve, cloud_memory). Precedence:
-# legacy env var > file > default. `list --json` is the agent view; `set`
-# validates and prints the restart command. NOT `th config` (= smoo config).
-# Adding a key: smooth_policy::settings::REGISTRY + settings::raw("key").
-th settings list [--json] / show <key> / set <key> <value> / unset <key> / explain <key> / path
-
-# Worktrees, daemon/operatives, audit, service
-th worktree create / list / merge / remove
-th daemon · th up / down / status
-th run / pause / resume / steer / cancel / approve / operatives / access / inbox
-th audit tail · th doctor · th service install
-th cast models
-```
-
-### What lives where (so you put new code in the right place)
-
-```
-Need to call api.smoo.ai?
-├── Per-org resource (acts on your active org)
-│   └── smoo api <resource> <verb>  →  crates/smooth-cli/src/smooai/<resource>.rs
-├── Cross-org / requires admin grants
-│   └── smoo admin <verb>           →  crates/smooth-cli/src/admin/   (paired API pearl required)
-└── Purely local (no api.smoo.ai roundtrip)
-    └── Top-level namespace        →  th pearls, th worktree, th doctor, …
-```
-
-| Lives in `smoo api`                                                         | Lives in `smoo admin`                                                             |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Acts on **your active org**                                                 | Acts **across orgs** or on the platform itself                                    |
-| Authenticated as M2M client or regular dashboard user                       | Authenticated as **admin-grant dashboard user**                                   |
-| Backed by `/organizations/{org_id}/…`                                       | Backed by `/admin/…` (paired endpoints don't exist yet)                           |
-| `agents`, `knowledge`, `members`, `config`, `jobs`, `keys`, `observability` | `onboard-customer`, `mint-key`, `set-secret`, `org list/show`, `feature-flag set` |
-| **Adding one**: file under `src/smooai/` + clap subcommand                  | **Adding one**: API endpoint + CLI subcommand together                            |
-
-### What does NOT belong in `th`
-
-- One-off scripts → `scripts/` in the relevant repo
-- `$EDITOR`-driven interactive flows (`th pearls edit` is discouraged for the same reason)
-- TUI-only workflows with no scriptable form → ship the headless surface first
-- `exec("curl ...")` wrappers with no value-add (auth refresh, error parsing, pagination, typing) → those go in `~/.smooth/plugins/` as file-based plugin manifests, not in the binary
-
-### Adding a `th` subcommand — the checklist
-
-1. **Search** — `rg "smoo api <something>" crates/`; someone may have started it
-2. **Pearl** — `th pearls create --title="smoo api X: add Y" --type=feature --priority=2`
-3. **Worktree** — `th worktree create th-<id>-…`
-4. **Code** — clone the nearest sibling under `crates/smooth-cli/src/smooai/` (they all follow the same shape), register in `src/smooai/mod.rs` + parent `Commands` enum
-5. **Test exhaustively** — colocated `#[cfg(test)]`, happy + error paths (§8 is non-negotiable)
-6. **Doc** — update help text **and** `docs/Engineering/Using-th-CLI.md`
-7. **Gate** — `cargo fmt && cargo clippy && cargo test && pnpm install:th`
-8. **Land** per §10
-
-### The `th-curl-hint` hook
-
-`.claude/hooks/th-curl-hint.sh` flags Bash commands that should be `th` calls and asks before letting them through:
-
-| Pattern                            | Suggestion                                             |
-| ---------------------------------- | ------------------------------------------------------ |
-| `curl … api.smoo.ai`               | `smoo api …`                                           |
-| `curl … auth.smoo.ai/token`        | `smoo auth login` (`--m2m` for a service account)      |
-| `curl … atlassian.net/rest/api`    | `th jira sync` (or file a pearl)                       |
-| `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879)   |
-| `pnpm sst secret list` (raw)       | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
-
-Override with ` # th-curl-hint:ack reason=…` if you genuinely need raw curl. **Overriding the same hint twice = file a pearl for the missing wrapper.**
-
-### Continuous improvement
-
-`th` is built from this repo. Every gap is a pearl waiting to happen:
-
-- Daily friction → `th pearls create --type=task --priority=3`
-- New API surface in `apps/web` → mirror under `smoo api <resource>` the same week + changeset
-- New admin operation → `smoo admin <verb>` (blocked on `th-feebd2`; file the sub-pearl now)
-- Shell-helper pattern that survives more than two uses → promote to a `th` subcommand or a `~/.smooth/plugins/` plugin
-
----
-
-## 2. Build, Test, Format, Lint
-
-```bash
-cargo build                  # Build all crates
-cargo test                   # Run all tests (2000+ across the 12 crates)
-cargo fmt                    # Format (rustfmt.toml: 160 width)
-cargo clippy                 # Lint (pedantic + nursery)
-cargo build --release -p smooth-cli  # Release binary (~10MB)
-pnpm install:th              # Build web bundle + install th FROM LOCAL SOURCE (the dev test loop)
-pnpm install:th:brew         # Install the latest RELEASED th via Homebrew (no source build; ignores local changes)
-pnpm build:web               # Just rebuild the embedded web SPA
+cargo build / cargo test / cargo fmt / cargo clippy   # clippy: pedantic + nursery
+cargo build --release -p smooth-cli  # Release binary
+pnpm install:th              # Build web bundle + install th FROM LOCAL SOURCE (the dev loop)
+pnpm install:th:brew         # Install the latest RELEASED th via Homebrew
+pnpm build:web               # Rebuild the embedded web SPA (dev: cd crates/smooth-web/web && pnpm dev → :3100)
 pnpm test:hooks              # Self-check the smooth-agent PreToolUse worktree guard
+pnpm format / format:check   # oxfmt
 ```
 
-> **PreToolUse hooks block on exit 2 and ONLY exit 2.** Any other non-zero exit
-> is a non-blocking hook error and Claude Code runs the tool anyway — which is
-> how `enforce-worktree.sh` sat at `exit 1` and never blocked a single edit on
-> main. `pnpm test:hooks` pins the exit codes; keep new deny paths at 2.
+- **PreToolUse hooks block on exit 2 and ONLY exit 2.** Any other non-zero exit is a non-blocking error and the tool runs anyway. Keep new deny paths at 2.
+- **After any install, `th --version` must match `git log -1`.** `~/.cargo/bin/th` does not automatically win on `PATH`; `install:th` repoints the `/usr/local/bin/th` symlink via `scripts/dev-link-th.sh` (skip with `SMOOTH_NO_DEV_LINK=1`).
+- Details (why, footguns): [`docs/Engineering/Dev-Loop-and-Landing.md`](docs/Engineering/Dev-Loop-and-Landing.md).
 
-> **`pnpm install:th` installs to `~/.cargo/bin/th`, which does NOT automatically win on `PATH`.** The menu bar's "Install th CLI…" symlinks `/usr/local/bin/th` (or `~/.local/bin/th`) at `Big Smooth.app/Contents/Resources/bin/th`, and those dirs usually come first — so a successful dev install can silently keep serving the older bundled binary while you debug a stale `th` (pearl th-fd9d98 lost real time to exactly this). `install:th` now ends with `scripts/dev-link-th.sh`, which repoints that symlink at your build; it only ever rewrites a **symlink**, warns and leaves regular files (Homebrew, manual copies) alone, and is skipped by `SMOOTH_NO_DEV_LINK=1`. Check with `bash scripts/dev-link-th.test.sh`.
->
-> **Sanity check after any install:** `th --version` prints the commit it was built from — compare it to `git log -1`. If they differ, you are testing the wrong binary.
+## 4. Coding Style
 
-### Web UI (crates/smooth-web/web/)
+- **Rust**: edition 2021, max_width 160, field init shorthand; `unsafe_code = "forbid"`, `unused_must_use = "deny"`; clippy pedantic + nursery; `anyhow` for errors, `thiserror` for library errors; `tracing` for logging.
+- **Web**: Vite + React 19 + Tailwind CSS 4; oxfmt + oxlint.
+- **Everything not Rust**: `oxfmt` is the only formatter, and its `format` job runs **ungated on every PR** — markdown and changesets are not exempt. Backtick `snake_case` identifiers in docs (oxfmt reads them as emphasis). Exclusions live in `.oxfmtrc.json` `ignorePatterns`.
 
-```bash
-cd crates/smooth-web/web
-pnpm install
-pnpm build                   # Builds to dist/, embedded in binary
-pnpm dev                     # Vite dev server at :3100
-```
+## 5. Architecture pointers
 
----
+- **Daemon**: no bespoke server or agent loop — hosts `LocalServer` in-process (`serve_local_flavor` in `operator.rs`); module map in [`docs/Architecture/Daemon-Modules-and-Security.md`](docs/Architecture/Daemon-Modules-and-Security.md).
+- **Security layers**, in order: (1) permission gate + `DenyPolicy`, installed FIRST; (2) Narc (`hooks/narc.rs`) detectors + secret redaction; (3) kernel OS sandbox — **opt-in, OFF by default, macOS only** (`th settings set sandbox.enabled true` or `SMOOTH_SANDBOX=1`). Sidekicks get layers 1–2 (`hooks/sidekick.rs`). `SandboxedCommand` is the only way `bash` spawns.
+- **Data**: every project's pearls in `~/.smooth/pearls.db` (keyed by main-checkout root, so worktrees share them); agent mail in `~/.smooth/mail.db`. Layout: [`docs/Architecture/Data-Layout.md`](docs/Architecture/Data-Layout.md).
+- **SmoothFlow**: [`docs/Architecture/SmoothFlow.md`](docs/Architecture/SmoothFlow.md).
 
-## 3. Coding Style
+## 6. Pearls + Jira
 
-### Rust
-
-- Edition 2021, max_width 160, field init shorthand
-- `unsafe_code = "forbid"`, `unused_must_use = "deny"`
-- clippy pedantic + nursery (warn)
-- `anyhow` for errors, `thiserror` for library errors
-- `tracing` for logging
-
-### Web (TypeScript/React)
-
-- Vite + React 19 + Tailwind CSS 4
-- oxfmt for formatting, oxlint for linting
-
-### Everything that is not Rust
-
-**`oxfmt` is the only formatter in this repo** (pearl th-9bee92 removed the never-wired `dprint.json` and `.prettierignore`). `pnpm format` writes, `pnpm format:check` verifies, and the `format` job in `pr-checks.yml` runs it **ungated on every PR** — it is the one check a docs-only or changeset-only diff cannot skip. It owns `md`, `json`/`jsonc`, `yaml`, `toml`, `css`, and `js`/`ts`, so a markdown or changeset edit is **not** format-exempt. Exclusions (generated or vendored bytes) live in `.oxfmtrc.json` `ignorePatterns` — `CHANGELOG.md` is on that list because `changeset version` writes it, and oxfmt mangles the prose it appends.
-
-> ⚠️ oxfmt formats markdown, and it reads bare `snake_case` in prose as an emphasis span — `transfer_call, notify_humans` comes back out as `transfer*call, notify_humans`. Backtick identifiers in docs; the corruption is oxfmt's own output, so `format:check` will _demand_ it once it lands.
-
----
-
-## 4. Key Modules (smooth-daemon)
-
-Big Smooth has **no bespoke server and no bespoke agent loop**. It hosts
-smooth-operator's `LocalServer` (canonical WS protocol + widget) and adds its
-own routes through the engine's `serve_routes` seam. Entry point:
-`serve_local_flavor` in `operator.rs`.
-
-| Module                         | Purpose                                                                                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib.rs`                       | Crate root; `serve_local_flavor` re-export + `start_egress_proxy` (the goalie egress boundary)                                                |
-| `operator.rs`                  | The local deployment flavor — builds and runs the operator `LocalServer` in-process, wires tool providers and hooks                           |
-| `operator_storage.rs`          | Durable SQLite `StorageAdapter` so conversations/sessions survive restart (no Postgres)                                                       |
-| `hooks/mod.rs`                 | The two engine `ToolHook`s installed on every per-turn registry: permission gate, then Narc                                                   |
-| `hooks/narc.rs`                | `NarcHook` — regex detectors on tool args (secrets, prompt injection, dangerous shell), LLM-judge escalation, secret redaction in `post_call` |
-| `config.rs`                    | Daemon config + LLM credential resolution (env → providers.json → gateway), egress config                                                     |
-| `schedule.rs` / `scheduler.rs` | Proactive/scheduled turns; `SqliteScheduleStore` persists them, the tick loop fires them via a `TurnDriver`                                   |
-| `search.rs`                    | `GET /search` — the `@`-mention autocomplete backend for the web composer                                                                     |
-| `cwd_route.rs`                 | `GET`/`POST /api/session/cwd` — the UI's `/cd` and `/pwd`                                                                                     |
-| `flow_route.rs`                | `/api/flow/*` — the SmoothFlow WS (`/api/flow/ws`), HTTP siblings, the Claude Code hooks long-poll, and the supervision tick (th-7f0af3)      |
-| `relay.rs`                     | Smoo Relay bridge; routes `channel:"flow"` envelopes to the flow WS and caps phone-bound `flow.output` (16 KiB / ~30 fps)                     |
-| `auth_login.rs`                | Browser OAuth2 + PKCE sign-in to Smoo AI, routed through the daemon (works over a tailnet origin)                                             |
-| `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                    |
-| `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                               |
-
-### Dispatch
-
-There is no per-task worker process. A message arrives on the operator's
-canonical WebSocket, the engine runs the turn in-process, and tools execute
-against the host filesystem through `smooth-tools` — `bash` as the user (or
-inside the opt-in kernel sandbox), egress pointed at the goalie proxy when one
-is configured. Events stream back over the same
-canonical WS to every client (`th code`, the web SPA, SDK clients).
-
-> **microVM sandboxed dispatch removed 2026-07 (pearl th-f4a801).** Big Smooth
-> used to spawn a per-task microsandbox microVM (mounting a cross-compiled
-> `smooth-operative` at `/opt/smooth/bin`, bind-mounting the workspace) with a
-> per-VM Wonk/Goalie/Narc/Scribe cast enforcing network + filesystem policy.
-> The interim host-subprocess `smooth-operative` dispatch that replaced it is
-> also gone. Git history and
-> [ADR-004](docs/Decisions/ADR-004-remove-microvm-sandbox-stack.md) have the
-> details.
-
-### Security Architecture
-
-Two layers always, a third opt-in, in the order a tool call meets them:
-
-1. **Permission gate** — the engine's `permission::PermissionHook`, built in
-   `smooth-daemon/src/operator::permission_hook`, layered with the daemon's
-   embedded declarative `DenyPolicy` circuit-breakers. Installed **FIRST**, so a
-   policy deny short-circuits before surveillance and before the tool runs.
-   Modes/allow-lists live in `smooth-policy/src/auto_mode.rs`; see
-   [`docs/Engineering/Auto-Mode-Permissions.md`](docs/Engineering/Auto-Mode-Permissions.md).
-2. **Narc** (`smooth-daemon/src/hooks/narc.rs`) — surveillance. `pre_call` regex
-   detectors (secret exfiltration, prompt injection, dangerous shell ops) with
-   fail-closed LLM-judge escalation on ambiguous hits; `post_call` redacts
-   detected secrets out of the tool result in place.
-3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — **opt-in, OFF by
-   default** (pearl th-efbab1). Turn it on with `th settings set
-sandbox.enabled true` and restart Big Smooth (or `SMOOTH_SANDBOX=1` in the
-   daemon's environment, which wins over the file). Big Smooth is a personal agent that operates AS its
-   user on the user's own machine, and the sandbox got in the way of exactly
-   that: asked to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound
-   kernel-denied behind the egress proxy) and git failed with "Operation not
-   permitted" on `~/.ssh/known_hosts` (credential-store read-deny). So by
-   default `bash` is a normal user subprocess — the user's env, `HOME`,
-   `SSH_AUTH_SOCK` and `PATH`, minus only the daemon's own config (`SMOOTH_*`, `SMOOAI_GATEWAY_KEY`) — and
-   layers 1 and 2 are the safety net. When on, `bash` subprocesses get
-   **reads and writes** denied on credential stores (`~/.ssh`, `~/.aws`,
-   `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`, and the
-   daemon's own `~/.smooth` secrets), write denies on `.git/hooks` /
-   `.git/config` in every repo and `~/Library/LaunchAgents`, and the full
-   secret-env scrub. With a proxy configured it is then also the **egress
-   boundary**: direct outbound is kernel-denied except loopback, so traffic must
-   pass goalie's exact-host allowlist. With the sandbox off, a configured
-   allowlist still runs and still sets `HTTP(S)_PROXY`, but it is **advisory**.
-   The daemon logs one startup line stating which posture it is in.
-   `SandboxedCommand` is the only way `bash` builds a subprocess either way:
-   pass-through is a mode of that type, not a second spawn path.
-
-    ⚠️ **macOS only.** The enforced mode is Seatbelt-backed and exists nowhere
-    else (th-08e05a). `SMOOTH_SANDBOX=1` on Linux or Windows logs a warning and
-    runs `bash` unsandboxed. Before shipping a Windows build read
-    [`docs/Architecture/Windows-Security-Posture.md`](docs/Architecture/Windows-Security-Posture.md),
-    which enumerates exactly what is exposed there.
-
-**Sidekicks** (`send_sidekick`) get the same first two layers. The engine
-builds a sidekick's registry fresh, without host hooks, so the daemon wraps
-each tool in the snapshot it hands the engine in the same hook chain, same
-instances, same order (`smooth-daemon/src/hooks/sidekick.rs`, th-8d1951). A
-sidekick's `Ask` reaches the user over the parent turn's approver; with no
-approver it fails closed.
-
-Removed with the microVM stack (2026-07, pearl th-f4a801; see git history):
-**Wonk** (per-VM access authority), Goalie's per-VM FUSE + iptables enforcement,
-and the "Big Smooth is READ-ONLY inside The Safehouse VM" isolation model.
-
----
-
-## 5. Data
-
-### Pearls (`~/.smooth/pearls.db`)
-
-Pearl data for **every project on the machine** lives in one SQLite file,
-`~/.smooth/pearls.db` (WAL; `$SMOOTH_PEARLS_DB` overrides — tests point it at
-a tempdir). Every row carries a `project` column = the canonical project root,
-resolved from any cwd as the **main checkout** even inside a linked git
-worktree (`git rev-parse --git-common-dir`'s parent), so pearls created in a
-worktree no longer vanish with it. Pearl th-d3e842 replaced the embedded
-per-project Dolt store (deleted in th-c6ba83): reads went from ~0.7s to ~10ms, concurrent agents
-queue on SQLite's lock instead of wedging "database is read only", and
-`ADD COLUMN IF NOT EXISTS` / `NOW()`-timezone footguns are gone.
-
-Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
-`pearl_history`, `memories`, `config` — all keyed `(project, …)`. Ids stay
-`th-xxxxxx` and are unique per project. Timestamps are fixed-width UTC RFC3339
-text; queries compare against a Rust `Utc::now()` literal, never SQLite `now`.
-
-> **Dolt is gone** (PR #522 retired it, pearl th-c6ba83 deleted the shim).
-> A straggler machine with a legacy `.smooth/dolt` store must run
-> `th pearls migrate-from-dolt` with **th ≤ 0.42.x** BEFORE upgrading; newer
-> builds cannot read it. `th pearls push` / `pull` print a notice and exit 0 —
-> cross-machine sync against Smoo Projects is pearl th-19cca5.
-
-### Global (`~/.smooth/`)
-
-- `pearls.db` — Every project's pearls (SQLite; see above)
-- `registry.json` — Multi-project registry. A plain store open registers the project only when its root is a git repo other than `/` or `$HOME` (hooks open the store from any cwd, so scratch dirs are not projects — th-92e046); `th pearls init` registers any directory explicitly. Entries whose path is gone, or that are not git repos unless explicit, are pruned on open
-- `smooth.db` — Legacy SQLite. No migration command ships any more (`th pearls migrate-from-sqlite` was removed); the file is unread and safe to delete.
-- `mail.db` — Agent mail + the agent roster (SQLite; `$SMOOTH_MAIL_DB` overrides). Machine-level on purpose — see [ADR-010](docs/Decisions/ADR-010-centralized-agent-mail.md)
-- `agent-sessions/<session_id>` — Handle each harness session registered under (written by the smooth-agent SessionStart hook, rewritten by `th agent claim`/`rename`)
-- `audit/` — Rotating tool usage logs per actor
-- `providers.json` — LLM credentials
-- `auth/` — **legacy** Smoo AI session tree (pre-SMOODEV-1739). Live sessions moved to `~/.config/smooth/auth/` (see §1a); these files remain only as a migration backup.
-- `mcp.toml` — MCP server configs (see `docs/extending.md`)
-- `plugins/<name>/plugin.toml` — CLI-wrapper tool manifests
-
-### Project-scoped (`<repo>/.smooth/`)
-
-- `mcp.toml` — Project-specific MCP servers; merged with global,
-  project wins on name collision
-- `plugins/<name>/plugin.toml` — Project-specific plugins; same
-  merge rules
-
----
-
-## 6. Pearl Tracking — SQLite + Jira Integration
-
-**Philosophy**: Built-in pearl tracking (`th pearls`) is the primary work
-tracker. Jira (SMOODEV project) is the external source of truth for project
-management.
-
-**Pearls is the only spelling.** There are no `th issues` or `th beads`
-aliases.
-
-**Storage**: one SQLite file, `~/.smooth/pearls.db`, for every project
-(see §5). `~/.smooth/registry.json` tracks all projects. Run `th pearls` from
-anywhere inside a repo — worktrees included — and it hits that repo's project.
-
-**Naming lineage**: beads → issues → pearls.
-
-### Quick reference
+Pearls (`th pearls`, the only spelling) is the primary tracker; Jira (SMOODEV) is the external source of truth.
 
 ```bash
-th pearls init                        # Ensure pearls.db exists + register this project
+th pearls ready / list --status=open|in_progress / show <id> / blocked
 th pearls create --title="Title" --description="..."
-th pearls list --status=open          # All open pearls
-th pearls list --status=in_progress   # Active work
-th pearls show <id>                   # Pearl details with dependencies
 th pearls update <id> --status=in_progress   # Claim work
-th pearls close <id1> <id2> ...       # Close completed pearls
-th pearls ready                       # Show ready pearls (open, no blockers)
-th pearls checkpoint <id> --note "…" --next "…"   # Record a handoff checkpoint (worktree/branch/HEAD/dirty auto-collected)
-th pearls show <id> --handoff [--json]   # Handoff packet: what / where / what happened / next
-th pearls prime --in-progress [--cwd .]  # Handoff packets for in-progress pearls (this worktree's with --cwd)
-th pearls blocked                     # Show blocked pearls
-th pearls projects                    # List all registered pearl projects
-th pearls push / pull                 # Exit-0 notice — sync is pearl th-19cca5
+th pearls close <id1> <id2> ...
+th pearls checkpoint <id> --note "…" --next "…"   # Handoff checkpoint
+th pearls show <id> --handoff                     # Resume a handoff
 ```
-
----
 
 ## 7. Git Workflow
 
-> **CRITICAL: All feature work MUST happen in a worktree.** Use `th worktree` commands.
-
-```bash
-# Create worktree for feature work
-th worktree create SMOODEV-XX-desc
-
-# List active worktrees
-th worktree list
-
-# When done: merge to main
-th worktree merge SMOODEV-XX-desc
-
-# Clean up
-th worktree remove SMOODEV-XX-desc
-```
-
-Never edit source code or commit directly on `main`. Always use worktrees.
-
----
+All feature work in a worktree: `th worktree create SMOODEV-XX-desc` (`th worktree list` shows them) → `th worktree merge …` → `th worktree remove …`. Never edit source or commit directly on `main`.
 
 ## 8. Testing — MANDATORY
 
-> **CRITICAL: Every crate, every module, every public function MUST have tests.** No code lands without passing tests. This is non-negotiable.
+> **Every crate, every module, every public function MUST have tests.** No code lands without passing tests.
 
-- Tests colocated in each module (`#[cfg(test)]`)
-- `cargo test` runs all — **must pass before any commit**
-- `cargo clippy` must be clean (zero warnings) before commit
-- `cargo fmt -- --check` must pass before commit
-- Test categories:
-    - **Unit tests**: every public function, every error path, every edge case
-    - **Integration tests**: cross-module interactions (e.g., policy → sandbox, sandbox → goalie egress)
-    - **Property tests**: where applicable (e.g., policy round-trip serialization)
-- When adding a new module: write tests FIRST or alongside, never "add tests later"
-- When fixing a bug: add a regression test that fails without the fix
-- Security-critical code (policy enforcement, access control, secret detection) requires **exhaustive** test coverage including adversarial inputs
+- Tests colocated (`#[cfg(test)]`); `cargo test`, `cargo clippy` (zero warnings) and `cargo fmt -- --check` must pass before commit.
+- Unit (every public fn, error path, edge case), integration (cross-module), property tests where applicable.
+- New module: tests first or alongside. Bug fix: regression test that fails without the fix. Security-critical code: **exhaustive** coverage incl. adversarial inputs.
 
----
+## 9. Changesets
 
-## 9. Changesets & Versioning
+Add a changeset when landing work (`pnpm changeset`). `package.json` is the version source of truth; `scripts/sync-versions.mjs` propagates to `Cargo.toml`/`Cargo.lock`; `release.yml` does Changesets PR → auto-merge → binaries → GitHub Release.
 
-Always add changesets when landing work — this is how versions get bumped and changelogs generated.
+## 10. Landing the Plane
 
-```bash
-pnpm changeset        # Interactive changeset creation
-```
+Work is NOT complete until the push succeeds. Full checklist: [`docs/Engineering/Dev-Loop-and-Landing.md`](docs/Engineering/Dev-Loop-and-Landing.md#10-landing-the-plane-session-completion).
 
-- Config: `.changeset/config.json`
-- `package.json` is the single source of truth for the version
-- `scripts/sync-versions.mjs` propagates the version to `Cargo.toml` workspace.package.version and `Cargo.lock`
-- Release automated via GitHub Actions (`release.yml`) — Changesets PR → auto-merge → multi-platform binary build → GitHub Release
-- Changesets describe what changed and why for the changelog
+1. Quality gates if code changed: `cargo fmt -- --check`, `cargo clippy`, `cargo test`, `cargo build`, `pnpm install:th`.
+2. Changeset. 3. Close pearls. 4. Merge to main. 5. Push; `git status` must show up to date. 6. Clean up worktrees/branches.
 
----
-
-## 10. Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-### Mandatory checklist
-
-1. **Run quality gates** (if code changed):
-
-    ```bash
-    cargo fmt -- --check
-    cargo clippy
-    cargo test
-    cargo build
-    pnpm install:th    # Update ~/.cargo/bin/th to latest
-    ```
-
-2. **Add changeset** for version bump:
-
-    ```bash
-    pnpm changeset    # Describe what changed and why
-    ```
-
-3. **Close pearls** for completed work:
-
-    ```bash
-    th pearls close <id1> <id2> ...
-    ```
-
-4. **Merge to main** if on feature branch:
-
-    ```bash
-    cd ~/dev/smooai/smooth
-    git checkout main && git pull --rebase
-    git merge <branch> --no-ff
-    ```
-
-5. **Push to remote**:
-
-    ```bash
-    git push
-    git status  # MUST show "up to date with origin"
-    ```
-
-6. **Clean up** — remove worktrees, delete merged branches
-
-7. **Verify** — all changes committed AND pushed
-
-### Critical rules
-
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing — that leaves work stranded locally
-- NEVER say "ready to push when you are" — YOU must push
-- All tests, clippy, and format checks must pass
-- If push fails, resolve and retry until it succeeds
+- NEVER stop before pushing; NEVER say "ready to push when you are" — YOU push.
+- All tests, clippy and format checks must pass. If push fails, resolve and retry.
