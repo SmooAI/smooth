@@ -226,7 +226,10 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             place(&mut widgets, &widget_id, at)?;
             save_layout(&client, &o, &dashboard_type, &widgets).await?;
             let at = if at == Placement::Top { "top" } else { "bottom" };
-            println!("✓ added `{widget_id}` ({size}) at the {at} of the {dashboard_type} dashboard ({} widgets)", widgets.len());
+            println!(
+                "✓ added `{widget_id}` ({size}) at the {at} of the {dashboard_type} dashboard ({} widgets)",
+                widgets.len()
+            );
         }
         LayoutCmd::Move {
             widget_id,
