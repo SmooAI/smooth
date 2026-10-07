@@ -20,6 +20,7 @@ pub mod git;
 pub mod headless;
 pub mod inline;
 pub mod intent;
+pub mod intro;
 pub mod layout;
 pub mod markdown;
 pub mod model_picker;
