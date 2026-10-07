@@ -26,13 +26,18 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // wrap-aware Paragraph keeps the most recent rows visible.
     // The input box grows with its content, so the preview's ceiling moves
     // with it (pearl th-958e2e). Width - 2 accounts for the box border.
-    let text_cap = crate::composer::max_text_rows(area.height);
+    // The cap follows the startup ceiling, not this frame's height: the
+    // viewport is sized to its content (`inline::desired_viewport_height`),
+    // and a cap that shrank with it would stop the composer from growing.
+    let text_cap = crate::composer::max_text_rows(state.viewport_h.max(area.height));
     let input_text_rows = crate::composer::desired_text_rows(&state.input, area.width.saturating_sub(2), text_cap);
     let input_h = crate::inline::input_height(input_text_rows, text_cap);
     let max_preview = area.height.saturating_sub(input_h + 1).max(1);
     let preview_h = crate::inline::preview_height(state, area.width, max_preview);
-    let todos_h = crate::inline::todo_panel_height(state.todos.len());
-    let regions = crate::inline::compute_regions_with_avatar(area, preview_h, input_h, todos_h, crate::avatar::rows_wanted(state));
+    // The `/` and `@` popup opens under the composer (the viewport grows
+    // downward to fit it), so the box you are typing in never jumps.
+    let below_h = crate::inline::todo_panel_height(state.todos.len()).max(crate::inline::autocomplete_popup_height(state));
+    let regions = crate::inline::compute_regions_with_avatar(area, preview_h, input_h, below_h, crate::avatar::rows_wanted(state));
 
     if let Some(spacer) = regions.spacer {
         frame.render_widget(Clear, spacer);
@@ -74,7 +79,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_status(frame, state, regions.status);
 
     if let Some(todos_area) = regions.todos {
-        render_todos(frame, state, todos_area);
+        if !state.todos.is_empty() {
+            render_todos(frame, state, todos_area);
+        }
     }
 
     if state.autocomplete.active && !state.autocomplete.results.is_empty() {
@@ -200,12 +207,17 @@ fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Re
     // border.
     let desired_height = (state.autocomplete.results.len() as u16).min(8) + 2;
 
-    // Try above the input first. If there's not enough room, fall
-    // through to overlapping the preview at the top of the frame.
-    // Either way the popup is clamped to fit within frame_area so
-    // we don't panic on out-of-buffer writes.
+    // Under the input first: the layout reserves rows there for it
+    // (`inline::autocomplete_popup_height`). Then above the input, then
+    // overlapping the preview at the top of the frame. Either way the popup
+    // is clamped to fit within frame_area so we don't panic on
+    // out-of-buffer writes.
+    let input_bottom = input_area.y.saturating_add(input_area.height);
+    let room_below = frame_area.y.saturating_add(frame_area.height).saturating_sub(input_bottom);
     let room_above = input_area.y.saturating_sub(frame_area.y);
-    let (popup_y, popup_height) = if room_above >= 3 {
+    let (popup_y, popup_height) = if room_below >= 3 {
+        (input_bottom, desired_height.min(room_below))
+    } else if room_above >= 3 {
         let h = desired_height.min(room_above);
         (input_area.y.saturating_sub(h), h)
     } else {

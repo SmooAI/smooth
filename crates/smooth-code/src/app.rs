@@ -612,6 +612,8 @@ fn event_loop(
             // Advance spinner each frame for animation
             s.advance_spinner();
             s.sync_turn_clock();
+            let width = terminal.size().map_or(80, |sz| sz.width);
+            crate::inline::set_viewport_height(terminal, crate::inline::desired_viewport_height(&s, width))?;
             terminal.draw(|f| render::render(f, &s))?;
             sync_mouse_capture(&s, &mut mouse_captured);
         }

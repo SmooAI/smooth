@@ -21,12 +21,14 @@
 //!   the terminal's scrollback. Skips the in-flight streaming
 //!   message; that one renders inside the viewport until it finishes.
 
+use std::io;
+
 use anyhow::Result;
-use ratatui::backend::Backend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::state::{AppState, ChatMessage, ChatRole, ToolStatus};
 use crate::theme;
@@ -434,6 +436,62 @@ pub fn preview_height(state: &AppState, width: u16, max: u16) -> u16 {
     paragraph_height(&lines, width).min(max)
 }
 
+/// Rows the inline viewport should have right now: exactly what it shows
+/// (preview, working animation, status, composer, task panel), capped at the
+/// startup ceiling `state.viewport_h`. The completion popup gets rows under
+/// the composer; the model and session pickers overlay the whole viewport,
+/// so they get the full ceiling.
+///
+/// The app resizes the viewport to this every frame
+/// ([`set_viewport_height`]), so an idle session is just status + composer
+/// directly under the last message instead of a band of empty preview rows.
+#[must_use]
+pub fn desired_viewport_height(state: &AppState, width: u16) -> u16 {
+    let full = state.viewport_h.max(4);
+    if state.model_picker.active || state.session_picker.active {
+        return full;
+    }
+    let cap = crate::composer::max_text_rows(full);
+    let input_h = input_height(crate::composer::desired_text_rows(&state.input, width.saturating_sub(2), cap), cap);
+    let preview_h = preview_height(state, width, full);
+    let below = todo_panel_height(state.todos.len()).max(autocomplete_popup_height(state));
+    let fixed = 1 + input_h + below + crate::avatar::rows_wanted(state);
+    preview_h.saturating_add(fixed).min(full)
+}
+
+/// Rows the `/` / `@` completion popup takes under the composer: up to eight
+/// results plus its border, or 0 when it is closed.
+#[must_use]
+pub fn autocomplete_popup_height(state: &AppState) -> u16 {
+    if !state.autocomplete.active || state.autocomplete.results.is_empty() {
+        return 0;
+    }
+    u16::try_from(state.autocomplete.results.len().min(8)).unwrap_or(8) + 2
+}
+
+/// Re-create `terminal`'s inline viewport at `height` rows, anchored at the
+/// current viewport's top. ratatui 0.30 fixes an inline viewport's height at
+/// construction (and only supports `insert_before` on inline viewports), so
+/// resizing means wiping the old viewport and building a new terminal there.
+/// Shrinking leaves blank rows below the viewport, which the next message
+/// pushed into scrollback fills; growing extends downward, scrolling older
+/// output up only when the screen is out of room.
+pub fn set_viewport_height(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, height: u16) -> Result<()> {
+    if terminal.get_frame().area().height == height {
+        return Ok(());
+    }
+    // Inline `clear` parks the cursor at the viewport's top and wipes from
+    // there to the end of the screen; the new viewport opens at the cursor.
+    terminal.clear()?;
+    *terminal = Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )?;
+    Ok(())
+}
+
 /// Layout regions for the inline viewport.
 ///
 /// The viewport is laid out top-to-bottom: an optional preview region
@@ -463,8 +521,8 @@ pub fn input_height(text_rows: u16, cap: u16) -> u16 {
 /// height including its border (see [`input_height`]). Status gets 1 row;
 /// preview takes whatever is left up to `preview_h`.
 ///
-/// The input grows by borrowing from the preview, because the inline viewport
-/// height is fixed at startup and cannot be renegotiated. It is clamped so at
+/// The input grows by borrowing from the preview once the viewport is at its
+/// startup ceiling (see [`desired_viewport_height`]). It is clamped so at
 /// least one preview row survives when a preview is wanted — a draft must
 /// never hide the streaming answer entirely (pearl th-958e2e).
 #[must_use]
@@ -870,5 +928,36 @@ mod tests {
         // At width 20, this should wrap to 5 rows.
         let h = paragraph_height(&lines, 20);
         assert_eq!(h, 5);
+    }
+
+    #[test]
+    fn viewport_fits_its_content() {
+        let mut s = AppState::new(std::path::PathBuf::from("/tmp"));
+        s.viewport_h = 20;
+        assert_eq!(desired_viewport_height(&s, 80), 4, "idle: status + 3-row composer, no empty preview band");
+
+        s.avatar_motion = true;
+        s.thinking = true;
+        s.sync_turn_clock();
+        assert_eq!(
+            desired_viewport_height(&s, 80),
+            7 + preview_height(&s, 80, 20),
+            "working: + the 3-row animation and the preview's spinner row"
+        );
+
+        let mut msg = ChatMessage::assistant("one\ntwo");
+        msg.streaming = true;
+        s.messages.push(msg);
+        let preview = preview_height(&s, 80, 20);
+        assert!(preview >= 2);
+        assert_eq!(desired_viewport_height(&s, 80), 7 + preview, "+ the preview's rows");
+
+        s.viewport_h = 8;
+        assert_eq!(desired_viewport_height(&s, 80), 8, "capped at the startup ceiling");
+
+        let mut idle = AppState::new(std::path::PathBuf::from("/tmp"));
+        idle.viewport_h = 20;
+        idle.model_picker.active = true;
+        assert_eq!(desired_viewport_height(&idle, 80), 20, "pickers overlay the preview area: full height");
     }
 }
