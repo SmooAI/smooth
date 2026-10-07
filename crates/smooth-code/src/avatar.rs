@@ -1,11 +1,13 @@
-//! The working avatar: a tiny animated Big Smooth that sits just above the
-//! status bar while a turn runs, with what he is doing and for how long.
+//! The working animation: a rainbow double-helix ribbon that flows along
+//! just above the status bar while a turn runs, beside what the agent is doing
+//! and for how long. (The module keeps its old "avatar" name; it used to be a
+//! tiny Big Smooth face.)
 //!
-//! Three rows of the splash avatar's legend ([`crate::render::welcome_banner_lines`]
-//! is the full-size original): fedora, shades, smirk. The animation is the lens
-//! glint sweeping across the shades, four frames at 5 fps — the frame index
-//! comes from the turn's elapsed time, so the redraw cadence of the event loop
-//! never changes how fast he moves.
+//! Two sine strands half a turn apart are drawn on a half-block grid (3 rows
+//! = 6 sub-rows), the hue sweeping along the ribbon and drifting with time;
+//! the strand that is "behind" at each column is dimmed so it reads as a twist.
+//! The frame comes from the turn's elapsed time quantized to [`FRAME_MS`], so
+//! the event loop's redraw cadence never changes how fast it moves.
 //!
 //! Shown only while a turn is in flight (`AppState::turn_started` is `Some`),
 //! and only in rows the preview would otherwise use — never the input box's.
@@ -13,28 +15,23 @@
 //! `SMOOTH_REDUCED_MOTION=1`); the status bar and preview spinner still show
 //! that a turn is running.
 
+use std::f64::consts::{PI, TAU};
 use std::time::Duration;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::state::{AppState, ChatRole, ToolStatus};
 use crate::theme;
 
-/// Rows the avatar occupies when shown.
+/// Rows the animation occupies when shown.
 pub const ROWS: u16 = 3;
 
-/// One animation frame every 200 ms (5 fps).
-const FRAME_MS: u128 = 200;
+/// Columns of ribbon.
+const WIDTH: usize = 24;
 
-/// The splash legend at 3 rows: `h` hat, `x` head, `g` shades, `w` glint,
-/// `m` smirk. Each frame moves the glint one lens-cell to the right.
-const FRAMES: [[&str; 3]; 4] = [
-    [" hhhhhh ", "xwgggggx", " xxxmmx "],
-    [" hhhhhh ", "xgwggggx", " xxxmmx "],
-    [" hhhhhh ", "xggggwgx", " xxxmmx "],
-    [" hhhhhh ", "xgggggwx", " xxxmmx "],
-];
+/// One animation frame every 80 ms (12.5 fps; the event loop polls at 50 ms).
+const FRAME_MS: u128 = 80;
 
 /// Whether the avatar may animate, given `NO_COLOR` and the reduced-motion vars.
 ///
@@ -94,23 +91,61 @@ pub fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
-/// The avatar's lines for a turn `elapsed` in: three art rows, the middle one
-/// carrying `activity · elapsed`.
+/// HSV (hue in degrees, s/v in 0..=1) to an RGB terminal color.
+fn hsv(h: f64, s: f64, v: f64) -> Color {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f64| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::Rgb(to(r), to(g), to(b))
+}
+
+/// The lit color of the sub-pixel at column `x`, sub-row `sub` (0 = top of
+/// 6) at time `t` seconds, or `None` when it is dark.
+fn pixel(x: usize, sub: usize, t: f64) -> Option<Color> {
+    let phase = x as f64 * 0.42 - t * 3.2;
+    let mid = 2.5;
+    let amp = 2.4;
+    // Strand A and its twin half a turn later; the one with the larger
+    // cosine is in front at this column.
+    let strands = [
+        (mid + amp * phase.sin(), phase.cos(), 0.0),
+        (mid + amp * (phase + PI).sin(), (phase + PI).cos(), 150.0),
+    ];
+    let hue = x as f64 * (300.0 / WIDTH as f64) + t * 90.0;
+    strands
+        .iter()
+        .filter(|(y, _, _)| (sub as f64 - y).abs() < 0.62)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|&(_, depth, hue_off)| {
+            let v = if depth >= 0.0 { 1.0 } else { 0.45 + 0.3 * (depth + 1.0) };
+            hsv(hue + hue_off, 0.85, v)
+        })
+}
+
+/// The animation's lines for a turn `elapsed` in: three ribbon rows, the
+/// middle one carrying `activity · elapsed`.
 #[must_use]
 pub fn lines(activity: &str, elapsed: Duration) -> Vec<Line<'static>> {
-    let frame = &FRAMES[usize::try_from(elapsed.as_millis() / FRAME_MS).unwrap_or(0) % FRAMES.len()];
-    let n = frame.len();
-    frame
-        .iter()
-        .enumerate()
-        .map(|(row, art)| {
-            let head = Style::default().fg(theme::th_gradient_color(row, n)).add_modifier(Modifier::BOLD);
+    let frame = elapsed.as_millis() / FRAME_MS;
+    let t = (frame * FRAME_MS) as f64 / 1000.0 % (TAU * 100.0);
+    (0..usize::from(ROWS))
+        .map(|row| {
             let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
-            spans.extend(art.chars().map(|c| match c {
-                'h' | 'g' | 'm' => Span::styled("\u{2593}", Style::default().fg(theme::FACE_DARK)),
-                'x' => Span::styled("\u{2588}", head),
-                'w' => Span::styled("\u{2580}", Style::default().fg(theme::SMOO_WHITE)),
-                _ => Span::raw(" "),
+            spans.extend((0..WIDTH).map(|x| match (pixel(x, row * 2, t), pixel(x, row * 2 + 1, t)) {
+                (Some(top), Some(bottom)) => Span::styled("\u{2580}", Style::default().fg(top).bg(bottom)),
+                (Some(top), None) => Span::styled("\u{2580}", Style::default().fg(top)),
+                (None, Some(bottom)) => Span::styled("\u{2584}", Style::default().fg(bottom)),
+                (None, None) => Span::raw(" "),
             }));
             if row == 1 {
                 spans.push(Span::raw("  "));
@@ -198,16 +233,35 @@ mod tests {
     }
 
     #[test]
-    fn frames_animate_at_five_fps_and_keep_their_width() {
-        let a = text(&lines("thinking", Duration::from_millis(0)));
-        let b = text(&lines("thinking", Duration::from_millis(199)));
-        let c = text(&lines("thinking", Duration::from_millis(200)));
-        assert_eq!(a, b, "same frame within 200 ms");
-        assert_ne!(a[1], c[1], "glint moves on the next frame");
-        assert_eq!(a[0], c[0]);
-        for f in FRAMES {
-            assert!(f.iter().all(|r| r.chars().count() == 8), "frames are equal width: {f:?}");
+    fn ribbon_animates_per_frame_and_keeps_its_width() {
+        let a = lines("thinking", Duration::from_millis(0));
+        let b = lines("thinking", Duration::from_millis(FRAME_MS as u64 - 1));
+        let c = lines("thinking", Duration::from_millis(FRAME_MS as u64 * 3));
+        assert_eq!(a, b, "same frame within one frame period");
+        assert_ne!(a, c, "the ribbon moves on later frames");
+        for l in [&a, &c] {
+            let t = text(l);
+            assert!(t.iter().all(|r| r.chars().take(1 + WIDTH).count() == 1 + WIDTH));
+            assert_eq!(t[0].chars().count(), 1 + WIDTH, "art rows are a fixed width: {t:?}");
+            assert!(t.iter().any(|r| r.contains(['\u{2580}', '\u{2584}'])), "ribbon renders: {t:?}");
         }
+    }
+
+    #[test]
+    fn ribbon_is_colorful() {
+        let colors: std::collections::HashSet<String> = lines("thinking", Duration::from_secs(1))
+            .iter()
+            .flat_map(|l| l.spans.iter().filter_map(|s| s.style.fg).map(|c| format!("{c:?}")))
+            .collect();
+        assert!(colors.len() >= 10, "many hues across the ribbon: {colors:?}");
+    }
+
+    #[test]
+    fn hsv_primaries() {
+        assert_eq!(hsv(0.0, 1.0, 1.0), Color::Rgb(255, 0, 0));
+        assert_eq!(hsv(120.0, 1.0, 1.0), Color::Rgb(0, 255, 0));
+        assert_eq!(hsv(240.0, 1.0, 1.0), Color::Rgb(0, 0, 255));
+        assert_eq!(hsv(-120.0, 1.0, 1.0), hsv(240.0, 1.0, 1.0));
     }
 
     #[test]

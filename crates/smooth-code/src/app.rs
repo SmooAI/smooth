@@ -339,6 +339,13 @@ pub async fn run_with_session(
     let viewport_h = u16::max(14, term_h.saturating_mul(2) / 5).min(term_h.saturating_mul(3) / 5).max(4);
     tui_debug(format!("viewport: Inline({viewport_h}), term_height={term_h}"));
 
+    // Big Smooth's startup intro (pop up, lean, wink) plays in its own
+    // inline viewport above where the app's viewport will open; when it
+    // ran, only the rest of the splash is pushed below.
+    let term_w = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+    let intro_played =
+        resume.is_none() && crate::intro::should_play(term_w, term_h) && crate::intro::play().map_err(|e| tui_debug(format!("intro failed: {e}"))).is_ok();
+
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
 
@@ -418,7 +425,11 @@ pub async fn run_with_session(
     // banner. Resumed sessions skip it — the user already saw it
     // when they first started that session.
     if resume.is_none() {
-        let banner = render::welcome_banner_lines();
+        let banner = if intro_played {
+            render::welcome_banner_tail_lines()
+        } else {
+            render::welcome_banner_lines()
+        };
         if let Err(e) = crate::inline::insert_before_lines(&mut terminal, banner) {
             tui_debug(format!("welcome banner insert_before failed: {e}"));
         }

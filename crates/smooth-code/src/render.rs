@@ -297,52 +297,87 @@ pub fn welcome_banner_lines() -> Vec<Line<'static>> {
 /// content (e.g. a fixed-screen mode rebuild) don't have to
 /// allocate twice.
 fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
-    /// Big Smooth's AVATAR — the terminal rendering of the web SPA's
-    /// `BigSmoothFace.tsx` (pearl th-a67752): teal→blue gradient head, dark
-    /// fedora with a teal hat band, dark sunglasses with white glints, and a
-    /// smirk. One char per column; the legend maps chars to Presence styles:
-    ///
-    ///   `h` hat (FACE_DARK) · `b` hat band (face teal) · `x` head (vertical
-    ///   th gradient) · `g` glasses (FACE_DARK) · `w` lens glint (white) ·
-    ///   `m` smirk (FACE_DARK) · space = terminal ground.
-    ///
-    /// The face gradient is RESERVED for Big Smooth's presence — this splash
-    /// is his introduction, the one place the avatar belongs at full size.
-    const AVATAR_ROWS: [&str; 12] = [
-        "       hhhhhhhhhhhh       ",
-        "       hhhhhhhhhhhh       ",
-        "       bbbbbbbbbbbb       ",
-        "    hhhhhhhhhhhhhhhhhh    ",
-        "      xxxxxxxxxxxxxx      ",
-        "     xxxxxxxxxxxxxxxx     ",
-        "    xggggggggggggggggx    ",
-        "    xgggggwggxxggggwgx    ",
-        "     xxxxxxxxxxxxxxxx     ",
-        "     xxxxxxxxxxmmmxxx     ",
-        "      xxxxxxxmmmxxxx      ",
-        "       xxxxxxxxxxxx       ",
-    ];
+    // Blank line at the top for spacing
+    lines.push(Line::from(""));
+    lines.extend(avatar_lines(|_| 0, false));
+    welcome_banner_tail_into(lines);
+}
+
+/// Big Smooth's AVATAR — the terminal rendering of the web SPA's
+/// `BigSmoothFace.tsx` (pearl th-a67752): teal→blue gradient head, dark
+/// fedora with a teal hat band, dark sunglasses with white glints, and a
+/// smirk. One char per column; the legend maps chars to Presence styles:
+///
+///   `h` hat (FACE_DARK) · `b` hat band (face teal) · `x` head (vertical
+///   th gradient) · `g` glasses (FACE_DARK) · `w` lens glint (white) ·
+///   `m` smirk (FACE_DARK) · space = terminal ground.
+///
+/// The face gradient is RESERVED for Big Smooth's presence — this splash
+/// is his introduction, the one place the avatar belongs at full size.
+pub(crate) const AVATAR_ROWS: [&str; 12] = [
+    "       hhhhhhhhhhhh       ",
+    "       hhhhhhhhhhhh       ",
+    "       bbbbbbbbbbbb       ",
+    "    hhhhhhhhhhhhhhhhhh    ",
+    "      xxxxxxxxxxxxxx      ",
+    "     xxxxxxxxxxxxxxxx     ",
+    "    xggggggggggggggggx    ",
+    "    xgggggwggxxggggwgx    ",
+    "     xxxxxxxxxxxxxxxx     ",
+    "     xxxxxxxxxxmmmxxx     ",
+    "      xxxxxxxmmmxxxx      ",
+    "       xxxxxxxxxxxx       ",
+];
+
+/// The shades rows while he winks: the right lens is lowered into a lid
+/// (skin above, a dark line below with no glint).
+const WINK_ROWS: [(usize, &str); 2] = [(6, "    xggggggggxxxxxxxxx    "), (7, "    xgggggwggxxggggggx    ")];
+
+/// The avatar's 12 rows, centered. `shift(row)` moves a row sideways
+/// (negative = left) for the intro's head tilt; `wink` swaps in
+/// [`WINK_ROWS`]. Rows are padded by [`crate::intro::MAX_SHIFT`] on both
+/// sides whenever any shift is non-zero, so every row keeps one width and
+/// centering can't skew.
+pub(crate) fn avatar_lines(shift: impl Fn(usize) -> i16, wink: bool) -> Vec<Line<'static>> {
     // First row of the head — the vertical gradient runs from here to the
     // chin so the teal→blue sweep covers the FACE, not the hat.
     const HEAD_TOP: usize = 4;
-
-    // Blank line at the top for spacing
-    lines.push(Line::from(""));
     let head_rows = AVATAR_ROWS.len() - HEAD_TOP;
-    for (row, art) in AVATAR_ROWS.iter().enumerate() {
-        let head_color = theme::th_gradient_color(row.saturating_sub(HEAD_TOP), head_rows);
-        let spans: Vec<Span<'static>> = art
-            .chars()
-            .map(|c| match c {
+    let shifts: Vec<i16> = (0..AVATAR_ROWS.len()).map(&shift).collect();
+    let pad = if shifts.iter().all(|&s| s == 0) { 0 } else { crate::intro::MAX_SHIFT };
+    AVATAR_ROWS
+        .iter()
+        .enumerate()
+        .map(|(row, art)| {
+            let art = WINK_ROWS.iter().find(|(r, _)| wink && *r == row).map_or(*art, |(_, w)| *w);
+            let head_color = theme::th_gradient_color(row.saturating_sub(HEAD_TOP), head_rows);
+            let s = shifts[row].clamp(-pad, pad);
+            let left = usize::try_from(pad + s).unwrap_or(0);
+            let right = usize::try_from(pad - s).unwrap_or(0);
+            let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(left))];
+            spans.extend(art.chars().map(|c| match c {
                 'h' | 'g' | 'm' => Span::styled("\u{2593}", Style::default().fg(theme::FACE_DARK)),
                 'b' => Span::styled("\u{2588}", Style::default().fg(theme::th_gradient_color(0, 1)).add_modifier(Modifier::BOLD)),
                 'x' => Span::styled("\u{2588}", Style::default().fg(head_color).add_modifier(Modifier::BOLD)),
                 'w' => Span::styled("\u{2580}", Style::default().fg(theme::SMOO_WHITE)),
                 _ => Span::raw(" "),
-            })
-            .collect();
-        lines.push(Line::from(spans).alignment(Alignment::Center));
-    }
+            }));
+            spans.push(Span::raw(" ".repeat(right)));
+            Line::from(spans).alignment(Alignment::Center)
+        })
+        .collect()
+}
+
+/// Everything in the splash below the avatar (wordmark, subtitle, hints).
+/// The intro animation draws the avatar itself, then pushes just this.
+#[must_use]
+pub fn welcome_banner_tail_lines() -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    welcome_banner_tail_into(&mut lines);
+    lines
+}
+
+fn welcome_banner_tail_into(lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
     // The brand mark stays, one quiet line under the avatar: the "Smooth"
     // wordmark gradient text (smoo orange→red + th teal→blue).
@@ -1148,14 +1183,17 @@ mod inline_todo_layout_tests {
         let composer_row = busy.iter().position(|r| r.contains("Working")).expect("composer");
         let avatar_row = busy.iter().position(|r| r.contains("thinking · 0s")).expect("avatar beside its activity");
         assert_eq!(avatar_row + 2, status_row, "the 3-row avatar ends directly above the status bar");
-        assert!(busy[avatar_row].contains('\u{2593}'), "avatar art renders: {:?}", busy[avatar_row]);
+        assert!(
+            busy[avatar_row - 1..=avatar_row + 1].iter().any(|r| r.contains(['\u{2580}', '\u{2584}'])),
+            "ribbon renders: {busy:#?}"
+        );
         assert_eq!(composer_row, status_row + 1, "composer stays directly under the status bar");
 
         state.thinking = false;
         state.sync_turn_clock();
         let idle = screen(&state);
         assert!(
-            !idle.iter().any(|r| r.contains("thinking ·") || r.contains('\u{2593}')),
+            !idle.iter().any(|r| r.contains("thinking ·") || r.contains(['\u{2580}', '\u{2584}'])),
             "hidden when idle: {idle:#?}"
         );
         assert_eq!(idle.iter().position(|r| r.contains("Message")), Some(composer_row), "the input box never moved");
