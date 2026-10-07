@@ -28,6 +28,7 @@ pub mod client;
 pub mod config;
 pub mod members;
 pub mod org;
+pub mod overrides;
 pub mod render;
 pub mod user;
 
@@ -39,7 +40,7 @@ pub enum AdminCommands {
         cmd: user::UserCommands,
     },
     /// Organization operations: list / show / create / members / products /
-    /// mint-client / scc-tier.
+    /// overrides / mint-client / scc-tier.
     #[command(visible_alias = "orgs")]
     Org {
         #[command(subcommand)]

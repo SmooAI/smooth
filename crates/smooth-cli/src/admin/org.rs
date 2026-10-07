@@ -1,4 +1,5 @@
-//! `th admin org *` — list / show / create / member ops / product ops.
+//! `th admin org *` — list / show / create / member ops / product ops /
+//! access overrides (`overrides`, in its own module).
 //!
 //! Every subcommand accepts `--json` for raw JSON; default is a
 //! pretty table.
@@ -10,6 +11,7 @@ use owo_colors::OwoColorize;
 use serde_json::json;
 
 use super::client::{print_ok, AdminClient};
+use super::overrides::{self, OverridesCommands};
 use super::render::{render, Format, TableOptions};
 
 #[derive(Debug, Subcommand)]
@@ -172,6 +174,16 @@ pub enum OrgCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Per-org product access overrides: list / set / remove (SMOODEV-3714).
+    ///
+    /// Grants or denies one feature regardless of what the org has bought
+    /// (pilots, MSA terms, comps). Writes confirm on a TTY and need `--yes`
+    /// in scripts.
+    #[command(visible_alias = "override")]
+    Overrides {
+        #[command(subcommand)]
+        cmd: OverridesCommands,
+    },
     /// List an org's child orgs. Defaults to the active org.
     Children {
         /// Parent org UUID. Defaults to the active org.
@@ -183,6 +195,10 @@ pub enum OrgCommands {
 }
 
 pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
+    // `overrides` validates its flags before loading a session.
+    if let OrgCommands::Overrides { cmd } = cmd {
+        return overrides::dispatch(cmd).await;
+    }
     let client = AdminClient::from_user_session().await?;
     match cmd {
         OrgCommands::List { search, limit, offset, json } => {
@@ -370,6 +386,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
             print_ok(format!("unlinked {child_org_id} from {parent} (relationship {rel_id})"));
             render(&body, Format::from_flag(json), &TableOptions::default());
         }
+        OrgCommands::Overrides { .. } => unreachable!("dispatched above"),
         OrgCommands::Children { parent, json } => {
             let parent = crate::active_org::resolve(parent).context("resolve parent org (pass --parent or set an active org)")?;
             let body = client.get(&format!("/organizations/{parent}/children")).await?;
