@@ -1,5 +1,16 @@
 # @smooai/smooth
 
+## 0.76.0
+
+### Minor Changes
+
+- 0273a24: `smoo admin org overrides list | set | remove` (SMOODEV-3714): super-admin per-org product access overrides over the SMOODEV-3711 API. Grant or deny one feature (`--enabled`/`--disabled`, required `--reason`, optional `--expires-at`, telephony-only `--included-voice-minutes`/`--overage-cents`) with client-side validation, a before/after banner, TTY confirmation and `--yes`/`--dry-run` for scripts. Internal `admin` build only.
+- d6712f2: `th smoo dashboard layout move <widget> --to top|bottom` repositions a widget already on your `/apps` dashboard, and `layout add --at top` places a new widget on the first row (every other widget shifts down) instead of appending it below the grid. SMOODEV-3697.
+
+### Patch Changes
+
+- bba4993: th code: the bottom area now sizes itself to what it shows, so the status bar and composer sit directly under the last message instead of below a band of empty rows. It grows for the streaming preview and working animation and shrinks back when the turn ends. The `/` and `@` completion popup now opens under the composer, so the box you type in no longer jumps.
+
 ## 0.75.0
 
 ### Minor Changes
