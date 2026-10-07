@@ -12,7 +12,8 @@
 //! same GET/PUT the web dashboard uses — the server validates widget ids
 //! against its registry, so an unknown id fails loudly rather than saving
 //! a dead tile. SMOODEV-2753 (dogfood: `th api dashboard layout add
-//! aws_cost_forecast`).
+//! aws_cost_forecast`). `layout move` and `layout add --at top` place a widget
+//! at the top or bottom of the grid (SMOODEV-3697).
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -38,13 +39,31 @@ pub enum LayoutCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Add a widget to the layout (appended below the current grid).
+    /// Add a widget to the layout (below the current grid, or `--at top`).
     Add {
         /// Widget id from the registry, e.g. `aws_cost_forecast` (see `th widgets list`).
         widget_id: String,
         /// Apple-style size: small | medium | large | full.
         #[arg(long, default_value = "medium")]
         size: String,
+        /// Where to put it: `bottom` (below the current grid) or `top` (first
+        /// row; every other widget shifts down).
+        #[arg(long, default_value = "bottom")]
+        at: Placement,
+        /// Dashboard type (defaults to `main`).
+        #[arg(long = "type", default_value = "main")]
+        dashboard_type: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Move a widget that is already on the layout to the top or bottom of the grid.
+    Move {
+        /// Widget id to move.
+        widget_id: String,
+        /// `top` (first row; every other widget shifts down) or `bottom`.
+        #[arg(long, default_value = "top")]
+        to: Placement,
         /// Dashboard type (defaults to `main`).
         #[arg(long = "type", default_value = "main")]
         dashboard_type: String,
@@ -66,6 +85,69 @@ pub enum LayoutCmd {
         #[command(flatten)]
         confirm: crate::destructive::Confirm,
     },
+}
+
+/// Where a widget lands in the 12-column grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Placement {
+    Top,
+    Bottom,
+}
+
+fn num(w: &Value, key: &str) -> i64 {
+    w.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn id_of(w: &Value) -> Option<&str> {
+    w.get("widgetId").and_then(Value::as_str)
+}
+
+/// First row below every widget except `skip`.
+fn bottom_y(widgets: &[Value], skip: Option<&str>) -> i64 {
+    widgets
+        .iter()
+        .filter(|w| skip.is_none() || id_of(w) != skip)
+        .map(|w| num(w, "y") + num(w, "h"))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Put `widget_id` (already in `widgets`) at `placement`.
+///
+/// The web dashboard is a sortable FLOW grid (`dashboard-grid.tsx`, dnd-kit): it
+/// renders widgets in ARRAY order and recomputes x/y itself (`reflowWidgets`), so
+/// the array position is what actually moves a widget; x/y are kept consistent for
+/// any reader that does use them. Top: first in the array, x 0, y 0, every other
+/// widget down by its height. Bottom: last, below everything else. Errors when the
+/// widget is absent.
+fn place(widgets: &mut Vec<Value>, widget_id: &str, placement: Placement) -> Result<()> {
+    let idx = widgets
+        .iter()
+        .position(|w| id_of(w) == Some(widget_id))
+        .ok_or_else(|| anyhow::anyhow!("widget `{widget_id}` is not on the dashboard"))?;
+    match placement {
+        Placement::Top => {
+            let h = num(&widgets[idx], "h").max(1);
+            for (i, w) in widgets.iter_mut().enumerate() {
+                if i != idx {
+                    let y = num(w, "y");
+                    w["y"] = json!(y + h);
+                }
+            }
+            widgets[idx]["x"] = json!(0);
+            widgets[idx]["y"] = json!(0);
+            let w = widgets.remove(idx);
+            widgets.insert(0, w);
+        }
+        Placement::Bottom => {
+            let y = bottom_y(widgets, Some(widget_id));
+            widgets[idx]["x"] = json!(0);
+            widgets[idx]["y"] = json!(y);
+            let w = widgets.remove(idx);
+            widgets.push(w);
+        }
+    }
+    Ok(())
 }
 
 fn resolve_org(override_org: Option<String>) -> Result<String> {
@@ -125,6 +207,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         LayoutCmd::Add {
             widget_id,
             size,
+            at,
             dashboard_type,
             org,
         } => {
@@ -136,15 +219,28 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 anyhow::bail!("widget `{widget_id}` is already on the {dashboard_type} dashboard");
             }
             // Stack below the current grid — the same placement the web
-            // dashboard uses for newly merged default widgets.
-            let y = widgets
-                .iter()
-                .map(|x| x.get("y").and_then(Value::as_i64).unwrap_or(0) + x.get("h").and_then(Value::as_i64).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
+            // dashboard uses for newly merged default widgets — then lift it to
+            // the top when asked.
+            let y = bottom_y(&widgets, None);
             widgets.push(json!({ "widgetId": widget_id, "x": 0, "y": y, "w": w, "h": 4, "size": size }));
+            place(&mut widgets, &widget_id, at)?;
             save_layout(&client, &o, &dashboard_type, &widgets).await?;
-            println!("✓ added `{widget_id}` ({size}) to the {dashboard_type} dashboard ({} widgets)", widgets.len());
+            let at = if at == Placement::Top { "top" } else { "bottom" };
+            println!("✓ added `{widget_id}` ({size}) at the {at} of the {dashboard_type} dashboard ({} widgets)", widgets.len());
+        }
+        LayoutCmd::Move {
+            widget_id,
+            to,
+            dashboard_type,
+            org,
+        } => {
+            let o = resolve_org(org)?;
+            let layout = fetch_layout(&client, &o, &dashboard_type).await?;
+            let mut widgets = widgets_of(&layout);
+            place(&mut widgets, &widget_id, to)?;
+            save_layout(&client, &o, &dashboard_type, &widgets).await?;
+            let to = if to == Placement::Top { "top" } else { "bottom" };
+            println!("✓ moved `{widget_id}` to the {to} of the {dashboard_type} dashboard");
         }
         LayoutCmd::Remove {
             widget_id,
@@ -191,6 +287,42 @@ mod tests {
         assert_eq!(width_for("large").unwrap(), 9);
         assert_eq!(width_for("full").unwrap(), 12);
         assert!(width_for("jumbo").is_err());
+    }
+
+    fn grid() -> Vec<Value> {
+        vec![
+            json!({ "widgetId": "a", "x": 0, "y": 0, "w": 12, "h": 2 }),
+            json!({ "widgetId": "b", "x": 0, "y": 2, "w": 8, "h": 3 }),
+            json!({ "widgetId": "c", "x": 0, "y": 35, "w": 9, "h": 4 }),
+        ]
+    }
+
+    #[test]
+    fn move_to_top_puts_it_first_and_shifts_the_rest_down_by_its_height() {
+        let mut w = grid();
+        place(&mut w, "c", Placement::Top).unwrap();
+        // The web grid renders in array order, so first in the array is what counts.
+        assert_eq!(id_of(&w[0]), Some("c"));
+        assert_eq!((num(&w[0], "x"), num(&w[0], "y")), (0, 0));
+        assert_eq!((id_of(&w[1]), num(&w[1], "y")), (Some("a"), 4));
+        assert_eq!((id_of(&w[2]), num(&w[2], "y")), (Some("b"), 6));
+        // Nothing overlaps the moved widget's rows.
+        assert!(w.iter().filter(|x| id_of(x) != Some("c")).all(|x| num(x, "y") >= 4));
+    }
+
+    #[test]
+    fn move_to_bottom_goes_below_everything_else() {
+        let mut w = grid();
+        place(&mut w, "a", Placement::Bottom).unwrap();
+        assert_eq!(id_of(&w[2]), Some("a"));
+        assert_eq!(num(&w[2], "y"), 39);
+        assert_eq!((id_of(&w[0]), num(&w[0], "y")), (Some("b"), 2), "others stay put");
+    }
+
+    #[test]
+    fn moving_a_widget_that_is_not_there_fails_loudly() {
+        let mut w = grid();
+        assert!(place(&mut w, "missing", Placement::Top).is_err());
     }
 
     #[test]
