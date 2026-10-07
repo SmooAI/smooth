@@ -127,6 +127,14 @@ const REFRESH_MARGIN_SECS: i64 = 60;
 /// it tells the supervisor to force a refresh and reconnect.
 const RELAY_AUTH_CLOSE_CODE: u16 = 4401;
 
+/// How long a phone's chat bridge (its loopback operator session, and any turn
+/// running in it) outlives the phone going offline or the relay socket dropping.
+/// See [`Bridges`].
+const BRIDGE_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// How often a live connection sweeps expired orphan bridges.
+const BRIDGE_REAP_EVERY: Duration = Duration::from_secs(30);
+
 /// Resolve the relay endpoint from env. Pure (args, not env reads) so it's
 /// hermetically testable: `enabled` = `SMOOTH_RELAY`, `url` = `SMOOTH_RELAY_URL`.
 /// `None` ⇒ relay disabled.
@@ -676,12 +684,117 @@ impl FlowGuard {
 struct Bridge {
     to_operator: mpsc::UnboundedSender<String>,
     task: tokio::task::JoinHandle<()>,
+    /// When the phone (or the relay socket) went away. `Some` = in its grace
+    /// window ([`BRIDGE_GRACE`]); a frame from the phone clears it.
+    orphaned_at: Option<tokio::time::Instant>,
+}
+
+impl Bridge {
+    fn new(to_operator: mpsc::UnboundedSender<String>, task: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            to_operator,
+            task,
+            orphaned_at: None,
+        }
+    }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Every phone's bridges, owned by the relay supervisor so they outlive one
+/// relay socket (SMOODEV-3708).
+///
+/// Tearing a chat bridge down closes its loopback WS, and the operator aborts a
+/// session's in-flight turn when its socket closes — so a phone that blinked
+/// (backgrounded, switched networks) or a relay redeploy used to kill whatever
+/// the agent was in the middle of. A chat bridge is therefore *orphaned*, not
+/// dropped: it keeps its loopback session (and the turn running) for
+/// [`BRIDGE_GRACE`], and is reused as-is if the phone writes again inside it.
+///
+/// Flow (terminal) bridges are still dropped at once: they stream ~30 fps of
+/// output nobody is reading, and a reconnecting phone re-pairs them cheaply.
+#[derive(Default)]
+struct Bridges {
+    map: HashMap<String, Bridge>,
+}
+
+impl Bridges {
+    /// A live bridge for `key` took `frame` — re-adopting it if it was orphaned.
+    /// `false` when there is no usable bridge (the caller spawns one).
+    fn deliver(&mut self, key: &str, frame: &str) -> bool {
+        let Some(bridge) = self.map.get_mut(key) else { return false };
+        if bridge.task.is_finished() || bridge.to_operator.send(frame.to_owned()).is_err() {
+            return false;
+        }
+        if let Some(since) = bridge.orphaned_at.take() {
+            tracing::info!(device = %bridge_device(key), after = ?since.elapsed(), "relay: phone is back inside the grace window — reusing its bridge (same session)");
+        }
+        true
+    }
+
+    fn insert(&mut self, key: String, bridge: Bridge) {
+        self.map.insert(key, bridge);
+    }
+
+    /// The relay says `device` is offline: drop its flow bridge, start its chat
+    /// bridge's grace window (once — a still-streaming turn re-triggers
+    /// `peer_offline` on every frame it writes to the absent phone).
+    fn peer_offline(&mut self, device: &str, now: tokio::time::Instant) {
+        self.map.remove(&flow_bridge_key(device));
+        if let Some(bridge) = self.map.get_mut(device) {
+            if bridge.orphaned_at.is_none() {
+                bridge.orphaned_at = Some(now);
+                tracing::info!(%device, grace = ?BRIDGE_GRACE, "relay: phone went offline — keeping its bridge (and any running turn) for the grace window");
+            }
+        }
+    }
+
+    /// The relay socket itself dropped: orphan every chat bridge, drop flow ones.
+    fn socket_lost(&mut self, now: tokio::time::Instant) {
+        self.map.retain(|key, _| !is_flow_key(key));
+        let mut kept = 0usize;
+        for bridge in self.map.values_mut() {
+            if bridge.orphaned_at.is_none() {
+                bridge.orphaned_at = Some(now);
+            }
+            kept += 1;
+        }
+        if kept > 0 {
+            tracing::info!(bridges = kept, grace = ?BRIDGE_GRACE, "relay: socket lost — keeping phone bridges for the grace window");
+        }
+    }
+
+    /// Drop orphans whose grace ran out, and bridges whose task already ended.
+    fn reap(&mut self, now: tokio::time::Instant) {
+        self.map.retain(|key, bridge| {
+            if bridge.task.is_finished() {
+                return false;
+            }
+            let expired = bridge.orphaned_at.is_some_and(|since| now.duration_since(since) >= BRIDGE_GRACE);
+            if expired {
+                tracing::info!(device = %bridge_device(key), "relay: phone did not come back within the grace window — closing its bridge");
+            }
+            !expired
+        });
+    }
+
+    /// Drop everything now (signed out / a different user).
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
+fn is_flow_key(key: &str) -> bool {
+    key.ends_with("\u{1}flow")
+}
+
+/// The device id a bridge key belongs to.
+fn bridge_device(key: &str) -> &str {
+    key.strip_suffix("\u{1}flow").unwrap_or(key)
 }
 
 /// Spawn the loopback bridge task for `device`: connect to the daemon's own
@@ -1035,6 +1148,9 @@ pub fn spawn_relay(
         // backoff still applies, so a persistently-dead refresh token can't
         // hammer the relay.
         let mut force_refresh = false;
+        // Phone bridges + their single out-channel live here, not per socket, so
+        // a relay reconnect doesn't kill the turns running in them (SMOODEV-3708).
+        let mut hub = BridgeHub::new();
         loop {
             if claim.is_none() && !lock_unavailable {
                 match claim_identity(lock_dir.as_deref(), &device) {
@@ -1067,6 +1183,7 @@ pub fn spawn_relay(
                 TokenOutcome::Dial { token, user } => (token, user),
                 TokenOutcome::NoSession(view) => {
                     force_refresh = false;
+                    hub.clear();
                     let phase = waiting_phase(&view);
                     let detail = waiting_detail(phase);
                     if status.set(phase, detail) {
@@ -1104,7 +1221,7 @@ pub fn spawn_relay(
                         ack_timeout: AUTH_ACK_TIMEOUT,
                         silence_timeout: RELAY_SILENCE_TIMEOUT,
                     };
-                    run_connection(stream, &ctx, &mut creds_rx).await
+                    run_connection(stream, &ctx, &mut creds_rx, &mut hub).await
                 }
                 Err(e) if is_auth_handshake_error(&e) => {
                     tracing::warn!(error = %e, relay = %relay_url, "relay: handshake rejected (401) — refreshing the Smoo session and reconnecting");
@@ -1185,6 +1302,32 @@ struct ConnCtx<'a> {
     silence_timeout: Duration,
 }
 
+/// The phone bridges and the one channel they all write the relay through.
+/// Outlives any single relay socket; see [`Bridges`].
+struct BridgeHub {
+    bridges: Bridges,
+    out_tx: mpsc::UnboundedSender<String>,
+    out_rx: mpsc::UnboundedReceiver<String>,
+}
+
+impl BridgeHub {
+    fn new() -> Self {
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        Self {
+            bridges: Bridges::default(),
+            out_tx,
+            out_rx,
+        }
+    }
+
+    /// Drop every bridge and anything they queued — never replay one session's
+    /// output onto a socket dialled for someone else.
+    fn clear(&mut self) {
+        self.bridges.clear();
+        while self.out_rx.try_recv().is_ok() {}
+    }
+}
+
 /// One live relay connection: pump relay ⇄ bridges until the socket ends, the
 /// relay fails to authenticate us in time, or the credentials change enough to
 /// matter ([`on_cred_change`]).
@@ -1196,6 +1339,7 @@ async fn run_connection(
     stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     ctx: &ConnCtx<'_>,
     creds: &mut watch::Receiver<CredView>,
+    hub: &mut BridgeHub,
 ) -> ConnEnd {
     let ConnCtx {
         local_ws_url,
@@ -1210,9 +1354,12 @@ async fn run_connection(
     } = *ctx;
     let (mut sink, mut source) = stream.split();
     // All bridges push outbound envelopes through one channel — the single
-    // writer to the relay socket.
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-    let mut bridges: HashMap<String, Bridge> = HashMap::new();
+    // writer to the relay socket. Bridges kept from an earlier socket queue into
+    // it while we're down; that backlog flushes once the relay acks us.
+    let BridgeHub { bridges, out_tx, out_rx } = hub;
+    bridges.reap(tokio::time::Instant::now());
+    let mut reap = tokio::time::interval(BRIDGE_REAP_EVERY);
+    reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut end = ConnEnd::Normal;
     let mut link = Link::Authenticating;
     let ack_deadline = tokio::time::sleep(ack_timeout);
@@ -1258,9 +1405,11 @@ async fn run_connection(
                     }
                 }
             }
-            envelope = out_rx.recv() => match envelope {
+            _ = reap.tick() => bridges.reap(tokio::time::Instant::now()),
+            // Only once authenticated: before the ack the relay can't route.
+            envelope = out_rx.recv(), if link == Link::Online => match envelope {
                 // Bridges hold clones of out_tx, so recv() only ever yields
-                // None when… it can't (we hold out_tx too). Guard anyway.
+                // None when… it can't (the hub holds out_tx too). Guard anyway.
                 Some(e) => {
                     if sink.send(Message::Text(e.into())).await.is_err() {
                         break;
@@ -1304,44 +1453,42 @@ async fn run_connection(
                     }
                     RelayMsg::Ignore => {}
                     RelayMsg::PeerOffline(device) => {
-                        // The phone we last wrote to is gone — reap its bridges so a
-                        // reconnecting phone gets fresh sessions.
-                        bridges.remove(&device);
-                        bridges.remove(&flow_bridge_key(&device));
+                        // The phone we last wrote to is gone. Its chat bridge waits
+                        // out the grace window so a running turn survives a blink.
+                        bridges.peer_offline(&device, tokio::time::Instant::now());
                     }
                     RelayMsg::Frame(from, frame) => {
                         // Get-or-(re)spawn the bridge, then forward. A bridge whose
                         // task died (operator restart) fails the send — respawn once.
-                        let delivered = bridges
-                            .get(&from)
-                            .is_some_and(|b| b.to_operator.send(frame.clone()).is_ok() && !b.task.is_finished());
-                        if !delivered {
+                        if !bridges.deliver(&from, &frame) {
                             let (tx, rx) = mpsc::unbounded_channel();
                             let task = spawn_bridge(from.clone(), local_ws_url.to_string(), rx, out_tx.clone());
                             let _ = tx.send(frame);
-                            bridges.insert(from, Bridge { to_operator: tx, task });
+                            bridges.insert(from, Bridge::new(tx, task));
                         }
                     }
                     RelayMsg::FlowFrame(from, frame) => {
                         // Same shape onto the flow WS, with the phone output caps.
                         let key = flow_bridge_key(&from);
-                        let delivered = bridges
-                            .get(&key)
-                            .is_some_and(|b| b.to_operator.send(frame.clone()).is_ok() && !b.task.is_finished());
-                        if !delivered {
+                        if !bridges.deliver(&key, &frame) {
                             let (tx, rx) = mpsc::unbounded_channel();
                             let guard = FlowGuard::new(from.clone(), pairing.clone());
                             let task = spawn_bridge_with(from, flow_ws_url.to_string(), rx, out_tx.clone(), Some(guard));
                             let _ = tx.send(frame);
-                            bridges.insert(key, Bridge { to_operator: tx, task });
+                            bridges.insert(key, Bridge::new(tx, task));
                         }
                     }
                 }
             }
         }
     }
-    // Dropping the map aborts every bridge task (Bridge::drop).
-    bridges.clear();
+    if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut) {
+        // A different session (or none): nothing from the old one may carry over.
+        // Dropping a bridge aborts its task (Bridge::drop).
+        hub.clear();
+    } else {
+        hub.bridges.socket_lost(tokio::time::Instant::now());
+    }
     if matches!(end, ConnEnd::CredsChanged | ConnEnd::SignedOut | ConnEnd::NoAck | ConnEnd::Silent) {
         // We're the ones leaving — say so, rather than letting the relay time us out.
         let _ = sink.send(Message::Close(None)).await;
@@ -1875,6 +2022,7 @@ mod tests {
         creds_rx: watch::Receiver<CredView>,
         dialled: CredView,
         pairing: Arc<PairingState>,
+        hub: BridgeHub,
     }
 
     fn harness() -> Harness {
@@ -1886,6 +2034,7 @@ mod tests {
             creds_rx,
             dialled,
             pairing: Arc::new(crate::flow_e2e::tests::state()),
+            hub: BridgeHub::new(),
         }
     }
 
@@ -1906,7 +2055,7 @@ mod tests {
             ack_timeout,
             silence_timeout,
         };
-        tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx))
+        tokio::time::timeout(Duration::from_secs(10), run_connection(stream, &ctx, &mut h.creds_rx, &mut h.hub))
             .await
             .expect("the connection must end on its own")
     }
@@ -1966,9 +2115,17 @@ mod tests {
         // must outlive the window many times over, then drop once pings stop.
         let (addr, closed) = relay_that_goes_quiet(10, Duration::from_millis(100)).await;
         let mut h = harness();
+        h.hub.bridges.insert("phone-1".into(), parked_bridge());
         let started = std::time::Instant::now();
         let end = run_against_with(addr, &mut h, Duration::from_secs(5), Duration::from_millis(400)).await;
         assert_eq!(end, ConnEnd::Silent);
+        let kept = h
+            .hub
+            .bridges
+            .map
+            .get("phone-1")
+            .expect("a dead socket must not kill the phone's bridge (SMOODEV-3708)");
+        assert!(kept.orphaned_at.is_some(), "…but it is now on the grace clock");
         assert!(
             started.elapsed() >= Duration::from_millis(900),
             "heartbeats must reset the silence timer (ended after {:?})",
@@ -1998,6 +2155,8 @@ mod tests {
     async fn the_ack_puts_the_link_online_and_a_logout_takes_it_off() {
         let (addr, closed) = fake_relay(true).await;
         let mut h = harness();
+        h.hub.bridges.insert("phone-1".into(), parked_bridge());
+        h.hub.out_tx.send("stale".into()).unwrap();
         let status = h.status.clone();
         let mut watch_status = status.subscribe();
         let creds_tx = h.creds_tx.clone();
@@ -2013,6 +2172,11 @@ mod tests {
         });
         let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
         assert_eq!(end, ConnEnd::SignedOut);
+        assert!(
+            h.hub.bridges.map.is_empty(),
+            "a logout drops every bridge at once — no grace for a session that ended"
+        );
+        assert!(h.hub.out_rx.try_recv().is_err(), "…and nothing the old session queued survives");
         assert!(closed.await.unwrap(), "leaving on logout closes the socket");
     }
 
@@ -2043,6 +2207,101 @@ mod tests {
         });
         let end = run_against(addr, &mut h, Duration::from_secs(5)).await;
         assert_eq!(end, ConnEnd::CredsChanged);
+    }
+
+    // --- Bridge grace window (SMOODEV-3708) ---------------------------------------
+
+    /// A bridge whose task never ends, standing in for a live loopback session.
+    fn parked_bridge() -> Bridge {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Keep the receiver alive inside the task so sends succeed.
+        let task = tokio::spawn(async move {
+            let _rx = _rx;
+            std::future::pending::<()>().await;
+        });
+        Bridge::new(tx, task)
+    }
+
+    #[tokio::test]
+    async fn peer_offline_keeps_the_chat_bridge_and_drops_the_flow_one() {
+        let mut b = Bridges::default();
+        b.insert("phone-1".into(), parked_bridge());
+        b.insert(flow_bridge_key("phone-1"), parked_bridge());
+        let t0 = tokio::time::Instant::now();
+        b.peer_offline("phone-1", t0);
+        assert!(!b.map.contains_key(&flow_bridge_key("phone-1")), "flow bridges are not worth keeping");
+        assert_eq!(b.map["phone-1"].orphaned_at, Some(t0));
+    }
+
+    #[tokio::test]
+    async fn a_returning_phone_reuses_its_orphaned_bridge() {
+        let mut b = Bridges::default();
+        b.insert("phone-1".into(), parked_bridge());
+        b.peer_offline("phone-1", tokio::time::Instant::now());
+        assert!(
+            b.deliver("phone-1", "{}"),
+            "the same bridge — and so the same operator session — takes the frame"
+        );
+        assert!(b.map["phone-1"].orphaned_at.is_none(), "back off the grace clock");
+        assert!(!b.deliver("phone-2", "{}"), "an unknown phone gets a fresh bridge from the caller");
+    }
+
+    #[tokio::test]
+    async fn repeated_peer_offline_does_not_restart_the_grace_clock() {
+        // A still-streaming turn writes to the absent phone, and every write
+        // earns another peer_offline — that must not keep the bridge alive forever.
+        let mut b = Bridges::default();
+        b.insert("phone-1".into(), parked_bridge());
+        let t0 = tokio::time::Instant::now();
+        b.peer_offline("phone-1", t0);
+        b.peer_offline("phone-1", t0 + Duration::from_secs(300));
+        assert_eq!(b.map["phone-1"].orphaned_at, Some(t0));
+    }
+
+    #[tokio::test]
+    async fn orphans_are_reaped_only_after_the_grace_window() {
+        let mut b = Bridges::default();
+        b.insert("phone-1".into(), parked_bridge());
+        b.insert("phone-2".into(), parked_bridge());
+        let t0 = tokio::time::Instant::now();
+        b.peer_offline("phone-1", t0);
+        b.reap(t0 + BRIDGE_GRACE - Duration::from_secs(1));
+        assert!(b.map.contains_key("phone-1"), "inside the window it stays");
+        b.reap(t0 + BRIDGE_GRACE);
+        assert!(!b.map.contains_key("phone-1"), "past the window it goes");
+        assert!(b.map.contains_key("phone-2"), "a phone that never left is never reaped");
+    }
+
+    #[tokio::test]
+    async fn socket_loss_orphans_chat_bridges_and_drops_flow_ones() {
+        let mut b = Bridges::default();
+        b.insert("phone-1".into(), parked_bridge());
+        b.insert(flow_bridge_key("phone-1"), parked_bridge());
+        let t0 = tokio::time::Instant::now();
+        b.socket_lost(t0);
+        assert_eq!(b.map.len(), 1);
+        assert_eq!(b.map["phone-1"].orphaned_at, Some(t0));
+    }
+
+    #[tokio::test]
+    async fn dead_bridges_are_neither_reused_nor_kept() {
+        let mut b = Bridges::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let task = tokio::spawn(async {});
+        b.insert("phone-1".into(), Bridge::new(tx, task));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!b.deliver("phone-1", "{}"));
+        b.reap(tokio::time::Instant::now());
+        assert!(b.map.is_empty());
+    }
+
+    #[test]
+    fn bridge_keys_name_their_device() {
+        assert!(is_flow_key(&flow_bridge_key("phone-1")));
+        assert!(!is_flow_key("phone-1"));
+        assert_eq!(bridge_device(&flow_bridge_key("phone-1")), "phone-1");
+        assert_eq!(bridge_device("phone-1"), "phone-1");
     }
 
     #[test]
