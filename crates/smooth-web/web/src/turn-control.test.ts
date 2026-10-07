@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control.ts';
+import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorCode, errorText, isStaleFrame, isTurnInProgress, mergeSteer } from './turn-control.ts';
 
 test('Stop sends the engine action `cancel`, never `interrupt` (th-74ba1f)', () => {
     const f = cancelFrame('turn-61', 'sess-1');
@@ -70,4 +70,23 @@ test('a second Steer folds into the waiting one; nothing typed is lost', () => {
 
 test('the cancel fallback is bounded and not instant', () => {
     assert.ok(CANCEL_FALLBACK_MS >= 2_000 && CANCEL_FALLBACK_MS <= 30_000);
+});
+
+test('TURN_IN_PROGRESS is recognised from the engine error frame (SMOODEV-3705)', () => {
+    const ev = { type: 'error', requestId: 'turn-9', error: { code: 'TURN_IN_PROGRESS', message: 'busy' }, data: { error: { code: 'TURN_IN_PROGRESS' } } };
+    assert.equal(isTurnInProgress(ev), true);
+    assert.equal(errorCode(ev), 'TURN_IN_PROGRESS');
+    // The code mirrored only under `data.error` still counts.
+    assert.equal(isTurnInProgress({ type: 'error', data: { error: { code: 'TURN_IN_PROGRESS' } } }), true);
+});
+
+test('other errors and non-error frames are not TURN_IN_PROGRESS', () => {
+    assert.equal(isTurnInProgress({ type: 'error', error: { code: 'LLM_ERROR' } }), false);
+    assert.equal(isTurnInProgress({ type: 'error' }), false);
+    assert.equal(isTurnInProgress({ type: 'cancelled', error: { code: 'TURN_IN_PROGRESS' } }), false);
+    assert.equal(errorCode({}), undefined);
+});
+
+test('stopping an earlier connection’s turn is a cancel naming only the session', () => {
+    assert.deepEqual(cancelFrame(null, 'sess-2'), { action: 'cancel', sessionId: 'sess-2' });
 });

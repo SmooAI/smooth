@@ -27,6 +27,9 @@ export interface HistoryMessage {
     /** ISO-8601 send time — used to render history oldest-first (the server
      * returns newest-first). */
     createdAt?: string;
+    /** Free-form metadata. A failed turn's record carries `turnError`
+     * (`{code, requestId}`), see {@link historyTurnError}. */
+    metadataJson?: { turnError?: { code?: string; requestId?: string } } | null;
 }
 
 /** Flatten a history message's content to text (real shape = content.items[] of
@@ -58,4 +61,15 @@ export function historyImages(m: HistoryMessage): Attachment[] {
         }
     }
     return out;
+}
+
+/** A failed turn the server recorded in the conversation (SMOODEV-3705): an
+ * outbound message whose `metadataJson.turnError` is `{code, requestId}`. A
+ * client that dropped mid-turn missed the live `error` frame; this record is how
+ * its reload learns the turn failed, so it renders as an error card rather than
+ * as a normal reply. Null for every ordinary message. */
+export function historyTurnError(m: HistoryMessage): { code: string; requestId?: string } | null {
+    const te = m.metadataJson?.turnError;
+    if (!te || typeof te !== 'object') return null;
+    return { code: typeof te.code === 'string' && te.code ? te.code : 'TURN_ERROR', requestId: te.requestId };
 }

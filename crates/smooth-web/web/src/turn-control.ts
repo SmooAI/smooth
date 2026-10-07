@@ -92,3 +92,19 @@ export function errorText(ev: {
 }): string {
     return ev.error?.message ?? ev.data?.error?.message ?? ev.message ?? ev.data?.message ?? 'operator error';
 }
+
+/** The machine code of an `error` frame (`error.code`, mirrored at
+ * `data.error.code`), or undefined. */
+export function errorCode(ev: { error?: { code?: string }; data?: { error?: { code?: string } } }): string | undefined {
+    return ev.error?.code ?? ev.data?.error?.code;
+}
+
+/** The engine refused a send because a turn is still running on this
+ * conversation (SMOODEV-3705). Turns now outlive the socket that started them,
+ * so after a reconnect the running turn can belong to an EARLIER connection:
+ * this connection has nothing to Stop, and only a `cancel` naming the session
+ * (`cancelFrame(null, sessionId)`) reaches it. The refused send was never
+ * persisted. */
+export function isTurnInProgress(ev: { type?: string; error?: { code?: string }; data?: { error?: { code?: string } } }): boolean {
+    return ev.type === 'error' && errorCode(ev) === 'TURN_IN_PROGRESS';
+}
