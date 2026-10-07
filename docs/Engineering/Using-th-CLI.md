@@ -512,6 +512,19 @@ smoo admin members add    --org-id <org> --user-id <uuid> --role member
 smoo admin members remove --org-id <org> --email jane@acme.com [--yes|--dry-run]
 # add/remove print org + user + role + host, confirm on a TTY, and refuse off a
 # TTY without --yes. `add` is idempotent: an existing member → "already a member".
+# Product access overrides (SMOODEV-3714, API SMOODEV-3711) — grant or deny ONE
+# feature to an org regardless of what it bought (pilots, MSA terms, comps).
+# Super admin only; internal `admin` build. The org is a positional UUID.
+smoo admin org overrides list <org-id> [--json]      # expired ones included
+smoo admin org overrides set <org-id> crm --enabled --reason "Launch partner comp" \
+  [--expires-at 2026-12-31T23:59:59Z] [--yes|--dry-run] [--json]
+smoo admin org overrides set <org-id> telephony --enabled --reason "MSA pilot" \
+  --included-voice-minutes 500 --overage-cents 3      # allowance flags: telephony only
+smoo admin org overrides set <org-id> crm --disabled --reason "Churned"   # deny even if bought
+smoo admin org overrides remove <org-id> crm [--yes|--dry-run]           # back to products
+# set REPLACES the override: no --expires-at = permanent, no allowance flags =
+# cleared. Writes show org + before/after + host, confirm on a TTY, refuse off a
+# TTY without --yes. remove with no override → "nothing to remove", no DELETE.
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 smoo admin org link-child <child-org-id>             # link under active org
