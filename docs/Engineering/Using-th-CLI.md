@@ -799,7 +799,7 @@ are two representations of the same keys, so an unmodified `pull` →
 > and set `"$smooaiName": "<name>"` in `schema.json`.
 
 > **Managing environments without `smoo admin`:** `smoo config environments
-> list|create|update|delete <…> --org-id <org>` works on the public
+list|create|update|delete <…> --org-id <org>` works on the public
 > user-JWT surface — a parent-org admin can create a child org's
 > `production` environment with it (no internal `smoo admin`).
 
@@ -1908,7 +1908,7 @@ claim about the **commit**; "your Docker daemon is off" is a claim about the
    to 120s. Only ever starts a runtime the machine already has, never stops one.
    A machine with no `docker` at all is skipped, not blocked.
 2. **Missing `node_modules`** (in a repo with a `package.json`) → `pnpm install
-   --frozen-lockfile`, which can never rewrite the lockfile behind you. A
+--frozen-lockfile`, which can never rewrite the lockfile behind you. A
    lockfile it cannot satisfy _is_ a broken precondition → 97.
 3. **Stripped `PATH`** — launchd, cron and `ssh host cmd` never source the
    profile that puts Homebrew and cargo on `PATH`. The four well-known dirs are
@@ -2123,7 +2123,7 @@ in parallel when they fit, and fewer when they don't.
   stays within `(available − mem_reserve_gb) × scale`. The memory side never
   goes above `mem_scale_max`, which is 1.0 by default.
 - **CPU:** the job fits while `estimate + Σ running estimates ≤ cores ×
-  cpu_factor × scale`.
+cpu_factor × scale`.
 - **AIMD scale:** starts at 1.0. It grows by `aimd_step` after
   `aimd_clean_samples` calm pressure samples in a row, and halves on any gate
   signal, at most once every 10 s. It stays within [`aimd_min`, `aimd_max`], so
