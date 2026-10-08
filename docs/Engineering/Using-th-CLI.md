@@ -1608,10 +1608,15 @@ SSH.
 
 Once granted, Big Smooth's `imessage` tool can read, search and **send** the
 user's real Messages: `recent`, `thread`, `search`, `conversations`, `send`.
-Reading exposes the whole message history to the model — a deliberate opt-in.
-Revoke by removing Big Smooth from Full Disk Access. See
-[Security-Model](../Architecture/Security-Model.md) for why it runs outside the
-kernel sandbox and what bounds the exposure.
+`conversations` lists each chat's participants with their Contacts names and
+filters by who is in it (`with`), and `thread` reads a chat by its exact GUID —
+so an unnamed group chat in a screenshot resolves in one call. Asked to, Big
+Smooth can also **watch** one thread and auto-reply inside hard limits
+(`imessage_watch` / `imessage_watches`, see
+[iMessage-Watch](iMessage-Watch.md)). Reading exposes the whole message history
+to the model — a deliberate opt-in. Revoke by removing Big Smooth from Full Disk
+Access. See [Security-Model](../Architecture/Security-Model.md) for why it runs
+outside the kernel sandbox and what bounds the exposure.
 
 ### LLM cast
 
