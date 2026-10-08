@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { historyImages, historyText, type HistoryMessage } from './history';
 import { DEFAULT_MIGRATION_KEY, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
+import { displayText, outgoingText, sessionOpenFrame } from './session';
 import { normalizeTodos, type TodoItem } from './todos';
 import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control';
 
@@ -99,10 +100,10 @@ export interface ConversationSummary {
 function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
     const chronological = (raw ?? []).slice().sort((a, b) => (Date.parse(a.createdAt ?? '') || 0) - (Date.parse(b.createdAt ?? '') || 0));
     return chronological.map((m) => {
-        const content = historyText(m);
         const isUser = m.direction === 'inbound' || m.role === 'user';
         const role: ChatMessage['role'] = isUser ? 'user' : m.role === 'system' ? 'system' : 'assistant';
         const attachments = isUser ? historyImages(m) : [];
+        const content = isUser ? displayText(historyText(m), attachments.length > 0) : historyText(m);
         return {
             id: nextId('h'),
             role,
@@ -308,6 +309,11 @@ export function useOperator(): OperatorApi {
     // load for this conversationId (resume can't fetch messages until it has a
     // sessionId from the create reply).
     const pendingResumeRef = useRef<string | null>(null);
+    // True from a socket opening until its session is bound (and, on a reconnect
+    // resume, its history reloaded). `connected` — what enables the composer and
+    // drains its queue — only flips on once this clears, so nothing is sent into
+    // a session that isn't there yet (SMOODEV-3708).
+    const bindingRef = useRef(false);
 
     const mode = useMemo(() => modeById(modeId), [modeId]);
     // Keep a ref so `sendMessage` always reads the live model without re-binding.
@@ -391,6 +397,16 @@ export function useOperator(): OperatorApi {
         [patchStreaming, flushSteer],
     );
 
+    // The socket's session is bound and (on a resume) its history loaded: open the
+    // composer, and send a Steer stranded by a dropped socket on the new session.
+    const markBound = useCallback(() => {
+        if (bindingRef.current) {
+            bindingRef.current = false;
+            setConnected(true);
+        }
+        flushSteer();
+    }, [flushSteer]);
+
     const handle = useCallback(
         (v: any) => {
             // A straggler from a turn we already cancelled: never let it open a
@@ -416,6 +432,10 @@ export function useOperator(): OperatorApi {
                     if (Array.isArray(d.messages)) {
                         if (d.conversationId) setActiveConversationId(d.conversationId);
                         setMessages(renderHistory(d.messages as HistoryMessage[]));
+                        // The history may have moved on (a turn that finished while we
+                        // were away, another client) — keep the sidebar in step.
+                        send({ action: 'list_conversations', requestId: nextId('lc') });
+                        markBound();
                         break;
                     }
                     // create_conversation_session → bind the session; on a resume, chase
@@ -427,9 +447,11 @@ export function useOperator(): OperatorApi {
                         if (resume) {
                             pendingResumeRef.current = null;
                             send({ action: 'get_conversation_messages', requestId: nextId('gm'), sessionId: d.sessionId, conversationId: resume });
+                            // Bound once the history lands: a Steer sent now would be
+                            // wiped from the transcript by the history render.
+                            break;
                         }
-                        // A Steer stranded by a dropped socket goes out on the new session.
-                        flushSteer();
+                        markBound();
                     }
                     break;
                 }
@@ -559,6 +581,18 @@ export function useOperator(): OperatorApi {
                     // rejected send) leaves the running turn running — ending it here
                     // is how the UI lost a turn that kept sending iMessages.
                     const text = errorText(v);
+                    if (bindingRef.current) {
+                        // The reconnect resume failed (conversation gone, history
+                        // unreadable). Keep a bound session if we got one; otherwise
+                        // start fresh rather than sitting on "connecting" forever.
+                        if (sessionRef.current) {
+                            markBound();
+                        } else {
+                            pendingResumeRef.current = null;
+                            setActiveConversationId(null);
+                            send(sessionOpenFrame(nextId('cs'), crypto.randomUUID(), null));
+                        }
+                    }
                     if (endsTurn(v, turnReqRef.current) && turnActiveRef.current) {
                         finishTurn(text);
                     } else {
@@ -573,7 +607,7 @@ export function useOperator(): OperatorApi {
                     break;
             }
         },
-        [ensureStreamingMessage, patchStreaming, send, finishTurn, flushSteer],
+        [ensureStreamingMessage, patchStreaming, send, finishTurn, markBound],
     );
 
     useEffect(() => {
@@ -585,10 +619,15 @@ export function useOperator(): OperatorApi {
             wsRef.current = ws;
 
             ws.onopen = () => {
-                setConnected(true);
                 setStatus((s) => ({ ...s, connected: true, since: Date.now() }));
-                // Open one persistent session for the control surface.
-                send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
+                // Open one persistent session for the control surface. On a
+                // reconnect, re-bind the conversation on screen and reload its
+                // history — never silently swap it for a new one (SMOODEV-3708).
+                bindingRef.current = true;
+                sessionRef.current = null;
+                const resume = activeConvRef.current;
+                pendingResumeRef.current = resume;
+                send(sessionOpenFrame(nextId('cs'), crypto.randomUUID(), resume));
                 // Pull the conversation history list for the sidebar.
                 send({ action: 'list_conversations', requestId: nextId('lc') });
                 // Best-effort identity/health.
@@ -612,12 +651,14 @@ export function useOperator(): OperatorApi {
             ws.onclose = () => {
                 setConnected(false);
                 setStatus((s) => ({ ...s, connected: false }));
-                // The engine aborts a disconnected connection's turn, so nothing will
-                // ever end it for us. End it here, or the composer stays in
-                // "working" and every message queues forever.
+                sessionRef.current = null;
+                // This socket's turn events are gone with it, so nothing will ever end
+                // the turn for us. End it here, or the composer stays in "working" and
+                // every message queues forever. The reconnect reloads the
+                // conversation, which shows the reply if the turn finished meanwhile.
                 if (turnActiveRef.current) {
                     cancelledReqRef.current = turnReqRef.current;
-                    finishTurn('Connection dropped — the running turn was stopped.');
+                    finishTurn('Connection dropped — reconnecting to this conversation.');
                 }
                 if (!closed) reconnectRef.current = setTimeout(connect, 1500);
             };
@@ -713,7 +754,8 @@ export function useOperator(): OperatorApi {
     const sendMessage = useCallback(
         (text: string, attachments: Attachment[] = []) => {
             const body = text.trim();
-            if ((!body && attachments.length === 0) || !sessionRef.current) return;
+            const wire = outgoingText(body, attachments.length);
+            if (!wire || !sessionRef.current) return;
             // Intercept the local working-directory commands before they become a
             // chat turn.
             if (body === '/cd' || body.startsWith('/cd ') || body === '/pwd' || body.startsWith('/pwd ')) {
@@ -743,7 +785,8 @@ export function useOperator(): OperatorApi {
                 action: 'send_message',
                 requestId,
                 sessionId: sessionRef.current,
-                message: body,
+                // Never empty: the engine rejects an image-only send's '' message.
+                message: wire,
                 model: modeRef.current.model,
             };
             // The engine parses `images` as `[{ url, detail? }]` objects (UserImage)
@@ -811,13 +854,14 @@ export function useOperator(): OperatorApi {
     const resumeConversation = useCallback(
         (conversationId: string) => {
             if (!conversationId) return;
+            // Re-opening the conversation already on screen keeps its checklist.
+            if (conversationId !== activeConvRef.current) setTodos([]);
             setActiveConversationId(conversationId);
             setMessages([]);
             setApprovals([]);
-            setTodos([]);
             pendingResumeRef.current = conversationId;
             sessionRef.current = null;
-            send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), conversationId, userName: 'console' });
+            send(sessionOpenFrame(nextId('cs'), crypto.randomUUID(), conversationId));
         },
         [send],
     );
@@ -843,7 +887,7 @@ export function useOperator(): OperatorApi {
         setApprovals([]);
         setTodos([]);
         sessionRef.current = null;
-        send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
+        send(sessionOpenFrame(nextId('cs'), crypto.randomUUID(), null));
     }, [send]);
 
     const state: AgentState = useMemo(() => {

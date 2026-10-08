@@ -65,6 +65,26 @@ use smooth_operator::{Tool, ToolSchema};
 /// Max bytes of output returned before truncation.
 const OUTPUT_CAP: usize = 50_000;
 
+/// Events a read (`today`/`upcoming`/`list`/`search`) returns when the caller
+/// passes no `limit`. A raw 60-day `search` used to come back as ~50 KB of
+/// byte-truncated (invalid) JSON — ~12.5k tokens a call, enough to force a
+/// context compaction mid-turn (SMOODEV-3708).
+const DEFAULT_LIMIT: usize = 25;
+
+/// Ceiling on a caller-supplied `limit`. Projected events are ~200 bytes, so
+/// this stays well under [`OUTPUT_CAP`].
+const MAX_LIMIT: usize = 100;
+
+/// Longest string kept in a projected event field (titles, locations) and the
+/// longest `notes` kept on a single-event `show`.
+const FIELD_CAP: usize = 200;
+const NOTES_CAP: usize = 2_000;
+
+/// Default `search` window when the caller names no `--from`/`--to`: `ical`'s own
+/// default is ±30 days, which drags in a month of history nobody asked about.
+const SEARCH_DAYS_BACK: i64 = 7;
+const SEARCH_DAYS_AHEAD: i64 = 30;
+
 /// Hard cap on an `ical` call. EventKit can hang indefinitely when the TCC
 /// daemon is wedged; a stuck child would otherwise stall the whole agent turn.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -131,7 +151,7 @@ impl Tool for CalendarTool {
         ToolSchema {
             name: "calendar".into(),
             description: format!(
-                "Read AND adjust the user's real macOS Calendar — meetings, appointments, travel. Use it for anything about their schedule (what's on today, what's next, is a time free, find an event) and to change it (book something, move it). Commands: {}. Reads: {{\"command\":\"today\"}}, {{\"command\":\"upcoming\",\"args\":[\"7\"]}}, {{\"command\":\"search\",\"args\":[\"dentist\"]}}, {{\"command\":\"list\",\"args\":[\"--from\",\"tomorrow\",\"--to\",\"friday\"]}}. Writes: {{\"command\":\"add\",\"args\":[\"Dentist\",\"-s\",\"tomorrow 2pm\",\"-e\",\"tomorrow 3pm\",\"-l\",\"Smile Dental, 123 Main St, Fishers, IN 46038\"]}}, {{\"command\":\"update\",\"args\":[\"<event-id>\",\"-s\",\"friday 10am\"]}}. Get the id from a read first — `update` REQUIRES one. For -l/--location always prefer a FULL street address (look it up with web_search if you only know the venue name) — a bare name is dead text, a full address becomes a tappable map location in Apple Calendar. To CANCEL/REMOVE an event use the separate `calendar_delete` tool. Output is JSON.",
+                "Read AND adjust the user's real macOS Calendar — meetings, appointments, travel. Use it for anything about their schedule (what's on today, what's next, is a time free, find an event) and to change it (book something, move it). Commands: {}. Reads: {{\"command\":\"today\"}}, {{\"command\":\"upcoming\",\"args\":[\"7\"]}} (next 7 days), {{\"command\":\"search\",\"args\":[\"dentist\"]}}, {{\"command\":\"list\",\"args\":[\"--from\",\"tomorrow\",\"--to\",\"friday\"]}}. Reads return a compact JSON list `{{\"events\":[{{id,title,start,end,all_day,calendar,location}}]}}`, at most `limit` events (default {DEFAULT_LIMIT}); if more matched you get `more` + a note — narrow the date range rather than raising `limit` far. `search` covers 7 days ago through 30 days ahead unless you pass --from/--to. `show` with an event id returns that one event in full (notes, attendees). To CHANGE an event: (1) `search` or `list` to find it, (2) take its `id`, (3) {{\"command\":\"update\",\"args\":[\"<event-id>\",\"-s\",\"friday 10am\"]}} — `update` REQUIRES the id. To create: {{\"command\":\"add\",\"args\":[\"Dentist\",\"-s\",\"tomorrow 2pm\",\"-e\",\"tomorrow 3pm\",\"-l\",\"Smile Dental, 123 Main St, Fishers, IN 46038\"]}}. For -l/--location always prefer a FULL street address (look it up with web_search if you only know the venue name) — a bare name is dead text, a full address becomes a tappable map location in Apple Calendar. To CANCEL/REMOVE an event use the separate `calendar_delete` tool.",
                 COMMANDS.join(", ")
             ),
             parameters: json!({
@@ -145,7 +165,13 @@ impl Tool for CalendarTool {
                     "args": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Arguments passed verbatim to `ical <command>`. Reads: [\"7\"] for upcoming, [\"--from\",\"monday\",\"--to\",\"friday\"] for list. add: the title, then -s/--start (required), -e/--end, -l/--location, -n/--notes, -c/--calendar, -a/--all-day, --invite <email>, --alert 15m, -r/--repeat daily|weekly|monthly|yearly. update: the event id, then the same field flags. Natural-language dates work (\"tomorrow 2pm\", \"friday\")."
+                        "description": "Arguments passed verbatim to `ical <command>`. Reads: [\"7\"] for upcoming (number of days), [\"--from\",\"monday\",\"--to\",\"friday\"] for list or search. add: the title, then -s/--start (required), -e/--end, -l/--location, -n/--notes, -c/--calendar, -a/--all-day, --invite <email>, --alert 15m, -r/--repeat daily|weekly|monthly|yearly. update: the event id, then the same field flags. Natural-language dates work (\"tomorrow 2pm\", \"friday\")."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_LIMIT,
+                        "description": format!("Max events a read returns (default {DEFAULT_LIMIT}, max {MAX_LIMIT}). Prefer a narrower date range over a bigger limit.")
                     }
                 },
                 "required": ["command"]
@@ -162,16 +188,20 @@ impl Tool for CalendarTool {
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let allow = self.allowed.as_deref();
-        let out = run_command(build_args(&arguments, COMMANDS, allow)?).await?;
+        let limit = parse_limit(&arguments)?;
+        let mut argv = build_args(&arguments, COMMANDS, allow)?;
+        apply_read_defaults(&mut argv, chrono::Local::now().date_naive());
+        let out = run_command(argv).await?;
+        let command = arguments.get("command").and_then(Value::as_str).map(str::trim).unwrap_or_default();
         // Restricted role listing calendars: `ical calendars` isn't `-c`-filterable,
         // so post-filter its JSON output to the allowed names — the child must not
         // even learn which other calendars exist.
         if let Some(allow) = allow {
-            if arguments.get("command").and_then(Value::as_str).map(str::trim) == Some("calendars") {
+            if command == "calendars" {
                 return Ok(filter_calendars_output(&out, allow));
             }
         }
-        Ok(out)
+        Ok(shape_output(command, &out, limit))
     }
 }
 
@@ -494,6 +524,150 @@ async fn run_ical(bin: &std::path::Path, args: &[String]) -> anyhow::Result<Stri
         return Ok(format!("$ ical {}\nexit code: {code}\n{}", args.join(" "), truncate(&stderr)));
     }
     Ok(truncate(&stdout))
+}
+
+/// The caller's `limit`, defaulted and clamped to `1..=MAX_LIMIT`.
+fn parse_limit(arguments: &Value) -> anyhow::Result<usize> {
+    match arguments.get("limit") {
+        None | Some(Value::Null) => Ok(DEFAULT_LIMIT),
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| anyhow::anyhow!("`limit` must be a positive integer"))?;
+            Ok(usize::try_from(n).unwrap_or(MAX_LIMIT).clamp(1, MAX_LIMIT))
+        }
+    }
+}
+
+/// Fill in the read defaults `ical` gets wrong for an agent, in place on a built
+/// argv (`<command> [args…] -o json`):
+/// - `upcoming 7` — `ical upcoming` ignores positionals (the day count is
+///   `-d`), so a bare leading number is rewritten to `-d 7`.
+/// - `search` with no `--from`/`--to` is bounded to a short window
+///   ([`SEARCH_DAYS_BACK`]..[`SEARCH_DAYS_AHEAD`] around `today`).
+fn apply_read_defaults(argv: &mut Vec<String>, today: chrono::NaiveDate) {
+    let has = |argv: &[String], flags: &[&str]| argv.iter().any(|a| flags.iter().any(|f| a == f || a.starts_with(&format!("{f}="))));
+    // Insert before the trailing `-o json` build_args always appends.
+    let at = argv.len().saturating_sub(2);
+    match argv.first().map(String::as_str) {
+        Some("upcoming") => {
+            if argv.get(1).is_some_and(|a| a.parse::<u32>().is_ok()) && !has(argv, &["-d", "--days"]) {
+                argv.insert(1, "-d".to_owned());
+            }
+        }
+        Some("search") => {
+            if !has(argv, &["-f", "--from"]) {
+                let from = today - chrono::Duration::days(SEARCH_DAYS_BACK);
+                argv.splice(at..at, ["--from".to_owned(), from.format("%Y-%m-%d").to_string()]);
+            }
+            let at = argv.len().saturating_sub(2);
+            if !has(argv, &["-t", "--to"]) {
+                let to = today + chrono::Duration::days(SEARCH_DAYS_AHEAD);
+                argv.splice(at..at, ["--to".to_owned(), to.format("%Y-%m-%d").to_string()]);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Shape `ical`'s JSON for the model. Event lists become a compact projection
+/// truncated by whole events; a single-event `show` keeps notes/attendees (capped).
+/// Anything else — text output from `add`/`update`, errors, the setup hint —
+/// passes through byte-capped as before.
+fn shape_output(command: &str, out: &str, limit: usize) -> String {
+    match command {
+        "today" | "upcoming" | "list" | "search" => match serde_json::from_str::<Value>(out) {
+            Ok(Value::Array(events)) => project_event_list(&events, limit),
+            _ => truncate(out),
+        },
+        "show" => match serde_json::from_str::<Value>(out) {
+            Ok(event @ Value::Object(_)) => serde_json::to_string(&project_event_detail(&event)).unwrap_or_else(|_| truncate(out)),
+            _ => truncate(out),
+        },
+        _ => truncate(out),
+    }
+}
+
+/// `{"events":[…]}` holding at most `limit` projected events, plus `more` and a
+/// `note` telling the model how to get the rest when anything was cut. Never
+/// exceeds [`OUTPUT_CAP`]: whole events are dropped until it fits, so the result
+/// is always valid JSON.
+fn project_event_list(events: &[Value], limit: usize) -> String {
+    let mut shown: Vec<Value> = events.iter().take(limit).map(project_event).collect();
+    loop {
+        let more = events.len() - shown.len();
+        let mut body = serde_json::Map::new();
+        body.insert("events".into(), Value::Array(shown.clone()));
+        if more > 0 {
+            body.insert("more".into(), json!(more));
+            body.insert(
+                "note".into(),
+                json!(format!(
+                    "{more} more event{} not shown — narrow the date range (--from/--to) or raise `limit` (max {MAX_LIMIT}).",
+                    if more == 1 { "" } else { "s" }
+                )),
+            );
+        }
+        let s = Value::Object(body).to_string();
+        if s.len() <= OUTPUT_CAP || shown.is_empty() {
+            return s;
+        }
+        shown.pop();
+    }
+}
+
+/// The per-event fields a list read keeps, as `(output key, ical key)`.
+const EVENT_FIELDS: &[(&str, &str)] = &[
+    ("id", "id"),
+    ("title", "title"),
+    ("start", "start_date"),
+    ("end", "end_date"),
+    ("all_day", "all_day"),
+    ("calendar", "calendar"),
+    ("location", "location"),
+];
+
+/// Compact projection of one `ical` event: [`EVENT_FIELDS`] only, empty values
+/// dropped, long strings capped at [`FIELD_CAP`].
+fn project_event(e: &Value) -> Value {
+    let mut m = serde_json::Map::new();
+    for (out_key, in_key) in EVENT_FIELDS {
+        match e.get(*in_key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if s.is_empty() => {}
+            Some(Value::String(s)) => {
+                m.insert((*out_key).into(), json!(cap_chars(s, FIELD_CAP)));
+            }
+            Some(v) => {
+                m.insert((*out_key).into(), v.clone());
+            }
+        }
+    }
+    Value::Object(m)
+}
+
+/// A single event in full enough detail to act on: the list projection plus
+/// notes (capped at [`NOTES_CAP`]), attendees, organizer, links and recurrence.
+fn project_event_detail(e: &Value) -> Value {
+    let mut out = project_event(e);
+    let Value::Object(m) = &mut out else { return out };
+    for key in ["organizer", "url", "conference_url", "status", "recurring", "attendees"] {
+        if let Some(v) = e.get(key).filter(|v| !v.is_null() && v.as_str() != Some("")) {
+            m.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(notes) = e.get("notes").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+        m.insert("notes".into(), json!(cap_chars(notes, NOTES_CAP)));
+    }
+    out
+}
+
+/// `s` cut to at most `max` chars, with an ellipsis when cut.
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let mut cut: String = s.chars().take(max).collect();
+    cut.push('…');
+    cut
 }
 
 /// Whether `text` reads like a TCC denial rather than a real `ical` error. The
@@ -918,5 +1092,143 @@ mod tests {
         let tool = CalendarTool::new(Some(allow()));
         let err = tool.execute(json!({"command": "list", "args": ["-c", "Work"]})).await.unwrap_err().to_string();
         assert!(err.contains("not in your allowed set"), "{err}");
+    }
+
+    // --- Output shaping (SMOODEV-3708) ---------------------------------------------
+
+    fn ical_event(i: usize) -> Value {
+        json!({
+            "id": format!("EV-{i}"),
+            "title": format!("Meeting {i}"),
+            "start_date": "2026-10-07T09:00:00-04:00",
+            "end_date": "2026-10-07T10:00:00-04:00",
+            "all_day": false,
+            "calendar": "Work",
+            "calendar_id": "CAL-1",
+            "location": "",
+            "notes": "x".repeat(5_000),
+            "attendees": [{"name": "A", "email": "a@example.com"}],
+            "status": "confirmed",
+            "availability": "busy",
+            "recurring": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "modified_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    fn ical_list(n: usize) -> String {
+        Value::Array((0..n).map(ical_event).collect()).to_string()
+    }
+
+    #[test]
+    fn list_reads_are_projected_to_the_compact_shape() {
+        let out: Value = serde_json::from_str(&shape_output("today", &ical_list(2), DEFAULT_LIMIT)).unwrap();
+        let ev = &out["events"][0];
+        assert_eq!(ev["id"], "EV-0");
+        assert_eq!(ev["title"], "Meeting 0");
+        assert_eq!(ev["start"], "2026-10-07T09:00:00-04:00");
+        assert_eq!(ev["end"], "2026-10-07T10:00:00-04:00");
+        assert_eq!(ev["all_day"], false);
+        assert_eq!(ev["calendar"], "Work");
+        // Empty location dropped; heavy fields never reach a list read.
+        for gone in ["location", "notes", "attendees", "calendar_id", "created_at"] {
+            assert!(ev.get(gone).is_none(), "{gone} must not be in a list projection");
+        }
+        assert!(out.get("more").is_none() && out.get("note").is_none());
+    }
+
+    #[test]
+    fn list_reads_truncate_by_whole_events_with_a_note() {
+        let raw = ical_list(40);
+        let out = shape_output("search", &raw, DEFAULT_LIMIT);
+        let v: Value = serde_json::from_str(&out).expect("truncated output must still be valid JSON");
+        assert_eq!(v["events"].as_array().unwrap().len(), DEFAULT_LIMIT);
+        assert_eq!(v["more"], 15);
+        assert!(v["note"].as_str().unwrap().contains("15 more events"));
+        assert!(out.len() < raw.len() / 10, "projection must be dramatically smaller than the raw ical JSON");
+    }
+
+    #[test]
+    fn list_output_never_exceeds_the_byte_cap() {
+        // Pathological: every event at the per-field cap, MAX_LIMIT of them.
+        let events: Vec<Value> = (0..MAX_LIMIT * 3)
+            .map(|i| {
+                let mut e = ical_event(i);
+                e["title"] = json!("t".repeat(10_000));
+                e["location"] = json!("l".repeat(10_000));
+                e["id"] = json!("i".repeat(400));
+                e
+            })
+            .collect();
+        let out = shape_output("list", &Value::Array(events).to_string(), MAX_LIMIT);
+        assert!(out.len() <= OUTPUT_CAP);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["more"].as_u64().unwrap() >= (MAX_LIMIT * 2) as u64);
+    }
+
+    #[test]
+    fn show_keeps_notes_and_attendees_capped() {
+        let out: Value = serde_json::from_str(&shape_output("show", &ical_event(1).to_string(), DEFAULT_LIMIT)).unwrap();
+        assert_eq!(out["id"], "EV-1");
+        assert_eq!(out["attendees"][0]["email"], "a@example.com");
+        assert_eq!(out["notes"].as_str().unwrap().chars().count(), NOTES_CAP + 1, "capped + ellipsis");
+        assert!(out.get("created_at").is_none());
+    }
+
+    #[test]
+    fn non_json_output_passes_through() {
+        assert_eq!(shape_output("today", "Calendar isn't set up yet", DEFAULT_LIMIT), "Calendar isn't set up yet");
+        assert_eq!(shape_output("add", "Created: Dentist\n  ID: ABC", DEFAULT_LIMIT), "Created: Dentist\n  ID: ABC");
+        assert_eq!(shape_output("today", "[]", DEFAULT_LIMIT), r#"{"events":[]}"#);
+    }
+
+    #[test]
+    fn limit_defaults_clamps_and_rejects_garbage() {
+        assert_eq!(parse_limit(&json!({})).unwrap(), DEFAULT_LIMIT);
+        assert_eq!(parse_limit(&json!({"limit": 5})).unwrap(), 5);
+        assert_eq!(parse_limit(&json!({"limit": 0})).unwrap(), 1);
+        assert_eq!(parse_limit(&json!({"limit": 10_000})).unwrap(), MAX_LIMIT);
+        assert!(parse_limit(&json!({"limit": "ten"})).is_err());
+        assert!(parse_limit(&json!({"limit": -3})).is_err());
+    }
+
+    fn day() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 7).unwrap()
+    }
+
+    #[test]
+    fn search_defaults_to_a_short_window() {
+        let mut a = build_args(&json!({"command": "search", "args": ["dentist"]}), COMMANDS, None).unwrap();
+        apply_read_defaults(&mut a, day());
+        assert_eq!(a, vec!["search", "dentist", "--from", "2026-09-30", "--to", "2026-11-06", "-o", "json"]);
+    }
+
+    #[test]
+    fn search_keeps_a_caller_range() {
+        let mut a = build_args(
+            &json!({"command": "search", "args": ["dentist", "-f", "2025-01-01", "--to=2025-12-31"]}),
+            COMMANDS,
+            None,
+        )
+        .unwrap();
+        apply_read_defaults(&mut a, day());
+        assert_eq!(a, vec!["search", "dentist", "-f", "2025-01-01", "--to=2025-12-31", "-o", "json"]);
+    }
+
+    #[test]
+    fn upcoming_number_becomes_the_days_flag() {
+        let mut a = build_args(&json!({"command": "upcoming", "args": ["3"]}), COMMANDS, None).unwrap();
+        apply_read_defaults(&mut a, day());
+        assert_eq!(a, vec!["upcoming", "-d", "3", "-o", "json"]);
+        let mut a = build_args(&json!({"command": "upcoming", "args": ["-d", "3"]}), COMMANDS, None).unwrap();
+        apply_read_defaults(&mut a, day());
+        assert_eq!(a, vec!["upcoming", "-d", "3", "-o", "json"]);
+    }
+
+    #[test]
+    fn schema_exposes_limit_and_the_update_flow() {
+        let s = CalendarTool::new(None).schema();
+        assert_eq!(s.parameters["properties"]["limit"]["type"], "integer");
+        assert!(s.description.contains("take its `id`"));
     }
 }

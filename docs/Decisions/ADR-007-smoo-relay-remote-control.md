@@ -92,6 +92,14 @@ The tailnet perimeter is gone for relay traffic; what replaces it:
   you have LAN/tailnet, relay otherwise — same protocol, one envelope layer.
 - Offline daemon = `peer_offline` to the phone (surfaced as "Big Smooth is
   offline"); there is no store-and-forward. Wake-the-Mac is out of scope.
+- Bridge lifetime (amended 2026-10-07, SMOODEV-3708): a phone going offline,
+  or the relay socket dropping, no longer tears its chat bridge down at once.
+  Closing the loopback WS aborted whatever turn was running, so a phone that
+  blinked killed the agent mid-task. The supervisor now owns the bridges: a
+  chat bridge is orphaned for `BRIDGE_GRACE` (10 min), reused as-is (same
+  operator session) if the phone writes again, and closed after that. Flow
+  (terminal) bridges are still dropped immediately; a sign-out or user change
+  drops everything.
 - Stats/REST are not proxied v1 (chat protocol only); the apps hint to
   connect directly for stats until a REST-over-relay follow-up.
 - Multi-daemon (two Macs, one user) needs a device-id scheme + picker later;
