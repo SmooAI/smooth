@@ -53,6 +53,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smooth_operator::{Tool, ToolSchema};
 
+/// The engine's deadline for one plugin call (see `CliPluginTool::timeout`).
+const PLUGIN_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+
 /// A plugin manifest, as parsed from `plugin.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginManifest {
@@ -332,6 +335,12 @@ impl Tool for CliPluginTool {
         false
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        // A user-installed CLI plugin may legitimately outrun the engine's 120s
+        // default; bound it generously instead (the child is `kill_on_drop`).
+        Some(PLUGIN_TOOL_TIMEOUT)
+    }
+
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let map = match arguments {
             serde_json::Value::Object(m) => m,
@@ -549,5 +558,26 @@ mod tests {
         };
         let out = tool.execute(serde_json::Value::Null).await.unwrap();
         assert!(out.starts_with("BLOCKED:"), "{out}");
+    }
+
+    #[test]
+    fn engine_deadline_outlasts_the_default_but_is_bounded() {
+        let tool = CliPluginTool {
+            tool_name: "plugin_slow".into(),
+            manifest: PluginManifest {
+                name: "slow".into(),
+                description: String::new(),
+                prompt_hint: String::new(),
+                command: "true".into(),
+                env: HashMap::new(),
+                parameters: default_params(),
+                disabled: false,
+            },
+            workspace: std::env::temp_dir(),
+            proxy: None,
+        };
+        let t = tool.timeout().unwrap();
+        assert!(t > smooth_operator::tool::DEFAULT_TOOL_TIMEOUT);
+        assert!(t < smooth_operator::tool::NO_TOOL_TIMEOUT);
     }
 }

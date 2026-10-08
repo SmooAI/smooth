@@ -39,9 +39,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolRegistry, ToolResult, ToolSchema};
+use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolRegistry, ToolResult, ToolSchema, DEFAULT_TOOL_TIMEOUT, NO_TOOL_TIMEOUT};
 
 /// Source of unique call ids for wrapped calls. The engine does not pass the
 /// model's call id down to `Tool::execute`, and Narc keys its pre-shell
@@ -82,6 +83,14 @@ impl Tool for HookedTool {
         self.inner.is_read_only()
     }
 
+    fn timeout(&self) -> Option<Duration> {
+        // The engine's deadline covers `execute`, and ours runs the pre-hooks
+        // too, including a permission prompt that waits on the human. So the
+        // wrapper is unbounded to the engine and applies the inner tool's own
+        // deadline around the inner call alone (below), as the registry does.
+        Some(NO_TOOL_TIMEOUT)
+    }
+
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let call = ToolCall {
             id: next_call_id(),
@@ -97,7 +106,11 @@ impl Tool for HookedTool {
             }
         }
 
-        let mut result = match self.inner.execute(call.arguments.clone()).await {
+        let deadline = self.inner.timeout().unwrap_or(DEFAULT_TOOL_TIMEOUT);
+        let mut result = match tokio::time::timeout(deadline, self.inner.execute(call.arguments.clone()))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("tool execution timed out after {}s", deadline.as_secs())))
+        {
             Ok(content) => ToolResult {
                 tool_call_id: call.id.clone(),
                 content,
@@ -339,5 +352,70 @@ mod tests {
             assert!(err.to_string().contains("blocked by hook"), "{name}: {err}");
         }
         assert!(a_calls.lock().unwrap().is_empty() && b_calls.lock().unwrap().is_empty());
+    }
+
+    /// A tool that sleeps before answering, with its own engine deadline.
+    struct SlowTool {
+        sleep: Duration,
+        deadline: Duration,
+    }
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "slow".to_owned(),
+                description: "slow".to_owned(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }
+        }
+
+        fn timeout(&self) -> Option<Duration> {
+            Some(self.deadline)
+        }
+
+        async fn execute(&self, _arguments: serde_json::Value) -> anyhow::Result<String> {
+            tokio::time::sleep(self.sleep).await;
+            Ok("done".to_owned())
+        }
+    }
+
+    /// A pre-hook that takes a while, like a permission prompt awaiting the human.
+    struct SlowGate(Duration);
+
+    #[async_trait]
+    impl ToolHook for SlowGate {
+        async fn pre_call(&self, _call: &ToolCall) -> anyhow::Result<()> {
+            tokio::time::sleep(self.0).await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn wrapper_is_unbounded_to_the_engine() {
+        let (tool, _) = FakeTool::build("bash", "ok");
+        let wrapped = HookedTool::new(tool, Arc::from(Vec::new()));
+        assert_eq!(wrapped.timeout(), Some(NO_TOOL_TIMEOUT));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inner_deadline_applies_to_the_inner_call() {
+        let tool: Arc<dyn Tool> = Arc::new(SlowTool {
+            sleep: Duration::from_secs(10),
+            deadline: Duration::from_secs(1),
+        });
+        let err = HookedTool::new(tool, Arc::from(Vec::new())).execute(serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("timed out after 1s"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_pre_hook_does_not_count_against_the_deadline() {
+        let tool: Arc<dyn Tool> = Arc::new(SlowTool {
+            sleep: Duration::from_millis(500),
+            deadline: Duration::from_secs(1),
+        });
+        let hooks: Arc<[Arc<dyn ToolHook>]> = Arc::from(vec![Arc::new(SlowGate(Duration::from_secs(5))) as Arc<dyn ToolHook>]);
+        let out = HookedTool::new(tool, hooks).execute(serde_json::json!({})).await.unwrap();
+        assert_eq!(out, "done");
     }
 }

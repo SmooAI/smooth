@@ -8,10 +8,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { historyImages, historyText, type HistoryMessage } from './history';
+import { historyImages, historyText, historyTurnError, type HistoryMessage } from './history';
 import { DEFAULT_MIGRATION_KEY, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { normalizeTodos, type TodoItem } from './todos';
-import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control';
+import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, isTurnInProgress, mergeSteer } from './turn-control';
 
 /** The agent's live presence — what the face reflects. */
 export type AgentState = 'connecting' | 'offline' | 'awake' | 'thinking' | 'speaking' | 'awaiting';
@@ -58,6 +58,10 @@ export interface ChatMessage {
     /** A plan the agent presented this turn (the `present_plan` directive).
      * Rendered as an accept/revise card on the assistant message. */
     plan?: string;
+    /** Set on a history record of a turn that failed (SMOODEV-3705): the server
+     * persists `{code, requestId}` so a client that missed the live `error` frame
+     * still sees it. Rendered as an error card, not a reply. */
+    turnError?: { code: string; requestId?: string };
 }
 
 /** One file the agent handed to the user via the `send_file` directive. */
@@ -103,6 +107,7 @@ function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
         const isUser = m.direction === 'inbound' || m.role === 'user';
         const role: ChatMessage['role'] = isUser ? 'user' : m.role === 'system' ? 'system' : 'assistant';
         const attachments = isUser ? historyImages(m) : [];
+        const turnError = isUser ? null : historyTurnError(m);
         return {
             id: nextId('h'),
             role,
@@ -112,6 +117,7 @@ function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
             blocks: role === 'assistant' ? [{ kind: 'text', text: content }] : [],
             streaming: false,
             attachments: attachments.length ? attachments : undefined,
+            turnError: turnError ?? undefined,
         };
     });
 }
@@ -140,6 +146,12 @@ interface OperatorApi {
     steer: (text: string, attachments?: Attachment[]) => void;
     /** A Stop (or Steer) has been sent and the turn has not ended yet. */
     stopping: boolean;
+    /** The engine refused a send with TURN_IN_PROGRESS: a turn this connection did
+     * not start (typically one from before a reconnect) is still running on the
+     * conversation. Shown with a Stop that reaches it via `stopEarlierTurn`. */
+    earlierTurnRunning: boolean;
+    /** Stop that earlier turn: a `cancel` naming only the session (SMOODEV-3705). */
+    stopEarlierTurn: () => void;
     /** The message waiting to go out once the running turn stops, if any. */
     pendingSteer: { text: string; attachments: Attachment[] } | null;
     /** Recent conversations for the sidebar (most-recent first), from `list_conversations`. */
@@ -292,6 +304,9 @@ export function useOperator(): OperatorApi {
     const [sessionMode, setSessionModeState] = useState<SessionMode>('auto');
     const [todos, setTodos] = useState<TodoItem[]>([]);
     const [stopping, setStopping] = useState(false);
+    const [earlierTurnRunning, setEarlierTurnRunning] = useState(false);
+    const earlierTurnRef = useRef(false);
+    const earlierTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [pendingSteer, setPendingSteer] = useState<{ text: string; attachments: Attachment[] } | null>(null);
     // Turn control (th-74ba1f). Refs, not state, because the WS handler must read
     // the live values: which turn is running, whether a Stop is in flight, the
@@ -390,6 +405,19 @@ export function useOperator(): OperatorApi {
         },
         [patchStreaming, flushSteer],
     );
+
+    const pushNote = useCallback((content: string) => {
+        setMessages((prev) => [...prev, { id: nextId('sys'), role: 'system', content, reasoning: '', tools: [], blocks: [], streaming: false }]);
+    }, []);
+
+    const clearEarlierTurn = useCallback(() => {
+        if (earlierTimerRef.current) {
+            clearTimeout(earlierTimerRef.current);
+            earlierTimerRef.current = null;
+        }
+        earlierTurnRef.current = false;
+        setEarlierTurnRunning(false);
+    }, []);
 
     const handle = useCallback(
         (v: any) => {
@@ -542,10 +570,19 @@ export function useOperator(): OperatorApi {
                     }
                     // The turn just landed — refresh the sidebar so this chat appears/updates.
                     send({ action: 'list_conversations', requestId: nextId('lc') });
+                    // A send that ran means no earlier turn is holding the conversation.
+                    if (earlierTurnRef.current) clearEarlierTurn();
                     finishTurn();
                     break;
                 }
                 case 'cancelled': {
+                    // An earlier connection's turn we stopped by session: it carries
+                    // THAT turn's requestId, so it never matches ours.
+                    if (earlierTurnRef.current && !turnActiveRef.current) {
+                        clearEarlierTurn();
+                        pushNote('Stopped the earlier turn. You can send again.');
+                        break;
+                    }
                     // The engine's terminal event for a stopped turn. It replaces the
                     // `eventual_response`; the partial reply was never persisted.
                     if (!endsTurn(v, turnReqRef.current)) break;
@@ -559,6 +596,15 @@ export function useOperator(): OperatorApi {
                     // rejected send) leaves the running turn running — ending it here
                     // is how the UI lost a turn that kept sending iMessages.
                     const text = errorText(v);
+                    // Our send was refused because a turn (likely started before a
+                    // reconnect) is still running here. Nothing was persisted; offer a
+                    // Stop that reaches that turn by session.
+                    if (isTurnInProgress(v) && endsTurn(v, turnReqRef.current) && turnActiveRef.current) {
+                        earlierTurnRef.current = true;
+                        setEarlierTurnRunning(true);
+                        finishTurn('A turn is still running on this conversation, so that message was not sent. Stop it, or wait and send again.');
+                        break;
+                    }
                     if (endsTurn(v, turnReqRef.current) && turnActiveRef.current) {
                         finishTurn(text);
                     } else {
@@ -573,7 +619,7 @@ export function useOperator(): OperatorApi {
                     break;
             }
         },
-        [ensureStreamingMessage, patchStreaming, send, finishTurn, flushSteer],
+        [ensureStreamingMessage, patchStreaming, send, finishTurn, flushSteer, clearEarlierTurn, pushNote],
     );
 
     useEffect(() => {
@@ -612,12 +658,13 @@ export function useOperator(): OperatorApi {
             ws.onclose = () => {
                 setConnected(false);
                 setStatus((s) => ({ ...s, connected: false }));
-                // The engine aborts a disconnected connection's turn, so nothing will
-                // ever end it for us. End it here, or the composer stays in
+                // The turn keeps running on the server (turns outlive their socket,
+                // SMOODEV-3705), but its frames went to this dead socket, so nothing
+                // will end it for us. End it locally, or the composer stays in
                 // "working" and every message queues forever.
                 if (turnActiveRef.current) {
                     cancelledReqRef.current = turnReqRef.current;
-                    finishTurn('Connection dropped — the running turn was stopped.');
+                    finishTurn('Connection dropped. The turn may still be running on Big Smooth; reopen this conversation to see its reply.');
                 }
                 if (!closed) reconnectRef.current = setTimeout(connect, 1500);
             };
@@ -782,6 +829,19 @@ export function useOperator(): OperatorApi {
         }, CANCEL_FALLBACK_MS);
     }, [send, finishTurn]);
 
+    // Stop a turn this connection did not start (SMOODEV-3705): after a reconnect
+    // the engine knows it only by conversation, so the cancel names just the
+    // session. A cancel that finds nothing running is a silent no-op, so the
+    // banner also clears after the same fallback Stop uses.
+    const stopEarlierTurn = useCallback(() => {
+        if (!earlierTurnRef.current || earlierTimerRef.current) return;
+        send(cancelFrame(null, sessionRef.current));
+        earlierTimerRef.current = setTimeout(() => {
+            earlierTimerRef.current = null;
+            if (earlierTurnRef.current) clearEarlierTurn();
+        }, CANCEL_FALLBACK_MS);
+    }, [send, clearEarlierTurn]);
+
     // Steer (th-74ba1f): redirect the running turn instead of queueing behind it.
     // Stop it, and send this the moment it has really ended — never before, or
     // the engine rejects it TURN_IN_PROGRESS. A second Steer while the first
@@ -817,9 +877,10 @@ export function useOperator(): OperatorApi {
             setTodos([]);
             pendingResumeRef.current = conversationId;
             sessionRef.current = null;
+            clearEarlierTurn();
             send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), conversationId, userName: 'console' });
         },
-        [send],
+        [send, clearEarlierTurn],
     );
 
     // Rename: optimistically patch the row, then tell the server. The server
@@ -843,8 +904,9 @@ export function useOperator(): OperatorApi {
         setApprovals([]);
         setTodos([]);
         sessionRef.current = null;
+        clearEarlierTurn();
         send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
-    }, [send]);
+    }, [send, clearEarlierTurn]);
 
     const state: AgentState = useMemo(() => {
         if (!connected) return reconnectRef.current ? 'offline' : 'connecting';
@@ -865,6 +927,8 @@ export function useOperator(): OperatorApi {
         interrupt,
         steer,
         stopping,
+        earlierTurnRunning,
+        stopEarlierTurn,
         pendingSteer,
         mode,
         setMode,

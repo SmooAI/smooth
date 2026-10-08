@@ -197,6 +197,8 @@ export default function App() {
         interrupt,
         steer,
         stopping,
+        earlierTurnRunning,
+        stopEarlierTurn,
         pendingSteer,
         mode,
         setMode,
@@ -408,6 +410,7 @@ export default function App() {
                                 />
                             )}
                             {inConversation && <div className="presence-rule shrink-0 mt-2 mb-3" aria-hidden="true" />}
+                            {earlierTurnRunning && <EarlierTurnBanner onStop={stopEarlierTurn} />}
                             <Composer
                                 onSend={sendMessage}
                                 disabled={state === 'connecting' || state === 'offline'}
@@ -850,6 +853,25 @@ function Conversation({
     );
 }
 
+/** Shown after the engine refused a send with TURN_IN_PROGRESS: a turn this
+ * connection did not start (typically one from before a reconnect) is still
+ * running. Its Stop reaches that turn by session (SMOODEV-3705). */
+function EarlierTurnBanner({ onStop }: { onStop: () => void }) {
+    return (
+        <div role="status" className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-sm text-amber/90">
+            <span className="flex-1">A turn is still running on this conversation.</span>
+            <button
+                type="button"
+                onClick={onStop}
+                className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1 text-foreground transition hover:bg-foreground/20"
+            >
+                <Square size={12} fill="currentColor" />
+                Stop
+            </button>
+        </div>
+    );
+}
+
 function MessageRow({
     m,
     awaiting,
@@ -863,6 +885,15 @@ function MessageRow({
 }) {
     if (m.role === 'system') {
         return <div className="rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-sm text-amber/90">{m.content}</div>;
+    }
+    // A turn the server recorded as failed (SMOODEV-3705): an error card, not a reply.
+    if (m.turnError) {
+        return (
+            <div role="alert" className="rounded-xl border border-coral/40 bg-coral/5 px-3 py-2 text-sm text-coral">
+                <div className="font-medium">This turn failed · {m.turnError.code}</div>
+                {m.content && <div className="mt-0.5 opacity-90">{m.content}</div>}
+            </div>
+        );
     }
     if (m.role === 'user') {
         return (

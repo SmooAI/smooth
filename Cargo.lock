@@ -5583,8 +5583,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.58.10"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
+version = "1.62.1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=19da0e9bf40c92d0341cd05588ab08af9a789dd5#19da0e9bf40c92d0341cd05588ab08af9a789dd5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5615,8 +5615,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.58.10"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
+version = "1.62.1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=19da0e9bf40c92d0341cd05588ab08af9a789dd5#19da0e9bf40c92d0341cd05588ab08af9a789dd5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5627,9 +5627,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "1.10.0"
+version = "1.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457200125a75ce4d1224524ee4021ae3d49ad004a173e49b82712c53a52a3c60"
+checksum = "0ef269ce0ac8d6f211f9855b323e8f7852b6562c8b797889248fbfdb6c587f6e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5655,8 +5655,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.58.10"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
+version = "1.62.1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=19da0e9bf40c92d0341cd05588ab08af9a789dd5#19da0e9bf40c92d0341cd05588ab08af9a789dd5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5676,8 +5676,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.58.10"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9b30ed7b#9b30ed7b96817f6a721584c11eee5c5b515ed4d0"
+version = "1.62.1"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=19da0e9bf40c92d0341cd05588ab08af9a789dd5#19da0e9bf40c92d0341cd05588ab08af9a789dd5"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -38,6 +38,25 @@ inside the opt-in kernel sandbox), egress pointed at the goalie proxy when one
 is configured. Events stream back over the same
 canonical WS to every client (`th code`, the web SPA, SDK clients).
 
+Turns outlive the socket that started them (SMOODEV-3705, engine server at
+smooth-operator `19da0e9`). A client that drops mid-turn does not abort the
+work; the engine allows one running turn per conversation, so a send while one
+runs is refused with `TURN_IN_PROGRESS`. A reconnected client stops the earlier
+turn with `{action:'cancel', sessionId}` (no turn on its own socket needed), and
+a turn that fails is persisted as an outbound message whose
+`metadataJson.turnError` is `{code, requestId}`. The web SPA shows the first as
+a "turn still running" banner with Stop, and the second as an error card when
+it loads history.
+
+Engine core 1.14.2 bounds every sequential tool call at 120s by default
+(`DEFAULT_TOOL_TIMEOUT`). Daemon tools that legitimately run longer declare
+their own `Tool::timeout`: `bash` is unbounded to the engine (its `timeout`
+argument kills the child), `flow_prompt_wait` sits just past its own 3600s
+cap, `th` gets 30 min, CLI plugins 10 min, and `flow_new` / `flow_fanout_new` /
+`project_setup` / `add_harness` 15 min. A sidekick's `HookedTool` wrapper is
+unbounded to the engine and applies the inner tool's deadline around the inner
+call only, so a permission prompt waiting on the human never times a call out.
+
 > **microVM sandboxed dispatch removed 2026-07 (pearl th-f4a801).** Big Smooth
 > used to spawn a per-task microsandbox microVM (mounting a cross-compiled
 > `smooth-operative` at `/opt/smooth/bin`, bind-mounting the workspace) with a
@@ -63,7 +82,7 @@ Two layers always, a third opt-in, in the order a tool call meets them:
    detected secrets out of the tool result in place.
 3. **Kernel OS sandbox** (`smooth-tools/src/sandbox.rs`) — **opt-in, OFF by
    default** (pearl th-efbab1). Turn it on with `th settings set
-sandbox.enabled true` and restart Big Smooth (or `SMOOTH_SANDBOX=1` in the
+   sandbox.enabled true` and restart Big Smooth (or `SMOOTH_SANDBOX=1` in the
    daemon's environment, which wins over the file). Big Smooth is a personal agent that operates AS its
    user on the user's own machine, and the sandbox got in the way of exactly
    that: asked to `ssh smoo-hub` and `git fetch`, ssh timed out (direct outbound
