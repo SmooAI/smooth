@@ -17,6 +17,9 @@ name = "smooth_tools"
 [dependencies]
 smooth-operator.workspace = true
 smooth-policy.workspace = true
+# SMOODEV-3734: the `th` tool reports which pearl project a pearls command hit,
+# using the store's own project resolution so the answer can't drift from it.
+smooth-pearls.workspace = true
 dirs-next.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
