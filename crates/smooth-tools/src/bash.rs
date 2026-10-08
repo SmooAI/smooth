@@ -67,6 +67,14 @@ impl Tool for BashTool {
         false
     }
 
+    fn timeout(&self) -> Option<Duration> {
+        // The engine bounds a tool call at 120s by default (core 1.14.2). A shell
+        // command legitimately runs longer (builds, test suites), and the call's
+        // own `timeout` argument is the deadline that kills the child; the
+        // engine's would only drop the future. So defer to it entirely.
+        Some(smooth_operator::tool::NO_TOOL_TIMEOUT)
+    }
+
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let command = req_str(&arguments, "command")?;
         let timeout_secs = arguments.get("timeout").and_then(Value::as_u64);
@@ -250,5 +258,13 @@ mod tests {
         let out = tool.execute(json!({"command": "echo PROXY=$HTTP_PROXY"})).await.unwrap();
         assert!(out.contains("exit code: 0"), "{out}");
         assert!(out.contains("PROXY=http://127.0.0.1:3128"), "egress proxy env reaches the shell: {out}");
+    }
+
+    #[test]
+    fn engine_deadline_defers_to_the_calls_own_timeout() {
+        // Core 1.14.2 bounds tool calls at 120s by default; a build or test run
+        // outlasts that, and the `timeout` argument is what kills the child.
+        let (_dir, tool) = tool();
+        assert_eq!(tool.timeout(), Some(smooth_operator::tool::NO_TOOL_TIMEOUT));
     }
 }

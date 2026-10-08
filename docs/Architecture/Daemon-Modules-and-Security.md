@@ -48,6 +48,15 @@ a turn that fails is persisted as an outbound message whose
 a "turn still running" banner with Stop, and the second as an error card when
 it loads history.
 
+Engine core 1.14.2 bounds every sequential tool call at 120s by default
+(`DEFAULT_TOOL_TIMEOUT`). Daemon tools that legitimately run longer declare
+their own `Tool::timeout`: `bash` is unbounded to the engine (its `timeout`
+argument kills the child), `flow_prompt_wait` sits just past its own 3600s
+cap, `th` gets 30 min, CLI plugins 10 min, and `flow_new` / `flow_fanout_new` /
+`project_setup` / `add_harness` 15 min. A sidekick's `HookedTool` wrapper is
+unbounded to the engine and applies the inner tool's deadline around the inner
+call only, so a permission prompt waiting on the human never times a call out.
+
 > **microVM sandboxed dispatch removed 2026-07 (pearl th-f4a801).** Big Smooth
 > used to spawn a per-task microsandbox microVM (mounting a cross-compiled
 > `smooth-operative` at `/opt/smooth/bin`, bind-mounting the workspace) with a

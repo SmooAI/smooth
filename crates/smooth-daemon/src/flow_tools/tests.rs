@@ -563,3 +563,17 @@ fn pearl_ids_are_plain_names() {
         assert!(!valid_pearl_id(bad), "{bad}");
     }
 }
+
+#[test]
+fn verb_deadlines_fit_what_each_verb_waits_on() {
+    use smooth_operator::tool::DEFAULT_TOOL_TIMEOUT;
+    // prompt_wait bounds itself; the engine's deadline must sit past its cap so
+    // the wait's own (clearer) timeout reports first.
+    assert!(Verb::PromptWait.timeout() > Duration::from_secs(vocab::PROMPT_WAIT_MAX_SECS));
+    for v in [Verb::New, Verb::FanoutNew, Verb::ProjectSetup] {
+        assert!(v.timeout() > DEFAULT_TOOL_TIMEOUT, "{v:?}");
+    }
+    for v in [Verb::List, Verb::Snapshot, Verb::Send, Verb::Kill, Verb::Close] {
+        assert_eq!(v.timeout(), DEFAULT_TOOL_TIMEOUT, "{v:?}");
+    }
+}

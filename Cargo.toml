@@ -223,13 +223,14 @@ prost-types = "0.13"
 # hostage with it. The `th-daemon-memory-seam` and `multimodal-content-model`
 # branches no longer anchor anything.
 #
-# SMOODEV-3705: core =1.14.1 (the server's floor) + server/svc at smooth-operator
-# main 19da0e9: detached turns that survive a client disconnect, image-only
-# sends, history image replay, persisted turn-error records, one running turn
-# per conversation (TURN_IN_PROGRESS) and cancel{sessionId} for orphaned turns.
-# Core 1.14.2 (sequential per-tool timeout, default 120s) was not yet published;
-# when bumping to it, give long-running daemon tools explicit timeouts.
-smooth-operator ={ version = "=1.14.1", package = "smooai-smooth-operator-core" }
+# SMOODEV-3705: core =1.14.2 + server/svc at smooth-operator main 19da0e9:
+# detached turns that survive a client disconnect, image-only sends, history
+# image replay, persisted turn-error records, one running turn per conversation
+# (TURN_IN_PROGRESS) and cancel{sessionId} for orphaned turns. Core 1.14.2 also
+# fixes compaction orphans and bounds every sequential tool call at 120s by
+# default, so long-running daemon tools (bash, th, flow waits, harness/plugin
+# runs) declare their own deadline via `Tool::timeout`.
+smooth-operator ={ version = "=1.14.2", package = "smooai-smooth-operator-core" }
 smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "19da0e9bf40c92d0341cd05588ab08af9a789dd5", package = "smooai-smooth-operator-server", default-features = false }
 smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "19da0e9bf40c92d0341cd05588ab08af9a789dd5", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from

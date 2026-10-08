@@ -47,6 +47,9 @@ const DOCS_CAP: usize = 24_000;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// The drafter must answer within this.
 const DRAFT_TIMEOUT: Duration = Duration::from_secs(180);
+/// The engine's deadline for one whole `add_harness` call: probes, drafting
+/// and live validation together.
+const ADD_HARNESS_TIMEOUT: Duration = Duration::from_mins(15);
 const DEFAULT_ITERATIONS: u8 = 3;
 const MAX_ITERATIONS: u8 = 6;
 
@@ -974,6 +977,12 @@ impl Tool for AddHarnessTool {
         false
     }
 
+    fn timeout(&self) -> Option<Duration> {
+        // Probing the CLI, drafting a manifest (up to DRAFT_TIMEOUT alone) and
+        // validating it in a live session outrun the engine's 120s default.
+        Some(ADD_HARNESS_TIMEOUT)
+    }
+
     async fn execute(&self, arguments: Value) -> Result<String> {
         let req = parse_request(&arguments)?;
         let Some(cfg) = (self.llm)() else {
@@ -1503,5 +1512,16 @@ mod tests {
         ] {
             assert!(m.contains(needle), "missing {needle}");
         }
+    }
+
+    #[test]
+    fn engine_deadline_covers_probe_draft_and_validation() {
+        let tool = AddHarnessTool {
+            workspace: std::env::temp_dir(),
+            llm: std::sync::Arc::new(|| None),
+        };
+        let t = tool.timeout().unwrap();
+        assert!(t > DRAFT_TIMEOUT + PROBE_TIMEOUT);
+        assert!(t > smooth_operator::tool::DEFAULT_TOOL_TIMEOUT);
     }
 }

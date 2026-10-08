@@ -102,6 +102,9 @@ struct Ctx {
     timing: WaitTiming,
 }
 
+/// Deadline for the flow verbs that create sessions, worktrees or clones.
+const FLOW_SETUP_TIMEOUT: Duration = Duration::from_mins(15);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     List,
@@ -162,6 +165,21 @@ impl Verb {
 
     const fn is_read_only(self) -> bool {
         matches!(self, Self::List | Self::Snapshot | Self::Handoff | Self::Harnesses | Self::Repos | Self::Infer)
+    }
+
+    /// The engine's per-call deadline for this verb (core 1.14.2 bounds every
+    /// sequential tool call, 120s by default). `flow_prompt_wait` bounds itself
+    /// (its `timeout_secs`, at most [`vocab::PROMPT_WAIT_MAX_SECS`]), so its
+    /// deadline sits just past that cap and the wait's own timeout reports first.
+    /// Starting sessions, fanning out and `project_setup` create worktrees or
+    /// clone repos on a blocking thread the engine can't cancel, so they get a
+    /// long bound rather than a misleading 120s "timed out" mid-clone.
+    fn timeout(self) -> Duration {
+        match self {
+            Self::PromptWait => Duration::from_secs(vocab::PROMPT_WAIT_MAX_SECS + 120),
+            Self::New | Self::FanoutNew | Self::ProjectSetup => FLOW_SETUP_TIMEOUT,
+            _ => smooth_operator::tool::DEFAULT_TOOL_TIMEOUT,
+        }
     }
 
     /// The MCP tools' descriptions, verbatim where a tool exists there.
@@ -332,6 +350,10 @@ impl Tool for FlowTool {
         // Reads are independent; a write changes the fleet another call may
         // be about to read, so writes go one at a time.
         self.verb.is_read_only()
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(self.verb.timeout())
     }
 
     async fn execute(&self, arguments: Value) -> Result<String> {

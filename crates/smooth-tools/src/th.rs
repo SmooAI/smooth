@@ -17,6 +17,9 @@ use smooth_operator::{Tool, ToolSchema};
 /// Max bytes returned per stream before truncation.
 const OUTPUT_CAP: usize = 50_000;
 
+/// The engine's deadline for one `th` call (see `ThTool::timeout`).
+const TH_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(30);
+
 /// `th` tool — invokes the SmooAI operator CLI with an argv array.
 pub struct ThTool {
     /// Default working directory when the call doesn't override it with `cwd`.
@@ -115,6 +118,13 @@ impl Tool for ThTool {
         // `th` args can mutate (api verbs, pearls create/close), so don't run it
         // concurrently with other tools.
         false
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        // `th` subcommands can block for a long time (`ci-queue run`, `flow`
+        // waits, crawls), past the engine's 120s default. Keep a generous bound
+        // so a wedged CLI still frees the turn; the child is `kill_on_drop`.
+        Some(TH_TOOL_TIMEOUT)
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
@@ -394,5 +404,12 @@ mod tests {
         }
         let out = tool().execute(json!({"args": ["definitely-not-a-real-subcommand-xyzzy"]})).await.unwrap();
         assert!(!out.contains("exit code: 0"), "unknown subcommand should fail: {out}");
+    }
+
+    #[test]
+    fn engine_deadline_outlasts_the_default_but_is_bounded() {
+        let t = tool().timeout().unwrap();
+        assert!(t > smooth_operator::tool::DEFAULT_TOOL_TIMEOUT);
+        assert!(t < smooth_operator::tool::NO_TOOL_TIMEOUT);
     }
 }
