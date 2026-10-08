@@ -79,13 +79,14 @@ bundle, and the user can revoke it in System Settings.
   crate). Seatbelt denies EventKit's XPC + mach lookups, so it cannot run inside
   the sandbox; but unlike `calendar` **no subprocess exists at all** — typed
   values go straight into a framework call, so there is no shell, no argv, and no
-  injection surface. The verb allowlist is `list` / `add` / `complete`, with
-  deliberately **no delete**: the worst a bad call does is tick something off
-  rather than destroy it. Reminders is a **separate TCC grant** from Calendar
+  injection surface. The verb allowlist is `lists` / `list` / `add` /
+  `complete` / `create_list` / `move` / `update` (the last three from
+  SMOODEV-3734); none of them destroys anything. Deleting a reminder is its own
+  tool, **`reminders_delete`**, on the daemon's `CONFIRM_TOOLS` floor beside
+  `calendar_delete`, so it parks until the user approves. Deleting or renaming a
+  list isn't exposed. Reminders is a **separate TCC grant** from Calendar
   (`NSRemindersFullAccessUsageDescription`), attributed to the app bundle and
-  revocable in System Settings → Privacy & Security → Reminders. There is no
-  reminders equivalent of `calendar_delete`, and that is the point: completing a
-  reminder is reversible, so nothing here needs a confirmation gate.
+  revocable in System Settings → Privacy & Security → Reminders.
 - **`imessage`** (macOS, pearl th-1665ed) — two halves, both outside the sandbox:
   the **read** is _in-process_ `rusqlite` against `~/Library/Messages/chat.db` on
   a `SQLITE_OPEN_READ_ONLY` connection (no subprocess exists at all, so there is

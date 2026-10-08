@@ -221,6 +221,19 @@ pub const REGISTRY: &[SettingDef] = &[
         component: "tools",
         apply: Apply::RestartBigSmooth,
     },
+    // SMOODEV-3734: where Big Smooth files pearls about ITSELF (its tools,
+    // prompt, behaviour), so they land in the smooth repo's pearl project and
+    // not in whatever directory the daemon happens to run from.
+    SettingDef {
+        key: "smooth.repo",
+        kind: Kind::String,
+        default: None,
+        default_note: "unset: ~/dev/smooai/smooth, when that is a git checkout",
+        env: "SMOOTH_REPO",
+        description: "Path to the smooth checkout; Big Smooth files pearls about its own tools and behaviour there",
+        component: "tools",
+        apply: Apply::Immediate,
+    },
     SettingDef {
         key: "tailscale.serve",
         kind: Kind::Bool,

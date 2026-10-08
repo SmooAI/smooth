@@ -58,6 +58,34 @@ pub struct Reminder {
     pub completed: bool,
     pub due: Option<Due>,
     pub notes: Option<String>,
+    /// EventKit priority: 0 = none, 1–4 high, 5 medium, 6–9 low.
+    pub priority: u8,
+}
+
+/// The fields an `update` may change. `None` leaves a field alone; for `notes`
+/// and `due`, `Some(None)` clears it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub title: Option<String>,
+    pub notes: Option<Option<String>>,
+    pub due: Option<Option<Due>>,
+    pub priority: Option<u8>,
+}
+
+impl Changes {
+    /// True when the update would change nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.notes.is_none() && self.due.is_none() && self.priority.is_none()
+    }
+}
+
+/// A reminder list, as `create_list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderList {
+    pub name: String,
+    /// The account (`EKSource` title) the list lives in, e.g. "iCloud".
+    pub account: String,
 }
 
 /// The names of the user's reminder lists.
@@ -79,6 +107,11 @@ pub fn lists() -> Result<Vec<String>> {
 pub fn list(include_completed: bool, list_name: Option<&str>) -> Result<Vec<Reminder>> {
     // SAFETY: plain designated initializer.
     let store = unsafe { EKEventStore::new() };
+    if let Some(want) = list_name {
+        // An unknown name is an error naming the real lists, not an empty
+        // result — "no reminders" and "no such list" read the same otherwise.
+        pick_calendar(&store, Some(want))?;
+    }
     let mut found = fetch(&store, include_completed)?;
     if let Some(want) = list_name {
         found.retain(|r| r.list.eq_ignore_ascii_case(want));
@@ -116,21 +149,11 @@ pub fn add(title: &str, due: Option<Due>, list_name: Option<&str>) -> Result<Rem
 /// Mark the reminder with `id` (a `calendarItemIdentifier`) completed.
 ///
 /// # Errors
-/// Fails when no open reminder has that id, or when EventKit refuses the save.
+/// Fails when no reminder has that id, or when EventKit refuses the save.
 pub fn complete(id: &str) -> Result<Reminder> {
     // SAFETY: plain designated initializer.
     let store = unsafe { EKEventStore::new() };
-    // ponytail: find it by scanning the fetch rather than
-    // `calendarItemWithIdentifier` + a downcast — reminder counts are small, and
-    // this reuses the one fetch path that's already tested.
-    let target = fetch_raw(&store, true)?
-        .into_iter()
-        .find(|r| {
-            // SAFETY: reading an identifier off a live reminder.
-            unsafe { r.calendarItemIdentifier() }.to_string() == id
-        })
-        .ok_or_else(|| anyhow!("no reminder with id `{id}` — run a list first and use the `id` from it"))?;
-
+    let target = find(&store, id)?;
     // SAFETY: setting a property on a live reminder from this store.
     unsafe { target.setCompleted(true) };
     // SAFETY: saving a reminder that came out of this same store.
@@ -138,8 +161,126 @@ pub fn complete(id: &str) -> Result<Reminder> {
     Ok(read(&target))
 }
 
-/// The reminder list `add` should write to: the named one, or EventKit's
-/// default. An unknown name lists the valid ones rather than silently landing
+/// Create a reminder list called `name` (SMOODEV-3734). It goes on the same
+/// account as `like` (a sibling list's name) or, when `None`, as the default
+/// reminder list — so a new "Cleaning" list sits next to "House" in iCloud
+/// rather than in a local-only store nobody syncs.
+///
+/// # Errors
+/// Fails when a list with that name already exists (case-insensitive), when
+/// `like` names no list, or when EventKit refuses the save.
+pub fn create_list(name: &str, like: Option<&str>) -> Result<ReminderList> {
+    // SAFETY: plain designated initializer.
+    let store = unsafe { EKEventStore::new() };
+    let existing = reminder_lists(&store);
+    if let Some(dupe) = existing.iter().find(|l| l.eq_ignore_ascii_case(name)) {
+        anyhow::bail!(
+            "a reminder list named `{dupe}` already exists — use it (e.g. `move` reminders into it). Lists: {}",
+            existing.join(", ")
+        );
+    }
+    let sibling = pick_calendar(&store, like)?;
+    // SAFETY: a property read on a live calendar.
+    let source = unsafe { sibling.source() }.ok_or_else(|| anyhow!("the list to copy the account from has no account (source)"))?;
+
+    // SAFETY: a class constructor taking the live store we just made.
+    let calendar = unsafe { EKCalendar::calendarForEntityType_eventStore(EKEntityType::Reminder, &store) };
+    // SAFETY: property setters on a new, unsaved calendar; the source is live
+    // and belongs to this store.
+    unsafe {
+        calendar.setTitle(&NSString::from_str(name));
+        calendar.setSource(Some(&source));
+    }
+    // SAFETY: saving a calendar built against this same store.
+    unsafe { store.saveCalendar_commit_error(&calendar, true) }.map_err(ns_err("creating the list"))?;
+    Ok(ReminderList {
+        // SAFETY: property reads on live objects.
+        name: unsafe { calendar.title() }.to_string(),
+        account: unsafe { source.title() }.to_string(),
+    })
+}
+
+/// Move the reminder with `id` to the list named `list_name`. The reminder
+/// object itself is re-parented, so title, notes, due date, priority,
+/// completion state and alarms all come along unchanged.
+///
+/// # Errors
+/// Fails when no reminder has that id, when the list doesn't exist (naming the
+/// ones that do), or when EventKit refuses the save.
+pub fn move_to(id: &str, list_name: &str) -> Result<Reminder> {
+    // SAFETY: plain designated initializer.
+    let store = unsafe { EKEventStore::new() };
+    let calendar = pick_calendar(&store, Some(list_name))?;
+    let target = find(&store, id)?;
+    // SAFETY: setting a property on a live reminder from this store, to a
+    // calendar from this same store.
+    unsafe { target.setCalendar(Some(&calendar)) };
+    // SAFETY: saving a reminder that came out of this same store.
+    unsafe { store.saveReminder_commit_error(&target, true) }.map_err(ns_err("moving the reminder"))?;
+    Ok(read(&target))
+}
+
+/// Apply `changes` to the reminder with `id`. Untouched fields keep their
+/// values.
+///
+/// # Errors
+/// Fails when no reminder has that id, or when EventKit refuses the save.
+pub fn update(id: &str, changes: &Changes) -> Result<Reminder> {
+    // SAFETY: plain designated initializer.
+    let store = unsafe { EKEventStore::new() };
+    let target = find(&store, id)?;
+    // SAFETY: property setters on a live reminder; the NSStrings outlive the
+    // calls (EventKit copies them).
+    unsafe {
+        if let Some(title) = &changes.title {
+            target.setTitle(Some(&NSString::from_str(title)));
+        }
+        if let Some(notes) = &changes.notes {
+            target.setNotes(notes.as_deref().map(NSString::from_str).as_deref());
+        }
+        if let Some(due) = changes.due {
+            target.setDueDateComponents(due.map(components).as_deref());
+        }
+        if let Some(priority) = changes.priority {
+            target.setPriority(usize::from(priority));
+        }
+    }
+    // SAFETY: saving a reminder that came out of this same store.
+    unsafe { store.saveReminder_commit_error(&target, true) }.map_err(ns_err("updating the reminder"))?;
+    Ok(read(&target))
+}
+
+/// Delete the reminder with `id` for good, returning what it was. Callers gate
+/// this behind the user's confirmation — see `smooth_tools::reminders`.
+///
+/// # Errors
+/// Fails when no reminder has that id, or when EventKit refuses the removal.
+pub fn delete(id: &str) -> Result<Reminder> {
+    // SAFETY: plain designated initializer.
+    let store = unsafe { EKEventStore::new() };
+    let target = find(&store, id)?;
+    let gone = read(&target);
+    // SAFETY: removing a reminder that came out of this same store.
+    unsafe { store.removeReminder_commit_error(&target, true) }.map_err(ns_err("deleting the reminder"))?;
+    Ok(gone)
+}
+
+/// The live reminder with `id`, completed or not.
+///
+/// ponytail: found by scanning the fetch rather than
+/// `calendarItemWithIdentifier` + a downcast — reminder counts are small, and
+/// this reuses the one fetch path that's already tested.
+fn find(store: &EKEventStore, id: &str) -> Result<Retained<EKReminder>> {
+    fetch_raw(store, true)?
+        .into_iter()
+        .find(|r| {
+            // SAFETY: reading an identifier off a live reminder.
+            unsafe { r.calendarItemIdentifier() }.to_string() == id
+        })
+        .ok_or_else(|| anyhow!("no reminder with id `{id}` — run a list first and use the `id` from it"))
+}
+
+/// The reminder list a write targets: the named one, or EventKit's default. An unknown name lists the valid ones rather than silently landing
 /// the reminder somewhere else.
 fn pick_calendar(store: &EKEventStore, list_name: Option<&str>) -> Result<Retained<EKCalendar>> {
     let Some(want) = list_name else {
@@ -236,6 +377,7 @@ fn read(r: &EKReminder) -> Reminder {
             completed: r.isCompleted(),
             due: r.dueDateComponents().and_then(|c| due_from(&c)),
             notes: r.notes().map(|n| n.to_string()).filter(|n| !n.is_empty()),
+            priority: u8::try_from(r.priority()).unwrap_or(0),
         }
     }
 }
@@ -327,6 +469,16 @@ mod tests {
         });
         assert_eq!(c.hour(), UNDEFINED);
         assert_eq!(c.minute(), UNDEFINED);
+    }
+
+    #[test]
+    fn an_update_with_no_fields_is_empty() {
+        assert!(Changes::default().is_empty());
+        let clear_notes = Changes {
+            notes: Some(None),
+            ..Changes::default()
+        };
+        assert!(!clear_notes.is_empty(), "clearing a field is a change");
     }
 
     #[test]

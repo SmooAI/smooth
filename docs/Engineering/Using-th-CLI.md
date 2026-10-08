@@ -216,22 +216,28 @@ th settings path [--json]
 th settings ai                       # the generated guide, for handing to an agent
 ```
 
-| Key                 | Type                                  | Default                  | Legacy env var             | Read by |
-| ------------------- | ------------------------------------- | ------------------------ | -------------------------- | ------- |
-| `auto_mode`         | enum: bypass, accept-edits, ask, deny | `bypass`                 | `SMOOTH_AUTO_MODE`         | daemon  |
-| `cloud_memory`      | bool                                  | `false`                  | `SMOOTH_CLOUD_MEMORY`      | daemon  |
-| `daemon.prefer_own` | bool                                  | `false`                  | `SMOOTH_PREFER_OWN_DAEMON` | th      |
-| `egress.allowlist`  | list                                  | unset (no egress proxy)  | `SMOOTH_EGRESS_ALLOWLIST`  | daemon  |
-| `fast_mode`         | bool                                  | `false`                  | `SMOOTH_FAST_MODE`         | daemon  |
-| `model`             | string                                | unset (routing decides)  | `SMOOTH_AGENT_MODEL`       | daemon  |
-| `relay.enabled`     | bool                                  | `true`                   | `SMOOTH_RELAY`             | daemon  |
-| `relay.url`         | string                                | `wss://relay.smoo.ai/ws` | `SMOOTH_RELAY_URL`         | daemon  |
-| `sandbox.enabled`   | bool                                  | `false`                  | `SMOOTH_SANDBOX`           | tools   |
-| `tailscale.serve`   | bool                                  | `true`                   | `SMOOTH_TAILSCALE_SERVE`   | daemon  |
+| Key                 | Type                                  | Default                       | Legacy env var             | Read by |
+| ------------------- | ------------------------------------- | ----------------------------- | -------------------------- | ------- |
+| `auto_mode`         | enum: bypass, accept-edits, ask, deny | `bypass`                      | `SMOOTH_AUTO_MODE`         | daemon  |
+| `cloud_memory`      | bool                                  | `false`                       | `SMOOTH_CLOUD_MEMORY`      | daemon  |
+| `daemon.prefer_own` | bool                                  | `false`                       | `SMOOTH_PREFER_OWN_DAEMON` | th      |
+| `egress.allowlist`  | list                                  | unset (no egress proxy)       | `SMOOTH_EGRESS_ALLOWLIST`  | daemon  |
+| `fast_mode`         | bool                                  | `false`                       | `SMOOTH_FAST_MODE`         | daemon  |
+| `model`             | string                                | unset (routing decides)       | `SMOOTH_AGENT_MODEL`       | daemon  |
+| `relay.enabled`     | bool                                  | `true`                        | `SMOOTH_RELAY`             | daemon  |
+| `relay.url`         | string                                | `wss://relay.smoo.ai/ws`      | `SMOOTH_RELAY_URL`         | daemon  |
+| `sandbox.enabled`   | bool                                  | `false`                       | `SMOOTH_SANDBOX`           | tools   |
+| `smooth.repo`       | string                                | unset (`~/dev/smooai/smooth`) | `SMOOTH_REPO`              | tools   |
+| `tailscale.serve`   | bool                                  | `true`                        | `SMOOTH_TAILSCALE_SERVE`   | daemon  |
 
-Every key except `daemon.prefer_own` is read when Big Smooth starts, so `set`
-ends with `restart Big Smooth to apply: th down && th up`. `daemon.prefer_own`
-is read by `th` itself the next time it would start a daemon (see §1e).
+Every key except `daemon.prefer_own` and `smooth.repo` is read when Big Smooth
+starts, so `set` ends with `restart Big Smooth to apply: th down && th up`.
+`daemon.prefer_own` is read by `th` itself the next time it would start a daemon
+(see §1e). `smooth.repo` is read on each `th` tool call: when Big Smooth files a
+pearl about its own tools or behaviour (`"about_smooth": true`), it runs
+`th pearls` there so the pearl lands in the smooth project, not wherever the
+daemon was started. Every pearls result from the tool ends with
+`pearl project: <path>` (SMOODEV-3734).
 
 The file is plain nested TOML; `set` writes through `toml_edit`, so comments
 and keys this build doesn't know survive, and it is written 0600:
@@ -793,7 +799,7 @@ are two representations of the same keys, so an unmodified `pull` →
 > and set `"$smooaiName": "<name>"` in `schema.json`.
 
 > **Managing environments without `smoo admin`:** `smoo config environments
-list|create|update|delete <…> --org-id <org>` works on the public
+> list|create|update|delete <…> --org-id <org>` works on the public
 > user-JWT surface — a parent-org admin can create a child org's
 > `production` environment with it (no internal `smoo admin`).
 
@@ -1902,7 +1908,7 @@ claim about the **commit**; "your Docker daemon is off" is a claim about the
    to 120s. Only ever starts a runtime the machine already has, never stops one.
    A machine with no `docker` at all is skipped, not blocked.
 2. **Missing `node_modules`** (in a repo with a `package.json`) → `pnpm install
---frozen-lockfile`, which can never rewrite the lockfile behind you. A
+   --frozen-lockfile`, which can never rewrite the lockfile behind you. A
    lockfile it cannot satisfy _is_ a broken precondition → 97.
 3. **Stripped `PATH`** — launchd, cron and `ssh host cmd` never source the
    profile that puts Homebrew and cargo on `PATH`. The four well-known dirs are
@@ -2117,7 +2123,7 @@ in parallel when they fit, and fewer when they don't.
   stays within `(available − mem_reserve_gb) × scale`. The memory side never
   goes above `mem_scale_max`, which is 1.0 by default.
 - **CPU:** the job fits while `estimate + Σ running estimates ≤ cores ×
-cpu_factor × scale`.
+  cpu_factor × scale`.
 - **AIMD scale:** starts at 1.0. It grows by `aimd_step` after
   `aimd_clean_samples` calm pressure samples in a row, and halves on any gate
   signal, at most once every 10 s. It stays within [`aimd_min`, `aimd_max`], so
@@ -2567,17 +2573,26 @@ Until then the `reminders` tool still registers and answers every call with "run
 
 Once granted, Big Smooth can read and adjust the user's real Reminders:
 
-| Verb       | Arguments                                                       | Does            |
-| ---------- | --------------------------------------------------------------- | --------------- |
-| `list`     | `status` (`open` default / `all`), `list` (filter by list name) | reads reminders |
-| `add`      | `title` (required), `due`, `list`                               | creates one     |
-| `complete` | `id` (from a `list`)                                            | marks it done   |
+| Verb          | Arguments                                                                          | Does                                             |
+| ------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `lists`       | none                                                                               | names every reminder list                        |
+| `list`        | `status` (`open` default / `all`), `list` (filter by list name)                    | reads reminders                                  |
+| `add`         | `title` (required), `due`, `list`                                                  | creates one                                      |
+| `complete`    | `id` (from a `list`)                                                               | marks it done                                    |
+| `create_list` | `name` (required), `like` (a list whose account the new one joins)                 | creates a list; refuses a duplicate name         |
+| `move`        | `id`, `list` (destination), both required                                          | re-parents the reminder; every field comes along |
+| `update`      | `id` (required), any of `title`, `notes`, `due`, `priority` (none/low/medium/high) | edits those fields; `""` clears `notes` or `due` |
 
 Due dates are **absolute** — `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Natural language
 ("tomorrow 2pm") is deliberately refused: the model resolves relative dates with
 the `get_current_datetime` tool first, rather than a half-working parser booking
-things on the wrong day. There is **no delete verb** — the reversible answer to a
-reminder the agent shouldn't have made is completing it.
+things on the wrong day. A list name that doesn't exist is an error naming the
+lists that do, on every verb.
+
+Deleting a reminder is the separate **`reminders_delete`** tool (`id`), which is
+on the daemon's confirm floor like `calendar_delete`: the call parks until the
+user approves it (SMOODEV-3734). Renaming or deleting a whole list isn't
+supported; Big Smooth falls back to `bash` + `osascript` for those.
 
 `--setup-imessage` reports whether `~/Library/Messages/chat.db` is readable (Full
 Disk Access) and fires a harmless Apple Event at Messages.app so the one-time
