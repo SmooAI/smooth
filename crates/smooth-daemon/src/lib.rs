@@ -37,6 +37,10 @@ pub mod flow_e2e;
 pub mod flow_pair_route;
 pub mod flow_route;
 pub mod hooks;
+// Watch one iMessage thread and auto-reply inside hard limits (th-592d67).
+// macOS-only, like the `imessage` tool it builds on.
+#[cfg(target_os = "macos")]
+pub mod imessage_watch;
 pub mod judge_settings;
 pub mod judge_settings_route;
 pub mod llm_provider;

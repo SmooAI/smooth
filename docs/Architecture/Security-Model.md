@@ -90,6 +90,16 @@ bundle, and the user can revoke it in System Settings.
   th-265003) addresses an _existing_ chat by its exact GUID (`chat id …`) and
   errors if none matches, so it can never silently invent a phantom conversation
   the way a group _name_ passed as a 1:1 handle once did.
+- **`imessage_watch` / `imessage_watches`** (macOS, pearl th-592d67) — keep
+  answering ONE thread on the user's behalf. The auto-reply is drafted by a
+  **tool-less** model call that can only return reply / handoff / skip, and the
+  daemon sends the text to that one chat through the `imessage` send path — so a
+  reply turn has no tool with which to email, buy, or text anyone else. Starting a
+  watch is mutating (Plan mode drops it); listing and stopping stay available in
+  Plan. Time-boxed (24h max), debounced, rate-limited, never replies to the
+  user's own messages, hands sensitive batches to the user, and ends itself on a
+  chat it can't read or a send it can't confirm. Details:
+  [iMessage-Watch](../Engineering/iMessage-Watch.md).
 - **`contacts`** (macOS, pearl th-ffa500) — **read-only**, and the reason a bare
   phone number can be given a name (and a name turned into a send handle). Like
   the `imessage` read it is _in-process_ `rusqlite` on a `SQLITE_OPEN_READ_ONLY`

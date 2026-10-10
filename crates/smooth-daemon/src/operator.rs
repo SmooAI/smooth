@@ -166,6 +166,11 @@ struct SandboxedToolProvider {
     /// per-conversation and toggleable from the phone — neither can be trusted
     /// when the demo creds ship in the App Store review notes.
     demo: bool,
+    /// Backs `imessage_watch` / `imessage_watches` (th-592d67): the durable watch
+    /// store the daemon's poll loop answers from. `None` for the ephemeral/test
+    /// providers — no hub, no watch tools.
+    #[cfg(target_os = "macos")]
+    imessage_watches: Option<crate::imessage_watch::WatchHub>,
 }
 
 /// The tools the App Store reviewer demo (`SMOOTH_DEMO`) exposes — chat plus a
@@ -221,6 +226,11 @@ const PLAN_READONLY_TOOLS: &[&str] = &[
     // Read-only macOS Contacts (th-ffa500). Naming a number never mutates
     // anything, so it's safe for a Plan-mode turn to look someone up.
     "contacts",
+    // List/stop iMessage watches (th-592d67). Stopping only ever REDUCES what
+    // Big Smooth does, and "stop replying to that thread" must work from any
+    // conversation — including one left in Plan. Starting a watch
+    // (`imessage_watch`) is mutating and stays off this list.
+    "imessage_watches",
 ];
 
 /// The role a turn runs as, extracted from the principal's groups. `None` for the
@@ -346,6 +356,16 @@ impl ToolProvider for SandboxedToolProvider {
         // read-only, it survives the Plan-mode filter (see `PLAN_READONLY_TOOLS`).
         #[cfg(target_os = "macos")]
         tools.push(Arc::new(smooth_tools::ContactsTool) as Arc<dyn Tool>);
+        // iMessage watch + auto-reply (th-592d67). Injected here because both
+        // tools need the daemon's watch hub and this turn's conversation id (the
+        // watch reports into the conversation that started it). `imessage_watch`
+        // is mutating — the Plan filter below drops it; `imessage_watches`
+        // (list/stop) survives Plan so a watch can always be stopped.
+        #[cfg(target_os = "macos")]
+        if let Some(hub) = &self.imessage_watches {
+            tools.push(Arc::new(crate::imessage_watch::ImessageWatchTool::new(hub.clone(), session.clone(), self.modes.clone())) as Arc<dyn Tool>);
+            tools.push(Arc::new(crate::imessage_watch::ImessageWatchesTool::new(hub.clone(), session.clone())) as Arc<dyn Tool>);
+        }
         // send_file (file transfer, EPIC th-2e39fe): deliver a workspace file to
         // the user as a download. It needs `ctx.directive_sink` — the per-turn
         // channel the engine drains onto `eventual_response.directive` — which
@@ -526,7 +546,21 @@ pub fn local_tool_provider_full(
     modes: crate::session_mode::SessionModes,
     notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
 ) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider {
+    Arc::new(sandboxed_provider(cwd, proxy, memory, mcp, family, modes, notify_sink))
+}
+
+/// The concrete provider behind [`local_tool_provider_full`], so the daemon can
+/// attach the pieces only it owns (the iMessage watch hub) before boxing it.
+fn sandboxed_provider(
+    cwd: SessionCwd,
+    proxy: Option<String>,
+    memory: Arc<dyn Memory>,
+    mcp: Option<Arc<smooth_tools::mcp::McpManager>>,
+    family: Option<Arc<FamilyConfig>>,
+    modes: crate::session_mode::SessionModes,
+    notify_sink: Option<Arc<dyn smooth_tools::NotifySink>>,
+) -> SandboxedToolProvider {
+    SandboxedToolProvider {
         cwd,
         proxy,
         memory,
@@ -535,7 +569,9 @@ pub fn local_tool_provider_full(
         modes,
         notify_sink,
         demo: demo_mode(),
-    })
+        #[cfg(target_os = "macos")]
+        imessage_watches: None,
+    }
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -1225,7 +1261,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // `NotifySink` so `notify` reaches the same devices as scheduled turns.
     let push_state = crate::push::PushState::from_env();
     let turn_notifier = Arc::new(crate::notify::TurnNotifier::new(push_state.clone()));
-    let provider = local_tool_provider_full(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut provider_impl = sandboxed_provider(
         session_cwd.clone(),
         egress_proxy,
         memory,
@@ -1234,6 +1271,26 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         session_modes.clone(),
         Some(turn_notifier.clone() as Arc<dyn smooth_tools::NotifySink>),
     );
+    // iMessage watch + auto-reply (th-592d67): the durable watch store, shared
+    // by the tools (start/list/stop) and the poll loop spawned below. Activity
+    // is noted in the SAME storage the operator reads history from, so every
+    // client sees it. A store that won't open disables the feature, not the daemon.
+    #[cfg(target_os = "macos")]
+    let imessage_watch_hub = {
+        let storage: Arc<dyn smooth_operator_svc::adapter::StorageAdapter> = Arc::clone(&storage_for_stats) as _;
+        match crate::imessage_watch::production_hub(storage, Some(turn_notifier.clone())) {
+            Ok(hub) => Some(hub),
+            Err(e) => {
+                tracing::warn!(error = %e, "imessage watch disabled — could not open its store");
+                None
+            }
+        }
+    };
+    #[cfg(target_os = "macos")]
+    {
+        provider_impl.imessage_watches = imessage_watch_hub.clone();
+    }
+    let provider: Arc<dyn ToolProvider> = Arc::new(provider_impl);
     // The SmoothFlow engine (th-7f0af3): opens ~/.smooth/flow.db, starts the
     // supervisor, serves the flow WS + HTTP siblings + the Claude Code hooks
     // endpoint. Token-gated (except hooks): a flow session is a shell on this
@@ -1437,6 +1494,19 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
             None
         }
     };
+    // iMessage watches (th-592d67): poll each watched thread by ROWID watermark
+    // and answer settled bursts with a TOOL-LESS draft sent to that one chat.
+    // Watches resume here after a restart — they live in their own sqlite store.
+    #[cfg(target_os = "macos")]
+    let _imessage_watcher = imessage_watch_hub.map(|hub| {
+        let engine = crate::imessage_watch::WatchEngine {
+            hub,
+            brain: Arc::new(crate::imessage_watch::LlmBrain),
+            sender: Arc::new(crate::imessage_watch::MessagesSender),
+        };
+        tracing::info!("imessage watcher armed ({}s poll)", crate::imessage_watch::POLL_INTERVAL.as_secs());
+        crate::imessage_watch::spawn_watcher(Arc::new(engine), crate::imessage_watch::POLL_INTERVAL)
+    });
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received");
@@ -1907,6 +1977,53 @@ mod tests {
         let teen = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("t".into()), vec!["role:teen".into()])).with_conversation_id("c");
         let teen_names: Vec<String> = provider.tools_for(&teen).await.iter().map(|t| t.schema().name).collect();
         assert!(has(&teen_names, "notify"), "teen granted notify gets it: {teen_names:?}");
+    }
+
+    /// iMessage watch (th-592d67): starting a watch sends messages as the user,
+    /// so Plan mode must never offer `imessage_watch` — while `imessage_watches`
+    /// (list/stop) survives, so a watch can be stopped from any conversation. The
+    /// demo clamp drops both.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn plan_mode_drops_imessage_watch_but_keeps_the_stop_switch() {
+        use smooth_operator_svc::access_control::AccessContext;
+
+        struct Quiet;
+        #[async_trait::async_trait]
+        impl crate::imessage_watch::WatchReporter for Quiet {
+            async fn report(&self, _: &crate::imessage_watch::Watch, _: &crate::imessage_watch::WatchEvent, _: bool) {}
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let hub = crate::imessage_watch::WatchHub {
+            store: Arc::new(crate::imessage_watch::WatchStore::open(&dir.path().join("w.db")).unwrap()),
+            chat_db: dir.path().join("chat.db"),
+            names: Arc::new(|_: &[String]| std::collections::HashMap::new()),
+            reporter: Arc::new(Quiet),
+        };
+        let modes = crate::session_mode::SessionModes::new();
+        modes.set("plan-conv", crate::session_mode::Mode::Plan);
+        let mut p = sandboxed_provider(
+            SessionCwd::new(std::env::temp_dir()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            None,
+            modes,
+            None,
+        );
+        p.imessage_watches = Some(hub);
+        let names_for = |conv: &str| {
+            let ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id(conv);
+            let p = &p;
+            async move { p.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect::<Vec<_>>() }
+        };
+        let auto = names_for("auto-conv").await;
+        assert!(auto.iter().any(|n| n == "imessage_watch"), "Auto offers the watch: {auto:?}");
+        assert!(auto.iter().any(|n| n == "imessage_watches"), "{auto:?}");
+        let plan = names_for("plan-conv").await;
+        assert!(!plan.iter().any(|n| n == "imessage_watch"), "Plan must DROP imessage_watch: {plan:?}");
+        assert!(plan.iter().any(|n| n == "imessage_watches"), "Plan keeps the stop switch: {plan:?}");
+        assert!(!DEMO_SAFE_TOOLS.contains(&"imessage_watch") && !DEMO_SAFE_TOOLS.contains(&"imessage_watches"));
     }
 
     /// Plan mode (th-c1b589) is a hard read-only guarantee: a Plan conversation's

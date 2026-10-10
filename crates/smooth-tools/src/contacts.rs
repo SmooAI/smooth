@@ -358,6 +358,107 @@ impl Person {
     }
 }
 
+/// Put names on a batch of chat.db handles (phone numbers / emails), for the
+/// `imessage` tool's participant lists and sender names (pearl th-592d67).
+///
+/// Reads the user's Address Book sources ([`address_book_paths`]). Degrades
+/// gracefully: a source that won't open (Full Disk Access missing, no Contacts
+/// at all) contributes nothing, so the caller simply gets fewer names — never an
+/// error. Handles with no match are absent from the map.
+#[must_use]
+pub fn resolve_names(handles: &[String]) -> std::collections::HashMap<String, String> {
+    resolve_names_in(&address_book_paths(), handles)
+}
+
+/// [`resolve_names`] against explicit Address Book paths (tests + the path
+/// resolution above).
+///
+/// One pass per source loads every phone/email → name pair (internal only —
+/// nothing but the matched names leaves this function), then each handle is
+/// matched: an email case-insensitively, a phone number on its trailing ten
+/// digits so `+1 (812) 887-6048` and `8128876048` agree. The first source to
+/// name a handle wins, so the result is deterministic.
+#[must_use]
+pub fn resolve_names_in(paths: &[PathBuf], handles: &[String]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if handles.is_empty() {
+        return out;
+    }
+    let mut phones: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut emails: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for path in paths {
+        let Ok(conn) = open_read_only(path) else { continue };
+        let _ = load_book(&conn, &mut phones, &mut emails);
+    }
+    for handle in handles {
+        let name = if handle.contains('@') {
+            emails.get(&handle.trim().to_ascii_lowercase())
+        } else {
+            phone_key(handle).and_then(|k| phones.get(&k))
+        };
+        if let Some(name) = name {
+            out.insert(handle.clone(), name.clone());
+        }
+    }
+    out
+}
+
+/// The matching key for a phone number: its last ten digits, or `None` when it
+/// has too few digits to be a phone number at all.
+fn phone_key(s: &str) -> Option<String> {
+    let digits = digits_only(s);
+    if digits.len() < 7 {
+        return None;
+    }
+    let skip = digits.len().saturating_sub(10);
+    Some(digits[skip..].to_owned())
+}
+
+/// Load every phone/email → display-name pair from one Address Book source,
+/// keeping the first name seen for each key.
+fn load_book(
+    conn: &Connection,
+    phones: &mut std::collections::HashMap<String, String>,
+    emails: &mut std::collections::HashMap<String, String>,
+) -> rusqlite::Result<()> {
+    let pairs = [
+        (
+            "SELECT r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, p.ZFULLNUMBER FROM ZABCDRECORD r JOIN ZABCDPHONENUMBER p ON p.ZOWNER = r.Z_PK",
+            true,
+        ),
+        (
+            "SELECT r.ZFIRSTNAME, r.ZLASTNAME, r.ZNICKNAME, r.ZORGANIZATION, e.ZADDRESS FROM ZABCDRECORD r JOIN ZABCDEMAILADDRESS e ON e.ZOWNER = r.Z_PK",
+            false,
+        ),
+    ];
+    for (sql, is_phone) in pairs {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let first: Option<String> = row.get(0).unwrap_or(None);
+            let last: Option<String> = row.get(1).unwrap_or(None);
+            let nick: Option<String> = row.get(2).unwrap_or(None);
+            let org: Option<String> = row.get(3).unwrap_or(None);
+            let Some(value) = row.get::<_, Option<String>>(4).unwrap_or(None) else {
+                continue;
+            };
+            let Some(name) = full_name(first.as_deref(), last.as_deref(), nick.as_deref()).or_else(|| org.filter(|o| !o.trim().is_empty())) else {
+                continue;
+            };
+            let key = if is_phone {
+                phone_key(&value)
+            } else {
+                Some(value.trim().to_ascii_lowercase())
+            };
+            if let Some(key) = key.filter(|k| !k.is_empty()) {
+                let map = if is_phone { &mut *phones } else { &mut *emails };
+                map.entry(key).or_insert(name);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Assemble a display name from the parts, falling back gracefully.
 fn full_name(first: Option<&str>, last: Option<&str>, nick: Option<&str>) -> Option<String> {
     let joined = [first, last]
@@ -615,6 +716,68 @@ mod tests {
         assert_eq!(rows[0]["name"], "Josh Heltsley");
 
         std::env::remove_var("SMOOTH_CONTACTS_DB");
+    }
+
+    // ---- batch name resolution (imessage participants, th-592d67) ----------
+
+    #[test]
+    fn resolve_names_maps_phones_and_emails_regardless_of_formatting() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = fixture_db(dir.path());
+        let handles = vec![
+            "+18128876048".to_owned(),
+            "JOSH@example.com".to_owned(),
+            "+13174598424".to_owned(),
+            "+19998887777".to_owned(),
+        ];
+        let names = resolve_names_in(&[db], &handles);
+        assert_eq!(names.get("+18128876048").map(String::as_str), Some("Josh Heltsley"));
+        assert_eq!(
+            names.get("JOSH@example.com").map(String::as_str),
+            Some("Josh Heltsley"),
+            "emails match case-insensitively"
+        );
+        assert_eq!(names.get("+13174598424").map(String::as_str), Some("Suraj Datta"));
+        assert!(!names.contains_key("+19998887777"), "an unknown number is simply absent");
+    }
+
+    #[test]
+    fn resolve_names_degrades_to_empty_when_contacts_are_unreadable() {
+        // No Full Disk Access / no Contacts: fewer names, never an error.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.abcddb");
+        let garbage = dir.path().join("garbage.abcddb");
+        std::fs::write(&garbage, b"not a sqlite file").unwrap();
+        assert!(resolve_names_in(&[missing, garbage], &["+18128876048".to_owned()]).is_empty());
+        assert!(resolve_names_in(&[], &["+18128876048".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn resolve_names_first_source_wins_and_org_is_a_fallback_name() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let first = fixture_db(a.path());
+        let second = b.path().join("AddressBook-v22.abcddb");
+        let conn = Connection::open(&second).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZORGANIZATION TEXT, ZNICKNAME TEXT);
+             CREATE TABLE ZABCDPHONENUMBER (Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZFULLNUMBER TEXT);
+             CREATE TABLE ZABCDEMAILADDRESS (Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZADDRESS TEXT);
+             INSERT INTO ZABCDRECORD VALUES (1, 'Joshua', 'Imposter', NULL, NULL), (2, NULL, NULL, 'Pizza Place', NULL);
+             INSERT INTO ZABCDPHONENUMBER VALUES (10, 1, '812 887 6048'), (11, 2, '(555) 010-2030');",
+        )
+        .unwrap();
+        drop(conn);
+        let names = resolve_names_in(&[first, second], &["8128876048".to_owned(), "+15550102030".to_owned()]);
+        assert_eq!(names["8128876048"], "Josh Heltsley", "the first source to name a handle wins");
+        assert_eq!(names["+15550102030"], "Pizza Place", "a company card is named by its organization");
+    }
+
+    #[test]
+    fn phone_key_uses_the_last_ten_digits_and_rejects_short_runs() {
+        assert_eq!(phone_key("+1 (812) 887-6048").as_deref(), Some("8128876048"));
+        assert_eq!(phone_key("8128876048").as_deref(), Some("8128876048"));
+        assert_eq!(phone_key("12345"), None);
     }
 
     #[test]

@@ -51,6 +51,7 @@
 
 #![cfg(target_os = "macos")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -211,7 +212,7 @@ impl Tool for IMessageTool {
         ToolSchema {
             name: "imessage".into(),
             description: format!(
-                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text a person OR a group. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first — each row includes a `chat` GUID you send a GROUP with). Send to ONE person: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email; a name will NOT resolve, so use the `contacts` tool to turn a name into a number first. Send to a GROUP: {{\"command\":\"send\",\"chat\":\"<the group's `chat` GUID from conversations>\",\"text\":\"hi all\"}} — NEVER pass a group's NAME as `contact` (that silently sends nowhere); run `conversations` to get the group's GUID and pass it as `chat`. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
+                "Read, search and SEND the user's real macOS Messages (iMessage/SMS). Use it for anything about their texts — what did someone say, find a conversation, catch up on what was missed — and to text a person OR a group. Commands: {}. Reads: {{\"command\":\"recent\"}} (latest messages across every chat), {{\"command\":\"thread\",\"contact\":\"Mom\"}} or {{\"command\":\"thread\",\"chat\":\"<GUID>\"}} (one conversation, newest last), {{\"command\":\"search\",\"query\":\"dinner\"}}, {{\"command\":\"conversations\"}} (who they talk to, most recent first — each row has the `chat` GUID plus its `participants` with contact names). Find a chat by who is in it: {{\"command\":\"conversations\",\"with\":[\"Alice\",\"Bob\"]}} returns only chats containing EVERY listed person (name, number or email). Message rows carry `is_from_me` and the sender's contact `sender_name` alongside the raw handle. RECIPE for a screenshot of a group chat (or any group with no name): call `conversations` with the names you can see as `with` → pick the matching row's `chat` GUID (when several match, each row carries a short `last_message` to tell them apart) → read it with `thread` + `chat` → reply with `send` + `chat`. Send to ONE person: {{\"command\":\"send\",\"contact\":\"+15551234567\",\"text\":\"on my way\"}} — `contact` must be an exact phone number or email; a name will NOT resolve, so use the `contacts` tool to turn a name into a number first. Send to a GROUP: {{\"command\":\"send\",\"chat\":\"<the group's `chat` GUID from conversations>\",\"text\":\"hi all\"}} — NEVER pass a group's NAME as `contact` (that silently sends nowhere). A send that reports success went out: never resend it. To keep answering a thread on the user's behalf, use the `imessage_watch` tool, and only when the user explicitly asks. These are the user's PRIVATE messages: read only what the question needs, and never repeat message contents into anything that leaves this conversation. Output is JSON.",
                 COMMANDS.join(", ")
             ),
             parameters: json!({
@@ -220,7 +221,7 @@ impl Tool for IMessageTool {
                     "command": {
                         "type": "string",
                         "enum": COMMANDS,
-                        "description": "recent (latest messages everywhere), thread (one conversation with a contact), search (find messages by text), conversations (list chats, most recently active first), send (send an iMessage)."
+                        "description": "recent (latest messages everywhere), thread (one conversation, by `contact` or `chat` GUID), search (find messages by text), conversations (list chats with their participants, most recently active first; filter with `with`), send (send an iMessage)."
                     },
                     "contact": {
                         "type": "string",
@@ -228,7 +229,12 @@ impl Tool for IMessageTool {
                     },
                     "chat": {
                         "type": "string",
-                        "description": "For `send` to a GROUP: the group's `chat` GUID exactly as `conversations` returned it (e.g. \"iMessage;+;chat123…\"). Targets that existing group thread; if no such chat exists the send fails loudly rather than going nowhere. Mutually exclusive with `contact`."
+                        "description": "A chat's GUID exactly as `conversations` returned it (e.g. \"iMessage;+;chat123…\"). For `thread`: read exactly that conversation — the reliable way to read a group, named or not. For `send` to a GROUP: targets that existing group thread; if no such chat exists the send fails loudly rather than going nowhere. Mutually exclusive with `contact`."
+                    },
+                    "with": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "For `conversations`: only chats that include EVERY one of these people — each a contact name (matched loosely, e.g. \"Alice\"), a phone number, or an email. Use the names visible in a screenshot to find a group's `chat` GUID."
                     },
                     "query": {
                         "type": "string",
@@ -258,10 +264,7 @@ impl Tool for IMessageTool {
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let command = command_of(&arguments)?;
         if command == "send" {
-            return match send_args(&arguments)? {
-                SendTarget::Contact(contact, text) => send_message(&contact, &text).await,
-                SendTarget::Group(guid, text) => send_group_message(&guid, &text).await,
-            };
+            return send(send_args(&arguments)?).await;
         }
 
         let Some(path) = chat_db_path() else {
@@ -274,9 +277,34 @@ impl Tool for IMessageTool {
         }
         let query = build_query(command, &arguments)?;
         // rusqlite is synchronous; keep the reactor free while SQLite works.
-        let rows = tokio::task::spawn_blocking(move || run_query(&path, &query)).await??;
+        // Names come from the user's Contacts; without access they're simply
+        // absent and the raw handles still read (pearl th-592d67).
+        let rows = tokio::task::spawn_blocking(move || read(&path, &query, &crate::contacts::resolve_names)).await??;
         Ok(truncate(&serde_json::to_string_pretty(&rows)?))
     }
+}
+
+/// Send one message — the tool's `send` path, exposed for in-process callers
+/// (the daemon's `imessage_watch` auto-reply, pearl th-592d67) so every outgoing
+/// message goes through the SAME validated, argv-only, fail-loud send.
+///
+/// Returns the tool's own answer: a JSON object with `"sent": true` on success,
+/// or a human-readable explanation when nothing was sent.
+///
+/// # Errors
+/// When `osascript` can't be spawned or the send times out.
+pub async fn send(target: SendTarget) -> anyhow::Result<String> {
+    match target {
+        SendTarget::Contact(contact, text) => send_message(&contact, &text).await,
+        SendTarget::Group(guid, text) => send_group_message(&guid, &text).await,
+    }
+}
+
+/// Did a [`send`] answer report a message actually going out? Only the success
+/// shape (`{"sent": true, …}`) counts; every failure explanation is plain text.
+#[must_use]
+pub fn send_succeeded(answer: &str) -> bool {
+    serde_json::from_str::<Value>(answer).ok().and_then(|v| v.get("sent").and_then(Value::as_bool)) == Some(true)
 }
 
 /// Pull and validate `command` against the allowlist.
@@ -305,7 +333,25 @@ pub struct ReadQuery {
     /// `thread` reads newest-first for the LIMIT, then flips so the model sees
     /// the conversation in the order it happened.
     chronological: bool,
+    /// `conversations` participant filter (`with`): every term must match a
+    /// participant (or the chat's name). Applied after names are resolved, so
+    /// the SQL over-fetches up to [`WITH_SCAN_CAP`] chats and [`read`] trims to
+    /// `limit`.
+    with: Vec<String>,
+    /// Rows the caller actually gets back (the SQL `LIMIT` can be larger when a
+    /// `with` filter needs a wider scan).
+    limit: usize,
 }
+
+/// How many recent chats a `with`-filtered `conversations` read scans before
+/// filtering. Wide enough to find a group that's gone quiet for a while; the
+/// output is still capped at the caller's `limit`.
+const WITH_SCAN_CAP: i64 = 1_000;
+
+/// Characters of a chat's last message shown to tell two matching chats apart.
+/// Deliberately a glance, not a read: the privacy posture is "only what the
+/// question needs" (pearl th-592d67).
+const PREVIEW_CHARS: usize = 60;
 
 /// The message columns every message-shaped read selects, in the order
 /// [`message_row`] unpacks them.
@@ -327,19 +373,39 @@ const MESSAGE_FROM: &str = "FROM message m
 /// When a command's required filter (`contact` / `query`) is missing or blank.
 pub fn build_query(command: &str, arguments: &Value) -> anyhow::Result<ReadQuery> {
     let limit = limit_of(arguments);
+    let rows = usize::try_from(limit).unwrap_or(20);
     match command {
         "recent" => Ok(ReadQuery {
             sql: format!("SELECT {MESSAGE_COLUMNS} {MESSAGE_FROM} GROUP BY m.ROWID ORDER BY m.date DESC LIMIT ?1"),
             params: vec![SqlValue::Integer(limit)],
             conversations: false,
             chronological: false,
+            with: Vec::new(),
+            limit: rows,
         }),
         "thread" => {
-            let contact = required_str(
-                arguments,
-                "contact",
-                "`thread` needs `contact` — who the conversation is with (a phone number, email, or part of a name)",
-            )?;
+            let chat = optional_str(arguments, "chat");
+            let contact = optional_str(arguments, "contact");
+            if chat.is_some() && contact.is_some() {
+                anyhow::bail!("`thread` takes `chat` (a GUID) OR `contact`, not both");
+            }
+            if let Some(guid) = chat {
+                // Exact GUID: the one read that reaches an UNNAMED group, which
+                // has no name for the loose `contact` match to find (th-592d67).
+                return Ok(ReadQuery {
+                    sql: format!("SELECT {MESSAGE_COLUMNS} {MESSAGE_FROM} WHERE c.guid = ?1 GROUP BY m.ROWID ORDER BY m.date DESC LIMIT ?2"),
+                    params: vec![SqlValue::Text(guid), SqlValue::Integer(limit)],
+                    conversations: false,
+                    chronological: true,
+                    with: Vec::new(),
+                    limit: rows,
+                });
+            }
+            let contact = contact.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`thread` needs `contact` — who the conversation is with (a phone number, email, or part of a name) — or `chat`, a GUID from `conversations`"
+                )
+            })?;
             Ok(ReadQuery {
                 // Loose match across the three places a person can be named: the
                 // handle (phone/email), the chat id, and a group's display name.
@@ -354,6 +420,8 @@ pub fn build_query(command: &str, arguments: &Value) -> anyhow::Result<ReadQuery
                 params: vec![SqlValue::Text(contains(&contact)), SqlValue::Integer(limit)],
                 conversations: false,
                 chronological: true,
+                with: Vec::new(),
+                limit: rows,
             })
         }
         "search" => {
@@ -373,22 +441,32 @@ pub fn build_query(command: &str, arguments: &Value) -> anyhow::Result<ReadQuery
                 params: vec![SqlValue::Text(contains(&query)), SqlValue::Integer(limit)],
                 conversations: false,
                 chronological: false,
+                with: Vec::new(),
+                limit: rows,
             })
         }
-        "conversations" => Ok(ReadQuery {
-            // `c.guid` is the send-addressable id: pass it back as `chat` to
-            // `send` to reach a group. Without it the model had no way to target a
-            // group thread and fell back to sending a group NAME as a handle.
-            sql: "SELECT c.chat_identifier, c.display_name, c.service_name, MAX(m.date), COUNT(m.ROWID), c.guid
-                  FROM chat c
-                  JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
-                  JOIN message m ON m.ROWID = cmj.message_id
-                  GROUP BY c.ROWID ORDER BY MAX(m.date) DESC LIMIT ?1"
-                .to_owned(),
-            params: vec![SqlValue::Integer(limit)],
-            conversations: true,
-            chronological: false,
-        }),
+        "conversations" => {
+            let with = with_terms(arguments);
+            Ok(ReadQuery {
+                // `c.guid` is the send-addressable id: pass it back as `chat` to
+                // `send` to reach a group. Without it the model had no way to target a
+                // group thread and fell back to sending a group NAME as a handle.
+                // `c.ROWID` keys the participant lookup in `run_query`.
+                sql: "SELECT c.chat_identifier, c.display_name, c.service_name, MAX(m.date), COUNT(m.ROWID), c.guid, c.ROWID
+                      FROM chat c
+                      JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                      JOIN message m ON m.ROWID = cmj.message_id
+                      GROUP BY c.ROWID ORDER BY MAX(m.date) DESC LIMIT ?1"
+                    .to_owned(),
+                // A `with` filter runs on resolved NAMES, after the SQL, so scan
+                // wider and let `read` trim to the caller's limit.
+                params: vec![SqlValue::Integer(if with.is_empty() { limit } else { WITH_SCAN_CAP })],
+                conversations: true,
+                chronological: false,
+                with,
+                limit: rows,
+            })
+        }
         other => anyhow::bail!("`{other}` is not a readable imessage command"),
     }
 }
@@ -422,7 +500,23 @@ fn contains(needle: &str) -> String {
     format!("%{needle}%")
 }
 
+/// The `with` terms for `conversations`: a string array (or, forgivingly, one
+/// string), trimmed, blanks dropped.
+fn with_terms(arguments: &Value) -> Vec<String> {
+    let raw: Vec<&str> = match arguments.get("with") {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        _ => Vec::new(),
+    };
+    raw.into_iter().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned).collect()
+}
+
 /// Open chat.db **read-only** and run `query`.
+///
+/// Conversation rows come back with their `participants` as bare handles
+/// (`name: null`); [`read`] resolves the names. When the query carries a `with`
+/// filter, each row also gets an internal `_preview` of its last message, which
+/// [`read`] keeps only when it's needed to tell matches apart.
 fn run_query(path: &Path, query: &ReadQuery) -> anyhow::Result<Vec<Value>> {
     let conn = open_read_only(path)?;
     let mut stmt = conn.prepare(&query.sql)?;
@@ -435,7 +529,178 @@ fn run_query(path: &Path, query: &ReadQuery) -> anyhow::Result<Vec<Value>> {
     if query.chronological {
         out.reverse();
     }
+    if query.conversations {
+        attach_participants(&conn, &mut out, !query.with.is_empty())?;
+    }
     Ok(out)
+}
+
+/// Fill each conversation row's `participants` (the other people in the chat —
+/// chat.db never lists the user themselves) and, when asked, a `_preview`.
+fn attach_participants(conn: &Connection, rows: &mut [Value], previews: bool) -> anyhow::Result<()> {
+    let mut who = conn.prepare(
+        "SELECT h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id
+         WHERE chj.chat_id = ?1 ORDER BY h.id",
+    )?;
+    let mut last = conn.prepare(
+        "SELECT m.is_from_me, m.text, m.attributedBody, h.id FROM message m
+         JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+         LEFT JOIN handle h ON h.ROWID = m.handle_id
+         WHERE cmj.chat_id = ?1 ORDER BY m.date DESC LIMIT 1",
+    )?;
+    for row in rows.iter_mut() {
+        let Some(obj) = row.as_object_mut() else { continue };
+        let Some(chat_rowid) = obj.remove("_rowid").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let handles: Vec<String> = who.query_map([chat_rowid], |r| r.get::<_, String>(0))?.filter_map(Result::ok).collect();
+        obj.insert("is_group".into(), json!(handles.len() > 1));
+        obj.insert(
+            "participants".into(),
+            Value::Array(handles.into_iter().map(|h| json!({"handle": h, "name": Value::Null})).collect()),
+        );
+        if previews {
+            let preview = last
+                .query_row([chat_rowid], |r| {
+                    let from_me: i64 = r.get(0).unwrap_or(0);
+                    let text: Option<String> = r.get(1).unwrap_or(None);
+                    let blob: Option<Vec<u8>> = r.get(2).unwrap_or(None);
+                    let handle: Option<String> = r.get(3).unwrap_or(None);
+                    let body = text.filter(|t| !t.is_empty()).or_else(|| blob.as_deref().and_then(extract_attributed_body));
+                    Ok(json!({
+                        "from": if from_me == 1 { "me".to_owned() } else { handle.unwrap_or_else(|| "unknown".to_owned()) },
+                        "text": body.map(|b| cap_chars(&b, PREVIEW_CHARS)),
+                    }))
+                })
+                .ok();
+            if let Some(p) = preview {
+                obj.insert("_preview".into(), p);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run a read end to end: the SQL, then contact names on every handle, then
+/// (for `conversations`) the `with` filter, the caller's limit, and the
+/// disambiguation previews. `names` maps handles to contact names — the
+/// production caller passes [`crate::contacts::resolve_names`]; tests pass a
+/// fixture. A resolver that knows nobody just leaves names `null`.
+///
+/// # Errors
+/// When chat.db can't be opened or queried.
+pub fn read(path: &Path, query: &ReadQuery, names: &dyn Fn(&[String]) -> HashMap<String, String>) -> anyhow::Result<Vec<Value>> {
+    let mut rows = run_query(path, query)?;
+    let handles = collect_handles(&rows);
+    let book = if handles.is_empty() { HashMap::new() } else { names(&handles) };
+    for row in &mut rows {
+        apply_names(row, &book);
+    }
+    if !query.conversations {
+        return Ok(rows);
+    }
+    if !query.with.is_empty() {
+        rows.retain(|row| chat_matches(row, &query.with));
+    }
+    rows.truncate(query.limit);
+    // A preview is shown only when it earns its privacy cost: a `with` search
+    // that matched MORE than one chat, where the model has to tell them apart.
+    let keep_previews = !query.with.is_empty() && rows.len() > 1;
+    for row in &mut rows {
+        let Some(obj) = row.as_object_mut() else { continue };
+        if let Some(preview) = obj.remove("_preview") {
+            if keep_previews {
+                obj.insert("last_message".into(), preview);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Every distinct sender / participant / preview handle in `rows`.
+fn collect_handles(rows: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |h: Option<&str>| {
+        if let Some(h) = h.filter(|h| !h.is_empty() && *h != "me" && *h != "unknown") {
+            if !out.iter().any(|x| x == h) {
+                out.push(h.to_owned());
+            }
+        }
+    };
+    for row in rows {
+        push(row.get("handle").and_then(Value::as_str));
+        if let Some(ps) = row.get("participants").and_then(Value::as_array) {
+            for p in ps {
+                push(p.get("handle").and_then(Value::as_str));
+            }
+        }
+        push(row.pointer("/_preview/from").and_then(Value::as_str));
+    }
+    out
+}
+
+/// Put contact names on one row: a message's `sender_name`, each participant's
+/// `name`, and a preview's sender.
+fn apply_names(row: &mut Value, book: &HashMap<String, String>) {
+    let Some(obj) = row.as_object_mut() else { return };
+    if obj.contains_key("is_from_me") {
+        let from_me = obj.get("is_from_me").and_then(Value::as_bool).unwrap_or(false);
+        let name = if from_me {
+            None
+        } else {
+            obj.get("handle").and_then(Value::as_str).and_then(|h| book.get(h)).cloned()
+        };
+        obj.insert("sender_name".into(), name.map_or(Value::Null, Value::String));
+    }
+    if let Some(Value::Array(ps)) = obj.get_mut("participants") {
+        for p in ps.iter_mut() {
+            let name = p.get("handle").and_then(Value::as_str).and_then(|h| book.get(h)).cloned();
+            if let (Some(name), Some(p)) = (name, p.as_object_mut()) {
+                p.insert("name".into(), Value::String(name));
+            }
+        }
+    }
+    if let Some(from) = obj.get_mut("_preview").and_then(|p| p.get_mut("from")) {
+        if let Some(name) = from.as_str().and_then(|h| book.get(h)).cloned() {
+            *from = Value::String(name);
+        }
+    }
+}
+
+/// Does a conversation row include every `with` term? A term matches a
+/// participant's name (case-insensitive substring), their handle, or — for a
+/// phone number — the handle's trailing digits; the chat's own display name also
+/// counts, so "Dinner Crew" finds the group by its name.
+fn chat_matches(row: &Value, with: &[String]) -> bool {
+    let chat_name = row.get("name").and_then(Value::as_str).map(str::to_lowercase);
+    let participants: Vec<(String, String)> = row
+        .get("participants")
+        .and_then(Value::as_array)
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    (
+                        p.get("handle").and_then(Value::as_str).unwrap_or_default().to_lowercase(),
+                        p.get("name").and_then(Value::as_str).unwrap_or_default().to_lowercase(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    with.iter().all(|term| {
+        let t = term.to_lowercase();
+        let digits: String = t.chars().filter(char::is_ascii_digit).collect();
+        chat_name.as_deref().is_some_and(|n| n.contains(&t))
+            || participants.iter().any(|(handle, name)| {
+                (!name.is_empty() && name.contains(&t))
+                    || handle.contains(&t)
+                    || (digits.len() >= 7 && {
+                        let hd: String = handle.chars().filter(char::is_ascii_digit).collect();
+                        let tail = &digits[digits.len().saturating_sub(10)..];
+                        hd.ends_with(tail)
+                    })
+            })
+    })
 }
 
 /// A read-only connection to chat.db.
@@ -483,6 +748,8 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "id": id,
         "at": format_apple_date(date),
         "from": if is_from_me == 1 { "me".to_owned() } else { handle.clone().unwrap_or_else(|| "unknown".to_owned()) },
+        // Explicit, so a reader never has to infer "me" from a string (th-592d67).
+        "is_from_me": is_from_me == 1,
         "handle": handle,
         "chat": display_name.filter(|d| !d.is_empty()).or(chat_identifier),
         "service": service,
@@ -501,7 +768,10 @@ fn conversation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let last: i64 = row.get(3).unwrap_or(0);
     let count: i64 = row.get(4).unwrap_or(0);
     let guid: Option<String> = row.get(5).unwrap_or(None);
+    let rowid: Option<i64> = row.get(6).unwrap_or(None);
     Ok(json!({
+        // Internal: keys the participant lookup, removed before output.
+        "_rowid": rowid,
         // The send-addressable GUID: pass it to `send` as `chat` to reach a group.
         "chat": guid,
         // The human identifier (phone/email for a 1:1, `chat123…` for a group).
@@ -511,6 +781,162 @@ fn conversation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "last_message_at": format_apple_date(last),
         "message_count": count,
     }))
+}
+
+// ---- typed reads for in-process callers (the daemon's imessage_watch) -------
+//
+// Same read-only connection, same fixed SELECTs with bound parameters, same
+// body decoding + caps as the tool's reads — just typed, so the watch engine
+// (pearl th-592d67) can poll a thread by ROWID watermark without parsing JSON.
+
+/// One chat, as a watch target resolves to it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChatInfo {
+    /// The send-addressable GUID (`iMessage;+;chat…` / `iMessage;-;+1555…`).
+    pub guid: String,
+    /// The chat identifier (a handle for a 1:1, `chat…` for a group).
+    pub identifier: Option<String>,
+    /// The group's display name, when it has one.
+    pub name: Option<String>,
+    /// The other people's handles (chat.db never lists the user).
+    pub participants: Vec<String>,
+}
+
+/// One message in a chat.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChatMessage {
+    /// chat.db's ROWID — monotonically increasing, so it is the watermark.
+    pub rowid: i64,
+    /// Local ISO-8601 time.
+    pub at: Option<String>,
+    /// Sent by the user (or by Big Smooth from the user's account).
+    pub is_from_me: bool,
+    /// The sender's handle for an inbound message.
+    pub handle: Option<String>,
+    /// The decoded body, capped at the tool's per-message limit.
+    pub text: Option<String>,
+    /// Whether it carried an attachment (never a path).
+    pub has_attachments: bool,
+}
+
+const CHAT_MESSAGE_COLUMNS: &str = "m.ROWID, m.date, m.is_from_me, m.text, m.attributedBody, m.cache_has_attachments, h.id";
+
+const CHAT_MESSAGE_FROM: &str = "FROM message m
+     JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+     JOIN chat c ON c.ROWID = cmj.chat_id
+     LEFT JOIN handle h ON h.ROWID = m.handle_id";
+
+fn chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    let text: Option<String> = row.get(3).unwrap_or(None);
+    let blob: Option<Vec<u8>> = row.get(4).unwrap_or(None);
+    Ok(ChatMessage {
+        rowid: row.get(0)?,
+        at: format_apple_date(row.get(1).unwrap_or(0)),
+        is_from_me: row.get::<_, i64>(2).unwrap_or(0) == 1,
+        text: text
+            .filter(|t| !t.is_empty())
+            .or_else(|| blob.as_deref().and_then(extract_attributed_body))
+            .map(|t| cap_chars(&t, TEXT_CAP)),
+        has_attachments: row.get::<_, i64>(5).unwrap_or(0) == 1,
+        handle: row.get(6).unwrap_or(None),
+    })
+}
+
+/// Resolve a watch target — an exact chat GUID, or the exact handle/identifier
+/// of a chat — to that chat. A handle with both an iMessage and an SMS chat
+/// resolves to the more recently active one. No loose matching: a watch must
+/// name exactly one thread.
+///
+/// # Errors
+/// When chat.db can't be opened or queried.
+pub fn find_chat(path: &Path, target: &str) -> anyhow::Result<Option<ChatInfo>> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let conn = open_read_only(path)?;
+    let found = conn
+        .query_row(
+            "SELECT c.guid, c.chat_identifier, c.display_name, c.ROWID FROM chat c
+             LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+             LEFT JOIN message m ON m.ROWID = cmj.message_id
+             WHERE c.guid = ?1 OR c.chat_identifier = ?1
+             GROUP BY c.ROWID ORDER BY (c.guid = ?1) DESC, MAX(m.date) DESC LIMIT 1",
+            [target],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .map(Some)
+        .or_else(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        })?;
+    let Some((guid, identifier, name, rowid)) = found else { return Ok(None) };
+    let mut stmt = conn.prepare("SELECT h.id FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id WHERE chj.chat_id = ?1 ORDER BY h.id")?;
+    let participants = stmt.query_map([rowid], |r| r.get::<_, String>(0))?.filter_map(Result::ok).collect();
+    Ok(Some(ChatInfo {
+        guid,
+        identifier,
+        name: name.filter(|n| !n.trim().is_empty()),
+        participants,
+    }))
+}
+
+/// Messages in chat `guid` with a ROWID strictly above `after`, oldest first,
+/// at most `limit` — the watch engine's cheap poll.
+///
+/// # Errors
+/// When chat.db can't be opened or queried.
+pub fn chat_messages_after(path: &Path, guid: &str, after: i64, limit: usize) -> anyhow::Result<Vec<ChatMessage>> {
+    let conn = open_read_only(path)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHAT_MESSAGE_COLUMNS} {CHAT_MESSAGE_FROM} WHERE c.guid = ?1 AND m.ROWID > ?2 GROUP BY m.ROWID ORDER BY m.ROWID ASC LIMIT ?3"
+    ))?;
+    let limit = i64::try_from(limit.min(usize::try_from(MAX_LIMIT).unwrap_or(200))).unwrap_or(MAX_LIMIT);
+    let rows = stmt.query_map(rusqlite::params![guid, after, limit], chat_message)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The last `limit` messages in chat `guid`, oldest first — context for a reply.
+///
+/// # Errors
+/// When chat.db can't be opened or queried.
+pub fn chat_recent_messages(path: &Path, guid: &str, limit: usize) -> anyhow::Result<Vec<ChatMessage>> {
+    let conn = open_read_only(path)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHAT_MESSAGE_COLUMNS} {CHAT_MESSAGE_FROM} WHERE c.guid = ?1 GROUP BY m.ROWID ORDER BY m.ROWID DESC LIMIT ?2"
+    ))?;
+    let limit = i64::try_from(limit.min(usize::try_from(MAX_LIMIT).unwrap_or(200))).unwrap_or(MAX_LIMIT);
+    let mut rows = stmt
+        .query_map(rusqlite::params![guid, limit], chat_message)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// The highest message ROWID in chat `guid` (0 for an empty chat) — where a new
+/// watch starts, so it never answers history.
+///
+/// # Errors
+/// When chat.db can't be opened or queried.
+pub fn chat_latest_rowid(path: &Path, guid: &str) -> anyhow::Result<i64> {
+    let conn = open_read_only(path)?;
+    let max: Option<i64> = conn.query_row(
+        "SELECT MAX(m.ROWID) FROM message m JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+         JOIN chat c ON c.ROWID = cmj.chat_id WHERE c.guid = ?1",
+        [guid],
+        |r| r.get(0),
+    )?;
+    Ok(max.unwrap_or(0))
 }
 
 /// Apple/Core Data timestamp → local ISO-8601.
@@ -1146,10 +1572,12 @@ mod tests {
              CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, is_from_me INTEGER, text TEXT,
                                    attributedBody BLOB, cache_has_attachments INTEGER, service TEXT, handle_id INTEGER);
              CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+             CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
 
              INSERT INTO handle VALUES (1, '+15551234567', 'iMessage'), (2, 'friend@example.com', 'iMessage');
              INSERT INTO chat VALUES (1, 'iMessage;-;+15551234567', '+15551234567', '', 'iMessage'),
-                                    (2, 'iMessage;+;chat99', 'chat99', 'Dinner Crew', 'iMessage');",
+                                    (2, 'iMessage;+;chat99', 'chat99', 'Dinner Crew', 'iMessage');
+             INSERT INTO chat_handle_join VALUES (1, 1), (2, 1), (2, 2);",
         )
         .unwrap();
 
@@ -1310,5 +1738,266 @@ mod tests {
         let text = rows[0]["text"].as_str().unwrap();
         assert!(text.ends_with("… [truncated]"), "a huge message must not flood the turn");
         assert!(text.chars().count() < TEXT_CAP + 20);
+    }
+
+    // ---- group lookup: participants, names, GUID reads (pearl th-592d67) ---
+    //
+    // The shape of Brent's real session: an UNNAMED group (empty display_name,
+    // `chat358…` identifier) that only a screenshot's names identify, next to a
+    // second unnamed group that shares one of those people.
+
+    const UNNAMED: &str = "iMessage;+;chat358836017578106964";
+    const OTHER_UNNAMED: &str = "iMessage;+;chat777";
+
+    /// The base fixture plus two unnamed groups: {Alice, Bob} and {Alice, Carol}.
+    fn group_fixture_db(dir: &Path) -> PathBuf {
+        let path = fixture_db(dir);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO handle VALUES (3, '+15550001111', 'iMessage'), (4, '+15550002222', 'iMessage'), (5, '+15550003333', 'iMessage');
+             INSERT INTO chat VALUES (3, '{UNNAMED}', 'chat358836017578106964', '', 'iMessage'),
+                                    (4, '{OTHER_UNNAMED}', 'chat777', NULL, 'iMessage');
+             INSERT INTO chat_handle_join VALUES (3, 3), (3, 4), (4, 3), (4, 5);"
+        ))
+        .unwrap();
+        let base: i64 = 694_224_000_000_000_000 + 300_000_000_000;
+        // (rowid, chat, is_from_me, handle, text)
+        for (i, (id, chat, me, handle, text)) in [
+            (10, 3, 0, 3, "who is this?"),
+            (11, 3, 1, 0, "hi it's Big Smooth"),
+            (12, 4, 0, 5, "lunch tomorrow?"),
+            (13, 3, 0, 4, "lol welcome to the chat"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let date = base + i64::try_from(i).unwrap() * 60_000_000_000;
+            conn.execute(
+                "INSERT INTO message (ROWID, date, is_from_me, text, cache_has_attachments, service, handle_id) VALUES (?1, ?2, ?3, ?4, 0, 'iMessage', ?5)",
+                rusqlite::params![id, date, me, text, handle],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO chat_message_join VALUES (?1, ?2)", rusqlite::params![chat, id])
+                .unwrap();
+        }
+        path
+    }
+
+    /// A stand-in for the user's Contacts.
+    fn book(handles: &[String]) -> HashMap<String, String> {
+        let known = [
+            ("+15550001111", "Alice Adams"),
+            ("+15550002222", "Bob Brown"),
+            ("+15550003333", "Carol Chen"),
+            ("+15551234567", "Mom"),
+        ];
+        handles
+            .iter()
+            .filter_map(|h| known.iter().find(|(k, _)| k == h).map(|(_, n)| (h.clone(), (*n).to_owned())))
+            .collect()
+    }
+
+    /// Contacts unreadable (no Full Disk Access): nobody has a name.
+    fn nobody(_: &[String]) -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn read_with(path: &Path, cmd: &str, args: Value, names: &dyn Fn(&[String]) -> HashMap<String, String>) -> Vec<Value> {
+        read(path, &build_query(cmd, &args).unwrap(), names).unwrap()
+    }
+
+    #[test]
+    fn conversations_list_participants_with_contact_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let rows = read_with(&db, "conversations", json!({}), &book);
+        let unnamed = rows.iter().find(|r| r["chat"] == UNNAMED).unwrap();
+        assert_eq!(unnamed["name"], Value::Null, "an unnamed group has no name…");
+        assert_eq!(unnamed["is_group"], true);
+        let names: Vec<&str> = unnamed["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["Alice Adams", "Bob Brown"], "…but its people are named");
+        assert_eq!(unnamed["participants"][0]["handle"], "+15550001111", "the raw handle stays alongside the name");
+        let one_to_one = rows.iter().find(|r| r["chat"] == "iMessage;-;+15551234567").unwrap();
+        assert_eq!(one_to_one["is_group"], false);
+        assert!(!serde_json::to_string(&rows).unwrap().contains("_rowid"), "internal keys never leak");
+        assert!(rows.iter().all(|r| r.get("last_message").is_none()), "no previews without a `with` search");
+    }
+
+    #[test]
+    fn participant_names_degrade_to_null_without_contacts_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let rows = read_with(&db, "conversations", json!({}), &nobody);
+        let unnamed = rows.iter().find(|r| r["chat"] == UNNAMED).unwrap();
+        assert_eq!(unnamed["participants"][0]["name"], Value::Null);
+        assert_eq!(unnamed["participants"][0]["handle"], "+15550001111", "handles still read");
+        // A `with` by NUMBER still works when names can't be resolved.
+        let by_number = read_with(&db, "conversations", json!({"with": ["(555) 000-2222"]}), &nobody);
+        assert_eq!(by_number.len(), 1);
+        assert_eq!(by_number[0]["chat"], UNNAMED);
+    }
+
+    #[test]
+    fn with_finds_the_unnamed_group_containing_every_listed_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let rows = read_with(&db, "conversations", json!({"with": ["alice", "Bob"]}), &book);
+        assert_eq!(rows.len(), 1, "only the chat with BOTH: {rows:?}");
+        assert_eq!(rows[0]["chat"], UNNAMED);
+        assert!(rows[0].get("last_message").is_none(), "one match needs no preview");
+        // Every term must match — Alice + Carol is the other group, Bob + Carol is nobody.
+        let other = read_with(&db, "conversations", json!({"with": ["Alice", "Carol"]}), &book);
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0]["chat"], OTHER_UNNAMED);
+        assert!(read_with(&db, "conversations", json!({"with": ["Bob", "Carol"]}), &book).is_empty());
+        // A group's display name counts as a match too.
+        let named = read_with(&db, "conversations", json!({"with": "dinner crew"}), &book);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0]["chat"], "iMessage;+;chat99");
+    }
+
+    #[test]
+    fn several_matches_carry_a_short_preview_to_tell_them_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let rows = read_with(&db, "conversations", json!({"with": ["Alice"]}), &book);
+        assert_eq!(rows.len(), 2, "both unnamed groups include Alice: {rows:?}");
+        let unnamed = rows.iter().find(|r| r["chat"] == UNNAMED).unwrap();
+        assert_eq!(unnamed["last_message"]["from"], "Bob Brown", "the preview's sender is named");
+        assert_eq!(unnamed["last_message"]["text"], "lol welcome to the chat");
+        let other = rows.iter().find(|r| r["chat"] == OTHER_UNNAMED).unwrap();
+        assert_eq!(other["last_message"]["text"], "lunch tomorrow?");
+    }
+
+    #[test]
+    fn previews_are_capped_to_a_glance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO message (ROWID, date, is_from_me, text, cache_has_attachments, service, handle_id) VALUES (50, 999224000000000000, 0, ?1, 0, 'iMessage', 5)",
+            [ "long ".repeat(100) ],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO chat_message_join VALUES (4, 50)", []).unwrap();
+        drop(conn);
+        let rows = read_with(&db, "conversations", json!({"with": ["Alice"]}), &book);
+        let other = rows.iter().find(|r| r["chat"] == OTHER_UNNAMED).unwrap();
+        let text = other["last_message"]["text"].as_str().unwrap();
+        assert!(text.chars().count() <= PREVIEW_CHARS + 20, "{text}");
+        assert!(text.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn with_filter_still_honours_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        assert_eq!(read_with(&db, "conversations", json!({"with": ["Alice"], "limit": 1}), &book).len(), 1);
+        let q = build_query("conversations", &json!({"with": ["Alice"]})).unwrap();
+        assert_eq!(q.params, vec![SqlValue::Integer(WITH_SCAN_CAP)], "a name filter scans wider than the output");
+    }
+
+    #[test]
+    fn thread_by_chat_guid_reads_an_unnamed_group_in_order_with_sender_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let rows = read_with(&db, "thread", json!({"chat": UNNAMED}), &book);
+        let ids: Vec<i64> = rows.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![10, 11, 13], "exactly that chat, oldest first");
+        assert_eq!(rows[0]["sender_name"], "Alice Adams");
+        assert_eq!(rows[0]["is_from_me"], false);
+        assert_eq!(rows[0]["handle"], "+15550001111");
+        assert_eq!(rows[1]["is_from_me"], true);
+        assert_eq!(rows[1]["sender_name"], Value::Null, "my own message has no contact name");
+        assert_eq!(rows[2]["sender_name"], "Bob Brown");
+        // An unknown GUID is empty, not an error — and never a loose match.
+        assert!(read_with(&db, "thread", json!({"chat": "iMessage;+;chat3"}), &book).is_empty());
+    }
+
+    #[test]
+    fn thread_takes_chat_or_contact_not_both() {
+        let err = build_query("thread", &json!({"chat": UNNAMED, "contact": "Mom"})).unwrap_err().to_string();
+        assert!(err.contains("not both"), "{err}");
+        let q = build_query("thread", &json!({"chat": "'; DROP TABLE chat; --"})).unwrap();
+        assert!(q.sql.contains("c.guid = ?1") && !q.sql.contains("DROP"), "{}", q.sql);
+    }
+
+    #[test]
+    fn every_message_read_carries_is_from_me_and_sender_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        for (cmd, args) in [
+            ("recent", json!({})),
+            ("search", json!({"query": "welcome"})),
+            ("thread", json!({"contact": "5551234567"})),
+        ] {
+            let rows = read_with(&db, cmd, args, &book);
+            assert!(!rows.is_empty(), "{cmd}");
+            for r in &rows {
+                assert!(r["is_from_me"].is_boolean(), "{cmd}: {r}");
+                assert!(r.get("sender_name").is_some(), "{cmd}: {r}");
+            }
+        }
+        let mom = read_with(&db, "thread", json!({"contact": "5551234567"}), &book);
+        assert_eq!(mom[0]["sender_name"], "Mom");
+    }
+
+    // ---- typed reads for the watch engine ----------------------------------
+
+    #[test]
+    fn find_chat_resolves_a_guid_or_an_exact_handle_and_nothing_loose() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let g = find_chat(&db, UNNAMED).unwrap().unwrap();
+        assert_eq!(g.guid, UNNAMED);
+        assert_eq!(g.name, None, "an empty display name is no name");
+        assert_eq!(g.participants, vec!["+15550001111".to_owned(), "+15550002222".to_owned()]);
+        let one = find_chat(&db, "+15551234567").unwrap().unwrap();
+        assert_eq!(one.guid, "iMessage;-;+15551234567", "an exact handle resolves to its 1:1 chat");
+        let named = find_chat(&db, "iMessage;+;chat99").unwrap().unwrap();
+        assert_eq!(named.name.as_deref(), Some("Dinner Crew"));
+        for loose in ["Dinner", "5551234567", "chat3", "", "  "] {
+            assert!(find_chat(&db, loose).unwrap().is_none(), "{loose:?} must not loosely match");
+        }
+    }
+
+    #[test]
+    fn chat_messages_after_polls_by_rowid_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let all = chat_messages_after(&db, UNNAMED, 0, 50).unwrap();
+        assert_eq!(all.iter().map(|m| m.rowid).collect::<Vec<_>>(), vec![10, 11, 13]);
+        assert!(all[1].is_from_me);
+        assert_eq!(all[0].handle.as_deref(), Some("+15550001111"));
+        assert_eq!(all[2].text.as_deref(), Some("lol welcome to the chat"));
+        let after = chat_messages_after(&db, UNNAMED, 11, 50).unwrap();
+        assert_eq!(after.iter().map(|m| m.rowid).collect::<Vec<_>>(), vec![13], "strictly above the watermark");
+        assert!(chat_messages_after(&db, UNNAMED, 13, 50).unwrap().is_empty());
+        assert_eq!(chat_messages_after(&db, UNNAMED, 0, 1).unwrap().len(), 1, "limited");
+        assert!(chat_messages_after(&db, "iMessage;+;nope", 0, 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_recent_messages_and_latest_rowid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = group_fixture_db(dir.path());
+        let last_two = chat_recent_messages(&db, UNNAMED, 2).unwrap();
+        assert_eq!(last_two.iter().map(|m| m.rowid).collect::<Vec<_>>(), vec![11, 13], "the LAST n, oldest first");
+        assert_eq!(chat_latest_rowid(&db, UNNAMED).unwrap(), 13);
+        assert_eq!(chat_latest_rowid(&db, "iMessage;+;nope").unwrap(), 0);
+    }
+
+    #[test]
+    fn send_succeeded_only_counts_the_success_shape() {
+        assert!(send_succeeded(r#"{"sent":true,"chat":"x"}"#));
+        assert!(!send_succeeded(r#"{"sent":false}"#));
+        assert!(!send_succeeded("No existing group chat matches `x`, so nothing was sent."));
+        assert!(!send_succeeded("Sending to group x failed."));
+        assert!(!send_succeeded(""));
     }
 }
