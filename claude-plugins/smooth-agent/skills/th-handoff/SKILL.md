@@ -63,6 +63,11 @@ Then give the user:
     - Codex: `cd <main checkout> && codex '$th-handoff resume <pearl>'`
     - OpenCode: `cd <main checkout> && opencode --prompt "Use the th-handoff skill to resume <pearl>"`
     - `th code` and any harness with no prompt argument: open it in the main checkout and run `/th-handoff resume <pearl>`, or the plain prompt `th pearls show <pearl> --handoff and continue`;
+- the other option, staying in this window: clear the conversation, then resume. Only offer it when this session has no in-process workers still running, because clearing kills them. Give the steps for the harness they're in now:
+    - Claude Code: `/clear`, then `/th-handoff resume <pearl>`. Alternatively, `/th-clear` arms the pearl so that after `/clear` any message (e.g. "go") resumes it without retyping the id;
+    - Codex: `/new`, then `$th-handoff resume <pearl>`;
+    - OpenCode: `/new`, then `Use the th-handoff skill to resume <pearl>`;
+    - Gemini CLI and `th code`: `/clear`, then `/th-handoff resume <pearl>` (or the plain prompt `th pearls show <pearl> --handoff and continue`);
 - anything they must do before or right after switching, such as an expired login;
 - whether it is safe to close this session yet, which it isn't until every worker has confirmed its push.
 
