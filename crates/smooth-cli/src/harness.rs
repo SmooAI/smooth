@@ -610,9 +610,13 @@ fn claude_plugin_step(home: &Path) {
         return;
     }
     if claude_plugin_cache(home).is_some() {
-        run_step("plugin", "claude", &["plugin", "update", "smooth-agent@smooth"]);
+        for (label, args) in claude_update_steps() {
+            // From $HOME: run inside a checkout with a project-scope pin, an
+            // unscoped update bumps that pin instead of the user install.
+            run_step_in(label, "claude", args, Some(home));
+        }
         // A project-scoped pin shadows the user install for every session
-        // started in that checkout, and the update above never touches it.
+        // started in that checkout, and the user-scope update never touches it.
         for pin in crate::harness_doctor::stale_project_pins(home) {
             match Command::new("claude")
                 .args(["plugin", "update", "smooth-agent@smooth", "--scope", "project"])
@@ -636,8 +640,30 @@ fn claude_plugin_step(home: &Path) {
     }
 }
 
+/// The `claude` commands that bring the user-scope smooth-agent install up
+/// to date, in order: refresh the marketplace clone first (otherwise the
+/// update resolves against a stale copy and reports the old version), then
+/// update the USER scope explicitly — an unscoped update picks whichever
+/// scope applies to the cwd.
+#[must_use]
+pub fn claude_update_steps() -> [(&'static str, &'static [&'static str]); 2] {
+    [
+        ("marketplace", &["plugin", "marketplace", "update", "smooth"]),
+        ("plugin", &["plugin", "update", "smooth-agent@smooth", "--scope", "user"]),
+    ]
+}
+
 fn run_step(label: &str, bin: &str, args: &[&str]) {
-    match Command::new(bin).args(args).output() {
+    run_step_in(label, bin, args, None);
+}
+
+fn run_step_in(label: &str, bin: &str, args: &[&str], cwd: Option<&Path>) {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        cmd.current_dir(dir);
+    }
+    match cmd.output() {
         Ok(out) if out.status.success() => println!("   {label}: {} {}", bin, args.join(" ")),
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -1101,6 +1127,26 @@ mod tests {
             package_root(tmp.path()).unwrap().ends_with("marketplaces/smooth/claude-plugins/smooth-agent"),
             "falls back"
         );
+    }
+
+    #[test]
+    fn claude_update_refreshes_the_marketplace_then_updates_user_scope() {
+        let steps = claude_update_steps();
+        assert_eq!(steps[0].1, &["plugin", "marketplace", "update", "smooth"], "marketplace refresh comes first");
+        let update = steps[1].1;
+        assert_eq!(&update[..3], &["plugin", "update", "smooth-agent@smooth"]);
+        assert!(update.windows(2).any(|w| w == ["--scope", "user"]), "user scope is explicit: {update:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_step_in_runs_in_the_given_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("cwd.txt");
+        let script = format!("pwd > '{}'", out.display());
+        run_step_in("probe", "sh", &["-c", &script], Some(tmp.path()));
+        let got = std::fs::canonicalize(std::fs::read_to_string(&out).unwrap().trim()).unwrap();
+        assert_eq!(got, std::fs::canonicalize(tmp.path()).unwrap());
     }
 
     #[test]
