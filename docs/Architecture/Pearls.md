@@ -128,6 +128,42 @@ project's root, not the worktree's.
 `th pearls prime --in-progress --cwd .` as `additionalContext`. Both are
 silent no-ops without `th`, a store, or a match.
 
+## Context budget and `/th-clear` (SMOODEV-3759)
+
+`/th-clear` is a handoff that continues in the **same terminal** with a fresh
+context. A plugin can't clear its own harness, so it arms a one-shot resume
+that the user's `/clear` triggers:
+
+1. The `th-clear` skill does the th-handoff checkpoint, then
+   `th harness handoff arm --pearl <id> --harness claude-code`. That writes a
+   token to `~/.smooth/handoff/armed/<cwd-hash>-<harness-pid>.json`
+   (`$SMOOTH_HOME` respected) with a 15-minute expiry. The harness PID
+   (`CLAUDE_PID`, else a process-tree walk to the `claude` process) stays the
+   same across `/clear` and tells two terminals in one checkout apart.
+2. The user types `/clear`. The `SessionStart` hook (matcher `clear|startup`)
+   runs `th harness handoff claim`. It takes the token by atomic rename (one
+   claimer wins), re-checkpoints each pearl with the **new** session id (so the
+   compact/resume hooks keep matching it in a primary checkout) and injects the
+   rendered handoff. With no token it prints nothing: a plain `/clear` is
+   untouched. `compact`/`resume` never claim.
+3. The first message after `/clear` (e.g. "go") starts the fresh session on it.
+
+A fresh launch (`startup`) in the same directory claims too, but only when
+exactly one token is armed there. `th harness handoff list` / `disarm` inspect
+and drop tokens.
+
+**Budget.** `th harness budget` runs on `UserPromptSubmit`, `PostToolUse` and
+`Stop`. It reads the context size from the last main-thread assistant `usage`
+in `transcript_path` (input + cache-creation + cache-read tokens) and, once
+per session (state in `~/.smooth/handoff/budget/<session>.json`):
+
+| Setting                       | Default | Effect                                                                                                                 |
+| ----------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `harness.context_budget_warn` | 220000  | one context nudge to wrap up and run th-clear                                                                          |
+| `harness.context_budget`      | 250000  | one mid-turn note, then **blocks the Stop once** (`decision: block`) so the agent runs th-clear before ending its turn |
+
+`0` disables either. Set with `th settings set harness.context_budget <n>`.
+
 ## Diver: the lifecycle wrapper
 
 The pearl store is a passive CRUD surface. The [[The-Cast#Diver|Diver]] cast member wraps it with lifecycle semantics:
