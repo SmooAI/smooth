@@ -6,6 +6,12 @@ import Foundation
 enum StoreEffect: Equatable {
     /// Raw PTY bytes for an attached session → the terminal surface.
     case output(id: String, data: Data)
+    /// th-c61966: a complete `flow.replay` — start the session's terminal over
+    /// (screen, history, modes) before the snapshot's bytes arrive as `.output`.
+    case reset(id: String, cols: Int, rows: Int)
+    /// th-c61966: the replay stream broke (a gap, a malformed part, too much
+    /// output held): re-send `flow.attach` for a fresh replay.
+    case resync(id: String)
     /// A session newly needs a human (permission / question / limit / held / crashed).
     case attention(Session)
     /// A session just reached `done` or `dead`.
@@ -55,6 +61,10 @@ final class FlowStore: ObservableObject {
     /// The harnesses a picker offers (th-0f6126): the engine's order, hidden
     /// ones already dropped. From `flow.hello`, replaced by `flow.harnesses`.
     @Published private(set) var harnesses: [HarnessInfo] = []
+    /// The engine advertised `replay` in `flow.hello` (Client Spec §10).
+    private(set) var engineReplays = false
+    /// Per attached session: the ordering of its output around replays.
+    private var replayOrders: [String: ReplayOrder] = [:]
 
     var ordered: [Session] { order.compactMap { sessions[$0] } }
     var focused: Session? { focusedId.flatMap { sessions[$0] } }
@@ -104,11 +114,36 @@ final class FlowStore: ObservableObject {
         return (f, (fanOutCandidates[fid] ?? []).compactMap { sessions[$0] })
     }
 
+    /// The client is about to send `flow.attach` for `id`: start its replay
+    /// ordering over. Returns whether the attach asks for a replay.
+    func willAttach(_ id: String) -> Bool {
+        replayOrders[id] = ReplayOrder(expectReplay: engineReplays)
+        return engineReplays
+    }
+
+    /// One output or replay frame through the session's ordering (Client Spec
+    /// §10). Output for a session never attached here streams in arrival order.
+    private func stream(_ id: String, _ frame: ReplayOrder.Frame) -> [StoreEffect] {
+        var order = replayOrders[id] ?? ReplayOrder(expectReplay: false)
+        let actions = order.onFrame(frame)
+        replayOrders[id] = order
+        return actions.compactMap { a -> StoreEffect? in
+            switch a {
+            case let .reset(cols, rows): .reset(id: id, cols: cols, rows: rows)
+            case let .write(data): data.isEmpty ? nil : .output(id: id, data: data)
+            case .resync: .resync(id: id)
+            }
+        }
+    }
+
     @discardableResult
     func apply(_ frame: FlowFrame) -> [StoreEffect] {
         switch frame {
-        case let .hello(daemon, list, harnessList):
+        case let .hello(daemon, list, harnessList, capabilities):
             connection = .connected(daemon)
+            engineReplays = capabilities.contains("replay")
+            // A new connection has no attachments: every surface attaches again.
+            replayOrders = [:]
             harnesses = HarnessOrdering.visible(harnessList)
             sessions = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
             order = list.map(\.id)
@@ -131,14 +166,19 @@ final class FlowStore: ObservableObject {
         case let .sessionRemoved(id):
             sessions[id] = nil
             events[id] = nil
+            replayOrders[id] = nil
             order.removeAll { $0 == id }
             for (fid, ids) in fanOutCandidates { fanOutCandidates[fid] = ids.filter { $0 != id } }
             if focusedId == id { focusedId = order.first }
             return []
 
-        case let .output(id, _, data):
-            guard sessions[id] != nil, !data.isEmpty else { return [] }
-            return [.output(id: id, data: data)]
+        case let .output(id, seq, data):
+            guard sessions[id] != nil else { return [] }
+            return stream(id, .output(seq: seq, data: data))
+
+        case let .replay(id, seq, cols, rows, part, parts, data):
+            guard sessions[id] != nil else { return [] }
+            return stream(id, .replay(seq: seq, cols: cols, rows: rows, part: part ?? 0, parts: parts ?? 1, data: data))
 
         case let .screen(id, _, _, text):
             return sessions[id] != nil ? [.screen(id: id, text: text)] : []

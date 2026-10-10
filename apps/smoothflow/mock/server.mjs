@@ -8,11 +8,25 @@
 // Serves flow.hello with the wireframe's fixture fleet, echoes flow.input back
 // as flow.output, answers flow.approve / flow.kill / flow.new / flow.fanout.*,
 // and flips states on a timer so the inbox has something to show.
+//
+// Replay (th-7e46cd, protocol.md `flow.replay`): hello advertises `replay`, and
+// an attach with `replay: true` opens with a `flow.replay` (the session's
+// transcript, current through its `seq`), followed by one STALE `flow.output`
+// (seq = the replay's, drawn in red) a correct client drops. Covered output can
+// also arrive before the replay. `seq` is per session. Fixtures run on the
+// `pty` host except `fs-shell001` (`tmux`: an empty replay, then a redraw).
+//   MOCK_NO_REPLAY=1            behave like an engine without the capability
+//   MOCK_REPLAY_PART_BYTES=N    chunk replays into N-byte parts (the relay's
+//                               phone path; 16384 there)
 
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 
 const PORT = Number(process.argv[2] || process.env.PORT || 8790);
+const REPLAY = process.env.MOCK_NO_REPLAY !== '1';
+const REPLAY_PART_BYTES = Number(process.env.MOCK_REPLAY_PART_BYTES || 0);
+// What a session's transcript (the mock's stand-in for a VT snapshot) keeps.
+const TRANSCRIPT_MAX_BYTES = 256 * 1024;
 const now = () => new Date().toISOString();
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 
@@ -29,6 +43,7 @@ const mk = (id, o) => ({
     agent_session_id: '7f3a1c2e-0000-4000-8000-' + id.padEnd(12, '0'),
     argv: ['claude', '--resume', '7f3a'],
     tmux_session: `sf-${id}`,
+    host: 'pty',
     pid: 40000 + Math.floor(Math.random() * 999),
     state: 'working',
     attention: null,
@@ -89,6 +104,8 @@ const seed = [
     mk('fs-shell001', {
         kind: 'shell',
         title: 'zsh · smoo-hub ssh',
+        // The one tmux-host fixture: empty replay, then a redraw.
+        host: 'tmux',
         argv: ['zsh'],
         worktree: HOME,
         project: '',
@@ -161,7 +178,14 @@ const handoff = (s) => ({
 });
 
 // ---------- websocket plumbing ----------
-const clients = new Set(); // { socket, attached: Set<id>, seq: Map }
+const clients = new Set(); // { socket, attached: Set<id>, replays: Set<id> (attached with replay:true) }
+// Per session: the output seq (a property of the session, not the client) and
+// the transcript every replay is built from.
+const streams = new Map(); // id -> { seq, transcript: Buffer }
+const streamOf = (id) => {
+    if (!streams.has(id)) streams.set(id, { seq: 0, transcript: Buffer.alloc(0) });
+    return streams.get(id);
+};
 
 function frame(json) {
     const payload = Buffer.from(JSON.stringify(json));
@@ -195,12 +219,37 @@ function sessionChanged(s, extra = {}) {
     if (s.attention) broadcast({ type: 'flow.attention', id: s.id, attention: s.attention });
 }
 function output(id, text) {
-    for (const c of clients) {
-        if (!c.attached.has(id)) continue;
-        const seq = (c.seq.get(id) || 0) + 1;
-        c.seq.set(id, seq);
-        send(c, { type: 'flow.output', id, seq, data_b64: b64(text) });
-    }
+    const st = streamOf(id);
+    st.seq += 1;
+    const bytes = Buffer.from(text, 'utf8');
+    st.transcript = Buffer.concat([st.transcript, bytes]);
+    if (st.transcript.length > TRANSCRIPT_MAX_BYTES) st.transcript = st.transcript.subarray(st.transcript.length - TRANSCRIPT_MAX_BYTES);
+    for (const c of clients) if (c.attached.has(id)) send(c, { type: 'flow.output', id, seq: st.seq, data_b64: bytes.toString('base64') });
+}
+// `flow.replay` to one client: the transcript through the session's seq
+// (empty on the tmux host), in REPLAY_PART_BYTES parts when set.
+function sendReplay(c, s, reason) {
+    const st = streamOf(s.id);
+    const data = s.host === 'tmux' ? Buffer.alloc(0) : st.transcript;
+    const g = s.geometry || { cols: 80, rows: 24 };
+    const base = { type: 'flow.replay', id: s.id, cols: g.cols, rows: g.rows, seq: st.seq, reason };
+    if (!REPLAY_PART_BYTES || data.length <= REPLAY_PART_BYTES) return send(c, { ...base, data_b64: data.toString('base64') });
+    const parts = Math.ceil(data.length / REPLAY_PART_BYTES);
+    for (let part = 0; part < parts; part++)
+        send(c, { ...base, part, parts, data_b64: data.subarray(part * REPLAY_PART_BYTES, (part + 1) * REPLAY_PART_BYTES).toString('base64') });
+}
+// A replay to every client attached to `s` with replay:true (resize, new host).
+function replayAll(s, reason) {
+    for (const c of clients) if (c.attached.has(s.id) && c.replays.has(s.id)) sendReplay(c, s, reason);
+}
+// What a session shows the first time anyone attaches.
+function seedScreen(s, m) {
+    output(
+        s.id,
+        `\x1b[36m▐ SmoothFlow mock · ${s.pearl_id || s.title} · ${m.cols}x${m.rows}\x1b[0m\r\n$ cargo test -p smooth-pearls\r\n running 84 tests … \x1b[32mok\x1b[0m\r\n`,
+    );
+    if (s.attention?.reason === 'permission')
+        output(s.id, `\x1b[33m● Bash(${s.attention.detail.command})\x1b[0m\r\n┌ Allow this command?\r\n│ [a] allow [d] deny [w] allow for session\r\n└ \r\n`);
 }
 
 function parseFrames(c, buf) {
@@ -259,20 +308,43 @@ function handle(c, m) {
     switch (m.type) {
         case 'flow.attach': {
             if (!s) return send(c, { type: 'flow.error', ref: null, code: 'not_found', message: `no session ${m.id}` });
+            // Subscribe first, then snapshot (engine rule 1): seeding a fresh
+            // session's screen reaches this client as output the replay covers.
             c.attached.add(m.id);
-            output(
-                m.id,
-                `\x1b[36m▐ SmoothFlow mock · ${s.pearl_id || s.title} · ${m.cols}x${m.rows}\x1b[0m\r\n$ cargo test -p smooth-pearls\r\n running 84 tests … \x1b[32mok\x1b[0m\r\n`,
-            );
-            if (s.attention?.reason === 'permission')
-                output(
-                    m.id,
-                    `\x1b[33m● Bash(${s.attention.detail.command})\x1b[0m\r\n┌ Allow this command?\r\n│ [a] allow [d] deny [w] allow for session\r\n└ \r\n`,
-                );
+            const wantsReplay = REPLAY && m.replay === true;
+            if (wantsReplay) c.replays.add(m.id);
+            else c.replays.delete(m.id);
+            if (m.cols && m.rows) s.geometry = { cols: m.cols, rows: m.rows };
+            const st = streamOf(s.id);
+            if (st.seq === 0) seedScreen(s, m);
+            if (s.host === 'tmux') {
+                // Rule 6: an empty replay, then a forced redraw as newer output.
+                if (wantsReplay) sendReplay(c, s, 'attach');
+                st.seq += 1;
+                send(c, {
+                    type: 'flow.output',
+                    id: s.id,
+                    seq: st.seq,
+                    data_b64: Buffer.concat([Buffer.from('\x1b[H\x1b[2J'), st.transcript]).toString('base64'),
+                });
+            } else if (wantsReplay) {
+                sendReplay(c, s, 'attach');
+                // A stale output (seq = the replay's): a correct client drops it.
+                send(c, { type: 'flow.output', id: s.id, seq: st.seq, data_b64: b64('\x1b[31m[stale: this client ignored the replay seq]\x1b[0m\r\n') });
+            } else {
+                // Rule 5, a legacy attach: the snapshot as one output, after a reset.
+                send(c, {
+                    type: 'flow.output',
+                    id: s.id,
+                    seq: st.seq,
+                    data_b64: Buffer.concat([Buffer.from('\x1bc\x1b[3J'), st.transcript]).toString('base64'),
+                });
+            }
             return;
         }
         case 'flow.detach':
             c.attached.delete(m.id);
+            c.replays.delete(m.id);
             return;
         case 'flow.input': {
             if (!s) return;
@@ -283,7 +355,11 @@ function handle(c, m) {
             return;
         }
         case 'flow.resize':
+            if (!s) return;
+            if (m.cols && m.rows) s.geometry = { cols: m.cols, rows: m.rows };
             output(m.id, `\r\n\x1b[90m[resized to ${m.cols}x${m.rows}]\x1b[0m\r\n`);
+            // Rule 3: every resize brings a replay at the new size.
+            if (s.host !== 'tmux') replayAll(s, 'resize');
             return;
         case 'flow.snapshot':
             if (s) send(c, { type: 'flow.screen', id: s.id, cols: 80, rows: 24, text: `$ (snapshot of ${s.id})` });
@@ -312,11 +388,14 @@ function handle(c, m) {
                 s,
                 m.resume ? { state: 'starting', attention: null, pid: 50000 + counter++ } : { state: 'dead', attention: null, exit_code: 137, ended_at: now() },
             );
-            if (m.resume)
+            if (m.resume) {
+                // Rule 4: the session moved to a new host process.
+                if (s.host !== 'tmux') replayAll(s, 'host');
                 setTimeout(() => {
                     output(s.id, '$ claude --resume ' + s.agent_session_id.slice(0, 8) + '\r\n');
                     sessionChanged(s, { state: 'working' });
                 }, 1500);
+            }
             return;
         }
         case 'flow.mark_read':
@@ -611,14 +690,20 @@ server.on('upgrade', (req, socket) => {
         .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
         .digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-    const c = { socket, attached: new Set(), seq: new Map(), buf: null };
+    const c = { socket, attached: new Set(), replays: new Set(), buf: null };
     clients.add(c);
     socket.on('data', (d) => parseFrames(c, d));
     socket.on('close', () => clients.delete(c));
     socket.on('error', () => clients.delete(c));
-    send(c, { type: 'flow.hello', daemon: { version: 'mock-0.1', machine_label: 'mock', home: '/Users/mock' }, sessions: [...sessions.values()] });
+    send(c, {
+        type: 'flow.hello',
+        daemon: { version: 'mock-0.1', machine_label: 'mock', home: '/Users/mock' },
+        sessions: [...sessions.values()],
+        ...(REPLAY ? { capabilities: ['replay'] } : {}),
+    });
     for (const [fid, f] of fanOuts)
         send(c, { type: 'flow.fanout', fan_out: f, candidates: (fanOutCandidates.get(fid) || []).map((id) => sessions.get(id)).filter(Boolean) });
 });
 
-server.listen(PORT, '127.0.0.1', () => console.log(`mock flow engine on ws://127.0.0.1:${PORT}/api/flow/ws`));
+// Port 0 picks a free one; the line says which (the tests read it).
+server.listen(PORT, '127.0.0.1', () => console.log(`mock flow engine on ws://127.0.0.1:${server.address().port}/api/flow/ws`));

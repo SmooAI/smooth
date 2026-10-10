@@ -263,9 +263,10 @@ control.
       `host` is `pty`, discard the replies your terminal generates to DA,
       DSR and similar queries, and never send them as `flow.input`: the
       session host already answered, and a second answer reaches the program
-      as stray input. SmoothFlow Desktop and the phones answer them today;
-      they must stop for `pty` sessions. `tmux` sessions, and rows with no
-      `host`, keep today's behaviour.
+      as stray input. SmoothFlow for Mac (ghostty's `MANUAL_MIRROR` surface
+      mode) and SmoothFlow Desktop stop for `pty` sessions (th-7e46cd); the
+      phones still answer them and must stop too. `tmux` sessions, and rows
+      with no `host`, keep today's behaviour.
     - Against an engine without the capability, expect no replay: apply
       output in arrival order, as before. A `flow.replay` that arrives anyway
       is honoured.
@@ -383,6 +384,16 @@ control.
   replay, and phones get it in ≤16 KiB parts that render only once complete.
   New vector file `replay.json`; the others are unchanged. Spec only so far
   (th-c61966, epic th-ce4f88); every client implements it in th-cbb0af.
+
+- 2026-10-05: SmoothFlow for Mac and SmoothFlow Desktop consume `flow.replay`
+  (th-7e46cd): they attach with `replay: true` only when `flow.hello`
+  advertises it, order output with `ReplayOrder` (the Mac's Swift twin
+  passes `replay.json`), reset the terminal on every complete replay,
+  re-attach on a gap, and drop their own DA/DSR replies for `pty` sessions.
+  The mock serves the §12 replay fixture: per-session `seq`, `host` on every
+  row, covered output before the replay and a stale one after it, an empty
+  replay plus redraw for its tmux fixture, and parts under
+  `MOCK_REPLAY_PART_BYTES`. No rule in §10 changed.
 
 ## 14. Diff
 

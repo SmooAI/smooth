@@ -64,6 +64,9 @@ struct Session: Codable, Equatable, Identifiable {
     var agentSessionId: String?
     var argv: [String]
     var tmuxSession: String?
+    /// `pty` | `tmux`: the session host (Client Spec §3). nil from an engine
+    /// that predates the field, which means tmux.
+    var host: String?
     var pid: Int?
     var state: SessionState
     var attention: Attention?
@@ -75,17 +78,17 @@ struct Session: Codable, Equatable, Identifiable {
     var unread: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread
+        case id, kind, title, project, worktree, branch, argv, host, pid, state, attention, unread
         case pearlId = "pearl_id", agentSessionId = "agent_session_id", tmuxSession = "tmux_session"
         case fanOutId = "fan_out_id", createdAt = "created_at", updatedAt = "updated_at", endedAt = "ended_at", exitCode = "exit_code"
     }
 
     init(id: String, kind: String = "claude", title: String = "", project: String = "", worktree: String = "", branch: String? = nil,
-         pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, pid: Int? = nil,
+         pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, host: String? = nil, pid: Int? = nil,
          state: SessionState = .idle, attention: Attention? = nil, fanOutId: String? = nil, createdAt: String = "", updatedAt: String = "",
          endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false) {
         self.id = id; self.kind = kind; self.title = title; self.project = project; self.worktree = worktree; self.branch = branch
-        self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.pid = pid
+        self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.host = host; self.pid = pid
         self.state = state; self.attention = attention; self.fanOutId = fanOutId; self.createdAt = createdAt; self.updatedAt = updatedAt
         self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread
     }
@@ -110,6 +113,7 @@ struct Session: Codable, Equatable, Identifiable {
             argv = []
         }
         tmuxSession = try c.decodeIfPresent(String.self, forKey: .tmuxSession)
+        host = try c.decodeIfPresent(String.self, forKey: .host)
         pid = try c.decodeIfPresent(Int.self, forKey: .pid)
         state = try c.decodeIfPresent(SessionState.self, forKey: .state) ?? .unknown
         attention = try c.decodeIfPresent(Attention.self, forKey: .attention)
@@ -344,12 +348,17 @@ struct FlowEvent: Codable, Equatable, Identifiable {
 
 /// Engine → client.
 enum FlowFrame: Equatable {
-    case hello(daemon: DaemonInfo, sessions: [Session], harnesses: [HarnessInfo] = [])
+    /// `capabilities` (th-c61966): optional protocol features; `replay` means a
+    /// `replay: true` attach opens with `flow.replay`. Empty from older engines.
+    case hello(daemon: DaemonInfo, sessions: [Session], harnesses: [HarnessInfo] = [], capabilities: [String] = [])
     /// Additive (th-0f6126): the visible harness list changed.
     case harnesses([HarnessInfo])
     case session(Session)
     case sessionRemoved(id: String)
     case output(id: String, seq: UInt64, data: Data)
+    /// th-c61966: a VT snapshot current through `seq`, or one part (`part` of
+    /// `parts`, both nil when unchunked) of a chunked one. Client Spec §10.
+    case replay(id: String, seq: UInt64, cols: Int, rows: Int, part: Int?, parts: Int?, data: Data)
     case screen(id: String, cols: Int, rows: Int, text: String)
     case attention(id: String, attention: Attention?)
     case fanout(FanOut, candidates: [Session])
@@ -388,7 +397,8 @@ enum FlowFrame: Equatable {
             case "flow.hello":
                 frame = .hello(daemon: try c.decodeIfPresent(DaemonInfo.self, forKey: Key("daemon")) ?? DaemonInfo(version: "?", machineLabel: ""),
                                sessions: try c.decodeIfPresent([Session].self, forKey: Key("sessions")) ?? [],
-                               harnesses: (try? c.decodeIfPresent([HarnessInfo].self, forKey: Key("harnesses"))) ?? [])
+                               harnesses: (try? c.decodeIfPresent([HarnessInfo].self, forKey: Key("harnesses"))) ?? [],
+                               capabilities: (try? c.decodeIfPresent([String].self, forKey: Key("capabilities"))) ?? [])
             case "flow.harnesses":
                 frame = .harnesses((try? c.decodeIfPresent([HarnessInfo].self, forKey: Key("harnesses"))) ?? [])
             case "flow.session":
@@ -399,6 +409,16 @@ enum FlowFrame: Equatable {
                 let b64 = try c.decodeIfPresent(String.self, forKey: Key("data_b64")) ?? ""
                 frame = .output(id: try c.decode(String.self, forKey: Key("id")),
                                 seq: try c.decodeIfPresent(UInt64.self, forKey: Key("seq")) ?? 0,
+                                data: Data(base64Encoded: b64) ?? Data())
+            case "flow.replay":
+                // An empty snapshot is still a replay (a tmux-host session).
+                let b64 = try c.decodeIfPresent(String.self, forKey: Key("data_b64")) ?? ""
+                frame = .replay(id: try c.decode(String.self, forKey: Key("id")),
+                                seq: try c.decodeIfPresent(UInt64.self, forKey: Key("seq")) ?? 0,
+                                cols: try c.decode(Int.self, forKey: Key("cols")),
+                                rows: try c.decode(Int.self, forKey: Key("rows")),
+                                part: try c.decodeIfPresent(Int.self, forKey: Key("part")),
+                                parts: try c.decodeIfPresent(Int.self, forKey: Key("parts")),
                                 data: Data(base64Encoded: b64) ?? Data())
             case "flow.screen":
                 frame = .screen(id: try c.decode(String.self, forKey: Key("id")),
@@ -443,7 +463,9 @@ enum FlowFrame: Equatable {
 enum ClientFrame: Equatable {
     /// Sent once per connection so the engine knows who is looking.
     case hello(client: String, version: String)
-    case attach(id: String, cols: Int, rows: Int)
+    /// `replay` asks for a `flow.replay` first (th-c61966); send it only to an
+    /// engine whose `flow.hello` advertised the capability.
+    case attach(id: String, cols: Int, rows: Int, replay: Bool = false)
     case detach(id: String)
     case input(id: String, data: Data)
     case resize(id: String, cols: Int, rows: Int)
@@ -493,7 +515,8 @@ enum ClientFrame: Equatable {
     var fields: [String: Any] {
         switch self {
         case let .hello(client, version): ["client": client, "version": version]
-        case let .attach(id, cols, rows): ["id": id, "cols": cols, "rows": rows]
+        case let .attach(id, cols, rows, replay):
+            replay ? ["id": id, "cols": cols, "rows": rows, "replay": true] : ["id": id, "cols": cols, "rows": rows]
         case let .detach(id): ["id": id]
         case let .input(id, data): ["id": id, "data_b64": data.base64EncodedString()]
         case let .resize(id, cols, rows): ["id": id, "cols": cols, "rows": rows]

@@ -15,6 +15,9 @@ use crate::diff::{base_str, Payload};
 pub struct Row {
     pub session: Session,
     pub attention: Option<Attention>,
+    /// `pty` | `tmux`: which session host runs it (spec §3). `None` from an
+    /// engine that predates the field, which means tmux.
+    pub host: Option<String>,
 }
 
 impl Row {
@@ -22,7 +25,15 @@ impl Row {
         Some(Self {
             session: serde_json::from_value(v.clone()).ok()?,
             attention: v.get("attention").and_then(|a| serde_json::from_value(a.clone()).ok()),
+            host: v.get("host").and_then(Value::as_str).map(str::to_string),
         })
+    }
+
+    /// The engine-owned PTY host answers terminal queries itself (spec §10),
+    /// so this client must not answer them too.
+    #[must_use]
+    pub fn host_answers_queries(&self) -> bool {
+        self.host.as_deref() == Some("pty")
     }
 }
 
@@ -35,12 +46,15 @@ fn harnesses(v: Option<&Value>) -> Option<Vec<Harness>> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inbound {
     /// `home` is the daemon's `$HOME` when it says (th-89eb13); `harnesses`
-    /// is `None` from a daemon that predates the list.
+    /// is `None` from a daemon that predates the list. `replay`: the engine
+    /// advertises the `replay` capability (th-c61966), so a `replay: true`
+    /// attach opens with a `flow.replay`.
     Hello {
         machine: String,
         home: Option<String>,
         sessions: Vec<Row>,
         harnesses: Option<Vec<Harness>>,
+        replay: bool,
     },
     Session(Row),
     Removed(String),
@@ -54,6 +68,17 @@ pub enum Inbound {
     Output {
         id: String,
         seq: u64,
+        bytes: Vec<u8>,
+    },
+    /// `flow.replay` (spec §10): a VT snapshot current through `seq`, or one
+    /// part of a chunked one.
+    Replay {
+        id: String,
+        seq: u64,
+        cols: u16,
+        rows: u16,
+        part: Option<u32>,
+        parts: Option<u32>,
         bytes: Vec<u8>,
     },
     /// `flow.error`. `reference` is the `seq` of the client frame it
@@ -99,6 +124,10 @@ pub fn parse(text: &str) -> Option<Inbound> {
                 .map(|a| a.iter().filter_map(Row::parse).collect())
                 .unwrap_or_default(),
             harnesses: harnesses(v.get("harnesses")),
+            replay: v
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|c| c.iter().any(|c| c.as_str() == Some("replay"))),
         }),
         "flow.session" => Row::parse(v.get("session")?).map(Inbound::Session),
         "flow.attention" => Some(Inbound::Attention {
@@ -112,6 +141,21 @@ pub fn parse(text: &str) -> Option<Inbound> {
             seq: v.get("seq").and_then(Value::as_u64).unwrap_or(0),
             bytes: base64::engine::general_purpose::STANDARD.decode(v.get("data_b64")?.as_str()?).ok()?,
         }),
+        "flow.replay" => {
+            let num = |k: &str| v.get(k).and_then(Value::as_u64);
+            Some(Inbound::Replay {
+                id: v.get("id")?.as_str()?.to_string(),
+                seq: num("seq").unwrap_or(0),
+                cols: u16::try_from(num("cols")?).ok()?,
+                rows: u16::try_from(num("rows")?).ok()?,
+                part: num("part").and_then(|n| u32::try_from(n).ok()),
+                parts: num("parts").and_then(|n| u32::try_from(n).ok()),
+                // An empty snapshot is still a replay (a tmux-host session).
+                bytes: base64::engine::general_purpose::STANDARD
+                    .decode(v.get("data_b64").and_then(Value::as_str).unwrap_or_default())
+                    .ok()?,
+            })
+        }
         "flow.diff" => Some(Inbound::Diff {
             id: v.get("id")?.as_str()?.to_string(),
             base: serde_json::from_value(v.get("base")?.clone()).ok()?,
@@ -138,10 +182,16 @@ pub fn parse(text: &str) -> Option<Inbound> {
     }
 }
 
-/// `flow.attach` — start streaming a session's PTY at this size.
+/// `flow.attach` — start streaming a session's PTY at this size. `replay`
+/// asks for a `flow.replay` first; send it only to an engine that advertised
+/// the capability.
 #[must_use]
-pub fn attach(id: &str, cols: u16, rows: u16) -> String {
-    json!({ "type": "flow.attach", "id": id, "cols": cols, "rows": rows }).to_string()
+pub fn attach(id: &str, cols: u16, rows: u16, replay: bool) -> String {
+    let mut v = json!({ "type": "flow.attach", "id": id, "cols": cols, "rows": rows });
+    if replay {
+        v["replay"] = json!(true);
+    }
+    v.to_string()
 }
 
 /// `flow.detach`.
@@ -280,11 +330,13 @@ mod tests {
             home,
             sessions,
             harnesses,
+            replay,
         }) = parse(hello)
         else {
             panic!("hello")
         };
         assert_eq!(harnesses, Some(vec![]));
+        assert!(!replay, "no capabilities: an older engine, no replay");
         assert_eq!(machine, "marvin");
         assert_eq!(home, None, "an older daemon says no home");
         let with_home = r#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"m","home":"/home/me"},"sessions":[]}"#;
@@ -322,6 +374,48 @@ mod tests {
         );
         assert_eq!(parse(r#"{"type":"flow.future_thing"}"#), None);
         assert_eq!(parse("not json"), None);
+    }
+
+    /// th-7e46cd: the replay capability, `flow.replay` (whole, chunked and
+    /// empty), the row's host, and `replay` on attach only when asked.
+    #[test]
+    fn reads_replays_capabilities_and_hosts() {
+        let hello = r#"{"type":"flow.hello","daemon":{"machine_label":"m"},"capabilities":["later","replay"],"sessions":[
+            {"id":"fs-1","kind":"shell","state":"idle","host":"pty"},{"id":"fs-2","kind":"shell","state":"idle","host":"tmux"},{"id":"fs-3","kind":"shell","state":"idle"}]}"#;
+        let Some(Inbound::Hello { replay, sessions, .. }) = parse(hello) else {
+            panic!("hello")
+        };
+        assert!(replay);
+        let answers: Vec<bool> = sessions.iter().map(Row::host_answers_queries).collect();
+        assert_eq!(answers, [true, false, false], "only the pty host answers queries; no host means tmux");
+        assert_eq!(
+            parse(r#"{"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":12,"data_b64":"aGk=","reason":"attach"}"#),
+            Some(Inbound::Replay {
+                id: "fs-1".into(),
+                seq: 12,
+                cols: 90,
+                rows: 30,
+                part: None,
+                parts: None,
+                bytes: b"hi".to_vec()
+            })
+        );
+        assert_eq!(
+            parse(r#"{"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":12,"data_b64":"","part":1,"parts":3}"#),
+            Some(Inbound::Replay {
+                id: "fs-1".into(),
+                seq: 12,
+                cols: 90,
+                rows: 30,
+                part: Some(1),
+                parts: Some(3),
+                bytes: Vec::new()
+            }),
+            "an empty part is still a part"
+        );
+        let wire = |replay| serde_json::from_str::<Value>(&attach("fs-1", 80, 24, replay)).expect("json");
+        assert_eq!(wire(true)["replay"], json!(true));
+        assert!(wire(false).get("replay").is_none(), "an older engine gets the v0 frame");
     }
 
     #[test]

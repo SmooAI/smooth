@@ -7,7 +7,9 @@ final class FlowFrameTests: XCTestCase {
 
     func testHello() throws {
         let f = try decode(#"{"channel":"flow","type":"flow.hello","daemon":{"version":"1.2","machine_label":"marvin"},"sessions":[{"id":"fs-1","kind":"claude","title":"t","project":"/p","worktree":"/w","branch":"b","pearl_id":"th-1","argv":["claude"],"state":"working","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","unread":true}]}"#)
-        guard case let .hello(daemon, sessions, harnesses) = f else { return XCTFail("\(f)") }
+        guard case let .hello(daemon, sessions, harnesses, capabilities) = f else { return XCTFail("\(f)") }
+        XCTAssertEqual(capabilities, [], "a v0 hello advertises nothing")
+        XCTAssertNil(sessions[0].host, "an engine that predates the host field")
         XCTAssertEqual(daemon.machineLabel, "marvin")
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions[0].pearlId, "th-1")
@@ -20,7 +22,7 @@ final class FlowFrameTests: XCTestCase {
     /// `hidden` is omitted when false on the wire.
     func testHelloWithHarnessesAndHarnessesFrame() throws {
         let f = try decode(#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"m"},"sessions":[],"harnesses":[{"name":"th-code","display_name":"th code","kind":"th-code","installed":true,"binary_path":"/x/th","state_source":"native","order_index":0,"origin":"builtin"},{"name":"aider","installed":false,"reason":"`aider` not found on PATH","state_source":"hooks","hidden":true,"order_index":1,"origin":"user"}]}"#)
-        guard case let .hello(_, _, harnesses) = f else { return XCTFail("\(f)") }
+        guard case let .hello(_, _, harnesses, _) = f else { return XCTFail("\(f)") }
         XCTAssertEqual(harnesses.map(\.name), ["th-code", "aider"])
         XCTAssertEqual(harnesses[0].displayName, "th code")
         XCTAssertEqual(harnesses[0].stateSource, "native")
@@ -81,6 +83,26 @@ final class FlowFrameTests: XCTestCase {
         XCTAssertEqual(id, "fs-1")
         XCTAssertEqual(seq, 7)
         XCTAssertEqual(String(data: data, encoding: .utf8), "hello")
+    }
+
+    /// th-7e46cd: the replay capability, the row's host, and `flow.replay`
+    /// whole, chunked and empty (Client Spec §10).
+    func testReplayCapabilityHostAndReplayFrames() throws {
+        let hello = try decode(#"{"type":"flow.hello","daemon":{"version":"1","machine_label":"m"},"capabilities":["replay"],"sessions":[{"id":"fs-1","kind":"shell","state":"idle","host":"pty"}]}"#)
+        guard case let .hello(_, sessions, _, capabilities) = hello else { return XCTFail("\(hello)") }
+        XCTAssertEqual(capabilities, ["replay"])
+        XCTAssertEqual(sessions[0].host, "pty")
+        XCTAssertFalse(AppController.answersQueries(sessions[0]), "the pty host answers queries itself")
+        XCTAssertTrue(AppController.answersQueries(Session(id: "fs-2", host: "tmux")))
+        XCTAssertTrue(AppController.answersQueries(Session(id: "fs-3")), "no host means tmux")
+
+        let whole = try decode(#"{"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":12,"data_b64":"aGk=","reason":"attach"}"#)
+        XCTAssertEqual(whole, .replay(id: "fs-1", seq: 12, cols: 90, rows: 30, part: nil, parts: nil, data: Data("hi".utf8)))
+        let part = try decode(#"{"type":"flow.replay","id":"fs-1","cols":90,"rows":30,"seq":12,"data_b64":"","part":1,"parts":3}"#)
+        XCTAssertEqual(part, .replay(id: "fs-1", seq: 12, cols: 90, rows: 30, part: 1, parts: 3, data: Data()))
+
+        XCTAssertEqual(try fields(.attach(id: "a", cols: 80, rows: 24, replay: true))["replay"] as? Bool, true)
+        XCTAssertNil(try fields(.attach(id: "a", cols: 80, rows: 24))["replay"], "an older engine gets the v0 attach")
     }
 
     func testScreen() throws {

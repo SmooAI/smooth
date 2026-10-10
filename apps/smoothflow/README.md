@@ -60,6 +60,12 @@ Allow in the inbox (or ⌘⌥Y) flips the session to working then done; ⌘⇧N
 fans out three candidates that finish on a timer. Settings ▸ Daemon also
 takes the address.
 
+The mock advertises `replay` and answers a `replay: true` attach with a
+`flow.replay` followed by one stale `flow.output` (red `[stale: …]` text on
+screen means the client applied it). `MOCK_NO_REPLAY=1` plays an engine
+without the capability; `MOCK_REPLAY_PART_BYTES=16384` chunks replays the way
+the relay does for phones. `pnpm test:mock` checks the fixture.
+
 Without the override the app spawns `smooth-daemon` itself (child mode) and
 the `smoothflow` tmux server; until the engine lands the flow WebSocket will
 404 and the sidebar says so.

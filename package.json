@@ -35,6 +35,7 @@
         "aichangeset": "changeset",
         "test:dev-link": "bash scripts/dev-link-th.test.sh",
         "test:hooks": "bash claude-plugins/smooth-agent/hooks/enforce-worktree.test.sh && bash claude-plugins/smooth-agent/hooks/flow-hook.test.sh && node claude-plugins/smooth-agent/harness/opencode/plugin.test.mjs && node claude-plugins/smooth-agent/harness/flow-plugins.test.mjs",
+        "test:mock": "node --test apps/smoothflow/mock/server.test.mjs",
         "test:e2e:daemon": "cargo test -p smooai-smooth-daemon --test e2e_ws_smoke -- --nocapture",
         "install:bigsmooth": "bash scripts/macos/install-bigsmooth.sh"
     },

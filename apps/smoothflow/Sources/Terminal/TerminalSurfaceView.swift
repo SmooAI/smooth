@@ -8,6 +8,12 @@ import GhosttyKit
 final class TerminalSurfaceView: NSView, NSTextInputClient {
     let sessionId: String
     private(set) var surface: ghostty_surface_t?
+    /// Whether the terminal's replies to the program's queries (DA, DSR, size
+    /// reports) go out through `onInput`. Off for a session on the engine's
+    /// PTY host, which answers them itself (Client Spec §10): the surface then
+    /// runs in ghostty's MANUAL_MIRROR mode, which suppresses parser replies
+    /// while still encoding what the user types.
+    private(set) var answersQueries: Bool
 
     /// Bytes the user typed (already terminal-encoded by ghostty) → `flow.input`.
     var onInput: ((Data) -> Void)?
@@ -24,8 +30,9 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     /// Screen-change observers for the current window (th-b9e6df).
     private var screenObservers: [NSObjectProtocol] = []
 
-    init(sessionId: String) {
+    init(sessionId: String, answersQueries: Bool = true) {
         self.sessionId = sessionId
+        self.answersQueries = answersQueries
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         wantsLayer = true
         layerContentsRedrawPolicy = .duringViewResize
@@ -56,7 +63,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         cfg.userdata = Unmanaged.passUnretained(self).toOpaque()
         cfg.scale_factor = Double(window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
         cfg.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-        cfg.io_mode = GHOSTTY_SURFACE_IO_MANUAL
+        cfg.io_mode = answersQueries ? GHOSTTY_SURFACE_IO_MANUAL : GHOSTTY_SURFACE_IO_MANUAL_MIRROR
         cfg.io_write_userdata = Unmanaged.passUnretained(self).toOpaque()
         cfg.io_write_cb = { userdata, bytes, len in
             guard let userdata, let bytes, len > 0 else { return }
@@ -68,7 +75,27 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         surface = ghostty_surface_new(app, &cfg)
     }
 
+    /// The io mode is fixed when ghostty creates a surface, so a change
+    /// replaces the terminal (its screen and history go). Only a session that
+    /// moved hosts changes it, and the attach that follows refills the screen.
+    func setAnswersQueries(_ answers: Bool) {
+        guard answers != answersQueries else { return }
+        answersQueries = answers
+        if let surface { ghostty_surface_free(surface) }
+        surface = nil
+        createSurface()
+        screenChanged()
+        if let surface, window?.firstResponder === self { ghostty_surface_set_focus(surface, true) }
+    }
+
     // MARK: output in
+
+    /// RIS, then erase the scrollback: what a `flow.replay` starts from.
+    static let resetSequence = Data("\u{1b}c\u{1b}[3J".utf8)
+
+    /// A complete `flow.replay` arrived: start over with screen, history,
+    /// modes and selection cleared, so the snapshot draws on a fresh terminal.
+    func resetTerminal() { feed(Self.resetSequence) }
 
     /// `flow.output` → the VT parser. Main thread only (manual-IO contract).
     func feed(_ data: Data) {

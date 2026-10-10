@@ -42,6 +42,45 @@ final class ConformanceVectorTests: XCTestCase {
         }
     }
 
+    /// §10 replay ordering (`replay.json`): which bytes apply around a
+    /// `flow.replay`. Steps are frames, or `{"type":"attach"}` for a re-attach;
+    /// every replay's data is a UTF-8 string here.
+    func testReplay() throws {
+        for c in try cases("replay.json") {
+            let name = c["name"] as? String ?? "?"
+            let input = try XCTUnwrap(c["input"] as? [String: Any])
+            let expected = try XCTUnwrap(c["expected"] as? [String: Any])
+            var order = ReplayOrder(expectReplay: try XCTUnwrap(input["expect_replay"] as? Bool),
+                                    maxPendingBytes: try XCTUnwrap(input["max_pending_bytes"] as? Int))
+            var got: [[[String: Any]]] = []
+            for f in try XCTUnwrap(input["frames"] as? [[String: Any]]) {
+                let data = Data((f["data"] as? String ?? "").utf8)
+                let seq = UInt64(f["seq"] as? Int ?? 0)
+                var actions: [ReplayOrder.Action] = []
+                switch f["type"] as? String {
+                case "attach": order.onAttach()
+                case "flow.output": actions = order.onFrame(.output(seq: seq, data: data))
+                case "flow.replay":
+                    actions = order.onFrame(.replay(seq: seq, cols: f["cols"] as? Int ?? 0, rows: f["rows"] as? Int ?? 0,
+                                                    part: f["part"] as? Int ?? 0, parts: f["parts"] as? Int ?? 1, data: data))
+                default: XCTFail("unknown step in \(name)")
+                }
+                got.append(actions.map { a -> [String: Any] in
+                    switch a {
+                    case let .reset(cols, rows): ["op": "reset", "cols": cols, "rows": rows]
+                    case let .write(d): ["op": "write", "data": String(decoding: d, as: UTF8.self)]
+                    case let .resync(reason): ["op": "resync", "reason": reason.rawValue]
+                    }
+                })
+            }
+            let want = try JSONSerialization.data(withJSONObject: try XCTUnwrap(expected["actions"]), options: .sortedKeys)
+            let have = try JSONSerialization.data(withJSONObject: got, options: .sortedKeys)
+            XCTAssertEqual(String(decoding: have, as: UTF8.self), String(decoding: want, as: UTF8.self), name)
+            XCTAssertEqual(order.baseline.map { Int($0) }, expected["baseline"] as? Int, name)
+            XCTAssertEqual(order.isWaiting, expected["waiting"] as? Bool, name)
+        }
+    }
+
     func testTitle() throws {
         for c in try cases("title.json") {
             let input = try XCTUnwrap(c["input"] as? [String: Any])

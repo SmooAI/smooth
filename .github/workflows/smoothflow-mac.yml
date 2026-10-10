@@ -41,6 +41,11 @@ jobs:
                   path: apps/smoothflow/Vendor/GhosttyKit.xcframework
                   key: ghosttykit-${{ hashFiles('apps/smoothflow/scripts/ghosttykit.lock') }}
 
+            # The mock the UI tests (and the phones) develop against: its
+            # flow.replay fixture, over a real WebSocket.
+            - name: Mock server tests
+              run: node --test apps/smoothflow/mock/server.test.mjs
+
             - name: GhosttyKit (pinned prebuilt)
               run: bash apps/smoothflow/scripts/ensure-ghosttykit.sh
 

@@ -168,6 +168,13 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             switch e {
             case let .output(id, data):
                 surfaces[id]?.feed(data)
+            case let .reset(id, _, _):
+                // The surface's size is its view's; a replay at another size
+                // (another client set the geometry) still draws, and our next
+                // resize brings a fresh replay at ours.
+                surfaces[id]?.resetTerminal()
+            case let .resync(id):
+                if let v = surfaces[id], store.sessions[id]?.isLive == true { attach(id, v) }
             case let .attention(s):
                 if let n = AttentionNotifier.notification(for: s, settings: notifySettings) {
                     AttentionNotifier.post(n, requestId: s.attention?.requestId, sound: notifySettings.sound)
@@ -183,7 +190,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             case .connected:
                 reattachSurfaces()
             case let .relaunched(id):
-                if let v = surfaces[id] { client.send(.attach(id: id, cols: v.gridSize.cols, rows: v.gridSize.rows)) }
+                if let v = surfaces[id] { attach(id, v) }
             case let .handoff(id, h):
                 handoffs[id] = h
             case let .diff(id, base, path, payload):
@@ -227,7 +234,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func surface(for id: String) -> TerminalSurfaceView {
         if let v = surfaces[id] { return v }
-        let v = TerminalSurfaceView(sessionId: id)
+        let v = TerminalSurfaceView(sessionId: id, answersQueries: Self.answersQueries(store.sessions[id]))
         // A done/dead row keeps its surface for scrollback; input and the
         // layout-driven resize must not reach the engine (it answers
         // "not running" for each, which used to land in the rail).
@@ -241,12 +248,25 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
         surfaces[id] = v
-        if store.sessions[id]?.isLive == true {
-            let g = v.gridSize
-            client.send(.attach(id: id, cols: g.cols, rows: g.rows))
-        }
+        if store.sessions[id]?.isLive == true { attach(id, v) }
         return v
     }
+
+    /// `flow.attach` at the surface's grid, asking for a replay when the
+    /// engine offers one (Client Spec §10). The surface first follows the
+    /// session's host: a host change (Kill & Resume onto the PTY host) swaps
+    /// its terminal, and the replay or redraw this attach brings refills it.
+    private func attach(_ id: String, _ v: TerminalSurfaceView) {
+        v.setAnswersQueries(Self.answersQueries(store.sessions[id]))
+        let g = v.gridSize
+        client.send(.attach(id: id, cols: g.cols, rows: g.rows, replay: store.willAttach(id)))
+    }
+
+    /// The engine-owned PTY host answers DA/DSR itself, so a surface showing
+    /// one of its sessions must not answer too: the second answer would reach
+    /// the program as stray input (Client Spec §10). tmux sessions, and rows
+    /// from an engine that sends no host, keep answering.
+    nonisolated static func answersQueries(_ s: Session?) -> Bool { s?.host != "pty" }
 
     /// After every (re)connect the engine has no attachments for us: re-attach
     /// every surface whose session still exists and drop the rest. Also runs
@@ -256,8 +276,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         for (id, v) in surfaces {
             guard let s = store.sessions[id] else { surfaces[id] = nil; continue }
             guard s.isLive else { continue }
-            let g = v.gridSize
-            client.send(.attach(id: id, cols: g.cols, rows: g.rows))
+            attach(id, v)
         }
     }
 

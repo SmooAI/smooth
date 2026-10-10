@@ -97,6 +97,38 @@ final class FlowStoreTests: XCTestCase {
         XCTAssertEqual(store.apply(.output(id: "a", seq: 2, data: Data())), [])
     }
 
+    /// th-7e46cd (Client Spec §10): against an engine that replays, the attach
+    /// asks for one, output waits for it, the replay resets the surface, and
+    /// output it covers drops; a gap asks for a re-attach.
+    func testReplayOrdersOutputAroundTheSnapshot() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [s("a")], capabilities: ["replay"]))
+        XCTAssertTrue(store.willAttach("a"), "the attach asks for a replay")
+        let d = { (t: String) in Data(t.utf8) }
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 4, data: d("covered"))), [], "held for the replay")
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 6, data: d("new"))), [])
+        XCTAssertEqual(store.apply(.replay(id: "a", seq: 5, cols: 90, rows: 30, part: nil, parts: nil, data: d("S"))),
+                       [.reset(id: "a", cols: 90, rows: 30), .output(id: "a", data: d("S")), .output(id: "a", data: d("new"))])
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 5, data: d("stale"))), [])
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 7, data: d("live"))), [.output(id: "a", data: d("live"))])
+        // An empty replay (a tmux session) still resets; the redraw follows.
+        XCTAssertEqual(store.apply(.replay(id: "a", seq: 1, cols: 90, rows: 30, part: nil, parts: nil, data: Data())), [.reset(id: "a", cols: 90, rows: 30)])
+        // Chunked: nothing until whole; a gap re-attaches.
+        XCTAssertEqual(store.apply(.replay(id: "a", seq: 9, cols: 90, rows: 30, part: 0, parts: 3, data: d("A"))), [])
+        XCTAssertEqual(store.apply(.replay(id: "a", seq: 9, cols: 90, rows: 30, part: 2, parts: 3, data: d("C"))), [.resync(id: "a")])
+    }
+
+    /// Against an engine without the capability the attach is v0 and output
+    /// streams in arrival order.
+    func testNoReplayCapabilityStreamsInArrivalOrder() {
+        let store = FlowStore()
+        store.apply(.hello(daemon: DaemonInfo(version: "1", machineLabel: "m"), sessions: [s("a")]))
+        XCTAssertFalse(store.willAttach("a"))
+        let x = Data("x".utf8), y = Data("y".utf8)
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 3, data: x)), [.output(id: "a", data: x)])
+        XCTAssertEqual(store.apply(.output(id: "a", seq: 1, data: y)), [.output(id: "a", data: y)])
+    }
+
     func testAttentionFrameIsIdempotentWithSession() {
         let store = FlowStore()
         store.apply(.session(s("a")))

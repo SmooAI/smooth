@@ -16,6 +16,7 @@ use smooth_flow_client::gate::{CenterTab, Gate};
 use smooth_flow_client::harness::Harness;
 use smooth_flow_client::keymap::{Action, Keymap, Platform};
 use smooth_flow_client::pane::{Direction, PaneId, Rect};
+use smooth_flow_client::replay::{self, ReplayOrder};
 use smooth_flow_client::surfaces::Surfaces;
 use smooth_flow_client::{fleet, title, Session};
 
@@ -249,6 +250,10 @@ pub struct PaneFrame {
     pub grid: (usize, usize),
 }
 
+/// What one session's output may pile up to while a replay is awaited
+/// before the client gives up and re-attaches (spec §10, "bound the buffer").
+const REPLAY_PENDING_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 pub struct Core {
     out: Outbox,
     pub connection: Connection,
@@ -261,6 +266,14 @@ pub struct Core {
     pub surfaces: Surfaces,
     /// Session → the size it is attached at on this connection.
     attached: HashMap<String, (usize, usize)>,
+    /// The engine advertised `replay` in `flow.hello` (spec §10): attaches
+    /// ask for a `flow.replay` and wait for it.
+    engine_replays: bool,
+    /// Session → the ordering of its output around replays, per attach.
+    orders: HashMap<String, ReplayOrder>,
+    /// Sessions on the engine-owned PTY host, which answers terminal queries
+    /// itself: their terminal's replies are dropped, never typed back.
+    pty_hosted: HashSet<String>,
     pub terminals: HashMap<String, TerminalModel>,
     pub home: String,
     pub keymap: Keymap,
@@ -306,6 +319,9 @@ impl Core {
             harnesses: Vec::new(),
             surfaces: Surfaces::new(),
             attached: HashMap::new(),
+            engine_replays: false,
+            orders: HashMap::new(),
+            pty_hosted: HashSet::new(),
             terminals: HashMap::new(),
             home,
             keymap,
@@ -400,6 +416,11 @@ impl Core {
             Some(a) => self.attention.insert(id.clone(), a),
             None => self.attention.remove(&id),
         };
+        if row.host.as_deref() == Some("pty") {
+            self.pty_hosted.insert(id.clone());
+        } else {
+            self.pty_hosted.remove(&id);
+        }
         self.sessions.insert(id, row.session);
         fresh
     }
@@ -416,14 +437,17 @@ impl Core {
                 self.connection = Connection::Offline(why);
                 // A reconnect must attach again.
                 self.attached.clear();
+                self.orders.clear();
             }
             Event::Frame(Inbound::Hello {
                 machine,
                 home,
                 sessions,
                 harnesses,
+                replay,
             }) => {
                 self.machine = machine;
+                self.engine_replays = replay;
                 // The daemon may be another machine (WSL, a remote host):
                 // titles abbreviate against its home, not this one's.
                 if let Some(home) = home {
@@ -435,6 +459,7 @@ impl Core {
                 self.order.clear();
                 self.sessions.clear();
                 self.attention.clear();
+                self.pty_hosted.clear();
                 for row in sessions {
                     self.upsert(row);
                 }
@@ -449,6 +474,7 @@ impl Core {
                     }
                 }
                 self.attached.clear();
+                self.orders.clear();
                 // A reconnect: answers to Close Outs sent on the old
                 // connection never come. One whose row is gone did close.
                 let done: Vec<String> = self
@@ -479,6 +505,8 @@ impl Core {
                 self.attention.remove(&id);
                 self.terminals.remove(&id);
                 self.attached.remove(&id);
+                self.orders.remove(&id);
+                self.pty_hosted.remove(&id);
                 self.surfaces.forget(&id);
             }
             Event::Frame(Inbound::Attention { id, attention }) => {
@@ -488,17 +516,26 @@ impl Core {
                 };
             }
             Event::Frame(Inbound::Harnesses(h)) => self.set_harnesses(h),
-            Event::Frame(Inbound::Output { id, bytes, .. }) => {
-                let term = self.terminals.entry(id.clone()).or_insert_with(|| TerminalModel::new(80, 24));
-                term.feed(&bytes);
-                // The terminal's answers to the program's queries (DA, DSR,
-                // size reports) are typed back into the session, as on the
-                // Mac and the phones.
-                let replies = term.take_replies();
-                if !replies.is_empty() {
-                    self.out.send(frames::input(&id, &replies));
-                }
-            }
+            Event::Frame(Inbound::Output { id, seq, bytes }) => self.stream(&id, replay::Frame::Output { seq, data: bytes }),
+            Event::Frame(Inbound::Replay {
+                id,
+                seq,
+                cols,
+                rows,
+                part,
+                parts,
+                bytes,
+            }) => self.stream(
+                &id,
+                replay::Frame::Replay {
+                    seq,
+                    cols,
+                    rows,
+                    part,
+                    parts,
+                    data: bytes,
+                },
+            ),
             Event::Frame(Inbound::Diff { id, base, path, diff }) => self.diff.received(&id, base, path.as_deref(), *diff),
             Event::Frame(Inbound::DiffResult { id, action, file }) => self.diff.result(&id, &action, file.as_deref()),
             Event::Frame(Inbound::DiffChanged(id)) => {
@@ -581,6 +618,51 @@ impl Core {
         }
     }
 
+    // ── terminal stream ─────────────────────────────────────────────────
+
+    /// One `flow.output` or `flow.replay` for `id`, through its replay
+    /// ordering (spec §10): a replay replaces the terminal with a fresh one at
+    /// its size, output it covers is dropped, and a gap re-attaches.
+    fn stream(&mut self, id: &str, frame: replay::Frame) {
+        // Output for a session this connection never attached (or attached
+        // before the engine replayed) streams in arrival order, as before.
+        let order = self
+            .orders
+            .entry(id.to_string())
+            .or_insert_with(|| ReplayOrder::new(false, REPLAY_PENDING_MAX_BYTES));
+        for action in order.on_frame(frame) {
+            match action {
+                replay::Action::Reset { cols, rows } => {
+                    self.terminals.insert(id.to_string(), TerminalModel::new(cols.into(), rows.into()));
+                }
+                replay::Action::Write { data } => {
+                    self.terminals.entry(id.to_string()).or_insert_with(|| TerminalModel::new(80, 24)).feed(&data);
+                }
+                // The ordering already forgot this attach; ask for a fresh
+                // replay at the size the session is attached at.
+                replay::Action::Resync { .. } => {
+                    if let Some(&(cols, rows)) = self.attached.get(id) {
+                        let (c16, r16) = (u16::try_from(cols).unwrap_or(u16::MAX), u16::try_from(rows).unwrap_or(u16::MAX));
+                        self.out.send(frames::attach(id, c16, r16, self.engine_replays));
+                    }
+                }
+            }
+        }
+        self.answer_queries(id);
+    }
+
+    /// The terminal's answers to the program's queries (DA, DSR, size
+    /// reports) go back as `flow.input`, as on the Mac and the phones —
+    /// except on the engine-owned PTY host, which answered them already: a
+    /// second answer would reach the program as stray input (spec §10).
+    fn answer_queries(&mut self, id: &str) {
+        let Some(term) = self.terminals.get_mut(id) else { return };
+        let replies = term.take_replies();
+        if !replies.is_empty() && !self.pty_hosted.contains(id) {
+            self.out.send(frames::input(id, &replies));
+        }
+    }
+
     // ── layout-driven attach ────────────────────────────────────────────
 
     /// Lay the panes out in `area` (pixels, the window minus the sidebar and
@@ -626,6 +708,7 @@ impl Core {
         }
         for gone in self.attached.keys().filter(|id| !wanted.contains_key(*id)).cloned().collect::<Vec<_>>() {
             self.attached.remove(&gone);
+            self.orders.remove(&gone);
             self.out.send(frames::detach(&gone));
         }
         for (id, (cols, rows)) in wanted {
@@ -634,17 +717,15 @@ impl Core {
             match self.attached.get(&id) {
                 None => {
                     term.resize(cols, rows);
-                    self.out.send(frames::attach(&id, c16, r16));
+                    self.out.send(frames::attach(&id, c16, r16, self.engine_replays));
+                    self.orders.insert(id.clone(), ReplayOrder::new(self.engine_replays, REPLAY_PENDING_MAX_BYTES));
                     self.attached.insert(id, (cols, rows));
                 }
                 Some(size) if *size != (cols, rows) => {
                     term.resize(cols, rows);
                     self.out.send(frames::resize(&id, c16, r16));
                     // An in-band size report (mode 2048) the resize produced.
-                    let replies = term.take_replies();
-                    if !replies.is_empty() {
-                        self.out.send(frames::input(&id, &replies));
-                    }
+                    self.answer_queries(&id);
                     self.attached.insert(id, (cols, rows));
                 }
                 Some(_) => {}
@@ -1091,6 +1172,7 @@ mod tests {
         let attach = sent(&mut rx);
         assert_eq!(attach[0]["type"], "flow.attach");
         assert_eq!((attach[0]["cols"].as_u64(), attach[0]["rows"].as_u64()), (Some(80), Some(24)));
+        assert!(attach[0].get("replay").is_none(), "this engine did not advertise replay");
         assert_eq!(c.attached_size("fs-1"), Some((80, 24)));
         c.layout(AREA, METRICS);
         assert!(sent(&mut rx).is_empty(), "an unchanged layout sends nothing");
@@ -1596,6 +1678,95 @@ mod tests {
         assert_eq!((answer[0]["type"].as_str(), answer[0]["id"].as_str()), (Some("flow.input"), Some("fs-1")));
         // base64 of ESC [2;3R: the DSR cursor-position reply.
         assert_eq!(answer[0]["data_b64"].as_str(), Some("G1syOzNS"));
+    }
+
+    fn replay(seq: u64, part: Option<u32>, parts: Option<u32>, bytes: &[u8]) -> Event {
+        Event::Frame(Inbound::Replay {
+            id: "fs-1".into(),
+            seq,
+            cols: 100,
+            rows: 30,
+            part,
+            parts,
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    /// th-7e46cd (spec §10): against an engine that replays, an attach asks
+    /// for one, output waits for it, the replay starts a fresh terminal at its
+    /// size, output it covers drops, and a gap in a chunked one re-attaches.
+    #[test]
+    fn a_replaying_engine_opens_every_attach_with_a_snapshot() {
+        let (mut c, mut rx) = core();
+        connected(&mut c);
+        let hello = r#"{"type":"flow.hello","daemon":{"machine_label":"m"},"capabilities":["replay"],"sessions":[{"id":"fs-1","kind":"shell","state":"idle","host":"pty"}]}"#;
+        c.apply(Event::Frame(frames::parse(hello).expect("hello")));
+        sent(&mut rx);
+        c.layout(AREA, METRICS);
+        let attach = sent(&mut rx);
+        assert_eq!((attach[0]["type"].as_str(), attach[0]["replay"].as_bool()), (Some("flow.attach"), Some(true)));
+        let out = |seq: u64, bytes: &[u8]| {
+            Event::Frame(Inbound::Output {
+                id: "fs-1".into(),
+                seq,
+                bytes: bytes.to_vec(),
+            })
+        };
+        c.apply(out(4, b"covered"));
+        c.apply(out(6, b" new"));
+        assert_eq!(c.terminals["fs-1"].line_text(0), "", "output waits for the replay");
+        c.apply(replay(5, None, None, b"$ snapshot"));
+        assert_eq!(c.terminals["fs-1"].size(), (100, 30), "a fresh terminal at the replay's size");
+        assert_eq!(c.terminals["fs-1"].line_text(0), "$ snapshot new", "the snapshot, then only newer output");
+        c.apply(out(5, b"stale"));
+        c.apply(out(7, b"!"));
+        assert_eq!(c.terminals["fs-1"].line_text(0), "$ snapshot new!");
+        assert!(sent(&mut rx).is_empty());
+
+        // A chunked replay renders only once whole; a gap asks again.
+        c.apply(replay(9, Some(0), Some(3), b"part"));
+        assert_eq!(c.terminals["fs-1"].line_text(0), "$ snapshot new!", "a partial replay renders nothing");
+        c.apply(replay(9, Some(2), Some(3), b"gap"));
+        let again = sent(&mut rx);
+        assert_eq!(again.len(), 1, "a gap re-attaches");
+        assert_eq!(
+            (again[0]["type"].as_str(), again[0]["replay"].as_bool(), again[0]["cols"].as_u64()),
+            (Some("flow.attach"), Some(true), Some(80))
+        );
+        // The latest replay wins, even with a lower seq; an empty one resets.
+        c.apply(replay(2, None, None, b""));
+        assert_eq!(c.terminals["fs-1"].line_text(0), "", "an empty replay still resets");
+        c.apply(out(3, b"redraw"));
+        assert_eq!(c.terminals["fs-1"].line_text(0), "redraw");
+    }
+
+    /// th-7e46cd (spec §10): the engine-owned PTY host answers DA/DSR itself,
+    /// so its sessions' terminal replies are dropped; tmux sessions, and rows
+    /// from an engine that sends no host, still answer.
+    #[test]
+    fn only_sessions_off_the_pty_host_answer_terminal_queries() {
+        let (mut c, mut rx) = core();
+        c.apply(hello(
+            r#"{"id":"fs-1","kind":"shell","state":"idle","host":"pty"},{"id":"fs-2","kind":"shell","state":"idle","host":"tmux"},{"id":"fs-3","kind":"shell","state":"idle"}"#,
+        ));
+        let dsr = |id: &str| {
+            Event::Frame(Inbound::Output {
+                id: id.into(),
+                seq: 1,
+                bytes: b"\x1b[6n".to_vec(),
+            })
+        };
+        c.apply(dsr("fs-1"));
+        assert!(sent(&mut rx).is_empty(), "the pty host already answered");
+        for id in ["fs-2", "fs-3"] {
+            c.apply(dsr(id));
+            let answer = sent(&mut rx);
+            assert_eq!((answer.len(), answer[0]["id"].as_str()), (1, Some(id)));
+        }
+        // A session that moves to the pty host stops answering.
+        c.apply(row(r#"{"id":"fs-2","kind":"shell","state":"idle","host":"pty"}"#));
+        c.apply(dsr("fs-2"));
+        assert!(sent(&mut rx).is_empty());
     }
 
     #[test]
