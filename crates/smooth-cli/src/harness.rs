@@ -144,12 +144,48 @@ pub enum Cmd {
         /// claude-code | codex | opencode | cursor | all
         provider: String,
     },
+    /// `/th-clear`'s one-shot resume: `arm` after a handoff checkpoint, and
+    /// the SessionStart hook's `claim` injects it into the next session in
+    /// this terminal (after `/clear`). Inert unless armed. SMOODEV-3759.
+    #[command(subcommand)]
+    Handoff(crate::harness_clear::HandoffCmd),
+    /// Context-budget hook: on Stop / PostToolUse / UserPromptSubmit, read the
+    /// session's context size and nudge once at `harness.context_budget_warn`,
+    /// then block the Stop once at `harness.context_budget` so the agent runs
+    /// th-clear. Reads the hook payload on stdin; with none, prints the budget.
+    Budget {
+        #[arg(long, default_value = "claude-code")]
+        harness: String,
+        /// Hook event (default: the payload's `hook_event_name`).
+        #[arg(long)]
+        event: Option<String>,
+        /// Context size, for harnesses whose payload carries no transcript.
+        #[arg(long)]
+        tokens: Option<u64>,
+        /// `json` (Claude Code hook output) or `text`.
+        #[arg(long)]
+        format: Option<String>,
+    },
 }
 
 /// # Errors
 /// Returns an error when the provider name is unknown or a config file is
 /// malformed (never silently clobbered).
 pub async fn cmd(cmd: Cmd) -> Result<()> {
+    // Hook paths first: they must not depend on a resolvable harness home.
+    let cmd = match cmd {
+        Cmd::Handoff(c) => return crate::harness_clear::handoff_cmd(c),
+        Cmd::Budget {
+            harness,
+            event,
+            tokens,
+            format,
+        } => {
+            crate::harness_clear::budget_cmd(&harness, event, tokens, format);
+            return Ok(());
+        }
+        other => other,
+    };
     let home = mcp_install::harness_home()?;
     match cmd {
         Cmd::List { all, json } => list(&home, all, json).await,
@@ -205,6 +241,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Handoff(_) | Cmd::Budget { .. } => unreachable!("handled above"),
     }
 }
 

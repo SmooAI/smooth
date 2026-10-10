@@ -87,6 +87,10 @@ th harness list [--all] [--json] / show <name> / add <path|owner/repo> / hide|un
 # sandbox's writable_roots (th-4ad334). enable is idempotent and doubles as
 # the update command.
 th harness enable claude-code|codex|opencode|cursor|all / status / disable
+# /th-clear's one-shot resume + the context-budget hook (SMOODEV-3759;
+# docs/Architecture/Pearls.md#context-budget-and-th-clear-smoodev-3759)
+th harness handoff arm --pearl <id> / claim / list / disarm
+th harness budget            # prints the budget; as a hook reads the payload on stdin
 
 # SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux
 th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
