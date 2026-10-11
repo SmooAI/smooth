@@ -117,6 +117,16 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: RemindersCmd,
     },
+    /// Duplicate contacts — review and merge the AI's duplicate queue.
+    ///
+    /// Groups of records that are the same person: merge them into one,
+    /// reject a pair, undo a merge. CLI twin of the copilot's
+    /// `crm.*_duplicate*` tools (SMOODEV-3859).
+    #[command(visible_alias = "dupes")]
+    Duplicates {
+        #[command(subcommand)]
+        cmd: super::crm_duplicates::Cmd,
+    },
     /// Capture a whole interaction in one step: an optional company, one or
     /// more contacts, and an optional deal — created (upserted) and linked.
     /// CLI twin of the copilot's `crm.capture` / the hosted MCP `crm_capture`.
@@ -926,6 +936,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org,
         } => remind(target, id, at, note, assignee, org).await,
         Cmd::Reminders { cmd } => reminders(cmd).await,
+        Cmd::Duplicates { cmd } => super::crm_duplicates::cmd(cmd).await,
         Cmd::Capture {
             company,
             domain,
