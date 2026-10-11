@@ -152,7 +152,12 @@ const EXAMPLES: &[(&str, &[&str])] = &[
     ),
     (
         "smoo crm",
-        &["smoo crm contacts list --json", "smoo crm deals list", "smoo crm pipeline forecast"],
+        &[
+            "smoo crm contacts list --json",
+            "smoo crm deals list",
+            "smoo crm pipeline forecast",
+            "smoo crm duplicates list",
+        ],
     ),
     (
         "smoo work",

@@ -502,6 +502,17 @@ smoo api crm contacts import-table leads.csv --map email=Email --map name="Full 
 smoo api crm contacts import-table leads.csv --map email=Email --apply
 smoo api crm contacts import-address-book --provider google  # preview a sample (user session)
 smoo api crm contacts import-address-book --provider microsoft --apply
+# Duplicate contacts (SMOODEV-3859, smooai ADR-139) — the AI merge queue, grouped
+# by person. CLI twin of the copilot's crm.*_duplicate* tools and the hosted MCP
+# crm_*_duplicate* tools. Needs crm.contacts.merge + CRM Pro. Merges and undo print
+# the target and confirm (--yes for scripts, --dry-run to stop); each merge stays
+# undoable from `history`.
+smoo crm duplicates list [--limit 20] [--offset 0] [--include-different] [--json]
+smoo crm dupes merge-group --keep <contact-id> <contact-id>... [--primary-email a@b.com] [--note "…"]
+smoo crm duplicates approve <candidate-id> [--keep <contact-id>] [--primary-email a@b.com]
+smoo crm duplicates reject <candidate-id> [--note "different people"]
+smoo crm duplicates history [--status merged,auto_merged,rejected] [--json]
+smoo crm duplicates undo <candidate-id>
 # Super-admin org membership (SMOODEV-3291) — any org, no invitation. Needs the
 # super_admin role (403 "requires the super_admin role" otherwise) and the
 # internal `admin` build (`pnpm install:th`). --org-id is REQUIRED: these verbs

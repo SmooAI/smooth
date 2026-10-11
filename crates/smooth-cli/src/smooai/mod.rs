@@ -23,6 +23,7 @@ pub mod campaigns;
 pub mod crawl;
 pub mod crm;
 pub mod crm_bulk;
+pub mod crm_duplicates;
 pub mod dashboard;
 pub mod drip;
 pub mod drive;
