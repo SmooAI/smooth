@@ -489,6 +489,11 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// The AI's verdict as a reader says it (`same_person` → "same person").
+fn verdict_label(v: &str) -> String {
+    v.replace('_', " ")
+}
+
 /// One pair: status, both names, the AI's verdict, and the candidate id.
 fn pair_line(p: &Value) -> String {
     let a = p.get("contactA").map_or_else(|| "?".to_string(), contact_name);
@@ -497,7 +502,7 @@ fn pair_line(p: &Value) -> String {
         "{a} ↔ {b}  [{}{}]  candidate {}",
         s(p, "status").unwrap_or("?"),
         s(p, "verdict")
-            .map(|v| format!(", AI: {v} {}", percent(p.get("confidence").and_then(Value::as_f64))))
+            .map(|v| format!(", AI: {} {}", verdict_label(v), percent(p.get("confidence").and_then(Value::as_f64))))
             .unwrap_or_default(),
         s(p, "id").unwrap_or("?")
     );
@@ -542,7 +547,7 @@ pub fn render_groups(groups: &Value, limit: u32, offset: u32) -> String {
                 "      {} ↔ {}  {} {}  candidate {}",
                 short("contactAId"),
                 short("contactBId"),
-                s(p, "verdict").unwrap_or("unjudged"),
+                s(p, "verdict").map_or_else(|| "unjudged".to_string(), verdict_label),
                 percent(p.get("confidence").and_then(Value::as_f64)),
                 s(p, "id").unwrap_or("?")
             );
@@ -556,7 +561,7 @@ pub fn render_groups(groups: &Value, limit: u32, offset: u32) -> String {
         }
         // A ready-to-run merge line only when the AI judged every link the same
         // person: a group chained by a shared name ("Hello") is not one person.
-        let all_same = !pairs.is_empty() && pairs.iter().all(|p| s(p, "verdict") == Some("same"));
+        let all_same = !pairs.is_empty() && pairs.iter().all(|p| s(p, "verdict") == Some("same_person"));
         if !keeper.is_empty() && all_same {
             let others: Vec<&str> = contacts.iter().filter_map(|c| s(c, "id")).filter(|id| *id != keeper).collect();
             out.push(format!(
@@ -734,7 +739,7 @@ mod tests {
             "suggestedSurvivorId": A,
             "contacts": [contact(A, "Brent", "brent@smoo.ai", "manual"), contact(B, "Brent", "brent+x@smoo.ai", "chat_widget"), contact(C, "", "", "sms")],
             "pairs": [
-                { "id": "cand-1", "contactAId": A, "contactBId": B, "verdict": "same", "confidence": 0.937, "reason": "Same   name\nand domain" },
+                { "id": "cand-1", "contactAId": A, "contactBId": B, "verdict": "same_person", "confidence": 0.937, "reason": "Same   name\nand domain" },
                 { "id": "cand-2", "contactAId": B, "contactBId": C, "verdict": "unsure", "confidence": null }
             ]
         }])
@@ -748,7 +753,7 @@ mod tests {
         assert!(out.contains(&format!("★ {A}  Brent Rager · brent@smoo.ai · Smoo AI · source manual · added 2025-03-04")));
         assert!(out.contains(&format!("  {B}  Brent Rager")), "non-keeper has no star");
         assert!(out.contains("Rager · Smoo AI · source sms"), "nameless-first contact still renders: {out}");
-        assert!(out.contains("same 94%  candidate cand-1"));
+        assert!(out.contains("same person 94%  candidate cand-1"));
         assert!(out.contains("unsure —  candidate cand-2"));
         assert!(out.contains("Same name and domain"), "reason whitespace collapsed");
         assert!(!out.contains("merge-group --keep"), "an unsure link gets no ready-made merge line");
@@ -756,7 +761,7 @@ mod tests {
         assert!(!out.contains("More may exist"));
 
         let mut sure = group();
-        sure[0]["pairs"][1]["verdict"] = json!("same");
+        sure[0]["pairs"][1]["verdict"] = json!("same_person");
         let out = render_groups(&sure, 20, 0);
         assert!(out.contains(&format!("merge-group --keep {A} {B} {C}")), "{out}");
     }
@@ -791,12 +796,12 @@ mod tests {
     #[test]
     fn history_renders_one_line_per_pair() {
         let pairs = json!([{
-            "id": "cand-9", "status": "merged", "verdict": "same", "confidence": 0.5, "canUndo": true,
+            "id": "cand-9", "status": "merged", "verdict": "same_person", "confidence": 0.5, "canUndo": true,
             "reviewedAt": "2026-10-09T10:00:00Z",
             "contactA": { "firstName": "Ann" }, "contactB": { "email": "ann@x.com" }
         }]);
         let out = render_history(&pairs, 25, 0);
-        assert_eq!(out, "  2026-10-09  Ann ↔ ann@x.com  [merged, AI: same 50%]  candidate cand-9  (undoable)");
+        assert_eq!(out, "  2026-10-09  Ann ↔ ann@x.com  [merged, AI: same person 50%]  candidate cand-9  (undoable)");
         assert!(render_history(&json!([]), 25, 0).contains("Nothing decided"));
     }
 
