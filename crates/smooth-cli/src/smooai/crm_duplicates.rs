@@ -801,7 +801,10 @@ mod tests {
             "contactA": { "firstName": "Ann" }, "contactB": { "email": "ann@x.com" }
         }]);
         let out = render_history(&pairs, 25, 0);
-        assert_eq!(out, "  2026-10-09  Ann ↔ ann@x.com  [merged, AI: same person 50%]  candidate cand-9  (undoable)");
+        assert_eq!(
+            out,
+            "  2026-10-09  Ann ↔ ann@x.com  [merged, AI: same person 50%]  candidate cand-9  (undoable)"
+        );
         assert!(render_history(&json!([]), 25, 0).contains("Nothing decided"));
     }
 
