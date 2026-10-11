@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.77.2
+
+### Patch Changes
+
+- 15b0aed: `/th-handoff` now also offers a stay-in-this-window option per harness: clear the conversation (`/clear` or `/new`), then resume the pearl. In Claude Code it also points at `/th-clear`.
+
 ## 0.77.1
 
 ### Patch Changes
