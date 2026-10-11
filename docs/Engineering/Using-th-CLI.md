@@ -1402,6 +1402,28 @@ them wholesale), so a flag only changes what it names. An org API key has no
 person behind it, so this needs `th auth login`.
 
 ```bash
+# The ORG's notification EMAIL recipients (smooai ADR-152; changes need org.notifications.manage)
+th smoo org-notifications list
+th smoo org-notifications add --email team@acme.com --name "Front desk" \
+    --event booking.created:instant --event deal.won:daily --event lead.captured:weekly
+th smoo org-notifications add --member <user-id> --event escalation.created:instant
+th smoo org-notifications update <id> --event deal.won:daily --event deal.lost:daily   # replaces the set
+th smoo org-notifications update <id> --clear-events
+th smoo org-notifications settings                                    # show
+th smoo org-notifications settings --tz America/Chicago --daily-hour 17 --quiet 21:00-07:00
+th smoo org-notifications test <id>
+th smoo org-notifications resend <id>
+th smoo org-notifications remove <id>
+```
+
+An external address receives nothing until someone there opens the confirmation
+link the server emails it; a member is active at once. Every recipient can
+unsubscribe themselves, and an admin can't undo that (re-adding asks them again).
+CLI twin of the copilot's `org_notification_emails.*` and the hosted MCP
+`org_notification_emails_*` tools; not the same thing as `th smoo notifications`
+(your own per-person routing).
+
+```bash
 # Roles (org.roles.manage / org.members.manage)
 th roles list                      # + member counts
 th roles templates                 # built-in role templates and their keys

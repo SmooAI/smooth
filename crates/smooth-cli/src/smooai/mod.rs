@@ -40,6 +40,7 @@ pub mod members;
 pub mod notification_prefs;
 pub mod notify;
 pub mod observability;
+pub mod org_notifications;
 pub mod products;
 pub mod profile;
 pub mod referrals;
