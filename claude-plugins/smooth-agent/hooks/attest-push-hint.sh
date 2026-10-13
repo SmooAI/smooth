@@ -124,14 +124,21 @@ ci-attest/<check> status on HEAD, so each row skips green in seconds.
 
   available: ${CHECKS:-none}
 
-If a check can't run on this machine, push with an ack and add the \`ci:full\`
-label to the PR — CI then runs every row itself. PRs that change
-.github/workflows, .github/actions or scripts/ci get full CI automatically.
+If a check is blocked or stuck in the queue, it is usually the MACHINE, not the
+code. The block prints why and a remedy; do that first:
+  · stop a long-running local stack     (scripts/dev-server.sh check, then stop)
+  · free disk — th ci-queue holds every heavy job below its disk floor
+  · \`th ci-queue status\` shows what is holding or running
+Then re-run ONLY the rows the Attest Gate named: \`th attest <check>...\`.
 
-A red local check may be the MACHINE, not the code: check \`uptime\` first.
+\`ci:full\` is the LAST resort: it is one-shot and sends every row to paid
+runners. Add it only when a check still cannot run here after the above.
+PRs that change .github/workflows, .github/actions or scripts/ci get full CI
+automatically.
 
 If a bare push is right here (WIP branch, no PR yet, you already attested, or
-you will add \`ci:full\`), append \` # attest:ack reason=...\` and re-run.
+you will add \`ci:full\` as that last resort), append
+\` # attest:ack reason=...\` and re-run.
 
 Reference: scripts/ci/README.md ("Attest-first PR CI")
 EOF
@@ -156,8 +163,10 @@ Credit what the diff touches (credits here are an optimisation, not a gate):
 
 Two things to weigh before attesting:
   · attesting \`test\` also skips its coverage artifact + sticky PR comment.
-  · a red local check may be the MACHINE, not the code. Check \`uptime\` first —
-    timing-sensitive tests fail under load and pass quiet.
+  · a red or blocked local check may be the MACHINE, not the code. Check
+    \`th ci-queue status\` and \`uptime\` first — timing-sensitive tests fail
+    under load and pass quiet; free disk or stop what is hogging it, then re-run
+    only that check.
 
 The order matters: \`th attest\` pushes for you. Pushing first loses the race,
 because every row reads the statuses once, ~20s into the job.

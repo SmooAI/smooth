@@ -38,6 +38,10 @@ pub struct Sys {
     /// Whether to append the well-known tool dirs to the process `PATH`. Off in
     /// tests so parallel cases don't race on a process-global.
     pub normalize_path: bool,
+    /// SMOODEV-3883: how long a check distrusted for load waits for the load to
+    /// fall before its one re-run, and how often it looks. Zero = no re-run.
+    pub overload_retry_wait: Duration,
+    pub overload_poll: Duration,
     /// The machine-wide `th ci-queue` every local check runs through
     /// (SMOODEV-3355). Tests point it at a temp dir.
     pub queue: crate::ci_queue::Queue,
@@ -58,6 +62,8 @@ impl Default for Sys {
             no_docker_start: env_flag("NO_DOCKER_START"),
             no_install: env_flag("NO_INSTALL"),
             normalize_path: true,
+            overload_retry_wait: Duration::from_secs(env_u64("OVERLOAD_RETRY_WAIT").unwrap_or(600)),
+            overload_poll: Duration::from_secs(env_u64("OVERLOAD_POLL").unwrap_or(15)),
             queue: crate::ci_queue::Queue::from_env(),
         }
     }
@@ -258,6 +264,22 @@ pub fn overloaded(sys: &Sys) -> bool {
         return false;
     };
     cores > 0 && load_now(sys).and_then(|l| l.parse::<f64>().ok()).is_some_and(|l| l > 2.0 * f64::from(cores))
+}
+
+/// SMOODEV-3883: poll until [`overloaded`] clears, for at most
+/// `sys.overload_retry_wait`. True when it did.
+pub fn wait_until_quiet(sys: &Sys) -> bool {
+    let deadline = Instant::now() + sys.overload_retry_wait;
+    loop {
+        if !overloaded(sys) {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(sys.overload_poll.min(left));
+    }
 }
 
 pub fn load_summary(sys: &Sys) -> String {
