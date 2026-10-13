@@ -46,6 +46,82 @@
             "description": "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, only when you pass approve=true, send — email or other writes. Needs Sign in with Smoo (`smoo auth login`). Continue a thread by passing back the conversation_id it returns."
         },
         {
+            "name": "bookmarks_add",
+            "description": "Add a bookmark (always creates; prefer bookmarks_upsert). Default parent: the synced bookmarks bar."
+        },
+        {
+            "name": "bookmarks_history",
+            "description": "Recent git-backed bookmark snapshots (sha, time, what changed)."
+        },
+        {
+            "name": "bookmarks_mkdir",
+            "description": "Idempotently create a bookmark folder path (synced by default)."
+        },
+        {
+            "name": "bookmarks_move",
+            "description": "Move a bookmark or folder into another folder. Moving a folder needs confirm=true (otherwise a dry run)."
+        },
+        {
+            "name": "bookmarks_remove",
+            "description": "Remove a bookmark or folder (with contents). Dry run unless confirm=true; confirm only after the user agreed. A history snapshot is taken first."
+        },
+        {
+            "name": "bookmarks_rename",
+            "description": "Change a bookmark's title and/or URL, or a folder's title."
+        },
+        {
+            "name": "bookmarks_restore",
+            "description": "Make bookmarks match a history snapshot. Returns the plan unless confirm=true; confirm only after the user agreed."
+        },
+        {
+            "name": "bookmarks_search",
+            "description": "Search Chrome bookmarks by title/URL; each hit shows its id and full path."
+        },
+        {
+            "name": "bookmarks_snapshot",
+            "description": "Commit the current bookmarks to the history repo (do this before bulk changes)."
+        },
+        {
+            "name": "bookmarks_tree",
+            "description": "Show Chrome bookmarks as a tree. Permanent folders are labelled synced (saved to the Google account) or local. Needs the Smooth Chrome extension (`th chrome install`)."
+        },
+        {
+            "name": "bookmarks_upsert",
+            "description": "Idempotently put a bookmark in a folder path on the account-synced bookmarks bar (folders created as needed). No duplicate if the URL is already there."
+        },
+        {
+            "name": "browse_click",
+            "description": "Click an element by ref from browse_snapshot."
+        },
+        {
+            "name": "browse_close",
+            "description": "Close a tab."
+        },
+        {
+            "name": "browse_open",
+            "description": "Open a URL in a new tab (or navigate `tab`) and wait for it to load. Returns the tab id."
+        },
+        {
+            "name": "browse_screenshot",
+            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it)."
+        },
+        {
+            "name": "browse_snapshot",
+            "description": "List a tab's visible interactive elements with refs (e1, e2, …) to pass to browse_click / browse_type."
+        },
+        {
+            "name": "browse_tabs",
+            "description": "List open Chrome tabs (id, title, URL). Browsing must be enabled in the Smooth extension popup."
+        },
+        {
+            "name": "browse_text",
+            "description": "A tab's title, URL and visible text."
+        },
+        {
+            "name": "browse_type",
+            "description": "Type text into an input/textarea by ref from browse_snapshot; submit=true submits the form."
+        },
+        {
             "name": "email_check_domain",
             "description": "Grade a domain's email authentication: MX, SPF (including the 10-DNS-lookup limit that silently breaks SPF), DKIM, DMARC, blocklists (Spamhaus and others), MTA-STS and BIMI. Each check comes back PASS/WARN/FAIL/INFO with the record found and what to change. Works on ANY domain — yours, a vendor's, a prospect's. Use for \"why is our mail going to spam\" or \"is this domain set up right\". Needs Sign in with Smoo (`smoo auth login`)."
         },

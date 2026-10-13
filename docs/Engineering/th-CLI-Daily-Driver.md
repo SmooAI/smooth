@@ -114,6 +114,15 @@ th pkg install <source> [--harness all|claude-code,codex,opencode,cursor] / list
 # Adding a key: smooth_policy::settings::REGISTRY + settings::raw("key").
 th settings list [--json] / show <key> / set <key> <value> / unset <key> / explain <key> / path
 
+# Chrome — bookmarks (account-synced included, via chrome.bookmarks) and
+# opt-in tab control through the Smooth extension + native host (SMOODEV-3887).
+# Writes default to the SYNCED folders; --local for the unsynced ones. Every
+# change is a commit in ~/.smooth/chrome/history. Spec: docs/Engineering/Chrome-Extension.md
+th chrome install / status / uninstall
+th chrome bm tree [path] / search / upsert / mkdir / add / move / rename / rm / export
+th chrome bm history log / snapshot / remote <url> [--auto-push] / push / fetch · th chrome bm restore <rev>
+th chrome browse tabs / open / text / snapshot / click / type / screenshot / close
+
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
 th daemon · th up / down / status

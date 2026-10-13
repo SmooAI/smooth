@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <style>
+            body {
+                font:
+                    13px system-ui,
+                    sans-serif;
+                width: 260px;
+                margin: 12px;
+                color: #111;
+            }
+            .dot {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                margin-right: 6px;
+                background: #aaa;
+            }
+            .on {
+                background: #1aa37a;
+            }
+            .off {
+                background: #d9822b;
+            }
+            button {
+                margin-top: 10px;
+                width: 100%;
+                padding: 6px;
+            }
+            small {
+                color: #666;
+                display: block;
+                margin-top: 6px;
+            }
+        </style>
+    </head>
+    <body>
+        <div><span id="dot" class="dot"></span><span id="conn">Checking…</span></div>
+        <small id="err"></small>
+        <div style="margin-top: 10px">Agent browsing: <b id="browsing">…</b></div>
+        <button id="toggle" hidden></button>
+        <small>Bookmarks are always available to th. Browsing lets agents open tabs, read pages, click and type.</small>
+        <script src="popup.js"></script>
+    </body>
+</html>

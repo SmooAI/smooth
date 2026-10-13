@@ -76,6 +76,7 @@ One process, one operative per task. The microVM sandbox stack was removed in Ju
 | [[Engineering/Build-Workflow]]       | `cargo`, `pnpm install:th`                             |
 | [[Engineering/Bench-Harness]]        | `th bench`, scoring, The Line                          |
 | [[Engineering/th-CLI-Daily-Driver]]  | `th`/`smoo` daily reference, adding a subcommand       |
+| [[Engineering/Chrome-Extension]]     | `th chrome`: synced bookmarks, history, tab control    |
 | [[Engineering/Dev-Loop-and-Landing]] | Build/test/style, oxfmt, changesets, landing checklist |
 
 ---
