@@ -1954,6 +1954,19 @@ attesting the check IS the load (cargo on 10 cores takes smoo-hub to 62), so
 sampling afterwards would swallow every genuine failure. A **pass** under load
 is still a pass.
 
+A distrusted failure is not handed straight to CI any more (SMOODEV-3883).
+`th attest` says why the machine is busy, then waits up to
+`SMOOAI_CI_OVERLOAD_RETRY_WAIT` seconds (default 600; poll
+`SMOOAI_CI_OVERLOAD_POLL`, default 15; 0 disables) for the load to fall below 2×
+cores and runs the check **once more**. That re-run is a real verdict: green is
+credited, red is posted. A check that waited out `--max-wait` for a ci-queue slot
+gets the same diagnosis. The diagnosis is the repo's own
+`scripts/ci/_pressure.sh` when it has one (smooai's prints load, disk against the
+queue's hold, the top CPU/memory processes and any long-running local stack, then
+a `→ remedy:` line), run with a 30s bound; otherwise a pointer to
+`th ci-queue status`. Apply the remedy and re-run only the blocked rows before
+reaching for a repo's full-CI escape hatch.
+
 #### Ordering — why it pushes for you
 
 Pushing starts the workflow, and every row reads the statuses **once**, ~20s
