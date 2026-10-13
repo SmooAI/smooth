@@ -1,6 +1,6 @@
 ---
 name: th-clear
-description: Hand this session off and continue in a fresh context in the SAME terminal — the th-handoff checkpoint, then `th harness handoff arm`, then the user types `/clear` and the next session resumes automatically (no resume command). Invoke as `/th-clear [pearl-id]`. Use when the context budget hook says the session is over budget, or the user says "clear and continue", "fresh context", "th-clear", or "context is getting big".
+description: Hand this session off and continue in a fresh context in the SAME terminal — the th-handoff checkpoint, then `th harness handoff arm`, then the user types `/clear` and `/th-handoff resume <pearl>` (the armed token usually resumes on its own). Invoke as `/th-clear [pearl-id]`. Use when the context budget hook says the session is over budget, or the user says "clear and continue", "fresh context", "th-clear", or "context is getting big".
 ---
 
 # th-clear — hand off, clear, keep going
@@ -21,12 +21,17 @@ The `th harness budget` hook invokes this for you when the session crosses `harn
 
 4. **Arm:** `th harness handoff arm --pearl <pearl> --harness claude-code` (in Codex/OpenCode/others, pass that harness's name). It warns if the pearl has no checkpoint — fix that, don't ignore it. The token expires in 15 minutes.
 
-5. **Stop and tell the user, in one line:** `Armed <pearl>. Type /clear, then any message (e.g. "go") — the fresh session picks up from: <next>.` Then end your turn. Do no more work: anything after the checkpoint is lost to the next session.
+5. **Stop and give the user the two lines `arm` printed**, copy-pasteable, plus where it picks up:
+    ```
+    /clear
+    /th-handoff resume <pearl>
+    ```
+    `Picks up from: <next>.` Then end your turn. Do no more work: anything after the checkpoint is lost to the next session.
 
 ## Notes
 
 - **In-process subagents die on `/clear`.** They must push and checkpoint before step 4, exactly as in `/th-handoff`.
-- **Why "then any message":** a SessionStart hook can add context but can't start a turn; the first message after `/clear` is what sets the fresh session working.
+- **Why the explicit resume line:** the armed token usually resumes the fresh session by itself (the SessionStart hook injects the handoff after `/clear`), but a hook can add context, not start a turn, and an expired or missed token leaves nothing injected. `/th-handoff resume <pearl>` works either way; if the handoff was already injected, it just re-reads the same pearl.
 - **Changed your mind?** `th harness handoff disarm` drops the token; `th harness handoff list` shows what is armed.
 - **Relaunch instead of `/clear`** (quit, then `claude` in the same directory within 15 minutes) also resumes, when exactly one token is armed there.
 - **Other harnesses:** the same two commands work anywhere; the harness's clear is `/clear` or `/new`. Where no SessionStart hook claims the token, the fresh session can claim by hand: `th harness handoff claim --format text`.
