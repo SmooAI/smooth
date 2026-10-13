@@ -22,11 +22,11 @@ The `th harness budget` hook invokes this for you when the session crosses `harn
 4. **Arm:** `th harness handoff arm --pearl <pearl> --harness claude-code` (in Codex/OpenCode/others, pass that harness's name). It warns if the pearl has no checkpoint — fix that, don't ignore it. The token expires in 15 minutes.
 
 5. **Stop and give the user the two lines `arm` printed**, copy-pasteable, plus where it picks up:
-   ```
-   /clear
-   /th-handoff resume <pearl>
-   ```
-   `Picks up from: <next>.` Then end your turn. Do no more work: anything after the checkpoint is lost to the next session.
+    ```
+    /clear
+    /th-handoff resume <pearl>
+    ```
+    `Picks up from: <next>.` Then end your turn. Do no more work: anything after the checkpoint is lost to the next session.
 
 ## Notes
 
