@@ -454,16 +454,12 @@ pub fn handoff_cmd(cmd: HandoffCmd) -> Result<()> {
                 expires_at: now + Duration::minutes(i64::from(ttl_minutes)),
             };
             arm_in(&armed_dir()?, &armed)?;
-            let clear = if matches!(harness.as_str(), "claude-code" | "claude") {
-                "/clear"
-            } else {
-                "your harness's clear (/clear or /new)"
-            };
             println!(
-                "✓ Armed {} for {} (expires in {ttl_minutes}m{}).\n  Now type {clear} — the next session here resumes it automatically.",
+                "✓ Armed {} for {} (expires in {ttl_minutes}m{}).\n{}",
                 armed.pearls.join(", "),
                 armed.cwd,
-                owner.map(|p| format!(", harness pid {p}")).unwrap_or_default()
+                owner.map(|p| format!(", harness pid {p}")).unwrap_or_default(),
+                resume_instructions(&harness, &armed.pearls)
             );
             Ok(())
         }
@@ -501,6 +497,20 @@ pub fn handoff_cmd(cmd: HandoffCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// What the user types after arming: the harness's clear, then the explicit
+/// resume command. The armed token usually resumes on its own after the clear;
+/// the resume line is the copy-pasteable fallback when it doesn't.
+#[must_use]
+pub fn resume_instructions(harness: &str, pearls: &[String]) -> String {
+    let (clear, skill) = match harness {
+        "claude-code" | "claude" => ("/clear", "/th-handoff"),
+        "codex" => ("/new", "$th-handoff"),
+        _ => ("/clear (or /new)", "/th-handoff"),
+    };
+    let resume: Vec<String> = pearls.iter().map(|p| format!("    {skill} resume {p}")).collect();
+    format!("  Type:\n    {clear}\n  then:\n{}", resume.join("\n"))
 }
 
 // ── budget ─────────────────────────────────────────────────────────
@@ -571,7 +581,7 @@ pub fn decide(event: &str, tokens: u64, warn: u64, hard: u64, state: &BudgetStat
     let near = warn > 0 && tokens >= warn;
     let over_msg = format!(
         "Context is at {} tokens, over this session's {} budget (harness.context_budget). Hand off now: finish the current step, \
-         invoke the th-clear skill (it checkpoints the work into a pearl and arms the resume), then stop and tell the user to type /clear.",
+         invoke the th-clear skill (it checkpoints the work into a pearl and arms the resume), then stop and give the user the two lines it prints: /clear, then /th-handoff resume <pearl>.",
         k(tokens),
         k(hard)
     );
@@ -895,6 +905,17 @@ mod tests {
         body.push_str(r#"{"type":"assistant","message":{"usage":{"input_tokens":4,"cache_read_input_tokens":240000}}}"#);
         fs::write(&p, body).unwrap();
         assert_eq!(transcript_context_tokens(&p), Some(240_004));
+    }
+
+    #[test]
+    fn resume_instructions_name_clear_and_resume_per_harness() {
+        let p = vec!["th-abc123".to_string()];
+        let claude = resume_instructions("claude-code", &p);
+        assert!(claude.contains("/clear") && claude.contains("/th-handoff resume th-abc123"), "{claude}");
+        let codex = resume_instructions("codex", &p);
+        assert!(codex.contains("/new") && codex.contains("$th-handoff resume th-abc123"), "{codex}");
+        let two = resume_instructions("claude-code", &["a".to_string(), "b".to_string()]);
+        assert!(two.contains("/th-handoff resume a") && two.contains("/th-handoff resume b"), "{two}");
     }
 
     #[test]
