@@ -74,7 +74,7 @@ pub enum ChromeCommands {
         #[command(subcommand)]
         cmd: BookmarkCommands,
     },
-    /// Drive tabs: needs "Enable browsing" in the extension popup
+    /// Drive tabs: needs Agent browsing on in the extension popup
     Browse {
         #[arg(long, global = true)]
         instance: Option<String>,

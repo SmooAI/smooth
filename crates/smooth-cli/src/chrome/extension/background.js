@@ -56,7 +56,7 @@ async function onRequest(msg) {
 }
 
 async function needBrowsing() {
-    if (!(await browsingEnabled())) throw new Error('browsing is off: click the Smooth extension icon and choose Enable browsing');
+    if (!(await browsingEnabled())) throw new Error('browsing is off: click the Smooth extension icon and turn on Agent browsing');
 }
 
 function waitForLoad(tabId, timeoutMs = 30000) {
@@ -888,14 +888,8 @@ const METHODS = {
     },
     'trusted.status': async () => ({ enabled: await trustedEnabled() }),
     'page.eval': async ({ tabId, code, timeoutMs = 10000 }) => {
-        const run = (expression) =>
-            cdp(tabId, 'Runtime.evaluate', { expression, replMode: true, returnByValue: true, awaitPromise: true, userGesture: true, timeout: timeoutMs });
-        let r = await run(code);
-        const why = (d) => d.exception?.description ?? d.text;
-        // A bare `return` is fine in a function body: retry wrapped in one.
-        if (r.exceptionDetails && /Illegal return/.test(why(r.exceptionDetails))) r = await run(`(async () => {\n${code}\n})()`);
-        if (r.exceptionDetails) throw new Error(why(r.exceptionDetails));
-        return clean({ type: r.result.type, value: r.result.value, unserializable: r.result.unserializableValue, description: r.result.description });
+        const r = await SmoothCdp.evaluate((params) => cdp(tabId, 'Runtime.evaluate', params), code, timeoutMs);
+        return clean({ type: r.type, value: r.value, unserializable: r.unserializableValue, description: r.description });
     },
     'page.console': async ({ tabId, clear, stop }) => {
         const s = await session(tabId);

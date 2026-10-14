@@ -1448,7 +1448,7 @@ impl ServerHandler for SmoothMcp {
                  `browse_*` drive tabs only after the user enables browsing in the extension popup; they act in the user's \
                  signed-in browser, so don't submit forms, buy, send or delete anything without explicit approval. \
                  `trusted: true`, x/y clicks, `browse_eval`, `browse_console`, `browse_network`, `browse_dialog` and \
-                 `browse_upload` also need the popup's \"Enable trusted input\" (chrome.debugger).\n\n\
+                 `browse_upload` also need the popup's \"Trusted input\" switch (chrome.debugger).\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )

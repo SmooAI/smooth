@@ -159,7 +159,22 @@ const SmoothCdp = (() => {
         }
     }
 
-    return { MOD, parseCombo, keyEvents, typeCalls, clickEvents, hoverEvents, wheelEvents, viewportClip, checkPoint };
+    /**
+     * browse_eval. REPL mode first (top-level await, re-declarable `const`); if the code uses a
+     * bare `return`, again as an async function body. REPL mode doesn't await a promise the code
+     * hands back, so that retry must not use it, or the caller gets the promise serialized as {}.
+     * `send` posts Runtime.evaluate params and resolves to its result.
+     */
+    async function evaluate(send, code, timeout) {
+        const base = { returnByValue: true, awaitPromise: true, userGesture: true, timeout };
+        const why = (d) => d.exception?.description ?? d.text;
+        let r = await send({ ...base, expression: code, replMode: true });
+        if (r.exceptionDetails && /Illegal return/.test(why(r.exceptionDetails))) r = await send({ ...base, expression: `(async () => {\n${code}\n})()` });
+        if (r.exceptionDetails) throw new Error(why(r.exceptionDetails));
+        return r.result;
+    }
+
+    return { MOD, parseCombo, keyEvents, typeCalls, clickEvents, hoverEvents, wheelEvents, viewportClip, checkPoint, evaluate };
 })();
 
 if (typeof module !== 'undefined') module.exports = SmoothCdp;
