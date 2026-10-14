@@ -148,6 +148,19 @@ pub struct Budgets {
     pub warn: u64,
     pub overrides: Vec<Override>,
     pub reset: Reset,
+    /// Context past which a milestone suggests `/th-clear` (0 = never).
+    pub suggest: u64,
+    pub suggest_overrides: Vec<Override>,
+}
+
+/// The most specific entry of `overrides` for this session, if any.
+fn best_override(overrides: &[Override], harness: &str, model: Option<&str>) -> Option<u64> {
+    overrides
+        .iter()
+        .filter_map(|o| o.rank(harness, model).map(|r| (r, o.tokens)))
+        // max_by_key keeps the LAST of equal keys: a later entry wins a tie.
+        .max_by_key(|(r, _)| *r)
+        .map(|(_, t)| t)
 }
 
 impl Budgets {
@@ -161,19 +174,23 @@ impl Budgets {
     pub fn from_resolver(r: &Resolver) -> Self {
         let raw = |k: &str| r.resolve(k).ok().and_then(|v| v.value);
         let int = |k: &str| raw(k).and_then(|v| v.trim().parse::<i64>().ok()).map_or(0, |n| u64::try_from(n).unwrap_or(0));
-        let overrides = raw("harness.context_budgets")
-            .map(|v| {
-                v.split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|e| !e.is_empty())
-                    .filter_map(|e| Override::parse(e).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let list = |k: &str| {
+            raw(k)
+                .map(|v| {
+                    v.split(|c: char| c == ',' || c.is_whitespace())
+                        .filter(|e| !e.is_empty())
+                        .filter_map(|e| Override::parse(e).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         Self {
             global: int("harness.context_budget"),
             warn: int("harness.context_budget_warn"),
-            overrides,
+            overrides: list("harness.context_budgets"),
             reset: Reset::parse(&raw("harness.context_reset").unwrap_or_default()),
+            suggest: int("harness.context_suggest"),
+            suggest_overrides: list("harness.context_suggests"),
         }
     }
 
@@ -182,19 +199,22 @@ impl Budgets {
     /// a warn of 0 stays off.
     #[must_use]
     pub fn for_session(&self, harness: &str, model: Option<&str>) -> (u64, u64) {
-        let best = self
-            .overrides
-            .iter()
-            .filter_map(|o| o.rank(harness, model).map(|r| (r, o.tokens)))
-            // max_by_key keeps the LAST of equal keys: a later entry wins a tie.
-            .max_by_key(|(r, _)| *r);
-        let Some((_, budget)) = best else { return (self.global, self.warn) };
+        let Some(budget) = best_override(&self.overrides, harness, model) else {
+            return (self.global, self.warn);
+        };
         if budget == 0 || self.warn == 0 {
             return (budget, if budget == 0 { 0 } else { self.warn.min(budget) });
         }
         let gap = self.global.saturating_sub(self.warn);
         let warn = if gap > 0 && gap < budget { budget - gap } else { budget / 10 * 9 };
         (budget, warn)
+    }
+
+    /// Context past which a milestone suggests `/th-clear` for this session
+    /// (0 = never): a `harness.context_suggests` entry, else the global line.
+    #[must_use]
+    pub fn suggest_for(&self, harness: &str, model: Option<&str>) -> u64 {
+        best_override(&self.suggest_overrides, harness, model).unwrap_or(self.suggest)
     }
 
     /// The threshold to write into `harness`'s own config, or `None` to leave
@@ -416,6 +436,8 @@ mod tests {
             warn,
             overrides: overrides.iter().map(|e| Override::parse(e).unwrap()).collect(),
             reset: Reset::Compact,
+            suggest: 150_000,
+            suggest_overrides: Vec::new(),
         }
     }
 
@@ -526,6 +548,16 @@ mod tests {
     }
 
     #[test]
+    fn suggest_takes_the_most_specific_override() {
+        let mut b = budgets(300_000, 270_000, &[]);
+        b.suggest_overrides = vec![Override::parse("*/claude-sonnet-*=120000").unwrap(), Override::parse("codex=0").unwrap()];
+        assert_eq!(b.suggest_for("claude-code", Some("claude-sonnet-5-5")), 120_000);
+        assert_eq!(b.suggest_for("claude-code", Some("claude-opus-5-5")), 150_000);
+        assert_eq!(b.suggest_for("claude-code", None), 150_000);
+        assert_eq!(b.suggest_for("codex", None), 0, "an override of 0 turns suggestions off");
+    }
+
+    #[test]
     fn native_threshold_is_off_in_clear_mode_and_when_disabled() {
         let mut b = budgets(250_000, 220_000, &["codex=0"]);
         assert_eq!(b.native_threshold("claude-code"), Some(250_000));
@@ -537,7 +569,7 @@ mod tests {
     #[test]
     fn from_resolver_reads_every_key() {
         let file = SettingsFile::parse(
-            "[harness]\ncontext_budget = 300000\ncontext_budget_warn = 260000\ncontext_reset = \"clear\"\ncontext_budgets = [\"codex=150000\", \"bogus\"]\n",
+            "[harness]\ncontext_budget = 300000\ncontext_budget_warn = 260000\ncontext_reset = \"clear\"\ncontext_budgets = [\"codex=150000\", \"bogus\"]\ncontext_suggest = 100000\ncontext_suggests = [\"*/claude-sonnet-*=120000\"]\n",
         )
         .unwrap();
         let r = Resolver::new(|_| None, file);
@@ -546,8 +578,10 @@ mod tests {
         assert_eq!(b.warn, 260_000);
         assert_eq!(b.reset, Reset::Clear);
         assert_eq!(b.overrides.len(), 1, "a bad entry is skipped, not fatal");
+        assert_eq!(b.suggest_for("claude-code", Some("claude-sonnet-5-5")), 120_000);
+        assert_eq!(b.suggest_for("claude-code", Some("claude-opus-5-5")), 100_000);
         let d = Budgets::from_resolver(&Resolver::new(|_| None, SettingsFile::empty()));
-        assert_eq!((d.global, d.warn, d.reset), (250_000, 220_000, Reset::Compact));
+        assert_eq!((d.global, d.warn, d.suggest, d.reset), (300_000, 270_000, 150_000, Reset::Compact));
     }
 
     #[test]

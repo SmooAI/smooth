@@ -57,6 +57,11 @@ pub struct Report {
     pub input_at_budget: u64,
     /// The global budget the estimate used (per-model overrides applied per call).
     pub budget: u64,
+    /// Estimated input had every session taken the `/th-clear` suggestion
+    /// the first time it was made (a reset at the suggest line).
+    pub input_at_suggest: u64,
+    /// The global suggest line that estimate used.
+    pub suggest: u64,
 }
 
 /// One main-thread call or compaction boundary, as parsed from a line.
@@ -156,6 +161,7 @@ impl Builder {
         let report = Report {
             days,
             budget: budgets.global,
+            suggest: budgets.suggest,
             buckets: (0..EDGES.len())
                 .map(|i| Bucket {
                     label: label(i),
@@ -211,6 +217,8 @@ impl Builder {
                         r.input_over_budget += context;
                     }
                     r.input_at_budget += if budget > 0 { folded(context, budget) } else { context };
+                    let suggest = self.budgets.suggest_for("claude-code", model.as_deref());
+                    r.input_at_suggest += if suggest > 0 { folded(context, suggest) } else { context };
                 }
             }
         }
@@ -349,6 +357,14 @@ pub fn render(r: &Report) -> String {
     } else {
         out.push_str("\nbudget off (harness.context_budget = 0)\n");
     }
+    if r.suggest > 0 {
+        let _ = writeln!(
+            out,
+            "taking the /th-clear suggestion at {} (harness.context_suggest) every time: about {} fewer — the same upper bound",
+            human(r.suggest),
+            pct(r.input_tokens.saturating_sub(r.input_at_suggest), r.input_tokens)
+        );
+    }
     out
 }
 
@@ -391,6 +407,8 @@ mod tests {
             warn: 0,
             overrides: overrides.iter().map(|o| Override::parse(o).unwrap()).collect(),
             reset: Reset::Compact,
+            suggest: 0,
+            suggest_overrides: Vec::new(),
         }
     }
 
@@ -470,6 +488,20 @@ mod tests {
         b.file(lines.iter().filter_map(|l| parse_line(l)), "f");
         let r = b.finish();
         assert_eq!(r.input_over_budget, 400_000, "only the sonnet call is over its budget");
+    }
+
+    #[test]
+    fn the_suggest_line_estimates_its_own_saving() {
+        let mut with = budgets(300_000, &[]);
+        with.suggest = 150_000;
+        let mut b = Builder::new(1, with);
+        b.file(parse_line(&call("a", 400_000, "m")), "f");
+        let r = b.finish();
+        assert_eq!(r.input_at_suggest, folded(400_000, 150_000));
+        assert!(render(&r).contains("/th-clear suggestion at 150k"), "{}", render(&r));
+        let mut b = Builder::new(1, budgets(300_000, &[]));
+        b.file(parse_line(&call("a", 400_000, "m")), "f");
+        assert!(!render(&b.finish()).contains("suggestion"), "suggest off → no line");
     }
 
     #[test]

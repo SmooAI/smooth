@@ -184,14 +184,6 @@
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/mail-guard.sh stop"
                     }
                 ]
-            },
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": "th harness budget --harness claude-code 2>/dev/null || exit 0"
-                    }
-                ]
             }
         ],
         "SubagentStop": [

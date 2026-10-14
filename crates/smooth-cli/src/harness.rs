@@ -184,6 +184,10 @@ pub enum Cmd {
         /// With --report: machine-readable output.
         #[arg(long, requires = "report")]
         json: bool,
+        /// Read a statusline payload on stdin and print the context segment
+        /// (`◔ 162k/300k 54%`).
+        #[arg(long, conflicts_with = "report")]
+        statusline: bool,
     },
 }
 
@@ -195,6 +199,10 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
     let cmd = match cmd {
         Cmd::Handoff(c) => return crate::harness_clear::handoff_cmd(c),
         Cmd::Budget { report: true, days, json, .. } => return crate::harness_budget_report::run(days, json),
+        Cmd::Budget { statusline: true, harness, .. } => {
+            crate::harness_clear::statusline_cmd(&harness);
+            return Ok(());
+        }
         Cmd::Budget {
             harness,
             event,
