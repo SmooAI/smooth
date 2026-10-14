@@ -246,7 +246,7 @@ pub enum BrowseCommands {
         /// 2 for a double click
         #[arg(long)]
         count: Option<u32>,
-        /// Real input through the debugger (needs "Enable trusted input")
+        /// Real input through the debugger (needs Trusted input on in the extension popup)
         #[arg(long)]
         trusted: bool,
         /// Print a fresh snapshot afterwards
@@ -1081,7 +1081,7 @@ pub fn screenshot(inst: Option<&str>, tab: i64) -> Result<Shot> {
     })
 }
 
-// ── trusted input (the optional chrome.debugger tier) ───────────────────────
+// ── trusted input (the opt-in chrome.debugger tier) ─────────────────────────
 
 /// Mark args for the debugger path. Only `true` is sent, so the extension's default stays the in-page path.
 pub fn trust(mut args: Value, trusted: bool) -> Value {

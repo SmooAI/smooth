@@ -2,8 +2,10 @@ importScripts('cdp.js');
 
 const HOST = 'ai.smoo.smooth_chrome';
 const BROWSING = { permissions: ['tabs', 'scripting', 'tabGroups'], origins: ['<all_urls>'] };
-// The optional "trusted input" tier: chrome.debugger, so clicks and keys are real input events.
-const TRUSTED = { permissions: ['debugger'] };
+// The opt-in "trusted input" tier: chrome.debugger, so clicks and keys are real input events.
+// Chrome refuses `debugger` as an optional permission (it silently drops it), so it is declared
+// up front and this setting, off by default and only on while browsing is granted, gates every attach.
+const TRUSTED_KEY = 'trusted';
 
 let port = null;
 let backoff = 1000;
@@ -39,7 +41,7 @@ async function hello() {
 }
 
 const browsingEnabled = () => chrome.permissions.contains(BROWSING);
-const trustedEnabled = () => chrome.permissions.contains(TRUSTED);
+const trustedEnabled = async () => (await chrome.storage.local.get(TRUSTED_KEY))[TRUSTED_KEY] === true && (await browsingEnabled());
 const platform = chrome.runtime.getPlatformInfo();
 
 async function onRequest(msg) {
@@ -143,7 +145,7 @@ const withTimeout = (p, ms, msg) =>
 
 async function needTrusted() {
     await needBrowsing();
-    if (!(await trustedEnabled())) throw new Error('trusted input is off: click the Smooth extension icon and choose Enable trusted input');
+    if (!(await trustedEnabled())) throw new Error('trusted input is off: click the Smooth extension icon and turn on Trusted input');
 }
 
 function attach(tabId) {
@@ -273,9 +275,8 @@ function onDebuggerDetach({ tabId }) {
     dbg.delete(tabId);
 }
 
-// chrome.debugger only exists once its optional permission is granted. Touching it at top
-// level otherwise throws, and a throw there kills the whole service worker (no host
-// connection, no popup status). So listen at startup only if granted, and again on grant.
+// A throw at top level kills the whole service worker (no host connection, no popup status),
+// so never assume chrome.debugger exists: a browser that drops the permission leaves it undefined.
 let debuggerListening = false;
 function listenDebugger() {
     if (debuggerListening || !chrome.debugger) return;
@@ -944,14 +945,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     browsingEnabled().then((browsing) => reply({ connected: !!port, lastError, browsing }));
     return true;
 });
+// Turning trusted input off (or revoking browsing, which it needs) ends every debugger session.
+async function trustedChanged() {
+    if (!(await trustedEnabled())) {
+        await Promise.all([...dbg.keys()].map((tabId) => chrome.debugger?.detach({ tabId }).catch(() => {})));
+        for (const s of dbg.values()) clearTimeout(s.idle);
+        dbg.clear();
+    }
+    hello();
+}
 chrome.permissions.onAdded.addListener(() => {
     listenDebugger();
     hello();
 });
-chrome.permissions.onRemoved.addListener(async () => {
-    // Revoking debugger ends every session; forget them.
-    if (!(await trustedEnabled())) dbg.clear();
-    hello();
+chrome.permissions.onRemoved.addListener(trustedChanged);
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && TRUSTED_KEY in changes) trustedChanged();
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
