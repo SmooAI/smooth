@@ -43,6 +43,13 @@
         <div style="margin-top: 10px">Agent browsing: <b id="browsing">…</b></div>
         <button id="toggle" hidden></button>
         <small>Bookmarks are always available to th. Browsing lets agents open tabs, read pages, click and type.</small>
+        <div style="margin-top: 10px">Trusted input: <b id="trusted">…</b></div>
+        <button id="trustedToggle" hidden></button>
+        <small
+            >Trusted input uses Chrome's debugger: real clicks and keystrokes (for sites that ignore scripted ones), answering alert/confirm dialogs,
+            screenshots without switching tabs, console and network logs, file uploads and running JavaScript. Chrome shows a "started debugging" bar while it
+            is in use.</small
+        >
         <script src="popup.js"></script>
     </body>
 </html>

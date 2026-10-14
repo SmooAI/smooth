@@ -14,6 +14,7 @@ pub const EXTENSION_ID: &str = "pgjpgmfljenhbbgkgjpmaghndenconlc";
 pub const FILES: &[(&str, &str)] = &[
     ("manifest.json", include_str!("extension/manifest.json")),
     ("background.js", include_str!("extension/background.js")),
+    ("cdp.js", include_str!("extension/cdp.js")),
     ("popup.html", include_str!("extension/popup.html")),
     ("popup.js", include_str!("extension/popup.js")),
 ];
