@@ -52,7 +52,7 @@ Chrome 134+ can return **two of each permanent folder** from `getTree()`, a loca
 
 ## Browsing (opt-in)
 
-`tabs`, `scripting` and `<all_urls>` are **optional** permissions. The user grants them with the popup's **Enable browsing** button (`chrome.permissions.request` needs a user gesture) and can revoke them the same way. Until then, every `browse_*` call fails with a message explaining how to turn it on.
+`tabs`, `scripting` and `<all_urls>` are **optional** permissions. The user grants them with the popup's **Agent browsing** switch (`chrome.permissions.request` needs a user gesture) and can revoke them the same way. Until then, every `browse_*` call fails with a message explaining how to turn it on.
 
 Browsing also asks for `tabGroups` (no warning): tabs the agent opens go in a purple **Smooth** group, and the extension badge reads `AI` while an action runs.
 
@@ -67,7 +67,7 @@ Screenshots use `captureVisibleTab`, which first activates the tab. `node script
 
 ## Trusted input (opt-in)
 
-`debugger` is a second optional permission, granted with the popup's **Enable trusted input** toggle (separate from Enable browsing). It shows Chrome's "Smooth started debugging this browser" bar while attached and carries the strongest permission warning, which is why it is off by default. With it on:
+`debugger` is a second optional permission, granted with the popup's **Trusted input** switch (separate from Agent browsing, and only available once browsing is on). It shows Chrome's "Smooth started debugging this browser" bar while attached and carries the strongest permission warning, which is why it is off by default. With it on:
 
 - `trusted: true` on `browse_click`, `browse_type`, `browse_key`, `browse_hover` and `browse_scroll` (CLI `--trusted`) sends real input through CDP: `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` (with the macOS editing `commands`, without which keys do nothing in a Mac text field) and `Input.insertText`. Targets are a main-frame ref or an `x`/`y` point; `x`/`y` imply trusted. Click also takes `button` (right, middle) and `count` (2 = double click); key takes `repeat`.
 - `browse_screenshot` captures through `Page.captureScreenshot` without switching tabs, scaled to CSS pixels, so a point in the image is the `x`/`y` to click.
@@ -95,6 +95,29 @@ The builders live in `extension/cdp.js` (pure functions, no `chrome.*`). `node s
 | `file_upload`                                                 | `browse_upload`                                                              |
 | —                                                             | `browse_dialog`, `browse_wait_for` (Claude in Chrome has no equivalent tool) |
 | `resize_window`, `gif_creator`, `upload_image`, `shortcuts_*` | Not done                                                                     |
+
+## Popup
+
+The toolbar popup (`popup.html`/`popup.js`) uses Presence, Smooth's design language: a warm ground, the ringed `th` mark, and coral for "on".
+
+- A status pill shows the connection by glyph as well as colour: `●` Connected, `○` Not connected or Not running, `◐` Checking.
+- When something is wrong, a box under the header says what and how to fix it. **Not connected** means the worker runs but can't reach `th` (it shows Chrome's error); **Not running** means the service worker itself didn't start, so the popup's message got no answer.
+- Agent browsing and Trusted input are checkbox switches (`role="switch"`), so keyboard and screen readers work. Trusted input reads "Needs browsing" and stays disabled until browsing is on, but can always be turned off.
+
+`node scripts/chrome-sw-smoke.mjs` boots `background.js` against a stub `chrome` holding only the up-front permissions, the state of a fresh install. Optional APIs such as `chrome.debugger` don't exist until granted; touching one at top level kills the worker, which once left the popup stuck on "Checking…". The smoke test is part of `pnpm test:chrome-page`.
+
+The icons (`icon.svg`, `icons/{16,32,48,128}.png`) are rendered by `scripts/gen-ring-icons.py --assets`; see [Brand icons](#brand-icons).
+
+## Brand icons
+
+Smooth's app icons put the product mark inside the Smoo AI social avatar's gradient band (teal → coral → orange → teal), so each one reads as a Smoo AI product. `python3 scripts/gen-ring-icons.py` writes the SVG masters, `images/th-ring-icon.svg` (Smooth, Big Smooth) and `images/smoothflow-ring-icon.svg` (the `th` on SmoothFlow's three streams). With `--assets` it also re-renders every icon in the repo: `scripts/macos/BigSmooth.icns`, `desktop/assets/icon.png`, the smooth-web favicons, touch and PWA icons, the Chrome extension icons, and SmoothFlow's `.icns` and SVG masters. It needs `rsvg-convert` (`brew install librsvg`) and, for `.icns`, macOS `iconutil`.
+
+- macOS icons follow Apple's grid: the disc is 824 of 1024 px, centred.
+- Touch and PWA icons are full-bleed squares with the disc at 80%, because iOS and maskable-icon launchers crop the corners themselves.
+- Below about 40 px the band gets a pixel floor, so it doesn't blur into the ground.
+- Menu-bar and tray glyphs stay monochrome templates and are not ringed.
+
+The `th` glyph itself is `images/smooth-icon.svg`; the generator reads its path from there.
 
 ## Setup
 

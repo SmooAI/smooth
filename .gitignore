@@ -50,3 +50,4 @@ Thumbs.db
 .smooth/pearls.db-shm
 .archivist-diag.txt
 .claude/worktrees/
+__pycache__/

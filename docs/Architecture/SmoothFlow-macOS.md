@@ -489,10 +489,12 @@ the file format and the two default changes th-27baa4 made are documented in
 
 ## Icon
 
-`Resources/SmoothFlow.icns` (wired by `CFBundleIconFile`; the `.icns` is built
-with Apple's 824-in-1024 squircle geometry) — the `th` mark floating on three
-Smoo-gradient streams (gold / orange / coral) on the Presence ground. Masters:
-`Resources/macos-1024.svg` and `Resources/icon-source.svg`.
+`Resources/SmoothFlow.icns` (wired by `CFBundleIconFile`; the disc is 824 of
+1024 px, Apple's icon grid) — the `th` mark riding three Smoo-gradient streams
+(gold / orange / coral) inside the Smoo AI gradient band, on the Presence
+ground. Masters: `Resources/macos-1024.svg` and `Resources/icon-source.svg`.
+All three are rendered by `python3 scripts/gen-ring-icons.py --assets` (see
+[Brand icons](../Engineering/Chrome-Extension.md#brand-icons)); don't edit them by hand.
 `Resources/MenuBarTemplate.png` (+`@2x`) is the monochrome glyph the menu-bar
 status item uses (`isTemplate = true`, so it follows the bar's appearance). The
 status item is how you get the window back after closing it — the app keeps

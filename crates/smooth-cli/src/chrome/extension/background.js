@@ -159,6 +159,7 @@ function attach(tabId) {
 async function attachNow(tabId) {
     const url = (await chrome.tabs.get(tabId)).url ?? '';
     if (/^(chrome|chrome-extension|chrome-untrusted|devtools|edge):/.test(url)) throw new Error(`browser pages are off limits to the debugger: ${url}`);
+    listenDebugger();
     // A session left over from a crashed worker would make attach fail.
     await chrome.debugger.detach({ tabId }).catch(() => {});
     try {
@@ -216,7 +217,7 @@ const capped = (arr, max, item) => {
     if (arr.length > max) arr.splice(0, arr.length - max);
 };
 
-chrome.debugger.onEvent.addListener(({ tabId }, method, p) => {
+function onDebuggerEvent({ tabId }, method, p) {
     const s = dbg.get(tabId);
     if (!s) return;
     switch (method) {
@@ -265,12 +266,24 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, p) => {
             break;
         }
     }
-});
+}
 
-chrome.debugger.onDetach.addListener(({ tabId }) => {
+function onDebuggerDetach({ tabId }) {
     clearTimeout(dbg.get(tabId)?.idle);
     dbg.delete(tabId);
-});
+}
+
+// chrome.debugger only exists once its optional permission is granted. Touching it at top
+// level otherwise throws, and a throw there kills the whole service worker (no host
+// connection, no popup status). So listen at startup only if granted, and again on grant.
+let debuggerListening = false;
+function listenDebugger() {
+    if (debuggerListening || !chrome.debugger) return;
+    chrome.debugger.onEvent.addListener(onDebuggerEvent);
+    chrome.debugger.onDetach.addListener(onDebuggerDetach);
+    debuggerListening = true;
+}
+listenDebugger();
 chrome.tabs.onRemoved.addListener((tabId) => dbg.delete(tabId));
 
 async function viewport(tabId) {
@@ -931,7 +944,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     browsingEnabled().then((browsing) => reply({ connected: !!port, lastError, browsing }));
     return true;
 });
-chrome.permissions.onAdded.addListener(hello);
+chrome.permissions.onAdded.addListener(() => {
+    listenDebugger();
+    hello();
+});
 chrome.permissions.onRemoved.addListener(async () => {
     // Revoking debugger ends every session; forget them.
     if (!(await trustedEnabled())) dbg.clear();

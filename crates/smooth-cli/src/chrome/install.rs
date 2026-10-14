@@ -11,12 +11,17 @@ pub const HOST_NAME: &str = "ai.smoo.smooth_chrome";
 /// Pinned by the `key` in the extension manifest, so it survives reloads and reinstalls.
 pub const EXTENSION_ID: &str = "pgjpgmfljenhbbgkgjpmaghndenconlc";
 
-pub const FILES: &[(&str, &str)] = &[
-    ("manifest.json", include_str!("extension/manifest.json")),
-    ("background.js", include_str!("extension/background.js")),
-    ("cdp.js", include_str!("extension/cdp.js")),
-    ("popup.html", include_str!("extension/popup.html")),
-    ("popup.js", include_str!("extension/popup.js")),
+pub const FILES: &[(&str, &[u8])] = &[
+    ("manifest.json", include_bytes!("extension/manifest.json")),
+    ("background.js", include_bytes!("extension/background.js")),
+    ("cdp.js", include_bytes!("extension/cdp.js")),
+    ("popup.html", include_bytes!("extension/popup.html")),
+    ("popup.js", include_bytes!("extension/popup.js")),
+    ("icon.svg", include_bytes!("extension/icon.svg")),
+    ("icons/16.png", include_bytes!("extension/icons/16.png")),
+    ("icons/32.png", include_bytes!("extension/icons/32.png")),
+    ("icons/48.png", include_bytes!("extension/icons/48.png")),
+    ("icons/128.png", include_bytes!("extension/icons/128.png")),
 ];
 
 pub const BROWSERS: &[&str] = &["chrome", "chrome-beta", "chrome-canary", "chromium", "brave", "edge"];
@@ -115,7 +120,11 @@ pub fn install(browsers: &[&str]) -> Result<Installed> {
     let ext = dir.join("extension");
     std::fs::create_dir_all(&ext)?;
     for (name, body) in FILES {
-        std::fs::write(ext.join(name), body)?;
+        let path = ext.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, body)?;
     }
     let th = th_path()?;
     let wrapper = dir.join("host");
@@ -189,7 +198,7 @@ fn diagnose_in(home: &Path, dir: &Path) -> Result<Vec<(bool, String)>> {
     let ext = dir.join("extension");
     let stale: Vec<&str> = FILES
         .iter()
-        .filter(|(n, body)| std::fs::read_to_string(ext.join(n)).ok().as_deref() != Some(*body))
+        .filter(|(n, body)| std::fs::read(ext.join(n)).ok().as_deref() != Some(*body))
         .map(|(n, _)| *n)
         .collect();
     out.push(if stale.is_empty() {
@@ -239,19 +248,34 @@ mod tests {
 
     #[test]
     fn pinned_id_matches_manifest_key() {
-        let m: serde_json::Value = serde_json::from_str(FILES[0].1).unwrap();
+        let m: serde_json::Value = serde_json::from_slice(FILES[0].1).unwrap();
         assert_eq!(extension_id(m["key"].as_str().unwrap()).unwrap(), EXTENSION_ID);
     }
 
     #[test]
+    fn every_icon_the_manifest_names_ships() {
+        let m: serde_json::Value = serde_json::from_slice(FILES[0].1).unwrap();
+        for set in [&m["icons"], &m["action"]["default_icon"]] {
+            let set = set.as_object().unwrap();
+            let mut sizes: Vec<u32> = set.keys().map(|k| k.parse().unwrap()).collect();
+            sizes.sort_unstable();
+            assert_eq!(sizes, [16, 32, 48, 128]);
+            for path in set.values() {
+                let body = FILES.iter().find(|(n, _)| *n == path.as_str().unwrap()).map(|(_, b)| *b);
+                assert!(body.is_some_and(|b| b.starts_with(b"\x89PNG")), "{path} is not a shipped PNG");
+            }
+        }
+    }
+
+    #[test]
     fn extension_asks_only_for_bookmarks_and_native_messaging_up_front() {
-        let m: serde_json::Value = serde_json::from_str(FILES[0].1).unwrap();
+        let m: serde_json::Value = serde_json::from_slice(FILES[0].1).unwrap();
         assert_eq!(m["manifest_version"], 3);
         // `alarms` shows no install warning; it only re-wakes the worker to reconnect.
         assert_eq!(m["permissions"], json!(["bookmarks", "nativeMessaging", "alarms"]));
         assert!(m.get("host_permissions").is_none());
         assert_eq!(m["optional_host_permissions"], json!(["<all_urls>"]));
-        let bg = FILES.iter().find(|(n, _)| *n == "background.js").unwrap().1;
+        let bg = std::str::from_utf8(FILES.iter().find(|(n, _)| *n == "background.js").unwrap().1).unwrap();
         assert!(bg.contains(HOST_NAME));
     }
 
@@ -293,7 +317,9 @@ mod tests {
         let ext = dir.join("extension");
         std::fs::create_dir_all(&ext).unwrap();
         for (n, body) in FILES {
-            std::fs::write(ext.join(n), body).unwrap();
+            let path = ext.join(n);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
         }
         let th = home.path().join("it's th");
         std::fs::write(&th, "").unwrap();
