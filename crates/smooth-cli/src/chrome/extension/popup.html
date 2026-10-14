@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <style>
+            body {
+                font:
+                    13px system-ui,
+                    sans-serif;
+                width: 260px;
+                margin: 12px;
+                color: #111;
+            }
+            .dot {
+                display: inline-block;
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                margin-right: 6px;
+                background: #aaa;
+            }
+            .on {
+                background: #1aa37a;
+            }
+            .off {
+                background: #d9822b;
+            }
+            button {
+                margin-top: 10px;
+                width: 100%;
+                padding: 6px;
+            }
+            small {
+                color: #666;
+                display: block;
+                margin-top: 6px;
+            }
+        </style>
+    </head>
+    <body>
+        <div><span id="dot" class="dot"></span><span id="conn">Checking…</span></div>
+        <small id="err"></small>
+        <div style="margin-top: 10px">Agent browsing: <b id="browsing">…</b></div>
+        <button id="toggle" hidden></button>
+        <small>Bookmarks are always available to th. Browsing lets agents open tabs, read pages, click and type.</small>
+        <div style="margin-top: 10px">Trusted input: <b id="trusted">…</b></div>
+        <button id="trustedToggle" hidden></button>
+        <small
+            >Trusted input uses Chrome's debugger: real clicks and keystrokes (for sites that ignore scripted ones), answering alert/confirm dialogs,
+            screenshots without switching tabs, console and network logs, file uploads and running JavaScript. Chrome shows a "started debugging" bar while it
+            is in use.</small
+        >
+        <script src="popup.js"></script>
+    </body>
+</html>

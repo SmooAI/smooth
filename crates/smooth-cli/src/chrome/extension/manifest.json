@@ -1,0 +1,13 @@
+{
+    "manifest_version": 3,
+    "name": "Smooth",
+    "description": "Lets th and your coding agents manage your Chrome bookmarks (synced included) and, if you turn it on, drive tabs.",
+    "version": "0.1.0",
+    "minimum_chrome_version": "134",
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA14AoTGCwzcr+B4urT8QOHtnNjyPuLYW3qBdJlNGPJdX5QaGTriShO80TdPRTQJNFUFxkR1GOiL0wPiudbHw2bEHW2U638jWfdoZL3HzjWvycD1YU6Co7RuEPufah2vmV3K+/gYZG6bmsfAXUQM7OqzrCewG/jJwH/3De7dlq7XEN6sMr6e0NgwVdxB6PTtcDNuYh0DN1z7f/OQBGaoPMR2qHaGONhyv0ieRCH5NZaVYn4mohDwRk3Id5Wa46TB1OXaIObRfsoNV7Gb8xxy6oy+2p8GYuKJERbor4jZV26UPJkCyhEo3rRwHbz3XTPIwf9Oz4/1qtF2oI5XilacVedQIDAQAB",
+    "permissions": ["bookmarks", "nativeMessaging", "alarms"],
+    "optional_permissions": ["tabs", "scripting", "tabGroups", "debugger"],
+    "optional_host_permissions": ["<all_urls>"],
+    "background": { "service_worker": "background.js" },
+    "action": { "default_title": "Smooth", "default_popup": "popup.html" }
+}

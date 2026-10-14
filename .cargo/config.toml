@@ -1,0 +1,4 @@
+[env]
+# Building `th`'s full clap tree in a debug build (the cli_dispatch_tests sweeps do it) outgrows
+# a test thread's default 2 MiB stack (1 MiB on Windows). Applies to cargo test and nextest.
+RUST_MIN_STACK = "8388608"

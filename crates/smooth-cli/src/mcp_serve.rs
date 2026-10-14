@@ -60,9 +60,17 @@ pub struct SmoothMcp {
 }
 
 impl SmoothMcp {
+    /// Every tool this build serves. Chrome needs Unix sockets, so it is macOS/Linux only.
+    pub(crate) fn all_tools() -> ToolRouter<Self> {
+        let router = Self::tool_router() + Self::flow_tool_router();
+        #[cfg(unix)]
+        let router = router + Self::chrome_tool_router();
+        router
+    }
+
     fn new() -> Self {
         // th-1efb59: SmoothFlow's tools live in `mcp_flow`.
-        let mut tool_router = Self::tool_router() + Self::flow_tool_router();
+        let mut tool_router = Self::all_tools();
         Self::apply_write_gate(&mut tool_router, mcp_writes_allowed());
         Self { tool_router }
     }
@@ -1430,8 +1438,17 @@ impl ServerHandler for SmoothMcp {
                  records with what to change; `email_dmarc_summary`, `email_sending_sources` and `email_tls_summary` read the \
                  reports mailbox providers send about the org's own domains; `email_signature_status` shows who gets the managed \
                  signature. No reports is a setup problem (a wrong or missing `rua=`), never a clean domain — say so.\n\n\
-                 SMOOTHFLOW — free, local, no sign-in. The `flow_*` tools drive SmoothFlow, the fleet of coding                  agents (Claude Code, Codex, OpenCode, Gemini, th code, shells) running on this machine. `flow_list` is                  the fleet; `flow_repos` finds a directory by name; `flow_new` starts an agent there (optionally with a                  prompt and a pearl); `flow_prompt_wait` sends a prompt and waits for the turn, `flow_send` does not wait;                  `flow_snapshot` shows the agent's screen. `flow_approve` answers an agent's permission request — ONLY                  with the user's explicit consent: show them what the agent wants to run and let them decide. `flow_kill`,                  `flow_close` and `flow_fanout_pick` end or merge work; confirm with the user first.
-
+                 SMOOTHFLOW — free, local, no sign-in. The `flow_*` tools drive SmoothFlow, the fleet of coding                  agents (Claude Code, Codex, OpenCode, Gemini, th code, shells) running on this machine. `flow_list` is                  the fleet; `flow_repos` finds a directory by name; `flow_new` starts an agent there (optionally with a                  prompt and a pearl); `flow_prompt_wait` sends a prompt and waits for the turn, `flow_send` does not wait;                  `flow_snapshot` shows the agent's screen. `flow_approve` answers an agent's permission request — ONLY                  with the user's explicit consent: show them what the agent wants to run and let them decide. `flow_kill`,                  `flow_close` and `flow_fanout_pick` end or merge work; confirm with the user first.\n\n\
+                 CHROME — free, local. `bookmarks_*` read and change the user's real Chrome bookmarks through the Smooth \
+                 extension (`th chrome install` sets it up). Writes default to the account-synced folders so Chrome Sync carries \
+                 them to the user's other devices; `local: true` uses the unsynced ones. Address things by path \
+                 (\"Bookmarks bar/Work\") or id. Prefer `bookmarks_upsert` (idempotent) over `bookmarks_add`. Every change is \
+                 committed to a git history (`bookmarks_history`, `bookmarks_restore`). `bookmarks_remove`, folder moves and \
+                 `bookmarks_restore` return a dry run unless confirm=true — show it and confirm only with the user's say-so. \
+                 `browse_*` drive tabs only after the user enables browsing in the extension popup; they act in the user's \
+                 signed-in browser, so don't submit forms, buy, send or delete anything without explicit approval. \
+                 `trusted: true`, x/y clicks, `browse_eval`, `browse_console`, `browse_network`, `browse_dialog` and \
+                 `browse_upload` also need the popup's \"Enable trusted input\" (chrome.debugger).\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -1755,7 +1772,7 @@ mod tests {
     /// calls to disabled routes), and unannotated tools fail closed.
     #[test]
     fn write_kill_switch_hides_every_mutating_tool() {
-        let mut router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
+        let mut router = SmoothMcp::all_tools();
         let full = router.list_all().len();
         SmoothMcp::apply_write_gate(&mut router, false);
         let gated = router.list_all();
@@ -1787,6 +1804,14 @@ mod tests {
             "flow_close",
             "flow_fanout_new",
             "flow_fanout_pick",
+            "bookmarks_upsert",
+            "bookmarks_remove",
+            "bookmarks_restore",
+            "browse_click",
+            "browse_type",
+            "browse_eval",
+            "browse_dialog",
+            "browse_upload",
         ] {
             assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
         }
@@ -1804,12 +1829,23 @@ mod tests {
             "flow_harnesses",
             "flow_repos",
             "flow_infer",
+            "bookmarks_tree",
+            "bookmarks_search",
+            "bookmarks_history",
+            "browse_tabs",
+            "browse_text",
+            "browse_console",
+            "browse_network",
         ] {
+            // The chrome tools are only registered on unix (Unix-socket native host).
+            if !cfg!(unix) && (read_tool.starts_with("bookmarks_") || read_tool.starts_with("browse_")) {
+                continue;
+            }
             assert!(names.contains(&read_tool), "{read_tool} is read-only and must survive");
         }
 
         // allow_writes = true is a no-op.
-        let mut untouched = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
+        let mut untouched = SmoothMcp::all_tools();
         SmoothMcp::apply_write_gate(&mut untouched, true);
         assert_eq!(untouched.list_all().len(), full);
     }
@@ -1819,13 +1855,15 @@ mod tests {
     /// while the server grew to forty, so it's pinned to the router here.
     /// Re-bless with `SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest`,
     /// then `pnpm format`.
+    // The manifest lists the macOS/Linux roster (Chrome included).
+    #[cfg(unix)]
     #[test]
     fn mcpb_manifest_lists_every_tool() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/mcpb/manifest.json");
         let text = std::fs::read_to_string(&path).expect("read the mcpb manifest");
         let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the mcpb manifest is JSON");
 
-        let router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router();
+        let router = SmoothMcp::all_tools();
         let mut tools = router.list_all();
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         let expected: Vec<serde_json::Value> = tools

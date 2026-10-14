@@ -46,6 +46,130 @@
             "description": "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, only when you pass approve=true, send — email or other writes. Needs Sign in with Smoo (`smoo auth login`). Continue a thread by passing back the conversation_id it returns."
         },
         {
+            "name": "bookmarks_add",
+            "description": "Add a bookmark (always creates; prefer bookmarks_upsert). Default parent: the synced bookmarks bar."
+        },
+        {
+            "name": "bookmarks_history",
+            "description": "Recent git-backed bookmark snapshots (sha, time, what changed)."
+        },
+        {
+            "name": "bookmarks_mkdir",
+            "description": "Idempotently create a bookmark folder path (synced by default)."
+        },
+        {
+            "name": "bookmarks_move",
+            "description": "Move a bookmark or folder into another folder. Moving a folder needs confirm=true (otherwise a dry run)."
+        },
+        {
+            "name": "bookmarks_remove",
+            "description": "Remove a bookmark or folder (with contents). Dry run unless confirm=true; confirm only after the user agreed. A history snapshot is taken first."
+        },
+        {
+            "name": "bookmarks_rename",
+            "description": "Change a bookmark's title and/or URL, or a folder's title."
+        },
+        {
+            "name": "bookmarks_restore",
+            "description": "Make bookmarks match a history snapshot. Returns the plan unless confirm=true; confirm only after the user agreed."
+        },
+        {
+            "name": "bookmarks_search",
+            "description": "Search Chrome bookmarks by title/URL; each hit shows its id and full path."
+        },
+        {
+            "name": "bookmarks_snapshot",
+            "description": "Commit the current bookmarks to the history repo (do this before bulk changes)."
+        },
+        {
+            "name": "bookmarks_tree",
+            "description": "Show Chrome bookmarks as a tree. Permanent folders are labelled synced (saved to the Google account) or local. Needs the Smooth Chrome extension (`th chrome install`)."
+        },
+        {
+            "name": "bookmarks_upsert",
+            "description": "Idempotently put a bookmark in a folder path on the account-synced bookmarks bar (folders created as needed). No duplicate if the URL is already there."
+        },
+        {
+            "name": "browse_click",
+            "description": "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot. If a page ignores the click, retry with trusted=true; with trusted input on you can also click x/y read off browse_screenshot (right/double clicks too)."
+        },
+        {
+            "name": "browse_close",
+            "description": "Close a tab."
+        },
+        {
+            "name": "browse_console",
+            "description": "A tab's console messages and uncaught errors. The first call starts capturing (it then stays on for that tab); call again after acting to see what was logged. Needs trusted input."
+        },
+        {
+            "name": "browse_dialog",
+            "description": "Show, accept or dismiss a JavaScript alert/confirm/prompt that is blocking a tab. Accepting a confirm can delete or send things: ask the user first. Needs trusted input."
+        },
+        {
+            "name": "browse_eval",
+            "description": "Run JavaScript in a tab's page and return the result (JSON values come back as JSON). It runs as the signed-in user: read with it freely, but don't change data without approval. Needs trusted input."
+        },
+        {
+            "name": "browse_fill",
+            "description": "Fill a form in one call: text inputs, selects (by option text) and checkboxes/radios (true/false). Prefer this over several browse_type calls."
+        },
+        {
+            "name": "browse_hover",
+            "description": "Hover an element by ref, e.g. to open a hover menu or tooltip. trusted=true (or x/y) moves the real mouse there."
+        },
+        {
+            "name": "browse_key",
+            "description": "Press a key (Enter, Escape, Tab, ArrowDown, Control+a, …) on an element or the focused one. Use Escape to close menus and dialogs."
+        },
+        {
+            "name": "browse_nav",
+            "description": "Go back, forward or reload a tab and wait for it to load."
+        },
+        {
+            "name": "browse_network",
+            "description": "A tab's requests (method, status or failure, URL, type). The first call starts capturing; act or reload, then call again. Needs trusted input."
+        },
+        {
+            "name": "browse_open",
+            "description": "Open a URL in a new tab (or navigate `tab`) and wait for it to load. Returns the tab id."
+        },
+        {
+            "name": "browse_screenshot",
+            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it). Prefer browse_snapshot unless you need to see the layout. Without trusted input it brings the tab to the front; with it the tab stays put and the image is in CSS pixels, so a point in it is the x/y for browse_click."
+        },
+        {
+            "name": "browse_scroll",
+            "description": "Scroll the page by viewports (direction, pages), to some text, or an element into view; with ref and direction, scrolls inside that panel. Use it when the snapshot says there's more below."
+        },
+        {
+            "name": "browse_select",
+            "description": "Choose an option in a <select> by its text or value. Custom dropdowns aren't <select>s: click them open, then click the option."
+        },
+        {
+            "name": "browse_snapshot",
+            "description": "Outline of a tab: its interactive elements with refs ([e12], or [f7:e3] inside an iframe), nested under headings, forms, dialogs and rows, with state (value, checked, disabled, expanded, covered, offscreen) and how much page is above/below. Prefer this over a screenshot. Refs come from the latest snapshot; action tools already return a fresh one."
+        },
+        {
+            "name": "browse_tabs",
+            "description": "List open Chrome tabs (id, title, URL). Browsing must be enabled in the Smooth extension popup."
+        },
+        {
+            "name": "browse_text",
+            "description": "A tab's title, URL and visible text. Pass find to get only matching lines (cheap way to check for a word or read one part of a long page)."
+        },
+        {
+            "name": "browse_type",
+            "description": "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select. trusted=true types real keystrokes (for editors that ignore the default), into ref, at x/y, or wherever focus is."
+        },
+        {
+            "name": "browse_upload",
+            "description": "Attach local files to a file input, as if picked in the file chooser. Only upload files the user asked you to. Needs trusted input."
+        },
+        {
+            "name": "browse_wait_for",
+            "description": "Wait until any of the given texts appears on the page (after a slow search, save or login)."
+        },
+        {
             "name": "email_check_domain",
             "description": "Grade a domain's email authentication: MX, SPF (including the 10-DNS-lookup limit that silently breaks SPF), DKIM, DMARC, blocklists (Spamhaus and others), MTA-STS and BIMI. Each check comes back PASS/WARN/FAIL/INFO with the record found and what to change. Works on ANY domain — yours, a vendor's, a prospect's. Use for \"why is our mail going to spam\" or \"is this domain set up right\". Needs Sign in with Smoo (`smoo auth login`)."
         },

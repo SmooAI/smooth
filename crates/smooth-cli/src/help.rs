@@ -113,9 +113,19 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("service", "run Smooth as a background service"),
             ("audit", "tool-usage audit logs"),
             ("tailscale", "tailnet devices Smooth can see"),
+            ("chrome", "Chrome bookmarks (synced) and opt-in tab control via the Smooth extension"),
         ],
     ),
 ];
+
+/// Curated rows whose command only exists on some platforms (gated with `cfg`
+/// in `main.rs`): `chrome` talks to its native host over a Unix socket.
+const UNIX_ONLY: &[&str] = &["chrome"];
+
+/// Whether a curated row names a command this build actually has.
+fn available(name: &str) -> bool {
+    cfg!(unix) || !UNIX_ONLY.contains(&name)
+}
 
 /// Curated examples for the `ai` explainer, keyed by the space-joined
 /// command path (`""` = root). Everything else in the explainer is generated
@@ -221,6 +231,7 @@ pub fn print_top_level() {
     let width = SECTIONS
         .iter()
         .flat_map(|(_, rows)| rows.iter())
+        .filter(|(name, _)| available(name))
         .map(|(name, _)| name.len())
         .max()
         .unwrap_or(10);
@@ -228,7 +239,7 @@ pub fn print_top_level() {
     for (section, rows) in SECTIONS {
         println!();
         println!("{}", section.bold());
-        for (name, blurb) in *rows {
+        for (name, blurb) in rows.iter().filter(|(name, _)| available(name)) {
             println!("  {:width$}  {}", name.cyan(), blurb.dimmed(), width = width);
         }
     }
@@ -341,13 +352,23 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn unix_only_rows_follow_the_build() {
+        assert!(available("pearls"));
+        assert_eq!(available("chrome"), cfg!(unix));
+    }
+
     /// The curated help and the real clap tree may never drift: every visible
     /// command appears in exactly one section, and every row names a real
     /// command.
     #[test]
     fn help_sync_both_directions() {
         let tree = visible_top_level();
-        let mut curated: Vec<&str> = SECTIONS.iter().flat_map(|(_, rows)| rows.iter().map(|(n, _)| *n)).collect();
+        let mut curated: Vec<&str> = SECTIONS
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().map(|(n, _)| *n))
+            .filter(|n| available(n))
+            .collect();
         curated.sort_unstable();
         let dup = curated.windows(2).find(|w| w[0] == w[1]);
         assert!(dup.is_none(), "command listed twice in SECTIONS: {dup:?}");
