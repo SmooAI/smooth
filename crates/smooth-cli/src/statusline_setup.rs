@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn a_pinned_old_plugin_path_moves_to_the_newest() {
         let tmp = TempDir::new().unwrap();
-        let base = tmp.path().join(".claude/plugins/cache/smooth/smooth-agent");
+        let base = tmp.path().join(".claude").join("plugins").join("cache").join("smooth").join("smooth-agent");
         for v in ["0.31.1", "0.80.0"] {
             let hooks = base.join(v).join("hooks");
             std::fs::create_dir_all(&hooks).unwrap();
@@ -252,9 +252,9 @@ mod tests {
             std::fs::write(hooks.join("smooth-statusline-with-ponytail.sh"), "#!/bin/bash\n").unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let old = base.join("0.31.1/hooks/smooth-statusline.sh").display().to_string();
-        let new = base.join("0.80.0/hooks/smooth-statusline.sh").display().to_string();
-        let path = tmp.path().join(".claude/settings.json");
+        let old = base.join("0.31.1").join("hooks").join("smooth-statusline.sh").display().to_string();
+        let new = base.join("0.80.0").join("hooks").join("smooth-statusline.sh").display().to_string();
+        let path = settings_path(tmp.path());
         std::fs::write(
             &path,
             serde_json::json!({ "model": "opus", "statusLine": { "type": "command", "command": old } }).to_string(),
@@ -268,8 +268,13 @@ mod tests {
         assert_eq!(refresh(tmp.path()).unwrap(), None, "current → no write");
 
         // The wrapper keeps being the wrapper.
-        let hooks = base.join("0.80.0/hooks");
-        let old_wrap = base.join("0.31.1/hooks/smooth-statusline-with-ponytail.sh").display().to_string();
+        let hooks = base.join("0.80.0").join("hooks");
+        let old_wrap = base
+            .join("0.31.1")
+            .join("hooks")
+            .join("smooth-statusline-with-ponytail.sh")
+            .display()
+            .to_string();
         assert_eq!(
             stale_target(&old_wrap, &hooks),
             Some(hooks.join("smooth-statusline-with-ponytail.sh").display().to_string())
