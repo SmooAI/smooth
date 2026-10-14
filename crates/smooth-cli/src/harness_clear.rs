@@ -448,7 +448,7 @@ pub fn missed_context(missed: &[Missed], now: DateTime<Utc>) -> String {
 }
 
 /// Best-effort copy to the system clipboard; `false` when no tool worked.
-fn copy_to_clipboard(text: &str) -> bool {
+pub fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write as _;
     use std::process::Stdio;
     let tools: &[(&str, &[&str])] = &[("pbcopy", &[]), ("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("clip.exe", &[])];

@@ -12,41 +12,42 @@ cssclasses:
 #moc
 
 > [!arch] About Smooth
-> A single Rust binary (`th`) that runs an AI agent stack on your machine. `th up` starts Big Smooth — an orchestrator + API on the host — which dispatches operatives to do real work, with Narc surveillance on the tool surface. No Docker. No nested virtualization. No cloud.
+> Your always-on AI assistant (Big Smooth) and the CLI that runs your coding agents (`th`), in one Rust binary. `th up` starts Big Smooth on your machine, with Narc surveillance on every tool call. No Docker. No nested virtualization. Local-first, with an optional cloud: sign in for synced memory and phone notifications, or take the Family plan for hosted models.
 
-Smooth is part of the [Smoo AI](https://smoo.ai) platform — AI built into every product. This vault is the canonical source of truth for Smooth's architecture, operations, and decisions. Start with [[Start-Here/What-Is-Smooth]], then follow the map below.
+Smooth is part of the [Smoo AI](https://smoo.ai) platform — AI built into every product. This vault is the canonical source of truth for Smooth's architecture, operations, and decisions. New? Start with [[Start-Here/Quickstart]] (or paste the [[Start-Here/Install-Prompt|install prompt]] into your coding agent), then [[Start-Here/What-Is-Smooth]] and the map below.
 
 ---
 
 ## The picture
 
 ```
-                        th up
-                          │
-                          ▼
-        ┌─────────────────────────────────────┐
-        │  Big Smooth  (host process, :4400)   │
-        │  API · pearl store · dispatch        │
-        └──────────────────┬──────────────────┘
-                           │ spawn subprocess per task
-                           ▼
-        ┌─────────────────────────────────────┐
-        │  smooth-operative  (agent loop)      │
-        │  tools + Narc surveillance           │
-        └─────────────────────────────────────┘
+   th up                         th harness enable all
+     │                                   │
+     ▼                                   ▼
+┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ Big Smooth  (127.0.0.1:4400) │   │ Claude Code · Codex ·        │
+│ smooth-operator engine,      │◀──│ OpenCode · Cursor            │
+│ in-process · tools · memory  │   │ + th MCP server, hooks,      │
+│ permission gate → Narc       │   │   skills, context budget     │
+└──────────────┬───────────────┘   └──────────────────────────────┘
+               │
+   web chat · th code · SmoothFlow app · phone (relay)
 ```
 
-One process, one operative per task. The microVM sandbox stack was removed in July 2026 (pearl `th-f4a801`; see [[Decisions/ADR-004-remove-microvm-sandbox-stack]] for what was lost and why); the [[Architecture/Daemon-Direction|daemon direction]] is where the always-on personal-agent story continues.
+One process on your host, no per-task VM or worker. The microVM sandbox stack was removed in July 2026 ([[Decisions/ADR-004-remove-microvm-sandbox-stack]]); [[Architecture/Daemon-Modules-and-Security]] is the current module map.
 
 ---
 
 ## Start here
 
-| Page                           | Description                                                  |
-| ------------------------------ | ------------------------------------------------------------ |
-| [[Start-Here/What-Is-Smooth]]  | One-pager. What `th up` boots, what gets dispatched, the why |
-| [[Start-Here/Glossary]]        | Cast roles, work model, terms                                |
-| [[Operations/Running-Locally]] | `th up`, `th down`, `th code`                                |
+| Page                           | Description                                                     |
+| ------------------------------ | --------------------------------------------------------------- |
+| [[Start-Here/Quickstart]]      | Install, choose a model, first chat, enable your harnesses      |
+| [[Start-Here/Install-Prompt]]  | The prompt that sets `th` up from inside your coding agent      |
+| [[Start-Here/What-Is-Smooth]]  | One-pager. Big Smooth, the toolbox, models, the security model  |
+| [[Start-Here/Roadmap]]         | Coming soon, and the personal-assistant gaps we're closing next |
+| [[Start-Here/Glossary]]        | Cast roles, work model, terms                                   |
+| [[Operations/Running-Locally]] | `th up`, `th down`, `th code`                                   |
 
 ---
 
