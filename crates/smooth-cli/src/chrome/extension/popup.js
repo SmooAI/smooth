@@ -1,4 +1,4 @@
-const BROWSING = { permissions: ['tabs', 'scripting'], origins: ['<all_urls>'] };
+const BROWSING = { permissions: ['tabs', 'scripting', 'tabGroups'], origins: ['<all_urls>'] };
 const $ = (id) => document.getElementById(id);
 
 async function render() {

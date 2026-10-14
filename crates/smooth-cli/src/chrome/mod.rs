@@ -218,19 +218,91 @@ pub enum BrowseCommands {
     Open { url: String },
     /// Point a tab at a URL
     Navigate { tab: i64, url: String },
-    /// A tab's visible text
-    Text { tab: i64 },
-    /// Interactive elements with refs for click/type
+    /// Go back in a tab's history
+    Back { tab: i64 },
+    /// Go forward in a tab's history
+    Forward { tab: i64 },
+    /// Reload a tab
+    Reload { tab: i64 },
+    /// A tab's visible text, or only the lines matching --find
+    Text {
+        tab: i64,
+        #[arg(long)]
+        find: Option<String>,
+    },
+    /// The page's interactive elements with refs, in context (headings, forms, dialogs)
     Snapshot { tab: i64 },
     /// Click an element from `snapshot`
-    Click { tab: i64, r#ref: String },
-    /// Type into an element from `snapshot`
+    Click {
+        tab: i64,
+        r#ref: String,
+        /// Print a fresh snapshot afterwards
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Type into an element from `snapshot` (replaces its text)
     Type {
         tab: i64,
         r#ref: String,
         text: String,
         #[arg(long)]
         submit: bool,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Pick a <select> option by its text or value
+    Select {
+        tab: i64,
+        r#ref: String,
+        option: String,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Press a key (Enter, Escape, Tab, ArrowDown, Control+a, …) on an element or the focused one
+    Key {
+        tab: i64,
+        key: String,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Hover an element (opens hover menus)
+    Hover {
+        tab: i64,
+        r#ref: String,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Scroll the page (or the --ref container) by pages, to --text, or --ref into view
+    Scroll {
+        tab: i64,
+        #[arg(long, value_parser = ["up", "down"])]
+        direction: Option<String>,
+        #[arg(long)]
+        pages: Option<f64>,
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Fill several fields at once: ref=value … (checkboxes take true/false, selects an option)
+    Fill {
+        tab: i64,
+        #[arg(required = true)]
+        fields: Vec<String>,
+        #[arg(long)]
+        snapshot: bool,
+    },
+    /// Wait until any of the texts appears on the page
+    Wait {
+        tab: i64,
+        #[arg(required = true)]
+        text: Vec<String>,
+        #[arg(long, default_value_t = 10000)]
+        timeout_ms: u64,
     },
     /// Save a PNG of the tab
     Screenshot {
@@ -322,12 +394,53 @@ fn browse_cli(inst: Option<&str>, cmd: BrowseCommands) -> Result<String> {
         BrowseCommands::Tabs => tabs(inst),
         BrowseCommands::Open { url } => browse(inst, "tabs.open", json!({"url": url})).map(pretty),
         BrowseCommands::Navigate { tab, url } => browse(inst, "tabs.navigate", json!({"tabId": tab, "url": url})).map(pretty),
-        BrowseCommands::Text { tab } => page_text(inst, tab),
+        BrowseCommands::Back { tab } => nav(inst, tab, "back"),
+        BrowseCommands::Forward { tab } => nav(inst, tab, "forward"),
+        BrowseCommands::Reload { tab } => nav(inst, tab, "reload"),
+        BrowseCommands::Text { tab, find } => page_text(inst, tab, find.as_deref()),
         BrowseCommands::Snapshot { tab } => page_snapshot(inst, tab),
-        BrowseCommands::Click { tab, r#ref: el } => browse(inst, "page.click", json!({"tabId": tab, "ref": el})).map(|_| format!("Clicked {el}")),
-        BrowseCommands::Type { tab, r#ref: el, text, submit } => {
-            browse(inst, "page.type", json!({"tabId": tab, "ref": el, "text": text, "submit": submit})).map(|_| format!("Typed into {el}"))
+        BrowseCommands::Click { tab, r#ref: el, snapshot } => act(inst, tab, "click", json!({"ref": el}), snapshot),
+        BrowseCommands::Type {
+            tab,
+            r#ref: el,
+            text,
+            submit,
+            snapshot,
+        } => act(inst, tab, "type", json!({"ref": el, "text": text, "submit": submit}), snapshot),
+        BrowseCommands::Select {
+            tab,
+            r#ref: el,
+            option,
+            snapshot,
+        } => act(inst, tab, "select", json!({"ref": el, "option": option}), snapshot),
+        BrowseCommands::Key { tab, key, r#ref: el, snapshot } => act(inst, tab, "key", json!({"ref": el, "key": key}), snapshot),
+        BrowseCommands::Hover { tab, r#ref: el, snapshot } => act(inst, tab, "hover", json!({"ref": el}), snapshot),
+        BrowseCommands::Scroll {
+            tab,
+            direction,
+            pages,
+            r#ref: el,
+            text,
+            snapshot,
+        } => act(
+            inst,
+            tab,
+            "scroll",
+            json!({"direction": direction, "pages": pages, "ref": el, "text": text}),
+            snapshot,
+        ),
+        BrowseCommands::Fill { tab, fields, snapshot } => {
+            let fields = fields
+                .iter()
+                .map(|f| {
+                    f.split_once('=')
+                        .map(|(r, v)| json!({"ref": r, "value": v}))
+                        .with_context(|| format!("'{f}' isn't ref=value"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            act(inst, tab, "fill", json!({ "fields": fields }), snapshot)
         }
+        BrowseCommands::Wait { tab, text, timeout_ms } => wait_for(inst, tab, &text, timeout_ms),
         BrowseCommands::Screenshot { tab, output } => {
             std::fs::write(&output, screenshot(inst, tab)?)?;
             Ok(format!("Wrote {}", output.display()))
@@ -645,33 +758,172 @@ pub fn tabs(inst: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
-pub fn page_text(inst: Option<&str>, tab: i64) -> Result<String> {
+pub fn page_text(inst: Option<&str>, tab: i64, find: Option<&str>) -> Result<String> {
     let v = browse(inst, "page.text", json!({"tabId": tab}))?;
+    let text = v["text"].as_str().unwrap_or_default();
+    let body = find.map_or_else(|| text.to_string(), |needle| find_lines(text, needle));
     Ok(format!(
-        "{}\n<{}>\n\n{}",
+        "{}\n<{}>\n\n{body}",
         v["title"].as_str().unwrap_or_default(),
-        v["url"].as_str().unwrap_or_default(),
-        v["text"].as_str().unwrap_or_default()
+        v["url"].as_str().unwrap_or_default()
     ))
 }
 
+/// Lines containing `needle` (case-insensitive) with one line of context each side.
+pub fn find_lines(text: &str, needle: &str) -> String {
+    const MAX: usize = 50;
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let n = needle.to_lowercase();
+    let hits: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].to_lowercase().contains(&n)).collect();
+    if hits.is_empty() {
+        return format!("No line contains \"{needle}\".");
+    }
+    let mut out = String::new();
+    let mut last = None;
+    for &i in hits.iter().take(MAX) {
+        let from = i.saturating_sub(1).max(last.map_or(0, |l: usize| l + 1));
+        if last.is_some_and(|l| from > l + 1) {
+            out.push_str("…\n");
+        }
+        for (j, line) in lines.iter().enumerate().take((i + 2).min(lines.len())).skip(from) {
+            let _ = writeln!(out, "{}{}", if j == i { "> " } else { "  " }, line.trim());
+            last = Some(j);
+        }
+    }
+    if hits.len() > MAX {
+        let _ = writeln!(out, "… {} more matches", hits.len() - MAX);
+    }
+    out
+}
+
 pub fn page_snapshot(inst: Option<&str>, tab: i64) -> Result<String> {
-    let v = browse(inst, "page.snapshot", json!({"tabId": tab}))?;
+    Ok(format_snapshot(&browse(inst, "page.snapshot", json!({"tabId": tab}))?))
+}
+
+fn element_line(out: &mut String, e: &Value, extra_depth: u64) {
+    let indent = "  ".repeat(usize::try_from(e["depth"].as_u64().unwrap_or(0) + extra_depth).unwrap_or(0));
+    let kind = e["kind"].as_str().unwrap_or("?");
+    let name = e["name"].as_str().unwrap_or_default();
+    let Some(r) = e["ref"].as_str() else {
+        let _ = writeln!(out, "{indent}{kind}{}", if name.is_empty() { String::new() } else { format!(" \"{name}\"") });
+        return;
+    };
+    let mut line = format!("{indent}[{r}] {kind} \"{name}\"");
+    if let Some(v) = e["value"].as_str() {
+        let _ = write!(line, " value=\"{v}\"");
+    }
+    if let Some(opts) = e["options"].as_array() {
+        let opts: Vec<&str> = opts.iter().filter_map(Value::as_str).collect();
+        let _ = write!(line, " options=[{}]", opts.join(" | "));
+    }
+    for flag in ["checked", "selected", "disabled", "required"] {
+        if e[flag] == true {
+            let _ = write!(line, " {flag}");
+        }
+    }
+    match e["expanded"].as_bool() {
+        Some(true) => line.push_str(" expanded"),
+        Some(false) => line.push_str(" collapsed"),
+        None => {}
+    }
+    if let Some(p) = e["placeholder"].as_str() {
+        let _ = write!(line, " placeholder=\"{p}\"");
+    }
+    if let Some(h) = e["href"].as_str() {
+        let _ = write!(line, " → {h}");
+    }
+    if e["covered"] == true {
+        line.push_str(" (covered by something; close it first)");
+    } else if e["offscreen"] == true {
+        line.push_str(" (offscreen)");
+    }
+    let _ = writeln!(out, "{line}");
+}
+
+/// The model-facing snapshot: where the viewport is, then an indented outline of
+/// interactive elements (with refs) inside their headings, forms, dialogs and rows.
+pub fn format_snapshot(v: &Value) -> String {
     let mut out = format!("{}\n<{}>\n", v["title"].as_str().unwrap_or_default(), v["url"].as_str().unwrap_or_default());
-    for e in v["elements"].as_array().map(Vec::as_slice).unwrap_or_default() {
-        let kind = e["role"]
-            .as_str()
-            .or_else(|| e["type"].as_str())
-            .unwrap_or_else(|| e["tag"].as_str().unwrap_or_default());
-        let _ = writeln!(
-            out,
-            "[{}] {kind} \"{}\"{}",
-            e["ref"].as_str().unwrap_or_default(),
-            e["name"].as_str().unwrap_or_default(),
-            e["href"].as_str().map(|h| format!(" → {h}")).unwrap_or_default()
-        );
+    #[allow(clippy::cast_precision_loss, reason = "page pixel counts")]
+    if let (Some(y), Some(vh), Some(h)) = (v["scrollY"].as_u64(), v["viewport"].as_u64(), v["height"].as_u64()) {
+        if vh > 0 {
+            let above = y as f64 / vh as f64;
+            let below = (h.saturating_sub(y + vh)) as f64 / vh as f64;
+            if above < 0.05 && below < 0.05 {
+                out.push_str("[whole page visible]\n");
+            } else {
+                let _ = writeln!(out, "[{above:.1} pages above, {below:.1} pages below; browse_scroll to see more]");
+            }
+        }
+    }
+    out.push('\n');
+    let elements = |v: &Value| v["elements"].as_array().cloned().unwrap_or_default();
+    for e in elements(v) {
+        element_line(&mut out, &e, 0);
+    }
+    if v["truncated"] == true {
+        out.push_str("… stopped here; scroll, or use browse_text with find, for the rest\n");
+    }
+    for f in v["frames"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let _ = writeln!(out, "iframe <{}>", f["url"].as_str().unwrap_or_default());
+        for e in elements(f) {
+            element_line(&mut out, &e, 1);
+        }
+        if f["truncated"] == true {
+            out.push_str("  … stopped here\n");
+        }
+    }
+    out
+}
+
+/// Run an in-page action (it waits for navigation or the DOM to settle) and say what changed;
+/// with `then_snapshot`, append a fresh snapshot so the caller needn't ask for one.
+pub fn act(inst: Option<&str>, tab: i64, op: &str, args: Value, then_snapshot: bool) -> Result<String> {
+    let mut c = Client::connect(inst)?;
+    let mut req = json!({"tabId": tab, "op": op});
+    req["args"] = args;
+    let v = c.call("page.act", req)?;
+    let mut out = describe_act(&v);
+    if then_snapshot {
+        out.push_str("\n\n");
+        out.push_str(&format_snapshot(&c.call("page.snapshot", json!({"tabId": tab}))?));
     }
     Ok(out)
+}
+
+fn describe_act(v: &Value) -> String {
+    let mut out = match &v["result"] {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"),
+        _ => "done".into(),
+    };
+    if v["navigated"] == true {
+        let _ = write!(
+            out,
+            "\nnow at {} <{}>",
+            v["title"].as_str().unwrap_or_default(),
+            v["url"].as_str().unwrap_or_default()
+        );
+    }
+    if let Some(ids) = v["opened"].as_array().filter(|a| !a.is_empty()) {
+        let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let _ = write!(out, "\nopened new tab {} (see browse_tabs)", ids.join(", "));
+    }
+    out
+}
+
+pub fn nav(inst: Option<&str>, tab: i64, action: &str) -> Result<String> {
+    let t = browse(inst, "tabs.history", json!({"tabId": tab, "action": action}))?;
+    Ok(format!(
+        "{} <{}>",
+        t["title"].as_str().unwrap_or_default(),
+        t["url"].as_str().unwrap_or_default()
+    ))
+}
+
+pub fn wait_for(inst: Option<&str>, tab: i64, texts: &[String], timeout_ms: u64) -> Result<String> {
+    let hit = browse(inst, "page.waitFor", json!({"tabId": tab, "texts": texts, "timeoutMs": timeout_ms}))?;
+    Ok(format!("\"{}\" is on the page", hit.as_str().unwrap_or_default()))
 }
 
 pub fn screenshot(inst: Option<&str>, tab: i64) -> Result<Vec<u8>> {
@@ -703,6 +955,57 @@ mod tests {
         let t = sample();
         assert_eq!(describe(t.root.find("30").unwrap()), "folder 'Work' (1 item inside)");
         assert_eq!(describe(t.root.find("31").unwrap()), "bookmark 'Jira' <https://jira.example>");
+    }
+
+    #[test]
+    fn snapshot_is_an_indented_outline_with_state_and_frames() {
+        let v = json!({
+            "title": "Sign in", "url": "https://x.example/login",
+            "scrollY": 800, "viewport": 800, "height": 4000, "truncated": true,
+            "elements": [
+                {"depth": 0, "kind": "heading", "name": "Welcome"},
+                {"depth": 0, "kind": "form", "name": ""},
+                {"depth": 1, "ref": "e3", "kind": "email", "name": "Email", "value": "a@b.c", "required": true},
+                {"depth": 1, "ref": "e4", "kind": "password", "name": "Password", "value": "••••"},
+                {"depth": 1, "ref": "e5", "kind": "select", "name": "Region", "value": "EU", "options": ["US", "EU"]},
+                {"depth": 1, "ref": "e6", "kind": "checkbox", "name": "Remember me", "checked": true},
+                {"depth": 1, "ref": "e7", "kind": "button", "name": "Sign in", "disabled": true, "covered": true},
+                {"depth": 0, "ref": "e8", "kind": "link", "name": "Help", "href": "https://x.example/help", "offscreen": true},
+                {"depth": 0, "ref": "e9", "kind": "button", "name": "Menu", "expanded": false}
+            ],
+            "frames": [{"frameId": 7, "url": "https://pay.example", "elements": [{"depth": 0, "ref": "f7:e1", "kind": "text", "name": "Card"}]}]
+        });
+        let s = format_snapshot(&v);
+        let want = "Sign in\n<https://x.example/login>\n[1.0 pages above, 3.0 pages below; browse_scroll to see more]\n\n\
+heading \"Welcome\"\nform\n  [e3] email \"Email\" value=\"a@b.c\" required\n  [e4] password \"Password\" value=\"••••\"\n  \
+[e5] select \"Region\" value=\"EU\" options=[US | EU]\n  [e6] checkbox \"Remember me\" checked\n  \
+[e7] button \"Sign in\" disabled (covered by something; close it first)\n[e8] link \"Help\" → https://x.example/help (offscreen)\n\
+[e9] button \"Menu\" collapsed\n… stopped here; scroll, or use browse_text with find, for the rest\niframe <https://pay.example>\n  [f7:e1] text \"Card\"\n";
+        assert_eq!(s, want);
+        let whole = format_snapshot(&json!({"title": "t", "url": "u", "scrollY": 0, "viewport": 800, "height": 800, "elements": []}));
+        assert!(whole.contains("[whole page visible]"), "{whole}");
+    }
+
+    #[test]
+    fn find_lines_shows_matches_in_context() {
+        let text = "Intro\nOrders\n\nOrder 1 Pending\nOrder 2 Shipped\nFooter\nmore\nlast pending item";
+        assert_eq!(
+            find_lines(text, "pending"),
+            "  Orders\n> Order 1 Pending\n  Order 2 Shipped\n…\n  more\n> last pending item\n"
+        );
+        assert_eq!(find_lines(text, "zzz"), "No line contains \"zzz\".");
+        let many = "hit\n".repeat(60);
+        assert!(find_lines(&many, "hit").ends_with("… 10 more matches\n"));
+    }
+
+    #[test]
+    fn describes_what_an_action_changed() {
+        assert_eq!(describe_act(&json!({"result": "clicked", "navigated": false, "opened": []})), "clicked");
+        assert_eq!(
+            describe_act(&json!({"result": ["e1: typed", "e2: checked"], "navigated": true, "url": "https://n", "title": "Next", "opened": [41]})),
+            "e1: typed\ne2: checked\nnow at Next <https://n>\nopened new tab 41 (see browse_tabs)"
+        );
+        assert_eq!(describe_act(&json!({"result": null})), "done");
     }
 
     #[test]

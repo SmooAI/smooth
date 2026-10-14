@@ -172,10 +172,36 @@ pub struct TabArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TextArgs {
+    pub tab: i64,
+    /// Only the lines containing this (case-insensitive), with a line of context. Much cheaper than the whole page.
+    #[serde(default)]
+    pub find: Option<String>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NavArgs {
+    pub tab: i64,
+    /// back, forward or reload.
+    pub action: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClickArgs {
     pub tab: i64,
-    /// Element ref from browse_snapshot (e.g. "e12").
+    /// Element ref from the latest browse_snapshot (e.g. "e12", or "f7:e3" inside an iframe).
     pub r#ref: String,
+    /// Return a fresh snapshot with the result (default true).
+    #[serde(default = "yes")]
+    pub snapshot: bool,
     #[serde(default)]
     pub instance: Option<String>,
 }
@@ -184,10 +210,90 @@ pub struct ClickArgs {
 pub struct TypeArgs {
     pub tab: i64,
     pub r#ref: String,
+    /// Replaces the field's current text.
     pub text: String,
     /// Submit the form (or press Enter) afterwards.
     #[serde(default)]
     pub submit: bool,
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SelectArgs {
+    pub tab: i64,
+    /// Ref of a <select>.
+    pub r#ref: String,
+    /// The option's visible text or value.
+    pub option: String,
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyArgs {
+    pub tab: i64,
+    /// Enter, Escape, Tab, ArrowDown, Backspace, a letter, or a combo like Control+a.
+    pub key: String,
+    /// Element to send it to; default is whatever has focus.
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScrollArgs {
+    pub tab: i64,
+    /// up or down (default down when no text/ref is given).
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// How many viewports to scroll (default 1).
+    #[serde(default)]
+    pub pages: Option<f64>,
+    /// Scroll this element into view, or, with direction, scroll inside it (a scrollable list or panel).
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    /// Scroll to the first visible occurrence of this text.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FillField {
+    pub r#ref: String,
+    /// Text for inputs, option text for selects, true/false for checkboxes and radios.
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FillArgs {
+    pub tab: i64,
+    pub fields: Vec<FillField>,
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WaitArgs {
+    pub tab: i64,
+    /// Resolves as soon as any of these appears in the page text.
+    pub text: Vec<String>,
+    /// Default 10000.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub instance: Option<String>,
 }
@@ -316,15 +422,25 @@ impl SmoothMcp {
         .await
     }
 
-    #[tool(name = "browse_text", description = "A tab's title, URL and visible text.", annotations(read_only_hint = true))]
-    pub async fn browse_text(&self, params: Parameters<TabArgs>) -> Result<String, ErrorData> {
+    #[tool(name = "browse_nav", description = "Go back, forward or reload a tab and wait for it to load.")]
+    pub async fn browse_nav(&self, params: Parameters<NavArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        blocking(move || chrome::page_text(a.instance.as_deref(), a.tab)).await
+        blocking(move || chrome::nav(a.instance.as_deref(), a.tab, &a.action)).await
+    }
+
+    #[tool(
+        name = "browse_text",
+        description = "A tab's title, URL and visible text. Pass find to get only matching lines (cheap way to check for a word or read one part of a long page).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn browse_text(&self, params: Parameters<TextArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::page_text(a.instance.as_deref(), a.tab, a.find.as_deref())).await
     }
 
     #[tool(
         name = "browse_snapshot",
-        description = "List a tab's visible interactive elements with refs (e1, e2, …) to pass to browse_click / browse_type.",
+        description = "Outline of a tab: its interactive elements with refs ([e12], or [f7:e3] inside an iframe), nested under headings, forms, dialogs and rows, with state (value, checked, disabled, expanded, covered, offscreen) and how much page is above/below. Prefer this over a screenshot. Refs come from the latest snapshot; action tools already return a fresh one.",
         annotations(read_only_hint = true)
     )]
     pub async fn browse_snapshot(&self, params: Parameters<TabArgs>) -> Result<String, ErrorData> {
@@ -332,33 +448,99 @@ impl SmoothMcp {
         blocking(move || chrome::page_snapshot(a.instance.as_deref(), a.tab)).await
     }
 
-    #[tool(name = "browse_click", description = "Click an element by ref from browse_snapshot.")]
+    #[tool(
+        name = "browse_click",
+        description = "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot."
+    )]
     pub async fn browse_click(&self, params: Parameters<ClickArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        blocking(move || chrome::browse(a.instance.as_deref(), "page.click", json!({"tabId": a.tab, "ref": a.r#ref})).map(|_| format!("Clicked {}", a.r#ref)))
-            .await
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "click", json!({"ref": a.r#ref}), a.snapshot)).await
     }
 
     #[tool(
         name = "browse_type",
-        description = "Type text into an input/textarea by ref from browse_snapshot; submit=true submits the form."
+        description = "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select."
     )]
     pub async fn browse_type(&self, params: Parameters<TypeArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         blocking(move || {
-            chrome::browse(
+            chrome::act(
                 a.instance.as_deref(),
-                "page.type",
-                json!({"tabId": a.tab, "ref": a.r#ref, "text": a.text, "submit": a.submit}),
+                a.tab,
+                "type",
+                json!({"ref": a.r#ref, "text": a.text, "submit": a.submit}),
+                a.snapshot,
             )
-            .map(|_| format!("Typed into {}", a.r#ref))
         })
         .await
     }
 
     #[tool(
+        name = "browse_fill",
+        description = "Fill a form in one call: text inputs, selects (by option text) and checkboxes/radios (true/false). Prefer this over several browse_type calls."
+    )]
+    pub async fn browse_fill(&self, params: Parameters<FillArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        let fields: Vec<_> = a.fields.iter().map(|f| json!({"ref": f.r#ref, "value": f.value})).collect();
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "fill", json!({ "fields": fields }), a.snapshot)).await
+    }
+
+    #[tool(
+        name = "browse_select",
+        description = "Choose an option in a <select> by its text or value. Custom dropdowns aren't <select>s: click them open, then click the option."
+    )]
+    pub async fn browse_select(&self, params: Parameters<SelectArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "select", json!({"ref": a.r#ref, "option": a.option}), a.snapshot)).await
+    }
+
+    #[tool(
+        name = "browse_key",
+        description = "Press a key (Enter, Escape, Tab, ArrowDown, Control+a, …) on an element or the focused one. Use Escape to close menus and dialogs."
+    )]
+    pub async fn browse_key(&self, params: Parameters<KeyArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "key", json!({"ref": a.r#ref, "key": a.key}), a.snapshot)).await
+    }
+
+    #[tool(name = "browse_hover", description = "Hover an element by ref, e.g. to open a hover menu or tooltip.")]
+    pub async fn browse_hover(&self, params: Parameters<ClickArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "hover", json!({"ref": a.r#ref}), a.snapshot)).await
+    }
+
+    #[tool(
+        name = "browse_scroll",
+        description = "Scroll the page by viewports (direction, pages), to some text, or an element into view; with ref and direction, scrolls inside that panel. Use it when the snapshot says there's more below.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn browse_scroll(&self, params: Parameters<ScrollArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || {
+            chrome::act(
+                a.instance.as_deref(),
+                a.tab,
+                "scroll",
+                json!({"direction": a.direction, "pages": a.pages, "ref": a.r#ref, "text": a.text}),
+                a.snapshot,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        name = "browse_wait_for",
+        description = "Wait until any of the given texts appears on the page (after a slow search, save or login).",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn browse_wait_for(&self, params: Parameters<WaitArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::wait_for(a.instance.as_deref(), a.tab, &a.text, a.timeout_ms.unwrap_or(10_000))).await
+    }
+
+    #[tool(
         name = "browse_screenshot",
-        description = "Screenshot a tab to a PNG file and return its path (read the file to see it)."
+        description = "Screenshot a tab to a PNG file and return its path (read the file to see it). Brings the tab to the front, so prefer browse_snapshot unless you need to see the layout."
     )]
     pub async fn browse_screenshot(&self, params: Parameters<TabArgs>) -> Result<String, ErrorData> {
         let a = params.0;

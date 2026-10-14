@@ -91,11 +91,27 @@
         },
         {
             "name": "browse_click",
-            "description": "Click an element by ref from browse_snapshot."
+            "description": "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot."
         },
         {
             "name": "browse_close",
             "description": "Close a tab."
+        },
+        {
+            "name": "browse_fill",
+            "description": "Fill a form in one call: text inputs, selects (by option text) and checkboxes/radios (true/false). Prefer this over several browse_type calls."
+        },
+        {
+            "name": "browse_hover",
+            "description": "Hover an element by ref, e.g. to open a hover menu or tooltip."
+        },
+        {
+            "name": "browse_key",
+            "description": "Press a key (Enter, Escape, Tab, ArrowDown, Control+a, …) on an element or the focused one. Use Escape to close menus and dialogs."
+        },
+        {
+            "name": "browse_nav",
+            "description": "Go back, forward or reload a tab and wait for it to load."
         },
         {
             "name": "browse_open",
@@ -103,11 +119,19 @@
         },
         {
             "name": "browse_screenshot",
-            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it)."
+            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it). Brings the tab to the front, so prefer browse_snapshot unless you need to see the layout."
+        },
+        {
+            "name": "browse_scroll",
+            "description": "Scroll the page by viewports (direction, pages), to some text, or an element into view; with ref and direction, scrolls inside that panel. Use it when the snapshot says there's more below."
+        },
+        {
+            "name": "browse_select",
+            "description": "Choose an option in a <select> by its text or value. Custom dropdowns aren't <select>s: click them open, then click the option."
         },
         {
             "name": "browse_snapshot",
-            "description": "List a tab's visible interactive elements with refs (e1, e2, …) to pass to browse_click / browse_type."
+            "description": "Outline of a tab: its interactive elements with refs ([e12], or [f7:e3] inside an iframe), nested under headings, forms, dialogs and rows, with state (value, checked, disabled, expanded, covered, offscreen) and how much page is above/below. Prefer this over a screenshot. Refs come from the latest snapshot; action tools already return a fresh one."
         },
         {
             "name": "browse_tabs",
@@ -115,11 +139,15 @@
         },
         {
             "name": "browse_text",
-            "description": "A tab's title, URL and visible text."
+            "description": "A tab's title, URL and visible text. Pass find to get only matching lines (cheap way to check for a word or read one part of a long page)."
         },
         {
             "name": "browse_type",
-            "description": "Type text into an input/textarea by ref from browse_snapshot; submit=true submits the form."
+            "description": "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select."
+        },
+        {
+            "name": "browse_wait_for",
+            "description": "Wait until any of the given texts appears on the page (after a slow search, save or login)."
         },
         {
             "name": "email_check_domain",

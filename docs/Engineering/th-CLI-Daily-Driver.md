@@ -121,7 +121,8 @@ th settings list [--json] / show <key> / set <key> <value> / unset <key> / expla
 th chrome install / status / uninstall
 th chrome bm tree [path] / search / upsert / mkdir / add / move / rename / rm / export
 th chrome bm history log / snapshot / remote <url> [--auto-push] / push / fetch · th chrome bm restore <rev>
-th chrome browse tabs / open / text / snapshot / click / type / screenshot / close
+th chrome browse tabs / open / navigate / back / forward / reload / text [--find] / snapshot
+th chrome browse click / type / select / key / hover / scroll / fill / wait / screenshot / close
 
 # Worktrees, daemon/operatives, audit, service
 th worktree create / list / merge / remove
