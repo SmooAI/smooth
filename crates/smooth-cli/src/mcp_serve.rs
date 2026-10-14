@@ -1830,6 +1830,10 @@ mod tests {
             "browse_tabs",
             "browse_text",
         ] {
+            // The chrome tools are only registered on unix (Unix-socket native host).
+            if !cfg!(unix) && (read_tool.starts_with("bookmarks_") || read_tool.starts_with("browse_")) {
+                continue;
+            }
             assert!(names.contains(&read_tool), "{read_tool} is read-only and must survive");
         }
 
