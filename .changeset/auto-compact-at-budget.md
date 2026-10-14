@@ -1,5 +1,0 @@
----
-'@smooai/smooth': minor
----
-
-The context budget is now each harness's auto-compaction point, and nothing blocks any more. `th harness enable` writes `harness.context_budget` (now 300k) into Claude Code (`autoCompactWindow`) and Codex (`model_auto_compact_token_limit`), so long sessions on 1M-context models compact at the budget instead of near the full window. A threshold you set yourself is left alone. Past `harness.context_suggest` (150k), each milestone (a commit, push, `th attest`, PR, pearl checkpoint or passing test run) has the agent suggest `/th-clear` to you, again every 50k, and the warn line (270k) asks it to checkpoint the pearl before compaction. The Stop hook no longer blocks. The smooth-agent statusline shows the context against the budget (`◔ 162k/300k 54%`), turning yellow at the suggest line and red at the warn line. `harness.context_budgets` and `harness.context_suggests` add per-harness and per-model overrides, `harness.context_reset = clear` keeps the `/th-clear` flow, and `th harness budget --report` shows where your Claude Code input tokens went.

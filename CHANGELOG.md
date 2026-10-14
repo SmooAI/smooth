@@ -1,5 +1,18 @@
 # @smooai/smooth
 
+## 0.80.0
+
+### Minor Changes
+
+- 29382f0: The context budget is now each harness's auto-compaction point, and nothing blocks any more. `th harness enable` writes `harness.context_budget` (now 300k) into Claude Code (`autoCompactWindow`) and Codex (`model_auto_compact_token_limit`), so long sessions on 1M-context models compact at the budget instead of near the full window. A threshold you set yourself is left alone. Past `harness.context_suggest` (150k), each milestone (a commit, push, `th attest`, PR, pearl checkpoint or passing test run) has the agent suggest `/th-clear` to you, again every 50k, and the warn line (270k) asks it to checkpoint the pearl before compaction. The Stop hook no longer blocks. The smooth-agent statusline shows the context against the budget (`◔ 162k/300k 54%`), turning yellow at the suggest line and red at the warn line. `harness.context_budgets` and `harness.context_suggests` add per-harness and per-model overrides, `harness.context_reset = clear` keeps the `/th-clear` flow, and `th harness budget --report` shows where your Claude Code input tokens went.
+- 60bdcb3: `th chrome`: the Smooth Chrome extension plus a native-messaging host let `th` and your agents read and write Chrome bookmarks, including account-synced ones, through `chrome.bookmarks`, so Chrome Sync carries changes to your other devices. Commands: `th chrome install`, `th chrome bm tree|search|upsert|mkdir|add|move|rename|rm|export`. Every change is committed to a git history with `restore <rev>` and optional push to a remote. Turn on browsing in the extension popup and agents can also list, open, read, click, type in and screenshot tabs. Turn on trusted input too (the optional `debugger` permission) for real clicks and keystrokes, clicks by screenshot coordinates, background-tab screenshots, and `browse_eval`, `browse_console`, `browse_network`, `browse_dialog` and `browse_upload`. Every command is also an MCP tool (`bookmarks_*`, `browse_*`).
+
+### Patch Changes
+
+- 6502575: `th chrome`: the extension's service worker no longer crashes on a fresh install. It touched `chrome.debugger` at startup, which doesn't exist until trusted input is granted, so the extension never connected to `th`. The popup is redesigned in Presence: a connection pill, a problem box that says how to fix it, and switches for Agent browsing and Trusted input.
+
+  New ringed app icons: the `th` mark (Big Smooth, the web app, the Chrome extension) and the SmoothFlow mark now sit inside the Smoo AI gradient band. `scripts/gen-ring-icons.py --assets` renders every icon from the SVG masters.
+
 ## 0.79.4
 
 ### Patch Changes
