@@ -65,6 +65,47 @@ fn plan(settings: &serde_json::Value) -> Plan {
     }
 }
 
+/// Where an existing statusline of ours should point instead: the same script
+/// in `hooks` (the newest installed plugin) when it names a copy in an older
+/// plugin-cache version. The cache keeps every version, so a pinned path keeps
+/// rendering the old script forever. `None` when it is current, or a copy of
+/// ours outside the plugin cache (the user's own — left alone).
+fn stale_target(current: &str, hooks: &Path) -> Option<String> {
+    let path = Path::new(current.trim());
+    let name = path.file_name()?.to_str()?;
+    if !matches!(name, "smooth-statusline.sh" | "smooth-statusline-with-ponytail.sh") {
+        return None;
+    }
+    let in_cache = path
+        .components()
+        .map(std::path::Component::as_os_str)
+        .collect::<Vec<_>>()
+        .windows(3)
+        .any(|w| w == ["cache", "smooth", "smooth-agent"]);
+    if !in_cache || path.parent()? == hooks {
+        return None;
+    }
+    let next = hooks.join(name);
+    next.is_file().then(|| next.display().to_string())
+}
+
+/// Repoint our statusline at the newest installed plugin (`th harness enable`
+/// runs this on every update). `Ok(Some(command))` when it changed.
+///
+/// # Errors
+/// Settings that can't be read, parsed or written.
+pub fn refresh(home: &Path) -> Result<Option<String>> {
+    let Some(hooks) = plugin_hooks_dir(home) else { return Ok(None) };
+    let path = settings_path(home);
+    let settings = load_settings(&path)?;
+    let current = settings.get("statusLine").and_then(|s| s.get("command")).and_then(|c| c.as_str());
+    let Some(next) = current.and_then(|c| stale_target(c, &hooks)) else {
+        return Ok(None);
+    };
+    write_statusline(&path, settings, &next)?;
+    Ok(Some(next))
+}
+
 /// Read `~/.claude/settings.json`, tolerating absent/empty but never malformed —
 /// clobbering settings we failed to parse would eat the user's whole config.
 fn load_settings(path: &Path) -> Result<serde_json::Value> {
@@ -111,9 +152,10 @@ pub fn run() -> Result<()> {
 
     println!();
     match plan(&settings) {
-        Plan::AlreadyOurs => {
-            println!("  {} statusline already set up → {}", "·".dimmed(), path.display().to_string().dimmed());
-        }
+        Plan::AlreadyOurs => match refresh(&home)? {
+            Some(next) => println!("  {} statusline moved to the newest plugin → {}", "✓".green().bold(), next.dimmed()),
+            None => println!("  {} statusline already set up → {}", "·".dimmed(), path.display().to_string().dimmed()),
+        },
         Plan::Install => {
             write_statusline(&path, settings, &ours)?;
             println!("  {} statusline installed → {}", "✓".green().bold(), path.display().to_string().dimmed());
@@ -138,6 +180,7 @@ pub fn run() -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -196,6 +239,44 @@ mod tests {
         std::fs::write(&path, "{not json").unwrap();
         assert!(load_settings(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json", "must not be touched");
+    }
+
+    #[test]
+    fn a_pinned_old_plugin_path_moves_to_the_newest() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join(".claude/plugins/cache/smooth/smooth-agent");
+        for v in ["0.31.1", "0.80.0"] {
+            let hooks = base.join(v).join("hooks");
+            std::fs::create_dir_all(&hooks).unwrap();
+            std::fs::write(hooks.join("smooth-statusline.sh"), "#!/bin/bash\n").unwrap();
+            std::fs::write(hooks.join("smooth-statusline-with-ponytail.sh"), "#!/bin/bash\n").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let old = base.join("0.31.1/hooks/smooth-statusline.sh").display().to_string();
+        let new = base.join("0.80.0/hooks/smooth-statusline.sh").display().to_string();
+        let path = tmp.path().join(".claude/settings.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({ "model": "opus", "statusLine": { "type": "command", "command": old } }).to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(refresh(tmp.path()).unwrap(), Some(new.clone()));
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["statusLine"]["command"], new.as_str());
+        assert_eq!(doc["model"], "opus");
+        assert_eq!(refresh(tmp.path()).unwrap(), None, "current → no write");
+
+        // The wrapper keeps being the wrapper.
+        let hooks = base.join("0.80.0/hooks");
+        let old_wrap = base.join("0.31.1/hooks/smooth-statusline-with-ponytail.sh").display().to_string();
+        assert_eq!(
+            stale_target(&old_wrap, &hooks),
+            Some(hooks.join("smooth-statusline-with-ponytail.sh").display().to_string())
+        );
+        // Someone else's statusline, or a copy of ours outside the cache, is never touched.
+        assert_eq!(stale_target("/p/ponytail-statusline.sh", &hooks), None);
+        assert_eq!(stale_target("/Users/me/bin/smooth-statusline.sh", &hooks), None);
     }
 
     #[test]

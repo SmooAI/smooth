@@ -756,6 +756,11 @@ fn codex_plugin_step(home: &Path) {
 }
 
 fn statusline_step(home: &Path) {
+    match crate::statusline_setup::refresh(home) {
+        Ok(Some(next)) => println!("   statusline: moved to the newest plugin → {next}"),
+        Ok(None) => {}
+        Err(e) => println!("   statusline: {} {e:#}", "FAILED".bright_red()),
+    }
     if claude_statusline_wired(home) {
         println!("   statusline: wired (settings.json has a statusLine entry — left alone)");
     } else {
