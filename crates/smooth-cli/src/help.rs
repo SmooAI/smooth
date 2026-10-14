@@ -109,6 +109,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "System",
         &[
             ("doctor", "health check, auto-fix, guided setup"),
+            ("install-prompt", "the prompt that sets th up from inside your coding agent (--copy)"),
             ("settings", "machine settings — sandbox, egress, model, relay, … (~/.smooth/settings.toml)"),
             ("service", "run Smooth as a background service"),
             ("audit", "tool-usage audit logs"),
@@ -139,6 +140,7 @@ const EXAMPLES: &[(&str, &[&str])] = &[
             "smoo auth login                     # sign in to the Smoo AI platform",
             "smoo crm contacts list --json       # any platform read, machine-readable",
             "th harness enable all               # wire Claude Code / Codex / OpenCode to the toolbox",
+            "th install-prompt --copy            # paste-ready setup prompt for a coding agent",
         ],
     ),
     (

@@ -32,6 +32,8 @@ mod hooks;
 /// macOS Messages setup driven by `th doctor --setup-imessage` (pearl th-1665ed).
 #[cfg(target_os = "macos")]
 mod imessage_setup;
+/// SMOODEV-3915: `th install-prompt` — the agent install prompt from the docs.
+mod install_prompt;
 use smooth_tools::mcp_config;
 /// th-19dac1: `th harness` — per-provider toolbox setup (EPIC th-1945b9).
 mod harness;
@@ -639,6 +641,16 @@ enum Commands {
     Service {
         #[command(subcommand)]
         cmd: ServiceCommands,
+    },
+    /// Print the prompt that installs th into your coding agent.
+    ///
+    /// Paste it into Claude Code, Codex or OpenCode: it installs or updates
+    /// `th`, runs `th harness enable` for each, verifies the context budget and
+    /// asks you to choose a model. The text is docs/Start-Here/Install-Prompt.md.
+    InstallPrompt {
+        /// Also copy it to the clipboard
+        #[arg(long)]
+        copy: bool,
     },
     /// Print the workflow-rules + current-state context block.
     ///
@@ -2320,6 +2332,7 @@ async fn main() -> Result<()> {
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
         Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
         Some(Commands::Prime { ready_limit }) => cmd_prime(ready_limit),
+        Some(Commands::InstallPrompt { copy }) => install_prompt::cmd_install_prompt(copy),
         Some(Commands::Project { cmd }) => cmd_project(cmd),
     }
 }
