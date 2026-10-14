@@ -3,53 +3,213 @@
     <head>
         <meta charset="utf-8" />
         <style>
+            /* Presence (Smooth's design language): warm ground, the th face only on the mark,
+               coral = on, online = connected. Tokens mirror smooth-web's globals.css. */
+            :root {
+                --bg: oklch(0.165 0.012 55);
+                --panel: oklch(0.205 0.014 58);
+                --panel-2: oklch(0.235 0.015 58);
+                --fg: oklch(0.93 0.014 70);
+                --muted: oklch(0.66 0.02 65);
+                --border: oklch(0.3 0.014 60);
+                --coral: oklch(0.74 0.15 32);
+                --online: oklch(0.74 0.17 152);
+                --error: oklch(0.7 0.16 25);
+            }
+            * {
+                box-sizing: border-box;
+            }
             body {
+                margin: 0;
+                width: 320px;
+                padding: 14px;
+                background: var(--bg);
+                color: var(--fg);
                 font:
-                    13px system-ui,
+                    13px/1.45 ui-rounded,
+                    'SF Pro Rounded',
+                    'Segoe UI',
+                    system-ui,
                     sans-serif;
-                width: 260px;
-                margin: 12px;
-                color: #111;
             }
-            .dot {
-                display: inline-block;
-                width: 8px;
-                height: 8px;
+            header {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 12px;
+            }
+            header img {
+                width: 32px;
+                height: 32px;
+            }
+            header h1 {
+                margin: 0;
+                font-size: 15px;
+                font-weight: 650;
+                letter-spacing: 0.01em;
+            }
+            .pill {
+                margin-left: auto;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 3px 9px;
+                border: 1px solid var(--border);
+                border-radius: 999px;
+                color: var(--muted);
+                font-size: 12px;
+                white-space: nowrap;
+            }
+            .pill .glyph {
+                font-size: 10px;
+            }
+            .pill.on {
+                color: var(--fg);
+            }
+            .pill.on .glyph {
+                color: var(--online);
+            }
+            .pill.off .glyph {
+                color: var(--error);
+            }
+            .problem {
+                margin: -4px 0 12px;
+                padding: 9px 11px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                background: var(--panel);
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .problem b {
+                color: var(--fg);
+                font-weight: 600;
+            }
+            code {
+                font:
+                    11.5px ui-monospace,
+                    'SF Mono',
+                    Menlo,
+                    monospace;
+                color: var(--fg);
+                background: var(--panel-2);
+                padding: 1px 5px;
+                border-radius: 5px;
+            }
+            .card {
+                padding: 11px 12px;
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                background: var(--panel);
+            }
+            .card + .card {
+                margin-top: 8px;
+            }
+            .row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .row h2 {
+                margin: 0;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .state {
+                margin-left: auto;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .card p {
+                margin: 6px 0 0;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .card.disabled h2,
+            .card.disabled .state {
+                color: var(--muted);
+            }
+            /* A switch: a checkbox, so keyboard and screen readers get it for free. */
+            .switch {
+                appearance: none;
+                position: relative;
+                flex: none;
+                width: 34px;
+                height: 20px;
+                margin: 0;
+                border-radius: 999px;
+                background: var(--panel-2);
+                border: 1px solid var(--border);
+                cursor: pointer;
+                transition: background 0.15s;
+            }
+            .switch::after {
+                content: '';
+                position: absolute;
+                top: 2px;
+                left: 2px;
+                width: 14px;
+                height: 14px;
                 border-radius: 50%;
-                margin-right: 6px;
-                background: #aaa;
+                background: var(--muted);
+                transition:
+                    transform 0.15s,
+                    background 0.15s;
             }
-            .on {
-                background: #1aa37a;
+            .switch:checked {
+                background: var(--coral);
+                border-color: var(--coral);
             }
-            .off {
-                background: #d9822b;
+            .switch:checked::after {
+                transform: translateX(14px);
+                background: var(--bg);
             }
-            button {
-                margin-top: 10px;
-                width: 100%;
-                padding: 6px;
+            .switch:disabled {
+                cursor: not-allowed;
+                opacity: 0.45;
             }
-            small {
-                color: #666;
-                display: block;
-                margin-top: 6px;
+            .switch:focus-visible {
+                outline: 2px solid var(--coral);
+                outline-offset: 2px;
+            }
+            footer {
+                margin-top: 12px;
+                color: var(--muted);
+                font-size: 11.5px;
             }
         </style>
     </head>
     <body>
-        <div><span id="dot" class="dot"></span><span id="conn">Checking…</span></div>
-        <small id="err"></small>
-        <div style="margin-top: 10px">Agent browsing: <b id="browsing">…</b></div>
-        <button id="toggle" hidden></button>
-        <small>Bookmarks are always available to th. Browsing lets agents open tabs, read pages, click and type.</small>
-        <div style="margin-top: 10px">Trusted input: <b id="trusted">…</b></div>
-        <button id="trustedToggle" hidden></button>
-        <small
-            >Trusted input uses Chrome's debugger: real clicks and keystrokes (for sites that ignore scripted ones), answering alert/confirm dialogs,
-            screenshots without switching tabs, console and network logs, file uploads and running JavaScript. Chrome shows a "started debugging" bar while it
-            is in use.</small
-        >
+        <header>
+            <img src="icon.svg" alt="" />
+            <h1>Smooth</h1>
+            <span id="pill" class="pill"><span class="glyph" aria-hidden="true">◐</span><span id="conn">Checking…</span></span>
+        </header>
+
+        <div id="problem" class="problem" hidden></div>
+
+        <section id="browsingCard" class="card">
+            <div class="row">
+                <h2 id="browsingLabel">Agent browsing</h2>
+                <span id="browsingState" class="state"></span>
+                <input id="browsing" class="switch" type="checkbox" role="switch" aria-labelledby="browsingLabel" disabled />
+            </div>
+            <p>Lets agents open tabs, read pages, click and type. Tabs they open go in a Smooth group.</p>
+        </section>
+
+        <section id="trustedCard" class="card">
+            <div class="row">
+                <h2 id="trustedLabel">Trusted input</h2>
+                <span id="trustedState" class="state"></span>
+                <input id="trusted" class="switch" type="checkbox" role="switch" aria-labelledby="trustedLabel" disabled />
+            </div>
+            <p>
+                Real clicks and keystrokes through Chrome's debugger, plus dialogs, uploads, console and network logs, and JavaScript. Chrome shows a "started
+                debugging" bar while it's in use.
+            </p>
+        </section>
+
+        <footer>Bookmarks are always available to <code>th</code>.</footer>
         <script src="popup.js"></script>
     </body>
 </html>
