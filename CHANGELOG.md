@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.80.1
+
+### Patch Changes
+
+- 787d0d7: `th chrome`: Trusted input works. Chrome won't accept `debugger` as an optional permission and silently dropped it, so the switch could never turn on. `debugger` is now declared up front, and Trusted input is a setting in the extension: off by default, it needs browsing, and turning it off detaches every debugger session. After upgrading, run `th chrome install` and reload the extension.
+- fadfa4c: `th harness enable claude-code` and `th doctor --setup-statusline` now move a statusline pinned to an old smooth-agent plugin version to the newest one, so the statusline picks up new segments (the context meter) after an update. A statusline that isn't ours, or a copy outside the plugin cache, is left alone.
+
 ## 0.80.0
 
 ### Minor Changes
