@@ -19,7 +19,7 @@ The `th harness budget` hook invokes this for you when the session crosses `harn
 
 3. **Read it back:** `th pearls show <pearl> --handoff`. If the fresh session would get it wrong from that text alone, checkpoint again.
 
-4. **Arm:** `th harness handoff arm --pearl <pearl> --harness claude-code` (in Codex/OpenCode/others, pass that harness's name). It warns if the pearl has no checkpoint — fix that, don't ignore it. The token expires in 15 minutes.
+4. **Arm:** `th harness handoff arm --pearl <pearl> --harness claude-code` (in Codex/OpenCode/others, pass that harness's name). It warns if the pearl has no checkpoint — fix that, don't ignore it. This terminal can claim the token for 24 hours. Arming prints the `/clear` + resume lines and copies the resume line to the clipboard.
 
 5. **Stop and give the user the two lines `arm` printed**, copy-pasteable, plus where it picks up:
     ```
@@ -33,5 +33,6 @@ The `th harness budget` hook invokes this for you when the session crosses `harn
 - **In-process subagents die on `/clear`.** They must push and checkpoint before step 4, exactly as in `/th-handoff`.
 - **Why the explicit resume line:** the armed token usually resumes the fresh session by itself (the SessionStart hook injects the handoff after `/clear`), but a hook can add context, not start a turn, and an expired or missed token leaves nothing injected. `/th-handoff resume <pearl>` works either way; if the handoff was already injected, it just re-reads the same pearl.
 - **Changed your mind?** `th harness handoff disarm` drops the token; `th harness handoff list` shows what is armed.
-- **Relaunch instead of `/clear`** (quit, then `claude` in the same directory within 15 minutes) also resumes, when exactly one token is armed there.
+- **Relaunch instead of `/clear`** (quit, then `claude` in the same directory within the hour) also resumes, when exactly one token is armed there.
+- **Missed claim?** A fresh session that finds a token it can't take (expired, another terminal's) gets a note naming the pearl instead of silence. The resume line always works.
 - **Other harnesses:** the same two commands work anywhere; the harness's clear is `/clear` or `/new`. Where no SessionStart hook claims the token, the fresh session can claim by hand: `th harness handoff claim --format text`.

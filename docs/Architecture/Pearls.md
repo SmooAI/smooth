@@ -137,19 +137,31 @@ that the user's `/clear` triggers:
 1. The `th-clear` skill does the th-handoff checkpoint, then
    `th harness handoff arm --pearl <id> --harness claude-code`. That writes a
    token to `~/.smooth/handoff/armed/<cwd-hash>-<harness-pid>.json`
-   (`$SMOOTH_HOME` respected) with a 15-minute expiry. The harness PID
-   (`CLAUDE_PID`, else a process-tree walk to the `claude` process) stays the
-   same across `/clear` and tells two terminals in one checkout apart.
+   (`$SMOOTH_HOME` respected). The harness PID (`CLAUDE_PID`, else a
+   process-tree walk to the `claude` process) stays the same across `/clear`
+   and tells two terminals in one checkout apart. It prints `/clear` and
+   `/th-handoff resume <pearl>` and copies the resume line to the clipboard
+   (`--no-copy` skips that), so a missed claim is one paste away.
 2. The user types `/clear`. The `SessionStart` hook (matcher `clear|startup`)
    runs `th harness handoff claim`. It takes the token by atomic rename (one
    claimer wins), re-checkpoints each pearl with the **new** session id (so the
    compact/resume hooks keep matching it in a primary checkout) and injects the
    rendered handoff. With no token it prints nothing: a plain `/clear` is
    untouched. `compact`/`resume` never claim.
+   **Expiry (SMOODEV-3888).** The arming terminal (an owner-PID match) claims
+   for 24 hours: the PID is what makes the match safe, so a `/clear` typed an
+   hour later still resumes. Before this, a 15-minute TTL reaped the token
+   silently. `--ttl-minutes` (default 60) now bounds only the fallbacks that
+   can't prove the terminal, such as a fresh launch.
+   **No silent misses.** If a token for this directory exists but this session
+   may not take it (expired, or another terminal's), the hook injects a short
+   note naming the pearl and `th pearls show <id> --handoff` instead of
+   nothing. An expired token whose terminal has exited is reaped once it has
+   been reported.
 3. The first message after `/clear` (e.g. "go") starts the fresh session on it.
 
 A fresh launch (`startup`) in the same directory claims too, but only when
-exactly one token is armed there. `th harness handoff list` / `disarm` inspect
+exactly one unexpired token is armed there. `th harness handoff list` / `disarm` inspect
 and drop tokens.
 
 **Budget.** `th harness budget` runs on `UserPromptSubmit`, `PostToolUse` and
