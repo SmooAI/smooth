@@ -502,6 +502,17 @@ smoo api crm contacts import-table leads.csv --map email=Email --map name="Full 
 smoo api crm contacts import-table leads.csv --map email=Email --apply
 smoo api crm contacts import-address-book --provider google  # preview a sample (user session)
 smoo api crm contacts import-address-book --provider microsoft --apply
+# Duplicate contacts (SMOODEV-3859, smooai ADR-139) — the AI merge queue, grouped
+# by person. CLI twin of the copilot's crm.*_duplicate* tools and the hosted MCP
+# crm_*_duplicate* tools. Needs crm.contacts.merge + CRM Pro. Merges and undo print
+# the target and confirm (--yes for scripts, --dry-run to stop); each merge stays
+# undoable from `history`.
+smoo crm duplicates list [--limit 20] [--offset 0] [--include-different] [--json]
+smoo crm dupes merge-group --keep <contact-id> <contact-id>... [--primary-email a@b.com] [--note "…"]
+smoo crm duplicates approve <candidate-id> [--keep <contact-id>] [--primary-email a@b.com]
+smoo crm duplicates reject <candidate-id> [--note "different people"]
+smoo crm duplicates history [--status merged,auto_merged,rejected] [--json]
+smoo crm duplicates undo <candidate-id>
 # Super-admin org membership (SMOODEV-3291) — any org, no invitation. Needs the
 # super_admin role (403 "requires the super_admin role" otherwise) and the
 # internal `admin` build (`pnpm install:th`). --org-id is REQUIRED: these verbs
@@ -1402,6 +1413,28 @@ them wholesale), so a flag only changes what it names. An org API key has no
 person behind it, so this needs `th auth login`.
 
 ```bash
+# The ORG's notification EMAIL recipients (smooai ADR-152; changes need org.notifications.manage)
+th smoo org-notifications list
+th smoo org-notifications add --email team@acme.com --name "Front desk" \
+    --event booking.created:instant --event deal.won:daily --event lead.captured:weekly
+th smoo org-notifications add --member <user-id> --event escalation.created:instant
+th smoo org-notifications update <id> --event deal.won:daily --event deal.lost:daily   # replaces the set
+th smoo org-notifications update <id> --clear-events
+th smoo org-notifications settings                                    # show
+th smoo org-notifications settings --tz America/Chicago --daily-hour 17 --quiet 21:00-07:00
+th smoo org-notifications test <id>
+th smoo org-notifications resend <id>
+th smoo org-notifications remove <id>
+```
+
+An external address receives nothing until someone there opens the confirmation
+link the server emails it; a member is active at once. Every recipient can
+unsubscribe themselves, and an admin can't undo that (re-adding asks them again).
+CLI twin of the copilot's `org_notification_emails.*` and the hosted MCP
+`org_notification_emails_*` tools; not the same thing as `th smoo notifications`
+(your own per-person routing).
+
+```bash
 # Roles (org.roles.manage / org.members.manage)
 th roles list                      # + member counts
 th roles templates                 # built-in role templates and their keys
@@ -1920,6 +1953,19 @@ scheduler. Sampling _before_ is load-bearing: on a machine dedicated to
 attesting the check IS the load (cargo on 10 cores takes smoo-hub to 62), so
 sampling afterwards would swallow every genuine failure. A **pass** under load
 is still a pass.
+
+A distrusted failure is not handed straight to CI any more (SMOODEV-3883).
+`th attest` says why the machine is busy, then waits up to
+`SMOOAI_CI_OVERLOAD_RETRY_WAIT` seconds (default 600; poll
+`SMOOAI_CI_OVERLOAD_POLL`, default 15; 0 disables) for the load to fall below 2×
+cores and runs the check **once more**. That re-run is a real verdict: green is
+credited, red is posted. A check that waited out `--max-wait` for a ci-queue slot
+gets the same diagnosis. The diagnosis is the repo's own
+`scripts/ci/_pressure.sh` when it has one (smooai's prints load, disk against the
+queue's hold, the top CPU/memory processes and any long-running local stack, then
+a `→ remedy:` line), run with a 30s bound; otherwise a pointer to
+`th ci-queue status`. Apply the remedy and re-run only the blocked rows before
+reaching for a repo's full-CI escape hatch.
 
 #### Ordering — why it pushes for you
 

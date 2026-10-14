@@ -1023,6 +1023,17 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::notification_prefs::Cmd,
     },
+    /// The org's notification EMAIL recipients — shared inboxes and members that
+    /// get instant emails and daily / weekly digests of bookings, deals, leads,
+    /// escalations, missed calls and conversations: `list`, `add`, `update`,
+    /// `remove`, `settings`, `test`, `resend`. CLI twin of the copilot's
+    /// `org_notification_emails.*` and the hosted MCP `org_notification_emails_*`
+    /// tools. Changes need `org.notifications.manage`.
+    #[command(name = "org-notifications", visible_alias = "org-notification")]
+    OrgNotifications {
+        #[command(subcommand)]
+        cmd: smooai::org_notifications::Cmd,
+    },
     /// Smoo AI campaigns — list, per-campaign analytics, and (preview-first)
     /// send. CLI twin of the hosted MCP campaign_* tools.
     #[command(visible_alias = "campaign")]
@@ -1984,6 +1995,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Analytics { cmd } => smooai::analytics::cmd(cmd).await,
         SmooCommands::AnalyticsDashboards { cmd } => smooai::analytics_dashboards::cmd(cmd).await,
         SmooCommands::Notifications { cmd } => smooai::notification_prefs::cmd(cmd).await,
+        SmooCommands::OrgNotifications { cmd } => smooai::org_notifications::cmd(cmd).await,
         SmooCommands::Campaigns { cmd } => smooai::campaigns::cmd(cmd).await,
         SmooCommands::Drip { cmd } => smooai::drip::cmd(cmd).await,
         SmooCommands::Audiences { cmd } => smooai::audiences::cmd(cmd).await,

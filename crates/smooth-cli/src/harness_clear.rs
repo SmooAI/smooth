@@ -8,12 +8,15 @@
 //!    drop a one-shot token in `~/.smooth/handoff/armed/`, keyed on the cwd and
 //!    the harness process that owns this session (found by walking the process
 //!    tree, so it survives `/clear` and tells two terminals in one checkout
-//!    apart). It expires after `--ttl-minutes`.
+//!    apart). The owning terminal can claim it for a day; any other launch
+//!    only within `--ttl-minutes`. It also prints the resume prompt and copies
+//!    it to the clipboard, so a missed claim is one paste away.
 //! 2. The user types the harness's clear (`/clear`). Its SessionStart hook runs
 //!    `th harness handoff claim`, which takes the token (atomic rename — one
 //!    claimer wins), re-stamps each pearl with the NEW session id and prints
 //!    the handoff as the hook's context. No token → prints nothing, so a plain
-//!    `/clear` is untouched.
+//!    `/clear` is untouched. A token for this cwd that it may not take
+//!    (expired, another terminal's) becomes a one-line note — never silence.
 //!
 //! `th harness budget` is the meter: hooked on Stop / PostToolUse /
 //! UserPromptSubmit, it reads the session's context size (Claude Code: the
@@ -39,10 +42,13 @@ use sha2::{Digest, Sha256};
 
 use crate::pearls_handoff;
 
-/// Default lifetime of an armed token: long enough to finish the handoff
-/// turn and type `/clear`, short enough that a forgotten one doesn't resurrect
-/// stale work tomorrow.
-pub const DEFAULT_TTL_MINUTES: u32 = 15;
+/// Default lifetime of an armed token for a claim that can't prove it is the
+/// arming terminal (a fresh launch, unknown PIDs).
+pub const DEFAULT_TTL_MINUTES: u32 = 60;
+/// How long past `expires_at` the arming terminal itself can still claim: the
+/// PID match is what makes a claim safe, so a `/clear` typed an hour after
+/// arming must still resume (SMOODEV-3888). Past this the token is reaped.
+pub const SAME_TERMINAL_GRACE_HOURS: i64 = 24;
 /// Per-pearl cap on the injected handoff text.
 pub const PACKET_CHARS: usize = 6000;
 /// Pearls injected per claim.
@@ -72,6 +78,9 @@ pub enum HandoffCmd {
         cwd: Option<PathBuf>,
         #[arg(long, default_value_t = DEFAULT_TTL_MINUTES)]
         ttl_minutes: u32,
+        /// Don't copy the resume prompt to the clipboard.
+        #[arg(long)]
+        no_copy: bool,
     },
     /// SessionStart hook: take this terminal's armed token, if any, and print
     /// the handoff as session context. Reads the hook payload on stdin.
@@ -227,30 +236,86 @@ pub fn pick(candidates: &[Armed], owner_pids: &[u32], source: Source) -> Option<
     (incomparable || source == Source::Startup).then_some(0)
 }
 
-/// Take this session's token for `cwd` from `dir`, if any: expired tokens for
-/// the cwd are deleted on the way, and the take is an atomic rename so two
-/// racing sessions can't both resume the same handoff.
-pub fn claim_in(dir: &Path, canon_cwd: &str, owner_pids: &[u32], source: Source, now: DateTime<Utc>) -> Option<Armed> {
-    let mut fresh: Vec<(PathBuf, Armed)> = Vec::new();
+/// What a SessionStart claim found for its cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// This session took the token.
+    Resumed(Armed),
+    /// Tokens exist for this cwd, but none was this session's to take.
+    Missed(Vec<Missed>),
+    /// Nothing armed here (or a compact/resume, which never claims).
+    Nothing,
+}
+
+/// A token this session saw but did not take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missed {
+    pub token: Armed,
+    /// Past `expires_at` (otherwise: another terminal's, or ambiguous).
+    pub expired: bool,
+}
+
+fn pids_of(t: &Armed) -> Vec<u32> {
+    t.owner_pids.iter().copied().chain(t.owner_pid).collect()
+}
+
+/// Take this session's token for `cwd` from `dir`. The arming terminal (an
+/// owner-PID match) claims even past `expires_at`, up to
+/// [`SAME_TERMINAL_GRACE_HOURS`]; everything else goes through [`pick`] over
+/// unexpired tokens only. The take is an atomic rename so two racing sessions
+/// can't both resume one handoff. Tokens left behind come back as
+/// [`Claim::Missed`]; an expired one whose terminal is gone (`alive` says no
+/// for every owner PID) is reaped once reported, since nothing can claim it.
+pub fn claim_in(dir: &Path, canon_cwd: &str, owner_pids: &[u32], source: Source, now: DateTime<Utc>, alive: impl Fn(u32) -> bool) -> Claim {
+    if source == Source::Other {
+        return Claim::Nothing;
+    }
+    let grace = Duration::hours(SAME_TERMINAL_GRACE_HOURS);
+    let mut live: Vec<(PathBuf, Armed)> = Vec::new();
     for (path, t) in tokens_in(dir) {
         if t.cwd != canon_cwd {
             continue;
         }
-        if t.expires_at <= now {
+        if t.expires_at + grace <= now {
             let _ = fs::remove_file(&path);
             continue;
         }
-        fresh.push((path, t));
+        live.push((path, t));
     }
-    let tokens: Vec<Armed> = fresh.iter().map(|(_, t)| t.clone()).collect();
-    let i = pick(&tokens, owner_pids, source)?;
-    let (path, token) = &fresh[i];
-    let claimed = path.with_extension(format!("claimed-{}", std::process::id()));
-    if fs::rename(path, &claimed).is_err() {
-        return None; // another session won the race
+    let own = live.iter().position(|(_, t)| pids_of(t).iter().any(|p| owner_pids.contains(p)));
+    let chosen = own.or_else(|| {
+        let fresh: Vec<usize> = (0..live.len()).filter(|&i| live[i].1.expires_at > now).collect();
+        let tokens: Vec<Armed> = fresh.iter().map(|&i| live[i].1.clone()).collect();
+        pick(&tokens, owner_pids, source).map(|i| fresh[i])
+    });
+    if let Some(i) = chosen {
+        let (path, token) = &live[i];
+        let claimed = path.with_extension(format!("claimed-{}", std::process::id()));
+        if fs::rename(path, &claimed).is_err() {
+            return Claim::Nothing; // another session won the race
+        }
+        let _ = fs::remove_file(&claimed);
+        return Claim::Resumed(token.clone());
     }
-    let _ = fs::remove_file(&claimed);
-    Some(token.clone())
+    if live.is_empty() {
+        return Claim::Nothing;
+    }
+    let missed = live
+        .into_iter()
+        .map(|(path, token)| {
+            let expired = token.expires_at <= now;
+            if expired && !pids_of(&token).into_iter().any(&alive) {
+                let _ = fs::remove_file(&path);
+            }
+            Missed { token, expired }
+        })
+        .collect();
+    Claim::Missed(missed)
+}
+
+/// Whether `pid` is a running process.
+fn pid_alive(pid: u32) -> bool {
+    ps_parent(pid).is_some()
 }
 
 // ── process tree ───────────────────────────────────────────────────
@@ -362,6 +427,43 @@ pub fn resume_context(packets: &[(String, String)]) -> String {
     out
 }
 
+/// The context for tokens a claim saw but did not take, so the fresh session
+/// knows a handoff exists instead of starting cold without a word.
+#[must_use]
+pub fn missed_context(missed: &[Missed], now: DateTime<Utc>) -> String {
+    let mut out = String::from("A /th-clear handoff is armed for this directory but was not resumed automatically:\n");
+    for m in missed {
+        let age = (now - m.token.created_at).num_minutes().max(0);
+        let why = if m.expired { "expired" } else { "armed by another terminal" };
+        let _ = writeln!(out, "- {} (armed {age}m ago, {why})", m.token.pearls.join(", "));
+    }
+    out.push_str(
+        "If the user's message is about continuing that work, run `th pearls show <id> --handoff`, re-verify live state, \
+         and carry on from its `next`; otherwise ignore this.",
+    );
+    out
+}
+
+/// Best-effort copy to the system clipboard; `false` when no tool worked.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let tools: &[(&str, &[&str])] = &[("pbcopy", &[]), ("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("clip.exe", &[])];
+    tools.iter().any(|(bin, args)| {
+        let Ok(mut child) = Command::new(bin)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let wrote = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+        child.wait().is_ok_and(|st| st.success()) && wrote
+    })
+}
+
 /// Emit `context` for a SessionStart hook in `format`.
 #[must_use]
 pub fn session_start_output(context: &str, format: &str) -> String {
@@ -387,8 +489,12 @@ fn do_claim(harness: &str, cwd: Option<PathBuf>, format: Option<String>) -> Resu
         .map_or_else(std::env::current_dir, Ok)?;
     let source = Source::parse(pstr(&payload, "source"));
     let session_id = pstr(&payload, "session_id").map(str::to_string);
-    let Some(token) = claim_in(&armed_dir()?, &canon(&cwd), &owner_pids(harness), source, Utc::now()) else {
-        return Ok(None);
+    let now = Utc::now();
+    let fmt = format.unwrap_or_else(|| default_format(harness).to_string());
+    let token = match claim_in(&armed_dir()?, &canon(&cwd), &owner_pids(harness), source, now, pid_alive) {
+        Claim::Resumed(token) => token,
+        Claim::Missed(missed) => return Ok(Some(session_start_output(&missed_context(&missed, now), &fmt))),
+        Claim::Nothing => return Ok(None),
     };
     let store = smooth_pearls::PearlStore::open(&cwd)?;
     let mut packets = Vec::new();
@@ -412,7 +518,6 @@ fn do_claim(harness: &str, cwd: Option<PathBuf>, format: Option<String>) -> Resu
     if packets.is_empty() {
         return Ok(None);
     }
-    let fmt = format.unwrap_or_else(|| default_format(harness).to_string());
     Ok(Some(session_start_output(&resume_context(&packets), &fmt)))
 }
 
@@ -426,6 +531,7 @@ pub fn handoff_cmd(cmd: HandoffCmd) -> Result<()> {
             session_id,
             cwd,
             ttl_minutes,
+            no_copy,
         } => {
             let cwd = cwd.map_or_else(std::env::current_dir, Ok)?;
             let store = smooth_pearls::PearlStore::open(&cwd)?;
@@ -454,16 +560,17 @@ pub fn handoff_cmd(cmd: HandoffCmd) -> Result<()> {
                 expires_at: now + Duration::minutes(i64::from(ttl_minutes)),
             };
             arm_in(&armed_dir()?, &armed)?;
-            let clear = if matches!(harness.as_str(), "claude-code" | "claude") {
-                "/clear"
-            } else {
-                "your harness's clear (/clear or /new)"
-            };
+            let window = owner.map_or_else(
+                || format!("expires in {ttl_minutes}m"),
+                |p| format!("this terminal (harness pid {p}) for {SAME_TERMINAL_GRACE_HOURS}h, a new launch here for {ttl_minutes}m"),
+            );
+            let copied = !no_copy && copy_to_clipboard(&resume_commands(&harness, &armed.pearls));
             println!(
-                "✓ Armed {} for {} (expires in {ttl_minutes}m{}).\n  Now type {clear} — the next session here resumes it automatically.",
+                "✓ Armed {} for {} ({window}).\n{}{}",
                 armed.pearls.join(", "),
                 armed.cwd,
-                owner.map(|p| format!(", harness pid {p}")).unwrap_or_default()
+                resume_instructions(&harness, &armed.pearls),
+                if copied { "\n  (the resume line is on your clipboard)" } else { "" }
             );
             Ok(())
         }
@@ -501,6 +608,32 @@ pub fn handoff_cmd(cmd: HandoffCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// What the user types after arming: the harness's clear, then the explicit
+/// resume command. The armed token usually resumes on its own after the clear;
+/// the resume line is the copy-pasteable fallback when it doesn't.
+#[must_use]
+pub fn resume_instructions(harness: &str, pearls: &[String]) -> String {
+    let (clear, _) = clear_and_skill(harness);
+    let resume: Vec<String> = resume_commands(harness, pearls).lines().map(|l| format!("    {l}")).collect();
+    format!("  Type:\n    {clear}\n  then:\n{}", resume.join("\n"))
+}
+
+/// The harness's clear and the th-handoff skill's invocation in it.
+const fn clear_and_skill(harness: &str) -> (&'static str, &'static str) {
+    match harness.as_bytes() {
+        b"claude-code" | b"claude" => ("/clear", "/th-handoff"),
+        b"codex" => ("/new", "$th-handoff"),
+        _ => ("/clear (or /new)", "/th-handoff"),
+    }
+}
+
+/// Just the resume line(s), one per pearl: what `arm` puts on the clipboard.
+#[must_use]
+pub fn resume_commands(harness: &str, pearls: &[String]) -> String {
+    let (_, skill) = clear_and_skill(harness);
+    pearls.iter().map(|p| format!("{skill} resume {p}")).collect::<Vec<_>>().join("\n")
 }
 
 // ── budget ─────────────────────────────────────────────────────────
@@ -571,7 +704,7 @@ pub fn decide(event: &str, tokens: u64, warn: u64, hard: u64, state: &BudgetStat
     let near = warn > 0 && tokens >= warn;
     let over_msg = format!(
         "Context is at {} tokens, over this session's {} budget (harness.context_budget). Hand off now: finish the current step, \
-         invoke the th-clear skill (it checkpoints the work into a pearl and arms the resume), then stop and tell the user to type /clear.",
+         invoke the th-clear skill (it checkpoints the work into a pearl and arms the resume), then stop and give the user the two lines it prints: /clear, then /th-handoff resume <pearl>.",
         k(tokens),
         k(hard)
     );
@@ -763,27 +896,98 @@ mod tests {
         assert_eq!(pick(&c, &[10], Source::Other), None);
     }
 
+    fn resumed(c: Claim) -> Armed {
+        match c {
+            Claim::Resumed(t) => t,
+            other => panic!("expected Resumed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn arm_then_claim_is_one_shot() {
         let dir = tempfile::tempdir().unwrap();
         let now = Utc::now();
         arm_in(dir.path(), &token("/w", Some(10), 5, now)).unwrap();
-        let got = claim_in(dir.path(), "/w", &[10], Source::Clear, now);
-        assert_eq!(got.unwrap().pearls, vec!["th-abc123".to_string()]);
-        assert!(claim_in(dir.path(), "/w", &[10], Source::Clear, now).is_none());
+        let got = resumed(claim_in(dir.path(), "/w", &[10], Source::Clear, now, |_| false));
+        assert_eq!(got.pearls, vec!["th-abc123".to_string()]);
+        assert_eq!(claim_in(dir.path(), "/w", &[10], Source::Clear, now, |_| false), Claim::Nothing);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "claimed token is gone");
     }
 
+    /// SMOODEV-3888 regression: armed with a 15m TTL, `/clear` typed 52m later
+    /// in the SAME terminal must still resume (it used to be reaped silently).
     #[test]
-    fn claim_ignores_other_cwds_and_reaps_expired() {
+    fn same_terminal_claims_past_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let armed_at = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(44434), 15, armed_at)).unwrap();
+        let later = armed_at + Duration::minutes(52);
+        let got = resumed(claim_in(dir.path(), "/w", &[44434], Source::Clear, later, |_| true));
+        assert_eq!(got.pearls, vec!["th-abc123".to_string()]);
+    }
+
+    #[test]
+    fn same_terminal_grace_has_a_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let armed_at = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(10), 15, armed_at)).unwrap();
+        let much_later = armed_at + Duration::minutes(15) + Duration::hours(SAME_TERMINAL_GRACE_HOURS);
+        assert_eq!(claim_in(dir.path(), "/w", &[10], Source::Clear, much_later, |_| true), Claim::Nothing);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "past the grace the token is reaped");
+    }
+
+    #[test]
+    fn expired_foreign_token_is_not_claimed_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(10), -1, now)).unwrap();
+        match claim_in(dir.path(), "/w", &[99], Source::Startup, now, |_| true) {
+            Claim::Missed(m) => {
+                assert_eq!(m.len(), 1);
+                assert!(m[0].expired);
+            }
+            other => panic!("expected Missed, got {other:?}"),
+        }
+        assert_eq!(tokens_in(dir.path()).len(), 1, "owner still alive: keep it for its own /clear");
+    }
+
+    #[test]
+    fn expired_token_of_a_dead_terminal_is_reported_once_then_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(10), -1, now)).unwrap();
+        assert!(matches!(claim_in(dir.path(), "/w", &[99], Source::Startup, now, |_| false), Claim::Missed(_)));
+        assert_eq!(claim_in(dir.path(), "/w", &[99], Source::Startup, now, |_| false), Claim::Nothing);
+    }
+
+    #[test]
+    fn another_terminals_fresh_token_is_reported_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(10), 5, now)).unwrap();
+        match claim_in(dir.path(), "/w", &[99], Source::Clear, now, |_| false) {
+            Claim::Missed(m) => assert!(!m[0].expired),
+            other => panic!("expected Missed, got {other:?}"),
+        }
+        assert_eq!(tokens_in(dir.path()).len(), 1, "a fresh token stays for its own terminal");
+    }
+
+    #[test]
+    fn compact_or_resume_never_claims_or_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        arm_in(dir.path(), &token("/w", Some(10), 5, now)).unwrap();
+        assert_eq!(claim_in(dir.path(), "/w", &[10], Source::Other, now, |_| true), Claim::Nothing);
+        assert_eq!(tokens_in(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn claim_ignores_other_cwds() {
         let dir = tempfile::tempdir().unwrap();
         let now = Utc::now();
         arm_in(dir.path(), &token("/other", Some(10), 5, now)).unwrap();
-        arm_in(dir.path(), &token("/w", Some(10), -1, now)).unwrap();
-        assert!(claim_in(dir.path(), "/w", &[10], Source::Clear, now).is_none());
-        let left: Vec<Armed> = tokens_in(dir.path()).into_iter().map(|(_, t)| t).collect();
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].cwd, "/other");
+        assert_eq!(claim_in(dir.path(), "/w", &[10], Source::Clear, now, |_| true), Claim::Nothing);
+        assert_eq!(tokens_in(dir.path()).len(), 1);
     }
 
     #[test]
@@ -795,15 +999,35 @@ mod tests {
         t.pearls = vec!["th-def456".into()];
         arm_in(dir.path(), &t).unwrap();
         assert_eq!(tokens_in(dir.path()).len(), 1);
-        let got = claim_in(dir.path(), "/w", &[10], Source::Clear, now).unwrap();
+        let got = resumed(claim_in(dir.path(), "/w", &[10], Source::Clear, now, |_| false));
         assert_eq!(got.pearls, vec!["th-def456".to_string()]);
     }
 
     #[test]
-    fn claim_with_missing_dir_is_none() {
+    fn claim_with_missing_dir_is_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
-        assert!(claim_in(&missing, "/w", &[], Source::Clear, Utc::now()).is_none());
+        assert_eq!(claim_in(&missing, "/w", &[], Source::Clear, Utc::now(), |_| false), Claim::Nothing);
+    }
+
+    #[test]
+    fn missed_context_names_pearls_age_and_reason() {
+        let now = Utc::now();
+        let mut old = token("/w", Some(10), 15, now - Duration::minutes(52));
+        old.pearls = vec!["th-c6dc33".into()];
+        let ctx = missed_context(
+            &[
+                Missed { token: old, expired: true },
+                Missed {
+                    token: token("/w", Some(20), 5, now),
+                    expired: false,
+                },
+            ],
+            now,
+        );
+        assert!(ctx.contains("th-c6dc33 (armed 52m ago, expired)"), "{ctx}");
+        assert!(ctx.contains("th-abc123 (armed 0m ago, armed by another terminal)"), "{ctx}");
+        assert!(ctx.contains("th pearls show <id> --handoff"));
     }
 
     #[test]
@@ -895,6 +1119,26 @@ mod tests {
         body.push_str(r#"{"type":"assistant","message":{"usage":{"input_tokens":4,"cache_read_input_tokens":240000}}}"#);
         fs::write(&p, body).unwrap();
         assert_eq!(transcript_context_tokens(&p), Some(240_004));
+    }
+
+    #[test]
+    fn resume_commands_are_bare_lines_for_the_clipboard() {
+        assert_eq!(resume_commands("claude-code", &["th-a".into()]), "/th-handoff resume th-a");
+        assert_eq!(
+            resume_commands("codex", &["a".into(), "b".into()]),
+            "$th-handoff resume a\n$th-handoff resume b"
+        );
+    }
+
+    #[test]
+    fn resume_instructions_name_clear_and_resume_per_harness() {
+        let p = vec!["th-abc123".to_string()];
+        let claude = resume_instructions("claude-code", &p);
+        assert!(claude.contains("/clear") && claude.contains("/th-handoff resume th-abc123"), "{claude}");
+        let codex = resume_instructions("codex", &p);
+        assert!(codex.contains("/new") && codex.contains("$th-handoff resume th-abc123"), "{codex}");
+        let two = resume_instructions("claude-code", &["a".to_string(), "b".to_string()]);
+        assert!(two.contains("/th-handoff resume a") && two.contains("/th-handoff resume b"), "{two}");
     }
 
     #[test]

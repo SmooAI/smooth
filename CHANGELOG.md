@@ -1,5 +1,47 @@
 # @smooai/smooth
 
+## 0.79.4
+
+### Patch Changes
+
+- eb99ad9: `/th-clear` no longer loses the handoff when `/clear` comes late. The arming terminal can claim its token for 24 hours; the old 15-minute TTL reaped it silently. A token the new session can't take now leaves a note naming the pearl. `th harness handoff arm` also copies the `/th-handoff resume <pearl>` line to the clipboard.
+
+## 0.79.3
+
+### Patch Changes
+
+- 5597e35: `th attest` now says why a check could not run on a busy machine and retries it once the load falls. A failure distrusted for load (above 2× cores), or a check that waited out the ci-queue, prints the repo's `scripts/ci/_pressure.sh` diagnosis when there is one (load, disk, top processes, long-running local stack, one remedy line). A distrusted failure is re-run once when the load drops below the threshold, waiting up to `SMOOAI_CI_OVERLOAD_RETRY_WAIT` seconds (default 600), and that re-run is a real verdict. The smooth-agent push hint now leads with the local remedy and `th attest <named rows>`, and calls `ci:full` the last resort (SMOODEV-3883).
+
+## 0.79.2
+
+### Patch Changes
+
+- 715a560: `th harness handoff arm`, the context-budget hook and `/th-clear` now hand the user an explicit, copy-pasteable pair, `/clear` then `/th-handoff resume <pearl>` (`/new` and `$th-handoff` in Codex), instead of "type /clear, then go". The armed token still resumes on its own when the SessionStart hook claims it; the resume line is the fallback when it doesn't.
+
+## 0.79.1
+
+### Patch Changes
+
+- 73dbf22: SMOODEV-3859: `smoo crm duplicates list` now recognizes the AI's `same_person` verdict, so groups the AI judged one person get their ready-to-run merge line again, and verdicts print as "same person".
+
+## 0.79.0
+
+### Minor Changes
+
+- f437221: `th smoo crm duplicates` (alias `dupes`) reviews the CRM's AI duplicate-contact queue. `list` groups the open pairs by person and stars the suggested keeper. It prints a ready-to-run merge line only when the AI judged every pair in the group the same person. `merge-group --keep <id> <ids…>` folds a group into one record. `approve`, `reject` and `undo` act on a single pair, and `history` lists past decisions. Merges and undo confirm first (`--yes`, `--dry-run`). They need `crm.contacts.merge` and CRM Pro. It is the CLI twin of the copilot's and the hosted MCP's duplicate tools (SMOODEV-3859).
+
+## 0.78.0
+
+### Minor Changes
+
+- 8045d18: `th smoo org-notifications` manages the org's notification email recipients: shared inboxes and members that get instant emails and daily or weekly digests of bookings, deals, leads, escalations, missed calls and conversations. The verbs are `list`, `add`, `update`, `remove`, `settings`, `test` and `resend`. Every change confirms first and needs `org.notifications.manage`. It is the CLI twin of the copilot's `org_notification_emails.*` tools and the hosted MCP `org_notification_emails_*` tools (SMOODEV-3828).
+
+## 0.77.2
+
+### Patch Changes
+
+- 15b0aed: `/th-handoff` now also offers a stay-in-this-window option per harness: clear the conversation (`/clear` or `/new`), then resume the pearl. In Claude Code it also points at `/th-clear`.
+
 ## 0.77.1
 
 ### Patch Changes

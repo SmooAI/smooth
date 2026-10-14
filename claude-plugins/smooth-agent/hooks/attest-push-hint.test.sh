@@ -146,6 +146,12 @@ out=$(payload 'git push' "$WITH" | bash "$HOOK" 2>&1)
 assert_hint 'gated repo says attest-first'           'ATTEST-FIRST'       present
 assert_hint 'gated repo says th attest --all'        'th attest --all'    present
 assert_hint 'gated repo names the ci:full label'     'ci:full'            present
+# SMOODEV-3883: ci:full was the reflex for any check that could not run (62% of
+# PRs). The hint must lead with the local remedy and only then the label.
+assert_hint 'gated repo calls ci:full the last resort' 'LAST resort'     present
+assert_hint 'gated repo points at th ci-queue status' 'th ci-queue status' present
+assert_hint 'gated repo says to re-run only named rows' 'ONLY the rows'  present
+assert_hint 'gated repo names the local stack'       'dev-server.sh check' present
 assert_hint 'gated repo drops pick-your-checks'      'Credit what the diff touches' absent
 assert_hint 'gated repo still lists checks'          'available: .*rust'  present
 assert_hint 'the gate script is not a check'         'available:.*_attest-gate' absent

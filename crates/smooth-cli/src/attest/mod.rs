@@ -422,7 +422,64 @@ fn route(args: &AttestArgs, root: &Path, requested: &[String]) -> Result<Plan> {
     Ok((local_checks, Some((cfg, remote_checks))))
 }
 
+/// SMOODEV-3883: a failure distrusted for load used to go straight to CI, and a
+/// block that said only "load 43 on 12 cores" sent agents to `ci:full` — every
+/// row on paid runners. Now the block says what is causing it, and the check gets
+/// one re-run once the load falls (bounded by `overload_retry_wait`), which is a
+/// real verdict: a transient spike no longer costs a CI row.
 fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
+    let (first, distrusted) = run_local_once(sys, root, check);
+    if !distrusted {
+        return first;
+    }
+    eprintln!("⊘ {check} failed at {} — not a verdict. Why the machine is busy:", env::load_summary(sys));
+    diagnose(root);
+    if sys.overload_retry_wait.is_zero() || !env::wait_until_quiet(sys) {
+        return first;
+    }
+    eprintln!("· load is down to {} — re-running {check} once.", env::load_summary(sys));
+    let (second, _) = run_local_once(sys, root, check);
+    CheckResult {
+        secs: first.secs + second.secs,
+        ..second
+    }
+}
+
+/// Print why this machine is too busy to attest. A repo supplies the diagnosis as
+/// `scripts/ci/_pressure.sh` (smooai's names its long-running local stack, disk
+/// against the queue's hold and the top processes, and ends with a remedy); a repo
+/// without one just gets pointed at the queue. Bounded, and never fatal: the
+/// diagnosis must not become one more reason a check could not run.
+fn diagnose(root: &Path) {
+    let script = root.join("scripts/ci/_pressure.sh");
+    if !script.is_file() {
+        eprintln!("  `th ci-queue status` shows what is holding the machine. Free it, then re-run only this check.");
+        return;
+    }
+    let Ok(mut child) = Command::new("bash")
+        .arg(&script)
+        .current_dir(root)
+        .env("CI_REPO_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::io::stderr()))
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(Some(_)) | Err(_) => return,
+        }
+    }
+    drop(child.kill());
+    drop(child.wait());
+}
+
+/// One queued run of `check`, and whether its failure was distrusted for load.
+fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
     // SMOODEV-3355: every local check takes a heavy slot in the machine-wide
     // `th ci-queue` first, so thirty agents attesting at once run two at a time
     // instead of thirty. Inside an already-queued job this admits instantly.
@@ -458,9 +515,14 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
         // Waiting out a busy machine is not a verdict on the commit: nothing
         // is posted and CI runs the row.
         Err(ci_queue::AdmitError::WaitTimeout { waited, reason }) => {
-            return blocked(waited.as_secs(), format!("no heavy ci-queue slot freed in {}s ({reason})", waited.as_secs()))
+            eprintln!("⊘ {check} waited {}s for a heavy ci-queue slot ({reason}). Why:", waited.as_secs());
+            diagnose(root);
+            return (
+                blocked(waited.as_secs(), format!("no heavy ci-queue slot freed in {}s ({reason})", waited.as_secs())),
+                false,
+            );
         }
-        Err(ci_queue::AdmitError::Queue(e)) => return blocked(0, format!("the ci-queue is unusable ({e:#})")),
+        Err(ci_queue::AdmitError::Queue(e)) => return (blocked(0, format!("the ci-queue is unusable ({e:#})")), false),
     };
 
     // th-b27ed0: sampled BEFORE the check, not after. "After" was right for a
@@ -501,13 +563,17 @@ fn run_local(sys: &Sys, root: &Path, check: &str) -> CheckResult {
     };
 
     let (outcome, note) = classify(code, was_overloaded, || env::load_summary(sys));
-    CheckResult {
-        name: check.to_string(),
-        outcome,
-        secs,
-        location: "locally".into(),
-        note,
-    }
+    let distrusted = was_overloaded && outcome == Outcome::Blocked && code != Some(EXIT_PRECONDITION);
+    (
+        CheckResult {
+            name: check.to_string(),
+            outcome,
+            secs,
+            location: "locally".into(),
+            note,
+        },
+        distrusted,
+    )
 }
 
 fn run_remote(sys: &Sys, root: &Path, cfg: &remote::Remote, check: &str, origin: &str, sha: &str) -> CheckResult {
@@ -841,6 +907,9 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             docker: tmp.path().join("no-docker").into(),
             cores: 12,
             normalize_path: false,
+            // No re-run unless a case asks for one, so overload cases stay fast.
+            overload_retry_wait: Duration::ZERO,
+            overload_poll: Duration::from_millis(50),
             queue: test_queue(tmp.path()),
             ..Sys::default()
         };
@@ -1026,6 +1095,70 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let code = f.attest(&["failing"]);
         assert_eq!(f.posted_for("failing"), 0, "89 on 12 cores measures the scheduler, not the commit");
         assert_eq!(code, EXIT_PRECONDITION);
+    }
+
+    // ── SMOODEV-3883: a spike gets one re-run once it passes ────────────────
+
+    /// The check calms the machine on its first run (as a finished spike would)
+    /// and passes on the second: the re-run turns a would-be CI row into a credit.
+    #[test]
+    fn a_failure_under_a_passing_spike_is_rerun_and_credited() {
+        let mut f = fixture();
+        f.sys.overload_retry_wait = Duration::from_secs(5);
+        let runs = f.root.join("runs");
+        check(
+            &f.root,
+            "flaky",
+            &format!(
+                "[ -f '{runs}' ] && exit 0\ntouch '{runs}'\necho 1.00 > '{load}'\nexit 1",
+                runs = runs.display(),
+                load = f.load.display()
+            ),
+        );
+        fs::write(&f.load, "89.04").unwrap();
+        let code = f.attest(&["flaky"]);
+        assert_eq!(f.posted_state("flaky").as_deref(), Some("state=success"));
+        assert_eq!(code, 0);
+    }
+
+    /// The same failure on the quiet re-run is a real verdict.
+    #[test]
+    fn a_failure_that_repeats_once_quiet_is_red() {
+        let mut f = fixture();
+        f.sys.overload_retry_wait = Duration::from_secs(5);
+        check(&f.root, "calming", &format!("echo 1.00 > '{}'\nexit 1", f.load.display()));
+        fs::write(&f.load, "89.04").unwrap();
+        let code = f.attest(&["calming"]);
+        assert_eq!(f.posted_state("calming").as_deref(), Some("state=failure"));
+        assert_eq!(code, 1);
+    }
+
+    /// Load that never falls stays blocked once the bounded wait runs out, and
+    /// the check is not run a second time.
+    #[test]
+    fn load_that_never_falls_stays_blocked() {
+        let mut f = fixture();
+        f.sys.overload_retry_wait = Duration::from_millis(300);
+        let runs = f.root.join("runs");
+        check(&f.root, "counted", &format!("echo x >> '{}'\nexit 1", runs.display()));
+        fs::write(&f.load, "89.04").unwrap();
+        let code = f.attest(&["counted"]);
+        assert_eq!(f.posted_for("counted"), 0);
+        assert_eq!(code, EXIT_PRECONDITION);
+        assert_eq!(fs::read_to_string(&runs).unwrap().lines().count(), 1);
+    }
+
+    /// A repo's own `_pressure.sh` runs when a check is distrusted for load.
+    #[test]
+    fn an_overload_block_runs_the_repos_diagnosis() {
+        let f = fixture();
+        let ran = f.root.join("diagnosed");
+        fs::write(f.root.join("scripts/ci/_pressure.sh"), format!("touch '{}'\n", ran.display())).unwrap();
+        fs::write(&f.load, "89.04").unwrap();
+        f.attest(&["failing"]);
+        assert!(ran.exists(), "the block must say why the machine is busy");
+        // ...and a helper is never mistaken for a check.
+        assert!(!discover(&f.root).contains(&"_pressure".to_string()));
     }
 
     #[test]
