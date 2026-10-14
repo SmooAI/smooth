@@ -7,7 +7,7 @@ description: Hand this session off and continue in a fresh context in the SAME t
 
 `/th-handoff` moves work to a session the user starts by hand. `/th-clear` is the same handoff for the common case: **this terminal, fresh context, keep going.** You can't clear your own context — only the user's `/clear` can — so this skill does everything up to that keystroke and arms a one-shot resume. The next session's SessionStart hook (`th harness handoff claim`) finds it and injects the handoff. A `/clear` with nothing armed stays a plain `/clear`.
 
-The `th harness budget` hook invokes this for you when the session crosses `harness.context_budget` (default 250k tokens; `th settings set harness.context_budget <n>`, 0 disables).
+**Usually you don't need this.** By default (`harness.context_reset = compact`) the harness auto-compacts at `harness.context_budget` (250k) — `th harness enable` sets that — and the pearl handoff is re-injected after the compaction; the budget hook only asks you to checkpoint the pearl before it. Use `/th-clear` when you want a genuinely fresh context: switching tasks, or a session that has drifted after several compactions. With `harness.context_reset = clear`, or when the harness did not compact at the budget, the `th harness budget` hook invokes this for you.
 
 ## Steps
 

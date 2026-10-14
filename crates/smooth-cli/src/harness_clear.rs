@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::harness_compact::{Budgets, Reset};
 use crate::pearls_handoff;
 
 /// Default lifetime of an armed token for a claim that can't prove it is the
@@ -639,10 +640,11 @@ pub fn resume_commands(harness: &str, pearls: &[String]) -> String {
 // ── budget ─────────────────────────────────────────────────────────
 
 /// Context size of the latest main-thread assistant turn in a Claude Code
-/// transcript (JSONL): input + cache-creation + cache-read tokens. Reads only
-/// the tail of the file. `None` when nothing usable is found.
+/// transcript (JSONL) — input + cache-creation + cache-read tokens — and the
+/// model it ran on (for per-model budgets). Reads only the tail of the file.
+/// `None` when nothing usable is found.
 #[must_use]
-pub fn transcript_context_tokens(path: &Path) -> Option<u64> {
+pub fn transcript_context(path: &Path) -> Option<(u64, Option<String>)> {
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     let start = len.saturating_sub(TRANSCRIPT_TAIL_BYTES);
@@ -654,21 +656,27 @@ pub fn transcript_context_tokens(path: &Path) -> Option<u64> {
     if start > 0 && !lines.is_empty() {
         lines.remove(0); // partial first line
     }
-    lines.iter().rev().find_map(|l| usage_tokens(l))
+    lines.iter().rev().find_map(|l| usage_context(l))
 }
 
-/// Context tokens from one transcript line, when it is a main-thread
-/// assistant message carrying `usage`.
+/// Context tokens (and `model`) from one transcript line, when it is a
+/// main-thread assistant message carrying `usage`.
 #[must_use]
-pub fn usage_tokens(line: &str) -> Option<u64> {
+pub fn usage_context(line: &str) -> Option<(u64, Option<String>)> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("assistant") || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
         return None;
     }
-    let u = v.get("message")?.get("usage")?;
+    let msg = v.get("message")?;
+    let u = msg.get("usage")?;
     let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
     let total = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
-    (total > 0).then_some(total)
+    let model = msg
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty() && !m.starts_with('<'))
+        .map(str::to_string);
+    (total > 0).then_some((total, model))
 }
 
 /// One-shot flags per session, so each nudge fires once.
@@ -680,6 +688,16 @@ pub struct BudgetState {
     pub over_noted: bool,
     #[serde(default)]
     pub blocked: bool,
+    /// Largest context seen since a flag was set. A context under half of it
+    /// means the session compacted, which re-arms every nudge.
+    #[serde(default)]
+    pub peak: u64,
+}
+
+impl BudgetState {
+    const fn flagged(&self) -> bool {
+        self.warned || self.over_noted || self.blocked
+    }
 }
 
 /// What the budget hook says for one event.
@@ -733,6 +751,76 @@ pub fn decide(event: &str, tokens: u64, warn: u64, hard: u64, state: &BudgetStat
     (verdict, next)
 }
 
+/// A session's budget: who it is and where its lines are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits<'a> {
+    pub harness: &'a str,
+    pub reset: Reset,
+    pub warn: u64,
+    pub hard: u64,
+}
+
+/// The budget decision for a session in `limits.reset` mode. A context under half
+/// of the flagged peak means the session compacted (natively or by hand), so
+/// the one-shot flags re-arm for the next segment.
+///
+/// - [`Reset::Clear`]: [`decide`] — nudge, then make the agent run th-clear.
+/// - [`Reset::Compact`]: the harness auto-compacts at `hard` by itself, so the
+///   warn asks for a pearl checkpoint at the next milestone (re-injected after
+///   compaction) and nothing blocks. Only a context past `hard` + 10% — the
+///   harness evidently isn't compacting there — falls back to th-clear.
+#[must_use]
+pub fn decide_session(limits: &Limits<'_>, event: &str, tokens: u64, state: &BudgetState, stop_hook_active: bool) -> (Verdict, BudgetState) {
+    let fresh;
+    let state = if state.flagged() && tokens.saturating_mul(2) < state.peak {
+        fresh = BudgetState::default();
+        &fresh
+    } else {
+        state
+    };
+    let (verdict, mut next) = match limits.reset {
+        Reset::Clear => decide(event, tokens, limits.warn, limits.hard, state, stop_hook_active),
+        Reset::Compact => decide_compact(limits, event, tokens, state, stop_hook_active),
+    };
+    if next.flagged() {
+        next.peak = next.peak.max(tokens);
+    }
+    (verdict, next)
+}
+
+fn decide_compact(limits: &Limits<'_>, event: &str, tokens: u64, state: &BudgetState, stop_hook_active: bool) -> (Verdict, BudgetState) {
+    let Limits { harness, warn, hard, .. } = *limits;
+    let past = hard > 0 && tokens >= hard + hard / 10;
+    if past {
+        let (verdict, next) = decide(event, tokens, warn, hard, state, stop_hook_active);
+        let why = format!(
+            "This harness has not auto-compacted at the {} budget — it reads the threshold at launch, so this session predates              `th harness enable {harness}`, or the harness has no auto-compaction. ",
+            k(hard)
+        );
+        let verdict = match verdict {
+            Verdict::Block(m) => Verdict::Block(format!("{why}{m}")),
+            Verdict::Context(m) => Verdict::Context(format!("{why}{m}")),
+            Verdict::Quiet => Verdict::Quiet,
+        };
+        return (verdict, next);
+    }
+    let mut next = state.clone();
+    let near = warn > 0 && tokens >= warn;
+    let verdict = if matches!(event, "UserPromptSubmit" | "PostToolUse") && near && !state.warned {
+        next.warned = true;
+        Verdict::Context(format!(
+            "Context is at {} tokens; this session auto-compacts at about {} (harness.context_budget). At the next clean stopping point — \
+             a commit, green tests, the end of this step — checkpoint the pearl you are on: `th pearls checkpoint <id> --note \"…\" --next \"…\"`. \
+             That handoff is re-injected after the compaction, so make `next` concrete. Then keep working; no /clear needed.",
+            k(tokens),
+            k(hard.max(warn))
+        ))
+    } else {
+        Verdict::Quiet
+    };
+    (verdict, next)
+}
+
 /// Render a verdict as hook stdout for `event`.
 #[must_use]
 pub fn verdict_output(v: &Verdict, event: &str, format: &str) -> Option<String> {
@@ -745,37 +833,29 @@ pub fn verdict_output(v: &Verdict, event: &str, format: &str) -> Option<String> 
     }
 }
 
-/// The effective value of an int setting (env > file > registry default);
-/// unset, unparseable or negative → 0 (disabled).
-fn setting_u64(key: &str) -> u64 {
-    setting_u64_from(&smooth_policy::settings::Resolver::from_process(), key)
-}
-
-fn setting_u64_from(resolver: &smooth_policy::settings::Resolver, key: &str) -> u64 {
-    resolver
-        .resolve(key)
-        .ok()
-        .and_then(|r| r.value)
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .map_or(0, |n| u64::try_from(n).unwrap_or(0))
-}
-
 fn safe_id(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(80).collect()
 }
 
 /// `th harness budget`: the hook entry. Silent unless a nudge is due; never fails.
-pub fn budget_cmd(harness: &str, event: Option<String>, tokens: Option<u64>, format: Option<String>) {
+pub fn budget_cmd(harness: &str, event: Option<String>, tokens: Option<u64>, model: Option<String>, format: Option<String>) {
     let payload = read_payload();
-    let warn = setting_u64("harness.context_budget_warn");
-    let hard = setting_u64("harness.context_budget");
+    let budgets = Budgets::from_settings();
     let event = event.or_else(|| pstr(&payload, "hook_event_name").map(str::to_string));
-    let tokens = tokens.or_else(|| pstr(&payload, "transcript_path").and_then(|p| transcript_context_tokens(Path::new(p))));
+    let seen = pstr(&payload, "transcript_path").and_then(|p| transcript_context(Path::new(p)));
+    let tokens = tokens.or_else(|| seen.as_ref().map(|(n, _)| *n));
+    let model = model.or_else(|| seen.and_then(|(_, m)| m));
+    let (hard, warn) = budgets.for_session(harness, model.as_deref());
     let Some(event) = event else {
+        let mode = match budgets.reset {
+            Reset::Compact => "auto-compact",
+            Reset::Clear => "/th-clear",
+        };
         println!(
-            "budget {} · warn {} · current {}",
+            "budget {} · warn {} · reset {mode} · {harness}{} · current {}",
             if hard == 0 { "off".into() } else { k(hard) },
             if warn == 0 { "off".into() } else { k(warn) },
+            model.as_deref().map(|m| format!(" / {m}")).unwrap_or_default(),
             tokens.map_or_else(|| "unknown (no hook payload)".into(), k)
         );
         return;
@@ -789,7 +869,13 @@ pub fn budget_cmd(harness: &str, event: Option<String>, tokens: Option<u64>, for
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let stop_active = payload.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false);
-    let (verdict, next) = decide(&event, tokens, warn, hard, &state, stop_active);
+    let limits = Limits {
+        harness,
+        reset: budgets.reset,
+        warn,
+        hard,
+    };
+    let (verdict, next) = decide_session(&limits, &event, tokens, &state, stop_active);
     if next != state {
         if let Some(p) = &state_path {
             if let Some(dir) = p.parent() {
@@ -1081,12 +1167,12 @@ mod tests {
     #[test]
     fn usage_tokens_sums_main_thread_assistant_usage() {
         let l = r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":99}}}"#;
-        assert_eq!(usage_tokens(l), Some(3210));
+        assert_eq!(usage_context(l).map(|(n, _)| n), Some(3210));
         let side = r#"{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":10}}}"#;
-        assert_eq!(usage_tokens(side), None);
-        assert_eq!(usage_tokens(r#"{"type":"user","message":{}}"#), None);
-        assert_eq!(usage_tokens("not json"), None);
-        assert_eq!(usage_tokens(r#"{"type":"assistant","message":{"usage":{}}}"#), None);
+        assert_eq!(usage_context(side).map(|(n, _)| n), None);
+        assert_eq!(usage_context(r#"{"type":"user","message":{}}"#).map(|(n, _)| n), None);
+        assert_eq!(usage_context("not json").map(|(n, _)| n), None);
+        assert_eq!(usage_context(r#"{"type":"assistant","message":{"usage":{}}}"#).map(|(n, _)| n), None);
     }
 
     #[test]
@@ -1100,8 +1186,8 @@ mod tests {
             r#"{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":9,"cache_read_input_tokens":90000}}}"#,
         ];
         fs::write(&p, lines.join("\n")).unwrap();
-        assert_eq!(transcript_context_tokens(&p), Some(5002));
-        assert_eq!(transcript_context_tokens(&dir.path().join("missing.jsonl")), None);
+        assert_eq!(transcript_context(&p).map(|(n, _)| n), Some(5002));
+        assert_eq!(transcript_context(&dir.path().join("missing.jsonl")), None);
     }
 
     #[test]
@@ -1118,7 +1204,7 @@ mod tests {
         }
         body.push_str(r#"{"type":"assistant","message":{"usage":{"input_tokens":4,"cache_read_input_tokens":240000}}}"#);
         fs::write(&p, body).unwrap();
-        assert_eq!(transcript_context_tokens(&p), Some(240_004));
+        assert_eq!(transcript_context(&p).map(|(n, _)| n), Some(240_004));
     }
 
     #[test]
@@ -1211,19 +1297,116 @@ mod tests {
     #[test]
     fn budget_settings_fall_back_to_registry_defaults() {
         use smooth_policy::settings::{Resolver, SettingsFile};
-        let none = Resolver::new(|_| None, SettingsFile::empty());
-        assert_eq!(setting_u64_from(&none, "harness.context_budget"), 250_000);
-        assert_eq!(setting_u64_from(&none, "harness.context_budget_warn"), 220_000);
-        let env = Resolver::new(
+        let none = Budgets::from_resolver(&Resolver::new(|_| None, SettingsFile::empty()));
+        assert_eq!((none.global, none.warn, none.reset), (250_000, 220_000, Reset::Compact));
+        let env = Budgets::from_resolver(&Resolver::new(
             |k| match k {
                 "SMOOTH_CONTEXT_BUDGET" => Some("0".into()),
                 "SMOOTH_CONTEXT_BUDGET_WARN" => Some("-5".into()),
+                "SMOOTH_CONTEXT_RESET" => Some("clear".into()),
                 _ => None,
             },
             SettingsFile::empty(),
+        ));
+        assert_eq!(env.global, 0, "0 disables");
+        assert_eq!(env.warn, 0, "negative is disabled");
+        assert_eq!(env.reset, Reset::Clear);
+    }
+
+    fn limits(reset: Reset) -> Limits<'static> {
+        Limits {
+            harness: "claude-code",
+            reset,
+            warn: 220_000,
+            hard: 250_000,
+        }
+    }
+
+    fn session(event: &str, tokens: u64, state: &BudgetState) -> (Verdict, BudgetState) {
+        decide_session(&limits(Reset::Compact), event, tokens, state, false)
+    }
+
+    #[test]
+    fn compact_mode_warns_once_with_a_checkpoint_not_a_clear() {
+        let (v, s) = session("PostToolUse", 225_000, &BudgetState::default());
+        let Verdict::Context(m) = v else { panic!("expected a nudge") };
+        assert!(
+            m.contains("th pearls checkpoint") && m.contains("auto-compacts") && m.contains("no /clear"),
+            "{m}"
         );
-        assert_eq!(setting_u64_from(&env, "harness.context_budget"), 0, "0 disables");
-        assert_eq!(setting_u64_from(&env, "harness.context_budget_warn"), 0, "negative is disabled");
+        assert!(!m.contains("th-clear skill"), "{m}");
+        assert!(s.warned && s.peak == 225_000);
+        assert_eq!(session("PostToolUse", 230_000, &s).0, Verdict::Quiet, "once");
+        assert_eq!(session("Stop", 225_000, &BudgetState::default()).0, Verdict::Quiet, "Stop never warns");
+    }
+
+    #[test]
+    fn compact_mode_never_blocks_just_over_the_budget() {
+        let (v, s) = session("Stop", 260_000, &BudgetState::default());
+        assert_eq!(v, Verdict::Quiet, "the harness compacts there itself");
+        assert!(!s.blocked);
+        let (mid, _) = session("PostToolUse", 270_000, &s);
+        assert!(
+            matches!(mid, Verdict::Context(ref m) if m.contains("auto-compacts")),
+            "inside the slack it is still the checkpoint nudge"
+        );
+    }
+
+    #[test]
+    fn compact_mode_falls_back_to_th_clear_when_compaction_never_came() {
+        let (v, s) = session("Stop", 280_000, &BudgetState::default());
+        let Verdict::Block(m) = v else { panic!("expected a block past budget + 10%") };
+        assert!(
+            m.contains("has not auto-compacted") && m.contains("th harness enable claude-code") && m.contains("th-clear"),
+            "{m}"
+        );
+        assert!(s.blocked);
+        assert_eq!(session("Stop", 290_000, &s).0, Verdict::Quiet, "blocks once");
+        let (mid, _) = session("PostToolUse", 280_000, &BudgetState::default());
+        assert!(matches!(mid, Verdict::Context(ref m) if m.contains("has not auto-compacted")));
+    }
+
+    #[test]
+    fn a_compaction_re_arms_the_nudges() {
+        let (_, warned) = session("PostToolUse", 240_000, &BudgetState::default());
+        assert!(warned.warned);
+        // Compacted to 60k: under half the peak → fresh flags, and nothing to say yet.
+        let (v, s) = session("PostToolUse", 60_000, &warned);
+        assert_eq!(v, Verdict::Quiet);
+        assert_eq!(s, BudgetState::default());
+        // Growing back to the warn line nudges again.
+        let (v, s) = session("PostToolUse", 221_000, &s);
+        assert!(matches!(v, Verdict::Context(_)));
+        assert!(s.warned);
+        // A dip that is not a compaction keeps the flags.
+        let (_, kept) = session("PostToolUse", 200_000, &s);
+        assert!(kept.warned);
+    }
+
+    #[test]
+    fn clear_mode_keeps_the_th_clear_flow() {
+        let (v, s) = decide_session(&limits(Reset::Clear), "Stop", 251_000, &BudgetState::default(), false);
+        assert!(matches!(v, Verdict::Block(ref m) if m.contains("th-clear") && !m.contains("has not auto-compacted")));
+        assert!(s.blocked && s.peak == 251_000);
+        let (v, _) = decide_session(&limits(Reset::Clear), "PostToolUse", 225_000, &BudgetState::default(), false);
+        assert!(matches!(v, Verdict::Context(ref m) if m.contains("th-clear skill")));
+    }
+
+    #[test]
+    fn quiet_sessions_write_no_state() {
+        let (v, s) = session("PostToolUse", 100_000, &BudgetState::default());
+        assert_eq!(v, Verdict::Quiet);
+        assert_eq!(s, BudgetState::default(), "no flag → no peak → no file write");
+    }
+
+    #[test]
+    fn usage_context_carries_the_model() {
+        let l = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":10,"cache_read_input_tokens":90}}}"#;
+        assert_eq!(usage_context(l), Some((100, Some("claude-opus-5-5".into()))));
+        let synthetic = r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":5}}}"#;
+        assert_eq!(usage_context(synthetic), Some((5, None)));
+        let none = r#"{"type":"assistant","message":{"usage":{"input_tokens":5}}}"#;
+        assert_eq!(usage_context(none), Some((5, None)));
     }
 
     #[test]

@@ -122,6 +122,10 @@ pub struct SettingDef {
 /// `AutoMode::from_env_value` also takes a few aliases from the env var).
 pub const AUTO_MODES: &[&str] = &["bypass", "accept-edits", "ask", "deny"];
 
+/// The `harness.context_reset` values: let the harness auto-compact at the
+/// budget, or hand off through `/th-clear`.
+pub const CONTEXT_RESETS: &[&str] = &["compact", "clear"];
+
 /// Every setting `th settings` knows. Keep sorted by key; a test enforces it.
 ///
 /// Only user-facing toggles belong here. Internal path overrides
@@ -187,7 +191,7 @@ pub const REGISTRY: &[SettingDef] = &[
         default: Some("250000"),
         default_note: "",
         env: "SMOOTH_CONTEXT_BUDGET",
-        description: "Context tokens a harness session may reach before its hooks make it hand off (/th-clear); 0 disables the budget",
+        description: "Context tokens at which a harness session resets (auto-compaction, or /th-clear — see harness.context_reset); 0 disables the budget",
         component: "harness",
         apply: Apply::Immediate,
     },
@@ -198,6 +202,26 @@ pub const REGISTRY: &[SettingDef] = &[
         default_note: "",
         env: "SMOOTH_CONTEXT_BUDGET_WARN",
         description: "Context tokens at which a harness session is nudged once to wrap up before the budget; 0 disables the nudge",
+        component: "harness",
+        apply: Apply::Immediate,
+    },
+    SettingDef {
+        key: "harness.context_budgets",
+        kind: Kind::List,
+        default: None,
+        default_note: "none: every harness and model uses harness.context_budget",
+        env: "SMOOTH_CONTEXT_BUDGETS",
+        description: "Per-harness / per-model budget overrides as selector=tokens (codex=200000, claude-code/claude-opus-*=300000, */claude-sonnet-*=180000); most specific wins",
+        component: "harness",
+        apply: Apply::Immediate,
+    },
+    SettingDef {
+        key: "harness.context_reset",
+        kind: Kind::Enum(CONTEXT_RESETS),
+        default: Some("compact"),
+        default_note: "",
+        env: "SMOOTH_CONTEXT_RESET",
+        description: "How a session resets at its budget: compact (the harness auto-compacts there, set by `th harness enable`; the pearl handoff is re-injected) or clear (/th-clear)",
         component: "harness",
         apply: Apply::Immediate,
     },
