@@ -1,5 +1,6 @@
 const BROWSING = { permissions: ['tabs', 'scripting', 'tabGroups'], origins: ['<all_urls>'] };
-const TRUSTED = { permissions: ['debugger'] };
+// Trusted input is a setting, not a permission: Chrome won't grant `debugger` at runtime.
+const TRUSTED_KEY = 'trusted';
 const $ = (id) => document.getElementById(id);
 
 function setPill(state, text) {
@@ -14,6 +15,14 @@ function problem(html) {
 }
 
 const escape = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+async function setTrusted(on) {
+    try {
+        await chrome.storage.local.set({ [TRUSTED_KEY]: on });
+    } finally {
+        render();
+    }
+}
 
 async function toggle(set, on) {
     try {
@@ -49,7 +58,7 @@ async function render() {
     }
 
     const browsing = !!s.browsing;
-    const trusted = await chrome.permissions.contains(TRUSTED);
+    const trusted = browsing && (await chrome.storage.local.get(TRUSTED_KEY))[TRUSTED_KEY] === true;
 
     $('browsing').disabled = false;
     $('browsing').checked = browsing;
@@ -62,7 +71,7 @@ async function render() {
     $('trusted').checked = trusted;
     $('trustedState').textContent = trusted ? 'On' : canTrust ? 'Off' : 'Needs browsing';
     $('trustedCard').classList.toggle('disabled', !canTrust);
-    $('trusted').onchange = (e) => toggle(TRUSTED, e.target.checked);
+    $('trusted').onchange = (e) => setTrusted(e.target.checked);
 }
 
 render();

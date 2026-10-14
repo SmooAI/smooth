@@ -211,7 +211,7 @@ pub struct ClickArgs {
     /// 2 for a double click. Trusted only.
     #[serde(default)]
     pub count: Option<u32>,
-    /// Real mouse input through the debugger, for pages that ignore synthetic clicks (needs "Enable trusted input" in the popup).
+    /// Real mouse input through the debugger, for pages that ignore synthetic clicks (needs Trusted input on in the Smooth extension popup).
     #[serde(default)]
     pub trusted: bool,
     /// Return a fresh snapshot with the result (default true).

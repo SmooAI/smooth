@@ -268,15 +268,40 @@ mod tests {
     }
 
     #[test]
-    fn extension_asks_only_for_bookmarks_and_native_messaging_up_front() {
+    fn extension_up_front_permissions_are_pinned() {
         let m: serde_json::Value = serde_json::from_slice(FILES[0].1).unwrap();
         assert_eq!(m["manifest_version"], 3);
-        // `alarms` shows no install warning; it only re-wakes the worker to reconnect.
-        assert_eq!(m["permissions"], json!(["bookmarks", "nativeMessaging", "alarms"]));
+        // `alarms` and `storage` show no install warning: one re-wakes the worker, the other
+        // holds the Trusted input setting. `debugger` must be here, not optional (see below);
+        // it is unusable until the user turns Trusted input on.
+        assert_eq!(m["permissions"], json!(["bookmarks", "nativeMessaging", "alarms", "storage", "debugger"]));
+        assert_eq!(m["optional_permissions"], json!(["tabs", "scripting", "tabGroups"]));
         assert!(m.get("host_permissions").is_none());
         assert_eq!(m["optional_host_permissions"], json!(["<all_urls>"]));
         let bg = std::str::from_utf8(FILES.iter().find(|(n, _)| *n == "background.js").unwrap().1).unwrap();
         assert!(bg.contains(HOST_NAME));
+    }
+
+    #[test]
+    fn optional_permissions_are_ones_chrome_will_grant() {
+        // Chrome drops these from optional_permissions with only a warning ("cannot be listed
+        // as optional"), so the API never appears and anything gated on granting it is dead.
+        const NEVER_OPTIONAL: &[&str] = &[
+            "debugger",
+            "declarativeNetRequest",
+            "devtools",
+            "experimental",
+            "geolocation",
+            "mdns",
+            "proxy",
+            "tts",
+            "ttsEngine",
+            "wallpaper",
+        ];
+        let m: serde_json::Value = serde_json::from_slice(FILES[0].1).unwrap();
+        for p in m["optional_permissions"].as_array().unwrap() {
+            assert!(!NEVER_OPTIONAL.contains(&p.as_str().unwrap()), "{p} cannot be optional in Chrome");
+        }
     }
 
     #[test]

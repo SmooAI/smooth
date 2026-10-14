@@ -74,7 +74,7 @@ pub enum ChromeCommands {
         #[command(subcommand)]
         cmd: BookmarkCommands,
     },
-    /// Drive tabs: needs "Enable browsing" in the extension popup
+    /// Drive tabs: needs Agent browsing on in the extension popup
     Browse {
         #[arg(long, global = true)]
         instance: Option<String>,
@@ -246,7 +246,7 @@ pub enum BrowseCommands {
         /// 2 for a double click
         #[arg(long)]
         count: Option<u32>,
-        /// Real input through the debugger (needs "Enable trusted input")
+        /// Real input through the debugger (needs Trusted input on in the extension popup)
         #[arg(long)]
         trusted: bool,
         /// Print a fresh snapshot afterwards
@@ -614,7 +614,7 @@ fn status() -> Result<String> {
                     .unwrap_or_default()
                     .iter()
                     .take(4)
-                    .map(|n| n.title.clone())
+                    .map(bar_label)
                     .collect::<Vec<_>>()
                     .join(", "),
             )
@@ -629,6 +629,19 @@ fn status() -> Result<String> {
         );
     }
     Ok(out)
+}
+
+/// A bookmark's name for a one-line summary. Icon-only bookmarks have no title, so they show
+/// their site instead of an empty slot.
+fn bar_label(n: &Node) -> String {
+    if !n.title.is_empty() {
+        return n.title.clone();
+    }
+    n.url
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()))
+        .unwrap_or_else(|| "(untitled)".into())
 }
 
 fn on_off(v: &Value) -> &'static str {
@@ -1081,7 +1094,7 @@ pub fn screenshot(inst: Option<&str>, tab: i64) -> Result<Shot> {
     })
 }
 
-// ── trusted input (the optional chrome.debugger tier) ───────────────────────
+// ── trusted input (the opt-in chrome.debugger tier) ─────────────────────────
 
 /// Mark args for the debugger path. Only `true` is sent, so the extension's default stays the in-page path.
 pub fn trust(mut args: Value, trusted: bool) -> Value {
@@ -1304,6 +1317,21 @@ mod tests {
         assert_eq!(path_of(&t.root, "31"), "Bookmarks bar (synced)/Work/Jira");
         assert_eq!(path_of(&t.root, "10"), "Bookmarks bar (local)/Local thing");
         assert_eq!(path_of(&t.root, "nope"), "nope");
+    }
+
+    #[test]
+    fn bar_label_falls_back_to_the_site_for_icon_only_bookmarks() {
+        let node = |v: Value| serde_json::from_value::<Node>(v).unwrap();
+        assert_eq!(
+            bar_label(&node(json!({"id": "1", "title": "SmooAI", "url": "https://github.com/SmooAI"}))),
+            "SmooAI"
+        );
+        assert_eq!(
+            bar_label(&node(json!({"id": "2", "title": "", "url": "https://www.mail.google.com/mail/u/0"}))),
+            "mail.google.com"
+        );
+        assert_eq!(bar_label(&node(json!({"id": "3", "title": "", "url": "not a url"}))), "(untitled)");
+        assert_eq!(bar_label(&node(json!({"id": "4", "title": ""}))), "(untitled)");
     }
 
     #[test]

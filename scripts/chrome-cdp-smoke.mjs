@@ -1,7 +1,7 @@
 // Replays the trusted-input tier's CDP builders (extension/cdp.js) against a fixture page in
 // headless Chrome over --remote-debugging-port, and checks the page sees real input: isTrusted
 // clicks (left, right, double), hover, keys, typed text, Enter submitting, select-all, wheel
-// scroll, and a screenshot scaled to CSS pixels. Usage: node scripts/chrome-cdp-smoke.mjs
+// scroll, a screenshot scaled to CSS pixels, and browse_eval's return handling. Usage: node scripts/chrome-cdp-smoke.mjs
 // (CHROME=/path overrides)
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -122,6 +122,14 @@ try {
     await cdp('Page.enable');
     for (let i = 0; i < 50 && (await evaluate('document.readyState')) !== 'complete'; i++) await sleep(100);
 
+    // browse_eval, exactly as the extension runs it.
+    const ev = async (code) => (await C.evaluate((params) => cdp('Runtime.evaluate', params), code, 5000)).value;
+    R.evalExpr = await ev('const x = 5; x * 2');
+    R.evalAwait = await ev('await new Promise((r) => setTimeout(r, 10)); 7');
+    R.evalReturn = await ev('return 42');
+    R.evalAsyncReturn = await ev("await new Promise((r) => setTimeout(r, 10)); return 'async ok'");
+    R.evalThrows = await ev("throw new Error('boom')").catch((e) => e.message);
+
     const b = await center('#btn');
     await mouse(C.clickEvents(b.x, b.y));
     R.click = await takeLog();
@@ -192,6 +200,11 @@ const checks = {
     'wheel scrolls': R.scrollY > 0,
     'screenshot is in CSS pixels': R.dpr === 2 && R.shot?.width === R.viewport?.width && R.shot?.height === R.viewport?.height,
     'off-viewport point refused': R.offscreenErr?.includes('outside'),
+    'eval: last expression is the result': R.evalExpr === 10,
+    'eval: top-level await': R.evalAwait === 7,
+    'eval: bare return': R.evalReturn === 42,
+    'eval: await then return': R.evalAsyncReturn === 'async ok',
+    'eval: a throw is an error': R.evalThrows?.includes('boom'),
 };
 const failed = Object.entries(checks).filter(([, ok]) => !ok);
 for (const [name, ok] of Object.entries(checks)) console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}`);
