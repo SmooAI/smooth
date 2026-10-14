@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 use smooth_flow::harness::{self as manifests, HarnessInfo, Prefs, Registry};
 
 use crate::gradient::paint;
+use crate::harness_compact;
 use crate::mcp_install::{self, Harness, Outcome};
 use crate::pkg;
 
@@ -150,9 +151,14 @@ pub enum Cmd {
     #[command(subcommand)]
     Handoff(crate::harness_clear::HandoffCmd),
     /// Context-budget hook: on Stop / PostToolUse / UserPromptSubmit, read the
-    /// session's context size and nudge once at `harness.context_budget_warn`,
-    /// then block the Stop once at `harness.context_budget` so the agent runs
-    /// th-clear. Reads the hook payload on stdin; with none, prints the budget.
+    /// session's context size (and model) against its budget —
+    /// `harness.context_budget`, overridden per harness/model by
+    /// `harness.context_budgets`. In `harness.context_reset = compact` mode
+    /// (default) the harness auto-compacts at the budget (`th harness enable`
+    /// sets that) and the hook asks once for a pearl checkpoint before it; in
+    /// `clear` mode it nudges, then blocks the Stop so the agent runs th-clear.
+    /// Reads the hook payload on stdin; with none, prints the budget.
+    /// `--report` shows where this machine's Claude Code input tokens went.
     Budget {
         #[arg(long, default_value = "claude-code")]
         harness: String,
@@ -162,9 +168,26 @@ pub enum Cmd {
         /// Context size, for harnesses whose payload carries no transcript.
         #[arg(long)]
         tokens: Option<u64>,
+        /// Model the session runs on (default: read from the transcript).
+        #[arg(long)]
+        model: Option<String>,
         /// `json` (Claude Code hook output) or `text`.
         #[arg(long)]
         format: Option<String>,
+        /// Report the last `--days` of Claude Code transcripts: input tokens
+        /// by context size, compactions, and the saving a reset at the budget
+        /// would bring.
+        #[arg(long)]
+        report: bool,
+        #[arg(long, default_value_t = 30, requires = "report")]
+        days: u32,
+        /// With --report: machine-readable output.
+        #[arg(long, requires = "report")]
+        json: bool,
+        /// Read a statusline payload on stdin and print the context segment
+        /// (`◔ 162k/300k 54%`).
+        #[arg(long, conflicts_with = "report")]
+        statusline: bool,
     },
 }
 
@@ -175,13 +198,20 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
     // Hook paths first: they must not depend on a resolvable harness home.
     let cmd = match cmd {
         Cmd::Handoff(c) => return crate::harness_clear::handoff_cmd(c),
+        Cmd::Budget { report: true, days, json, .. } => return crate::harness_budget_report::run(days, json),
+        Cmd::Budget { statusline: true, harness, .. } => {
+            crate::harness_clear::statusline_cmd(&harness);
+            return Ok(());
+        }
         Cmd::Budget {
             harness,
             event,
             tokens,
+            model,
             format,
+            ..
         } => {
-            crate::harness_clear::budget_cmd(&harness, event, tokens, format);
+            crate::harness_clear::budget_cmd(&harness, event, tokens, model, format);
             return Ok(());
         }
         other => other,
@@ -554,13 +584,48 @@ fn enable(h: Harness, home: &Path) {
         Harness::ClaudeCode => {
             claude_plugin_step(home);
             statusline_step(home);
+            compact_step(h, home);
         }
         Harness::Codex => {
             pkg_step(h, home);
             codex_plugin_step(home);
             codex_sandbox_step(home);
+            compact_step(h, home);
         }
         Harness::OpenCode | Harness::Cursor => pkg_step(h, home),
+    }
+}
+
+/// Make `harness.context_budget` the harness's own auto-compaction threshold
+/// (SMOODEV-3891). A value the user set themselves is left alone.
+fn compact_step(h: Harness, home: &Path) {
+    let want = harness_compact::Budgets::from_settings().native_threshold(h.as_str());
+    let (result, where_) = match h {
+        Harness::ClaudeCode => (harness_compact::sync_claude(home, want), "~/.claude/settings.json autoCompactWindow"),
+        Harness::Codex => (harness_compact::sync_codex(home, want), "~/.codex/config.toml model_auto_compact_token_limit"),
+        Harness::OpenCode | Harness::Cursor => return,
+    };
+    match result {
+        Ok(outcome) => println!("   compact: {}", harness_compact::describe(&outcome, where_)),
+        Err(e) => println!("   compact: {} {e:#}", "FAILED".bright_red()),
+    }
+}
+
+fn compact_status(h: Harness, home: &Path) {
+    let want = harness_compact::Budgets::from_settings().native_threshold(h.as_str());
+    match (harness_compact::current(home, h.as_str()), want) {
+        (Some(cur), Some(w)) if cur == w || (h == Harness::ClaudeCode && cur == harness_compact::claude_window(w)) => {
+            println!("   compact: auto-compacts at {}k (harness.context_budget)", cur / 1000);
+        }
+        (Some(cur), _) => println!(
+            "   compact: auto-compacts at {}k — differs from the budget; `th harness enable {h}` syncs th's own value",
+            cur / 1000
+        ),
+        (None, Some(w)) => println!(
+            "   compact: harness default (near the full window) — `th harness enable {h}` sets {}k",
+            w / 1000
+        ),
+        (None, None) => println!("   compact: harness default (budget off or harness.context_reset=clear)"),
     }
 }
 
@@ -720,8 +785,10 @@ fn status(h: Harness, home: &Path) {
                 None => println!("   plugin: not installed — `th harness enable claude-code`"),
             }
             statusline_step(home);
+            compact_status(h, home);
         }
         Harness::Codex => {
+            compact_status(h, home);
             match codex_plugin_enabled(home) {
                 Ok(true) => println!("   plugin: smooth-agent@smooth enabled"),
                 Ok(false) => println!("   plugin: not installed"),
@@ -793,6 +860,16 @@ fn disable(h: Harness, home: &Path) -> Result<()> {
     }
     if h == Harness::Codex {
         println!("   sandbox: ~/.smooth left in writable_roots (harmless without th; remove by hand if you mean it)");
+    }
+    let compact = match h {
+        Harness::ClaudeCode => Some(harness_compact::sync_claude(home, None)?),
+        Harness::Codex => Some(harness_compact::sync_codex(home, None)?),
+        Harness::OpenCode | Harness::Cursor => None,
+    };
+    match compact {
+        Some(harness_compact::Sync::Removed) => println!("   compact: th's auto-compact threshold removed"),
+        Some(harness_compact::Sync::UserOwned(_)) => println!("   compact: your own auto-compact threshold left alone"),
+        _ => {}
     }
     println!("   (th pkg rm smooth-agent removes the package from every harness at once)");
     Ok(())

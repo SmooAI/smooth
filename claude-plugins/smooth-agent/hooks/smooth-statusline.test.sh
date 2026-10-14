@@ -23,7 +23,12 @@ export SMOOTH_AGENT_SESSIONS_DIR="$STATE"
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/th" <<'EOF'
 #!/bin/bash
-# th msg unread-count --agent <handle>
+# th msg unread-count --agent <handle> | th harness budget --statusline
+if [[ "$1 $2" == "harness budget" ]]; then
+    cat >/dev/null
+    [ -n "${TH_FAKE_CTX:-}" ] && printf '%s' "$TH_FAKE_CTX"
+    exit 0
+fi
 [[ "$1 $2" == "msg unread-count" ]] || exit 1
 echo "${TH_FAKE_UNREAD:-0}"
 EOF
@@ -55,6 +60,12 @@ payload() { jq -cn --arg s "$1" '{session_id:$s, cwd:"/tmp", model:{display_name
 check 'handle renders'            '⚙ th:fix-auth'    "$(payload sess-1)" "$LINE"
 TH_FAKE_UNREAD=3 check 'unread count appended' '⚙ th:fix-auth ✉3' "$(payload sess-1)" "$LINE"
 TH_FAKE_UNREAD=0 check 'zero unread is not shown' '⚙ th:fix-auth' "$(payload sess-1)" "$LINE"
+
+# The context segment follows, and stands alone without a handle.
+TH_FAKE_CTX=$'\033[33m◔ 162k/300k 54%\033[0m' check 'context segment appended' '⚙ th:fix-auth ◔ 162k/300k 54%' "$(payload sess-1)" "$LINE"
+TH_FAKE_UNREAD=2 TH_FAKE_CTX='◔ 9k/300k 3%' check 'handle, mail, context' '⚙ th:fix-auth ✉2 ◔ 9k/300k 3%' "$(payload sess-1)" "$LINE"
+TH_FAKE_CTX='◔ 162k/300k 54%' check 'context without a handle' '◔ 162k/300k 54%' "$(payload sess-missing)" "$LINE"
+TH_FAKE_CTX='error: junk' check 'non-segment output is dropped' '⚙ th:fix-auth' "$(payload sess-1)" "$LINE"
 
 # No trailing newline — Claude Code renders the raw bytes.
 raw=$(run "$(payload sess-1)" "$LINE"; printf X)

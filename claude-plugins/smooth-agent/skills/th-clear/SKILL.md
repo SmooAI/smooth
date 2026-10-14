@@ -1,13 +1,13 @@
 ---
 name: th-clear
-description: Hand this session off and continue in a fresh context in the SAME terminal — the th-handoff checkpoint, then `th harness handoff arm`, then the user types `/clear` and `/th-handoff resume <pearl>` (the armed token usually resumes on its own). Invoke as `/th-clear [pearl-id]`. Use when the context budget hook says the session is over budget, or the user says "clear and continue", "fresh context", "th-clear", or "context is getting big".
+description: Hand this session off and continue in a fresh context in the SAME terminal — the th-handoff checkpoint, then `th harness handoff arm`, then the user types `/clear` and `/th-handoff resume <pearl>` (the armed token usually resumes on its own). Invoke as `/th-clear [pearl-id]`. Use when the user accepts the budget hook's /th-clear suggestion, when the hook says the session did not auto-compact, or the user says "clear and continue", "fresh context", "th-clear", or "context is getting big".
 ---
 
 # th-clear — hand off, clear, keep going
 
 `/th-handoff` moves work to a session the user starts by hand. `/th-clear` is the same handoff for the common case: **this terminal, fresh context, keep going.** You can't clear your own context — only the user's `/clear` can — so this skill does everything up to that keystroke and arms a one-shot resume. The next session's SessionStart hook (`th harness handoff claim`) finds it and injects the handoff. A `/clear` with nothing armed stays a plain `/clear`.
 
-The `th harness budget` hook invokes this for you when the session crosses `harness.context_budget` (default 250k tokens; `th settings set harness.context_budget <n>`, 0 disables).
+**When it comes up.** The `th harness budget` hook never blocks. Past `harness.context_suggest` (150k), each milestone — a commit, push, `th attest`, PR, pearl checkpoint, or green test run — asks you to add one line to your report suggesting `/th-clear`; do that, and run this skill only when the user says so. Otherwise the harness auto-compacts at `harness.context_budget` (300k; `th harness enable` sets it) and the pearl handoff is re-injected after the compaction. The hook asks you to run this yourself only with `harness.context_reset = clear`, or when the harness did not compact at the budget.
 
 ## Steps
 

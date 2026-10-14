@@ -36,7 +36,9 @@ use smooth_tools::mcp_config;
 /// th-19dac1: `th harness` — per-provider toolbox setup (EPIC th-1945b9).
 mod harness;
 mod harness_agentic;
+mod harness_budget_report;
 mod harness_clear;
+mod harness_compact;
 mod harness_doctor;
 /// th-7f1da8: the branded top-level help + the universal `ai` explainer.
 mod help;

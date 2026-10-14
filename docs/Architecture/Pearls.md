@@ -164,17 +164,67 @@ A fresh launch (`startup`) in the same directory claims too, but only when
 exactly one unexpired token is armed there. `th harness handoff list` / `disarm` inspect
 and drop tokens.
 
-**Budget.** `th harness budget` runs on `UserPromptSubmit`, `PostToolUse` and
-`Stop`. It reads the context size from the last main-thread assistant `usage`
-in `transcript_path` (input + cache-creation + cache-read tokens) and, once
-per session (state in `~/.smooth/handoff/budget/<session>.json`):
+**Budget.** `th harness budget` runs on `UserPromptSubmit` and `PostToolUse`.
+It reads the context size and model from the last main-thread assistant `usage`
+in `transcript_path` (input + cache-creation + cache-read tokens) and only ever
+adds context: **nothing blocks**, so when to start fresh stays the user's call.
+State lives in `~/.smooth/handoff/budget/<session>.json`; a context under half
+the flagged peak means the session compacted, which re-arms every note.
 
-| Setting                       | Default | Effect                                                                                                                 |
-| ----------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `harness.context_budget_warn` | 220000  | one context nudge to wrap up and run th-clear                                                                          |
-| `harness.context_budget`      | 250000  | one mid-turn note, then **blocks the Stop once** (`decision: block`) so the agent runs th-clear before ending its turn |
+- **Suggest (150k).** Past `harness.context_suggest`, a milestone — a commit,
+  push, `th attest`, `gh pr create`/`merge`, `th pearls checkpoint`/`close`,
+  or a passing test run (`cargo test`, `pnpm test`, `vitest`, `pytest`, …) —
+  asks the agent to add one line to its next report suggesting `/th-clear`.
+  It repeats every 50k after that. A milestone is the right moment: the work
+  is in a consistent state and the handoff is easy to write.
+- **Warn (270k).** Once: auto-compaction is near, checkpoint the pearl so the
+  re-injected handoff is current.
+- **Reset (300k).** The harness auto-compacts there. Only a context past
+  budget + 10% (the harness is not compacting) gets a note to run th-clear.
 
-`0` disables either. Set with `th settings set harness.context_budget <n>`.
+**Statusline.** The smooth-agent statusline (`th doctor --setup-statusline`)
+shows the context against the session's budget, `◔ 162k/300k 54%`, from
+`th harness budget --statusline` (Claude Code's `context_window.current_usage`,
+else the transcript). It is dim under the suggest line, yellow past it (a good
+time to `/th-clear`) and red past the warn line. Codex and OpenCode have no
+scriptable status line, so they get the hook notes only.
+
+**Auto-compaction is the default reset (SMOODEV-3891).** Every call resends the
+whole context, so long sessions on 1M-context models dominate input spend, and
+native auto-compaction only fires near the window (~970k). Compaction itself is
+cheap (it cut 80–90% of the context for ~0.3% of what it saved, measured across
+a month of transcripts), so `th harness enable` makes it fire at the budget:
+Claude Code gets `autoCompactWindow` in `~/.claude/settings.json` (clamped to
+100k–1M), Codex gets `model_auto_compact_token_limit` in `~/.codex/config.toml`.
+A value th did not write is the user's and is left alone; what th wrote is
+recorded in `~/.smooth/harness/compact-owned.json` so `disable` and a budget of
+0 remove only that. The harness reads the threshold at launch, so new sessions
+pick it up. The pearl handoff rides along: `PreCompact` checkpoints, and the
+`SessionStart` `compact` hook re-injects it on top of the harness's summary.
+`/th-clear` stays the manual fresh start.
+
+| Setting                       | Default   | Effect                                                                                                                                                                                          |
+| ----------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness.context_suggest`     | 150000    | past it, a milestone suggests `/th-clear` to the user, again every 50k                                                                                                                          |
+| `harness.context_suggests`    | (none)    | per-harness / per-model suggest overrides, same `selector=tokens` form: `*/claude-sonnet-*=120000`                                                                                              |
+| `harness.context_budget`      | 300000    | the reset point. `compact`: the harness auto-compacts there; a context past budget + 10% gets a note to run th-clear. `clear`: one note to run th-clear                                         |
+| `harness.context_budget_warn` | 270000    | one note. `compact`: checkpoint the pearl at the next clean stopping point. `clear`: wrap up and run th-clear                                                                                   |
+| `harness.context_budgets`     | (none)    | overrides as `selector=tokens`: `codex=200000`, `claude-code/claude-opus-*=300000`, `*/claude-sonnet-*=180000`. Most specific wins (harness+model > model > harness); warn keeps the global gap |
+| `harness.context_reset`       | `compact` | `compact` (native auto-compaction) or `clear` (the `/th-clear` flow; `th harness enable` then removes th's threshold)                                                                           |
+
+`0` disables a budget. Set with `th settings set harness.context_budget <n>`,
+then `th harness enable claude-code` (and `codex`) to sync the native
+thresholds; `th harness status` shows them. Per-model overrides apply to the
+hook only: a harness has one compaction threshold, set from its harness-level
+budget.
+
+**Measure it.** `th harness budget --report [--days 30] [--json]` reads
+`~/.claude/projects/*/*.jsonl` (main thread only, deduped by message id) and
+shows input tokens by context size at the call, the auto and manual
+compactions (median context before → after), the share of input carried by
+calls already over their budget, and upper-bound estimates of what resetting
+at the budget, or taking every `/th-clear` suggestion, would have saved (each
+reset to ~30k).
 
 ## Diver: the lifecycle wrapper
 

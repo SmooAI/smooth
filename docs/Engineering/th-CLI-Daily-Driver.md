@@ -90,7 +90,12 @@ th harness enable claude-code|codex|opencode|cursor|all / status / disable
 # /th-clear's one-shot resume + the context-budget hook (SMOODEV-3759;
 # docs/Architecture/Pearls.md#context-budget-and-th-clear-smoodev-3759)
 th harness handoff arm --pearl <id> / claim / list / disarm
-th harness budget            # prints the budget; as a hook reads the payload on stdin
+th harness budget            # prints the lines; as a hook reads the payload on stdin
+th harness budget --report   # where Claude Code input tokens went: context size, compactions, savings
+th harness budget --statusline  # the statusline's context segment (◔ 162k/300k 54%)
+# Lines (SMOODEV-3891): suggest /th-clear at milestones past 150k, warn at
+# 270k, auto-compact at 300k (enable writes it into Claude Code / Codex).
+# Nothing blocks. Overrides via harness.context_budgets / context_suggests.
 
 # SmoothFlow — agent/shell sessions Big Smooth keeps alive under tmux
 th flow ls / new / attach / send / approve / kill / snapshot / inbox / handoff
