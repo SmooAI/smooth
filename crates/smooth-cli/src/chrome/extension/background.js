@@ -24,6 +24,7 @@ function connect() {
     hello();
 }
 
+// A pending timer doesn't survive the worker being stopped; the alarm below does.
 function retry() {
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 60000);
@@ -182,6 +183,7 @@ const METHODS = {
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type !== 'status') return;
+    connect();
     browsingEnabled().then((browsing) => reply({ connected: !!port, lastError, browsing }));
     return true;
 });
@@ -189,4 +191,6 @@ chrome.permissions.onAdded.addListener(hello);
 chrome.permissions.onRemoved.addListener(hello);
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
+chrome.alarms.onAlarm.addListener(connect);
+chrome.alarms.create('reconnect', { periodInMinutes: 1 });
 connect();

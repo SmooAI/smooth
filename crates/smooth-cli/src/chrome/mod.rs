@@ -47,16 +47,17 @@ fn history() -> Result<History> {
 pub enum ChromeCommands {
     /// Unpack the extension and register the native-messaging host
     Install {
-        /// chrome, chrome-beta, chrome-canary, chromium, brave, edge
-        #[arg(long, default_value = "chrome")]
-        browser: String,
+        /// chrome, chrome-beta, chrome-canary, chromium, brave, edge (default: every one installed)
+        #[arg(long)]
+        browser: Option<String>,
     },
     /// Remove the native-messaging host registration (history is kept)
     Uninstall {
-        #[arg(long, default_value = "chrome")]
-        browser: String,
+        #[arg(long)]
+        browser: Option<String>,
     },
-    /// Connected Chrome instances and whether browsing is enabled
+    /// Connected Chrome instances and whether browsing is enabled; diagnoses setup when none is
+    #[command(alias = "doctor")]
     Status,
     /// The native-messaging host Chrome launches (not for direct use)
     #[command(hide = true)]
@@ -247,8 +248,15 @@ pub enum BrowseCommands {
 /// Whatever the op reports.
 pub fn dispatch(cmd: ChromeCommands) -> Result<()> {
     let out = match cmd {
-        ChromeCommands::Install { browser } => install_text(&browser)?,
-        ChromeCommands::Uninstall { browser } => format!("Removed {}", install::uninstall(&browser)?.display()),
+        ChromeCommands::Install { browser } => install_text(&browsers(browser.as_deref())?)?,
+        ChromeCommands::Uninstall { browser } => {
+            let gone = install::uninstall(&browsers(browser.as_deref())?)?;
+            if gone.is_empty() {
+                "Nothing to remove".into()
+            } else {
+                gone.iter().map(|p| format!("Removed {}", p.display())).collect::<Vec<_>>().join("\n")
+            }
+        }
         ChromeCommands::Status => status()?,
         ChromeCommands::Host { .. } => return host::run(),
         ChromeCommands::Bookmarks { instance, cmd } => bookmarks_cli(instance.as_deref(), cmd)?,
@@ -334,16 +342,20 @@ fn api(inst: Option<&str>) -> Result<LiveApi> {
     Ok(LiveApi(Client::connect(inst)?))
 }
 
-fn install_text(browser: &str) -> Result<String> {
-    let i = install::install(browser)?;
+fn browsers(one: Option<&str>) -> Result<Vec<&str>> {
+    one.map_or_else(|| Ok(install::detected()?.into_iter().collect()), |b| Ok(vec![b]))
+}
+
+fn install_text(browsers: &[&str]) -> Result<String> {
+    let i = install::install(browsers)?;
     Ok(format!(
-        "Registered native host {} → {}\n  (launches {} chrome host)\nUnpacked the extension to {}\n\n\
+        "Registered native host {} for {}\n  (launches {} chrome host)\nUnpacked the extension to {}\n\n\
          Load it once per Chrome profile:\n  1. Open chrome://extensions in the profile whose bookmarks you want\n  \
          2. Turn on Developer mode (top right)\n  3. Load unpacked → {}\n  4. Check its id is {}\n\n\
          Then: th chrome status · th chrome bookmarks tree --depth 1\n\
          After upgrading th, run `th chrome install` again and press reload on the extension.",
         install::HOST_NAME,
-        i.manifest.display(),
+        i.manifests.iter().map(|m| m.display().to_string()).collect::<Vec<_>>().join(", "),
         i.th.display(),
         i.extension_dir.display(),
         i.extension_dir.display(),
@@ -354,7 +366,12 @@ fn install_text(browser: &str) -> Result<String> {
 fn status() -> Result<String> {
     let socks = client::instances(&sock_dir()?);
     if socks.is_empty() {
-        return Ok("No Chrome instance connected. Run `th chrome install`, load the extension, and keep Chrome open.".into());
+        let mut out = String::from("No Chrome instance connected. Setup checks:\n");
+        for (ok, line) in install::diagnose()? {
+            let _ = writeln!(out, "  {} {line}", if ok { "✓" } else { "✗" });
+        }
+        out.push_str("If all pass: open Chrome, check the extension is enabled, then click its icon to see the last connection error.");
+        return Ok(out);
     }
     let mut out = String::new();
     for s in socks {

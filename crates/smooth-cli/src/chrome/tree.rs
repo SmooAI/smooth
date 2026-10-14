@@ -267,16 +267,27 @@ pub fn path_start<'a>(root: &'a Node, path: &str, local: bool) -> Result<(&'a No
     Ok((permanent(root, ft, local)?, segs))
 }
 
+/// The child titled `seg` that passes `pred`: an exact title, else the only case-insensitive one,
+/// so "brokerage test" finds "Brokerage Test" instead of making a twin.
+fn child<'a>(kids: &'a [Node], seg: &str, pred: impl Fn(&Node) -> bool) -> Option<&'a Node> {
+    kids.iter().find(|c| pred(c) && c.title == seg).or_else(|| {
+        let mut it = kids.iter().filter(|c| pred(c) && c.title.to_lowercase() == seg.to_lowercase());
+        let one = it.next();
+        if it.next().is_some() {
+            None
+        } else {
+            one
+        }
+    })
+}
+
 /// Resolve a path to a node. Intermediate segments match folders; the last matches anything (folders first).
 pub fn resolve<'a>(root: &'a Node, path: &str, local: bool) -> Result<Option<&'a Node>> {
     let (mut cur, segs) = path_start(root, path, local)?;
     for (i, seg) in segs.iter().enumerate() {
         let last = i + 1 == segs.len();
         let kids = cur.kids();
-        let hit = kids
-            .iter()
-            .find(|c| c.is_folder() && &c.title == seg)
-            .or_else(|| if last { kids.iter().find(|c| &c.title == seg) } else { None });
+        let hit = child(kids, seg, Node::is_folder).or_else(|| if last { child(kids, seg, |_| true) } else { None });
         match hit {
             Some(n) => cur = n,
             None => return Ok(None),
@@ -355,7 +366,7 @@ pub fn ensure_folder(api: &mut dyn Api, path: &str, local: bool) -> Result<Ensur
     let mut created = Vec::new();
     for seg in segs {
         let kids = api.children(&id)?;
-        id = if let Some(f) = kids.iter().find(|c| c.is_folder() && c.title == seg) {
+        id = if let Some(f) = child(&kids, &seg, Node::is_folder) {
             f.id.clone()
         } else {
             guard_parent(&api.tree()?, &id)?;
@@ -621,6 +632,19 @@ pub(crate) mod tests {
         assert!(resolve(&t.root, "Bookmarks bar/Local thing", false).unwrap().is_none());
         assert_eq!(resolve_target(&t.root, "31", false).unwrap().title, "Jira");
         assert!(resolve_target(&t.root, "Nope", false).is_err());
+    }
+
+    #[test]
+    fn paths_fall_back_to_one_case_insensitive_match() {
+        let mut t = sample();
+        assert_eq!(resolve(&t.root, "work/JIRA", false).unwrap().unwrap().id, "31");
+        let e = ensure_folder(&mut t, "bookmarks bar/WORK", false).unwrap();
+        assert_eq!(e.id, "30");
+        assert!(e.created.is_empty(), "reused Work instead of making a twin");
+
+        t.create("3", "work", None, None).unwrap();
+        assert_eq!(resolve(&t.root, "work", false).unwrap().unwrap().title, "work", "exact title wins");
+        assert!(resolve(&t.root, "WORK", false).unwrap().is_none(), "two case-insensitive matches is ambiguous");
     }
 
     #[test]

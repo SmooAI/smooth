@@ -18,10 +18,11 @@ pub const FILES: &[(&str, &str)] = &[
     ("popup.js", include_str!("extension/popup.js")),
 ];
 
-/// Where each browser looks for user-level native messaging host manifests.
-pub fn manifest_dir(browser: &str) -> Result<PathBuf> {
-    let home = dirs_next::home_dir().context("no home dir")?;
-    let rel = if cfg!(target_os = "macos") {
+pub const BROWSERS: &[&str] = &["chrome", "chrome-beta", "chrome-canary", "chromium", "brave", "edge"];
+
+/// A browser's user-data dir, relative to home.
+fn data_dir(browser: &str) -> Result<&'static str> {
+    Ok(if cfg!(target_os = "macos") {
         match browser {
             "chrome" => "Library/Application Support/Google/Chrome",
             "chrome-beta" => "Library/Application Support/Google/Chrome Beta",
@@ -42,8 +43,34 @@ pub fn manifest_dir(browser: &str) -> Result<PathBuf> {
         }
     } else {
         bail!("th chrome supports macOS and Linux so far (Windows registers hosts in the registry)");
-    };
-    Ok(home.join(rel).join("NativeMessagingHosts"))
+    })
+}
+
+fn home() -> Result<PathBuf> {
+    dirs_next::home_dir().context("no home dir")
+}
+
+fn manifest_dir_in(home: &Path, browser: &str) -> Result<PathBuf> {
+    Ok(home.join(data_dir(browser)?).join("NativeMessagingHosts"))
+}
+
+/// Where each browser looks for user-level native messaging host manifests.
+pub fn manifest_dir(browser: &str) -> Result<PathBuf> {
+    manifest_dir_in(&home()?, browser)
+}
+
+/// Browsers this user has run (their data dir exists); just `chrome` when none has.
+fn detected_in(home: &Path) -> Vec<&'static str> {
+    let found: Vec<&str> = BROWSERS.iter().copied().filter(|b| data_dir(b).is_ok_and(|d| home.join(d).is_dir())).collect();
+    if found.is_empty() {
+        vec!["chrome"]
+    } else {
+        found
+    }
+}
+
+pub fn detected() -> Result<Vec<&'static str>> {
+    Ok(detected_in(&home()?))
 }
 
 /// The `th` Chrome should launch: the PATH copy when it's this binary (a stable symlink across
@@ -74,15 +101,15 @@ pub fn host_manifest(wrapper: &Path) -> serde_json::Value {
 
 pub struct Installed {
     pub extension_dir: PathBuf,
-    pub manifest: PathBuf,
+    pub manifests: Vec<PathBuf>,
     pub th: PathBuf,
 }
 
-/// Write the extension, the host wrapper and the host manifest.
+/// Write the extension, the host wrapper and a host manifest for each browser.
 ///
 /// # Errors
 /// Filesystem failure or an unsupported platform/browser.
-pub fn install(browser: &str) -> Result<Installed> {
+pub fn install(browsers: &[&str]) -> Result<Installed> {
     let dir = super::chrome_dir()?;
     let ext = dir.join("extension");
     std::fs::create_dir_all(&ext)?;
@@ -94,30 +121,96 @@ pub fn install(browser: &str) -> Result<Installed> {
     let quoted = th.display().to_string().replace('\'', r"'\''");
     std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{quoted}' chrome host \"$@\"\n"))?;
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
-    let mdir = manifest_dir(browser)?;
-    std::fs::create_dir_all(&mdir)?;
-    let manifest = mdir.join(format!("{HOST_NAME}.json"));
-    std::fs::write(&manifest, serde_json::to_string_pretty(&host_manifest(&wrapper))? + "\n")?;
+    let mut manifests = Vec::new();
+    for b in browsers {
+        let mdir = manifest_dir(b)?;
+        std::fs::create_dir_all(&mdir)?;
+        let manifest = mdir.join(format!("{HOST_NAME}.json"));
+        std::fs::write(&manifest, serde_json::to_string_pretty(&host_manifest(&wrapper))? + "\n")?;
+        manifests.push(manifest);
+    }
     Ok(Installed {
         extension_dir: ext,
-        manifest,
+        manifests,
         th,
     })
 }
 
-/// Remove the host manifest and wrapper. History and the unpacked extension stay.
+/// Remove the host manifests and wrapper. History and the unpacked extension stay.
 ///
 /// # Errors
 /// Filesystem failure other than "already gone".
-pub fn uninstall(browser: &str) -> Result<PathBuf> {
-    let manifest = manifest_dir(browser)?.join(format!("{HOST_NAME}.json"));
-    for p in [&manifest, &super::chrome_dir()?.join("host")] {
-        match std::fs::remove_file(p) {
+pub fn uninstall(browsers: &[&str]) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let mut paths = vec![super::chrome_dir()?.join("host")];
+    for b in browsers {
+        paths.push(manifest_dir(b)?.join(format!("{HOST_NAME}.json")));
+    }
+    for p in paths {
+        match std::fs::remove_file(&p) {
+            Ok(()) => removed.push(p),
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
+            Err(_) => {}
         }
     }
-    Ok(manifest)
+    Ok(removed)
+}
+
+/// Why no extension may be connecting: one `(ok, line)` per check.
+pub fn diagnose() -> Result<Vec<(bool, String)>> {
+    diagnose_in(&home()?, &super::chrome_dir()?)
+}
+
+fn diagnose_in(home: &Path, dir: &Path) -> Result<Vec<(bool, String)>> {
+    let wrapper = dir.join("host");
+    let mut out = Vec::new();
+    for b in detected_in(home) {
+        let path = manifest_dir_in(home, b)?.join(format!("{HOST_NAME}.json"));
+        let m: Option<serde_json::Value> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok());
+        out.push(match m {
+            None => (false, format!("{b}: no host manifest at {}; run `th chrome install`", path.display())),
+            Some(m) if m != host_manifest(&wrapper) => (false, format!("{b}: host manifest {} is out of date; run `th chrome install`", path.display())),
+            Some(_) => (true, format!("{b}: host registered")),
+        });
+    }
+    let th = std::fs::read_to_string(&wrapper).ok().and_then(|w| {
+        w.lines()
+            .find_map(|l| l.strip_prefix("exec '")?.split("' chrome host").next().map(|p| p.replace(r"'\''", "'")))
+    });
+    out.push(match th {
+        None => (false, format!("no host wrapper at {}; run `th chrome install`", wrapper.display())),
+        Some(_) if std::fs::metadata(&wrapper).is_ok_and(|m| m.permissions().mode() & 0o111 == 0) => {
+            (false, format!("{} isn't executable; run `th chrome install`", wrapper.display()))
+        }
+        Some(th) if !Path::new(&th).is_file() => (false, format!("the host wrapper runs {th}, which is gone; run `th chrome install`")),
+        Some(th) => (true, format!("host runs {th}")),
+    });
+    let ext = dir.join("extension");
+    let stale: Vec<&str> = FILES
+        .iter()
+        .filter(|(n, body)| std::fs::read_to_string(ext.join(n)).ok().as_deref() != Some(*body))
+        .map(|(n, _)| *n)
+        .collect();
+    out.push(if stale.is_empty() {
+        (true, format!("extension files at {} match this th", ext.display()))
+    } else {
+        (
+            false,
+            format!(
+                "extension at {} differs from this th ({}); run `th chrome install`, then reload it in chrome://extensions",
+                ext.display(),
+                stale.join(", ")
+            ),
+        )
+    });
+    out.push((
+        true,
+        format!(
+            "in each Chrome profile: chrome://extensions → Developer mode → Load unpacked → {}; its id must be {EXTENSION_ID}",
+            ext.display()
+        ),
+    ));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -153,7 +246,8 @@ mod tests {
     fn extension_asks_only_for_bookmarks_and_native_messaging_up_front() {
         let m: serde_json::Value = serde_json::from_str(FILES[0].1).unwrap();
         assert_eq!(m["manifest_version"], 3);
-        assert_eq!(m["permissions"], json!(["bookmarks", "nativeMessaging"]));
+        // `alarms` shows no install warning; it only re-wakes the worker to reconnect.
+        assert_eq!(m["permissions"], json!(["bookmarks", "nativeMessaging", "alarms"]));
         assert!(m.get("host_permissions").is_none());
         assert_eq!(m["optional_host_permissions"], json!(["<all_urls>"]));
         let bg = FILES.iter().find(|(n, _)| *n == "background.js").unwrap().1;
@@ -172,5 +266,51 @@ mod tests {
     fn knows_browser_dirs() {
         assert!(manifest_dir("chrome").unwrap().ends_with("NativeMessagingHosts"));
         assert!(manifest_dir("netscape").is_err());
+    }
+
+    #[test]
+    fn detects_installed_browsers_or_falls_back_to_chrome() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(detected_in(home.path()), vec!["chrome"]);
+        std::fs::create_dir_all(home.path().join(data_dir("brave").unwrap())).unwrap();
+        std::fs::create_dir_all(home.path().join(data_dir("chromium").unwrap())).unwrap();
+        assert_eq!(detected_in(home.path()), vec!["chromium", "brave"]);
+    }
+
+    #[test]
+    fn diagnose_flags_each_missing_piece_then_passes() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("smooth-chrome");
+        let fails = |d: &[(bool, String)]| d.iter().filter(|(ok, _)| !ok).map(|(_, l)| l.clone()).collect::<Vec<_>>();
+        let d = diagnose_in(home.path(), &dir).unwrap();
+        let bad = fails(&d);
+        assert_eq!(bad.len(), 3, "{bad:?}");
+        assert!(bad[0].contains("no host manifest"));
+        assert!(bad[1].contains("no host wrapper"));
+        assert!(bad[2].contains("differs from this th"));
+
+        let ext = dir.join("extension");
+        std::fs::create_dir_all(&ext).unwrap();
+        for (n, body) in FILES {
+            std::fs::write(ext.join(n), body).unwrap();
+        }
+        let th = home.path().join("it's th");
+        std::fs::write(&th, "").unwrap();
+        let wrapper = dir.join("host");
+        let quoted = th.display().to_string().replace('\'', r"'\''");
+        std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{quoted}' chrome host \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mdir = manifest_dir_in(home.path(), "chrome").unwrap();
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join(format!("{HOST_NAME}.json")), host_manifest(&wrapper).to_string()).unwrap();
+        let d = diagnose_in(home.path(), &dir).unwrap();
+        assert!(fails(&d).is_empty(), "{d:?}");
+        assert!(d.iter().any(|(_, l)| l.contains("it's th")), "{d:?}");
+
+        std::fs::write(ext.join("background.js"), "old").unwrap();
+        std::fs::remove_file(&th).unwrap();
+        let bad = fails(&diagnose_in(home.path(), &dir).unwrap());
+        assert!(bad.iter().any(|l| l.contains("which is gone")), "{bad:?}");
+        assert!(bad.iter().any(|l| l.contains("background.js")), "{bad:?}");
     }
 }
