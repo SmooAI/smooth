@@ -232,10 +232,23 @@ pub enum BrowseCommands {
     },
     /// The page's interactive elements with refs, in context (headings, forms, dialogs)
     Snapshot { tab: i64 },
-    /// Click an element from `snapshot`
+    /// Click an element from `snapshot`, or a point with --x/--y (trusted input)
     Click {
         tab: i64,
-        r#ref: String,
+        r#ref: Option<String>,
+        /// CSS pixels, as in a trusted screenshot
+        #[arg(long, requires = "y")]
+        x: Option<f64>,
+        #[arg(long, requires = "x")]
+        y: Option<f64>,
+        #[arg(long, value_parser = ["left", "right", "middle"])]
+        button: Option<String>,
+        /// 2 for a double click
+        #[arg(long)]
+        count: Option<u32>,
+        /// Real input through the debugger (needs "Enable trusted input")
+        #[arg(long)]
+        trusted: bool,
         /// Print a fresh snapshot afterwards
         #[arg(long)]
         snapshot: bool,
@@ -247,6 +260,8 @@ pub enum BrowseCommands {
         text: String,
         #[arg(long)]
         submit: bool,
+        #[arg(long)]
+        trusted: bool,
         #[arg(long)]
         snapshot: bool,
     },
@@ -264,13 +279,24 @@ pub enum BrowseCommands {
         key: String,
         #[arg(long)]
         r#ref: Option<String>,
+        /// Press it this many times
+        #[arg(long)]
+        repeat: Option<u32>,
+        #[arg(long)]
+        trusted: bool,
         #[arg(long)]
         snapshot: bool,
     },
-    /// Hover an element (opens hover menus)
+    /// Hover an element (opens hover menus), or a point with --x/--y
     Hover {
         tab: i64,
-        r#ref: String,
+        r#ref: Option<String>,
+        #[arg(long, requires = "y")]
+        x: Option<f64>,
+        #[arg(long, requires = "x")]
+        y: Option<f64>,
+        #[arg(long)]
+        trusted: bool,
         #[arg(long)]
         snapshot: bool,
     },
@@ -285,6 +311,9 @@ pub enum BrowseCommands {
         r#ref: Option<String>,
         #[arg(long)]
         text: Option<String>,
+        /// Wheel-scroll through the debugger (at the viewport centre)
+        #[arg(long)]
+        trusted: bool,
         #[arg(long)]
         snapshot: bool,
     },
@@ -312,6 +341,55 @@ pub enum BrowseCommands {
     },
     /// Close a tab
     Close { tab: i64 },
+    /// Run JavaScript in the page and print the result (trusted input)
+    Eval {
+        tab: i64,
+        code: String,
+        #[arg(long, default_value_t = 10000)]
+        timeout_ms: u64,
+    },
+    /// The page's console messages since capture began; the first call starts capturing (trusted input)
+    Console {
+        tab: i64,
+        /// Only messages containing this (case-insensitive)
+        #[arg(long)]
+        filter: Option<String>,
+        /// Empty the buffer after reading
+        #[arg(long)]
+        clear: bool,
+        /// Stop capturing
+        #[arg(long)]
+        stop: bool,
+    },
+    /// The page's requests since capture began; the first call starts capturing (trusted input)
+    Network {
+        tab: i64,
+        /// Only requests whose URL contains this (case-insensitive)
+        #[arg(long)]
+        filter: Option<String>,
+        #[arg(long)]
+        clear: bool,
+        #[arg(long)]
+        stop: bool,
+    },
+    /// Show, accept or dismiss an open alert/confirm/prompt (trusted input)
+    Dialog {
+        tab: i64,
+        #[arg(value_parser = ["show", "accept", "dismiss"], default_value = "show")]
+        action: String,
+        /// Answer for a prompt()
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Attach local files to a file input (trusted input)
+    Upload {
+        tab: i64,
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// The file input's ref (default: the page's only file input)
+        #[arg(long)]
+        r#ref: Option<String>,
+    },
 }
 
 /// Dispatch `th chrome …`.
@@ -399,34 +477,64 @@ fn browse_cli(inst: Option<&str>, cmd: BrowseCommands) -> Result<String> {
         BrowseCommands::Reload { tab } => nav(inst, tab, "reload"),
         BrowseCommands::Text { tab, find } => page_text(inst, tab, find.as_deref()),
         BrowseCommands::Snapshot { tab } => page_snapshot(inst, tab),
-        BrowseCommands::Click { tab, r#ref: el, snapshot } => act(inst, tab, "click", json!({"ref": el}), snapshot),
+        BrowseCommands::Click {
+            tab,
+            r#ref: el,
+            x,
+            y,
+            button,
+            count,
+            trusted,
+            snapshot,
+        } => {
+            let mut args = point_target(el.as_deref(), x, y, true)?;
+            args["button"] = json!(button);
+            args["count"] = json!(count);
+            act(inst, tab, "click", trust(args, trusted), snapshot)
+        }
         BrowseCommands::Type {
             tab,
             r#ref: el,
             text,
             submit,
+            trusted,
             snapshot,
-        } => act(inst, tab, "type", json!({"ref": el, "text": text, "submit": submit}), snapshot),
+        } => act(inst, tab, "type", trust(json!({"ref": el, "text": text, "submit": submit}), trusted), snapshot),
         BrowseCommands::Select {
             tab,
             r#ref: el,
             option,
             snapshot,
         } => act(inst, tab, "select", json!({"ref": el, "option": option}), snapshot),
-        BrowseCommands::Key { tab, key, r#ref: el, snapshot } => act(inst, tab, "key", json!({"ref": el, "key": key}), snapshot),
-        BrowseCommands::Hover { tab, r#ref: el, snapshot } => act(inst, tab, "hover", json!({"ref": el}), snapshot),
+        BrowseCommands::Key {
+            tab,
+            key,
+            r#ref: el,
+            repeat,
+            trusted,
+            snapshot,
+        } => act(inst, tab, "key", trust(json!({"ref": el, "key": key, "repeat": repeat}), trusted), snapshot),
+        BrowseCommands::Hover {
+            tab,
+            r#ref: el,
+            x,
+            y,
+            trusted,
+            snapshot,
+        } => act(inst, tab, "hover", trust(point_target(el.as_deref(), x, y, true)?, trusted), snapshot),
         BrowseCommands::Scroll {
             tab,
             direction,
             pages,
             r#ref: el,
             text,
+            trusted,
             snapshot,
         } => act(
             inst,
             tab,
             "scroll",
-            json!({"direction": direction, "pages": pages, "ref": el, "text": text}),
+            trust(json!({"direction": direction, "pages": pages, "ref": el, "text": text}), trusted),
             snapshot,
         ),
         BrowseCommands::Fill { tab, fields, snapshot } => {
@@ -442,10 +550,16 @@ fn browse_cli(inst: Option<&str>, cmd: BrowseCommands) -> Result<String> {
         }
         BrowseCommands::Wait { tab, text, timeout_ms } => wait_for(inst, tab, &text, timeout_ms),
         BrowseCommands::Screenshot { tab, output } => {
-            std::fs::write(&output, screenshot(inst, tab)?)?;
-            Ok(format!("Wrote {}", output.display()))
+            let shot = screenshot(inst, tab)?;
+            std::fs::write(&output, &shot.png)?;
+            Ok(format!("Wrote {}{}", output.display(), shot.note()))
         }
         BrowseCommands::Close { tab } => browse(inst, "tabs.close", json!({"tabId": tab})).map(|_| format!("Closed tab {tab}")),
+        BrowseCommands::Eval { tab, code, timeout_ms } => eval(inst, tab, &code, timeout_ms),
+        BrowseCommands::Console { tab, filter, clear, stop } => console(inst, tab, filter.as_deref(), clear, stop),
+        BrowseCommands::Network { tab, filter, clear, stop } => network(inst, tab, filter.as_deref(), clear, stop),
+        BrowseCommands::Dialog { tab, action, text } => dialog(inst, tab, &action, text.as_deref()),
+        BrowseCommands::Upload { tab, paths, r#ref: el } => upload(inst, tab, el.as_deref(), &paths),
     }
 }
 
@@ -507,13 +621,22 @@ fn status() -> Result<String> {
         });
         let _ = writeln!(
             out,
-            "instance {pid}: extension {} · browsing {} · bar: {}",
+            "instance {pid}: extension {} · browsing {} · trusted input {} · bar: {}",
             ext["version"].as_str().unwrap_or("?"),
-            if ext["browsing"].as_bool() == Some(true) { "on" } else { "off" },
+            on_off(&ext["browsing"]),
+            on_off(&ext["trusted"]),
             bar.unwrap_or_else(|| "?".into())
         );
     }
     Ok(out)
+}
+
+fn on_off(v: &Value) -> &'static str {
+    if v.as_bool() == Some(true) {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// Where a node lives, e.g. "Bookmarks bar (synced)/Work/Jira".
@@ -881,7 +1004,7 @@ pub fn format_snapshot(v: &Value) -> String {
 pub fn act(inst: Option<&str>, tab: i64, op: &str, args: Value, then_snapshot: bool) -> Result<String> {
     let mut c = Client::connect(inst)?;
     let mut req = json!({"tabId": tab, "op": op});
-    req["args"] = args;
+    req["args"] = drop_nulls(args);
     let v = c.call("page.act", req)?;
     let mut out = describe_act(&v);
     if then_snapshot {
@@ -926,14 +1049,247 @@ pub fn wait_for(inst: Option<&str>, tab: i64, texts: &[String], timeout_ms: u64)
     Ok(format!("\"{}\" is on the page", hit.as_str().unwrap_or_default()))
 }
 
-pub fn screenshot(inst: Option<&str>, tab: i64) -> Result<Vec<u8>> {
+pub struct Shot {
+    pub png: Vec<u8>,
+    /// Set when the image is in CSS pixels (trusted input on), so its points are click x/y.
+    pub css_size: Option<(u64, u64)>,
+}
+
+impl Shot {
+    pub fn note(&self) -> String {
+        self.css_size.map_or_else(
+            || " (device pixels; turn on trusted input to click by x/y)".into(),
+            |(w, h)| format!(" ({w}×{h} CSS px: a point in it is the x/y to click)"),
+        )
+    }
+}
+
+pub fn screenshot(inst: Option<&str>, tab: i64) -> Result<Shot> {
     let v = browse(inst, "page.screenshot", json!({"tabId": tab}))?;
     let data = v["dataUrl"]
         .as_str()
         .and_then(|d| d.split_once(','))
         .map(|(_, b)| b)
         .context("no image from Chrome")?;
-    Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
+    let css_size = match (v["cssPixels"].as_bool(), v["width"].as_u64(), v["height"].as_u64()) {
+        (Some(true), Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    };
+    Ok(Shot {
+        png: base64::engine::general_purpose::STANDARD.decode(data)?,
+        css_size,
+    })
+}
+
+// ── trusted input (the optional chrome.debugger tier) ───────────────────────
+
+/// Mark args for the debugger path. Only `true` is sent, so the extension's default stays the in-page path.
+pub fn trust(mut args: Value, trusted: bool) -> Value {
+    if trusted {
+        args["trusted"] = Value::Bool(true);
+    }
+    args
+}
+
+/// The `ref` or `x`/`y` an action aims at. x/y alone means trusted input at that CSS-pixel point.
+///
+/// # Errors
+/// Both or neither given (when `required`), or only one of x and y.
+pub fn point_target(r: Option<&str>, x: Option<f64>, y: Option<f64>, required: bool) -> Result<Value> {
+    match (r, x, y) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => bail!("give a ref or x/y, not both"),
+        (Some(r), None, None) => Ok(json!({ "ref": r })),
+        (None, Some(x), Some(y)) => {
+            if !(x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0) {
+                bail!("x/y must be non-negative CSS pixels");
+            }
+            Ok(json!({ "x": x, "y": y }))
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => bail!("give both x and y"),
+        (None, None, None) if required => bail!("give a ref from browse_snapshot, or x/y from a trusted browse_screenshot"),
+        (None, None, None) => Ok(json!({})),
+    }
+}
+
+/// The extension tests `args.x !== undefined`, so a null must not be sent as a value.
+fn drop_nulls(mut v: Value) -> Value {
+    if let Value::Object(m) = &mut v {
+        m.retain(|_, x| !x.is_null());
+    }
+    v
+}
+
+const EVAL_MAX: usize = 4000;
+const LIST_MAX: usize = 200;
+
+fn cap(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}… ({} more chars)", s.chars().count() - max)
+}
+
+pub fn eval(inst: Option<&str>, tab: i64, code: &str, timeout_ms: u64) -> Result<String> {
+    Ok(format_eval(&browse(
+        inst,
+        "page.eval",
+        json!({"tabId": tab, "code": code, "timeoutMs": timeout_ms}),
+    )?))
+}
+
+/// An eval result as text: strings raw, other JSON pretty, else what CDP could describe.
+pub fn format_eval(v: &Value) -> String {
+    let body = match &v["value"] {
+        Value::String(s) => s.clone(),
+        Value::Null if v["type"] == "undefined" => "undefined".into(),
+        Value::Null => v["unserializable"]
+            .as_str()
+            .or_else(|| v["description"].as_str())
+            .map_or_else(|| if v["type"] == "object" { "null" } else { "undefined" }.to_string(), str::to_string),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    };
+    cap(&body, EVAL_MAX)
+}
+
+fn matches(hay: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|f| hay.to_lowercase().contains(&f.to_lowercase()))
+}
+
+/// Keep the newest `LIST_MAX` lines, saying how many older ones were dropped.
+fn newest(lines: Vec<String>) -> String {
+    let skip = lines.len().saturating_sub(LIST_MAX);
+    let mut out = if skip > 0 {
+        format!("… {skip} earlier (filter, or clear to reset)\n")
+    } else {
+        String::new()
+    };
+    for l in lines.into_iter().skip(skip) {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    out
+}
+
+pub fn console(inst: Option<&str>, tab: i64, filter: Option<&str>, clear: bool, stop: bool) -> Result<String> {
+    Ok(format_console(
+        &browse(inst, "page.console", json!({"tabId": tab, "clear": clear, "stop": stop}))?,
+        filter,
+    ))
+}
+
+pub fn format_console(v: &Value, filter: Option<&str>) -> String {
+    let mut out = String::new();
+    if v["started"] == true {
+        out.push_str("Started capturing this tab's console (Chrome replays what it still holds; reload to catch load-time messages).\n");
+    }
+    let lines: Vec<String> = v["messages"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| matches(m["text"].as_str().unwrap_or_default(), filter))
+        .map(|m| {
+            let src = m["source"].as_str().map(|s| format!("  ({})", cap(s, 160))).unwrap_or_default();
+            format!("[{}] {}{src}", m["level"].as_str().unwrap_or("log"), m["text"].as_str().unwrap_or_default())
+        })
+        .collect();
+    if lines.is_empty() {
+        out.push_str(if filter.is_some() {
+            "No console messages match."
+        } else {
+            "No console messages yet."
+        });
+        return out;
+    }
+    out + &newest(lines)
+}
+
+pub fn network(inst: Option<&str>, tab: i64, filter: Option<&str>, clear: bool, stop: bool) -> Result<String> {
+    Ok(format_network(
+        &browse(inst, "page.network", json!({"tabId": tab, "clear": clear, "stop": stop}))?,
+        filter,
+    ))
+}
+
+pub fn format_network(v: &Value, filter: Option<&str>) -> String {
+    let mut out = String::new();
+    if v["started"] == true {
+        out.push_str("Started capturing this tab's requests; only ones from now on are recorded, so act or reload, then call again.\n");
+    }
+    let lines: Vec<String> = v["requests"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| matches(r["url"].as_str().unwrap_or_default(), filter))
+        .map(|r| {
+            let status = r["failed"]
+                .as_str()
+                .map(|f| format!("failed: {f}"))
+                .or_else(|| r["status"].as_u64().map(|s| s.to_string()))
+                .unwrap_or_else(|| "pending".into());
+            let kind = [r["type"].as_str(), r["mime"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(", ");
+            format!(
+                "{} {status} {}{}",
+                r["method"].as_str().unwrap_or("GET"),
+                cap(r["url"].as_str().unwrap_or_default(), 200),
+                if kind.is_empty() { String::new() } else { format!("  ({kind})") }
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        out.push_str(if filter.is_some() { "No requests match." } else { "No requests yet." });
+        return out;
+    }
+    out + &newest(lines)
+}
+
+pub fn dialog(inst: Option<&str>, tab: i64, action: &str, text: Option<&str>) -> Result<String> {
+    Ok(format_dialog(&browse(
+        inst,
+        "page.dialog",
+        json!({"tabId": tab, "action": action, "text": text}),
+    )?))
+}
+
+pub fn format_dialog(v: &Value) -> String {
+    if v["open"] != true {
+        return "No JavaScript dialog is open.".into();
+    }
+    let what = format!("{} \"{}\"", v["type"].as_str().unwrap_or("dialog"), v["message"].as_str().unwrap_or_default());
+    v["handled"].as_str().map_or_else(
+        || {
+            let default = v["defaultPrompt"]
+                .as_str()
+                .filter(|d| !d.is_empty())
+                .map(|d| format!(" (default \"{d}\")"))
+                .unwrap_or_default();
+            format!("Open: {what}{default}. Answer with action accept or dismiss.")
+        },
+        |h| format!("{h}ed {what}"),
+    )
+}
+
+/// Attach files to a file input. Paths must exist; they're sent absolute because Chrome reads them itself.
+pub fn upload(inst: Option<&str>, tab: i64, r: Option<&str>, paths: &[PathBuf]) -> Result<String> {
+    act(inst, tab, "upload", json!({"ref": r, "paths": absolute_files(paths)?}), false)
+}
+
+fn absolute_files(paths: &[PathBuf]) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        bail!("give at least one file");
+    }
+    paths
+        .iter()
+        .map(|p| {
+            let abs = std::fs::canonicalize(p).with_context(|| format!("{}: no such file", p.display()))?;
+            if !abs.is_file() {
+                bail!("{} is not a file", p.display());
+            }
+            Ok(abs.display().to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1006,6 +1362,142 @@ heading \"Welcome\"\nform\n  [e3] email \"Email\" value=\"a@b.c\" required\n  [e
             "e1: typed\ne2: checked\nnow at Next <https://n>\nopened new tab 41 (see browse_tabs)"
         );
         assert_eq!(describe_act(&json!({"result": null})), "done");
+    }
+
+    #[test]
+    fn point_target_takes_a_ref_or_a_point() {
+        assert_eq!(point_target(Some("e3"), None, None, true).unwrap(), json!({"ref": "e3"}));
+        assert_eq!(point_target(None, Some(10.0), Some(20.5), true).unwrap(), json!({"x": 10.0, "y": 20.5}));
+        assert_eq!(point_target(None, None, None, false).unwrap(), json!({}));
+        for (r, x, y) in [
+            (Some("e3"), Some(1.0), Some(2.0)),
+            (Some("e3"), None, Some(2.0)),
+            (None, Some(1.0), None),
+            (None, None, Some(1.0)),
+            (None, None, None),
+            (None, Some(-1.0), Some(2.0)),
+            (None, Some(f64::NAN), Some(2.0)),
+            (None, Some(f64::INFINITY), Some(2.0)),
+        ] {
+            assert!(point_target(r, x, y, true).is_err(), "{r:?} {x:?} {y:?}");
+        }
+    }
+
+    #[test]
+    fn trust_only_marks_true_and_nulls_are_not_sent() {
+        assert_eq!(trust(json!({"ref": "e1"}), false), json!({"ref": "e1"}));
+        assert_eq!(trust(json!({"ref": "e1"}), true), json!({"ref": "e1", "trusted": true}));
+        // `args.x !== undefined` in the extension would treat a null x as a point.
+        assert_eq!(
+            drop_nulls(json!({"ref": "e1", "x": null, "count": null, "submit": false})),
+            json!({"ref": "e1", "submit": false})
+        );
+        assert_eq!(drop_nulls(json!("x")), json!("x"));
+    }
+
+    #[test]
+    fn eval_results_read_naturally_and_are_capped() {
+        assert_eq!(format_eval(&json!({"type": "string", "value": "hi"})), "hi");
+        assert_eq!(format_eval(&json!({"type": "number", "value": 3})), "3");
+        assert_eq!(format_eval(&json!({"type": "object", "value": {"a": [1]}})), "{\n  \"a\": [\n    1\n  ]\n}");
+        assert_eq!(format_eval(&json!({"type": "undefined"})), "undefined");
+        assert_eq!(format_eval(&json!({"type": "object"})), "null");
+        assert_eq!(format_eval(&json!({"type": "number", "unserializable": "NaN"})), "NaN");
+        assert_eq!(format_eval(&json!({"type": "function", "description": "function f() {}"})), "function f() {}");
+        let long = format_eval(&json!({"type": "string", "value": "é".repeat(EVAL_MAX + 5)}));
+        assert!(long.ends_with("… (5 more chars)"), "{long}");
+        assert_eq!(long.chars().filter(|&c| c == 'é').count(), EVAL_MAX);
+    }
+
+    #[test]
+    fn console_lists_levels_sources_and_filters() {
+        let v = json!({"started": true, "messages": [
+            {"level": "log", "text": "booted", "source": "https://x.example/app.js:12"},
+            {"level": "error", "text": "Failed to fetch /api"},
+            {"level": "exception", "text": "TypeError: x is undefined"}
+        ]});
+        let all = format_console(&v, None);
+        assert!(all.starts_with("Started capturing"), "{all}");
+        assert!(
+            all.contains("[log] booted  (https://x.example/app.js:12)\n[error] Failed to fetch /api\n[exception] TypeError"),
+            "{all}"
+        );
+        assert_eq!(
+            format_console(&json!({"messages": v["messages"]}), Some("FETCH")),
+            "[error] Failed to fetch /api\n"
+        );
+        assert_eq!(format_console(&json!({"messages": v["messages"]}), Some("zzz")), "No console messages match.");
+        assert_eq!(format_console(&json!({"messages": []}), None), "No console messages yet.");
+    }
+
+    #[test]
+    fn long_lists_keep_the_newest() {
+        let msgs: Vec<Value> = (0..250).map(|i| json!({"level": "log", "text": format!("m{i}")})).collect();
+        let out = format_console(&json!({ "messages": msgs }), None);
+        assert!(out.starts_with("… 50 earlier"), "{}", &out[..40]);
+        assert!(!out.contains("[log] m49\n") && out.contains("[log] m50\n") && out.ends_with("[log] m249\n"));
+    }
+
+    #[test]
+    fn network_shows_status_failures_and_pending() {
+        let v = json!({"started": false, "requests": [
+            {"method": "GET", "url": "https://x.example/", "type": "Document", "status": 200, "mime": "text/html"},
+            {"method": "POST", "url": "https://x.example/api/save", "type": "Fetch", "failed": "net::ERR_FAILED"},
+            {"method": "GET", "url": "https://cdn.example/a.js", "type": "Script"}
+        ]});
+        assert_eq!(
+            format_network(&v, None),
+            "GET 200 https://x.example/  (Document, text/html)\nPOST failed: net::ERR_FAILED https://x.example/api/save  (Fetch)\nGET pending https://cdn.example/a.js  (Script)\n"
+        );
+        assert_eq!(
+            format_network(&v, Some("/API/")),
+            "POST failed: net::ERR_FAILED https://x.example/api/save  (Fetch)\n"
+        );
+        let long = format_network(
+            &json!({"requests": [{"method": "GET", "url": format!("https://x/{}", "a".repeat(300)), "status": 200}]}),
+            None,
+        );
+        assert!(long.contains("… (") && long.len() < 300, "{long}");
+        assert!(format_network(&json!({"started": true, "requests": []}), None).ends_with("No requests yet."));
+    }
+
+    #[test]
+    fn dialog_says_what_is_open_and_what_was_done() {
+        assert_eq!(format_dialog(&json!({"open": false})), "No JavaScript dialog is open.");
+        assert_eq!(
+            format_dialog(&json!({"open": true, "type": "prompt", "message": "Name?", "defaultPrompt": "Bo"})),
+            "Open: prompt \"Name?\" (default \"Bo\"). Answer with action accept or dismiss."
+        );
+        assert_eq!(
+            format_dialog(&json!({"open": true, "handled": "accept", "type": "confirm", "message": "Delete?"})),
+            "accepted confirm \"Delete?\""
+        );
+        assert_eq!(
+            format_dialog(&json!({"open": true, "handled": "dismiss", "type": "alert", "message": "Hi"})),
+            "dismissed alert \"Hi\""
+        );
+    }
+
+    #[test]
+    fn upload_paths_must_be_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "x").unwrap();
+        let got = absolute_files(std::slice::from_ref(&f)).unwrap();
+        assert_eq!(got, vec![std::fs::canonicalize(&f).unwrap().display().to_string()]);
+        assert!(absolute_files(&[]).is_err());
+        assert!(absolute_files(&[dir.path().join("missing")]).is_err());
+        assert!(absolute_files(&[dir.path().to_path_buf()]).is_err());
+    }
+
+    #[test]
+    fn screenshot_note_says_whether_points_are_clickable() {
+        let s = Shot {
+            png: vec![],
+            css_size: Some((1280, 720)),
+        };
+        assert_eq!(s.note(), " (1280×720 CSS px: a point in it is the x/y to click)");
+        assert!(Shot { png: vec![], css_size: None }.note().contains("device pixels"));
     }
 
     #[test]

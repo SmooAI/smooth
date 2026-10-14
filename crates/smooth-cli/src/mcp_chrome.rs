@@ -197,8 +197,23 @@ const fn yes() -> bool {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClickArgs {
     pub tab: i64,
-    /// Element ref from the latest browse_snapshot (e.g. "e12", or "f7:e3" inside an iframe).
-    pub r#ref: String,
+    /// Element ref from the latest browse_snapshot (e.g. "e12", or "f7:e3" inside an iframe). Or give x/y.
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    /// A point in CSS pixels from a trusted browse_screenshot, instead of ref. Implies trusted.
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    /// left (default), right or middle. Trusted only.
+    #[serde(default)]
+    pub button: Option<String>,
+    /// 2 for a double click. Trusted only.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Real mouse input through the debugger, for pages that ignore synthetic clicks (needs "Enable trusted input" in the popup).
+    #[serde(default)]
+    pub trusted: bool,
     /// Return a fresh snapshot with the result (default true).
     #[serde(default = "yes")]
     pub snapshot: bool,
@@ -209,12 +224,21 @@ pub struct ClickArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TypeArgs {
     pub tab: i64,
-    pub r#ref: String,
-    /// Replaces the field's current text.
+    /// The field's ref. With trusted, may be omitted to type where focus is, or replaced by x/y to click there first.
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    /// Replaces the field's current text (trusted typing inserts at the caret instead).
     pub text: String,
     /// Submit the form (or press Enter) afterwards.
     #[serde(default)]
     pub submit: bool,
+    /// Real key input through the debugger, for editors that ignore synthetic input (canvas apps, some rich editors).
+    #[serde(default)]
+    pub trusted: bool,
     #[serde(default = "yes")]
     pub snapshot: bool,
     #[serde(default)]
@@ -242,6 +266,12 @@ pub struct KeyArgs {
     /// Element to send it to; default is whatever has focus.
     #[serde(default)]
     pub r#ref: Option<String>,
+    /// Press it this many times (max 100).
+    #[serde(default)]
+    pub repeat: Option<u32>,
+    /// Real key events through the debugger (shortcuts the page handles itself, like Control+b in an editor).
+    #[serde(default)]
+    pub trusted: bool,
     #[serde(default = "yes")]
     pub snapshot: bool,
     #[serde(default)]
@@ -263,6 +293,13 @@ pub struct ScrollArgs {
     /// Scroll to the first visible occurrence of this text.
     #[serde(default)]
     pub text: Option<String>,
+    /// Wheel-scroll through the debugger, at x/y (default the viewport centre); ref and text are ignored.
+    #[serde(default)]
+    pub trusted: bool,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
     #[serde(default = "yes")]
     pub snapshot: bool,
     #[serde(default)]
@@ -296,6 +333,67 @@ pub struct WaitArgs {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EvalArgs {
+    pub tab: i64,
+    /// A JavaScript expression or statements; `await` and a final `return` both work.
+    pub code: String,
+    /// Default 10000.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureArgs {
+    pub tab: i64,
+    /// Only entries containing this (case-insensitive): message text for the console, URL for the network.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Empty the buffer after reading, so the next call shows only what is new.
+    #[serde(default)]
+    pub clear: bool,
+    /// Stop capturing.
+    #[serde(default)]
+    pub stop: bool,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DialogArgs {
+    pub tab: i64,
+    /// show (default), accept or dismiss.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// The answer to a prompt(), with accept.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadArgs {
+    pub tab: i64,
+    /// The file input's ref; omit when the page has just one.
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    /// Local file paths.
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+/// A click/hover's args: its target, `trusted` when asked for (x/y imply it in the extension).
+fn pointer_args(a: &ClickArgs) -> anyhow::Result<serde_json::Value> {
+    let mut args = chrome::point_target(a.r#ref.as_deref(), a.x, a.y, true)?;
+    args["button"] = json!(a.button);
+    args["count"] = json!(a.count);
+    Ok(chrome::trust(args, a.trusted))
 }
 
 #[tool_router(router = chrome_tool_router, vis = "pub(crate)")]
@@ -450,27 +548,24 @@ impl SmoothMcp {
 
     #[tool(
         name = "browse_click",
-        description = "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot."
+        description = "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot. If a page ignores the click, retry with trusted=true; with trusted input on you can also click x/y read off browse_screenshot (right/double clicks too)."
     )]
     pub async fn browse_click(&self, params: Parameters<ClickArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "click", json!({"ref": a.r#ref}), a.snapshot)).await
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "click", pointer_args(&a)?, a.snapshot)).await
     }
 
     #[tool(
         name = "browse_type",
-        description = "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select."
+        description = "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select. trusted=true types real keystrokes (for editors that ignore the default), into ref, at x/y, or wherever focus is."
     )]
     pub async fn browse_type(&self, params: Parameters<TypeArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         blocking(move || {
-            chrome::act(
-                a.instance.as_deref(),
-                a.tab,
-                "type",
-                json!({"ref": a.r#ref, "text": a.text, "submit": a.submit}),
-                a.snapshot,
-            )
+            let mut args = chrome::point_target(a.r#ref.as_deref(), a.x, a.y, !a.trusted)?;
+            args["text"] = json!(a.text);
+            args["submit"] = json!(a.submit);
+            chrome::act(a.instance.as_deref(), a.tab, "type", chrome::trust(args, a.trusted), a.snapshot)
         })
         .await
     }
@@ -500,13 +595,20 @@ impl SmoothMcp {
     )]
     pub async fn browse_key(&self, params: Parameters<KeyArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "key", json!({"ref": a.r#ref, "key": a.key}), a.snapshot)).await
+        blocking(move || {
+            let args = json!({"ref": a.r#ref, "key": a.key, "repeat": a.repeat});
+            chrome::act(a.instance.as_deref(), a.tab, "key", chrome::trust(args, a.trusted), a.snapshot)
+        })
+        .await
     }
 
-    #[tool(name = "browse_hover", description = "Hover an element by ref, e.g. to open a hover menu or tooltip.")]
+    #[tool(
+        name = "browse_hover",
+        description = "Hover an element by ref, e.g. to open a hover menu or tooltip. trusted=true (or x/y) moves the real mouse there."
+    )]
     pub async fn browse_hover(&self, params: Parameters<ClickArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "hover", json!({"ref": a.r#ref}), a.snapshot)).await
+        blocking(move || chrome::act(a.instance.as_deref(), a.tab, "hover", pointer_args(&a)?, a.snapshot)).await
     }
 
     #[tool(
@@ -521,7 +623,10 @@ impl SmoothMcp {
                 a.instance.as_deref(),
                 a.tab,
                 "scroll",
-                json!({"direction": a.direction, "pages": a.pages, "ref": a.r#ref, "text": a.text}),
+                chrome::trust(
+                    json!({"direction": a.direction, "pages": a.pages, "ref": a.r#ref, "text": a.text, "x": a.x, "y": a.y}),
+                    a.trusted,
+                ),
                 a.snapshot,
             )
         })
@@ -540,15 +645,15 @@ impl SmoothMcp {
 
     #[tool(
         name = "browse_screenshot",
-        description = "Screenshot a tab to a PNG file and return its path (read the file to see it). Brings the tab to the front, so prefer browse_snapshot unless you need to see the layout."
+        description = "Screenshot a tab to a PNG file and return its path (read the file to see it). Prefer browse_snapshot unless you need to see the layout. Without trusted input it brings the tab to the front; with it the tab stays put and the image is in CSS pixels, so a point in it is the x/y for browse_click."
     )]
     pub async fn browse_screenshot(&self, params: Parameters<TabArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         blocking(move || {
-            let png = chrome::screenshot(a.instance.as_deref(), a.tab)?;
+            let shot = chrome::screenshot(a.instance.as_deref(), a.tab)?;
             let path = std::env::temp_dir().join(format!("smooth-tab-{}-{}.png", a.tab, chrono::Utc::now().timestamp_millis()));
-            std::fs::write(&path, png)?;
-            Ok(path.display().to_string())
+            std::fs::write(&path, &shot.png)?;
+            Ok(format!("{}{}", path.display(), shot.note()))
         })
         .await
     }
@@ -557,5 +662,56 @@ impl SmoothMcp {
     pub async fn browse_close(&self, params: Parameters<TabArgs>) -> Result<String, ErrorData> {
         let a = params.0;
         blocking(move || chrome::browse(a.instance.as_deref(), "tabs.close", json!({"tabId": a.tab})).map(|_| format!("Closed tab {}", a.tab))).await
+    }
+
+    #[tool(
+        name = "browse_eval",
+        description = "Run JavaScript in a tab's page and return the result (JSON values come back as JSON). It runs as the signed-in user: read with it freely, but don't change data without approval. Needs trusted input."
+    )]
+    pub async fn browse_eval(&self, params: Parameters<EvalArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::eval(a.instance.as_deref(), a.tab, &a.code, a.timeout_ms.unwrap_or(10_000))).await
+    }
+
+    #[tool(
+        name = "browse_console",
+        description = "A tab's console messages and uncaught errors. The first call starts capturing (it then stays on for that tab); call again after acting to see what was logged. Needs trusted input.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn browse_console(&self, params: Parameters<CaptureArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::console(a.instance.as_deref(), a.tab, a.filter.as_deref(), a.clear, a.stop)).await
+    }
+
+    #[tool(
+        name = "browse_network",
+        description = "A tab's requests (method, status or failure, URL, type). The first call starts capturing; act or reload, then call again. Needs trusted input.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn browse_network(&self, params: Parameters<CaptureArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::network(a.instance.as_deref(), a.tab, a.filter.as_deref(), a.clear, a.stop)).await
+    }
+
+    #[tool(
+        name = "browse_dialog",
+        description = "Show, accept or dismiss a JavaScript alert/confirm/prompt that is blocking a tab. Accepting a confirm can delete or send things: ask the user first. Needs trusted input."
+    )]
+    pub async fn browse_dialog(&self, params: Parameters<DialogArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || chrome::dialog(a.instance.as_deref(), a.tab, a.action.as_deref().unwrap_or("show"), a.text.as_deref())).await
+    }
+
+    #[tool(
+        name = "browse_upload",
+        description = "Attach local files to a file input, as if picked in the file chooser. Only upload files the user asked you to. Needs trusted input."
+    )]
+    pub async fn browse_upload(&self, params: Parameters<UploadArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        blocking(move || {
+            let paths: Vec<std::path::PathBuf> = a.paths.iter().map(std::path::PathBuf::from).collect();
+            chrome::upload(a.instance.as_deref(), a.tab, a.r#ref.as_deref(), &paths)
+        })
+        .await
     }
 }

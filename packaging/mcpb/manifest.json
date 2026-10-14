@@ -91,11 +91,23 @@
         },
         {
             "name": "browse_click",
-            "description": "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot."
+            "description": "Click an element by ref. Waits for any navigation or for the page to settle, says if the URL changed or a tab opened, and returns a fresh snapshot. If a page ignores the click, retry with trusted=true; with trusted input on you can also click x/y read off browse_screenshot (right/double clicks too)."
         },
         {
             "name": "browse_close",
             "description": "Close a tab."
+        },
+        {
+            "name": "browse_console",
+            "description": "A tab's console messages and uncaught errors. The first call starts capturing (it then stays on for that tab); call again after acting to see what was logged. Needs trusted input."
+        },
+        {
+            "name": "browse_dialog",
+            "description": "Show, accept or dismiss a JavaScript alert/confirm/prompt that is blocking a tab. Accepting a confirm can delete or send things: ask the user first. Needs trusted input."
+        },
+        {
+            "name": "browse_eval",
+            "description": "Run JavaScript in a tab's page and return the result (JSON values come back as JSON). It runs as the signed-in user: read with it freely, but don't change data without approval. Needs trusted input."
         },
         {
             "name": "browse_fill",
@@ -103,7 +115,7 @@
         },
         {
             "name": "browse_hover",
-            "description": "Hover an element by ref, e.g. to open a hover menu or tooltip."
+            "description": "Hover an element by ref, e.g. to open a hover menu or tooltip. trusted=true (or x/y) moves the real mouse there."
         },
         {
             "name": "browse_key",
@@ -114,12 +126,16 @@
             "description": "Go back, forward or reload a tab and wait for it to load."
         },
         {
+            "name": "browse_network",
+            "description": "A tab's requests (method, status or failure, URL, type). The first call starts capturing; act or reload, then call again. Needs trusted input."
+        },
+        {
             "name": "browse_open",
             "description": "Open a URL in a new tab (or navigate `tab`) and wait for it to load. Returns the tab id."
         },
         {
             "name": "browse_screenshot",
-            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it). Brings the tab to the front, so prefer browse_snapshot unless you need to see the layout."
+            "description": "Screenshot a tab to a PNG file and return its path (read the file to see it). Prefer browse_snapshot unless you need to see the layout. Without trusted input it brings the tab to the front; with it the tab stays put and the image is in CSS pixels, so a point in it is the x/y for browse_click."
         },
         {
             "name": "browse_scroll",
@@ -143,7 +159,11 @@
         },
         {
             "name": "browse_type",
-            "description": "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select."
+            "description": "Replace the text of an input, textarea or rich editor by ref; submit=true submits the form. For several fields use browse_fill; for a <select> use browse_select. trusted=true types real keystrokes (for editors that ignore the default), into ref, at x/y, or wherever focus is."
+        },
+        {
+            "name": "browse_upload",
+            "description": "Attach local files to a file input, as if picked in the file chooser. Only upload files the user asked you to. Needs trusted input."
         },
         {
             "name": "browse_wait_for",

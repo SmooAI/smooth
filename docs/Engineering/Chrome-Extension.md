@@ -30,7 +30,7 @@ th chrome bm … / MCP bookmarks_* ──┐
 | Manifest  | `…/Google/Chrome/NativeMessagingHosts/ai.smoo.smooth_chrome.json` | `allowed_origins` is limited to the pinned extension ID.                                                                                                                                                                                    |
 | Logic     | `chrome/tree.rs`                                                  | Paths, upsert, managed guards and restore are written against an `Api` trait. The same code runs live, as a dry run (`MemTree`) and in tests.                                                                                               |
 | History   | `chrome/history.rs`                                               | A git repo at `~/.smooth/chrome/history` holding `bookmarks.json` and `bookmarks.html`.                                                                                                                                                     |
-| MCP       | `mcp_chrome.rs`                                                   | 11 `bookmarks_*` and 15 `browse_*` tools on `th mcp serve`.                                                                                                                                                                                 |
+| MCP       | `mcp_chrome.rs`                                                   | 11 `bookmarks_*` and 20 `browse_*` tools on `th mcp serve`.                                                                                                                                                                                 |
 
 The extension's service worker connects to the host when it starts, on `onStartup` and on `onInstalled`. While that native port is open, Chrome keeps the worker alive. On disconnect it reconnects with exponential backoff, capped at 60s.
 
@@ -61,9 +61,40 @@ All page work is one self-contained function, `pageCall` in `background.js`, inj
 - **Snapshot.** A DOM walk, through open shadow roots, and across every frame (`allFrames`; subframe refs look like `f7:e3`). It emits an indented outline: interactive elements with refs, nested under headings, forms, dialogs, landmarks, table rows and list items, so two "Edit" buttons can be told apart by their row. It records state (value, with passwords masked; options; checked, expanded, disabled, required) and flags elements that are offscreen or covered by an overlay (`elementFromPoint`). Elements styled only with `cursor:pointer` count as interactive. The header says how many viewports are above and below.
 - **Refs.** These live in a `WeakRef` map on the isolated world's global, so the page can't see them, refs stay stable between snapshots, and numbers never repeat. If the element under a ref is re-rendered, the ref is re-matched to the single element with the same role and name.
 - **Actions.** Click sends pointer and mouse down/up at the element's centre, then `click()`. Type uses `execCommand('insertText')`, which React and rich editors both see, and falls back to the native value setter. Select matches an option by its text or value. There are also key, hover, scroll (by viewports, to some text, or inside a panel), fill (several fields at once) and waitFor. Every action waits for a navigation or for the DOM to settle (a MutationObserver quiet for 200ms, capped at 3s). It reports a URL change or a newly opened tab, and the MCP tools return a fresh snapshot.
-- **Limits.** Events are synthetic (`isTrusted` is false), so a site that checks it, or a native file picker, won't respond. JS dialogs can't be dismissed; the action times out and says so. Fixing either needs the `debugger` permission, which we have deliberately not asked for.
+- **Limits.** Events are synthetic (`isTrusted` is false), so a site that checks it, a canvas editor, or a native file picker won't respond. A JS dialog blocks the page, and the action times out and says so. Trusted input (below) fixes all of these.
 
-Screenshots use `captureVisibleTab`, which first activates the tab. `node scripts/chrome-page-smoke.mjs` (`pnpm test:chrome-page`) runs `pageCall` against a fixture page in headless Chrome and checks every op.
+Screenshots use `captureVisibleTab`, which first activates the tab. `node scripts/chrome-page-smoke.mjs` runs `pageCall` against a fixture page in headless Chrome and checks every op.
+
+## Trusted input (opt-in)
+
+`debugger` is a second optional permission, granted with the popup's **Enable trusted input** toggle (separate from Enable browsing). It shows Chrome's "Smooth started debugging this browser" bar while attached and carries the strongest permission warning, which is why it is off by default. With it on:
+
+- `trusted: true` on `browse_click`, `browse_type`, `browse_key`, `browse_hover` and `browse_scroll` (CLI `--trusted`) sends real input through CDP: `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` (with the macOS editing `commands`, without which keys do nothing in a Mac text field) and `Input.insertText`. Targets are a main-frame ref or an `x`/`y` point; `x`/`y` imply trusted. Click also takes `button` (right, middle) and `count` (2 = double click); key takes `repeat`.
+- `browse_screenshot` captures through `Page.captureScreenshot` without switching tabs, scaled to CSS pixels, so a point in the image is the `x`/`y` to click.
+- New tools: `browse_eval` (`Runtime.evaluate`; `await` and a final `return` work), `browse_console` and `browse_network` (buffers fed by `Runtime.consoleAPICalled`/`exceptionThrown` and `Network.*`; the first call starts capturing; capped at 1000 messages and 500 requests), `browse_dialog` (show/accept/dismiss an alert, confirm or prompt via `Page.handleJavaScriptDialog`) and `browse_upload` (`DOM.setFileInputFiles`; paths must be existing local files).
+- Sessions attach per tab (protocol 1.3), single-flight, and detach after 30s idle unless console or network capture is on. Browser pages (`chrome://` and the like) and tabs that DevTools or another extension already debugs are refused. `th chrome status` shows `trusted input on/off`.
+
+The builders live in `extension/cdp.js` (pure functions, no `chrome.*`). `node scripts/chrome-cdp-smoke.mjs` replays them against headless Chrome over `--remote-debugging-port` and checks the page sees `isTrusted` clicks (left, right, double), hover, keys, typed Unicode, Enter submitting, select-all, wheel scrolling and a CSS-pixel screenshot. `pnpm test:chrome-page` runs both smoke scripts.
+
+### Parity with Claude in Chrome
+
+| Claude in Chrome                                              | Smooth                                                                       |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `tabs_context`                                                | `browse_tabs`                                                                |
+| `tabs_create` / `tabs_close`                                  | `browse_open` / `browse_close`                                               |
+| `navigate`                                                    | `browse_open` with `tab`, `browse_nav` (back, forward, reload)               |
+| `computer` (click, type, key, scroll, hover)                  | `browse_click`/`type`/`key`/`scroll`/`hover`, by ref or (trusted) by `x`/`y` |
+| `computer` (screenshot)                                       | `browse_screenshot`                                                          |
+| `read_page`                                                   | `browse_snapshot`                                                            |
+| `find`                                                        | `browse_text` with `find`, `browse_scroll` with `text`                       |
+| `form_input`                                                  | `browse_fill`, `browse_select`                                               |
+| `get_page_text`                                               | `browse_text`                                                                |
+| `javascript_tool`                                             | `browse_eval`                                                                |
+| `read_console_messages`                                       | `browse_console`                                                             |
+| `read_network_requests`                                       | `browse_network`                                                             |
+| `file_upload`                                                 | `browse_upload`                                                              |
+| —                                                             | `browse_dialog`, `browse_wait_for` (Claude in Chrome has no equivalent tool) |
+| `resize_window`, `gif_creator`, `upload_image`, `shortcuts_*` | Not done                                                                     |
 
 ## Setup
 
@@ -91,4 +122,4 @@ Reviewed against this design, with clones in `~/dev/refs`:
     - waiting for the DOM to settle after each action, and returning a snapshot with the result;
     - `fill`, `select`, `key`, `scroll` and `wait_for`;
     - shadow DOM and frame traversal, the `cursor:pointer` and covered-element checks, and re-resolving stale refs.
-- **What we skipped.** Most of these also attach `chrome.debugger` (CDP) for trusted input, dialogs, network idle and console logs. That shows a "debugging this browser" bar and the strongest install warning, so it stays a possible opt-in tier, not a default.
+- **Trusted input.** Most of these attach `chrome.debugger` for real input, dialogs and console/network logs, and so does Claude in Chrome. We do the same, but only as the opt-in tier above, because of the debugging bar and the install warning. From Claude in Chrome we took per-tab attach, the Mac editing commands, focus emulation plus a throwaway capture so background tabs paint, and idle detach.

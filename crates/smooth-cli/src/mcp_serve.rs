@@ -1446,7 +1446,9 @@ impl ServerHandler for SmoothMcp {
                  committed to a git history (`bookmarks_history`, `bookmarks_restore`). `bookmarks_remove`, folder moves and \
                  `bookmarks_restore` return a dry run unless confirm=true — show it and confirm only with the user's say-so. \
                  `browse_*` drive tabs only after the user enables browsing in the extension popup; they act in the user's \
-                 signed-in browser, so don't submit forms, buy, send or delete anything without explicit approval.\n\n\
+                 signed-in browser, so don't submit forms, buy, send or delete anything without explicit approval. \
+                 `trusted: true`, x/y clicks, `browse_eval`, `browse_console`, `browse_network`, `browse_dialog` and \
+                 `browse_upload` also need the popup's \"Enable trusted input\" (chrome.debugger).\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -1807,6 +1809,9 @@ mod tests {
             "bookmarks_restore",
             "browse_click",
             "browse_type",
+            "browse_eval",
+            "browse_dialog",
+            "browse_upload",
         ] {
             assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
         }
@@ -1829,6 +1834,8 @@ mod tests {
             "bookmarks_history",
             "browse_tabs",
             "browse_text",
+            "browse_console",
+            "browse_network",
         ] {
             // The chrome tools are only registered on unix (Unix-socket native host).
             if !cfg!(unix) && (read_tool.starts_with("bookmarks_") || read_tool.starts_with("browse_")) {
