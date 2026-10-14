@@ -13,6 +13,8 @@ mod boot_ui;
 /// macOS calendar setup driven by `th doctor --setup-calendar` (pearl th-94cc4a).
 #[cfg(target_os = "macos")]
 mod calendar_setup;
+// Chrome talks to its native host over a Unix socket; `th chrome install` is macOS/Linux only.
+#[cfg(unix)]
 mod chrome;
 mod ci_queue;
 mod claude;
@@ -42,6 +44,7 @@ mod help;
 /// SQLite mail store (ADR-010), separate from the pearl store.
 mod mail;
 mod mail_backend;
+#[cfg(unix)]
 mod mcp_chrome;
 mod mcp_flow;
 mod mcp_install;
@@ -607,6 +610,7 @@ enum Commands {
         cmd: RoutingCommands,
     },
     /// Chrome bookmarks (synced included) and opt-in tab control via the Smooth extension
+    #[cfg(unix)]
     Chrome {
         #[command(subcommand)]
         cmd: chrome::ChromeCommands,
@@ -2291,6 +2295,7 @@ async fn main() -> Result<()> {
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         // `serve` is async (runs the MCP server); the rest are sync config ops.
+        #[cfg(unix)]
         Some(Commands::Chrome { cmd }) => chrome::dispatch(cmd),
         Some(Commands::Mcp { cmd: McpCommands::Serve }) => mcp_serve::serve_stdio().await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
@@ -8296,6 +8301,8 @@ mod cli_dispatch_tests {
             // th-d98fde: phone pairings live in THIS machine's ~/.smooth/flow.db;
             // revoke talks to the local daemon only (nothing on smoo.ai changes).
             "th flow pair",
+            // Bookmarks in this machine's Chrome; `rm` already dry-runs without --yes and snapshots first.
+            "th chrome",
         ];
 
         fn is_delete_verb(name: &str) -> bool {

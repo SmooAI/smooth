@@ -60,9 +60,17 @@ pub struct SmoothMcp {
 }
 
 impl SmoothMcp {
+    /// Every tool this build serves. Chrome needs Unix sockets, so it is macOS/Linux only.
+    pub(crate) fn all_tools() -> ToolRouter<Self> {
+        let router = Self::tool_router() + Self::flow_tool_router();
+        #[cfg(unix)]
+        let router = router + Self::chrome_tool_router();
+        router
+    }
+
     fn new() -> Self {
         // th-1efb59: SmoothFlow's tools live in `mcp_flow`.
-        let mut tool_router = Self::tool_router() + Self::flow_tool_router() + Self::chrome_tool_router();
+        let mut tool_router = Self::all_tools();
         Self::apply_write_gate(&mut tool_router, mcp_writes_allowed());
         Self { tool_router }
     }
@@ -1762,7 +1770,7 @@ mod tests {
     /// calls to disabled routes), and unannotated tools fail closed.
     #[test]
     fn write_kill_switch_hides_every_mutating_tool() {
-        let mut router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router() + SmoothMcp::chrome_tool_router();
+        let mut router = SmoothMcp::all_tools();
         let full = router.list_all().len();
         SmoothMcp::apply_write_gate(&mut router, false);
         let gated = router.list_all();
@@ -1826,7 +1834,7 @@ mod tests {
         }
 
         // allow_writes = true is a no-op.
-        let mut untouched = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router() + SmoothMcp::chrome_tool_router();
+        let mut untouched = SmoothMcp::all_tools();
         SmoothMcp::apply_write_gate(&mut untouched, true);
         assert_eq!(untouched.list_all().len(), full);
     }
@@ -1836,13 +1844,15 @@ mod tests {
     /// while the server grew to forty, so it's pinned to the router here.
     /// Re-bless with `SMOOTH_MCPB_BLESS=1 cargo test -p smooai-smooth-cli mcpb_manifest`,
     /// then `pnpm format`.
+    // The manifest lists the macOS/Linux roster (Chrome included).
+    #[cfg(unix)]
     #[test]
     fn mcpb_manifest_lists_every_tool() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/mcpb/manifest.json");
         let text = std::fs::read_to_string(&path).expect("read the mcpb manifest");
         let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the mcpb manifest is JSON");
 
-        let router = SmoothMcp::tool_router() + SmoothMcp::flow_tool_router() + SmoothMcp::chrome_tool_router();
+        let router = SmoothMcp::all_tools();
         let mut tools = router.list_all();
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         let expected: Vec<serde_json::Value> = tools
