@@ -477,8 +477,10 @@ mod tests {
         assert_eq!(code, StatusCode::OK, "{j}");
         assert_eq!(j["status"], "saved");
         assert!(!j.to_string().contains("sk-family"), "the key never goes back to the browser");
-        let (url, key, _) = smooth_cast::providers::route_at(&p, "coding").unwrap();
-        assert!(url.contains("llm.smoo.ai"));
+        // The URL follows SMOOAI_GATEWAY_URL, which sibling tests set — check the id.
+        let (_, key, _) = smooth_cast::providers::route_at(&p, "coding").unwrap();
         assert_eq!(key, "sk-family");
+        let root = smooth_cast::providers::load_value(&p).unwrap();
+        assert_eq!(root["routing"]["coding"]["provider"], "smooai-gateway");
     }
 }
