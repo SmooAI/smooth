@@ -39,6 +39,7 @@ import remarkGfm from 'remark-gfm';
 
 import CiQueuePage from './CiQueuePage';
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
+import { FirstRunCard } from './FirstRunCard';
 import { dequeue, enqueue, queuedLabel, removeAt, submitAction, takeAt, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
 import { costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
@@ -398,14 +399,19 @@ export default function App() {
                                     </main>
                                 </>
                             ) : (
-                                <Greeting
-                                    state={state}
-                                    status={status}
-                                    faceState={faceState}
-                                    mode={mode}
-                                    modelCosts={modelCosts}
-                                    sessionCostUsd={sessionCostUsd}
-                                />
+                                <>
+                                    {/* First run (SMOODEV-3918): no model yet → the Family plan
+                                        or your own key. Renders nothing once one is set. */}
+                                    <FirstRunCard />
+                                    <Greeting
+                                        state={state}
+                                        status={status}
+                                        faceState={faceState}
+                                        mode={mode}
+                                        modelCosts={modelCosts}
+                                        sessionCostUsd={sessionCostUsd}
+                                    />
+                                </>
                             )}
                             {inConversation && <div className="presence-rule shrink-0 mt-2 mb-3" aria-hidden="true" />}
                             <Composer

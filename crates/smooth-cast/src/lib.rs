@@ -21,12 +21,17 @@
 //! - [`providers`] — field-preserving `providers.json` editing (raw
 //!   `serde_json::Value`) so `th providers add/remove` and per-provider
 //!   `max_tokens` survive the published registry's lossy serializer.
+//! - [`provider_setup`] / [`family_plan`] — Big Smooth onboarding: validate,
+//!   probe and save a bring-your-own-key endpoint, or mint this machine's
+//!   Smoo AI gateway key (402 ⇒ the Family plan checkout).
 //! - [`wire`] — canonical-protocol frame helpers shared by every Smooth
 //!   WebSocket client, so the `error` frame is parsed in exactly one place.
 
 pub mod cast;
 pub mod coding_workflow;
+pub mod family_plan;
 pub mod provider_migration;
+pub mod provider_setup;
 pub mod providers;
 pub mod skills;
 pub mod wire;

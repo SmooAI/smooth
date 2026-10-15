@@ -4,11 +4,10 @@
 //! Two halves:
 //!
 //! 1. **The provider gate.** `GET /api/llm/provider` on the running daemon.
-//!    No model ⇒ prompt for one — the Smoo AI Gateway (sign in with Smoo,
-//!    mint the org's `llm.smoo.ai` key, save it to `~/.smooth/providers.json`)
-//!    or bring-your-own-key (`th model login`). The daemon reads its gateway
-//!    at boot, so after saving one the honest answer is "restart Big Smooth
-//!    and rerun", which is what this prints.
+//!    No model ⇒ the shared first-run picker (`onboard_provider`: the Family
+//!    plan or your own key). The daemon reads its gateway at boot, so after
+//!    saving one the honest answer is "restart Big Smooth and rerun", which
+//!    is what this prints.
 //! 2. **The turn.** One canonical-protocol turn over the daemon's `/ws`
 //!    (`create_conversation_session` → `send_message` → stream →
 //!    `eventual_response`), asking the agent to call its `add_harness` tool
@@ -71,88 +70,46 @@ pub fn turn_message(args: &AgenticArgs) -> String {
     )
 }
 
-/// Which provider the user chose at the gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderChoice {
-    SmooGateway,
-    BringYourOwn,
-    Cancel,
-}
-
-/// Map a picker index to a choice (the picker lists Smoo first, BYO second,
-/// cancel last).
-#[must_use]
-pub const fn provider_choice(index: usize) -> ProviderChoice {
-    match index {
-        0 => ProviderChoice::SmooGateway,
-        1 => ProviderChoice::BringYourOwn,
-        _ => ProviderChoice::Cancel,
-    }
-}
-
-/// The picker rows, in the order [`provider_choice`] expects.
-#[must_use]
-pub fn provider_rows() -> Vec<String> {
-    vec![
-        format!(
-            "{} Gateway (recommended) — sign in with Smoo, mint your org's llm.smoo.ai key",
-            crate::gradient::smoo_ai()
-        ),
-        "Bring your own key — openai / anthropic / openrouter / ollama … (th model login)".to_string(),
-        "Cancel".to_string(),
-    ]
-}
-
 /// Run the gate: returns `Ok(true)` when the daemon can draft right now,
 /// `Ok(false)` when the user must restart the daemon (or cancelled) — the
-/// caller prints nothing more in that case.
+/// caller prints nothing more in that case. The picker itself is the shared
+/// first-run flow in [`crate::onboard_provider`].
 ///
 /// # Errors
 /// When the daemon is unreachable or a provider step fails.
 pub async fn ensure_provider() -> Result<bool> {
+    use crate::onboard_provider::{gate_from_status, run_picker, Gate};
     let status = crate::flow::call(reqwest::Method::GET, "/api/llm/provider", None).await?;
-    let configured = status.get("configured").and_then(Value::as_bool).unwrap_or(false);
-    let restart = status.get("restart_required").and_then(Value::as_bool).unwrap_or(false);
-    if configured && !restart {
-        let model = status.get("model").and_then(Value::as_str).unwrap_or("?");
-        let host = status.get("gateway_host").and_then(Value::as_str).unwrap_or("?");
-        eprintln!("{} provider: {model} via {host}", paint("●", |g| g.bold().to_string()));
-        return Ok(true);
-    }
-    if configured && restart {
-        print_restart();
-        return Ok(false);
+    match gate_from_status(&status) {
+        Gate::Ready => {
+            let model = status.get("model").and_then(Value::as_str).unwrap_or("?");
+            let host = status.get("gateway_host").and_then(Value::as_str).unwrap_or("?");
+            eprintln!("{} provider: {model} via {host}", paint("●", |g| g.bold().to_string()));
+            return Ok(true);
+        }
+        Gate::RestartRequired => {
+            print_restart();
+            return Ok(false);
+        }
+        Gate::NeedsSetup => {}
     }
     eprintln!(
         "{} Big Smooth has no LLM provider — drafting a manifest needs a model.",
         paint("○", |g| g.dimmed().to_string())
     );
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        bail!(
-            "no LLM provider configured\n  → smoo auth login && smoo llm create-key && th model login smooai-gateway   (Smoo AI Gateway)\n  → th model login <provider> --api-key <key>                                  (your own key)"
-        );
-    }
-    let rows = provider_rows();
-    let idx = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-        .with_prompt("Choose a provider for Big Smooth")
-        .items(&rows)
-        .default(0)
-        .interact()?;
-    match provider_choice(idx) {
-        ProviderChoice::SmooGateway => setup_smoo_gateway().await?,
-        ProviderChoice::BringYourOwn => setup_byo()?,
-        ProviderChoice::Cancel => return Ok(false),
+    if run_picker().await?.is_none() {
+        return Ok(false);
     }
     // Saved. The daemon booted without it — say so plainly.
     let status = crate::flow::call(reqwest::Method::GET, "/api/llm/provider", None).await?;
-    if status.get("configured").and_then(Value::as_bool).unwrap_or(false) {
-        if status.get("restart_required").and_then(Value::as_bool).unwrap_or(false) {
+    match gate_from_status(&status) {
+        Gate::Ready => Ok(true),
+        Gate::RestartRequired => {
             print_restart();
-            return Ok(false);
+            Ok(false)
         }
-        return Ok(true);
+        Gate::NeedsSetup => bail!("the provider was saved but the daemon still reports none — check ~/.smooth/providers.json (th model status)"),
     }
-    bail!("the provider was saved but the daemon still reports none — check ~/.smooth/providers.json (th model status)")
 }
 
 fn print_restart() {
@@ -160,103 +117,6 @@ fn print_restart() {
         "{} provider saved, but Big Smooth read its gateway at boot — restart it, then rerun:\n  th down && th up\n  th harness add --agentic <name>",
         paint("◐", |g| g.bold().to_string())
     );
-}
-
-/// `th` itself, for re-entrant subcommands (`smoo auth login`, `th model login`).
-fn self_exe() -> Result<std::path::PathBuf> {
-    std::env::current_exe().context("locate the th binary")
-}
-
-fn run_self(args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new(self_exe()?)
-        .args(args)
-        .status()
-        .with_context(|| format!("run th {}", args.join(" ")))?;
-    if !status.success() {
-        bail!("`th {}` exited with {status}", args.join(" "));
-    }
-    Ok(())
-}
-
-/// Smoo AI Gateway: user session → mint (or paste) the org key → save it as
-/// the `smooai-gateway` provider, routed for coding.
-async fn setup_smoo_gateway() -> Result<()> {
-    if crate::smooai::user_client::UserClient::user_label().is_none() {
-        eprintln!("{} signing in to Smoo AI…", paint("●", |g| g.bold().to_string()));
-        run_self(&["smoo", "auth", "login"])?;
-    }
-    let client = crate::smooai::user_client::UserClient::from_user_session().await?;
-    let org = crate::active_org::resolve(None)?;
-    let key = match client.post(&format!("/organizations/{org}/llm-gateway/create-key"), &json!({})).await {
-        Ok(resp) => resp
-            .get("key")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("create-key returned no key"))?,
-        Err(e) if e.to_string().contains("409") => {
-            eprintln!(
-                "{} this org already has a gateway key (its value is shown once, at mint time).",
-                paint("◐", |g| g.bold().to_string())
-            );
-            let rotate = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt("Rotate it now? (the old key stops working everywhere it is used)")
-                .default(false)
-                .interact()?;
-            if rotate {
-                let resp = client
-                    .post(&format!("/organizations/{org}/llm-gateway/rotate-key"), &json!({}))
-                    .await
-                    .context("rotate-key")?;
-                resp.get("key")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or_else(|| anyhow!("rotate-key returned no key"))?
-            } else {
-                dialoguer::Password::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("Paste the existing llm.smoo.ai key")
-                    .interact()?
-            }
-        }
-        Err(e) => return Err(e.context("mint the org's LLM gateway key (smoo llm create-key)")),
-    };
-    let path = dirs_next::home_dir().context("no home directory")?.join(".smooth").join("providers.json");
-    save_smoo_provider(&path, key.trim())?;
-    eprintln!("{} saved smooai-gateway to {}", paint("●", |g| g.bold().to_string()), path.display());
-    Ok(())
-}
-
-/// Register the Smoo gateway provider in `providers.json` without clobbering
-/// other providers; it becomes the default when nothing else works (the same
-/// rule `th model login` applies).
-pub fn save_smoo_provider(path: &std::path::Path, key: &str) -> Result<()> {
-    if key.is_empty() {
-        bail!("empty gateway key");
-    }
-    let mut registry = if path.exists() {
-        smooth_cast::provider_migration::load_providers_with_migration(path).unwrap_or_default()
-    } else {
-        smooth_operator::providers::ProviderRegistry::default()
-    };
-    let mut cfg = smooth_operator::providers::ProviderConfig::smooai_gateway(key);
-    cfg.default_model = SMOO_DEFAULT_MODEL.to_string();
-    registry.register_provider(cfg);
-    if registry.default_llm_config().is_err() || registry.list_providers().len() == 1 {
-        registry.set_default_provider("smooai-gateway");
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    registry.save_to_file(path)
-}
-
-/// The gateway's coding default (concrete: the legacy `smooth-*` aliases are
-/// gone at the gateway, SMOODEV-1793). Tracks the coding slot so it can't drift
-/// again (it sat on deepseek-v4-flash after the slot moved; SMOODEV-3342).
-pub const SMOO_DEFAULT_MODEL: &str = smooth_policy::smooth_alias::SmoothSlot::Coding.concrete_default();
-
-fn setup_byo() -> Result<()> {
-    eprintln!("{} th model login (pick a provider, paste its key)…", paint("●", |g| g.bold().to_string()));
-    run_self(&["model", "login"])
 }
 
 // ── the turn ─────────────────────────────────────────────────────────────────
@@ -454,41 +314,6 @@ mod tests {
         assert!(m.contains("`add_harness` tool exactly once"));
         assert!(m.contains("\"name\": \"aider\""));
         assert!(m.contains("do not call any other tool"));
-    }
-
-    #[test]
-    fn provider_choice_maps_rows_in_order() {
-        assert_eq!(provider_rows().len(), 3);
-        assert_eq!(provider_choice(0), ProviderChoice::SmooGateway);
-        assert_eq!(provider_choice(1), ProviderChoice::BringYourOwn);
-        assert_eq!(provider_choice(2), ProviderChoice::Cancel);
-        assert_eq!(provider_choice(9), ProviderChoice::Cancel);
-        assert!(provider_rows()[0].contains("llm.smoo.ai"));
-    }
-
-    #[test]
-    fn save_smoo_provider_registers_without_clobbering_and_routes_by_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("providers.json");
-        // Fresh file: the gateway is the default.
-        save_smoo_provider(&p, "sk-1").unwrap();
-        let reg = smooth_operator::providers::ProviderRegistry::load_from_file(&p).unwrap();
-        assert_eq!(reg.list_providers(), vec!["smooai-gateway"]);
-        let cfg = reg.default_llm_config().unwrap();
-        assert!(cfg.api_url.contains("llm.smoo.ai"), "{}", cfg.api_url);
-        assert_eq!(cfg.api_key, "sk-1");
-        assert_eq!(cfg.model, SMOO_DEFAULT_MODEL);
-        // Existing other provider survives; the gateway key updates in place.
-        let mut reg = reg;
-        reg.register_provider(smooth_operator::providers::ProviderConfig::ollama());
-        reg.save_to_file(&p).unwrap();
-        save_smoo_provider(&p, "sk-2").unwrap();
-        let reg = smooth_operator::providers::ProviderRegistry::load_from_file(&p).unwrap();
-        let mut ids = reg.list_providers();
-        ids.sort_unstable();
-        assert_eq!(ids, vec!["ollama", "smooai-gateway"]);
-        assert_eq!(reg.get_provider("smooai-gateway").unwrap().api_key, "sk-2");
-        assert!(save_smoo_provider(&p, "").is_err());
     }
 
     #[test]

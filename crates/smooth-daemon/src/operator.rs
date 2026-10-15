@@ -106,6 +106,9 @@ When a request matches one of your Available skills (listed below), READ its SKI
 ## Environment
 You run always-on on the user's machine. Your filesystem and shell tools are confined to their workspace (the `~/dev` tree — their repos and Obsidian vault live under it). Be proactive when it clearly helps (a heads-up, a follow-up you promised) but never noisy.
 
+## Your model
+You run on whatever model the user set up: the Family plan (hosted models through the Smoo AI gateway) or their own key. To add or switch to their own OpenAI-compatible or Anthropic endpoint, use `configure_provider` (it tests the endpoint before saving; a switch applies after Big Smooth restarts — say so). When you run on their own key and they ask for something the Family plan covers — hosted models with no keys to manage, sync across their devices — mention once that the Family plan ($9/month, 14-day free trial, `th model setup`) does that. Once per conversation at most; never nag, never upsell unprompted.
+
 ## Judgment
 Proceed with sensible defaults and state your assumption; ask only when you're blocked on a genuine fork the user must decide, or on information you cannot obtain yourself. Confirm before destructive, irreversible, or outward-facing actions — deleting or overwriting things you didn't create, sending messages, spending money — unless the user has clearly authorized it. Handle secrets carefully: never echo or transmit credentials. Report outcomes honestly — if something failed, say so with the error; never dress up a partial result as done."#;
 
@@ -289,6 +292,12 @@ impl ToolProvider for SandboxedToolProvider {
             workspace: dir.clone(),
             llm: Arc::new(agent_llm_config),
         }) as Arc<dyn Tool>);
+        // configure_provider (SMOODEV-3918): add or switch Big Smooth's own
+        // OpenAI-compatible / Anthropic endpoint from chat — validated, probed
+        // with one tiny request, then written to providers.json. Writes a
+        // credential and redirects every future turn, so it is on the
+        // [`CONFIRM_TOOLS`] floor; Plan mode drops it like any writer.
+        tools.push(Arc::new(crate::configure_provider::ConfigureProviderTool { providers_path: None }) as Arc<dyn Tool>);
         // SmoothFlow (th-8b3918): the `flow_*` tools + `project_setup`, over
         // the daemon's own flow engine (no HTTP). Every write is in
         // [`CONFIRM_TOOLS`] (parks for the user), the reads are on the Plan
@@ -859,44 +868,11 @@ fn gateway_from_providers(route: &str) -> Option<(String, String, String)> {
     gateway_from_providers_at(&path, route)
 }
 
-/// Find the provider entry with the given id.
-fn provider_by_id<'a>(providers: &'a [serde_json::Value], id: Option<&str>) -> Option<&'a serde_json::Value> {
-    let id = id?;
-    providers.iter().find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some(id))
-}
-
 /// [`gateway_from_providers`] against an explicit path — the testable core.
+/// The rule lives in `smooth_cast::providers::route_at` so `th up`'s
+/// first-run gate and this daemon agree on what "configured" means.
 pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let providers = v.get("providers")?.as_array()?;
-    // Resolve the provider BY the routing slot's own `provider` id rather than a
-    // hardcoded one: every writer of providers.json stamps a different id
-    // (`smooai-gateway`, `ollama`, `openai`, the legacy `smooth`…), so matching a
-    // literal silently resolved `None` for everyone but legacy installs and the
-    // daemon fell through to the engine defaults (pearl th-6062ea). Falls back to
-    // the `coding` slot's provider, then the sole provider when there's only one.
-    let slot_provider = |r: &str| {
-        v.pointer(&format!("/routing/{r}/provider"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
-    let route_id = slot_provider(route);
-    let coding_id = slot_provider("coding");
-    let provider = provider_by_id(providers, route_id.as_deref())
-        .or_else(|| provider_by_id(providers, coding_id.as_deref()))
-        .or_else(|| if providers.len() == 1 { providers.first() } else { None })?;
-    let url = provider.get("api_url")?.as_str()?.to_owned();
-    let key = provider.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
-    let model = v
-        .pointer(&format!("/routing/{route}/model"))
-        .and_then(serde_json::Value::as_str)
-        // Fall back to the `coding` slot, then the provider default, then the
-        // gateway's default slot model (SMOODEV-3342: was claude-haiku-4-5).
-        .or_else(|| v.pointer("/routing/coding/model").and_then(serde_json::Value::as_str))
-        .or_else(|| provider.get("default_model").and_then(serde_json::Value::as_str))
-        .unwrap_or(smooth_policy::smooth_alias::SmoothSlot::Default.concrete_default())
-        .to_owned();
-    Some((url, key, model))
+    smooth_cast::providers::route_at(path, route)
 }
 
 /// Tools the daemon ALWAYS routes through the engine's write-confirmation HITL,
@@ -924,6 +900,7 @@ pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(Str
 /// of a read tool (`flow_list`, `flow_snapshot`, …); a test pins that.
 const CONFIRM_TOOLS: &[&str] = &[
     "calendar_delete",
+    "configure_provider",
     "flow_new",
     "flow_send",
     "flow_prompt_wait",
@@ -1436,7 +1413,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // The gateway is read ONCE here; `llm_provider` remembers whether it had a
     // key so a provider added later is reported as "restart required".
     let gateway_config = resolve_gateway_config();
-    crate::llm_provider::mark_boot(gateway_config.gateway_key.as_deref().is_some_and(|k| !k.trim().is_empty()));
+    crate::llm_provider::mark_boot(
+        gateway_config.gateway_key.as_deref().is_some_and(|k| !k.trim().is_empty()),
+        &gateway_config.gateway_url,
+    );
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
@@ -1526,7 +1506,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
                 // GET /api/llm/provider — does this daemon have model creds, and
                 // if not, the two ways to get some (th-473294). `th harness add
                 // --agentic` asks before driving a turn. Name + host only.
-                .merge(crate::llm_provider::provider_router())
+                .merge(crate::llm_provider::provider_router(Some(token.clone())))
                 // The bench-scored model lineup, single source of truth for every
                 // client's model picker (th-1d8007). Public data, ungated.
                 .merge(crate::model_catalog_route::model_catalog_router())
@@ -1816,6 +1796,32 @@ mod tests {
         let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
         assert!(names.iter().any(|n| n == "calendar"), "calendar registered: {names:?}");
         assert!(names.iter().any(|n| n == "calendar_delete"), "calendar_delete registered: {names:?}");
+    }
+
+    /// `configure_provider` (SMOODEV-3918) writes a credential and redirects
+    /// every future turn: always parks for the user, never survives Plan mode,
+    /// never reaches a demo reviewer — and is actually handed to the agent.
+    #[tokio::test]
+    async fn configure_provider_is_registered_and_confirm_gated() {
+        use smooth_operator_svc::access_control::AccessContext;
+        assert!(requires_confirmation("configure_provider"));
+        assert!(!PLAN_READONLY_TOOLS.contains(&"configure_provider"));
+        assert!(!DEMO_SAFE_TOOLS.contains(&"configure_provider"));
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "configure_provider"), "{names:?}");
+        // The floor's `contains` match must not catch any other tool.
+        for n in names.iter().filter(|n| *n != "configure_provider") {
+            assert!(!n.contains("configure_provider"), "{n}");
+        }
+    }
+
+    #[test]
+    fn persona_mentions_the_family_plan_once_and_never_nags() {
+        assert!(BIG_SMOOTH_PERSONA.contains("configure_provider"));
+        assert!(BIG_SMOOTH_PERSONA.contains("Family plan"));
+        assert!(BIG_SMOOTH_PERSONA.contains("never nag"));
     }
 
     /// SmoothFlow permission classes (th-8b3918): every flow tool that
