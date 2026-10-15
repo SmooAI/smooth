@@ -67,6 +67,7 @@ One process on your host, no per-task VM or worker. The microVM sandbox stack wa
 | [[Architecture/Workspace-Crates]]            | What each workspace crate owns                                |
 | [[Architecture/Daemon-Modules-and-Security]] | smooth-daemon modules, dispatch, security layers              |
 | [[Architecture/Data-Layout]]                 | On-disk layout + pearl/Jira reference                         |
+| [[Architecture/Onboarding]]                  | First-run model setup: Family plan or your own key            |
 
 ---
 
