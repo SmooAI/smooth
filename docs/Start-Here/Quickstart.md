@@ -49,7 +49,7 @@ th providers add myproxy --url https://proxy.example.com --api-key … --format 
 th up        # start Big Smooth on this machine
 ```
 
-Then open the chat at <http://localhost:4400> (`th web` prints the address), or stay in the terminal with `th code`.
+Then open the chat at <http://localhost:4400> (`th web` prints the address), or stay in the terminal with `th code`. On a Mac you can also use the desktop app (beta): [download Big Smooth for Mac](https://downloads.smoo.ai/bigsmooth/latest-arm64.dmg) (Apple Silicon).
 
 Ask it something that needs a tool, such as "what's on my calendar tomorrow?", "remind me to call Mom at 6" or "what's the weather this weekend?". On macOS, the Calendar, Reminders and Messages tools each need a one-time permission grant:
 

@@ -5,13 +5,16 @@
 > [!info] Where Big Smooth is headed
 > What we are building next to make Big Smooth a complete personal assistant for you and your family. These are directions, not dates. Each item becomes a pearl when work starts, and this page moves an item to the README's "What you get today" when it ships.
 
+## Available now
+
+- **Big Smooth for Mac (beta)**: the desktop app, Apple Silicon. [Download the DMG](https://downloads.smoo.ai/bigsmooth/latest-arm64.dmg).
+
 ## Coming soon
 
-| Surface                | Status                                                                                                                                                      |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Big Smooth desktop app | In progress. Join the waitlist at [smoo.ai/big-smooth#coming-soon](https://smoo.ai/big-smooth#coming-soon).                                                 |
-| iPhone and Android     | In progress. Same waitlist.                                                                                                                                 |
-| Browser extension      | Today `th chrome` gives agents bookmarks and opt-in tab control ([[Engineering/Chrome-Extension]]). A chat-in-the-browser extension is next. Same waitlist. |
+| Surface            | Status                                                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| iPhone and Android | In progress. Join the waitlist at [smoo.ai/big-smooth#coming-soon](https://smoo.ai/big-smooth#coming-soon).                                                 |
+| Browser extension  | Today `th chrome` gives agents bookmarks and opt-in tab control ([[Engineering/Chrome-Extension]]). A chat-in-the-browser extension is next. Same waitlist. |
 
 ## Personal-assistant gaps
 

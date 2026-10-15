@@ -81,7 +81,7 @@ th up                              # start it; chat at http://localhost:4400, or
 - **Schedules.** Prompts it runs on a cadence: `th daemon schedule add`.
 - **Your browser.** `th chrome install` adds bookmarks (synced ones too) and opt-in tab control. See [Chrome Extension](docs/Engineering/Chrome-Extension.md).
 
-Keep it running across reboots with `th service install`. How it works: [What Is Smooth](docs/Start-Here/What-Is-Smooth.md).
+**On a Mac, there's a desktop app (beta):** [download Big Smooth for Mac](https://downloads.smoo.ai/bigsmooth/latest-arm64.dmg) (Apple Silicon). Or keep the daemon running across reboots with `th service install`. How it works: [What Is Smooth](docs/Start-Here/What-Is-Smooth.md).
 
 ### The harness toolbox for Claude Code, Codex, OpenCode and Cursor
 
@@ -143,11 +143,10 @@ The same binary is also `smoo`: CRM, config, agents, analytics and the rest of [
 
 ## Coming soon
 
-- **Big Smooth desktop app**
 - **Big Smooth for iPhone and Android**
 - **A browser extension** for chatting with Big Smooth from any page
 
-Join the waitlist at [smoo.ai/big-smooth#coming-soon](https://smoo.ai/big-smooth#coming-soon). What else is next: [Roadmap](docs/Start-Here/Roadmap.md).
+The Mac desktop app is already available as a beta: [download it](https://downloads.smoo.ai/bigsmooth/latest-arm64.dmg). Join the waitlist for the rest at [smoo.ai/big-smooth#coming-soon](https://smoo.ai/big-smooth#coming-soon). What else is next: [Roadmap](docs/Start-Here/Roadmap.md).
 
 ---
 
