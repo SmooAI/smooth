@@ -5324,6 +5324,7 @@ version = "0.80.2"
 dependencies = [
  "anyhow",
  "dirs-next",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yml",

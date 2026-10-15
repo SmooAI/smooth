@@ -53,6 +53,7 @@ mod mcp_chrome;
 mod mcp_flow;
 mod mcp_install;
 mod mcp_serve;
+mod onboard_provider;
 mod operator_serve;
 mod pearls_handoff;
 /// th-55b2c7: `th pkg` — one package, N harness renderings.
@@ -1618,6 +1619,10 @@ enum ModelCommands {
     Remove { provider: String },
     /// Show LLM provider configuration status
     Status,
+    /// Choose Big Smooth's model: the Family plan ($9/month, 14-day free
+    /// trial, hosted models) or your own OpenAI-compatible / Anthropic key.
+    /// The same picker `th up` runs on first start.
+    Setup,
 }
 
 #[derive(Subcommand)]
@@ -2499,6 +2504,9 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
     // caller until ctrl-c, breaking shell chains like
     // `th down && th up && th`.
     if !foreground {
+        // First run (SMOODEV-3918): no model ⇒ choose one before the daemon
+        // boots, since it reads its gateway once at startup.
+        let provider_saved = onboard_provider::up_gate().await;
         // A daemon from ANY launcher (the Big Smooth app bundle, a bare
         // `smooth-daemon run`) advertises itself in ~/.smooth/daemon.addr.
         // Probe it FIRST so `th up` says "already running" up front instead
@@ -2512,6 +2520,9 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
                 println!();
                 println!("    {}  {}", "Web UI".dimmed(), format!("http://{addr}").cyan().bold());
                 println!("    {}  {}", "Stop  ".dimmed(), "th down (or quit the Big Smooth app)".dimmed());
+                if provider_saved {
+                    println!("    {}  {}", "Model ".dimmed(), "saved — restart to use it: th down && th up".yellow());
+                }
                 println!();
                 return Ok(());
             }
@@ -2549,6 +2560,9 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
                         println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
                         println!("    {}  {}", "Logs  ".dimmed(), log_file_path().display().to_string().dimmed());
                         println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
+                        if provider_saved {
+                            println!("    {}  {}", "Model ".dimmed(), "saved — restart to use it: th down && th up".yellow());
+                        }
                         println!();
                         return Ok(());
                     }
@@ -2969,6 +2983,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
 
     match cmd {
+        ModelCommands::Setup => onboard_provider::cmd_model_setup().await?,
         ModelCommands::Status => {
             println!();
             println!("  {}", "Auth Status".bold().cyan());
@@ -4096,7 +4111,7 @@ impl SetupStep {
     /// The command that fixes it — printed by `th doctor`, run by `--onboard`.
     fn fix(self) -> &'static str {
         match self {
-            Self::Providers => "th model login <provider>",
+            Self::Providers => "th model setup",
             Self::SmooLogin => "th auth login",
             Self::Fda => "th doctor --fix-fda",
             Self::Calendar => "th doctor --setup-calendar",
@@ -4105,8 +4120,9 @@ impl SetupStep {
         }
     }
 
-    /// Run this step. The two credential steps are interactive flows of their
-    /// own, so onboarding points at them rather than hijacking the terminal.
+    /// Run this step. Sign-in is an interactive flow of its own, so onboarding
+    /// points at it; the provider step runs the first-run model picker itself
+    /// (see [`cmd_doctor_onboard`]).
     fn drive(self) -> Result<()> {
         match self {
             Self::Providers | Self::SmooLogin => {
@@ -4153,16 +4169,18 @@ async fn run_doctor() -> Result<Vec<SetupStep>> {
         println!("  {} Pearl store: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
     }
 
-    // 3. Check providers
-    let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
-    if let Some(ref path) = providers_path {
-        if path.exists() {
-            println!("  {} Providers: {}", "✓".green().bold(), format!("configured ({})", path.display()).green());
-        } else {
-            println!("  {} Providers: {}", "✗".red().bold(), "not configured (run: th model login <provider>)".red());
-            issues += 1;
-            pending.push(SetupStep::Providers);
-        }
+    // 3. Check providers — the same "can Big Smooth run a turn" rule the
+    // daemon applies at boot, not just "providers.json exists".
+    if onboard_provider::local_gate() == onboard_provider::Gate::Ready {
+        println!("  {} Providers: {}", "✓".green().bold(), "a model is configured".green());
+    } else {
+        println!(
+            "  {} Providers: {}",
+            "✗".red().bold(),
+            "no model yet (run: th model setup — the Family plan or your own key)".red()
+        );
+        issues += 1;
+        pending.push(SetupStep::Providers);
     }
 
     // 3b. Smoo AI session — `th api …`, the config server and the hosted
@@ -4504,7 +4522,13 @@ async fn cmd_doctor_onboard() -> Result<()> {
     for (i, step) in pending.iter().enumerate() {
         println!("{}", format!("── {}/{total}  {}", i + 1, step.label()).bold().cyan());
         // One failing step must not strand the rest — report and keep walking.
-        if let Err(e) = step.drive() {
+        // The provider step is the first-run model picker (async, interactive).
+        let result = if *step == SetupStep::Providers {
+            onboard_provider::run_picker().await.map(|_| ())
+        } else {
+            step.drive()
+        };
+        if let Err(e) = result {
             println!("  {} {} failed: {e:#}", "✗".red().bold(), step.label());
             println!("  {} fix by hand with: {}", "→".cyan(), step.fix().bold());
         }

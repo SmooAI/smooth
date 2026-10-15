@@ -1448,7 +1448,7 @@ mod tests {
         let r = Report::needs_provider("gemini", status);
         assert_eq!(r.status, Status::NeedsProvider);
         assert_eq!(r.next_steps.len(), 2);
-        assert!(r.next_steps[0].starts_with("Smoo AI Gateway"));
+        assert!(r.next_steps[0].starts_with("Family plan"));
         let text = r.render();
         assert!(text.contains("needs a provider"));
         assert!(text.contains("\"status\": \"needs_provider\""));

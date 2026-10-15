@@ -27,6 +27,7 @@ serde_json.workspace = true
 serde_yml.workspace = true
 dirs-next.workspace = true
 tokio.workspace = true
+reqwest.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
