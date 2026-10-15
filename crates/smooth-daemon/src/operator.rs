@@ -80,6 +80,11 @@ Warm, smooth, a little swagger — confident and easygoing, never stuffy. Concis
 ## Agency — finish the job
 When given a task, drive it to completion before yielding. Don't stop at the first obstacle or hand back a plan when you could execute it. If a step fails, diagnose it, adapt, and try another way; only surface a blocker when you genuinely cannot proceed — and then say exactly what you tried and what you need. Prefer doing over describing.
 
+## Capabilities — check before you claim
+- Before offering the user options, make sure you can actually carry out each one. Don't offer a choice you'd then fail to deliver.
+- Before saying you can't do something, try the other tools you have: `bash` (on macOS, `osascript` and `shortcuts` drive most apps), `th`, the web. If you still can't, say exactly what you tried.
+- When one of your own tools lacks a capability, offer to file a pearl in the smooth repo (`th` with `["pearls","create",…]` and `"about_smooth": true`) and tell the user the project it landed in.
+
 ## Tools — use them, never guess
 - You have tools; reach for them instead of assuming. To answer about a file, `read_file` it; to find something, `grep`; to change a file, read it first, then `edit_file`. Use `bash` for anything the dedicated tools don't cover.
 - NEVER fabricate file contents, command output, tool results, or the existence of a file, repo, or capability. If you don't know, look; if you can't look, say so plainly.
@@ -353,8 +358,14 @@ impl ToolProvider for SandboxedToolProvider {
         // in-process through `smooth_menubar::reminders` (the objc2 quarantine
         // crate), which is likewise outside the kernel sandbox. See the
         // trusted-integration exceptions in docs/Architecture/Security-Model.md.
+        //
+        // Deleting a reminder (SMOODEV-3734) is split onto `reminders_delete`
+        // and listed in [`CONFIRM_TOOLS`], exactly like `calendar_delete`.
         #[cfg(target_os = "macos")]
-        tools.push(Arc::new(smooth_tools::RemindersTool) as Arc<dyn Tool>);
+        {
+            tools.push(Arc::new(smooth_tools::RemindersTool) as Arc<dyn Tool>);
+            tools.push(Arc::new(smooth_tools::RemindersDeleteTool) as Arc<dyn Tool>);
+        }
         // Platform-specific tools (pearl th-1665ed). The macOS Messages tool
         // exists only where chat.db and Messages.app do, so it's cfg-gated —
         // Linux/Windows never see it. It registers even when Full Disk Access
@@ -903,11 +914,11 @@ pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(Str
 /// on top of whatever `SMOOTH_AGENT_CONFIRM_TOOLS` adds (pearl th-94cc4a).
 ///
 /// Big Smooth's posture is `AutoMode::Bypass` — mutations run unprompted — with
-/// exactly one exception so far: **cancelling a calendar event**. It's the one
-/// mutation the agent can't walk back on the next turn, so the user gets the
-/// last word. This is a floor, not a setting: the env var can widen the list but
-/// not shrink it, so an empty/absent `SMOOTH_AGENT_CONFIRM_TOOLS` can't quietly
-/// disarm the gate.
+/// a narrow exception: **cancelling a calendar event** and **deleting a
+/// reminder** (SMOODEV-3734). They're the personal-data mutations the agent
+/// can't walk back on the next turn, so the user gets the last word. This is a
+/// floor, not a setting: the env var can widen the list but not shrink it, so
+/// an empty/absent `SMOOTH_AGENT_CONFIRM_TOOLS` can't quietly disarm the gate.
 ///
 /// Matched by core's `ConfirmationHook` with `contains`, so these are tool-name
 /// SUBSTRINGS. `calendar_delete` is deliberately not a prefix of any other tool
@@ -924,6 +935,8 @@ pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(Str
 /// of a read tool (`flow_list`, `flow_snapshot`, …); a test pins that.
 const CONFIRM_TOOLS: &[&str] = &[
     "calendar_delete",
+    // SMOODEV-3734: same shape — the irreversible half of `reminders`.
+    "reminders_delete",
     "flow_new",
     "flow_send",
     "flow_prompt_wait",
@@ -2044,6 +2057,9 @@ mod tests {
         let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
         let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
         assert!(names.iter().any(|n| n == "reminders"), "reminders registered: {names:?}");
+        assert!(names.iter().any(|n| n == "reminders_delete"), "reminders_delete registered: {names:?}");
+        assert!(requires_confirmation("reminders_delete"), "deleting a reminder must park for the user");
+        assert!(!requires_confirmation("reminders"), "list/add/move/update stay unprompted");
     }
 
     /// Platform-specific registration (pearl th-1665ed): the Messages tool must
@@ -2370,6 +2386,7 @@ mod tests {
             "send_sidekick",
             "calendar",
             "reminders",
+            "reminders_delete",
             "imessage",
             "contacts",
             "notify",
@@ -2420,6 +2437,12 @@ mod tests {
         // a turn walking --help to find the pipeline.
         assert!(p.contains(r#"["smoo","crm","pipeline"]"#), "pipeline recipe up front");
         assert!(p.contains("smoo auth login"), "sign-in errors are handed to the user, not retried");
+        // SMOODEV-3734: offered options it couldn't do, said "can't" without
+        // trying bash/osascript, and filed its own gap in the wrong project.
+        assert!(p.contains("Before offering the user options"), "verify options first");
+        assert!(p.contains("Before saying you can't do something"), "try other tools before giving up");
+        assert!(p.contains("osascript"), "names the macOS fallback");
+        assert!(p.contains(r#""about_smooth": true"#), "files its own gaps in the smooth repo");
     }
 
     // ── deny policy + permission gate ─────────────────────────────────────

@@ -105,7 +105,7 @@ pub use present_plan::PresentPlanTool;
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::{RecallTool, RememberTool};
 #[cfg(target_os = "macos")]
-pub use reminders::RemindersTool;
+pub use reminders::{RemindersDeleteTool, RemindersTool};
 pub use sandbox::{SandboxMode, SandboxPolicy, SandboxedCommand, SANDBOX_ENV};
 pub use send_file::SendFileTool;
 pub use th::ThTool;

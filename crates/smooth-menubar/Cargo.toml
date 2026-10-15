@@ -38,6 +38,9 @@ objc2-event-kit = { version = "0.3.2", features = [
     "EKCalendarItem",
     "EKCalendar",
     "EKObject",
+    # SMOODEV-3734: `create_list` puts a new list on the same account (source)
+    # as the default or a named sibling list.
+    "EKSource",
 ] }
 # th-ecdf4d: Location Services, for the `get_location` tool (and the weather
 # tool's coordinates). Only the two classes are needed — a manager to ask, and a

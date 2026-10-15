@@ -5768,6 +5768,7 @@ dependencies = [
  "smooai-smooth-cast",
  "smooai-smooth-menubar",
  "smooai-smooth-operator-core",
+ "smooai-smooth-pearls",
  "smooai-smooth-policy",
  "tempfile",
  "tokio",
