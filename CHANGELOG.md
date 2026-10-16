@@ -1,5 +1,22 @@
 # @smooai/smooth
 
+## 0.81.0
+
+### Minor Changes
+
+- 947a383: Big Smooth now helps a new user pick a model on first run. The choice is the Family plan ($9/month, 14-day free trial, hosted models through the Smoo AI gateway) or your own OpenAI-compatible or Anthropic key. Your own key is tested with one request before it is saved.
+
+  The picker appears in these places:
+
+  - `th up`, when no model is configured
+  - `th model setup`
+  - `th doctor --onboard`
+  - a first-run card in the web UI
+
+  In chat, Big Smooth can switch endpoints with the new `configure_provider` tool, which asks you to approve each change. Big Smooth also reports when a switch needs a restart.
+
+- db146a2: `th smoo calling ring-groups list|show|set|members` (alias `departments`) lets an admin read and change ring group settings: strategy, ring-first seconds, message-only, notify email, enabled, and the ordered member list with ring-first and off flags. It calls the same api-prime routes as the Calling settings page, so a non-admin gets the API's 403, reported as "admin only".
+
 ## 0.80.2
 
 ### Patch Changes
