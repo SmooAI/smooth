@@ -1021,6 +1021,34 @@ smoo calling settings update --set recordingRetentionDays=365 [--body changes.js
   are refused locally, by name, with the list.
 - Every write asks for confirmation: it changes what the next caller gets.
 
+#### Ring groups (departments) — SMOODEV-3960
+
+CLI twin of the hosted MCP's `ring_groups_list` / `ring_groups_get` /
+`ring_groups_update` / `ring_group_members_set` and the copilot's
+`ring_groups.list` / `ring_groups.update`. All three call the same api-prime
+`/organizations/{org}/calling/ring-groups…` routes with your own sign-in.
+Reads need `calling.use` and writes need `calling.admin`, both behind the
+`telephony` product. A 403 is reported as "admin only".
+
+```bash
+smoo calling ring-groups list [--json]                   # alias: departments
+smoo calling ring-groups show <group-id> [--json]        # members in ring order
+smoo calling ring-groups set <group-id> [--strategy simultaneous|sequential|round_robin] \
+    [--ring-first-seconds 5-120] [--message-only true|false] [--notify-email ar@acme.com|""] \
+    [--enabled true|false] [--yes|--dry-run]
+smoo calling ring-groups members <group-id> --member <userId>:first --member <userId> \
+    --member <userId>:off [--yes|--dry-run]               # or --body members.json, or --clear
+```
+
+- `set` sends only the flags you pass. `--notify-email ""` clears the address.
+  Values are checked locally with the same limits api-prime applies: a 5-120
+  second ring-first window and one email address.
+- `members` replaces the WHOLE list. The order you give is the ring order, and
+  anyone you leave out is removed. `:first` rings that member first, and `:off`
+  keeps them in the list without ringing them. The limit is 100 unique members.
+- The org-wide `callDepartmentRoutingEnabled` switch is a config flag. No
+  command here can change it.
+
 ### Support (`smoo support`) — SMOODEV-3611
 
 ```bash
