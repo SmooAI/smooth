@@ -39,6 +39,11 @@ pub fn error_message(v: &Value) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("unknown error");
 
+    // Out of AI budget: the fix is a top-up, so say that instead of the gateway's JSON (SMOODEV-3967).
+    if let Some(hint) = crate::ai_credits::budget_exceeded_hint(text) {
+        return hint;
+    }
+
     match v
         .pointer("/error/code")
         .or_else(|| v.pointer("/data/error/code"))
@@ -87,6 +92,18 @@ mod tests {
         assert_eq!(error_message(&json!({ "type": "error", "error": {} })), "unknown error");
         assert_eq!(error_message(&json!({ "type": "error" })), "unknown error");
         assert_eq!(error_message(&json!({ "message": "" })), "unknown error");
+    }
+
+    /// A turn that died on the gateway budget names the top-up page, not the raw body.
+    #[test]
+    fn budget_refusal_becomes_the_top_up_hint() {
+        let frame = json!({
+            "type": "error",
+            "error": { "code": "INTERNAL_ERROR", "message": r#"LLM API error 402 Payment Required: {"error":{"message":"Budget has been exceeded! Team=o","type":"budget_exceeded"}}"# },
+        });
+        let text = error_message(&frame);
+        assert!(text.starts_with("Out of AI budget"), "{text}");
+        assert!(text.contains(crate::ai_credits::TOP_UP_URL), "{text}");
     }
 
     /// Regression: `error` is an object, so a bare `as_str()` on it returns

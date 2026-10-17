@@ -26,7 +26,10 @@
 //!   Smoo AI gateway key (402 ⇒ the Family plan checkout).
 //! - [`wire`] — canonical-protocol frame helpers shared by every Smooth
 //!   WebSocket client, so the `error` frame is parsed in exactly one place.
+//! - [`ai_credits`] — the prepaid AI credits top-up link and pack sizes; turns
+//!   a gateway `Budget has been exceeded` into one actionable line.
 
+pub mod ai_credits;
 pub mod cast;
 pub mod coding_workflow;
 pub mod family_plan;

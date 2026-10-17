@@ -76,8 +76,10 @@ pub fn options() -> Vec<ProviderOption> {
         ProviderOption {
             id: "smoo-gateway".into(),
             title: "Family plan (recommended)".into(),
-            description:
-                "$9/month with a 14-day free trial: hosted models through the Smoo AI gateway, no keys to manage. Sign in with Smoo and start the trial.".into(),
+            description: format!(
+                "$9/month with a 14-day free trial: hosted models through the Smoo AI gateway, no keys to manage. Sign in with Smoo and start the trial. {}.",
+                smooth_cast::ai_credits::top_up_line(" during the trial")
+            ),
             command: "th model setup   # choose “Family plan”".into(),
         },
         ProviderOption {
@@ -258,7 +260,8 @@ pub async fn family_setup(http: &reqwest::Client, api_base: &str, session: Optio
                     "status": "saved",
                     "keyName": key_name,
                     "restart_required": true,
-                    "message": "Family plan active. Big Smooth reads its model at startup — restart it (th down && th up, or quit and reopen the app) to start using it."
+                    "message": "Family plan active. Big Smooth reads its model at startup — restart it (th down && th up, or quit and reopen the app) to start using it.",
+                    "topUp": family_plan::top_up_note(),
                 })),
             ),
             Err(e) => (
@@ -268,7 +271,9 @@ pub async fn family_setup(http: &reqwest::Client, api_base: &str, session: Optio
         },
         Ok(MintOutcome::PlanRequired { upgrade_url, message }) => (
             StatusCode::OK,
-            Json(json!({ "status": "plan_required", "upgradeUrl": upgrade_url, "message": message, "pitch": family_plan::FAMILY_PLAN_PITCH })),
+            Json(
+                json!({ "status": "plan_required", "upgradeUrl": upgrade_url, "message": message, "pitch": family_plan::FAMILY_PLAN_PITCH, "topUp": family_plan::top_up_note() }),
+            ),
         ),
         Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "status": "error", "message": format!("{e:#}") }))),
     }
@@ -352,6 +357,10 @@ mod tests {
         assert_eq!(s.options[1].id, "byo-key");
         assert!(s.options[0].title.contains("Family plan"));
         assert!(s.options[0].description.contains("$9/month") && s.options[0].description.contains("14-day"));
+        assert!(
+            s.options[0].description.contains("Top up $5 or $10 anytime during the trial"),
+            "SMOODEV-3969: onboarding names top-ups"
+        );
         assert!(s.options[0].command.contains("th model setup"));
         assert!(s.options[1].command.contains("--format openai|anthropic"));
     }
@@ -465,6 +474,7 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         assert_eq!(j["status"], "plan_required");
         assert_eq!(j["upgradeUrl"], family_plan::FAMILY_PLAN_URL);
+        assert_eq!(j["topUp"], family_plan::top_up_note());
         assert!(!p.exists(), "nothing saved before the plan is active");
 
         // Signed in but no org yet (a brand-new user): checkout creates one.
@@ -476,6 +486,7 @@ mod tests {
         let (code, Json(j)) = family_setup(&http, &base, Some(("jwt".into(), Some("org".into()))), "big-smooth-x", &p).await;
         assert_eq!(code, StatusCode::OK, "{j}");
         assert_eq!(j["status"], "saved");
+        assert_eq!(j["topUp"], family_plan::top_up_note());
         assert!(!j.to_string().contains("sk-family"), "the key never goes back to the browser");
         // The URL follows SMOOAI_GATEWAY_URL, which sibling tests set — check the id.
         let (_, key, _) = smooth_cast::providers::route_at(&p, "coding").unwrap();

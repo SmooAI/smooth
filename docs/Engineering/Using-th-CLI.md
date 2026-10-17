@@ -879,6 +879,33 @@ this is the **static-key** model: a persistent virtual key, not the
 ephemeral JWT→session exchange originally sketched in pearl `th-f7b20f`
 (the backend shipped static keys, so `smoo llm` wraps that).
 
+### AI credits (`smoo credits`) — SMOODEV-3969
+
+Prepaid AI credits lift the org's gateway ceiling on top of its monthly
+allowance (smooai ADR-155). `smoo credits` wraps
+`/organizations/{org}/llm-gateway/credits*` with the user session; reading
+needs `billing.read`, buying or changing auto-reload needs `billing.manage`.
+
+```bash
+smoo credits                              # balance, credit used this month, auto-reload (alias: balance; --json)
+smoo credits buy 10                       # open a Stripe Checkout for a pack (alias: top-up; --no-open prints the link)
+smoo credits auto-reload                  # status (--json)
+smoo credits auto-reload on --below 1 --add 10            # preview only
+smoo credits auto-reload on --below 1 --add 10 --confirm  # turn it on (charges the saved card off-session)
+smoo credits auto-reload off
+```
+
+Packs and thresholds are validated locally against the same lists the server
+uses (`smooth_cast::ai_credits::PACKS_CENTS`, `credits::THRESHOLDS_CENTS`).
+`buy` charges nothing by itself: the credit lands when the Checkout is paid.
+Unset `on` flags keep the org's current values.
+
+When a turn runs out of AI budget, the gateway answers `Budget has been
+exceeded` (a 402 with the top-up link since smooai SMOODEV-3967, a 429
+before). `smooth_cast::ai_credits::explain` turns that into one line naming the
+top-up page; it runs in `wire::error_message` (every canonical-protocol client),
+`th code`'s error rendering, and the web SPA's `errorText`.
+
 ### Jobs (async queue)
 
 ```bash
