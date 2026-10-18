@@ -129,6 +129,10 @@ enum Commands {
     /// passing one posts a `ci-attest/<name>` commit status on HEAD. A check
     /// that could not START posts nothing at all — that is not the same as a
     /// check that failed (pearl th-b27ed0).
+    ///
+    /// Each check takes a heavy `th ci-queue` slot. A quick one (a lint, a
+    /// guard) runs in the light pool instead when its script has a whole-line
+    /// `# ci-queue: light` comment; a script that runs cargo stays heavy.
     Attest(attest::AttestArgs),
     /// Run a heavy check through the machine-wide, capacity-aware queue.
     ///
