@@ -478,11 +478,33 @@ fn diagnose(root: &Path) {
     drop(child.wait());
 }
 
+/// The ci-queue class a check's row runs in. Heavy unless the script opts into
+/// the light pool with a whole-line comment `# ci-queue: light` (anywhere in the
+/// file; matched as `^\s*#\s*ci-queue:\s*light\s*$`). Only a comment line
+/// counts: `echo "# ci-queue: light"` is a command, not a marker, so it stays
+/// Heavy. A script that takes the cargo lock is a cargo build and is never
+/// light, marker or not (SMOODEV-4018).
+fn row_class(script_text: &str, takes_cargo_lock: bool) -> ci_queue::Class {
+    let marked = script_text.lines().any(|line| {
+        line.trim()
+            .strip_prefix('#')
+            .and_then(|rest| rest.trim_start().strip_prefix("ci-queue:"))
+            .is_some_and(|value| value.trim() == "light")
+    });
+    if marked && !takes_cargo_lock {
+        ci_queue::Class::Light
+    } else {
+        ci_queue::Class::Heavy
+    }
+}
+
 /// One queued run of `check`, and whether its failure was distrusted for load.
 fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
-    // SMOODEV-3355: every local check takes a heavy slot in the machine-wide
+    // SMOODEV-3355: every local check takes a slot in the machine-wide
     // `th ci-queue` first, so thirty agents attesting at once run two at a time
     // instead of thirty. Inside an already-queued job this admits instantly.
+    // The slot is heavy unless the script opts into the light pool
+    // (`row_class`, SMOODEV-4018).
     let blocked = |secs: u64, note: String| CheckResult {
         name: check.to_string(),
         outcome: Outcome::Blocked,
@@ -496,14 +518,16 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
     // would stall every other Rust build behind that lock (priority inversion,
     // SMOODEV-3355). The script text is the only signal: attest knows nothing
     // about a repo's checks.
-    let locks = if std::fs::read_to_string(&script).is_ok_and(|t| t.contains("cargo")) {
+    let text = std::fs::read_to_string(&script).unwrap_or_default();
+    let locks = if text.contains("cargo") {
         vec![sys.queue.resolve_lock("cargo", root)]
     } else {
         Vec::new()
     };
+    let class = row_class(&text, !locks.is_empty());
     let qos = sys.queue.config.run.qos.effective(!locks.is_empty());
     let request = ci_queue::Request {
-        class: ci_queue::Class::Heavy,
+        class,
         label: format!("attest {check}"),
         cwd: root.to_path_buf(),
         max_wait: Duration::from_secs(sys.queue.config.run.max_wait_secs),
@@ -515,10 +539,13 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
         // Waiting out a busy machine is not a verdict on the commit: nothing
         // is posted and CI runs the row.
         Err(ci_queue::AdmitError::WaitTimeout { waited, reason }) => {
-            eprintln!("⊘ {check} waited {}s for a heavy ci-queue slot ({reason}). Why:", waited.as_secs());
+            eprintln!("⊘ {check} waited {}s for a {} ci-queue slot ({reason}). Why:", waited.as_secs(), class.name());
             diagnose(root);
             return (
-                blocked(waited.as_secs(), format!("no heavy ci-queue slot freed in {}s ({reason})", waited.as_secs())),
+                blocked(
+                    waited.as_secs(),
+                    format!("no {} ci-queue slot freed in {}s ({reason})", class.name(), waited.as_secs()),
+                ),
                 false,
             );
         }
@@ -1057,6 +1084,75 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         let code = f.attest(&["failing"]);
         assert_eq!(f.posted_for("failing"), 0, "a check that never ran may not post a verdict");
         assert_eq!(code, EXIT_PRECONDITION);
+        drop(hogs);
+    }
+
+    // ── SMOODEV-4018: a marked script runs in the light pool ────────────────
+
+    #[test]
+    fn row_class_is_light_only_for_a_marked_script_without_cargo() {
+        use ci_queue::Class::{Heavy, Light};
+        assert_eq!(row_class("# ci-queue: light\nexit 0", false), Light);
+        assert_eq!(
+            row_class("#!/usr/bin/env bash\nset -e\n  #ci-queue:light  \nexit 0", false),
+            Light,
+            "spacing is free"
+        );
+        assert_eq!(row_class("exit 0", false), Heavy, "no marker is today's behaviour");
+        assert_eq!(row_class("", false), Heavy);
+        assert_eq!(row_class("# ci-queue: light\ncargo clippy", true), Heavy, "a cargo build is never light");
+    }
+
+    #[test]
+    fn row_class_ignores_near_misses() {
+        use ci_queue::Class::Heavy;
+        for text in [
+            "echo \"# ci-queue: light\"",
+            "exit 0 # ci-queue: light",
+            "# ci-queue: heavy",
+            "# ci-queue: lightweight",
+            "# ci-queue light",
+            "# CI-QUEUE: LIGHT",
+            "# not ci-queue: light",
+        ] {
+            assert_eq!(row_class(text, false), Heavy, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_marked_check_runs_in_a_light_queue_slot() {
+        let f = fixture();
+        check(&f.root, "quick", "# ci-queue: light\nexit 0");
+        assert_eq!(f.attest(&["quick"]), 0);
+        let h = f.sys.queue.history(10);
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!((h[0].label.as_str(), h[0].class, h[0].exit), ("attest quick", Some(ci_queue::Class::Light), 0));
+    }
+
+    /// The point of the marker: a seconds-long row is not stuck behind a full
+    /// heavy pool, while an unmarked row still waits for a heavy slot.
+    #[test]
+    fn a_marked_check_runs_while_every_heavy_slot_is_held() {
+        let f = fixture();
+        check(&f.root, "quick", "# ci-queue: light\nexit 0");
+        let hogs: Vec<_> = (0..f.sys.queue.config.slots.heavy)
+            .map(|i| {
+                f.sys
+                    .queue
+                    .admit(&ci_queue::Request {
+                        class: ci_queue::Class::Heavy,
+                        label: format!("hog{i}"),
+                        cwd: f.root.clone(),
+                        max_wait: Duration::from_secs(1),
+                        locks: Vec::new(),
+                        cmd_hash: None,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(f.attest(&["quick"]), 0, "the light row must not wait on the heavy pool");
+        assert_eq!(f.posted_state("quick").as_deref(), Some("state=success"));
+        assert_eq!(f.attest(&["passing"]), EXIT_PRECONDITION, "an unmarked row still waits for a heavy slot");
         drop(hogs);
     }
 
