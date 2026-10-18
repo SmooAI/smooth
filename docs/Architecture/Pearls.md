@@ -171,16 +171,17 @@ adds context: **nothing blocks**, so when to start fresh stays the user's call.
 State lives in `~/.smooth/handoff/budget/<session>.json`; a context under half
 the flagged peak means the session compacted, which re-arms every note.
 
-- **Suggest (150k).** Past `harness.context_suggest`, a milestone — a commit,
-  push, `th attest`, `gh pr create`/`merge`, `th pearls checkpoint`/`close`,
-  or a passing test run (`cargo test`, `pnpm test`, `vitest`, `pytest`, …) —
-  asks the agent to add one line to its next report suggesting `/th-clear`.
-  It repeats every 50k after that. A milestone is the right moment: the work
-  is in a consistent state and the handoff is easy to write.
+- **Suggest (150k).** Past `harness.context_suggest`, finished work — `gh pr
+  merge`, `th worktree merge` or `th pearls close` — asks the agent, once per
+  context segment, to mention `/th-clear` in its final report if the user's
+  task is done, and otherwise to keep going. Commits, pushes, PRs and green
+  tests are mid-task, and a suggestion there stalled sessions (SMOODEV-4020):
+  auto-compaction is what keeps a long session going.
 - **Warn (270k).** Once: auto-compaction is near, checkpoint the pearl so the
   re-injected handoff is current.
-- **Reset (300k).** The harness auto-compacts there. Only a context past
-  budget + 10% (the harness is not compacting) gets a note to run th-clear.
+- **Reset (300k).** The harness auto-compacts there. A context past budget +
+  10% (a session launched before `th harness enable`) gets one note to
+  checkpoint the pearl and keep working; its native compaction still comes.
 
 **Statusline.** The smooth-agent statusline (`th doctor --setup-statusline`)
 shows the context against the session's budget, `◔ 162k/300k 54%`, from
@@ -205,9 +206,9 @@ pick it up. The pearl handoff rides along: `PreCompact` checkpoints, and the
 
 | Setting                       | Default   | Effect                                                                                                                                                                                          |
 | ----------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `harness.context_suggest`     | 150000    | past it, a milestone suggests `/th-clear` to the user, again every 50k                                                                                                                          |
+| `harness.context_suggest`     | 150000    | past it, a merge or pearl close has the agent mention `/th-clear`, once per segment                                                                                                            |
 | `harness.context_suggests`    | (none)    | per-harness / per-model suggest overrides, same `selector=tokens` form: `*/claude-sonnet-*=120000`                                                                                              |
-| `harness.context_budget`      | 300000    | the reset point. `compact`: the harness auto-compacts there; a context past budget + 10% gets a note to run th-clear. `clear`: one note to run th-clear                                         |
+| `harness.context_budget`      | 300000    | the reset point. `compact`: the harness auto-compacts there; a context past budget + 10% gets a note to checkpoint. `clear`: one note to run th-clear                                         |
 | `harness.context_budget_warn` | 270000    | one note. `compact`: checkpoint the pearl at the next clean stopping point. `clear`: wrap up and run th-clear                                                                                   |
 | `harness.context_budgets`     | (none)    | overrides as `selector=tokens`: `codex=200000`, `claude-code/claude-opus-*=300000`, `*/claude-sonnet-*=180000`. Most specific wins (harness+model > model > harness); warn keeps the global gap |
 | `harness.context_reset`       | `compact` | `compact` (native auto-compaction) or `clear` (the `/th-clear` flow; `th harness enable` then removes th's threshold)                                                                           |

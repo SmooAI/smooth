@@ -21,10 +21,10 @@
 //! `th harness budget` is the meter: hooked on PostToolUse / UserPromptSubmit,
 //! it reads the session's context size (Claude Code: the last main-thread
 //! assistant `usage` in `transcript_path`) and only ever adds context — it
-//! never blocks. Past `harness.context_suggest`, a milestone (commit, push,
-//! attest, PR, pearl checkpoint, green tests) asks the agent to suggest
-//! `/th-clear` to the user; `harness.context_budget_warn` says the reset is
-//! near. `--statusline` prints the context segment for the statusline.
+//! never blocks. Auto-compaction at the budget is the default reset; past
+//! `harness.context_suggest`, a finished piece of work (a merge, a pearl
+//! close) asks the agent, once per context segment, to mention `/th-clear` in
+//! its report; `harness.context_budget_warn` says the reset is near. `--statusline` prints the context segment for the statusline.
 //!
 //! Every hook path is silent and exits 0 on any failure — a hook never breaks
 //! the harness.
@@ -713,9 +713,6 @@ pub enum Verdict {
     Context(String),
 }
 
-/// After a suggestion, the next one waits for this much more context.
-pub const SUGGEST_STEP: u64 = 50_000;
-
 fn k(n: u64) -> String {
     format!("{}k", n / 1000)
 }
@@ -730,58 +727,17 @@ fn shell_command(payload: &Value) -> Option<String> {
     }
 }
 
-/// The tool's output as text (Claude Code: `{stdout, stderr, …}`; others: a string).
-fn tool_output(payload: &Value) -> String {
-    match payload.get("tool_response").or_else(|| payload.get("tool_output")) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Object(o)) => ["stdout", "stderr", "output"]
-            .iter()
-            .filter_map(|k| o.get(*k).and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
-/// Did a test run's output report a failure? (`FAILED`/`FAIL`, or `N failed` with N > 0.)
-#[must_use]
-pub fn output_failed(out: &str) -> bool {
-    if out.contains("FAIL") {
-        return true;
-    }
-    out.match_indices(" failed").any(|(i, _)| {
-        let head = out[..i].trim_end_matches(' ');
-        let digits: String = head.chars().rev().take_while(char::is_ascii_digit).collect();
-        digits.chars().any(|c| c != '0')
-    })
-}
-
-/// Milestones: shell commands that end a piece of work, as consecutive words.
+/// Handoff points: shell commands that finish a piece of work, as consecutive
+/// words. Commits, pushes, PRs and green tests happen mid-task, so they are
+/// not here — a suggestion there stalls the work (SMOODEV-4020).
 const MILESTONES: &[(&[&str], &str)] = &[
-    (&["git", "commit"], "a commit"),
-    (&["git", "push"], "a push"),
-    (&["th", "attest"], "th attest"),
-    (&["gh", "pr", "create"], "opening a PR"),
     (&["gh", "pr", "merge"], "a merge"),
-    (&["th", "pearls", "checkpoint"], "a pearl checkpoint"),
+    (&["th", "worktree", "merge"], "a merge"),
     (&["th", "pearls", "close"], "closing a pearl"),
 ];
 
-/// Test runners: a milestone only when the run passed.
-const TEST_RUNS: &[&[&str]] = &[
-    &["cargo", "test"],
-    &["cargo", "nextest"],
-    &["pnpm", "test"],
-    &["npm", "test"],
-    &["yarn", "test"],
-    &["bun", "test"],
-    &["go", "test"],
-    &["vitest"],
-    &["pytest"],
-];
-
-/// The milestone a PostToolUse payload marks — a commit, push, attest, PR,
-/// pearl checkpoint/close, or a passing test run — as a short label.
+/// The handoff point a PostToolUse payload marks — a merge or a pearl close —
+/// as a short label.
 #[must_use]
 pub fn milestone(payload: &Value) -> Option<&'static str> {
     let cmd = shell_command(payload)?;
@@ -791,21 +747,7 @@ pub fn milestone(payload: &Value) -> Option<&'static str> {
         .map(|w| w.rsplit('/').next().unwrap_or(w))
         .collect();
     let has = |seq: &[&str]| words.windows(seq.len()).any(|w| w == seq);
-    if let Some((_, label)) = MILESTONES.iter().find(|(seq, _)| has(seq)) {
-        return Some(*label);
-    }
-    if TEST_RUNS.iter().any(|seq| has(seq)) {
-        let resp = payload.get("tool_response");
-        let interrupted = resp.and_then(|r| r.get("interrupted")).and_then(Value::as_bool) == Some(true);
-        let exit = resp
-            .and_then(|r| r.get("exit_code").or_else(|| r.get("exitCode")))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        if !interrupted && exit == 0 && !output_failed(&tool_output(payload)) {
-            return Some("a passing test run");
-        }
-    }
-    None
+    MILESTONES.iter().find(|(seq, _)| has(seq)).map(|(_, label)| *label)
 }
 
 /// A session's lines: who it is and where each one sits.
@@ -823,13 +765,13 @@ pub struct Limits<'a> {
 
 /// The budget decision for one hook event. Never blocks; at most one note.
 ///
-/// - **Suggest** — a [`milestone`] with context past `suggest` asks the agent
-///   to tell the user this is a good point to `/th-clear`; again every
-///   [`SUGGEST_STEP`] after that.
+/// - **Suggest** — once, a [`milestone`] with context past `suggest` asks the
+///   agent to mention `/th-clear` in its report and keep working.
 /// - **Warn** — once, past `warn`: the reset is near, checkpoint the pearl
 ///   (compact) or wrap up and th-clear (clear).
 /// - **Over** — once, past `hard` (clear mode) or `hard` + 10% (compact mode,
-///   where the harness should have compacted at `hard` by itself).
+///   where the harness should have compacted at `hard` by itself; the native
+///   compaction still comes, so the agent only checkpoints and keeps going).
 ///
 /// A context under half of the flagged peak means the session compacted (or
 /// was cleared), so the flags re-arm for the next segment.
@@ -866,19 +808,23 @@ fn note(limits: &Limits<'_>, event: &str, tokens: u64, s: &mut BudgetState, mile
     if hard > 0 && tokens >= over_line && !s.over_noted {
         s.over_noted = true;
         s.warned = true;
-        let why = match reset {
-            Reset::Clear => format!("Context is at {}, over this session's {} budget (harness.context_budget). ", k(tokens), k(hard)),
-            Reset::Compact => format!(
-                "Context is at {} and this harness has not auto-compacted at the {} budget — it reads the threshold at launch, so this \
-                 session predates `th harness enable {harness}`, or the harness has no auto-compaction. ",
+        return Verdict::Context(match reset {
+            Reset::Clear => format!(
+                "Context is at {}, over this session's {} budget (harness.context_budget). At the next clean stopping point, invoke the \
+                 th-clear skill (it checkpoints the work into a pearl and arms the resume) and give the user the line it prints. Until \
+                 then, keep working.",
                 k(tokens),
                 k(hard)
             ),
-        };
-        return Verdict::Context(format!(
-            "{why}At the next clean stopping point, invoke the th-clear skill (it checkpoints the work into a pearl and arms the resume) \
-             and give the user the line it prints. Until then, keep working."
-        ));
+            Reset::Compact => format!(
+                "Context is at {} and this harness has not auto-compacted at the {} budget — it reads the threshold at launch, so this \
+                 session predates `th harness enable {harness}`; it still auto-compacts near its full window. Keep working: checkpoint \
+                 the pearl you are on (`th pearls checkpoint <id> --note \"…\" --next \"…\"`) so the handoff survives the compaction. \
+                 No /clear or th-clear needed.",
+                k(tokens),
+                k(hard)
+            ),
+        });
     }
     if warn > 0 && tokens >= warn && !s.warned {
         s.warned = true;
@@ -898,7 +844,7 @@ fn note(limits: &Limits<'_>, event: &str, tokens: u64, s: &mut BudgetState, mile
             ),
         });
     }
-    let due = suggest > 0 && tokens >= suggest && (s.suggested_at == 0 || tokens >= s.suggested_at + SUGGEST_STEP);
+    let due = suggest > 0 && tokens >= suggest && s.suggested_at == 0;
     if let (true, "PostToolUse", Some(what)) = (due, event, milestone) {
         s.suggested_at = tokens;
         let later = match reset {
@@ -906,9 +852,9 @@ fn note(limits: &Limits<'_>, event: &str, tokens: u64, s: &mut BudgetState, mile
             _ => String::new(),
         };
         return Verdict::Context(format!(
-            "Checkpoint reached ({what}) with context at {} (harness.context_suggest {}). Every later call resends all of it, so this is \
-             a good point to start fresh. When you next report to the user, add one line suggesting /th-clear — it hands this work to a \
-             pearl and resumes it in a clean context. Don't run it unasked; carry on with the task.{later}",
+            "Work finished ({what}) with context at {} (harness.context_suggest {}). If this ends what the user asked for, add one line \
+             to your final report saying /th-clear would start the next task fresh. If more work remains, don't mention it and don't \
+             stop — carry on with the task; the session takes care of itself.{later}",
             k(tokens),
             k(suggest)
         ));
@@ -1390,7 +1336,7 @@ mod tests {
     }
 
     fn at_milestone(tokens: u64, state: &BudgetState) -> (Verdict, BudgetState) {
-        decide_session(&limits(Reset::Compact), "PostToolUse", tokens, state, Some("a commit"))
+        decide_session(&limits(Reset::Compact), "PostToolUse", tokens, state, Some("a merge"))
     }
 
     fn bash(cmd: &str, response: &Value) -> Value {
@@ -1416,19 +1362,21 @@ mod tests {
     }
 
     #[test]
-    fn a_milestone_past_suggest_suggests_th_clear_then_every_50k() {
+    fn a_handoff_point_past_suggest_suggests_th_clear_once_per_segment() {
         let (v, s) = at_milestone(160_000, &BudgetState::default());
         let Verdict::Context(m) = v else { panic!("expected a suggestion") };
         assert!(
-            m.contains("a commit") && m.contains("160k") && m.contains("/th-clear") && m.contains("unasked"),
+            m.contains("a merge") && m.contains("160k") && m.contains("/th-clear") && m.contains("don't stop"),
             "{m}"
         );
-        assert!(m.contains("auto-compacts at about 300k"), "{m}");
+        assert!(m.contains("carry on with the task") && m.contains("auto-compacts at about 300k"), "{m}");
         assert_eq!(s.suggested_at, 160_000);
-        assert_eq!(at_milestone(200_000, &s).0, Verdict::Quiet, "under +50k");
-        let (v, s2) = at_milestone(210_000, &s);
-        assert!(matches!(v, Verdict::Context(ref m) if m.contains("210k")), "+50k suggests again");
-        assert_eq!(s2.suggested_at, 210_000);
+        for later in [210_000, 260_000, 290_000] {
+            assert!(
+                !matches!(at_milestone(later, &s).0, Verdict::Context(ref m) if m.contains("/th-clear")),
+                "{later}: once per segment"
+            );
+        }
     }
 
     #[test]
@@ -1455,12 +1403,12 @@ mod tests {
         assert!(!m.contains("th-clear skill"), "{m}");
         assert!(s.warned && s.peak == 275_000);
         assert_eq!(session("PostToolUse", 280_000, &s).0, Verdict::Quiet, "once");
-        // A milestone after the warn still suggests.
+        // A handoff point after the warn still suggests.
         assert!(matches!(at_milestone(280_000, &s).0, Verdict::Context(ref m) if m.contains("/th-clear")));
     }
 
     #[test]
-    fn compact_mode_notes_th_clear_only_past_budget_plus_ten_percent() {
+    fn compact_mode_notes_only_past_budget_plus_ten_percent_and_keeps_working() {
         let warned = session("PostToolUse", 275_000, &BudgetState::default()).1;
         assert_eq!(
             session("PostToolUse", 320_000, &warned).0,
@@ -1472,9 +1420,10 @@ mod tests {
             panic!("expected a note past budget + 10%")
         };
         assert!(
-            m.contains("has not auto-compacted") && m.contains("th harness enable claude-code") && m.contains("th-clear"),
+            m.contains("has not auto-compacted") && m.contains("th harness enable claude-code") && m.contains("Keep working"),
             "{m}"
         );
+        assert!(!m.contains("invoke the th-clear skill"), "compact mode never sends the agent to th-clear: {m}");
         assert!(s.over_noted);
         assert_eq!(session("PostToolUse", 345_000, &s).0, Verdict::Quiet, "once");
     }
@@ -1522,49 +1471,30 @@ mod tests {
     }
 
     #[test]
-    fn milestones_are_work_boundaries() {
+    fn only_finished_work_is_a_handoff_point() {
         let ok = json!({"stdout": "done", "stderr": "", "interrupted": false});
-        let commit = ["git", "commit -m x"].join(" ");
-        assert_eq!(milestone(&bash(&commit, &ok)), Some("a commit"));
-        assert_eq!(milestone(&bash("cd /x && git -C . status; git push -u origin b", &ok)), Some("a push"));
-        assert_eq!(milestone(&bash("th attest --all", &ok)), Some("th attest"));
-        assert_eq!(milestone(&bash("gh pr create --title t", &ok)), Some("opening a PR"));
         assert_eq!(milestone(&bash("gh pr merge 5 --squash", &ok)), Some("a merge"));
-        assert_eq!(milestone(&bash("th pearls checkpoint th-1 --note n", &ok)), Some("a pearl checkpoint"));
+        assert_eq!(milestone(&bash("th worktree merge SMOODEV-1-x", &ok)), Some("a merge"));
         assert_eq!(milestone(&bash("/usr/local/bin/th pearls close th-1", &ok)), Some("closing a pearl"));
-        assert_eq!(milestone(&bash("git status", &ok)), None);
-        assert_eq!(milestone(&bash("echo th-attest", &ok)), None);
+        // Mid-task steps never suggest a clear.
+        let commit = ["git", "commit -m x"].join(" ");
+        for cmd in [
+            commit.as_str(),
+            "cd /x && git push -u origin b",
+            "th attest --all",
+            "gh pr create --title t",
+            "th pearls checkpoint th-1 --note n",
+            "cargo test -p x",
+            "pnpm test",
+            "git status",
+            "echo th-pearls-close",
+        ] {
+            assert_eq!(milestone(&bash(cmd, &ok)), None, "{cmd}");
+        }
         assert_eq!(milestone(&json!({"tool_name": "Edit", "tool_input": {"file_path": "x"}})), None);
         // Codex passes the command as argv.
-        let argv = json!({"tool_name": "shell", "tool_input": {"command": ["bash", "-lc", "git push"]}});
-        assert_eq!(milestone(&argv), Some("a push"));
-    }
-
-    #[test]
-    fn only_a_passing_test_run_is_a_milestone() {
-        let pass = json!({"stdout": "test result: ok. 102 passed; 0 failed; 0 ignored", "stderr": ""});
-        assert_eq!(milestone(&bash("cargo test -p x", &pass)), Some("a passing test run"));
-        let fail = json!({"stdout": "test result: FAILED. 1 passed; 1 failed", "stderr": ""});
-        assert_eq!(milestone(&bash("cargo test", &fail)), None);
-        let vitest = json!({"stdout": "Tests  2 failed | 5 passed", "stderr": ""});
-        assert_eq!(milestone(&bash("pnpm test", &vitest)), None);
-        let code = json!({"stdout": "", "stderr": "", "exit_code": 1});
-        assert_eq!(milestone(&bash("pytest", &code)), None);
-        let cut = json!({"stdout": "", "stderr": "", "interrupted": true});
-        assert_eq!(milestone(&bash("go test ./...", &cut)), None);
-        assert_eq!(
-            milestone(&bash("th ci-queue run --lock cargo -- cargo test", &json!("ok"))),
-            Some("a passing test run")
-        );
-    }
-
-    #[test]
-    fn output_failed_reads_counts() {
-        assert!(!output_failed("3 passed; 0 failed"));
-        assert!(output_failed("1 failed, 2 passed"));
-        assert!(output_failed("  10 failed"));
-        assert!(!output_failed("nothing failed here"));
-        assert!(output_failed("FAIL src/a.test.ts"));
+        let argv = json!({"tool_name": "shell", "tool_input": {"command": ["bash", "-lc", "gh pr merge 9"]}});
+        assert_eq!(milestone(&argv), Some("a merge"));
     }
 
     #[test]
