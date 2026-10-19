@@ -499,7 +499,7 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
         }
         "Error" => {
             if let Some(message) = event.get("message").and_then(|m| m.as_str()) {
-                eprintln!("[error] {message}");
+                eprintln!("[error] {}", smooth_cast::ai_credits::explain(message));
             }
         }
         "Completed" => {

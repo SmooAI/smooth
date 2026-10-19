@@ -82,6 +82,21 @@ export function mergeSteer<A>(prev: PendingSteer<A> | null, next: PendingSteer<A
     };
 }
 
+/** The dashboard's AI credits card (smooai `AI_CREDITS_TOP_UP_PATH`); mirrors `smooth_cast::ai_credits::TOP_UP_URL`. */
+export const AI_CREDITS_TOP_UP_URL = 'https://smoo.ai/apps/llm-gateway#ai-credits';
+/** The packs, in cents (smooai `AI_CREDIT_PACKS_CENTS`). */
+export const AI_CREDIT_PACKS_CENTS = [500, 1000] as const;
+const PACKS_IN_WORDS = AI_CREDIT_PACKS_CENTS.map((c) => `$${c % 100 === 0 ? c / 100 : (c / 100).toFixed(2)}`).join(' or ');
+
+/** SMOODEV-3967: a turn that died on the gateway budget (`Budget has been exceeded`, a
+ * 402 since the gateway callback, a 429 before it) becomes one line naming the top-up
+ * page — the link the gateway sent, else the dashboard's. `null` for any other error. */
+export function budgetExceededHint(text: string): string | null {
+    if (!text.includes('Budget has been exceeded') && !text.includes('"budget_exceeded"')) return null;
+    const url = text.match(/https:\/\/[^\s"'\\)\]},]*#ai-credits/)?.[0] ?? AI_CREDITS_TOP_UP_URL;
+    return `Out of AI budget on the Smoo AI gateway. Add AI credits (${PACKS_IN_WORDS}; auto-reload optional): ${url} or \`smoo credits buy\``;
+}
+
 /** The human text of an `error` frame. The engine puts it at `error.message` (and
  * `data.error.message`), not at a top-level `message`. Reading only `message` is
  * why every error rendered as a bare "operator error". */
@@ -90,5 +105,6 @@ export function errorText(ev: {
     error?: { message?: string; code?: string };
     data?: { message?: string; error?: { message?: string } };
 }): string {
-    return ev.error?.message ?? ev.data?.error?.message ?? ev.message ?? ev.data?.message ?? 'operator error';
+    const text = ev.error?.message ?? ev.data?.error?.message ?? ev.message ?? ev.data?.message ?? 'operator error';
+    return budgetExceededHint(text) ?? text;
 }

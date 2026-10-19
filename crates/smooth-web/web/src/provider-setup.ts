@@ -64,7 +64,7 @@ export function validateByoForm(f: ByoForm): string | null {
 /** What the card shows after a POST /api/llm/provider/family answer. */
 export type FamilyStep =
     | { kind: 'saved'; message: string }
-    | { kind: 'checkout'; upgradeUrl: string; message: string }
+    | { kind: 'checkout'; upgradeUrl: string; message: string; topUp: string }
     | { kind: 'signin'; message: string }
     | { kind: 'error'; message: string };
 
@@ -79,7 +79,9 @@ export function familyStepFrom(body: unknown): FamilyStep {
                 typeof b.upgradeUrl === 'string' && b.upgradeUrl.startsWith('https://')
                     ? b.upgradeUrl
                     : 'https://smoo.ai/apps/start/product?plan=Family%20plan&term=monthly';
-            return { kind: 'checkout', upgradeUrl: url, message };
+            // SMOODEV-3969: the daemon's "Top up $5 or $10 anytime during the trial …" line.
+            const topUp = typeof b.topUp === 'string' ? b.topUp : '';
+            return { kind: 'checkout', upgradeUrl: url, message, topUp };
         }
         case 'signed_out':
             return { kind: 'signin', message };

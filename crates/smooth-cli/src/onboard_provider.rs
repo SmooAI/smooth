@@ -341,6 +341,7 @@ async fn setup_family_plan() -> Result<bool> {
                 family_plan::FAMILY_PLAN_PITCH
             );
             eprintln!("    {}", upgrade_url.cyan());
+            eprintln!("    {}", paint(&family_plan::top_up_note(), |g| g.dimmed().to_string()));
             if let Err(e) = open::that(&upgrade_url) {
                 eprintln!("    (couldn't open a browser: {e} — open the link above)");
             }
@@ -368,6 +369,7 @@ async fn setup_family_plan() -> Result<bool> {
         paint("●", |g| g.bold().to_string()),
         path.display()
     );
+    eprintln!("  {} {}", paint("○", |g| g.dimmed().to_string()), family_plan::top_up_note());
     Ok(true)
 }
 

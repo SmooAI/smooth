@@ -1068,7 +1068,8 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         }
         AgentEvent::Error { message } => {
             state.finish_streaming();
-            state.add_message(ChatMessage::system(format!("Error: {message}")));
+            // A gateway budget refusal reads as the top-up link, not the raw body (SMOODEV-3967).
+            state.add_message(ChatMessage::system(format!("Error: {}", smooth_cast::ai_credits::explain(&message))));
         }
         // Pearl th-486bd0: non-workflow agent paths (single-Agent
         // loop without coding_workflow phases) emit LlmRequest at

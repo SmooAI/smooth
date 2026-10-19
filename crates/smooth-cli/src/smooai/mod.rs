@@ -21,6 +21,7 @@ pub mod calling;
 pub mod calling_config;
 pub mod campaigns;
 pub mod crawl;
+pub mod credits;
 pub mod crm;
 pub mod crm_bulk;
 pub mod crm_duplicates;
