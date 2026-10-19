@@ -66,6 +66,8 @@ th pearls create / ready / list / show / update / close / push / pull
 # `th attest` knows nothing about any particular repo's checks. Three outcomes:
 # pass → success, fail → failure, COULD-NOT-RUN (exit 97) → nothing posted,
 # because a status is a claim about the COMMIT, not about your laptop.
+# Each row takes a HEAVY ci-queue slot unless its script has a whole-line
+# `# ci-queue: light` comment (a quick lint/guard; ignored when it runs cargo).
 th attest <check>… | --all | --status | --no-push | --remote <host> | --local
 
 # Run a heavy check (typecheck, clippy, a test suite) through the machine-wide

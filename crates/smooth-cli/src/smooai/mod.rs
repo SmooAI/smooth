@@ -45,6 +45,7 @@ pub mod org_notifications;
 pub mod products;
 pub mod profile;
 pub mod referrals;
+pub mod ring_groups;
 pub mod roles;
 pub mod search_console;
 pub mod sheets;

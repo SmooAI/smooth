@@ -1,5 +1,34 @@
 # @smooai/smooth
 
+## 0.81.1
+
+### Patch Changes
+
+- efc2e17: SMOODEV-4018: `th attest` runs a check in the ci-queue light pool when its script has a whole-line `# ci-queue: light` comment, so seconds-long rows no longer wait behind heavy Rust and iOS jobs. Unmarked scripts, and any script that takes the cargo lock, still run heavy.
+
+## 0.81.0
+
+### Minor Changes
+
+- 947a383: Big Smooth now helps a new user pick a model on first run. The choice is the Family plan ($9/month, 14-day free trial, hosted models through the Smoo AI gateway) or your own OpenAI-compatible or Anthropic key. Your own key is tested with one request before it is saved.
+
+  The picker appears in these places:
+
+  - `th up`, when no model is configured
+  - `th model setup`
+  - `th doctor --onboard`
+  - a first-run card in the web UI
+
+  In chat, Big Smooth can switch endpoints with the new `configure_provider` tool, which asks you to approve each change. Big Smooth also reports when a switch needs a restart.
+
+- db146a2: `th smoo calling ring-groups list|show|set|members` (alias `departments`) lets an admin read and change ring group settings: strategy, ring-first seconds, message-only, notify email, enabled, and the ordered member list with ring-first and off flags. It calls the same api-prime routes as the Calling settings page, so a non-admin gets the API's 403, reported as "admin only".
+
+## 0.80.2
+
+### Patch Changes
+
+- cec423b: New `th install-prompt [--copy]`: prints the prompt that sets `th` up from inside Claude Code, Codex or OpenCode (install or update, `th harness enable` for each, verify the context budget, choose a model), and `--copy` puts it on the clipboard. The README now leads with that prompt, the Family plan or bring-your-own-key choice, and what Big Smooth and the harness toolbox do today. New Start-Here docs: Quickstart, Install Prompt and Roadmap.
+
 ## 0.80.1
 
 ### Patch Changes

@@ -35,6 +35,7 @@ pub mod capabilities_route;
 pub mod ci_queue_route;
 pub mod cloud_memory;
 pub mod config;
+pub mod configure_provider;
 pub mod cwd_route;
 mod flow_addr;
 pub mod flow_e2e;

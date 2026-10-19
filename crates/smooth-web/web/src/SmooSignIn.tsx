@@ -8,7 +8,7 @@
 import { ExternalLink, Sparkles, UserCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-interface AuthStatus {
+export interface AuthStatus {
     loggedIn: boolean;
     user: string | null;
     orgId: string | null;
@@ -18,7 +18,7 @@ interface AuthStatus {
     expired?: boolean;
 }
 
-interface DeviceStart {
+export interface DeviceStart {
     user_code: string;
     verification_uri: string;
     verification_uri_complete: string;
@@ -27,7 +27,10 @@ interface DeviceStart {
 // top offset clears the iOS status bar in an installed PWA (th-086d97).
 const PILL = 'fixed top-[calc(env(safe-area-inset-top)+1rem)] right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs';
 
-export function SmooSignIn() {
+/** The sign-in state machine, shared by the top-right pill and the first-run
+ * card's Family plan door (SMOODEV-3918): polls /api/auth/status and starts the
+ * device flow, popping the approval page. */
+export function useSmooAuth() {
     const [status, setStatus] = useState<AuthStatus | null>(null);
     const [device, setDevice] = useState<DeviceStart | null>(null);
     const [error, setError] = useState(false);
@@ -64,6 +67,12 @@ export function SmooSignIn() {
             })
             .catch(() => setError(true));
     };
+
+    return { status, device, error, startSignIn };
+}
+
+export function SmooSignIn() {
+    const { status, device, error, startSignIn } = useSmooAuth();
 
     // Until the first poll returns, render nothing rather than flash a wrong state.
     if (!status) return null;

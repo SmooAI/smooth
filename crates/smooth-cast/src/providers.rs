@@ -253,11 +253,54 @@ pub fn set_routing_slot(root: &mut Value, slot_key: &str, provider: &str, model:
 }
 
 /// Point every routing slot at `provider`/`model`. Used to bootstrap a
-/// fresh file's routing when the first provider is added.
-fn wire_routing_to(root: &mut Value, provider: &str, model: &str) {
+/// fresh file's routing when the first provider is added, and by onboarding
+/// (`th up`'s picker, the daemon's `configure_provider` tool) when the user
+/// explicitly switches Big Smooth to a provider.
+pub fn wire_routing_to(root: &mut Value, provider: &str, model: &str) {
     for slot in ["coding", "reasoning", "reviewing", "judge", "summarize", "fast", "default"] {
         set_routing_slot(root, slot, provider, model);
     }
+}
+
+fn provider_by_id<'a>(providers: &'a [Value], id: Option<&str>) -> Option<&'a Value> {
+    let id = id?;
+    providers.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(id))
+}
+
+/// Resolve a routing slot of a parsed providers.json to `(api_url, api_key,
+/// model)` — the rule Big Smooth uses to pick its gateway at boot.
+///
+/// The provider is found BY the slot's own `provider` id (every writer stamps a
+/// different id), falling back to the `coding` slot's provider, then the sole
+/// provider. A provider with an empty key resolves `None` (the daemon cannot
+/// run a turn without one). The model falls back from the slot to `coding`, to
+/// the provider default, to the gateway's default slot model.
+#[must_use]
+pub fn route_from_value(v: &Value, route: &str) -> Option<(String, String, String)> {
+    let providers = v.get("providers")?.as_array()?;
+    let slot_provider = |r: &str| v.pointer(&format!("/routing/{r}/provider")).and_then(Value::as_str).map(str::to_owned);
+    let route_id = slot_provider(route);
+    let coding_id = slot_provider("coding");
+    let provider = provider_by_id(providers, route_id.as_deref())
+        .or_else(|| provider_by_id(providers, coding_id.as_deref()))
+        .or_else(|| if providers.len() == 1 { providers.first() } else { None })?;
+    let url = provider.get("api_url")?.as_str()?.to_owned();
+    let key = provider.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
+    let model = v
+        .pointer(&format!("/routing/{route}/model"))
+        .and_then(Value::as_str)
+        .or_else(|| v.pointer("/routing/coding/model").and_then(Value::as_str))
+        .or_else(|| provider.get("default_model").and_then(Value::as_str))
+        .unwrap_or(smooth_policy::smooth_alias::SmoothSlot::Default.concrete_default())
+        .to_owned();
+    Some((url, key, model))
+}
+
+/// [`route_from_value`] against a file. `None` when it is missing or unparseable.
+#[must_use]
+pub fn route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    route_from_value(&v, route)
 }
 
 #[cfg(test)]

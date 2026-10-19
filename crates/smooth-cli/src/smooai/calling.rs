@@ -166,6 +166,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: super::calling_config::SettingsCmd,
     },
+    /// Ring groups (departments): strategy, ring-first, message-only, members (SMOODEV-3960).
+    #[command(name = "ring-groups", visible_aliases = ["ring-group", "departments"])]
+    RingGroups {
+        #[command(subcommand)]
+        cmd: super::ring_groups::RingGroupsCmd,
+    },
 }
 
 /// An id destined for a URL path segment. Smoo ids are UUIDs; anything with a
@@ -425,6 +431,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Numbers { cmd } => return super::calling_config::numbers(cmd).await,
         Cmd::Hours { cmd } => return super::calling_config::hours(cmd).await,
         Cmd::Settings { cmd } => return super::calling_config::settings(cmd).await,
+        Cmd::RingGroups { cmd } => return super::ring_groups::ring_groups(cmd).await,
         Cmd::List {
             direction,
             status,
@@ -662,6 +669,15 @@ mod tests {
         assert!(matches!(
             parse(&["settings", "update", "--set", "autoExpandSeats=false", "--yes"]).unwrap(),
             Cmd::Settings { .. }
+        ));
+        assert!(matches!(parse(&["ring-groups", "ls"]).unwrap(), Cmd::RingGroups { .. }));
+        assert!(matches!(
+            parse(&["departments", "set", "g1", "--ring-first-seconds", "10", "--message-only", "false", "--yes"]).unwrap(),
+            Cmd::RingGroups { .. }
+        ));
+        assert!(matches!(
+            parse(&["ring-groups", "members", "g1", "--member", "u1:first", "--member", "u2", "--dry-run"]).unwrap(),
+            Cmd::RingGroups { .. }
         ));
     }
 
