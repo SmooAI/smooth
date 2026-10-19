@@ -1963,6 +1963,23 @@ own tests, so neither is discovered. `th attest` contains no knowledge of any
 particular repo's checks — see `smooai/scripts/ci/README.md` for the reference
 implementation of the check side.
 
+Every local check takes a slot in the machine-wide `th ci-queue` first. By
+default that is a **heavy** slot, so a two-second lint waits behind 20-minute
+Rust and iOS jobs. A check that is quick opts into the **light** pool (six slots,
+never held by the pressure gate) with a whole-line comment anywhere in its
+script:
+
+```bash
+#!/usr/bin/env bash
+# ci-queue: light
+```
+
+The line must match `^\s*#\s*ci-queue:\s*light\s*$`. Only a comment line counts,
+so `echo "# ci-queue: light"` is not a marker. A script that mentions `cargo`
+takes the queue's cargo lock and **stays heavy even when marked**, because a
+cargo build is never light. With no marker the row runs heavy, as before
+(SMOODEV-4018).
+
 Each passing check posts a `ci-attest/<name>` commit status on HEAD, which the
 workflow reads to skip that row. Freshness is free: the status is bound to a
 SHA, so pushing a new commit un-credits everything.
