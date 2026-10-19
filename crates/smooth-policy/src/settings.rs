@@ -231,7 +231,7 @@ pub const REGISTRY: &[SettingDef] = &[
         default: Some("150000"),
         default_note: "",
         env: "SMOOTH_CONTEXT_SUGGEST",
-        description: "Context tokens past which a milestone (commit, push, th attest, PR, pearl checkpoint, green tests) makes the agent suggest /th-clear to the user, again every 50k; 0 disables",
+        description: "Context tokens past which finished work (a merge, a pearl close) has the agent mention /th-clear in its final report, once per context segment; 0 disables",
         component: "harness",
         apply: Apply::Immediate,
     },
