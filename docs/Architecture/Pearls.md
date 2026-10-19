@@ -172,7 +172,7 @@ State lives in `~/.smooth/handoff/budget/<session>.json`; a context under half
 the flagged peak means the session compacted, which re-arms every note.
 
 - **Suggest (150k).** Past `harness.context_suggest`, finished work — `gh pr
-  merge`, `th worktree merge` or `th pearls close` — asks the agent, once per
+merge`, `th worktree merge` or `th pearls close` — asks the agent, once per
   context segment, to mention `/th-clear` in its final report if the user's
   task is done, and otherwise to keep going. Commits, pushes, PRs and green
   tests are mid-task, and a suggestion there stalled sessions (SMOODEV-4020):
