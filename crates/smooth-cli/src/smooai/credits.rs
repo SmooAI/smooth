@@ -549,8 +549,8 @@ mod tests {
 
     #[test]
     fn explain_gives_two_lines_with_the_server_message() {
-        let e = explain(anyhow!(
-            r#"PUT https://api.smoo.ai/x returned HTTP 409 Conflict: {"message":"Add a card to your billing details to turn on auto-reload."}"#
+        let e = explain(anyhow::Error::msg(
+            r#"PUT https://api.smoo.ai/x returned HTTP 409 Conflict: {"message":"Add a card to your billing details to turn on auto-reload."}"#,
         ))
         .to_string();
         let mut lines = e.lines();

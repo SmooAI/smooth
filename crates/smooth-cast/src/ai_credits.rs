@@ -26,7 +26,7 @@ const BUDGET_EXCEEDED_TYPE: &str = "\"budget_exceeded\"";
 /// `$5` for 500 cents, `$2.50` for 250.
 #[must_use]
 pub fn dollars(cents: u32) -> String {
-    if cents % 100 == 0 {
+    if cents.is_multiple_of(100) {
         format!("${}", cents / 100)
     } else {
         format!("${}.{:02}", cents / 100, cents % 100)
