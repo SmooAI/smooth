@@ -19,8 +19,6 @@ pub mod booking;
 pub mod branding;
 pub mod calling;
 pub mod calling_config;
-// SMOODEV-4052: `calling numbers available|attach|buy`.
-pub mod phone_numbers;
 pub mod campaigns;
 pub mod crawl;
 pub mod credits;
@@ -45,6 +43,8 @@ pub mod notification_prefs;
 pub mod notify;
 pub mod observability;
 pub mod org_notifications;
+// SMOODEV-4052: `calling numbers available|attach|buy`.
+pub mod phone_numbers;
 pub mod products;
 pub mod profile;
 pub mod referrals;
