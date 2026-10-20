@@ -973,6 +973,13 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::calling::Cmd,
     },
+    /// Enterprise SSO — connections, linking existing accounts, and Require
+    /// SSO (previews the lockout count, confirms first). CLI twin of the hosted
+    /// MCP `sso_*` tools. Needs `org.sso.manage` and the SSO feature.
+    Sso {
+        #[command(subcommand)]
+        cmd: smooai::sso::Cmd,
+    },
     /// Support health report — open/solved tickets, CSAT, first response,
     /// SLA breaches. CLI twin of the copilot's `support.report`.
     Support {
@@ -2064,6 +2071,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
+        SmooCommands::Sso { cmd } => smooai::sso::cmd(cmd).await,
         SmooCommands::Support { cmd } => smooai::support::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
