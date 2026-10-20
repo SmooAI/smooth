@@ -123,6 +123,57 @@ pub enum HoursCmd {
         #[command(flatten)]
         confirm: Confirm,
     },
+    /// One schedule with its windows and holidays (SMOODEV-4052).
+    #[command(visible_alias = "get")]
+    Show {
+        /// The schedule id (from `calling hours list`).
+        hours_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a schedule (needs calling admin). No number uses it until one is
+    /// pointed at it (`calling numbers update <id> --set businessHoursId=<id>`).
+    #[command(visible_alias = "new")]
+    Create {
+        /// The schedule's name (1-100 characters), e.g. "Main office".
+        name: String,
+        /// IANA timezone, e.g. America/Indiana/Indianapolis.
+        #[arg(long, visible_alias = "tz")]
+        timezone: String,
+        /// An open window (repeatable): `mon:09:00-17:00` or a range `mon-fri:09:00-17:00`.
+        #[arg(long = "window", value_name = "DAY[-DAY]:HH:MM-HH:MM")]
+        windows: Vec<String>,
+        /// Make it the org's default schedule.
+        #[arg(long)]
+        default: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
+    /// Delete a schedule and its holidays (needs calling admin). Refused while a
+    /// phone number uses it.
+    #[command(visible_alias = "rm")]
+    Delete {
+        /// The schedule id (from `calling hours list`).
+        hours_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
+    /// A schedule's holidays: get, or set (with the `--us-holidays` preset) (SMOODEV-4052).
+    #[command(visible_alias = "holiday")]
+    Holidays {
+        #[command(subcommand)]
+        cmd: super::business_hours::HolidaysCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -371,6 +422,17 @@ pub async fn hours(cmd: HoursCmd) -> Result<()> {
             )
             .await?;
         }
+        HoursCmd::Show { hours_id, org, json } => super::business_hours::show(&hours_id, org, json).await?,
+        HoursCmd::Create {
+            name,
+            timezone,
+            windows,
+            default,
+            org,
+            confirm,
+        } => super::business_hours::create(&name, &timezone, &windows, default, org, confirm).await?,
+        HoursCmd::Delete { hours_id, org, confirm } => super::business_hours::delete(&hours_id, org, confirm).await?,
+        HoursCmd::Holidays { cmd } => super::business_hours::holidays(cmd).await?,
     }
     Ok(())
 }
