@@ -1781,14 +1781,14 @@ fn mask_secret(s: &str) -> String {
 /// because that crate's `CredentialsStore` is hard-wired to the M2M
 /// file path. The user-JWT support lives in the `smooai-client-shared`
 /// crate, so we build a tiny HTTP shim around it.
-struct ConfigClient {
+pub struct ConfigClient {
     base_url: String,
     creds: Credentials,
     http: reqwest::Client,
 }
 
 impl ConfigClient {
-    async fn load(m2m: bool) -> Result<Self> {
+    pub async fn load(m2m: bool) -> Result<Self> {
         let store = if m2m {
             CredentialsStore::default_m2m().context("locate ~/.smooth/auth/smooai.json")?
         } else {
@@ -1818,7 +1818,7 @@ impl ConfigClient {
         })
     }
 
-    fn resolve_org(&self, override_org: Option<String>) -> Result<String> {
+    pub fn resolve_org(&self, override_org: Option<String>) -> Result<String> {
         // Prefer the shared resolver so an `active_org_id` set via
         // `th api orgs switch` on the legacy or M2M store is visible
         // here too. Falls back to `self.creds.active_org_id` only when
@@ -1837,11 +1837,11 @@ impl ConfigClient {
             .context("no active org set — pass `--org-id <id>`, set SMOOAI_ORG_ID, or run `th api orgs switch <id>`")
     }
 
-    async fn get(&self, path: &str) -> Result<Value> {
+    pub async fn get(&self, path: &str) -> Result<Value> {
         self.send(reqwest::Method::GET, path, None).await
     }
 
-    async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
         self.send(reqwest::Method::PUT, path, Some(body)).await
     }
 
@@ -2014,7 +2014,7 @@ fn schema_tier_for_key(doc: &Value, canonical: &str) -> Option<Tier> {
 /// `None` when the key is declared in no schema. Declared in multiple schemas
 /// with conflicting tiers → `secret` wins (the D1 migration tiebreak, the safe
 /// direction — same loud-failure asymmetry as the rest of the ADR).
-fn derive_tier_from_schemas(schemas: &[Value], key: &str) -> Option<Tier> {
+pub fn derive_tier_from_schemas(schemas: &[Value], key: &str) -> Option<Tier> {
     let ck = canonical_key(key);
     let mut found: Option<Tier> = None;
     for schema in schemas {

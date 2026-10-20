@@ -10,13 +10,18 @@
 //!
 //! - the org is a UUID, the reason is non-blank and ≤ 500 chars, `--expires-at`
 //!   is RFC 3339 with an offset and in the future;
-//! - `--included-voice-minutes` / `--overage-cents` only with `telephony`, and
-//!   they are sent only when given (the server rejects them on any other key,
-//!   even as `null`).
+//! - `--seats`, `--included-voice-minutes` / `--overage-cents` only with
+//!   `telephony` (the server rejects them on any other key, even as `null`).
 //!
-//! Writes read the current override first (which also 404s an unknown org
-//! before any prompt), print org + feature + before/after + host, confirm on a
-//! TTY and refuse off a TTY without `--yes` (`crate::destructive::gate`).
+//! `set` is read-modify-write (SMOODEV-4052): it reads the current override
+//! (which also 404s an unknown org before any prompt), changes ONLY the flags
+//! you pass and sends everything else back as it is stored — so
+//! `set <org> telephony --seats 10` grants seats without touching the
+//! expiry, reason or calling allowance. Creating an override still needs
+//! `--enabled`/`--disabled` and `--reason`. `--permanent`, `--clear-seats`
+//! and `--clear-voice-allowance` clear a field explicitly. Writes print org +
+//! feature + before/after + host, confirm on a TTY and refuse off a TTY
+//! without `--yes` (`crate::destructive::gate`).
 
 use anstream::println;
 use anyhow::{bail, Context, Result};
@@ -36,6 +41,7 @@ const OVERRIDE_COLUMNS: &[&str] = &[
     "expired",
     "expiresAt",
     "reason",
+    "seats",
     "includedVoiceMinutes",
     "voiceMinutesOverageRateCents",
     "updatedAt",
@@ -58,10 +64,11 @@ pub enum OverridesCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Grant or deny one feature to an org (replaces any existing override).
+    /// Create or change one feature's override on an org.
     ///
-    /// The PUT replaces the whole override: omitting `--expires-at` makes it
-    /// permanent, and omitting the telephony allowance flags clears them.
+    /// Changes only the flags you pass and keeps everything else stored on
+    /// the override (expiry, reason, seats, calling allowance). Creating one
+    /// needs `--enabled`/`--disabled` and `--reason`.
     Set(SetArgs),
     /// Remove an override so the org falls back to what its products grant.
     #[command(visible_alias = "rm")]
@@ -79,31 +86,45 @@ pub enum OverridesCommands {
 }
 
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("state").required(true).args(["enabled", "disabled"])))]
+#[command(group(ArgGroup::new("state").args(["enabled", "disabled"])))]
+#[allow(clippy::struct_excessive_bools, reason = "these are the command's flags, one field per flag")]
 pub struct SetArgs {
     /// Org UUID.
     org_id: String,
     /// Feature key (e.g. `crm`, `telephony`). The server rejects unknown keys.
     feature_key: String,
-    /// Grant the feature.
+    /// Grant the feature. Kept as stored when omitted on an existing override.
     #[arg(long)]
     enabled: bool,
     /// Deny the feature, even when a product would grant it.
     #[arg(long)]
     disabled: bool,
     /// Why — kept on the override for the audit trail (≤ 500 chars).
+    /// Required to create an override; omitted, an update keeps the stored one.
     #[arg(long)]
-    reason: String,
+    reason: Option<String>,
     /// Expiry as RFC 3339 with an offset (`2026-12-31T23:59:59Z`), in the
-    /// future. Omit for a permanent override.
-    #[arg(long, value_name = "RFC3339")]
+    /// future. Omitted, an update keeps the stored expiry.
+    #[arg(long, value_name = "RFC3339", conflicts_with = "permanent")]
     expires_at: Option<String>,
+    /// Remove the expiry: the override never lapses.
+    #[arg(long)]
+    permanent: bool,
+    /// telephony only: calling seats granted (capacity = max(seats, paid seats)).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "clear_seats")]
+    seats: Option<u32>,
+    /// telephony only: remove the seat grant (capacity falls back to paid seats).
+    #[arg(long)]
+    clear_seats: bool,
     /// telephony only: PSTN minutes included per month.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "clear_voice_allowance")]
     included_voice_minutes: Option<u32>,
     /// telephony only: overage rate in cents per minute.
-    #[arg(long = "overage-cents", value_name = "CENTS")]
+    #[arg(long = "overage-cents", value_name = "CENTS", conflicts_with = "clear_voice_allowance")]
     overage_cents: Option<u32>,
+    /// telephony only: remove the included minutes and the overage rate.
+    #[arg(long)]
+    clear_voice_allowance: bool,
     #[command(flatten)]
     confirm: Confirm,
     /// Print the server response as JSON.
@@ -140,37 +161,132 @@ fn parse_expires_at(raw: &str, now: DateTime<Utc>) -> Result<String> {
     Ok(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-/// Build the PUT body, validating it the way the server will.
+/// The fields `set` was asked to change, validated the way the server will.
+/// Only flags that were passed appear; `null` means "clear it".
 ///
 /// # Errors
-/// Blank or over-long reason, a bad/past expiry, or an allowance flag on a
-/// feature other than `telephony`.
-fn build_set_body(args: &SetArgs, feature_key: &str, now: DateTime<Utc>) -> Result<Value> {
-    let reason = args.reason.trim();
-    if reason.is_empty() {
-        bail!("`--reason` cannot be blank — it is the audit trail for this override");
+/// Blank or over-long reason, a bad/past expiry, or a seat/allowance flag on
+/// a feature other than `telephony`.
+fn build_changes(args: &SetArgs, feature_key: &str, now: DateTime<Utc>) -> Result<Map<String, Value>> {
+    let mut changes = Map::new();
+    if args.enabled || args.disabled {
+        changes.insert("enabled".into(), json!(args.enabled));
     }
-    if reason.chars().count() > REASON_MAX {
-        bail!("`--reason` is {} chars; the server caps it at {REASON_MAX}", reason.chars().count());
-    }
-    let mut body = Map::new();
-    body.insert("enabled".into(), json!(args.enabled));
-    body.insert("reason".into(), json!(reason));
-    if let Some(raw) = &args.expires_at {
-        body.insert("expiresAt".into(), json!(parse_expires_at(raw, now)?));
-    }
-    let allowance = [
-        ("includedVoiceMinutes", "--included-voice-minutes", args.included_voice_minutes),
-        ("voiceMinutesOverageRateCents", "--overage-cents", args.overage_cents),
-    ];
-    for (field, flag, value) in allowance {
-        let Some(v) = value else { continue };
-        if feature_key != TELEPHONY {
-            bail!("`{flag}` only applies to the `{TELEPHONY}` override, not `{feature_key}`");
+    if let Some(raw) = &args.reason {
+        let reason = raw.trim();
+        if reason.is_empty() {
+            bail!("`--reason` cannot be blank — it is the audit trail for this override");
         }
-        body.insert(field.into(), json!(v));
+        if reason.chars().count() > REASON_MAX {
+            bail!("`--reason` is {} chars; the server caps it at {REASON_MAX}", reason.chars().count());
+        }
+        changes.insert("reason".into(), json!(reason));
+    }
+    if let Some(raw) = &args.expires_at {
+        changes.insert("expiresAt".into(), json!(parse_expires_at(raw, now)?));
+    } else if args.permanent {
+        changes.insert("expiresAt".into(), Value::Null);
+    }
+    let telephony_only = [
+        ("seats", "--seats", args.seats.map(|v| json!(v)), args.clear_seats, "--clear-seats"),
+        (
+            "includedVoiceMinutes",
+            "--included-voice-minutes",
+            args.included_voice_minutes.map(|v| json!(v)),
+            args.clear_voice_allowance,
+            "--clear-voice-allowance",
+        ),
+        (
+            "voiceMinutesOverageRateCents",
+            "--overage-cents",
+            args.overage_cents.map(|v| json!(v)),
+            args.clear_voice_allowance,
+            "--clear-voice-allowance",
+        ),
+    ];
+    for (field, flag, value, clear, clear_flag) in telephony_only {
+        let change = match (value, clear) {
+            (Some(v), _) => (v, flag),
+            (None, true) => (Value::Null, clear_flag),
+            (None, false) => continue,
+        };
+        if feature_key != TELEPHONY {
+            bail!("`{}` only applies to the `{TELEPHONY}` override, not `{feature_key}`", change.1);
+        }
+        changes.insert(field.into(), change.0);
+    }
+    if changes.is_empty() {
+        bail!("nothing to change — pass `--enabled`/`--disabled`, `--reason`, `--expires-at`/`--permanent`, `--seats` or an allowance flag");
+    }
+    Ok(changes)
+}
+
+/// The fields a stored override carries that `set` sends back unchanged.
+/// The PUT keeps these when omitted, so clearing one sends an explicit `null`.
+const KEPT_FIELDS: &[&str] = &["seats", "includedVoiceMinutes", "voiceMinutesOverageRateCents"];
+
+/// The full PUT body: `changes` on top of the `current` override (read-modify-
+/// write), so a field the operator did not name keeps its stored value.
+///
+/// # Errors
+/// Creating an override without `--enabled`/`--disabled` and `--reason`, or
+/// an update that would resend an expiry that has already passed.
+fn merge_body(current: Option<&Value>, changes: &Map<String, Value>, feature_key: &str, now: DateTime<Utc>) -> Result<Value> {
+    let Some(current) = current else {
+        if !changes.contains_key("enabled") || !changes.contains_key("reason") {
+            bail!("there is no `{feature_key}` override yet — creating one needs `--enabled` or `--disabled`, and `--reason`");
+        }
+        // A brand-new override has nothing to clear: drop the nulls.
+        return Ok(Value::Object(
+            changes.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        ));
+    };
+    let stored = |k: &str| current.get(k).filter(|v| !v.is_null());
+    let mut body = Map::new();
+    for key in ["enabled", "reason"] {
+        let v = changes
+            .get(key)
+            .or_else(|| stored(key))
+            .with_context(|| format!("the stored override has no `{key}`"))?;
+        body.insert(key.into(), v.clone());
+    }
+    match changes.get("expiresAt") {
+        Some(Value::Null) => {}
+        Some(v) => {
+            body.insert("expiresAt".into(), v.clone());
+        }
+        None => {
+            if let Some(at) = stored("expiresAt").and_then(Value::as_str) {
+                let lapsed = DateTime::parse_from_rfc3339(at).map_or(true, |t| t.with_timezone(&Utc) <= now);
+                if lapsed {
+                    bail!("the stored override expired at {at} — pass `--expires-at <future>` or `--permanent` to renew it");
+                }
+                body.insert("expiresAt".into(), json!(at));
+            }
+        }
+    }
+    for key in KEPT_FIELDS {
+        if let Some(v) = changes.get(*key).or_else(|| stored(key)) {
+            body.insert((*key).into(), v.clone());
+        }
     }
     Ok(Value::Object(body))
+}
+
+/// Does `body` say the same as the stored override (nothing to write)?
+fn same_as_stored(current: Option<&Value>, body: &Value) -> bool {
+    let Some(current) = current else { return false };
+    let norm = |v: Option<&Value>| v.filter(|v| !v.is_null()).cloned();
+    [
+        "enabled",
+        "reason",
+        "expiresAt",
+        "seats",
+        "includedVoiceMinutes",
+        "voiceMinutesOverageRateCents",
+    ]
+    .iter()
+    .all(|k| norm(current.get(*k)) == norm(body.get(*k)))
 }
 
 /// The `overrides` array of a list response (a bare array is tolerated).
@@ -211,6 +327,9 @@ fn describe(o: &Value) -> String {
     if o.get("expired").and_then(Value::as_bool) == Some(true) {
         parts.push("EXPIRED".to_string());
     }
+    if let Some(n) = o.get("seats").and_then(Value::as_u64) {
+        parts.push(format!("{n} seats"));
+    }
     if let Some(m) = o.get("includedVoiceMinutes").and_then(Value::as_u64) {
         parts.push(format!("{m} min incl"));
     }
@@ -247,9 +366,9 @@ pub async fn dispatch(cmd: OverridesCommands) -> Result<()> {
         OverridesCommands::Set(args) => {
             let org = parse_org(&args.org_id)?;
             let feature_key = parse_feature_key(&args.feature_key)?;
-            let body = build_set_body(&args, &feature_key, Utc::now())?;
+            let changes = build_changes(&args, &feature_key, Utc::now())?;
             let client = AdminClient::from_user_session().await?;
-            set(&client, &org, &feature_key, &body, args.confirm, args.json).await?;
+            set(&client, &org, &feature_key, &changes, args.confirm, args.json).await?;
         }
         OverridesCommands::Remove {
             org_id,
@@ -280,18 +399,21 @@ fn print_list(body: &Value, org: &str, json: bool) {
     render(&json!(rows), Format::Table, &override_table());
 }
 
-async fn set(client: &AdminClient, org: &str, feature_key: &str, body: &Value, confirm: Confirm, json: bool) -> Result<()> {
-    // Read first: 404s an unknown org before the prompt, and shows what the
-    // PUT is about to replace.
+async fn set(client: &AdminClient, org: &str, feature_key: &str, changes: &Map<String, Value>, confirm: Confirm, json: bool) -> Result<()> {
+    // Read first: 404s an unknown org before the prompt, and is the base the
+    // changes are merged onto, so nothing the operator did not name changes.
     let current = list_overrides(client, org).await?;
+    let stored = find_override(&current, feature_key);
+    let body = merge_body(stored, changes, feature_key, Utc::now())?;
     println!();
     println!("  {}  {}", "org    ".dimmed(), org_label(&current, org).yellow());
-    println!(
-        "  {}  {}",
-        "before ".dimmed(),
-        find_override(&current, feature_key).map_or_else(|| "(no override)".to_string(), describe)
-    );
-    println!("  {}  {}", "after  ".dimmed(), describe(body).bold());
+    println!("  {}  {}", "before ".dimmed(), stored.map_or_else(|| "(no override)".to_string(), describe));
+    println!("  {}  {}", "after  ".dimmed(), describe(&body).bold());
+    if same_as_stored(stored, &body) {
+        print_ok(format!("`{feature_key}` override on {org} already says that — nothing to change"));
+        return Ok(());
+    }
+    let body = &body;
     if let Some(reason) = body.get("reason").and_then(Value::as_str) {
         println!("  {}  {reason}", "reason ".dimmed());
     }
@@ -416,17 +538,27 @@ mod tests {
     }
 
     #[test]
-    fn set_needs_exactly_one_of_enabled_or_disabled() {
-        let neither = parse(&["set", ORG, "crm", "--reason", "pilot"]).expect_err("neither must be rejected");
-        assert_eq!(neither.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{neither}");
+    fn set_takes_at_most_one_of_enabled_or_disabled() {
         let both = parse(&["set", ORG, "crm", "--enabled", "--disabled", "--reason", "pilot"]).expect_err("both must be rejected");
         assert_eq!(both.kind(), clap::error::ErrorKind::ArgumentConflict, "{both}");
+        // Neither is fine at parse time: an update keeps the stored state.
+        assert!(parse(&["set", ORG, "telephony", "--seats", "10"]).is_ok());
     }
 
     #[test]
-    fn set_requires_a_reason() {
-        let err = parse(&["set", ORG, "crm", "--enabled"]).expect_err("missing --reason must be rejected");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{err}");
+    fn clear_flags_conflict_with_their_values() {
+        for args in [
+            &["--seats", "3", "--clear-seats"][..],
+            &["--included-voice-minutes", "5", "--clear-voice-allowance"],
+            &["--overage-cents", "5", "--clear-voice-allowance"],
+            &["--expires-at", "2027-01-01T00:00:00Z", "--permanent"],
+        ] {
+            let mut full = vec!["set", ORG, "telephony"];
+            full.extend_from_slice(args);
+            let err = parse(&full).expect_err("conflict must be rejected");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{args:?}: {err}");
+        }
+        assert!(parse(&["set", ORG, "telephony", "--seats", "0"]).is_err(), "seats must be >= 1");
     }
 
     #[test]
@@ -464,67 +596,133 @@ mod tests {
         }
     }
 
+    fn changes(args: &[&str], key: &str) -> Result<Map<String, Value>> {
+        let mut full = vec![key];
+        full.extend_from_slice(args);
+        build_changes(&set_args(&full), key, now())
+    }
+
     #[test]
-    fn minimal_body_is_enabled_and_reason_only() {
-        let a = set_args(&["crm", "--enabled", "--reason", "  comp for launch partner  "]);
+    fn changes_hold_only_the_flags_given() {
         assert_eq!(
-            build_set_body(&a, "crm", now()).unwrap(),
+            Value::Object(changes(&["--enabled", "--reason", "  comp for launch partner  "], "crm").unwrap()),
             json!({ "enabled": true, "reason": "comp for launch partner" })
         );
-        let a = set_args(&["crm", "--disabled", "--reason", "churned"]);
-        assert_eq!(build_set_body(&a, "crm", now()).unwrap(), json!({ "enabled": false, "reason": "churned" }));
+        assert_eq!(Value::Object(changes(&["--disabled"], "crm").unwrap()), json!({ "enabled": false }));
+        assert_eq!(Value::Object(changes(&["--seats", "10"], "telephony").unwrap()), json!({ "seats": 10 }));
+        assert_eq!(Value::Object(changes(&["--permanent"], "crm").unwrap()), json!({ "expiresAt": null }));
+        assert_eq!(
+            Value::Object(changes(&["--clear-seats", "--clear-voice-allowance"], "telephony").unwrap()),
+            json!({ "seats": null, "includedVoiceMinutes": null, "voiceMinutesOverageRateCents": null })
+        );
+        assert!(changes(&[], "crm").unwrap_err().to_string().contains("nothing to change"));
     }
 
     #[test]
     fn expiry_is_normalised_to_utc_and_must_be_future() {
-        let a = set_args(&["crm", "--enabled", "--reason", "pilot", "--expires-at", "2026-12-31T19:00:00-05:00"]);
-        assert_eq!(build_set_body(&a, "crm", now()).unwrap()["expiresAt"], json!("2027-01-01T00:00:00Z"));
+        let c = changes(&["--expires-at", "2026-12-31T19:00:00-05:00"], "crm").unwrap();
+        assert_eq!(c["expiresAt"], json!("2027-01-01T00:00:00Z"));
         for bad in ["2026-10-07T12:00:00Z", "2020-01-01T00:00:00Z"] {
-            let a = set_args(&["crm", "--enabled", "--reason", "pilot", "--expires-at", bad]);
-            let err = build_set_body(&a, "crm", now()).unwrap_err().to_string();
+            let err = changes(&["--expires-at", bad], "crm").unwrap_err().to_string();
             assert!(err.contains("in the past"), "{bad}: {err}");
         }
         for bad in ["2026-12-31", "tomorrow", "2026-12-31T00:00:00"] {
-            let a = set_args(&["crm", "--enabled", "--reason", "pilot", "--expires-at", bad]);
-            let err = build_set_body(&a, "crm", now()).unwrap_err().to_string();
+            let err = changes(&["--expires-at", bad], "crm").unwrap_err().to_string();
             assert!(err.contains("RFC 3339"), "{bad}: {err}");
         }
     }
 
     #[test]
     fn reason_must_be_non_blank_and_capped() {
-        let a = set_args(&["crm", "--enabled", "--reason", "   "]);
-        assert!(build_set_body(&a, "crm", now()).unwrap_err().to_string().contains("blank"));
+        assert!(changes(&["--reason", "   "], "crm").unwrap_err().to_string().contains("blank"));
         let long = "x".repeat(REASON_MAX + 1);
-        let a = set_args(&["crm", "--enabled", "--reason", &long]);
-        assert!(build_set_body(&a, "crm", now()).unwrap_err().to_string().contains("500"));
+        assert!(changes(&["--reason", &long], "crm").unwrap_err().to_string().contains("500"));
         let exact = "é".repeat(REASON_MAX);
-        let a = set_args(&["crm", "--enabled", "--reason", &exact]);
-        assert!(build_set_body(&a, "crm", now()).is_ok(), "500 multibyte chars is within the cap");
+        assert!(changes(&["--reason", &exact], "crm").is_ok(), "500 multibyte chars is within the cap");
     }
 
     #[test]
-    fn telephony_allowance_is_sent_only_when_given_and_only_for_telephony() {
-        let a = set_args(&[
-            "telephony",
-            "--enabled",
-            "--reason",
-            "pilot",
-            "--included-voice-minutes",
-            "500",
-            "--overage-cents",
-            "3",
-        ]);
+    fn seats_and_allowance_flags_are_telephony_only() {
+        for args in [
+            &["--seats", "3"][..],
+            &["--overage-cents", "3"],
+            &["--clear-seats"],
+            &["--clear-voice-allowance"],
+        ] {
+            let err = changes(args, "crm").unwrap_err().to_string();
+            assert!(err.contains(args[0]) && err.contains("telephony"), "{args:?}: {err}");
+        }
+    }
+
+    fn stored_telephony() -> Value {
+        json!({ "featureKey": "telephony", "enabled": true, "expiresAt": "2027-06-01T00:00:00Z", "reason": "MSA pilot",
+                "seats": null, "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3, "expired": false })
+    }
+
+    #[test]
+    fn granting_seats_keeps_every_other_stored_field() {
+        let c = changes(&["--seats", "10"], "telephony").unwrap();
         assert_eq!(
-            build_set_body(&a, "telephony", now()).unwrap(),
-            json!({ "enabled": true, "reason": "pilot", "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3 })
+            merge_body(Some(&stored_telephony()), &c, "telephony", now()).unwrap(),
+            json!({ "enabled": true, "reason": "MSA pilot", "expiresAt": "2027-06-01T00:00:00Z",
+                    "seats": 10, "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3 })
         );
-        let a = set_args(&["telephony", "--enabled", "--reason", "pilot"]);
-        let body = build_set_body(&a, "telephony", now()).unwrap();
-        assert!(body.get("includedVoiceMinutes").is_none() && body.get("voiceMinutesOverageRateCents").is_none());
-        let a = set_args(&["crm", "--enabled", "--reason", "pilot", "--overage-cents", "3"]);
-        let err = build_set_body(&a, "crm", now()).unwrap_err().to_string();
-        assert!(err.contains("--overage-cents") && err.contains("telephony"), "{err}");
+    }
+
+    #[test]
+    fn named_flags_win_and_clears_drop_the_field() {
+        let mut stored = stored_telephony();
+        stored["seats"] = json!(4);
+        let c = changes(
+            &["--disabled", "--reason", "churned", "--permanent", "--clear-seats", "--clear-voice-allowance"],
+            "telephony",
+        )
+        .unwrap();
+        // The PUT keeps an omitted seat/allowance field, so a clear is an explicit null.
+        assert_eq!(
+            merge_body(Some(&stored), &c, "telephony", now()).unwrap(),
+            json!({ "enabled": false, "reason": "churned", "seats": null, "includedVoiceMinutes": null, "voiceMinutesOverageRateCents": null })
+        );
+        let c = changes(&["--included-voice-minutes", "900"], "telephony").unwrap();
+        let body = merge_body(Some(&stored), &c, "telephony", now()).unwrap();
+        assert_eq!((body["seats"].clone(), body["includedVoiceMinutes"].clone()), (json!(4), json!(900)));
+        assert_eq!(body["voiceMinutesOverageRateCents"], json!(3));
+    }
+
+    #[test]
+    fn creating_needs_state_and_reason_and_sends_no_nulls() {
+        let err = merge_body(None, &changes(&["--seats", "10"], "telephony").unwrap(), "telephony", now())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `telephony` override") && err.contains("--reason"), "{err}");
+        assert!(merge_body(None, &changes(&["--enabled"], "crm").unwrap(), "crm", now()).is_err());
+        let c = changes(&["--enabled", "--reason", "pilot", "--seats", "10", "--permanent"], "telephony").unwrap();
+        assert_eq!(
+            merge_body(None, &c, "telephony", now()).unwrap(),
+            json!({ "enabled": true, "reason": "pilot", "seats": 10 })
+        );
+    }
+
+    #[test]
+    fn a_lapsed_stored_expiry_must_be_renewed_explicitly() {
+        let mut stored = stored_telephony();
+        stored["expiresAt"] = json!("2026-01-01T00:00:00Z");
+        let err = merge_body(Some(&stored), &changes(&["--seats", "2"], "telephony").unwrap(), "telephony", now())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expired") && err.contains("--permanent"), "{err}");
+        let c = changes(&["--seats", "2", "--permanent"], "telephony").unwrap();
+        assert!(merge_body(Some(&stored), &c, "telephony", now()).unwrap().get("expiresAt").is_none());
+    }
+
+    #[test]
+    fn an_unchanged_merge_is_detected() {
+        let stored = stored_telephony();
+        let same = merge_body(Some(&stored), &changes(&["--enabled"], "telephony").unwrap(), "telephony", now()).unwrap();
+        assert!(same_as_stored(Some(&stored), &same));
+        let diff = merge_body(Some(&stored), &changes(&["--seats", "1"], "telephony").unwrap(), "telephony", now()).unwrap();
+        assert!(!same_as_stored(Some(&stored), &diff));
+        assert!(!same_as_stored(None, &diff));
     }
 
     // ── response parsing ───────────────────────────────────────────────
@@ -535,7 +733,7 @@ mod tests {
             "overrides": [
                 { "featureKey": "crm", "enabled": true, "expiresAt": null, "reason": "comp", "expired": false },
                 { "featureKey": "telephony", "enabled": true, "expiresAt": "2026-01-01T00:00:00Z", "reason": "pilot",
-                  "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3, "expired": true },
+                  "seats": 10, "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3, "expired": true },
             ]
         })
     }
@@ -558,7 +756,7 @@ mod tests {
         assert_eq!(describe(find_override(&body, "crm").unwrap()), "enabled · permanent");
         assert_eq!(
             describe(find_override(&body, "telephony").unwrap()),
-            "enabled · until 2026-01-01T00:00:00Z · EXPIRED · 500 min incl · 3¢/min over"
+            "enabled · until 2026-01-01T00:00:00Z · EXPIRED · 10 seats · 500 min incl · 3¢/min over"
         );
         assert_eq!(describe(&json!({ "enabled": false, "reason": "x" })), "disabled · permanent");
     }
@@ -586,23 +784,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_puts_the_built_body_to_the_feature_path() {
-        use axum::{extract::Path, routing::put, Json};
-        let router = axum::Router::new().route(
-            "/admin/organizations/{org}/overrides/{key}",
-            put(|Path((org, key)): Path<(String, String)>, Json(body): Json<Value>| async move {
-                assert_eq!(org, ORG);
-                assert_eq!(key, "telephony");
-                assert_eq!(body, json!({ "enabled": true, "reason": "pilot", "includedVoiceMinutes": 500 }));
-                Json(json!({ "override": { "featureKey": key, "enabled": true, "expiresAt": null, "expired": false, "includedVoiceMinutes": 500 }, "created": true }))
-            }),
-        );
+    async fn set_seats_puts_the_merged_body_to_the_feature_path() {
+        use axum::{extract::Path, routing::get, Json};
+        let router = axum::Router::new()
+            .route(
+                "/admin/organizations/{org}/overrides",
+                get(|| async { Json(json!({ "organization": { "id": ORG, "name": "Acme" }, "overrides": [stored_telephony()] })) }),
+            )
+            .route(
+                "/admin/organizations/{org}/overrides/{key}",
+                axum::routing::put(|Path((org, key)): Path<(String, String)>, Json(body): Json<Value>| async move {
+                    assert_eq!(org, ORG);
+                    assert_eq!(key, "telephony");
+                    assert_eq!(
+                        body,
+                        json!({ "enabled": true, "reason": "MSA pilot", "expiresAt": "2027-06-01T00:00:00Z",
+                                "seats": 10, "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3 })
+                    );
+                    Json(json!({ "override": body, "created": false }))
+                }),
+            );
         let client = AdminClient::with_base(fake_api(router).await, "tok");
-        let a = set_args(&["telephony", "--enabled", "--reason", "pilot", "--included-voice-minutes", "500", "--yes"]);
-        let body = build_set_body(&a, "telephony", now()).unwrap();
-        let resp = client.put(&override_path(ORG, "telephony"), &body).await.unwrap();
-        assert_eq!(resp["created"], json!(true));
-        assert_eq!(describe(&resp["override"]), "enabled · permanent · 500 min incl");
+        let c = changes(&["--seats", "10", "--yes"], "telephony").unwrap();
+        set(&client, ORG, "telephony", &c, Confirm { dry_run: false, yes: true }, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_that_changes_nothing_never_writes() {
+        use axum::{routing::get, Json};
+        use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+        let written = Arc::new(AtomicBool::new(false));
+        let router = axum::Router::new()
+            .route(
+                "/admin/organizations/{org}/overrides",
+                get(|| async { Json(json!({ "organization": { "id": ORG, "name": "Acme" }, "overrides": [stored_telephony()] })) }),
+            )
+            .route("/admin/organizations/{org}/overrides/{key}", recording(&written, json!({ "created": false })));
+        let client = AdminClient::with_base(fake_api(router).await, "tok");
+        let c = changes(&["--included-voice-minutes", "500"], "telephony").unwrap();
+        set(&client, ORG, "telephony", &c, Confirm { dry_run: false, yes: true }, false).await.unwrap();
+        assert!(!written.load(Ordering::SeqCst), "PUT must not be sent when nothing changes");
     }
 
     #[tokio::test]
@@ -643,8 +864,8 @@ mod tests {
             .route("/admin/organizations/{org}/overrides", get(|| async { Json(list_body()) }))
             .route("/admin/organizations/{org}/overrides/{key}", recording(&written, json!({ "created": false })));
         let client = AdminClient::with_base(fake_api(router).await, "tok");
-        let body = json!({ "enabled": false, "reason": "churned" });
-        set(&client, ORG, "crm", &body, Confirm { dry_run: true, yes: false }, false).await.unwrap();
+        let c = changes(&["--disabled", "--reason", "churned"], "crm").unwrap();
+        set(&client, ORG, "crm", &c, Confirm { dry_run: true, yes: false }, false).await.unwrap();
         assert!(!written.load(Ordering::SeqCst), "PUT must not be sent on --dry-run");
     }
 

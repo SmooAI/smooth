@@ -532,10 +532,31 @@ smoo admin org overrides set <org-id> crm --enabled --reason "Launch partner com
 smoo admin org overrides set <org-id> telephony --enabled --reason "MSA pilot" \
   --included-voice-minutes 500 --overage-cents 3      # allowance flags: telephony only
 smoo admin org overrides set <org-id> crm --disabled --reason "Churned"   # deny even if bought
+smoo admin org overrides set <org-id> telephony --seats 10   # grant calling seats, keep the rest
+smoo admin org overrides set <org-id> crm --permanent        # drop the expiry only
+smoo admin org overrides set <org-id> telephony --clear-seats --clear-voice-allowance
 smoo admin org overrides remove <org-id> crm [--yes|--dry-run]           # back to products
-# set REPLACES the override: no --expires-at = permanent, no allowance flags =
-# cleared. Writes show org + before/after + host, confirm on a TTY, refuse off a
-# TTY without --yes. remove with no override → "nothing to remove", no DELETE.
+# set is read-modify-write (SMOODEV-4052): it reads the stored override and
+# changes ONLY the flags you pass — expiry, reason, seats and allowance you don't
+# name are sent back as stored. Creating an override still needs --enabled or
+# --disabled plus --reason. --seats / --clear-seats / allowance flags: telephony
+# only (seats ≥ 1; calling capacity = max(seats, paid seats)). A lapsed stored
+# expiry must be renewed with --expires-at or --permanent. Writes show org +
+# before/after + host, confirm on a TTY, refuse off a TTY without --yes; a set
+# that changes nothing sends no PUT. remove with no override → "nothing to
+# remove", no DELETE.
+# Per-org feature-flag rollout (SMOODEV-4052) — add/remove ONE org in a flag's
+# org allowlist rule in the master org's config, in place. Uses the user
+# session (`th auth login`); --environment is required (no default).
+smoo admin config flag-org add    callVoicemailEnabled <org-id> --environment development [--yes|--dry-run]
+smoo admin config flag-org remove callVoicemailEnabled <org-id> --environment development
+# Edits only allowlist rules (when = orgId in/eq, value = true); other rules and
+# `default` are untouched. No allowlist → one `orgs` rule is appended LAST (a
+# rule above it that matches the org wins). A bare `false`/unset flag becomes a
+# segment envelope with default false. Refuses: removing from a flag that is
+# `true` for everyone, and any value it does not recognise. Prints before/after,
+# confirms, and re-reads before the write so a concurrent edit aborts it.
+# Never point it at production without the change being agreed.
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 smoo admin org link-child <child-org-id>             # link under active org
