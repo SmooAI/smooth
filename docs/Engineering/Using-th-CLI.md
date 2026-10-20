@@ -1048,6 +1048,28 @@ smoo calling settings update --set recordingRetentionDays=365 [--body changes.js
   are refused locally, by name, with the list.
 - Every write asks for confirmation: it changes what the next caller gets.
 
+#### Attach or buy a number — SMOODEV-4052
+
+CLI twin of the hosted MCP's `phone_numbers_available` / `phone_number_attach` /
+`phone_number_purchase` and the copilot's `phone_numbers.*`. All three call the
+smooai Twilio integration routes (`/organizations/{org}/integrations/twilio/…`)
+with your own sign-in.
+
+```bash
+smoo calling numbers available [--area-code 415] [--country US] [--json]    # owned (attach) + for sale, with the monthly price
+smoo calling numbers attach +13175550100 [--yes|--dry-run]                  # already owned: never buys
+smoo calling numbers buy +14155550100 --accept-price 1.15 [--yes|--dry-run] # SPENDS MONEY monthly
+```
+
+- `attach` sends `intent: "attach"`: a number the org's Twilio account does not
+  own is refused, never bought. It needs `calling.admin`.
+- `buy` reads Twilio's current monthly price first and prints it. Without
+  `--accept-price`, or with an amount below the quote, it stops before buying.
+  It then asks for confirmation (`--yes` in scripts) and sends
+  `intent: "purchase"` with the acknowledged price, which the route checks
+  again. It needs `calling.admin` and `billing.manage`.
+- A 403 is reported as "admin only", naming the keys.
+
 #### Ring groups (departments) — SMOODEV-3960
 
 CLI twin of the hosted MCP's `ring_groups_list` / `ring_groups_get` /
