@@ -973,6 +973,13 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::calling::Cmd,
     },
+    /// Enterprise SSO — connections, linking existing accounts, and Require
+    /// SSO (previews the lockout count, confirms first). CLI twin of the hosted
+    /// MCP `sso_*` tools. Needs `org.sso.manage` and the SSO feature.
+    Sso {
+        #[command(subcommand)]
+        cmd: smooai::sso::Cmd,
+    },
     /// Support health report — open/solved tickets, CSAT, first response,
     /// SLA breaches. CLI twin of the copilot's `support.report`.
     Support {
@@ -2064,6 +2071,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
+        SmooCommands::Sso { cmd } => smooai::sso::cmd(cmd).await,
         SmooCommands::Support { cmd } => smooai::support::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
@@ -2106,8 +2114,28 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     args
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Stack for the thread `th` actually runs on, and for tokio's workers.
+///
+/// th-bd84cf: Windows gives the process main thread 1 MB (Linux and macOS
+/// give 8 MB), and rendering clap's help/version for th's 53-command tree
+/// recurses past that, so `th --version` died with 0xC00000FD. Running on
+/// an explicitly sized thread makes the stack the same on every OS.
+const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runner = std::thread::Builder::new().name("main".into()).stack_size(MAIN_STACK_SIZE).spawn(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(MAIN_STACK_SIZE)
+            .build()?
+            .block_on(run_main())
+    })?;
+    // A panic on the runner already printed its message through the panic
+    // hook; re-raise it here so the process exits 101 exactly as before.
+    runner.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+async fn run_main() -> Result<()> {
     let mut argv = smoo_argv(std::env::args_os().collect());
     // th-f97a27: `th flow hook` runs on every harness lifecycle event, so it
     // skips clap, auth-profile setup and the log file — and a usage error

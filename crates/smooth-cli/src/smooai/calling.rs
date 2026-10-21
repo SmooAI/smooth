@@ -668,6 +668,14 @@ mod tests {
             parse(&["numbers", "update", "n1", "--set", "a=b", "--body", "-"]).is_err(),
             "--set and --body conflict"
         );
+        // SMOODEV-4052 — attach / buy.
+        assert!(matches!(parse(&["numbers", "available", "--area-code", "415"]).unwrap(), Cmd::Numbers { .. }));
+        assert!(matches!(parse(&["numbers", "attach", "+14155550100", "--yes"]).unwrap(), Cmd::Numbers { .. }));
+        assert!(matches!(
+            parse(&["numbers", "buy", "+14155550100", "--accept-price", "1.15", "--yes"]).unwrap(),
+            Cmd::Numbers { .. }
+        ));
+        assert!(parse(&["numbers", "buy", "+14155550100", "--accept-price", "cheap"]).is_err());
         assert!(matches!(parse(&["hours", "ls"]).unwrap(), Cmd::Hours { .. }));
         assert!(matches!(
             parse(&["business-hours", "update", "h1", "--set", "name=Main"]).unwrap(),

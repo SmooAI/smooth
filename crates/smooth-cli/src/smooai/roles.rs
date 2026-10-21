@@ -169,12 +169,52 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// The org's default member role: what a new member gets when their
+    /// invite, import row or SSO connection names none (SMOODEV-4052).
+    Default {
+        #[command(subcommand)]
+        cmd: DefaultCmd,
+    },
     /// Unassign roles from a member, keeping their other roles.
     Unassign {
         /// The member (email or member-id uuid).
         member: String,
         /// Roles to unassign (each a name or role-id uuid).
         roles: Vec<String>,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+/// `th smoo roles default …` — `GET`/`PUT /organizations/:org_id/default-member-role`.
+#[derive(Subcommand)]
+pub enum DefaultCmd {
+    /// Show the default member role (unset = the read-only template role).
+    Get {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make a role (name or id) the default for new members. Needs
+    /// `org.roles.manage`, and the server refuses a role carrying a permission
+    /// you don't hold yourself. Confirms first; `--yes` in scripts.
+    Set {
+        /// The role (name or id).
+        role: String,
+        #[command(flatten)]
+        confirm: crate::destructive::Confirm,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove the default: new members get the read-only template role.
+    Clear {
         #[command(flatten)]
         confirm: crate::destructive::Confirm,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
@@ -204,6 +244,85 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::MemberRoles { member, org, json } => member_roles(&client, resolve_org(org)?, &member, json).await,
         Cmd::Assign { member, roles, confirm, org } => assign(&client, resolve_org(org)?, &member, &roles, confirm).await,
         Cmd::Unassign { member, roles, confirm, org } => unassign(&client, resolve_org(org)?, &member, &roles, confirm).await,
+        Cmd::Default { cmd } => default_role(&client, cmd).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default member role (SMOODEV-4052)
+// ---------------------------------------------------------------------------
+
+async fn default_role(client: &UserClient, cmd: DefaultCmd) -> Result<()> {
+    match cmd {
+        DefaultCmd::Get { org, json } => {
+            let org = resolve_org(org)?;
+            let view = client
+                .get(&format!("/organizations/{org}/default-member-role"))
+                .await
+                .map_err(default_role_refusal)?;
+            if json {
+                print_json(&view);
+            } else {
+                println!("  {}", render_default_role(&view));
+            }
+            Ok(())
+        }
+        DefaultCmd::Set { role, confirm, org } => {
+            let org = resolve_org(org)?;
+            let roles = fetch_roles(client, &org).await?;
+            let found = find_role(&roles, &role)?;
+            let name = found.get("name").and_then(Value::as_str).unwrap_or(&role).to_string();
+            let target = format!("{name} ({} permission(s))", permissions_of(found).len());
+            put_default_role(client, &org, &target, default_role_body(Some(role_id(found))), confirm).await
+        }
+        DefaultCmd::Clear { confirm, org } => {
+            let org = resolve_org(org)?;
+            put_default_role(client, &org, "none (new members get read-only)", default_role_body(None), confirm).await
+        }
+    }
+}
+
+async fn put_default_role(client: &UserClient, org: &str, target: &str, body: Value, confirm: crate::destructive::Confirm) -> Result<()> {
+    // Every future member who joins without a named role gets this one.
+    if !gate(org, "change", "default member role to", target, confirm)? {
+        return Ok(());
+    }
+    let view = client
+        .put(&format!("/organizations/{org}/default-member-role"), &body)
+        .await
+        .map_err(default_role_refusal)?;
+    println!("  {} {}", "✓".green(), render_default_role(&view));
+    Ok(())
+}
+
+/// The `PUT` body: `{ roleId }`, or `{ roleId: null }` to clear.
+fn default_role_body(role_id: Option<&str>) -> Value {
+    json!({ "roleId": role_id })
+}
+
+/// The `{ roleId, role }` view as one line.
+fn render_default_role(view: &Value) -> String {
+    match view.get("role").filter(|r| !r.is_null()) {
+        Some(role) => format!(
+            "default member role: {} {} ({} permission(s))",
+            role.get("name").and_then(Value::as_str).unwrap_or("?").bold(),
+            role_id(role).dimmed(),
+            permissions_of(role).len()
+        ),
+        None if view.get("roleId").is_some_and(|v| !v.is_null()) => format!(
+            "default member role {} is no longer visible to this org",
+            view.get("roleId").and_then(Value::as_str).unwrap_or("?")
+        ),
+        None => "no default member role — new members get the read-only template role".to_string(),
+    }
+}
+
+/// A 403 from the default-role routes is the permission answer, not an outage.
+fn default_role_refusal(e: anyhow::Error) -> anyhow::Error {
+    if format!("{e:#}").contains("returned HTTP 403") {
+        e.context("admin only: the default member role needs org.roles.manage, and the role may not carry a permission you don't hold yourself")
+    } else {
+        e
     }
 }
 
@@ -841,6 +960,63 @@ mod tests {
     }
     fn custom_role() -> Value {
         json!({ "id": "660e8400-e29b-41d4-a716-446655440000", "name": "Support", "organizationId": "org-1", "permissions": ["a.b", "c.d"] })
+    }
+
+    #[test]
+    fn default_role_body_sets_or_clears() {
+        assert_eq!(
+            default_role_body(Some("660e8400-e29b-41d4-a716-446655440000")),
+            json!({ "roleId": "660e8400-e29b-41d4-a716-446655440000" })
+        );
+        assert_eq!(default_role_body(None), json!({ "roleId": null }));
+    }
+
+    #[test]
+    fn default_role_renders_set_missing_and_unset() {
+        let set = render_default_role(&json!({ "roleId": "r1", "role": custom_role() }));
+        assert!(set.contains("Support") && set.contains("2 permission(s)"), "{set}");
+        assert!(render_default_role(&json!({ "roleId": null, "role": null })).contains("read-only"));
+        assert!(render_default_role(&json!({ "roleId": "r1", "role": null })).contains("no longer visible"));
+    }
+
+    #[test]
+    fn default_role_403_reads_as_admin_only() {
+        let e = default_role_refusal(anyhow::anyhow!("PUT https://api/x returned HTTP 403 Forbidden: {{}}"));
+        assert!(format!("{e:#}").starts_with("admin only"), "{e:#}");
+        assert!(format!("{e:#}").contains("org.roles.manage"));
+        let e = default_role_refusal(anyhow::anyhow!("PUT https://api/x returned HTTP 500: boom"));
+        assert!(!format!("{e:#}").contains("admin only"));
+    }
+
+    #[test]
+    fn default_subcommands_parse_and_writes_take_confirm() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let parse = |args: &[&str]| T::try_parse_from(std::iter::once("roles").chain(args.iter().copied())).map(|t| t.cmd);
+        assert!(matches!(
+            parse(&["default", "get", "--json"]).unwrap(),
+            Cmd::Default {
+                cmd: DefaultCmd::Get { json: true, .. }
+            }
+        ));
+        match parse(&["default", "set", "Sales Rep", "--yes"]).unwrap() {
+            Cmd::Default {
+                cmd: DefaultCmd::Set { role, confirm, .. },
+            } => {
+                assert_eq!(role, "Sales Rep");
+                assert!(confirm.yes && !confirm.dry_run);
+            }
+            _ => panic!("expected default set"),
+        }
+        assert!(matches!(
+            parse(&["default", "clear", "--dry-run"]).unwrap(),
+            Cmd::Default { cmd: DefaultCmd::Clear { .. } }
+        ));
+        assert!(parse(&["default", "set"]).is_err(), "set needs a role");
     }
 
     #[test]
