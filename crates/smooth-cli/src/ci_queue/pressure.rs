@@ -80,6 +80,13 @@ impl Readings {
 /// Where readings come from. `Send + Sync` so a `Queue` can be shared.
 pub trait Probe: Send + Sync {
     fn read(&self, disk_paths: &[PathBuf]) -> Readings;
+
+    /// The machine's top CPU hogs (at least `min_pcpu` %), attributed to `jobs`.
+    /// `with_cwd` also looks up each one's working directory (slow). Probes that
+    /// cannot see processes (tests) report none.
+    fn hogs(&self, _jobs: &[super::watch::JobRef], _n: usize, _min_pcpu: f64, _with_cwd: bool) -> Vec<super::watch::Hog> {
+        Vec::new()
+    }
 }
 
 /// Below this CPU busy percentage, load average never holds a job: see [`holds`].
@@ -246,6 +253,14 @@ impl CpuState {
 }
 
 impl Probe for SystemProbe {
+    fn hogs(&self, jobs: &[super::watch::JobRef], n: usize, min_pcpu: f64, with_cwd: bool) -> Vec<super::watch::Hog> {
+        let Some(procs) = super::watch::snapshot() else {
+            return Vec::new();
+        };
+        let cwd = |pid: u32| if with_cwd { super::watch::cwd_of(pid) } else { None };
+        super::watch::top_hogs(&procs, jobs, n, min_pcpu, std::process::id(), &super::watch::env_lines, &cwd)
+    }
+
     fn read(&self, disk_paths: &[PathBuf]) -> Readings {
         let mut r = Readings {
             cores: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),

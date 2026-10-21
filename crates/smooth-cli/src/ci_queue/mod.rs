@@ -19,6 +19,7 @@
 //! | n    | the job exited n                                          |
 //! | 128+n| the job died on signal n                                  |
 //! | 124  | the job's `--timeout` fired; its process group was killed |
+//! | 76   | the stall watchdog killed it (process tree idle for `run.stall_minutes`) |
 //! | 127  | the job could not be started                              |
 //! | 75   | no slot within `--max-wait` (EX_TEMPFAIL) — nothing ran   |
 //! | 71   | the queue itself is unusable (EX_OSERR) — nothing ran     |
@@ -32,6 +33,7 @@ pub mod queue;
 pub mod sampler;
 pub mod shim;
 pub mod top;
+pub mod watch;
 pub mod web;
 
 use std::ffi::OsString;
@@ -206,7 +208,7 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         eprintln!("th ci-queue: the queue is Unix-only (it relies on flock and process groups) — running {label} directly, unqueued");
     }
     let max_wait = Duration::from_secs(a.max_wait.unwrap_or(q.config.run.max_wait_secs));
-    let locks = job_locks(q, &a.locks, &a.cmd, &cwd);
+    let locks = with_ios_lock(job_locks(q, &a.locks, &a.cmd, &cwd), &label, &q.config);
     let qos = a.qos.unwrap_or(q.config.run.qos).effective(!locks.is_empty());
     let req = Request {
         class: a.class,
@@ -220,11 +222,12 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         Ok(adm) => adm,
         Err(AdmitError::WaitTimeout { waited, reason }) => {
             eprintln!(
-                "th ci-queue: {label} gave up after {}s without a {} slot ({reason})",
+                "th ci-queue: NEVER RAN: {label} waited {} and gave up after {}s without a {} slot ({reason})",
+                human_wait(waited),
                 waited.as_secs(),
                 a.class.name()
             );
-            eprintln!("  nothing ran. See who holds the slots with `th ci-queue status`, or raise --max-wait.");
+            eprintln!("  This is a queue timeout, not a test failure: nothing ran. See who holds the slots with `th ci-queue status`, or raise --max-wait.");
             return EXIT_WAIT_TIMEOUT;
         }
         Err(AdmitError::Queue(e)) => {
@@ -236,11 +239,25 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
     let timeout = a.timeout.filter(|t| *t > 0).map(Duration::from_secs);
     let began = Instant::now();
     let progress = admission.progress();
+    let cap = q.config.run.max_runtime(&label, a.class == Class::Heavy).filter(|_| a.timeout.is_none());
+    let window = q.config.run.stall_window(&label);
+    let watch = (!window.is_zero() || cap.is_some()).then(|| exec::Watch {
+        window,
+        others: admission.other_roots(),
+        max_runtime: cap,
+        threshold_pct: q.config.run.stall_cpu_pct,
+        every: Duration::from_secs(q.config.run.watch_every_secs.max(1)),
+        ticket: admission.ticket(),
+        on_idle: admission.idle_publisher(),
+    });
     let (ended, usage) = exec::run_measured(
         &exec::Spec {
             argv: &a.cmd,
             cwd: &cwd,
-            env: vec![(queue::NESTED_ENV.into(), admission.slot_name().into())],
+            env: vec![
+                (queue::NESTED_ENV.into(), admission.slot_name().into()),
+                (watch::TICKET_ENV.into(), admission.ticket().to_string().into()),
+            ],
             timeout,
             qos,
             kill_grace: Duration::from_secs(q.config.run.kill_grace_secs),
@@ -249,6 +266,7 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
         },
         |pid| admission.set_child(pid),
         progress,
+        watch,
     );
     if ended == exec::Ended::TimedOut {
         eprintln!(
@@ -256,8 +274,39 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
             timeout.map_or(0, |t| t.as_secs())
         );
     }
+    if ended == exec::Ended::Stalled {
+        eprintln!(
+            "th ci-queue: {label} was killed as STALLED after {}s — the slot is free; this was not a test failure",
+            began.elapsed().as_secs()
+        );
+    }
     admission.finish(ended, began.elapsed(), usage);
     ended.exit_code()
+}
+
+/// The machine-wide lock that keeps iOS jobs (each boots simulators outside its
+/// process group, so its measured footprint is a fraction of the real one) one
+/// at a time. Off with `[run] serialize_ios = false`.
+const IOS_LOCK: &str = "ios";
+
+/// `locks` plus the `ios` lock when `label` is an iOS job and the config serializes them.
+pub fn with_ios_lock(mut locks: Vec<String>, label: &str, cfg: &config::Config) -> Vec<String> {
+    if cfg.run.serialize_ios && budget::is_ios_label(label) {
+        locks.push(IOS_LOCK.into());
+        locks.sort();
+        locks.dedup();
+    }
+    locks
+}
+
+/// `7200s` as `120m`; short waits stay in seconds.
+fn human_wait(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 120 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// The resolved `--lock`s, plus `cargo` when the command is cargo itself.
@@ -268,6 +317,9 @@ fn job_locks(q: &Queue, named: &[String], cmd: &[OsString], cwd: &Path) -> Vec<S
     // released binary: `run -- cargo --version` sat 91s behind an outside build.
     let runs_cargo = cmd.first().and_then(|c| Path::new(c).file_name()).is_some_and(|n| n == "cargo")
         && !shim::is_light("cargo", &cmd[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+    // Running a prebuilt nextest archive compiles nothing and never touches the
+    // target dir, so it must not queue behind (or hold up) real builds.
+    let runs_cargo = runs_cargo && !shim::runs_from_archive("cargo", &cmd[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
     if runs_cargo && !wanted.contains(&"cargo") {
         wanted.push("cargo");
     }
@@ -585,6 +637,41 @@ fn render(s: &queue::Snapshot) -> String {
         s.config.budget.cpu_factor
     );
 
+    let _ = writeln!(o, "\nTop CPU");
+    if s.hogs.is_empty() {
+        let _ = writeln!(o, "  (nothing using 25%+ of a core)");
+    }
+    for h in &s.hogs {
+        let who = h.owner.as_ref().map_or_else(
+            || "not from a queue job".to_string(),
+            |ow| {
+                format!(
+                    "{} #{} ({}){}",
+                    ow.label,
+                    ow.ticket,
+                    if ow.via == watch::Via::Env {
+                        "left running outside its process tree"
+                    } else {
+                        "in its tree"
+                    },
+                    if ow.stalled {
+                        " — STALLED job: its CPU is excluded from the gate"
+                    } else {
+                        ""
+                    }
+                )
+            },
+        );
+        let _ = writeln!(
+            o,
+            "  {:>5.0}%  pid {:<7} {:<40} {}  ← {who}",
+            h.pcpu,
+            h.pid,
+            h.command.chars().take(40).collect::<String>(),
+            h.cwd.as_ref().map_or_else(String::new, |c| c.display().to_string()),
+        );
+    }
+
     let _ = writeln!(o, "\nRecent");
     if s.history.is_empty() {
         let _ = writeln!(o, "  (no finished jobs yet)");
@@ -642,6 +729,94 @@ mod tests {
         let tsc: Vec<OsString> = ["pnpm", "typecheck"].iter().map(Into::into).collect();
         assert!(job_locks(&q, &[], &tsc, Path::new("/repo")).is_empty());
         assert_eq!(job_locks(&q, &["docker".into()], &tsc, Path::new("/repo")), vec!["docker".to_string()]);
+    }
+
+    #[test]
+    fn running_a_nextest_archive_takes_no_cargo_lock_but_building_it_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        let q = Queue::at(tmp.path().join("q"), config::Config::default(), std::sync::Arc::new(Quiet)).with_cargo_target("/t".into());
+        let locks = |args: &[&str]| {
+            let cmd: Vec<OsString> = args.iter().map(Into::into).collect();
+            job_locks(&q, &[], &cmd, Path::new("/repo"))
+        };
+        assert!(locks(&["cargo", "nextest", "run", "--archive-file", "a.tar.zst"]).is_empty());
+        assert!(locks(&["cargo", "nextest", "run", "--archive-file=a.tar.zst", "--workspace-remap", "."]).is_empty());
+        assert_eq!(
+            locks(&["cargo", "nextest", "archive", "--archive-file", "a.tar.zst"]),
+            vec!["cargo:/t".to_string()]
+        );
+        assert_eq!(
+            locks(&["cargo", "nextest", "run", "-p", "x"]),
+            vec!["cargo:/t".to_string()],
+            "no archive: unchanged"
+        );
+        assert_eq!(locks(&["cargo", "test"]), vec!["cargo:/t".to_string()]);
+        let cmd: Vec<OsString> = ["cargo", "nextest", "run", "--archive-file", "a"].iter().map(Into::into).collect();
+        assert_eq!(
+            job_locks(&q, &["cargo".into()], &cmd, Path::new("/repo")),
+            vec!["cargo:/t".to_string()],
+            "explicit --lock wins"
+        );
+    }
+
+    #[test]
+    fn ios_jobs_take_the_ios_lock_unless_turned_off() {
+        let cfg = config::Config::default();
+        assert!(cfg.run.serialize_ios, "default is one iOS job at a time");
+        assert_eq!(
+            with_ios_lock(vec!["cargo:/t".into()], "attest ios", &cfg),
+            vec!["cargo:/t".to_string(), "ios".to_string()]
+        );
+        assert_eq!(with_ios_lock(vec!["ios".into()], "attest ios", &cfg), vec!["ios".to_string()], "no duplicate");
+        assert!(with_ios_lock(vec![], "attest rust", &cfg).is_empty());
+        let off = config::Config::parse("[run]\nserialize_ios = false\n").unwrap();
+        assert!(with_ios_lock(vec![], "attest ios", &off).is_empty());
+    }
+
+    #[test]
+    fn status_names_the_hogs_and_the_stalled_job_they_belong_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let q = Queue::at(tmp.path().join("q"), config::Config::default(), std::sync::Arc::new(Quiet));
+        let mut snap = q.snapshot(0, tmp.path()).unwrap();
+        assert!(render(&snap).contains("(nothing using 25%+ of a core)"));
+        snap.hogs = vec![
+            watch::Hog {
+                pid: 4242,
+                pcpu: 270.0,
+                command: "esbuild --service".into(),
+                cwd: Some("/work/wt".into()),
+                owner: Some(watch::Owner {
+                    ticket: 7,
+                    label: "attest test".into(),
+                    stalled: true,
+                    via: watch::Via::Env,
+                }),
+            },
+            watch::Hog {
+                pid: 9,
+                pcpu: 80.0,
+                command: "Safari".into(),
+                cwd: None,
+                owner: None,
+            },
+        ];
+        let text = render(&snap);
+        assert!(text.contains("Top CPU"), "{text}");
+        assert!(
+            text.contains("270%") && text.contains("esbuild --service") && text.contains("/work/wt"),
+            "{text}"
+        );
+        assert!(
+            text.contains("attest test #7") && text.contains("outside its process tree") && text.contains("STALLED"),
+            "{text}"
+        );
+        assert!(text.contains("not from a queue job"), "{text}");
+    }
+
+    #[test]
+    fn wait_times_read_in_minutes_once_long() {
+        assert_eq!(human_wait(Duration::from_secs(7200)), "120m");
+        assert_eq!(human_wait(Duration::from_secs(90)), "90s");
     }
 
     #[test]

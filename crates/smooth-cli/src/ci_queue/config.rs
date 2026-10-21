@@ -49,6 +49,12 @@ pub struct Budget {
     pub heavy_cores: f64,
     pub light_rss_gb: f64,
     pub light_cores: f64,
+    /// Floor on an iOS job's estimate (`attest ios`, `xcodebuild`). Its process
+    /// group is measured small — the simulators it boots live outside the group
+    /// — and most history runs are instant "nothing changed" skips, so the p90
+    /// says ~0.1 GB for a job that really loads the machine.
+    pub ios_rss_gb: f64,
+    pub ios_cores: f64,
     /// How many of a label's recent runs its estimate is drawn from.
     pub window: usize,
     /// How many times smaller jobs may pass an earlier waiter that does not
@@ -80,6 +86,8 @@ impl Default for Budget {
             heavy_cores: 4.0,
             light_rss_gb: 0.5,
             light_cores: 1.0,
+            ios_rss_gb: 6.0,
+            ios_cores: 4.0,
             window: 20,
             max_passes: 3,
             aimd_step: 0.1,
@@ -178,6 +186,30 @@ impl Gate {
 pub struct Run {
     /// Default cap on time spent WAITING for a slot. Past it, `run` exits 75.
     pub max_wait_secs: u64,
+    /// Kill a running job whose process TREE (itself, every descendant by
+    /// parent pid whatever group it moved to, and its group) averaged under
+    /// `stall_cpu_pct` of one core for this many minutes. 0 = never. It exits 76
+    /// (`stalled`), distinct from 75 (never ran) and 124 (`--timeout`).
+    pub stall_minutes: u64,
+    pub stall_cpu_pct: u32,
+    /// Labels (substring match, plus every iOS label) whose real work runs
+    /// outside the job's process tree (simulators, the gradle/docker daemons):
+    /// the idle check would kill a healthy job, so they keep only the runtime cap.
+    pub stall_exempt_labels: Vec<String>,
+    /// How often the watchdog samples a running job's tree.
+    pub watch_every_secs: u64,
+    /// Backstop: kill a job that runs longer than this, by class. 0 = no limit.
+    /// An explicit `--timeout` wins.
+    pub max_runtime_heavy_secs: u64,
+    pub max_runtime_light_secs: u64,
+    /// Per-label runtime caps (a label that starts with the key), checked before
+    /// the class cap. A job over its cap is killed as `stalled` (exit 76).
+    /// `attest rust` runs 15-40 min; one stuck for 12 h held 16 GB reserved.
+    pub max_runtime_by_label_secs: std::collections::BTreeMap<String, u64>,
+    /// Run at most one iOS job at a time (takes the machine-wide `ios` lock).
+    /// Each one spawns hundreds of simulator processes; two at once pushed the
+    /// load past 500.
+    pub serialize_ios: bool,
     /// Default priority for jobs (`--qos` overrides). A job that holds a
     /// machine-shared lock never runs below `nice`: see [`Qos`].
     pub qos: Qos,
@@ -192,10 +224,45 @@ pub struct Run {
     pub note_every_secs: u64,
 }
 
+impl Run {
+    /// The idle window for a job: zero (no idle check) when stalls are off or the
+    /// label is exempt.
+    pub fn stall_window(&self, label: &str) -> std::time::Duration {
+        let l = label.to_lowercase();
+        let exempt = super::budget::is_ios_label(label) || self.stall_exempt_labels.iter().any(|w| !w.is_empty() && l.contains(&w.to_lowercase()));
+        if exempt {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(self.stall_minutes * 60)
+        }
+    }
+
+    /// The runtime cap for a job: the longest-matching label cap, else the class's.
+    /// 0 / absent = none.
+    pub fn max_runtime(&self, label: &str, heavy: bool) -> Option<std::time::Duration> {
+        let by_label = self
+            .max_runtime_by_label_secs
+            .iter()
+            .filter(|(k, _)| label.starts_with(k.as_str()))
+            .max_by_key(|(k, _)| k.len())
+            .map(|(_, v)| *v);
+        let secs = by_label.unwrap_or(if heavy { self.max_runtime_heavy_secs } else { self.max_runtime_light_secs });
+        (secs > 0).then(|| std::time::Duration::from_secs(secs))
+    }
+}
+
 impl Default for Run {
     fn default() -> Self {
         Self {
             max_wait_secs: 1800,
+            serialize_ios: true,
+            stall_minutes: 20,
+            stall_cpu_pct: 5,
+            stall_exempt_labels: vec!["xcodebuild".into(), "gradle".into(), "docker".into()],
+            watch_every_secs: 15,
+            max_runtime_heavy_secs: 0,
+            max_runtime_light_secs: 0,
+            max_runtime_by_label_secs: std::collections::BTreeMap::from([("attest rust".to_string(), 7200)]),
             qos: Qos::Nice,
             kill_grace_secs: 10,
             history_keep: 500,
@@ -323,6 +390,35 @@ mod tests {
         let p = tmp.path().join("ci-queue.toml");
         std::fs::write(&p, "[slots\nheavy = ").unwrap();
         assert_eq!(Config::load(Some(&p)), Config::default());
+    }
+
+    #[test]
+    fn ios_gradle_and_docker_jobs_are_exempt_from_the_idle_check() {
+        let r = Run::default();
+        assert_eq!(r.stall_window("attest rust"), std::time::Duration::from_secs(20 * 60));
+        for l in ["attest ios", "xcodebuild test", "./gradlew build", "docker build ."] {
+            assert!(r.stall_window(l).is_zero(), "{l}");
+        }
+    }
+
+    #[test]
+    fn runtime_caps_by_label_then_class() {
+        let mut r = Run::default();
+        let h = |l: &str| r.max_runtime(l, true);
+        assert_eq!(h("attest rust"), Some(std::time::Duration::from_secs(7200)), "attest rust defaults to ~2h");
+        assert_eq!(h("attest rustfmt"), Some(std::time::Duration::from_secs(7200)), "prefix match");
+        assert_eq!(h("attest test"), None);
+        r.max_runtime_heavy_secs = 600;
+        r.max_runtime_by_label_secs.insert("attest rust x".into(), 60);
+        assert_eq!(r.max_runtime("attest test", true), Some(std::time::Duration::from_secs(600)));
+        assert_eq!(r.max_runtime("attest test", false), None, "the heavy cap is not the light cap");
+        assert_eq!(
+            r.max_runtime("attest rust x1", true),
+            Some(std::time::Duration::from_secs(60)),
+            "longest label wins"
+        );
+        let c = Config::parse("[run]\nmax_runtime_by_label_secs = { \"attest rust\" = 0 }\n").unwrap();
+        assert_eq!(c.run.max_runtime("attest rust", true), None, "0 turns a label's cap off");
     }
 
     #[test]
