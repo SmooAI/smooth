@@ -1515,6 +1515,36 @@ Things worth knowing:
   `title` (`{{entity.title}}`). The CLI's starter templates use those names;
   a filter on a field the event doesn't carry is `null` and never matches.
 
+### Workforce: create accounts for directory people (SMOODEV-4052)
+
+CLI twin of the hosted MCP `workforce_create_accounts` and the Workforce page's
+**Create account**: gives directory people a Smoo account and org membership on
+their work email, with no email sent, so they can join ring groups and hold
+calling seats. It calls `POST /organizations/{org}/workforce/employees/accounts`
+with your own sign-in, so the route decides: `org.members.manage`, the
+`workforce` product, work emails on a DNS-verified org domain only, and a
+`--role-id` carrying a permission you don't hold is refused. A 403 reads
+"admin only".
+
+```bash
+th smoo workforce directory --json                       # ids; needsAccount marks who is waiting
+th smoo workforce create-account <employee_id> [<employee_id>…] [--role-id <role_id>]
+th smoo workforce create-account --needs-account --dry-run   # everyone waiting, preview only
+th smoo workforce create-account --needs-account --yes       # scripts / CI
+```
+
+It needs a signed-in user (`th auth login`); an org API key / `th api login`
+session is refused before any call, because the route is user-only. The prompt
+and `--dry-run` name who gets an account ("Name <email>", the first 10 then
+"+N more") and the role by name; it confirms on a TTY (`--yes` otherwise). Longer
+lists go in batches of 50, and it prints one line per person: created, added
+(they already had a Smoo account), already member, or failed with the reason.
+NO ROLE means the org has no default member role: run again with `--role-id`.
+If a batch fails, the results of the batches before it are still printed (their
+accounts exist), the error names "batch N of M", and the command exits non-zero;
+re-run to continue — people who already have an account come back as already
+member. Only a 401/403 on the first batch says "nothing was changed".
+
 ### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
 
 CLI twins of the copilot's `dashboards.*`, `notifications.*_preferences` and
