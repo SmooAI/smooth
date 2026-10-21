@@ -10,15 +10,18 @@
 //! and a `--role-id` you could not grant yourself is refused. A 403 is
 //! reported as "admin only".
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 
 use anstream::println;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
 use owo_colors::OwoColorize;
 use serde_json::{json, Value};
 
-use super::{print_json, require_active_org, require_authed};
+use smooth_api_client::SmoothApiClient;
+
+use super::{print_json, require_active_org, require_authed, require_user_session};
 use crate::destructive::{Confirm, Severity, Target};
 
 /// `MAX_EMPLOYEES_PER_REQUEST` in smooai api-prime `handlers/workforce_accounts.rs`.
@@ -164,18 +167,222 @@ pub fn result_line(r: &Value) -> String {
     out
 }
 
-/// A 403 from the route reads as "admin only", not an outage.
-fn admin_only(err: anyhow::Error) -> anyhow::Error {
-    if err.to_string().contains("HTTP 403") {
-        return err.context(
-            "admin only: creating accounts needs org.members.manage and the Workforce product, and --role-id may not carry a permission you don't hold — nothing was changed",
-        );
+/// How many people the confirm prompt and `--dry-run` name before "+N more".
+pub const PREVIEW_LIMIT: usize = 10;
+
+/// Why the route is refused without a person's session: it is `auth: 'user'`
+/// (the account is attributed to, and role-checked against, the admin), so an
+/// org API key gets a bare 401.
+pub const NEEDS_USER: &str = "creating accounts acts as you, so it needs a signed-in Smoo user — run `th auth login` \
+     (an org API key / `th api login` session is refused by this route)";
+
+/// The people about to get accounts, as "Name <email>", the first
+/// [`PREVIEW_LIMIT`] of them then "+N more". An id the directory doesn't know
+/// is shown as-is so the prompt never hides who is affected.
+#[must_use]
+pub fn who_preview(ids: &[String], directory: &Value) -> String {
+    let by_id: HashMap<&str, &Value> = rows(directory, "data")
+        .map(|rows| rows.iter().filter_map(|e| Some((e.get("id")?.as_str()?, e))).collect())
+        .unwrap_or_default();
+    let mut names: Vec<String> = ids
+        .iter()
+        .take(PREVIEW_LIMIT)
+        .map(|id| match by_id.get(id.as_str()) {
+            Some(e) => {
+                let name = e.get("fullName").and_then(Value::as_str).unwrap_or("(unnamed)");
+                match e.get("primaryEmail").and_then(Value::as_str).filter(|m| !m.is_empty()) {
+                    Some(mail) => format!("{name} <{mail}>"),
+                    None => format!("{name} (no work email)"),
+                }
+            }
+            None => format!("{id} (not in the directory)"),
+        })
+        .collect();
+    if ids.len() > PREVIEW_LIMIT {
+        names.push(format!("+{} more", ids.len() - PREVIEW_LIMIT));
     }
-    err
+    names.join(", ")
+}
+
+/// "BDR (uuid)" from the org's `GET /roles` catalog, or the bare id if it isn't there.
+#[must_use]
+pub fn role_label(roles: &Value, role_id: &str) -> String {
+    roles
+        .get("roles")
+        .and_then(Value::as_array)
+        .and_then(|rs| rs.iter().find(|r| r.get("id").and_then(Value::as_str) == Some(role_id)))
+        .and_then(|r| r.get("name").and_then(Value::as_str))
+        .map_or_else(|| role_id.to_string(), |name| format!("{name} ({role_id})"))
+}
+
+/// What the confirm prompt and `--dry-run` say is about to happen.
+#[must_use]
+pub fn plan_summary(ids: &[String], directory: &Value, role: Option<&str>) -> String {
+    let role = role.map(|r| format!(" with role {r}")).unwrap_or_default();
+    format!("{} person(s){role}: {}", ids.len(), who_preview(ids, directory))
+}
+
+/// The results of every batch that went through, and the batch that didn't (0-based) with its error.
+pub struct BatchRun {
+    pub results: Vec<Value>,
+    pub failure: Option<(usize, anyhow::Error)>,
+}
+
+/// POST each batch in order and stop at the first failure, keeping what the
+/// earlier batches returned: those accounts exist now, so dropping their
+/// results would hide changes that were made.
+pub async fn send_batches<F, Fut>(bodies: &[Value], mut post: F) -> BatchRun
+where
+    F: FnMut(Value) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let mut results = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        match post(body.clone()).await {
+            Ok(resp) => results.extend(resp.get("results").and_then(Value::as_array).cloned().unwrap_or_default()),
+            Err(e) => {
+                return BatchRun {
+                    results,
+                    failure: Some((i, e)),
+                }
+            }
+        }
+    }
+    BatchRun { results, failure: None }
+}
+
+/// A 403 reads as "admin only" and a 401 as "sign in as a user", not an outage.
+fn explain(err: &anyhow::Error) -> Option<&'static str> {
+    let text = format!("{err:#}");
+    if text.contains("HTTP 403") {
+        Some("admin only: creating accounts needs org.members.manage and the Workforce product, and --role-id may not carry a permission you don't hold")
+    } else if text.contains("HTTP 401") {
+        Some(NEEDS_USER)
+    } else {
+        None
+    }
+}
+
+/// The error for batch `i` (0-based) of `total`. Only a refusal (401/403) of
+/// the FIRST batch is known to have changed nothing; anything later means the
+/// earlier batches' accounts exist, and a timeout or 5xx may have landed.
+#[must_use]
+pub fn batch_error(i: usize, total: usize, err: anyhow::Error) -> anyhow::Error {
+    let why = explain(&err);
+    let msg = match (i, why) {
+        (0, Some(why)) => format!("{why} — nothing was changed"),
+        (0, None) if total == 1 => "the request failed; check the directory before retrying (re-running is safe: existing members come back as already member)".to_string(),
+        (_, why) => format!(
+            "batch {} of {total} failed{}; the results above are from the batches that went through — re-run to continue (people who already have an account come back as already member)",
+            i + 1,
+            why.map(|w| format!(" ({w})")).unwrap_or_default()
+        ),
+    };
+    err.context(msg)
+}
+
+/// The create-account route is user-only, so refuse an M2M session up front
+/// instead of letting it 401.
+async fn user_client() -> Result<SmoothApiClient> {
+    require_user_session().await.map_err(|_| anyhow!(NEEDS_USER))
+}
+
+fn print_results(results: &[Value]) {
+    println!();
+    for r in results {
+        let mark = if r.get("status").and_then(Value::as_str) == Some("failed") {
+            "✗".red().to_string()
+        } else {
+            "✓".green().to_string()
+        };
+        println!("  {mark} {}", result_line(r));
+    }
+    println!();
+}
+
+async fn create_account(
+    client: &SmoothApiClient,
+    raw: &[String],
+    needs_account: bool,
+    role_id: Option<String>,
+    json: bool,
+    org: Option<String>,
+    confirm: Confirm,
+) -> Result<()> {
+    let role_id = role_id.as_deref().map(|r| uuid_arg("--role-id", r)).transpose()?;
+    let o = require_active_org(client, org)?;
+    // Read the directory either way: --needs-account picks from it, and the
+    // prompt names who gets an account.
+    let directory = client
+        .get(&format!("/organizations/{o}/workforce/employees"))
+        .await
+        .context("GET workforce employees")?;
+    let ids = if needs_account {
+        let ids = needing_account(&directory);
+        if ids.is_empty() {
+            println!("\n  {} {}\n", "●".dimmed(), "nobody in the directory is waiting for an account".dimmed());
+            return Ok(());
+        }
+        ids
+    } else {
+        employee_ids(raw)?
+    };
+    let role = match role_id.as_deref() {
+        // A failed catalog read only costs the prompt the role's name.
+        Some(r) => Some(match client.get(&format!("/organizations/{o}/roles")).await {
+            Ok(roles) => role_label(&roles, r),
+            Err(_) => r.to_string(),
+        }),
+        None => None,
+    };
+    let what = plan_summary(&ids, &directory, role.as_deref());
+    let bodies = batches(&ids, role_id.as_deref());
+    if confirm.dry_run {
+        println!("\n  {} would create accounts for {what}", "●".dimmed());
+        for b in &bodies {
+            println!("\n  {} would POST /organizations/{o}/workforce/employees/accounts", "●".dimmed());
+            print_json(b);
+        }
+    }
+    let proceed = crate::destructive::gate_with(
+        &Target {
+            verb: "create Smoo accounts (and org membership) for",
+            noun: "directory",
+            id: &what,
+            org: &o,
+            severity: Severity::Standard,
+        },
+        confirm,
+    )?;
+    if !proceed {
+        return Ok(());
+    }
+    let path = format!("/organizations/{o}/workforce/employees/accounts");
+    let run = send_batches(&bodies, |body| {
+        let path = &path;
+        async move { client.post(path, Some(&body)).await }
+    })
+    .await;
+    let failure = run.failure.map(|(i, e)| (i, batch_error(i, bodies.len(), e)));
+    if json {
+        let error = failure
+            .as_ref()
+            .map(|(i, e)| json!({ "batch": i + 1, "of": bodies.len(), "message": format!("{e:#}") }));
+        print_json(&json!({ "results": run.results, "error": error }));
+    } else if !run.results.is_empty() || failure.is_none() {
+        print_results(&run.results);
+    }
+    match failure {
+        Some((_, e)) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed().await?;
+    let client = match &cmd {
+        Cmd::CreateAccount { .. } => user_client().await?,
+        Cmd::Directory { .. } => require_authed().await?,
+    };
     match cmd {
         Cmd::CreateAccount {
             employee_ids: raw,
@@ -184,72 +391,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             json,
             org,
             confirm,
-        } => {
-            let role_id = role_id.as_deref().map(|r| uuid_arg("--role-id", r)).transpose()?;
-            let o = require_active_org(&client, org)?;
-            let ids = if needs_account {
-                let directory = client
-                    .get(&format!("/organizations/{o}/workforce/employees"))
-                    .await
-                    .context("GET workforce employees")?;
-                let ids = needing_account(&directory);
-                if ids.is_empty() {
-                    println!("\n  {} {}\n", "●".dimmed(), "nobody in the directory is waiting for an account".dimmed());
-                    return Ok(());
-                }
-                ids
-            } else {
-                employee_ids(&raw)?
-            };
-            let what = format!(
-                "{} person(s){}",
-                ids.len(),
-                role_id.as_deref().map(|r| format!(" with role {r}")).unwrap_or_default()
-            );
-            let bodies = batches(&ids, role_id.as_deref());
-            if confirm.dry_run {
-                for b in &bodies {
-                    println!("\n  {} would POST /organizations/{o}/workforce/employees/accounts", "●".dimmed());
-                    print_json(b);
-                }
-            }
-            let proceed = crate::destructive::gate_with(
-                &Target {
-                    verb: "create Smoo accounts (and org membership) for",
-                    noun: "directory",
-                    id: &what,
-                    org: &o,
-                    severity: Severity::Standard,
-                },
-                confirm,
-            )?;
-            if !proceed {
-                return Ok(());
-            }
-            let mut results = Vec::new();
-            for body in &bodies {
-                let resp = client
-                    .post(&format!("/organizations/{o}/workforce/employees/accounts"), Some(body))
-                    .await
-                    .map_err(admin_only)
-                    .context("POST workforce/employees/accounts")?;
-                results.extend(resp.get("results").and_then(Value::as_array).cloned().unwrap_or_default());
-            }
-            if json {
-                print_json(&json!({ "results": results }));
-                return Ok(());
-            }
-            println!();
-            for r in &results {
-                let mark = if r.get("status").and_then(Value::as_str) == Some("failed") {
-                    "✗".red().to_string()
-                } else {
-                    "✓".green().to_string()
-                };
-                println!("  {mark} {}", result_line(r));
-            }
-            println!();
-        }
+        } => create_account(&client, &raw, needs_account, role_id, json, org, confirm).await?,
         Cmd::Directory { view, json, org } => {
             let o = require_active_org(&client, org)?;
             match view {
@@ -347,6 +489,7 @@ fn print_org_units(body: &serde_json::Value, key: &str) {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use serde_json::json;
 
     use super::{Cmd, View};
 
@@ -455,11 +598,88 @@ mod tests {
     }
 
     #[test]
-    fn a_403_reads_as_admin_only() {
-        let e = super::admin_only(anyhow::anyhow!("HTTP 403 Forbidden"));
-        assert!(format!("{e:#}").contains("admin only"));
-        let e = super::admin_only(anyhow::anyhow!("HTTP 500"));
-        assert!(!format!("{e:#}").contains("admin only"));
+    fn a_refused_first_batch_says_nothing_changed() {
+        let e = super::batch_error(0, 1, anyhow::anyhow!("HTTP 403 Forbidden"));
+        let msg = format!("{e:#}");
+        assert!(msg.contains("admin only") && msg.contains("nothing was changed"), "{msg}");
+        let e = super::batch_error(0, 1, anyhow::anyhow!("HTTP 401 Unauthorized"));
+        assert!(format!("{e:#}").contains("th auth login"));
+        let e = super::batch_error(0, 1, anyhow::anyhow!("HTTP 500"));
+        let msg = format!("{e:#}");
+        assert!(!msg.contains("admin only") && !msg.contains("nothing was changed"), "{msg}");
+    }
+
+    #[test]
+    fn a_later_batch_failure_never_claims_nothing_changed() {
+        for err in ["HTTP 403 Forbidden", "HTTP 500", "connection reset"] {
+            let msg = format!("{:#}", super::batch_error(2, 3, anyhow::anyhow!(err)));
+            assert!(msg.contains("batch 3 of 3 failed") && msg.contains("re-run to continue"), "{msg}");
+            assert!(!msg.contains("nothing was changed"), "{msg}");
+            assert!(msg.contains(err), "the cause is kept: {msg}");
+        }
+        assert!(format!("{:#}", super::batch_error(1, 2, anyhow::anyhow!("HTTP 403"))).contains("admin only"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_keeps_earlier_results() {
+        let ids: Vec<String> = (0..120).map(|i| format!("00000000-0000-4000-8000-{i:012}")).collect();
+        let bodies = super::batches(&ids, None);
+        let mut calls = 0;
+        let run = super::send_batches(&bodies, |body| {
+            calls += 1;
+            let n = calls;
+            async move {
+                if n == 2 {
+                    anyhow::bail!("HTTP 403 Forbidden");
+                }
+                let first = body["employeeIds"][0].clone();
+                Ok(json!({ "results": [{ "employeeId": first, "status": "added" }] }))
+            }
+        })
+        .await;
+        assert_eq!(calls, 2, "stops at the failed batch");
+        assert_eq!(run.results.len(), 1, "batch 1's results survive");
+        assert_eq!(run.results[0]["employeeId"], ids[0].as_str());
+        let (i, _) = run.failure.expect("batch 2 failed");
+        assert_eq!(i, 1);
+
+        let run = super::send_batches(&bodies, |_| async { Ok(json!({ "results": [{ "status": "added" }] })) }).await;
+        assert_eq!(run.results.len(), 3);
+        assert!(run.failure.is_none());
+    }
+
+    #[test]
+    fn a_missing_user_session_points_at_auth_login() {
+        assert!(super::NEEDS_USER.contains("th auth login"));
+        assert!(super::NEEDS_USER.contains("API key"), "says why the M2M session won't do");
+    }
+
+    #[test]
+    fn the_plan_names_people_and_the_role() {
+        let dir = json!({ "data": [
+            { "id": E1, "fullName": "Linda Ray", "primaryEmail": "linda@corp.com" },
+            { "id": E2, "fullName": "Sam Lee", "primaryEmail": null }
+        ] });
+        let ghost = "00000000-0000-4000-8000-00000000abcd".to_string();
+        let ids = vec![E1.to_string(), E2.to_string(), ghost.clone()];
+        let roles = json!({ "roles": [{ "id": R, "name": "BDR" }] });
+        let role = super::role_label(&roles, R);
+        assert_eq!(role, format!("BDR ({R})"));
+        assert_eq!(super::role_label(&json!({ "roles": [] }), R), R, "unknown role falls back to the id");
+        let plan = super::plan_summary(&ids, &dir, Some(&role));
+        assert!(plan.starts_with(&format!("3 person(s) with role BDR ({R}): ")), "{plan}");
+        assert!(plan.contains("Linda Ray <linda@corp.com>"), "{plan}");
+        assert!(plan.contains("Sam Lee (no work email)"), "{plan}");
+        assert!(plan.contains(&format!("{ghost} (not in the directory)")), "{plan}");
+    }
+
+    #[test]
+    fn a_long_plan_is_truncated() {
+        let ids: Vec<String> = (0..25).map(|i| format!("00000000-0000-4000-8000-{i:012}")).collect();
+        let dir = json!({ "data": ids.iter().map(|id| json!({ "id": id, "fullName": "P", "primaryEmail": "p@corp.com" })).collect::<Vec<_>>() });
+        let preview = super::who_preview(&ids, &dir);
+        assert_eq!(preview.matches("P <p@corp.com>").count(), super::PREVIEW_LIMIT);
+        assert!(preview.ends_with("+15 more"), "{preview}");
     }
 
     #[test]

@@ -1533,10 +1533,17 @@ th smoo workforce create-account --needs-account --dry-run   # everyone waiting,
 th smoo workforce create-account --needs-account --yes       # scripts / CI
 ```
 
-It prints the target and confirms on a TTY (`--yes` otherwise), sends longer
-lists in batches of 50, and prints one line per person: created, added (they
-already had a Smoo account), already member, or failed with the reason. NO ROLE
-means the org has no default member role: run again with `--role-id`.
+It needs a signed-in user (`th auth login`); an org API key / `th api login`
+session is refused before any call, because the route is user-only. The prompt
+and `--dry-run` name who gets an account ("Name <email>", the first 10 then
+"+N more") and the role by name; it confirms on a TTY (`--yes` otherwise). Longer
+lists go in batches of 50, and it prints one line per person: created, added
+(they already had a Smoo account), already member, or failed with the reason.
+NO ROLE means the org has no default member role: run again with `--role-id`.
+If a batch fails, the results of the batches before it are still printed (their
+accounts exist), the error names "batch N of M", and the command exits non-zero;
+re-run to continue — people who already have an account come back as already
+member. Only a 401/403 on the first batch says "nothing was changed".
 
 ### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
 
