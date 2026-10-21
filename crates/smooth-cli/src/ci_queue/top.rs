@@ -1299,6 +1299,7 @@ pub mod demo {
                 waiting,
                 readings: self.readings(),
                 holds: self.holds(),
+                hogs: Vec::new(),
                 history: self.history.clone(),
             };
             // Publish each waiter's blocker the way a real waiter does.
@@ -1350,6 +1351,7 @@ mod tests {
             waiting: Vec::new(),
             readings: readings(),
             holds: Vec::new(),
+            hogs: Vec::new(),
             history: Vec::new(),
         }
     }

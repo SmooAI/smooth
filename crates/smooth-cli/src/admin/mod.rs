@@ -26,6 +26,7 @@ use clap::Subcommand;
 
 pub mod client;
 pub mod config;
+pub mod flag_org;
 pub mod members;
 pub mod org;
 pub mod overrides;

@@ -57,6 +57,7 @@ use super::exec::{Ended, Usage};
 use super::history::History;
 pub use super::history::HistoryEntry;
 use super::pressure::{self, CpuState, Probe, Readings, SystemProbe};
+use super::watch;
 
 /// Set in every admitted job's environment. A nested `th ci-queue run` (or
 /// `th attest`) inside a queued job runs directly instead of queueing again:
@@ -98,6 +99,13 @@ impl Class {
     }
 }
 
+/// How many of the hungriest processes attribution looks at.
+const HOG_SAMPLE: usize = 12;
+
+/// `discount_idle_cpu` runs whenever the reading is above this (or the gate's
+/// own line, if lower): the load backstop disarms below 50% busy.
+const LOAD_FLOOR_PCT: f64 = pressure::LOAD_COUNTS_FROM_CPU_BUSY_PCT;
+
 /// What a job says about itself, in its ticket and then in its slot.
 /// `Default` is for literals in tests and demos (`..Default::default()`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +144,10 @@ pub struct JobInfo {
     /// While running: its process group's memory at the last sample.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rss_now_kb: Option<u64>,
+    /// While running: since when the stall watchdog has judged its process tree
+    /// idle (a stall suspect). Its CPU is then not counted against the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_ms: Option<u64>,
 }
 
 pub struct Request {
@@ -312,7 +324,7 @@ impl Queue {
             Vec::new()
         });
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        budget::estimate(&samples, class, &self.config.budget, cores)
+        budget::ios_floor(budget::estimate(&samples, class, &self.config.budget, cores), label, &self.config.budget)
     }
 
     fn aimd_path(&self) -> PathBuf {
@@ -417,6 +429,7 @@ impl Queue {
             blocked_by_ticket: None,
             est: Some(est),
             rss_now_kb: None,
+            idle_since_ms: None,
         };
         let (ticket_path, mut ticket_file) = self.take_ticket(&mut me)?;
         let poll = Duration::from_millis(self.config.run.poll_ms);
@@ -630,12 +643,25 @@ impl Queue {
             Class::Heavy => Class::Light,
             Class::Light => Class::Heavy,
         })?;
+        let all_busy: Vec<JobInfo> = slots
+            .iter()
+            .chain(other.iter())
+            .filter_map(|s| match s {
+                SlotState::Busy(i) if !is_phantom(i) => Some((**i).clone()),
+                _ => None,
+            })
+            .collect();
         let running: Vec<Running> = slots
             .iter()
             .chain(other.iter())
             .filter_map(|s| match s {
                 // A held slot with no readable info is not a job: see `is_phantom`.
                 SlotState::Busy(i) if is_phantom(i) => None,
+                // A job the stall watchdog has flagged idle keeps its slot until
+                // it is killed, but its reservation is released: it is using
+                // nothing, and a hung job (12 h, 0.0 GB used, 16 GB reserved)
+                // must not keep blocking the jobs that can run.
+                SlotState::Busy(i) if i.idle_since_ms.is_some() => None,
                 SlotState::Busy(i) => Some(Running {
                     est: i.est.unwrap_or_else(|| self.estimate_for(&i.label, i.class)),
                     rss_now_kb: i.rss_now_kb,
@@ -656,7 +682,11 @@ impl Queue {
 
         // One pressure sample per attempt while anything runs. It drives the
         // gate, the budget's memory side, and the AIMD scale.
-        let readings = (!running.is_empty()).then(|| self.read_pressure(&me.cwd));
+        let readings = (!running.is_empty()).then(|| {
+            let mut r = self.read_pressure(&me.cwd);
+            self.discount_idle_cpu(&mut r, &all_busy);
+            r
+        });
         let mut aimd = self.load_aimd();
         let holds = readings.as_ref().map(|r| pressure::holds(r, &self.config.gate)).unwrap_or_default();
         if readings.is_some() {
@@ -665,7 +695,12 @@ impl Queue {
         }
         let empty = Readings::default();
         let r = readings.as_ref().unwrap_or(&empty);
-        let fits = |e: Option<Estimate>| e.map_or(Ok(()), |e| budget::fits(e, &running, r, &self.config.budget, aimd.scale));
+        let fits = |e: Option<Estimate>| {
+            e.map_or(Ok(()), |e| match class {
+                Class::Heavy => budget::fits(e, &running, r, &self.config.budget, aimd.scale),
+                Class::Light => budget::fits_light(e, &running, r, &self.config.budget),
+            })
+        };
 
         // FIFO, with two bounded exceptions: an earlier waiter blocked only on
         // a named lock, or one that does not fit the budget and has been passed
@@ -705,7 +740,12 @@ impl Queue {
             return Ok(Attempt::wait(format!("{} / {busy_note}", holds.join(" / "))));
         }
         if let Err(why) = fits(me.est) {
-            return Ok(Attempt::wait(format!("{why} (scale {:.2}) / {busy_note}", aimd.scale)));
+            let scale = if class == Class::Heavy {
+                format!(" (scale {:.2})", aimd.scale)
+            } else {
+                String::new()
+            };
+            return Ok(Attempt::wait(format!("{why}{scale} / {busy_note}")));
         }
         let SlotState::Free { index, mut file } = slots.swap_remove(pos) else {
             return Ok(Attempt::wait(busy_note));
@@ -738,6 +778,37 @@ impl Queue {
             locks,
             readings: readings.map(Box::new),
         })
+    }
+
+    /// The running jobs as attribution sees them.
+    fn job_refs(jobs: &[JobInfo]) -> Vec<watch::JobRef> {
+        jobs.iter()
+            .map(|j| watch::JobRef {
+                ticket: j.ticket,
+                label: j.label.clone(),
+                pid: j.child_pid.unwrap_or(j.pid),
+                stalled: j.idle_since_ms.is_some(),
+                cwd: j.cwd.clone(),
+            })
+            .collect()
+    }
+
+    /// CPU that belongs to a job the watchdog has judged idle is not the
+    /// machine's load from queue work: waiting does not relieve it, and the
+    /// watchdog will kill the job. Take it out of `cpu_busy_pct`, so the gate
+    /// does not hold every new job, and the AIMD scale does not collapse, on
+    /// account of a stalled job's runaway helpers. Only when a job IS flagged
+    /// idle and the CPU reading is over the gate's line.
+    fn discount_idle_cpu(&self, r: &mut Readings, jobs: &[JobInfo]) {
+        let gate = &self.config.gate;
+        let Some(busy) = r.cpu_busy_pct.filter(|c| *c > gate.max_cpu_busy_pct.min(LOAD_FLOOR_PCT)) else {
+            return;
+        };
+        if !jobs.iter().any(|j| j.idle_since_ms.is_some()) {
+            return;
+        }
+        let hogs = self.probe.hogs(&Self::job_refs(jobs), HOG_SAMPLE, 5.0, false);
+        r.cpu_busy_pct = Some((busy - watch::stalled_machine_pct(&hogs, r.cores)).max(0.0));
     }
 
     fn lock_path(&self, name: &str) -> PathBuf {
@@ -829,8 +900,10 @@ impl Queue {
             (self.read_pressure(cwd), self.load_aimd())
         };
         let holds = pressure::holds(&readings, &self.config.gate);
+        let hogs = self.probe.hogs(&Self::job_refs(&running), 6, 25.0, true);
         let budget_running: Vec<Running> = running
             .iter()
+            .filter(|i| i.idle_since_ms.is_none())
             .map(|i| Running {
                 est: i.est.unwrap_or_else(|| self.estimate_for(&i.label, i.class)),
                 rss_now_kb: i.rss_now_kb,
@@ -847,6 +920,7 @@ impl Queue {
             waiting,
             readings,
             holds,
+            hogs,
             history: self.history(history),
         })
     }
@@ -885,7 +959,9 @@ enum SlotState {
 ///
 /// 2: history from SQLite with measured memory/CPU; `JobInfo.est` and
 /// `rss_now_kb`; the `budget` view.
-pub const SNAPSHOT_SCHEMA: u32 = 2;
+///
+/// 3: `hogs` (top CPU consumers attributed to jobs); `JobInfo.idle_since_ms`.
+pub const SNAPSHOT_SCHEMA: u32 = 3;
 
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
@@ -900,6 +976,9 @@ pub struct Snapshot {
     pub readings: Readings,
     /// What the gate would hold a new heavy job on right now.
     pub holds: Vec<String>,
+    /// The machine's top CPU consumers and which queue job each belongs to.
+    #[serde(default)]
+    pub hogs: Vec<watch::Hog>,
     pub history: Vec<HistoryEntry>,
 }
 
@@ -939,6 +1018,7 @@ impl Admission {
                 blocked_by_ticket: None,
                 est: None,
                 rss_now_kb: None,
+                idle_since_ms: None,
             },
             waited: Duration::ZERO,
             queue: None,
@@ -997,6 +1077,58 @@ impl Admission {
             info.rss_now_kb = Some(kb);
             let _ = rewrite(&mut file, &info);
         })
+    }
+
+    /// This job's ticket: unique per queue, exported to the job as
+    /// [`super::watch::TICKET_ENV`] so its stray helpers can be traced back.
+    pub const fn ticket(&self) -> u64 {
+        self.info.ticket
+    }
+
+    /// The root pids of every OTHER live job, read when the watchdog is about
+    /// to kill: their process trees are off limits.
+    pub fn other_roots(&self) -> Option<Box<dyn Fn() -> Vec<u32> + Send>> {
+        let q = self.queue.clone()?;
+        let mine = self.info.ticket;
+        Some(Box::new(move || {
+            let Ok(_m) = q.mutex() else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for class in [Class::Heavy, Class::Light] {
+                for s in q.scan_slots(class).unwrap_or_default() {
+                    if let SlotState::Busy(i) = s {
+                        if i.ticket != mine && !is_phantom(&i) {
+                            out.push(i.child_pid.unwrap_or(i.pid));
+                        }
+                    }
+                }
+            }
+            out
+        }))
+    }
+
+    /// A callback that publishes whether the stall watchdog judges the job idle
+    /// into its slot (like [`Admission::progress`]: its own dup of the fd,
+    /// under the mutex, changing only `idle_since_ms`).
+    pub fn idle_publisher(&self) -> Option<Box<dyn FnMut(Option<Duration>) + Send>> {
+        let mut file = self.lock.as_ref()?.try_clone().ok()?;
+        let q = self.queue.clone()?;
+        let fallback = self.info.clone();
+        Some(Box::new(move |idle: Option<Duration>| {
+            let Ok(_m) = q.mutex() else {
+                return;
+            };
+            let mut text = String::new();
+            let current = file
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| file.read_to_string(&mut text))
+                .ok()
+                .and_then(|_| serde_json::from_str::<JobInfo>(&text).ok());
+            let mut info = current.unwrap_or_else(|| fallback.clone());
+            info.idle_since_ms = idle.map(|d| now_ms().saturating_sub(u64::try_from(d.as_millis()).unwrap_or(0)));
+            let _ = rewrite(&mut file, &info);
+        }))
     }
 
     /// Record the finished job in the history and release the slot.
@@ -1074,6 +1206,7 @@ fn unknown_job(ticket: u64) -> JobInfo {
         blocked_by_ticket: None,
         est: None,
         rss_now_kb: None,
+        idle_since_ms: None,
     }
 }
 
@@ -1151,11 +1284,32 @@ mod tests {
     use std::sync::Mutex;
 
     /// Readings a test controls. Nothing here reads the real machine.
-    struct FakeProbe(Mutex<Readings>);
+    /// `.1` is the %CPU of one runaway helper the fake machine reports, owned by
+    /// the first running job (0 = none).
+    struct FakeProbe(Mutex<Readings>, Mutex<f64>);
 
     impl Probe for FakeProbe {
         fn read(&self, _disk_paths: &[PathBuf]) -> Readings {
             self.0.lock().unwrap().clone()
+        }
+
+        fn hogs(&self, jobs: &[watch::JobRef], _n: usize, _min: f64, _cwd: bool) -> Vec<watch::Hog> {
+            let pcpu = *self.1.lock().unwrap();
+            match jobs.first() {
+                Some(j) if pcpu > 0.0 => vec![watch::Hog {
+                    pid: 4242,
+                    pcpu,
+                    command: "esbuild --service".into(),
+                    cwd: None,
+                    owner: Some(watch::Owner {
+                        ticket: j.ticket,
+                        label: j.label.clone(),
+                        stalled: j.stalled,
+                        via: watch::Via::Env,
+                    }),
+                }],
+                _ => Vec::new(),
+            }
         }
     }
 
@@ -1194,7 +1348,7 @@ mod tests {
         config.slots.heavy = heavy;
         config.run.poll_ms = 10;
         config.run.note_every_secs = 3600;
-        let probe = Arc::new(FakeProbe(Mutex::new(calm())));
+        let probe = Arc::new(FakeProbe(Mutex::new(calm()), Mutex::new(0.0)));
         let q = Queue::at(tmp.path().join("q"), config, probe.clone());
         Fx { _tmp: tmp, q, probe }
     }
@@ -1567,6 +1721,125 @@ mod tests {
 
     const GB: u64 = 1024 * 1024; // in KiB
 
+    /// 2026-10-19: light jobs waited 1-2 h with "memory budget: needs 0.9 GB +
+    /// 9.1 GB committed > 6.9 GB (scale 0.25)" while 0/6 light slots were busy.
+    /// The heavy side's commitments, CPU budget and scale must not hold a light job.
+    #[test]
+    fn a_light_job_is_not_held_by_the_heavy_budget_or_a_collapsed_scale() {
+        let f = fx(3);
+        let _a = admit(&f.q, Class::Heavy, "a");
+        let _b = admit(&f.q, Class::Heavy, "b");
+        let _c = admit(&f.q, Class::Heavy, "c");
+        let floor = Aimd {
+            scale: 0.25,
+            ..Aimd::default()
+        };
+        f.q.save_aimd(&floor);
+        // Control: a fourth heavy job is held by that same budget.
+        let Err(AdmitError::WaitTimeout { reason, .. }) = f.q.admit(&req(Class::Heavy, "d", 150)) else {
+            panic!("the heavy budget did not hold a heavy job");
+        };
+        assert!(reason.contains("budget") || reason.contains("heavy busy"), "{reason}");
+        f.q.save_aimd(&floor);
+        let light = f.q.admit(&req(Class::Light, "lint", 2_000));
+        assert!(light.is_ok(), "a light job was held: {:?}", light.err());
+    }
+
+    /// The incident: the only heavy jobs are stalled (idle tree) while their
+    /// runaway helpers burn every core. The gate must not hold new jobs for CPU
+    /// that belongs to a stalled job, nor collapse the budget scale over it.
+    #[test]
+    fn cpu_of_a_stalled_job_neither_holds_the_gate_nor_collapses_the_scale() {
+        let busy = Readings {
+            cpu_busy_pct: Some(97.0),
+            ..calm()
+        };
+        // Control: nobody is flagged idle, so the saturated CPUs do hold b.
+        let f = fx(2);
+        let _a = admit(&f.q, Class::Heavy, "a");
+        *f.probe.0.lock().unwrap() = busy.clone();
+        *f.probe.1.lock().unwrap() = 1100.0;
+        let Err(AdmitError::WaitTimeout { reason, .. }) = f.q.admit(&req(Class::Heavy, "b", 300)) else {
+            panic!("saturated CPUs admitted b");
+        };
+        assert!(reason.starts_with("cpu 97% busy"), "{reason}");
+
+        // The job's watchdog now says its tree is idle: 1100% of 12 cores is ~92%
+        // of the machine, so what is left (~5%) is under the gate's 90%.
+        let f = fx(2);
+        let a = admit(&f.q, Class::Heavy, "a");
+        let idle = a.idle_publisher().expect("a queued job can publish idleness");
+        let mut idle = idle;
+        idle(Some(Duration::from_secs(300)));
+        *f.probe.0.lock().unwrap() = busy;
+        *f.probe.1.lock().unwrap() = 1100.0;
+        let floor_before = f.q.load_aimd().scale;
+        assert!(f.q.admit(&req(Class::Heavy, "b", 2_000)).is_ok(), "a stalled job's CPU held the gate");
+        assert!(f.q.load_aimd().scale >= floor_before, "the scale collapsed over a stalled job's CPU");
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert!(snap.running.iter().any(|j| j.idle_since_ms.is_some()), "status does not show the idle job");
+        assert_eq!(snap.hogs.len(), 1);
+        assert!(snap.hogs[0].owner.as_ref().unwrap().stalled);
+        drop(idle);
+        drop(a);
+    }
+
+    /// A job the watchdog flags idle keeps its slot but gives back its memory
+    /// reservation: a hung job must not block jobs that fit beside it.
+    #[test]
+    fn an_idle_flagged_job_releases_its_reservation() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "big");
+        // 15 GB reserved of a 20 GB pool: a second 15 GB job does not fit.
+        assert!(matches!(f.q.admit(&req(Class::Heavy, "big", 150)), Err(AdmitError::WaitTimeout { .. })));
+        let mut idle = a.idle_publisher().unwrap();
+        idle(Some(Duration::from_secs(300)));
+        let b = f.q.admit(&req(Class::Heavy, "big", 2_000));
+        assert!(b.is_ok(), "the idle job's reservation was not released: {:?}", b.err());
+        let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
+        assert_eq!(snap.budget.mem_committed_kb, 15 * GB, "only the live job is committed");
+        drop(a);
+    }
+
+    /// A job that recovers (the watchdog sees it busy again) gets its
+    /// reservation back.
+    #[test]
+    fn a_job_that_resumes_gets_its_reservation_back() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "big");
+        let mut idle = a.idle_publisher().unwrap();
+        idle(Some(Duration::from_secs(600)));
+        let b = f.q.admit(&req(Class::Heavy, "big", 2_000));
+        assert!(b.is_ok());
+        drop(b);
+        idle(None);
+        assert!(
+            matches!(f.q.admit(&req(Class::Heavy, "big", 150)), Err(AdmitError::WaitTimeout { .. })),
+            "the resumed job's reservation was not restored"
+        );
+        drop(a);
+    }
+
+    /// The rule that matters most: discounting must never wedge the queue the
+    /// other way. A hog that is NOT a stalled job's still holds the gate.
+    #[test]
+    fn cpu_of_an_unrelated_hog_still_holds_the_gate() {
+        let f = fx(2);
+        let a = admit(&f.q, Class::Heavy, "a");
+        let mut idle = a.idle_publisher().unwrap();
+        idle(Some(Duration::from_secs(300)));
+        *f.probe.0.lock().unwrap() = Readings {
+            cpu_busy_pct: Some(97.0),
+            ..calm()
+        };
+        // Only 50% of one core (~4% of the machine) is the stalled job's; the rest is someone else's.
+        *f.probe.1.lock().unwrap() = 50.0;
+        // With only idle jobs "running" nothing is held (never deadlock), so a live job runs too.
+        let _live = admit(&f.q, Class::Heavy, "live");
+        assert!(matches!(f.q.admit(&req(Class::Heavy, "b", 300)), Err(AdmitError::WaitTimeout { .. })));
+        drop(a);
+    }
+
     /// Give `label` a history: `runs` measured exits peaking at `gb`.
     fn seed(q: &Queue, label: &str, gb: u64, runs: usize) {
         for _ in 0..runs {
@@ -1602,7 +1875,7 @@ mod tests {
         let est = |l: &str| snap.running.iter().find(|j| j.label == l).and_then(|j| j.est).unwrap();
         assert_eq!((est("big").rss_kb, est("big").from_runs), (15 * GB, 3));
         assert_eq!((est("unknown").rss_kb, est("unknown").from_runs), (4 * GB, 0), "no history: the heavy default");
-        assert_eq!(snap.schema, 2);
+        assert_eq!(snap.schema, SNAPSHOT_SCHEMA);
         assert_eq!(snap.budget.mem_pool_kb, Some(20 * GB));
     }
 

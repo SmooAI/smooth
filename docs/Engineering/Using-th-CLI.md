@@ -534,10 +534,34 @@ smoo admin org overrides set <org-id> crm --enabled --reason "Launch partner com
 smoo admin org overrides set <org-id> telephony --enabled --reason "MSA pilot" \
   --included-voice-minutes 500 --overage-cents 3      # allowance flags: telephony only
 smoo admin org overrides set <org-id> crm --disabled --reason "Churned"   # deny even if bought
+smoo admin org overrides set <org-id> telephony --seats 10   # grant calling seats, keep the rest
+smoo admin org overrides set <org-id> crm --permanent        # drop the expiry only
+smoo admin org overrides set <org-id> telephony --clear-seats --clear-voice-allowance
 smoo admin org overrides remove <org-id> crm [--yes|--dry-run]           # back to products
-# set REPLACES the override: no --expires-at = permanent, no allowance flags =
-# cleared. Writes show org + before/after + host, confirm on a TTY, refuse off a
-# TTY without --yes. remove with no override → "nothing to remove", no DELETE.
+# set changes ONLY the flags you pass (SMOODEV-4052): it reads the stored
+# override to preview before/after, then PATCHes just those fields, so an edit
+# another admin makes while you confirm is not reverted (PUT only creates). Creating an override still needs --enabled or
+# --disabled plus --reason. --seats / --clear-seats / allowance flags: telephony
+# only (seats ≥ 1; calling capacity = max(seats, paid seats)). A lapsed stored
+# expiry must be renewed with --expires-at or --permanent. Writes show org +
+# before/after + host, confirm on a TTY, refuse off a TTY without --yes; a set
+# that changes nothing sends no PUT. remove with no override → "nothing to
+# remove", no DELETE.
+# Per-org feature-flag rollout (SMOODEV-4052) — add/remove ONE org in a flag's
+# org allowlist rule in the master org's config, in place. Uses the user
+# session (`th auth login`); --environment is required (no default).
+smoo admin config flag-org add    callVoicemailEnabled <org-id> --environment development [--yes|--dry-run]
+smoo admin config flag-org remove callVoicemailEnabled <org-id> --environment development
+# Edits only allowlist rules (when = orgId in/eq, value = true); other rules and
+# `default` are untouched. No allowlist → one `orgs` rule is appended LAST (a
+# rule above it that matches the org wins). A bare `false`/unset flag becomes a
+# segment envelope with default false. Refuses: removing from a flag that is
+# `true` for everyone, and any value it does not recognise. Prints before/after,
+# confirms, and re-reads before the write (best effort: an edit landing between
+# the re-read and the PUT can still be overwritten). The key is matched
+# case/underscore-insensitively and written under its stored/declared name. An
+# earlier deny rule naming the org is flagged: the org stays off.
+# Never point it at production without the change being agreed.
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 smoo admin org link-child <child-org-id>             # link under active org
@@ -1050,6 +1074,32 @@ smoo calling settings update --set recordingRetentionDays=365 [--body changes.js
   are refused locally, by name, with the list.
 - Every write asks for confirmation: it changes what the next caller gets.
 
+#### Attach or buy a number — SMOODEV-4052
+
+CLI twin of the hosted MCP's `phone_numbers_available` / `phone_number_attach` /
+`phone_number_purchase` and the copilot's `phone_numbers.*`. All three call the
+smooai Twilio integration routes (`/organizations/{org}/integrations/twilio/…`)
+with your own sign-in.
+
+```bash
+smoo calling numbers available [--area-code 415] [--country US] [--json]    # owned (attach) + for sale, with the monthly price
+smoo calling numbers attach +13175550100 [--yes|--dry-run]                  # already owned: never buys
+smoo calling numbers buy +14155550100 --accept-price 1.15 [--yes|--dry-run] # SPENDS MONEY monthly
+```
+
+- `attach` sends `intent: "attach"`: a number the org's Twilio account does not
+  own is refused, never bought. It needs `calling.admin`.
+- `buy` first asks the route for the quote for THAT number: a purchase request
+  with no acknowledgement, which buys nothing and answers with the price. The
+  route takes the country from the number and prices the type Twilio sells it
+  as, so a toll-free or foreign number shows its own price ("a US toll-free
+  number … $2.15/month"). `--country` is optional and only cross-checked.
+  Without `--accept-price`, or with an amount below the quote, it stops before
+  buying. It then asks for confirmation (`--yes` in scripts) and sends
+  `intent: "purchase"` with the acknowledged price, which the route checks
+  again. It needs `calling.admin` and `billing.manage`.
+- A 403 is reported as "admin only", naming the keys.
+
 #### Ring groups (departments) — SMOODEV-3960
 
 CLI twin of the hosted MCP's `ring_groups_list` / `ring_groups_get` /
@@ -1077,6 +1127,37 @@ smoo calling ring-groups members <group-id> --member <userId>:first --member <us
   keeps them in the list without ringing them. The limit is 100 unique members.
 - The org-wide `callDepartmentRoutingEnabled` switch is a config flag. No
   command here can change it.
+
+### Enterprise SSO (`smoo sso`) — SMOODEV-4052
+
+CLI twin of the hosted MCP's `sso_*` tools and the copilot's `sso.*` tools. All
+three call the same api-prime `/organizations/{org}/sso-connections…` routes
+with your own sign-in, so every verb needs `org.sso.manage` and the `sso`
+product. A 403 is reported as "admin only". Creating or editing a connection
+(IdP metadata, domains) stays on the dashboard.
+
+```bash
+smoo sso connections list [--json]                       # alias: conn ls
+smoo sso connections show <connection-id> [--json]
+smoo sso link preview <connection-id> [--json]           # every account + the lockout count
+smoo sso link apply <connection-id> a@acme.com b@acme.com [--yes|--dry-run]
+smoo sso require on <connection-id> --acknowledge-lockout <N> [--yes|--dry-run]
+smoo sso require off <connection-id> [--yes|--dry-run]
+```
+
+- `link preview` lists each existing account in the verified domains as
+  `linked`, `not_linked` or `conflict`, and how many accounts Require SSO would
+  lock out (not linked plus conflicting).
+- `link apply` takes at most 200 emails (trimmed, lowercased, de-duplicated).
+  All or nothing: one missing, SSO-born or conflicting account refuses the batch.
+- `require on` prints the preview and refuses unless `--acknowledge-lockout`
+  equals the current count, 0 included, then confirms like every write and reads
+  the count again after the confirm, aborting if it moved. It is refused outright
+  while the connection cannot link (provider not registered, or no verified
+  domain: the hooks would start enforcing the moment it became ready) and when
+  the domains hold more than 1000 accounts (the count is only a lower bound; use
+  Settings → SSO). api-prime refuses the unready case too. Turning it off needs
+  no count.
 
 ### Support (`smoo support`) — SMOODEV-3611
 
@@ -1475,6 +1556,36 @@ Things worth knowing:
   `title` (`{{entity.title}}`). The CLI's starter templates use those names;
   a filter on a field the event doesn't carry is `null` and never matches.
 
+### Workforce: create accounts for directory people (SMOODEV-4052)
+
+CLI twin of the hosted MCP `workforce_create_accounts` and the Workforce page's
+**Create account**: gives directory people a Smoo account and org membership on
+their work email, with no email sent, so they can join ring groups and hold
+calling seats. It calls `POST /organizations/{org}/workforce/employees/accounts`
+with your own sign-in, so the route decides: `org.members.manage`, the
+`workforce` product, work emails on a DNS-verified org domain only, and a
+`--role-id` carrying a permission you don't hold is refused. A 403 reads
+"admin only".
+
+```bash
+th smoo workforce directory --json                       # ids; needsAccount marks who is waiting
+th smoo workforce create-account <employee_id> [<employee_id>…] [--role-id <role_id>]
+th smoo workforce create-account --needs-account --dry-run   # everyone waiting, preview only
+th smoo workforce create-account --needs-account --yes       # scripts / CI
+```
+
+It needs a signed-in user (`th auth login`); an org API key / `th api login`
+session is refused before any call, because the route is user-only. The prompt
+and `--dry-run` name who gets an account ("Name <email>", the first 10 then
+"+N more") and the role by name; it confirms on a TTY (`--yes` otherwise). Longer
+lists go in batches of 50, and it prints one line per person: created, added
+(they already had a Smoo account), already member, or failed with the reason.
+NO ROLE means the org has no default member role: run again with `--role-id`.
+If a batch fails, the results of the batches before it are still printed (their
+accounts exist), the error names "batch N of M", and the command exits non-zero;
+re-run to continue — people who already have an account come back as already
+member. Only a 401/403 on the first batch says "nothing was changed".
+
 ### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
 
 CLI twins of the copilot's `dashboards.*`, `notifications.*_preferences` and
@@ -1538,6 +1649,9 @@ th roles create-from-template sales_rep --name "Field Sales"
 th roles set-permissions "Field Sales" crm.contacts.read crm.deals.read
 th roles member-roles ana@acme.com # roles + effective permissions
 th roles assign ana@acme.com "Field Sales"   # additive; no-op if already held
+th roles default get               # the role new members get (SMOODEV-4052)
+th roles default set "Field Sales" # org.roles.manage; refused if it carries a key you don't hold
+th roles default clear             # new members get the read-only template role
 ```
 
 The server refuses granting a permission you do not hold yourself, or
@@ -2164,14 +2278,41 @@ th ci-queue status             # running, waiting, pressure vs thresholds, recen
 th ci-queue status --json
 ```
 
-| Exit      | Meaning                                                                           |
-| --------- | --------------------------------------------------------------------------------- |
-| _n_       | the job exited _n_                                                                |
-| 128 + _n_ | the job died on signal _n_                                                        |
-| 124       | the job's `--timeout` fired; its whole process group was killed                   |
-| 127       | the job could not be started                                                      |
-| **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.**                 |
-| 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran. |
+| Exit      | Meaning                                                                                                  |
+| --------- | -------------------------------------------------------------------------------------------------------- |
+| _n_       | the job exited _n_                                                                                       |
+| 128 + _n_ | the job died on signal _n_                                                                               |
+| 124       | the job's `--timeout` fired; its whole process group was killed                                          |
+| 76        | the stall watchdog killed the job (see **Stalled jobs**); not a test failure                             |
+| 127       | the job could not be started                                                                             |
+| **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.** Stderr says `NEVER RAN: … waited 120m` |
+| 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran.                        |
+
+**Stalled jobs.** A running job whose process _tree_ used under `run.stall_cpu_pct` (5) percent of one
+**Exempt labels.** iOS, xcodebuild, gradle and docker jobs do their work outside the job's process tree (simulators, daemons), so the idle check would kill healthy runs; they keep only the runtime cap (`run.stall_exempt_labels`). A job is flagged idle (and releases its reservation) after half the window, and gets it back if it resumes.
+
+core for `run.stall_minutes` (20; 0 = off) is killed and recorded as `stalled` (exit 76; the slot is free
+again). The tree is the job's pid, every descendant found by walking parent pids (whatever process group or
+session it moved to) and its process group, so a job whose real work runs in a detached child is never
+mistaken for idle. Helpers a stalled job left re-parented to launchd and spinning (turbo daemon, esbuild
+service) are not in the tree; they are found by the `SMOOTH_CI_QUEUE_TICKET` every job exports, and the busy
+ones are killed with it. A job idle for a quarter of the window is a _suspect_: its helpers' CPU is taken out
+of the gate's `cpu busy` reading and out of the adaptive scale, so one stalled job cannot hold the whole queue
+(2026-10-19: three stalled jobs held every heavy and light job for hours). Idle CPU of an unrelated process
+still holds the gate. A job flagged idle also gives back its memory/CPU reservation (its slot stays until it
+is killed), so a hung job cannot block jobs that fit beside it. Runtime caps are a hard backstop and also kill
+as `stalled` (exit 76): `run.max_runtime_by_label_secs` (default `"attest rust" = 7200`; longest matching label
+prefix wins; 0 turns one off), then `max_runtime_heavy_secs` / `max_runtime_light_secs` (0 = off). An explicit
+`--timeout` (exit 124) replaces them. `th ci-queue status` lists the **Top CPU** processes with their working directory and the
+queue job each belongs to.
+
+**Light jobs** are admitted on real free memory only: they do not count the heavy jobs' committed estimates,
+the CPU budget or the adaptive scale.
+
+**Cargo lock.** Compiling jobs take the machine-wide `cargo` lock (cargo's own target-dir lock).
+`cargo nextest run --archive-file …` compiles nothing, so it queues for a heavy slot but takes no cargo
+lock; `nextest archive` (the build) keeps it. Split a Rust check into archive then run-from-archive to
+hold the lock only while compiling.
 
 **Admission.**
 
@@ -2334,6 +2475,14 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
+stall_minutes = 20   # kill a job whose process tree is idle this long (0 = off)
+stall_cpu_pct = 5    # "idle" = under this percent of one core
+stall_exempt_labels = ["xcodebuild", "gradle", "docker"]  # + iOS labels: work runs outside the tree, so only the runtime cap applies
+watch_every_secs = 15
+max_runtime_heavy_secs = 0 # hard cap per class (0 = none); --timeout wins
+max_runtime_light_secs = 0
+max_runtime_by_label_secs = { "attest rust" = 7200 } # label prefix -> cap; 0 = off
+serialize_ios = true # one iOS job (`attest ios`, `xcodebuild`) at a time: the machine-wide `ios` lock
 qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
@@ -2348,6 +2497,8 @@ heavy_rss_gb = 4         # estimates for a label with no history yet
 heavy_cores = 4
 light_rss_gb = 0.5
 light_cores = 1
+ios_rss_gb = 6           # floor on an iOS job's estimate (its simulators run outside the measured process group)
+ios_cores = 4
 window = 20              # runs an estimate is drawn from
 max_passes = 3           # passes before a big waiter gets a reservation
 aimd_step = 0.1

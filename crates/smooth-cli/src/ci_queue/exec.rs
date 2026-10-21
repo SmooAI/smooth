@@ -22,6 +22,9 @@ pub enum Ended {
     Signaled(i32),
     /// Our `--timeout` fired and the group was killed.
     TimedOut,
+    /// The stall watchdog killed it: its process tree used almost no CPU for the
+    /// whole stall window (see `watch`).
+    Stalled,
     /// The command could not be started at all.
     SpawnFailed,
 }
@@ -29,6 +32,10 @@ pub enum Ended {
 /// `th ci-queue run`'s exit code for a job its `--timeout` killed — the same
 /// code GNU `timeout` uses, so hook scripts that already handle one handle both.
 pub const EXIT_TIMEOUT: i32 = 124;
+
+/// `th ci-queue run`'s exit code for a job the stall watchdog killed. Distinct
+/// from 75 (never ran), 124 (`--timeout`) and 127 (could not start).
+pub const EXIT_STALLED: i32 = 76;
 
 /// The shell's "command not found / not executable".
 pub const EXIT_SPAWN_FAILED: i32 = 127;
@@ -39,6 +46,7 @@ impl Ended {
             Self::Exited(c) => c,
             Self::Signaled(n) => 128 + n,
             Self::TimedOut => EXIT_TIMEOUT,
+            Self::Stalled => EXIT_STALLED,
             Self::SpawnFailed => EXIT_SPAWN_FAILED,
         }
     }
@@ -48,6 +56,7 @@ impl Ended {
             Self::Exited(_) => "exit",
             Self::Signaled(_) => "signal",
             Self::TimedOut => "timeout",
+            Self::Stalled => "stalled",
             Self::SpawnFailed => "spawn-failed",
         }
     }
@@ -78,17 +87,36 @@ pub struct Usage {
     pub cpu_ms: Option<u64>,
 }
 
+/// The stall watchdog for one job. Every `every` it samples the job's process
+/// tree; see `watch::StallTracker` for what counts as idle.
+pub struct Watch {
+    pub window: Duration,
+    /// Percent of ONE core the tree must average to count as busy.
+    pub threshold_pct: u32,
+    pub every: Duration,
+    /// The job's ticket: how its stray, re-parented helpers are found (they
+    /// inherit `watch::TICKET_ENV`).
+    pub ticket: u64,
+    /// Root pids of the OTHER live queue jobs: their trees are never victims.
+    pub others: Option<Box<dyn Fn() -> Vec<u32> + Send>>,
+    /// Kill the job as stalled once it has run this long, whatever its CPU.
+    pub max_runtime: Option<Duration>,
+    /// Told how long the tree has been idle (`None` = busy), for `status` and
+    /// the gate. Called only when the answer changes.
+    pub on_idle: Option<Box<dyn FnMut(Option<Duration>) + Send>>,
+}
+
 /// Run `spec` to completion. `on_spawn` gets the job's pid (== its process
 /// group id on Unix) as soon as it exists.
 #[cfg(test)]
 pub fn run(spec: &Spec<'_>, on_spawn: impl FnOnce(u32)) -> Ended {
-    run_measured(spec, on_spawn, None::<fn(u64)>).0
+    run_measured(spec, on_spawn, None::<fn(u64)>, None).0
 }
 
 /// [`run`], and measure the job: its process group's peak total memory
 /// (sampled every `spec.sample_every`, each total also handed to `on_sample`)
 /// and its CPU time.
-pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: impl FnOnce(u32), on_sample: Option<S>) -> (Ended, Usage) {
+pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: impl FnOnce(u32), on_sample: Option<S>, watch: Option<Watch>) -> (Ended, Usage) {
     let Some((program, args)) = spec.argv.split_first() else {
         return (Ended::SpawnFailed, Usage::default());
     };
@@ -143,27 +171,96 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         let _ = tx.send(status);
     });
 
-    let mut timed_out = false;
-    #[allow(clippy::option_if_let_else, reason = "each branch also records the timeout and kills the group")]
-    let status = if let Some(limit) = spec.timeout {
-        if let Ok(s) = rx.recv_timeout(limit) {
-            Some(s)
-        } else {
-            timed_out = true;
-            kill_group(pid, false);
-            if let Ok(s) = rx.recv_timeout(spec.kill_grace) {
-                Some(s)
-            } else {
-                kill_group(pid, true);
-                rx.recv().ok()
+    let began = std::time::Instant::now();
+    let mut why_killed: Option<Ended> = None;
+    let mut watch = watch.filter(|_| cfg!(unix));
+    let mut tracker = watch
+        .as_ref()
+        .filter(|w| !w.window.is_zero())
+        .map(|w| super::watch::StallTracker::new(w.window, w.threshold_pct));
+    let mut last_idle: Option<Duration> = None;
+    let mut next_check = watch.as_ref().map(|w| began + w.every);
+    let mut victims: Vec<Victim> = Vec::new();
+    let deadline = spec.timeout.map(|t| began + t);
+    let mut status = loop {
+        let now = std::time::Instant::now();
+        let until = [deadline, next_check].into_iter().flatten().min();
+        let wait = until.map_or(Duration::from_secs(3600), |u| u.saturating_duration_since(now));
+        match rx.recv_timeout(wait) {
+            Ok(s) => break Some(s),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let now = std::time::Instant::now();
+        if deadline.is_some_and(|d| now >= d) {
+            why_killed = Some(Ended::TimedOut);
+            break None;
+        }
+        if let (Some(w), Some(at)) = (watch.as_mut(), next_check) {
+            if now >= at {
+                next_check = Some(now + w.every);
+                let procs = super::watch::snapshot();
+                let me = std::process::id();
+                // The cap does not depend on a readable process table.
+                let over = w.max_runtime.filter(|m| began.elapsed() >= *m);
+                let mut verdict = super::watch::Verdict::Busy;
+                if let Some(procs) = &procs {
+                    let tree = super::watch::tree(procs, pid, me);
+                    verdict = tracker.as_mut().map_or(super::watch::Verdict::Busy, |t| t.observe(began.elapsed(), &tree));
+                    let idle = match verdict {
+                        super::watch::Verdict::Idle(d) => Some(d),
+                        super::watch::Verdict::Busy => None,
+                        super::watch::Verdict::Stalled => Some(w.window),
+                    };
+                    if idle.is_some() != last_idle.is_some() {
+                        if let Some(f) = w.on_idle.as_mut() {
+                            f(idle);
+                        }
+                    }
+                    last_idle = idle;
+                }
+                if verdict == super::watch::Verdict::Stalled || over.is_some() {
+                    if let Some(procs) = &procs {
+                        let others = w.others.as_ref().map(|f| f()).unwrap_or_default();
+                        let mut pids: Vec<u32> = super::watch::tree(procs, pid, me).iter().map(|p| p.pid).collect();
+                        pids.extend(super::watch::tagged_hogs(procs, w.ticket, 50.0, me, &others, &super::watch::env_lines));
+                        victims = procs
+                            .iter()
+                            .filter(|p| pids.contains(&p.pid))
+                            .map(|p| Victim {
+                                pid: p.pid,
+                                ppid: p.ppid,
+                                command: p.command.clone(),
+                            })
+                            .collect();
+                    }
+                    let why = over.map_or_else(
+                        || format!("averaged under {}% of one core for {} min", w.threshold_pct, w.window.as_secs() / 60),
+                        |m| format!("ran past its {} min runtime cap", m.as_secs() / 60),
+                    );
+                    eprintln!(
+                        "th ci-queue: STALLED: the job's process tree {why} — killing it and {} process(es) (exit {EXIT_STALLED}, not a test failure)",
+                        victims.len()
+                    );
+                    why_killed = Some(Ended::Stalled);
+                    break None;
+                }
             }
         }
-    } else {
-        rx.recv().ok()
     };
-    if timed_out {
-        // The leader is gone; anything it left in the group goes too.
+    if why_killed.is_some() {
+        kill_group(pid, false);
+        kill_victims(&victims, false);
+        if let Ok(s) = rx.recv_timeout(spec.kill_grace) {
+            status = Some(s);
+        } else {
+            kill_group(pid, true);
+            status = rx.recv().ok();
+        }
+        // The leader is gone; anything it left in the group, or detached from
+        // it, goes too.
         kill_group(pid, true);
+        kill_victims(&victims, true);
     }
     let _ = waiter.join();
     let peak = sampler.map(super::sampler::Sampler::stop);
@@ -194,8 +291,8 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         cpu_ms,
     };
 
-    if timed_out {
-        return (Ended::TimedOut, usage);
+    if let Some(ended) = why_killed {
+        return (ended, usage);
     }
     let ended = match status {
         Some(Ok(s)) => classify(s),
@@ -263,6 +360,46 @@ fn kill_group(pgid: u32, hard: bool) {
     };
     let _ = killpg(Pid::from_raw(raw), if hard { Signal::SIGKILL } else { Signal::SIGTERM });
 }
+
+/// A process the watchdog means to kill, as it looked when chosen.
+#[derive(Clone, Debug)]
+pub struct Victim {
+    pub pid: u32,
+    pub ppid: u32,
+    pub command: String,
+}
+
+/// SIGTERM/SIGKILL a stalled job's detached helpers. Pids are reused, and the
+/// final SIGKILL comes seconds after the choice, so the process table is read
+/// again and a pid is signalled only if it is still the same command under the
+/// same parent (or re-parented to init because its parent was just killed).
+/// Never pid 0/1 or our own.
+#[cfg(unix)]
+fn kill_victims(victims: &[Victim], hard: bool) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    if victims.is_empty() {
+        return;
+    }
+    let Some(now) = super::watch::snapshot() else {
+        return;
+    };
+    let me = std::process::id();
+    for v in victims.iter().filter(|v| v.pid > 1 && v.pid != me) {
+        let same = now
+            .iter()
+            .any(|p| p.pid == v.pid && p.command == v.command && (p.ppid == v.ppid || p.ppid == 1));
+        if !same {
+            continue;
+        }
+        if let Ok(raw) = i32::try_from(v.pid) {
+            let _ = kill(Pid::from_raw(raw), if hard { Signal::SIGKILL } else { Signal::SIGTERM });
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_victims(_victims: &[Victim], _hard: bool) {}
 
 #[cfg(not(unix))]
 fn kill_group(pid: u32, _hard: bool) {
@@ -444,6 +581,7 @@ mod tests {
             Some(move |kb: u64| {
                 seen2.fetch_max(kb, std::sync::atomic::Ordering::SeqCst);
             }),
+            None,
         );
         assert_eq!(ended, Ended::Exited(0));
         let (group, single) = (u.peak_group_rss_kb.unwrap_or(0), u.max_single_rss_kb.unwrap_or(0));
@@ -461,7 +599,7 @@ mod tests {
     fn cpu_time_is_measured() {
         let tmp = tempfile::tempdir().unwrap();
         let argv = sh("perl -e '$t = time; 1 while time - $t < 2'");
-        let (_, u) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>);
+        let (_, u) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>, None);
         let cpu = u.cpu_ms.unwrap();
         assert!(cpu >= 500, "a ~2s busy loop reported {cpu} ms of CPU");
     }
@@ -477,7 +615,7 @@ mod tests {
             ..spec(&argv, tmp.path(), None)
         };
         let t = Instant::now();
-        let (ended, u) = run_measured(&s, |_| {}, None::<fn(u64)>);
+        let (ended, u) = run_measured(&s, |_| {}, None::<fn(u64)>, None);
         assert_eq!(ended, Ended::Exited(0));
         assert!(t.elapsed() < Duration::from_secs(10), "run waited {:?} on the sampler", t.elapsed());
         assert!(u.peak_group_rss_kb.is_some(), "the first sample is taken at once");
@@ -496,7 +634,7 @@ mod tests {
             sample_every: Some(Duration::from_secs(30)),
             ..spec(&argv, tmp.path(), None)
         };
-        let (_, u) = run_measured(&s, |_| {}, None::<fn(u64)>);
+        let (_, u) = run_measured(&s, |_| {}, None::<fn(u64)>, None);
         assert!(u.peak_group_rss_kb.unwrap_or(0) >= 50 * 1024, "{u:?}");
         assert!(u.peak_group_rss_kb >= u.max_single_rss_kb, "{u:?}");
     }
@@ -510,5 +648,60 @@ mod tests {
             ..spec(&argv, tmp.path(), None)
         };
         assert_eq!(run(&s, |_| {}).exit_code(), EXIT_SPAWN_FAILED);
+    }
+
+    fn watch(window_ms: u64, idle: Option<std::sync::Arc<std::sync::Mutex<Vec<bool>>>>) -> Watch {
+        Watch {
+            window: Duration::from_millis(window_ms),
+            threshold_pct: 5,
+            every: Duration::from_millis(100),
+            ticket: 1,
+            others: None,
+            max_runtime: None,
+            on_idle: idle.map(|log| Box::new(move |d: Option<Duration>| log.lock().unwrap().push(d.is_some())) as Box<dyn FnMut(Option<Duration>) + Send>),
+        }
+    }
+
+    #[test]
+    fn an_idle_job_is_killed_as_stalled_with_its_own_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("sleep 60 & wait");
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let began = Instant::now();
+        let (ended, _) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>, Some(watch(1500, Some(log.clone()))));
+        assert_eq!(ended, Ended::Stalled);
+        assert_eq!((ended.exit_code(), ended.outcome()), (EXIT_STALLED, "stalled"));
+        assert!(began.elapsed() < Duration::from_secs(20), "{:?}", began.elapsed());
+        assert_eq!(log.lock().unwrap().first(), Some(&true), "the job was reported idle before it was killed");
+    }
+
+    /// The incident's inverse: the leader is idle but a descendant that moved
+    /// to its own process group and session is burning a core. Not a stall.
+    #[test]
+    fn a_busy_detached_descendant_is_not_a_stall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("perl -MPOSIX -e 'POSIX::setsid(); 1 while 1' & wait");
+        let (ended, _) = run_measured(&spec(&argv, tmp.path(), Some(4000)), |_| {}, None::<fn(u64)>, Some(watch(1500, None)));
+        assert_eq!(ended, Ended::TimedOut, "ran until the timeout; the watchdog saw the descendant's CPU");
+    }
+
+    #[test]
+    fn a_job_over_its_runtime_cap_is_killed_as_stalled_even_when_busy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("while :; do :; done");
+        let mut w = watch(60_000, None);
+        w.max_runtime = Some(Duration::from_millis(800));
+        let began = Instant::now();
+        let (ended, _) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>, Some(w));
+        assert_eq!(ended, Ended::Stalled);
+        assert!(began.elapsed() < Duration::from_secs(20), "{:?}", began.elapsed());
+    }
+
+    #[test]
+    fn a_job_that_exits_normally_is_untouched_by_the_watchdog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv = sh("exit 3");
+        let (ended, _) = run_measured(&spec(&argv, tmp.path(), None), |_| {}, None::<fn(u64)>, Some(watch(60_000, None)));
+        assert_eq!(ended, Ended::Exited(3));
     }
 }
