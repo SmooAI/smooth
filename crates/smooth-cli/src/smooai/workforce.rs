@@ -148,14 +148,18 @@ pub fn result_line(r: &Value) -> String {
     }
     let mut out = format!("{who}: {}", status.replace('_', " "));
     match r.get("role").filter(|v| !v.is_null()) {
-        Some(role) => out.push_str(&format!("; role {}", role.get("name").and_then(Value::as_str).unwrap_or(""))),
+        Some(role) => {
+            out.push_str("; role ");
+            out.push_str(role.get("name").and_then(Value::as_str).unwrap_or(""));
+        }
         None => out.push_str("; NO ROLE (run again with --role-id)"),
     }
     if r.get("ssoLinked").and_then(Value::as_bool) == Some(true) {
         out.push_str("; linked to SSO");
     }
     if let Some(e) = r.get("ssoLinkError").and_then(Value::as_str) {
-        out.push_str(&format!("; SSO link refused: {e}"));
+        out.push_str("; SSO link refused: ");
+        out.push_str(e);
     }
     out
 }
