@@ -80,6 +80,25 @@ pub fn estimate(samples: &[Sample], class: Class, cfg: &Cfg, cores: usize) -> Es
     }
 }
 
+/// Whether a job label is an iOS job: `attest ios`, or `xcodebuild …` (the
+/// shim's label is the command line).
+pub fn is_ios_label(label: &str) -> bool {
+    let l = label.trim_start();
+    l == "attest ios" || l.starts_with("attest ios ") || l.starts_with("xcodebuild") || l.starts_with("xcrun xcodebuild")
+}
+
+/// Raise `est` to the configured iOS floor when `label` is an iOS job.
+pub fn ios_floor(est: Estimate, label: &str, cfg: &Cfg) -> Estimate {
+    if !is_ios_label(label) {
+        return est;
+    }
+    Estimate {
+        rss_kb: est.rss_kb.max(to_u64(cfg.ios_rss_gb * KIB_PER_GIB)),
+        millicores: est.millicores.max(to_u64(cfg.ios_cores * 1000.0)),
+        ..est
+    }
+}
+
 /// A running job as the budget sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
@@ -138,6 +157,31 @@ pub fn fits(new: Estimate, running: &[Running], r: &Readings, cfg: &Cfg, scale: 
             to_f64(v.cpu_used_millicores) / 1000.0,
             to_f64(v.cpu_budget_millicores) / 1000.0
         ));
+    }
+    Ok(())
+}
+
+/// [`fits`] for a LIGHT job. Light jobs are seconds-long and small, and they
+/// must not queue behind the heavy side's accounting: the heavy jobs' committed
+/// memory (their whole estimate while they still have a low reading), the CPU
+/// budget and the adaptive scale all measure heavy work. A light job needs only
+/// that its own estimate fits the memory the machine really has free
+/// (available − reserve, at scale 1). With nothing running it is admitted whatever
+/// it is estimated at, like every job.
+pub fn fits_light(new: Estimate, running: &[Running], r: &Readings, cfg: &Cfg) -> Result<(), String> {
+    if !cfg.enabled || running.is_empty() {
+        return Ok(());
+    }
+    let reserve = cfg.mem_reserve_gb * KIB_PER_GIB;
+    if let Some(avail) = r.mem_available_bytes {
+        let pool = to_u64((to_f64(avail / 1024) - reserve).max(0.0) * cfg.mem_scale_max.min(1.0));
+        if new.rss_kb > pool {
+            return Err(format!(
+                "memory: a light job needs {:.1} GB, {:.1} GB free above the reserve",
+                to_f64(new.rss_kb) / KIB_PER_GIB,
+                to_f64(pool) / KIB_PER_GIB
+            ));
+        }
     }
     Ok(())
 }
@@ -223,6 +267,47 @@ mod tests {
         assert_eq!((h.rss_kb, h.millicores, h.from_runs), (4 * GIB_KB, 4000, 0));
         let l = estimate(&[], Class::Light, &cfg, 12);
         assert_eq!((l.rss_kb, l.millicores), (GIB_KB / 2, 1000));
+    }
+
+    #[test]
+    fn a_light_job_ignores_heavy_commitments_cpu_and_the_scale() {
+        let cfg = Cfg::default();
+        // Three heavy jobs, each still reading ~0 against a 4 GB estimate: 12 GB
+        // "committed"; the CPU budget is spent too. 20 GB free, 6 reserved.
+        let heavy = Running {
+            est: est(4, 4),
+            rss_now_kb: Some(0),
+        };
+        let running = [heavy, heavy, heavy];
+        let r = readings(20, 12);
+        let light = est(1, 1);
+        assert!(fits(light, &running, &r, &cfg, 0.25).is_err(), "the heavy budget refuses it");
+        assert!(fits_light(light, &running, &r, &cfg).is_ok());
+        // Real memory shortage still holds a light job back.
+        assert!(fits_light(est(9, 1), &running, &readings(12, 12), &cfg).is_err());
+        // Never deadlock: nothing running admits anything.
+        assert!(fits_light(est(99, 1), &[], &readings(1, 12), &cfg).is_ok());
+    }
+
+    #[test]
+    fn ios_labels_are_recognised_and_floored() {
+        for l in ["attest ios", "attest ios --x", "xcodebuild test", "xcrun xcodebuild build"] {
+            assert!(is_ios_label(l), "{l}");
+        }
+        for l in ["attest rust", "attest iosx", "swift test", "cargo build"] {
+            assert!(!is_ios_label(l), "{l}");
+        }
+        let cfg = Cfg::default();
+        let tiny = Estimate {
+            rss_kb: 66_000,
+            millicores: 900,
+            from_runs: 20,
+        };
+        let f = ios_floor(tiny, "attest ios", &cfg);
+        assert_eq!((f.rss_kb, f.millicores, f.from_runs), (6 * GIB_KB, 4000, 20));
+        assert_eq!(ios_floor(tiny, "attest rust", &cfg), tiny, "other labels are untouched");
+        let big = est(9, 6);
+        assert_eq!(ios_floor(big, "attest ios", &cfg), big, "a floor never lowers an estimate");
     }
 
     #[test]
