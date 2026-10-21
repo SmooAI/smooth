@@ -1099,8 +1099,13 @@ smoo sso require off <connection-id> [--yes|--dry-run]
 - `link apply` takes at most 200 emails (trimmed, lowercased, de-duplicated).
   All or nothing: one missing, SSO-born or conflicting account refuses the batch.
 - `require on` prints the preview and refuses unless `--acknowledge-lockout`
-  equals the current count, 0 included, then confirms like every write. Turning
-  it off needs no count.
+  equals the current count, 0 included, then confirms like every write and reads
+  the count again after the confirm, aborting if it moved. It is refused outright
+  while the connection cannot link (provider not registered, or no verified
+  domain: the hooks would start enforcing the moment it became ready) and when
+  the domains hold more than 1000 accounts (the count is only a lower bound; use
+  Settings → SSO). api-prime refuses the unready case too. Turning it off needs
+  no count.
 
 ### Support (`smoo support`) — SMOODEV-3611
 

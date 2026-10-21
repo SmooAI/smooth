@@ -13,7 +13,12 @@
 //! - `require on|off <connection>`: ON refuses every non-SSO sign-in for the
 //!   verified domains, so an account that is not linked is LOCKED OUT. `on`
 //!   prints the preview and refuses unless `--acknowledge-lockout <N>` equals the
-//!   fresh lockout count (0 included), then confirms like every write.
+//!   fresh lockout count (0 included), then confirms like every write and reads
+//!   the count once more after the confirm (it may have moved while you read).
+//!   It is refused outright while the connection cannot link (not registered,
+//!   or no verified domain: the plan lists nobody, yet the sign-in block starts
+//!   the moment it becomes ready) and when the plan is truncated (more than 1000
+//!   accounts, so the count is only a lower bound).
 //!
 //! The rules mirror smooai's shared validator
 //! (`rust/smooth-operator-agent/src/tools_org_admin.rs`): connection ids are
@@ -209,19 +214,35 @@ pub fn lockout_count(plan: &Value) -> usize {
     not_linked + conflict
 }
 
-/// Turning Require SSO ON needs the exact current lockout count.
+fn not_ready_text(reason: &str) -> &'static str {
+    match reason {
+        "not_saml" => "only SAML connections can link accounts",
+        "not_registered" => "the identity provider is not registered yet",
+        "no_verified_domain" => "no domain is verified yet",
+        _ => "it is not ready",
+    }
+}
+
+/// Turning Require SSO ON needs a ready connection, an exact (untruncated)
+/// plan, and the exact current lockout count.
 pub fn require_check(plan: &Value, acknowledged: Option<i64>) -> Result<()> {
+    if !on(plan, "ready") {
+        bail!(
+            "not changed: Require SSO cannot be turned on yet: {}. No account can be linked until then, and the sign-in block would start the moment the connection becomes ready, locking out everyone not yet linked",
+            not_ready_text(s(plan, "notReadyReason"))
+        );
+    }
     let locked = lockout_count(plan);
+    if on(plan, "truncated") {
+        bail!(
+            "not changed: these verified domains hold more than 1000 accounts, so the lockout count ({locked} so far) is only a lower bound — link the accounts first, then turn Require SSO on from Settings → SSO"
+        );
+    }
     if acknowledged == i64::try_from(locked).ok() {
         return Ok(());
     }
-    let lower = if plan.get("truncated").and_then(Value::as_bool) == Some(true) {
-        " at least"
-    } else {
-        ""
-    };
     bail!(
-        "not changed: Require SSO would lock out{lower} {locked} account(s) that are not linked to the identity provider — link them first, or pass --acknowledge-lockout {locked}"
+        "not changed: Require SSO would lock out {locked} account(s) that are not linked to the identity provider — link them first, or pass --acknowledge-lockout {locked}"
     )
 }
 
@@ -265,7 +286,7 @@ fn render_plan(plan: &Value) {
     println!();
     if !on(plan, "ready") {
         println!(
-            "  {} not ready to link ({}) — nothing is linked and Require SSO locks no one out yet",
+            "  {} not ready to link ({}) — nothing can be linked, and Require SSO cannot be turned on until it is ready",
             "●".yellow(),
             plan.get("notReadyReason").and_then(Value::as_str).unwrap_or("unknown")
         );
@@ -430,6 +451,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             if !gate("require SSO on", &id, &o, confirm)? {
                 return Ok(());
             }
+            // The confirm can sit on a TTY for minutes: read the count again.
+            let fresh = get(&client, &format!("{path}/account-links")).await?;
+            require_check(&fresh, acknowledge_lockout).context("the lockout count changed while you confirmed")?;
             patch_required(&client, &path, true).await?;
         }
         Cmd::Require {
@@ -561,6 +585,24 @@ mod tests {
         let clean = json!({ "ready": true, "accounts": [] });
         assert!(require_check(&clean, None).is_err(), "0 must still be acknowledged");
         assert!(require_check(&clean, Some(0)).is_ok());
+    }
+
+    #[test]
+    fn require_on_is_refused_on_an_unready_connection_whatever_the_ack() {
+        for reason in ["not_registered", "no_verified_domain", "not_saml"] {
+            let plan = json!({ "ready": false, "notReadyReason": reason, "accounts": [] });
+            assert_eq!(lockout_count(&plan), 0, "an unready plan lists nobody");
+            let err = require_check(&plan, Some(0)).unwrap_err().to_string();
+            assert!(err.contains("cannot be turned on yet"), "{reason}: {err}");
+        }
+    }
+
+    #[test]
+    fn require_on_is_refused_on_a_truncated_plan_whatever_the_ack() {
+        let mut plan = plan();
+        plan["truncated"] = json!(true);
+        let err = require_check(&plan, Some(2)).unwrap_err().to_string();
+        assert!(err.contains("lower bound"), "{err}");
     }
 
     #[test]
