@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// `ci-queue` — and for two hours every heavy cargo, xcodebuild and gradle run
 /// on the machine died with "unrecognized subcommand 'ci-queue'". v2 probes
 /// for a `th` that can run the queue and falls back to the real tool.
-pub const MARKER: &str = "th-ci-queue-shim v2";
+pub const MARKER: &str = "th-ci-queue-shim v3";
 
 /// What every shim version's marker starts with. Detection matches on this,
 /// so a v1 shim is still recognised as ours: `install` upgrades it in place
@@ -80,6 +80,19 @@ pub const DEFAULT_TOOLS: &[&str] = &["cargo", "cargo-nextest", "xcodebuild", "gr
 
 /// Tools whose shim takes the machine's `cargo` lock.
 const CARGO_LOCK_TOOLS: &[&str] = &["cargo", "cargo-nextest"];
+
+/// Whether `tool args…` is `nextest run` from a prebuilt archive
+/// (`--archive-file`): no compilation, so no need for the cargo target-dir lock.
+/// `nextest archive` (the build) also takes `--archive-file` and keeps the lock.
+/// Conservative: any `archive` word anywhere keeps the lock. The shim script
+/// makes the same decision in sh; the tests pin the two together.
+pub fn runs_from_archive(tool: &str, args: &[String]) -> bool {
+    if !CARGO_LOCK_TOOLS.contains(&tool) {
+        return false;
+    }
+    let has = |w: &str| args.iter().any(|a| a == w);
+    args.iter().any(|a| a == "--archive-file" || a.starts_with("--archive-file=")) && has("run") && !has("archive")
+}
 
 /// A word a tool's own argv starts with before the real subcommand, skipped
 /// once when finding it: cargo runs `cargo-nextest nextest <sub> …`.
@@ -240,7 +253,25 @@ pub fn script(tool: &str, real: &Path, ths: &[PathBuf]) -> Result<String> {
     let Some(light) = light_commands(tool) else {
         bail!("no shim is defined for `{tool}` (supported: cargo, cargo-nextest, xcodebuild, gradle, swift, xcrun, gradlew, turbo, tsgo, tsc)");
     };
-    let lock = if CARGO_LOCK_TOOLS.contains(&tool) { " --lock cargo" } else { "" };
+    let takes_lock = CARGO_LOCK_TOOLS.contains(&tool);
+    // `nextest run --archive-file` compiles nothing: it must not take the lock.
+    let lock_decision = if takes_lock {
+        r#"lock_args='--lock cargo'
+archive_file=''
+has_run=''
+has_archive=''
+for a in "$@"; do
+    case "$a" in
+        --archive-file | --archive-file=*) archive_file=1 ;;
+        run) has_run=1 ;;
+        archive) has_archive=1 ;;
+    esac
+done
+[ -n "$archive_file" ] && [ -n "$has_run" ] && [ -z "$has_archive" ] && lock_args=''
+"#
+    } else {
+        "lock_args=''\n"
+    };
     let alts = |words: &[&str]| words.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(" | ");
     let help_case = alts(HELP_FLAGS);
     let dash_case = alts(DASH_SUBCOMMANDS);
@@ -376,7 +407,7 @@ if [ -z "$th" ]; then
 fi
 
 label=$(printf '%s' "$tool $*" | cut -c1-60)
-exec "$th" ci-queue run --class heavy --label "$label"{lock} -- "$real" "$@"
+{lock_decision}exec "$th" ci-queue run --class heavy --label "$label" $lock_args -- "$real" "$@"
 "#
     ))
 }
@@ -911,6 +942,35 @@ mod tests {
         assert!(log.contains("real cargo-nextest nextest run -p smooai-voice slot=heavy-1"), "{log}");
     }
 
+    /// `nextest run --archive-file` compiles nothing: it queues (heavy slot) but
+    /// takes no cargo lock, in sh and in `runs_from_archive` alike.
+    #[test]
+    fn running_from_an_archive_skips_the_cargo_lock_in_the_shim() {
+        let f = fx(true);
+        f.install(&["cargo", "cargo-nextest"]);
+        let cases: &[(&str, &[&str], bool)] = &[
+            ("cargo-nextest", &["nextest", "run", "--archive-file", "a.tar.zst"], false),
+            ("cargo-nextest", &["nextest", "run", "--archive-file=a.tar.zst", "-p", "x"], false),
+            ("cargo-nextest", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
+            ("cargo-nextest", &["nextest", "run", "-p", "x"], true),
+            ("cargo", &["nextest", "run", "--archive-file", "a.tar.zst"], false),
+            ("cargo", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
+            ("cargo", &["test", "-p", "x"], true),
+        ];
+        for (tool, args, locked) in cases {
+            let log = f.call(tool, args, &[]);
+            assert!(log.contains("th ci-queue run --class heavy"), "{tool} {args:?} must still queue: {log}");
+            assert_eq!(log.contains("--lock cargo"), *locked, "{tool} {args:?}: {log}");
+            let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                runs_from_archive(tool, &owned),
+                !*locked,
+                "runs_from_archive disagrees with the sh shim on {tool} {args:?}"
+            );
+        }
+        assert!(!runs_from_archive("gradle", &["run".to_string(), "--archive-file".to_string()]));
+    }
+
     /// Table-driven: the light allowlist is part of the contract.
     #[test]
     fn light_commands_never_queue_and_heavy_ones_do() {
@@ -943,6 +1003,7 @@ mod tests {
             // `list` builds every test binary to list it.
             ("cargo-nextest", &["nextest", "list"], true),
             ("cargo-nextest", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
+            ("cargo-nextest", &["nextest", "run", "--archive-file", "a.tar.zst"], true),
             ("cargo-nextest", &[], false),
             ("cargo-nextest", &["nextest"], false),
             ("cargo-nextest", &["--version"], false),
@@ -1072,9 +1133,9 @@ mod tests {
         let out = f.install(&["cargo"]);
         assert!(matches!(out[0].1, Installed::Upgraded { from: 1, .. }), "{out:?}");
         assert_eq!(shim_version(&f.shims.join("cargo")), Some(current_version()));
-        assert_eq!(current_version(), 2);
+        assert_eq!(current_version(), 3);
         let rows = status(&f.state, &f.path_var()).unwrap();
-        assert_eq!(rows[0].version, Some(2));
+        assert_eq!(rows[0].version, Some(3));
         // And again: now current.
         assert!(matches!(f.install(&["cargo"])[0].1, Installed::Unchanged { .. }));
     }

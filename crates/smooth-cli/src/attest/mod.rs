@@ -525,6 +525,8 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
         Vec::new()
     };
     let class = row_class(&text, !locks.is_empty());
+    // iOS checks boot hundreds of simulator processes: one at a time.
+    let locks = ci_queue::with_ios_lock(locks, &format!("attest {check}"), &sys.queue.config);
     let qos = sys.queue.config.run.qos.effective(!locks.is_empty());
     let request = ci_queue::Request {
         class,
@@ -564,6 +566,16 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
     let began = Instant::now();
     let argv = [OsString::from("bash"), script.into_os_string()];
     let progress = admission.progress();
+    let run_cfg = &sys.queue.config.run;
+    let cap = run_cfg.max_runtime(&format!("attest {check}"), class == ci_queue::Class::Heavy);
+    let watch = (run_cfg.stall_minutes > 0 || cap.is_some()).then(|| ci_queue::exec::Watch {
+        window: Duration::from_secs(run_cfg.stall_minutes * 60),
+        max_runtime: cap,
+        threshold_pct: run_cfg.stall_cpu_pct,
+        every: Duration::from_secs(run_cfg.watch_every_secs.max(1)),
+        ticket: admission.ticket(),
+        on_idle: admission.idle_publisher(),
+    });
     let (ended, usage) = ci_queue::exec::run_measured(
         &ci_queue::exec::Spec {
             argv: &argv,
@@ -571,6 +583,7 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
             env: vec![
                 ("CI_REPO_ROOT".into(), root.as_os_str().to_owned()),
                 (ci_queue::queue::NESTED_ENV.into(), admission.slot_name().into()),
+                (ci_queue::watch::TICKET_ENV.into(), admission.ticket().to_string().into()),
             ],
             timeout: None,
             qos,
@@ -580,6 +593,7 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
         },
         |pid| admission.set_child(pid),
         progress,
+        watch,
     );
     let ran = began.elapsed();
     admission.finish(ended, ran, usage);
@@ -589,8 +603,17 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
         _ => None,
     };
 
-    let (outcome, note) = classify(code, was_overloaded, || env::load_summary(sys));
-    let distrusted = was_overloaded && outcome == Outcome::Blocked && code != Some(EXIT_PRECONDITION);
+    let stalled = ended == ci_queue::exec::Ended::Stalled;
+    let (outcome, note) = if stalled {
+        // The watchdog killed an idle job: infrastructure, never a verdict on the commit.
+        (
+            Outcome::Blocked,
+            Some("stalled: its process tree sat idle until the queue's stall watchdog killed it — rerun".into()),
+        )
+    } else {
+        classify(code, was_overloaded, || env::load_summary(sys))
+    };
+    let distrusted = was_overloaded && !stalled && outcome == Outcome::Blocked && code != Some(EXIT_PRECONDITION);
     (
         CheckResult {
             name: check.to_string(),

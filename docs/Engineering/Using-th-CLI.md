@@ -2101,9 +2101,34 @@ th ci-queue status --json
 | _n_       | the job exited _n_                                                                |
 | 128 + _n_ | the job died on signal _n_                                                        |
 | 124       | the job's `--timeout` fired; its whole process group was killed                   |
+| 76        | the stall watchdog killed the job (see **Stalled jobs**); not a test failure      |
 | 127       | the job could not be started                                                      |
-| **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.**                 |
+| **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.** Stderr says `NEVER RAN: … waited 120m` |
 | 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran. |
+
+**Stalled jobs.** A running job whose process _tree_ used under `run.stall_cpu_pct` (5) percent of one
+core for `run.stall_minutes` (20; 0 = off) is killed and recorded as `stalled` (exit 76; the slot is free
+again). The tree is the job's pid, every descendant found by walking parent pids (whatever process group or
+session it moved to) and its process group, so a job whose real work runs in a detached child is never
+mistaken for idle. Helpers a stalled job left re-parented to launchd and spinning (turbo daemon, esbuild
+service) are not in the tree; they are found by the `SMOOTH_CI_QUEUE_TICKET` every job exports, and the busy
+ones are killed with it. A job idle for a quarter of the window is a _suspect_: its helpers' CPU is taken out
+of the gate's `cpu busy` reading and out of the adaptive scale, so one stalled job cannot hold the whole queue
+(2026-10-19: three stalled jobs held every heavy and light job for hours). Idle CPU of an unrelated process
+still holds the gate. A job flagged idle also gives back its memory/CPU reservation (its slot stays until it
+is killed), so a hung job cannot block jobs that fit beside it. Runtime caps are a hard backstop and also kill
+as `stalled` (exit 76): `run.max_runtime_by_label_secs` (default `"attest rust" = 7200`; longest matching label
+prefix wins; 0 turns one off), then `max_runtime_heavy_secs` / `max_runtime_light_secs` (0 = off). An explicit
+`--timeout` (exit 124) replaces them. `th ci-queue status` lists the **Top CPU** processes with their working directory and the
+queue job each belongs to.
+
+**Light jobs** are admitted on real free memory only: they do not count the heavy jobs' committed estimates,
+the CPU budget or the adaptive scale.
+
+**Cargo lock.** Compiling jobs take the machine-wide `cargo` lock (cargo's own target-dir lock).
+`cargo nextest run --archive-file …` compiles nothing, so it queues for a heavy slot but takes no cargo
+lock; `nextest archive` (the build) keeps it. Split a Rust check into archive then run-from-archive to
+hold the lock only while compiling.
 
 **Admission.**
 
@@ -2266,6 +2291,13 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
+stall_minutes = 20   # kill a job whose process tree is idle this long (0 = off)
+stall_cpu_pct = 5    # "idle" = under this percent of one core
+watch_every_secs = 15
+max_runtime_heavy_secs = 0 # hard cap per class (0 = none); --timeout wins
+max_runtime_light_secs = 0
+max_runtime_by_label_secs = { "attest rust" = 7200 } # label prefix -> cap; 0 = off
+serialize_ios = true # one iOS job (`attest ios`, `xcodebuild`) at a time: the machine-wide `ios` lock
 qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
@@ -2280,6 +2312,8 @@ heavy_rss_gb = 4         # estimates for a label with no history yet
 heavy_cores = 4
 light_rss_gb = 0.5
 light_cores = 1
+ios_rss_gb = 6           # floor on an iOS job's estimate (its simulators run outside the measured process group)
+ios_cores = 4
 window = 20              # runs an estimate is drawn from
 max_passes = 3           # passes before a big waiter gets a reservation
 aimd_step = 0.1
