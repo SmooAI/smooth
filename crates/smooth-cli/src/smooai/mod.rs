@@ -54,6 +54,7 @@ pub mod search_console;
 pub mod sheets;
 pub mod smooth_operator;
 pub mod smooth_operator_ws;
+pub mod sso;
 pub mod support;
 pub mod teams;
 pub mod testing;

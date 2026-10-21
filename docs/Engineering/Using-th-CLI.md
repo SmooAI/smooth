@@ -532,10 +532,34 @@ smoo admin org overrides set <org-id> crm --enabled --reason "Launch partner com
 smoo admin org overrides set <org-id> telephony --enabled --reason "MSA pilot" \
   --included-voice-minutes 500 --overage-cents 3      # allowance flags: telephony only
 smoo admin org overrides set <org-id> crm --disabled --reason "Churned"   # deny even if bought
+smoo admin org overrides set <org-id> telephony --seats 10   # grant calling seats, keep the rest
+smoo admin org overrides set <org-id> crm --permanent        # drop the expiry only
+smoo admin org overrides set <org-id> telephony --clear-seats --clear-voice-allowance
 smoo admin org overrides remove <org-id> crm [--yes|--dry-run]           # back to products
-# set REPLACES the override: no --expires-at = permanent, no allowance flags =
-# cleared. Writes show org + before/after + host, confirm on a TTY, refuse off a
-# TTY without --yes. remove with no override → "nothing to remove", no DELETE.
+# set changes ONLY the flags you pass (SMOODEV-4052): it reads the stored
+# override to preview before/after, then PATCHes just those fields, so an edit
+# another admin makes while you confirm is not reverted (PUT only creates). Creating an override still needs --enabled or
+# --disabled plus --reason. --seats / --clear-seats / allowance flags: telephony
+# only (seats ≥ 1; calling capacity = max(seats, paid seats)). A lapsed stored
+# expiry must be renewed with --expires-at or --permanent. Writes show org +
+# before/after + host, confirm on a TTY, refuse off a TTY without --yes; a set
+# that changes nothing sends no PUT. remove with no override → "nothing to
+# remove", no DELETE.
+# Per-org feature-flag rollout (SMOODEV-4052) — add/remove ONE org in a flag's
+# org allowlist rule in the master org's config, in place. Uses the user
+# session (`th auth login`); --environment is required (no default).
+smoo admin config flag-org add    callVoicemailEnabled <org-id> --environment development [--yes|--dry-run]
+smoo admin config flag-org remove callVoicemailEnabled <org-id> --environment development
+# Edits only allowlist rules (when = orgId in/eq, value = true); other rules and
+# `default` are untouched. No allowlist → one `orgs` rule is appended LAST (a
+# rule above it that matches the org wins). A bare `false`/unset flag becomes a
+# segment envelope with default false. Refuses: removing from a flag that is
+# `true` for everyone, and any value it does not recognise. Prints before/after,
+# confirms, and re-reads before the write (best effort: an edit landing between
+# the re-read and the PUT can still be overwritten). The key is matched
+# case/underscore-insensitively and written under its stored/declared name. An
+# earlier deny rule naming the org is flagged: the org stays off.
+# Never point it at production without the change being agreed.
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 smoo admin org link-child <child-org-id>             # link under active org
@@ -1102,6 +1126,37 @@ smoo calling ring-groups members <group-id> --member <userId>:first --member <us
 - The org-wide `callDepartmentRoutingEnabled` switch is a config flag. No
   command here can change it.
 
+### Enterprise SSO (`smoo sso`) — SMOODEV-4052
+
+CLI twin of the hosted MCP's `sso_*` tools and the copilot's `sso.*` tools. All
+three call the same api-prime `/organizations/{org}/sso-connections…` routes
+with your own sign-in, so every verb needs `org.sso.manage` and the `sso`
+product. A 403 is reported as "admin only". Creating or editing a connection
+(IdP metadata, domains) stays on the dashboard.
+
+```bash
+smoo sso connections list [--json]                       # alias: conn ls
+smoo sso connections show <connection-id> [--json]
+smoo sso link preview <connection-id> [--json]           # every account + the lockout count
+smoo sso link apply <connection-id> a@acme.com b@acme.com [--yes|--dry-run]
+smoo sso require on <connection-id> --acknowledge-lockout <N> [--yes|--dry-run]
+smoo sso require off <connection-id> [--yes|--dry-run]
+```
+
+- `link preview` lists each existing account in the verified domains as
+  `linked`, `not_linked` or `conflict`, and how many accounts Require SSO would
+  lock out (not linked plus conflicting).
+- `link apply` takes at most 200 emails (trimmed, lowercased, de-duplicated).
+  All or nothing: one missing, SSO-born or conflicting account refuses the batch.
+- `require on` prints the preview and refuses unless `--acknowledge-lockout`
+  equals the current count, 0 included, then confirms like every write and reads
+  the count again after the confirm, aborting if it moved. It is refused outright
+  while the connection cannot link (provider not registered, or no verified
+  domain: the hooks would start enforcing the moment it became ready) and when
+  the domains hold more than 1000 accounts (the count is only a lower bound; use
+  Settings → SSO). api-prime refuses the unready case too. Turning it off needs
+  no count.
+
 ### Support (`smoo support`) — SMOODEV-3611
 
 ```bash
@@ -1523,6 +1578,9 @@ th roles create-from-template sales_rep --name "Field Sales"
 th roles set-permissions "Field Sales" crm.contacts.read crm.deals.read
 th roles member-roles ana@acme.com # roles + effective permissions
 th roles assign ana@acme.com "Field Sales"   # additive; no-op if already held
+th roles default get               # the role new members get (SMOODEV-4052)
+th roles default set "Field Sales" # org.roles.manage; refused if it carries a key you don't hold
+th roles default clear             # new members get the read-only template role
 ```
 
 The server refuses granting a permission you do not hold yourself, or
