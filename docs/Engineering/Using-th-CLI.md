@@ -2096,15 +2096,15 @@ th ci-queue status             # running, waiting, pressure vs thresholds, recen
 th ci-queue status --json
 ```
 
-| Exit      | Meaning                                                                           |
-| --------- | --------------------------------------------------------------------------------- |
-| _n_       | the job exited _n_                                                                |
-| 128 + _n_ | the job died on signal _n_                                                        |
-| 124       | the job's `--timeout` fired; its whole process group was killed                   |
-| 76        | the stall watchdog killed the job (see **Stalled jobs**); not a test failure      |
-| 127       | the job could not be started                                                      |
+| Exit      | Meaning                                                                                                  |
+| --------- | -------------------------------------------------------------------------------------------------------- |
+| _n_       | the job exited _n_                                                                                       |
+| 128 + _n_ | the job died on signal _n_                                                                               |
+| 124       | the job's `--timeout` fired; its whole process group was killed                                          |
+| 76        | the stall watchdog killed the job (see **Stalled jobs**); not a test failure                             |
+| 127       | the job could not be started                                                                             |
 | **75**    | no slot freed within `--max-wait` (EX_TEMPFAIL). **Nothing ran.** Stderr says `NEVER RAN: … waited 120m` |
-| 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran. |
+| 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran.                        |
 
 **Stalled jobs.** A running job whose process _tree_ used under `run.stall_cpu_pct` (5) percent of one
 **Exempt labels.** iOS, xcodebuild, gradle and docker jobs do their work outside the job's process tree (simulators, daemons), so the idle check would kill healthy runs; they keep only the runtime cap (`run.stall_exempt_labels`). A job is flagged idle (and releases its reservation) after half the window, and gets it back if it resumes.
