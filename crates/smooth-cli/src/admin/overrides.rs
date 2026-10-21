@@ -13,11 +13,12 @@
 //! - `--seats`, `--included-voice-minutes` / `--overage-cents` only with
 //!   `telephony` (the server rejects them on any other key, even as `null`).
 //!
-//! `set` is read-modify-write (SMOODEV-4052): it reads the current override
-//! (which also 404s an unknown org before any prompt), changes ONLY the flags
-//! you pass and sends everything else back as it is stored — so
-//! `set <org> telephony --seats 10` grants seats without touching the
-//! expiry, reason or calling allowance. Creating an override still needs
+//! `set` changes only what you name (SMOODEV-4052): it reads the current override
+//! (which also 404s an unknown org before any prompt) to preview before/after,
+//! then PATCHes ONLY the flags you pass — so `set <org> telephony --seats 10`
+//! grants seats without touching the expiry, reason or calling allowance, and
+//! an edit another admin makes while you confirm is not reverted. A lapsed
+//! stored expiry must be renewed explicitly. Creating an override (PUT) still needs
 //! `--enabled`/`--disabled` and `--reason`. `--permanent`, `--clear-seats`
 //! and `--clear-voice-allowance` clear a field explicitly. Writes print org +
 //! feature + before/after + host, confirm on a TTY and refuse off a TTY
@@ -222,11 +223,11 @@ fn build_changes(args: &SetArgs, feature_key: &str, now: DateTime<Utc>) -> Resul
 }
 
 /// The fields a stored override carries that `set` sends back unchanged.
-/// The PUT keeps these when omitted, so clearing one sends an explicit `null`.
+/// The server keeps these when omitted, so clearing one sends an explicit `null`.
 const KEPT_FIELDS: &[&str] = &["seats", "includedVoiceMinutes", "voiceMinutesOverageRateCents"];
 
-/// The full PUT body: `changes` on top of the `current` override (read-modify-
-/// write), so a field the operator did not name keeps its stored value.
+/// `changes` on top of the `current` override: the before/after preview and the
+/// no-op check, and — with no override yet — the PUT that creates it.
 ///
 /// # Errors
 /// Creating an override without `--enabled`/`--disabled` and `--reason`, or
@@ -401,7 +402,7 @@ fn print_list(body: &Value, org: &str, json: bool) {
 
 async fn set(client: &AdminClient, org: &str, feature_key: &str, changes: &Map<String, Value>, confirm: Confirm, json: bool) -> Result<()> {
     // Read first: 404s an unknown org before the prompt, and is the base the
-    // changes are merged onto, so nothing the operator did not name changes.
+    // before/after preview, the lapsed-expiry guard and the no-op check use.
     let current = list_overrides(client, org).await?;
     let stored = find_override(&current, feature_key);
     let body = merge_body(stored, changes, feature_key, Utc::now())?;
@@ -433,10 +434,15 @@ async fn set(client: &AdminClient, org: &str, feature_key: &str, changes: &Map<S
         return Ok(());
     }
 
-    let resp = client
-        .put(&override_path(org, feature_key), body)
-        .await
-        .with_context(|| format!("set override `{feature_key}` on org {org}"))?;
+    // An existing override gets a PATCH of only the changed fields — a full
+    // PUT built before the prompt would revert any edit another admin made
+    // meanwhile (or recreate an override they deleted). PUT only creates.
+    let resp = if stored.is_some() {
+        client.patch(&override_path(org, feature_key), changes).await
+    } else {
+        client.put(&override_path(org, feature_key), body).await
+    }
+    .with_context(|| format!("set override `{feature_key}` on org {org}"))?;
     let created = resp.get("created").and_then(Value::as_bool).unwrap_or(false);
     let stored = resp.get("override").unwrap_or(&resp);
     print_ok(format!(
@@ -496,6 +502,7 @@ async fn remove(client: &AdminClient, org: &str, feature_key: &str, confirm: Con
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Arc, Mutex};
 
     const ORG: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -783,30 +790,67 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn set_seats_puts_the_merged_body_to_the_feature_path() {
+    /// The overrides list, plus a PUT and a PATCH route that record the body they got.
+    fn writes_router(listed: Vec<Value>, put_body: &Arc<Mutex<Option<Value>>>, patch_body: &Arc<Mutex<Option<Value>>>) -> axum::Router {
         use axum::{extract::Path, routing::get, Json};
-        let router = axum::Router::new()
+        let record = |slot: &Arc<Mutex<Option<Value>>>| {
+            let slot = slot.clone();
+            move |Path((org, key)): Path<(String, String)>, Json(body): Json<Value>| async move {
+                assert_eq!((org.as_str(), key.as_str()), (ORG, "telephony"));
+                *slot.lock().unwrap() = Some(body.clone());
+                Json(json!({ "override": body, "created": false }))
+            }
+        };
+        axum::Router::new()
             .route(
                 "/admin/organizations/{org}/overrides",
-                get(|| async { Json(json!({ "organization": { "id": ORG, "name": "Acme" }, "overrides": [stored_telephony()] })) }),
+                get(move || {
+                    let listed = listed.clone();
+                    async move { Json(json!({ "organization": { "id": ORG, "name": "Acme" }, "overrides": listed })) }
+                }),
             )
             .route(
                 "/admin/organizations/{org}/overrides/{key}",
-                axum::routing::put(|Path((org, key)): Path<(String, String)>, Json(body): Json<Value>| async move {
-                    assert_eq!(org, ORG);
-                    assert_eq!(key, "telephony");
-                    assert_eq!(
-                        body,
-                        json!({ "enabled": true, "reason": "MSA pilot", "expiresAt": "2027-06-01T00:00:00Z",
-                                "seats": 10, "includedVoiceMinutes": 500, "voiceMinutesOverageRateCents": 3 })
-                    );
-                    Json(json!({ "override": body, "created": false }))
-                }),
-            );
-        let client = AdminClient::with_base(fake_api(router).await, "tok");
-        let c = changes(&["--seats", "10", "--yes"], "telephony").unwrap();
+                axum::routing::put(record(put_body)).patch(record(patch_body)),
+            )
+    }
+
+    #[tokio::test]
+    async fn set_on_an_existing_override_patches_only_the_changed_fields() {
+        let (put, patch) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let client = AdminClient::with_base(fake_api(writes_router(vec![stored_telephony()], &put, &patch)).await, "tok");
+        let c = changes(&["--seats", "10", "--clear-voice-allowance"], "telephony").unwrap();
         set(&client, ORG, "telephony", &c, Confirm { dry_run: false, yes: true }, true).await.unwrap();
+        assert_eq!(
+            patch.lock().unwrap().clone(),
+            Some(json!({ "seats": 10, "includedVoiceMinutes": null, "voiceMinutesOverageRateCents": null })),
+            "a concurrent edit to any other field must survive: only the named fields are sent"
+        );
+        assert!(put.lock().unwrap().is_none(), "an existing override is never PUT");
+    }
+
+    #[tokio::test]
+    async fn set_without_an_override_creates_it_with_put() {
+        let (put, patch) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let client = AdminClient::with_base(fake_api(writes_router(vec![], &put, &patch)).await, "tok");
+        let c = changes(&["--enabled", "--reason", "pilot", "--seats", "10"], "telephony").unwrap();
+        set(&client, ORG, "telephony", &c, Confirm { dry_run: false, yes: true }, true).await.unwrap();
+        assert_eq!(put.lock().unwrap().clone(), Some(json!({ "enabled": true, "reason": "pilot", "seats": 10 })));
+        assert!(patch.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn set_on_a_lapsed_override_is_refused_before_any_write() {
+        let (put, patch) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let mut lapsed = stored_telephony();
+        lapsed["expiresAt"] = json!("2020-01-01T00:00:00Z");
+        let client = AdminClient::with_base(fake_api(writes_router(vec![lapsed], &put, &patch)).await, "tok");
+        let c = changes(&["--seats", "10"], "telephony").unwrap();
+        let err = set(&client, ORG, "telephony", &c, Confirm { dry_run: false, yes: true }, true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+        assert!(put.lock().unwrap().is_none() && patch.lock().unwrap().is_none());
     }
 
     #[tokio::test]

@@ -536,9 +536,9 @@ smoo admin org overrides set <org-id> telephony --seats 10   # grant calling sea
 smoo admin org overrides set <org-id> crm --permanent        # drop the expiry only
 smoo admin org overrides set <org-id> telephony --clear-seats --clear-voice-allowance
 smoo admin org overrides remove <org-id> crm [--yes|--dry-run]           # back to products
-# set is read-modify-write (SMOODEV-4052): it reads the stored override and
-# changes ONLY the flags you pass — expiry, reason, seats and allowance you don't
-# name are sent back as stored. Creating an override still needs --enabled or
+# set changes ONLY the flags you pass (SMOODEV-4052): it reads the stored
+# override to preview before/after, then PATCHes just those fields, so an edit
+# another admin makes while you confirm is not reverted (PUT only creates). Creating an override still needs --enabled or
 # --disabled plus --reason. --seats / --clear-seats / allowance flags: telephony
 # only (seats ≥ 1; calling capacity = max(seats, paid seats)). A lapsed stored
 # expiry must be renewed with --expires-at or --permanent. Writes show org +
@@ -555,7 +555,10 @@ smoo admin config flag-org remove callVoicemailEnabled <org-id> --environment de
 # rule above it that matches the org wins). A bare `false`/unset flag becomes a
 # segment envelope with default false. Refuses: removing from a flag that is
 # `true` for everyone, and any value it does not recognise. Prints before/after,
-# confirms, and re-reads before the write so a concurrent edit aborts it.
+# confirms, and re-reads before the write (best effort: an edit landing between
+# the re-read and the PUT can still be overwritten). The key is matched
+# case/underscore-insensitively and written under its stored/declared name. An
+# earlier deny rule naming the org is flagged: the org stays off.
 # Never point it at production without the change being agreed.
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).

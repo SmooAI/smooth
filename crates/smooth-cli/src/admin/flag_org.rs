@@ -17,9 +17,11 @@
 //! dropped a customer's switch. This command reads the value stored in that
 //! exact environment (no fallback chain), changes only the one org id in the
 //! org allowlist rule, prints before and after, confirms on a TTY (`--yes`
-//! in scripts), re-reads to make sure nobody changed it in between, and
-//! writes it back. Every other rule, the default and the rule order are
-//! kept byte for byte.
+//! in scripts), re-reads it (a best-effort check — the API has no
+//! compare-and-swap) and writes it back. Every other rule, the default and
+//! the rule order are kept byte for byte. The key is matched canonically
+//! (`CALL_VOICEMAIL_ENABLED` finds `callVoicemailEnabled`) and written under
+//! the stored or schema-declared name, never the typed spelling.
 //!
 //! The pure merge ([`plan`]) refuses any shape it does not understand (a
 //! string, a number, an object that is not a segment envelope, a malformed
@@ -31,7 +33,7 @@ use clap::Subcommand;
 use owo_colors::OwoColorize;
 use serde_json::{json, Map, Value};
 
-use crate::config::{derive_tier_from_schemas, ConfigClient, Tier};
+use crate::config::{canonical_key, declared_feature_flag_key, derive_tier_from_schemas, ConfigClient, Tier};
 use crate::destructive::{gate_with, Confirm, Severity, Target};
 
 /// Id given to a newly created org allowlist rule.
@@ -81,6 +83,8 @@ pub struct Plan {
     pub after: Value,
     pub changed: bool,
     pub notes: Vec<String>,
+    /// Add only: an earlier deny rule names the org, so the flag stays off for it.
+    pub still_off: bool,
 }
 
 /// A canonical (lowercase, hyphenated) org UUID.
@@ -160,6 +164,7 @@ pub fn plan(current: Option<&Value>, org: &str, op: Op) -> Result<Plan> {
         after: v,
         changed: false,
         notes: vec![note],
+        still_off: false,
     };
     match current {
         None | Some(Value::Null | Value::Bool(false)) => match op {
@@ -167,6 +172,7 @@ pub fn plan(current: Option<&Value>, org: &str, op: Op) -> Result<Plan> {
                 after: json!({ "$segment": true, "default": false, "rules": [new_org_rule(ORG_RULE_ID, org)] }),
                 changed: true,
                 notes: vec!["the flag was off for every org; it becomes a segment that is on for this org only".to_string()],
+                still_off: false,
             }),
             Op::Remove => Ok(unchanged(
                 current.cloned().unwrap_or(Value::Null),
@@ -267,13 +273,35 @@ fn plan_envelope(envelope: &Map<String, Value>, org: &str, op: Op) -> Result<Pla
             "{other_rules} other rule(s) (email, multi-clause, deny) are untouched and may still match this org"
         ));
     }
+    let deny = if op == Op::Add { earlier_deny(&out, org) } else { None };
+    if let Some(id) = &deny {
+        notes.push(format!(
+            "rule `{id}` comes earlier, denies (value false) and names this org — rules are first-match-wins, so the flag stays OFF for this org until that rule changes"
+        ));
+    }
     let mut after = envelope.clone();
     after.insert("rules".to_string(), Value::Array(out));
     Ok(Plan {
         after: Value::Object(after),
         changed,
         notes,
+        still_off: deny.is_some(),
     })
+}
+
+/// The id of a deny rule (`value: false`) whose `orgId` clause names `org` and
+/// that sits before the first allowlist naming it, so it wins for this org.
+fn earlier_deny(rules: &[Value], org: &str) -> Option<String> {
+    let allowed_at = rules.iter().position(|r| org_allowlist(r).is_some_and(|ids| ids.iter().any(|id| id == org)))?;
+    rules[..allowed_at]
+        .iter()
+        .find(|r| {
+            r.get("value") == Some(&Value::Bool(false))
+                && r.pointer("/when/orgId")
+                    .and_then(org_clause_ids)
+                    .is_some_and(|ids| ids.iter().any(|id| id == org))
+        })
+        .map(|r| r.get("id").and_then(Value::as_str).unwrap_or("?").to_string())
 }
 
 /// One-line JSON, cut so a huge value cannot flood an error.
@@ -301,7 +329,45 @@ fn list(body: &Value) -> &[Value] {
 /// Where the flag's value lives in this environment.
 struct Located {
     schema_id: String,
+    /// The key as stored (or, with no value yet, as the schema declares it) —
+    /// never the operator's spelling, so a write cannot fork a second row.
+    key: String,
     value: Option<Value>,
+}
+
+/// The one row of a schema+environment read whose key is `flag`, compared
+/// canonically (`CALL_VOICEMAIL_ENABLED` ≡ `callVoicemailEnabled`), as
+/// `(stored key, value)`.
+///
+/// # Errors
+/// When two stored keys collapse to the same canonical key.
+fn match_row(rows: &[Value], flag: &str) -> Result<Option<(String, Option<Value>)>> {
+    let want = canonical_key(flag);
+    let mut hits = rows.iter().filter_map(|r| {
+        let key = r.get("key").and_then(Value::as_str)?;
+        (canonical_key(key) == want).then(|| (key.to_string(), r.get("value").cloned()))
+    });
+    let first = hits.next();
+    if let Some((other, _)) = hits.next() {
+        bail!(
+            "`{flag}` matches more than one stored key (`{}` and `{other}`) — fix the duplicate with `th config`",
+            first.as_ref().map_or("", |(k, _)| k.as_str())
+        );
+    }
+    Ok(first)
+}
+
+/// The candidate schemas that declare `flag` as a feature flag, as
+/// `(schema id, declared key)`.
+fn declaring_schemas(candidates: &[&Value], flag: &str) -> Vec<(String, String)> {
+    candidates
+        .iter()
+        .filter_map(|s| {
+            let id = s.get("id").and_then(Value::as_str)?;
+            let doc = s.get("jsonSchema").unwrap_or(s);
+            declared_feature_flag_key(doc, flag).map(|key| (id.to_string(), key))
+        })
+        .collect()
 }
 
 /// Read the flag's value in `env_id` directly (no fallback chain) across the
@@ -317,26 +383,35 @@ async fn locate(cfg: &ConfigClient, config_org: &str, env_id: &str, schemas: &[V
             None => bail!("org {config_org} has no config schemas"),
         }
     }
-    let mut found: Vec<(String, Option<Value>)> = Vec::new();
+    let mut found: Vec<Located> = Vec::new();
     for schema in &candidates {
         let sid = schema.get("id").and_then(Value::as_str).context("a schema has no id")?;
         let body = cfg
             .get(&format!("/organizations/{config_org}/config/schemas/{sid}/environments/{env_id}/values"))
             .await
             .with_context(|| format!("read values of schema {sid}"))?;
-        if let Some(row) = rows(&body).iter().find(|r| r.get("key").and_then(Value::as_str) == Some(flag)) {
-            found.push((sid.to_string(), row.get("value").cloned()));
+        if let Some((key, value)) = match_row(rows(&body), flag)? {
+            found.push(Located {
+                schema_id: sid.to_string(),
+                key,
+                value,
+            });
         }
     }
     match found.len() {
-        0 => Ok(Located {
-            schema_id: candidates[0].get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-            value: None,
-        }),
-        1 => {
-            let (schema_id, value) = found.remove(0);
-            Ok(Located { schema_id, value })
+        0 => {
+            // No value yet: write under the schema that declares the key, by its declared name.
+            let mut declaring = declaring_schemas(&candidates, flag);
+            match declaring.len() {
+                1 => {
+                    let (schema_id, key) = declaring.remove(0);
+                    Ok(Located { schema_id, key, value: None })
+                }
+                0 => bail!("no candidate schema declares `{flag}` as a feature flag — check `--schema-name`"),
+                n => bail!("`{flag}` is declared by {n} schemas and has no value yet — pass `--schema-name` to pick one"),
+            }
         }
+        1 => Ok(found.remove(0)),
         n => bail!("`{flag}` has a value under {n} schemas in this environment — pass `--schema-name` to pick one"),
     }
 }
@@ -380,11 +455,13 @@ pub async fn dispatch(cmd: FlagOrgCmd) -> Result<()> {
     match derive_tier_from_schemas(schemas, &flag) {
         Some(Tier::FeatureFlag) => {}
         Some(other) => bail!("`{flag}` is declared as a {} key, not a feature flag", other.as_wire()),
-        None => bail!("`{flag}` is not declared in any config schema of org {config_org} — check the key (it is case-sensitive)"),
+        None => bail!("`{flag}` is not declared in any config schema of org {config_org} — check the key"),
     }
 
     let located = locate(&cfg, &config_org, &env_id, schemas, &flag, args.schema_name.as_deref()).await?;
     let p = plan(located.value.as_ref(), &org, op)?;
+    // Everything below names the key as stored/declared, not as typed.
+    let flag = located.key.clone();
 
     println!();
     println!("  {}  {}", "flag   ".dimmed(), flag.cyan().bold());
@@ -413,10 +490,12 @@ pub async fn dispatch(cmd: FlagOrgCmd) -> Result<()> {
         return Ok(());
     }
 
-    // Optimistic check: the PUT replaces the whole value, so refuse when
-    // someone changed it while the operator was reading the diff.
+    // Best-effort optimistic check: the PUT replaces the whole value, so refuse
+    // when it changed while the operator was reading the diff. A write landing
+    // between this re-read and the PUT is still possible (the API has no
+    // compare-and-swap).
     let again = locate(&cfg, &config_org, &env_id, schemas, &flag, args.schema_name.as_deref()).await?;
-    if again.value != located.value {
+    if again.value != located.value || again.key != located.key {
         bail!(
             "`{flag}` changed in {} while you were confirming — nothing was written; run the command again",
             args.environment
@@ -442,6 +521,12 @@ pub async fn dispatch(cmd: FlagOrgCmd) -> Result<()> {
         if op == Op::Add { "to" } else { "from" },
         format!("{flag} ({})", args.environment).cyan()
     );
+    if p.still_off {
+        println!(
+            "  {} an earlier deny rule still names this org, so the flag stays OFF for it — see the note above",
+            "!".yellow().bold()
+        );
+    }
     println!("    {}", "the voice pod and api-prime cache flags for up to 60 s".dimmed());
     Ok(())
 }
@@ -525,6 +610,69 @@ mod tests {
         let both = json!({ "id": "both", "when": { "orgId": { "op": "in", "value": [C] }, "email": { "op": "eq", "value": "a@b.c" } }, "value": true });
         let p = plan(Some(&env(json!([deny, both]))), A, Op::Add).unwrap();
         assert_eq!(p.after["rules"], json!([deny, both, org_rule("orgs", &[A])]));
+        // …but says the earlier deny still wins for this org.
+        assert!(p.still_off);
+        assert!(p.notes.iter().any(|n| n.contains("rule `deny`") && n.contains("stays OFF")), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn add_warns_only_about_a_deny_that_comes_first_and_names_the_org() {
+        let deny_a = json!({ "id": "deny", "when": { "orgId": { "op": "eq", "value": A } }, "value": false });
+        let deny_b = json!({ "id": "deny-b", "when": { "orgId": { "op": "in", "value": [B] } }, "value": false });
+        // Deny after the allowlist: the allowlist wins, no warning.
+        let p = plan(Some(&env(json!([org_rule("orgs", &[C]), deny_a]))), A, Op::Add).unwrap();
+        assert!(!p.still_off, "{:?}", p.notes);
+        // A deny for a different org: no warning.
+        let p = plan(Some(&env(json!([deny_b, org_rule("orgs", &[C])]))), A, Op::Add).unwrap();
+        assert!(!p.still_off);
+        // Already listed but shadowed: unchanged, still warned.
+        let p = plan(Some(&env(json!([deny_a, org_rule("orgs", &[A])]))), A, Op::Add).unwrap();
+        assert!(!p.changed && p.still_off);
+        // Remove never warns about it.
+        let p = plan(Some(&env(json!([deny_a, org_rule("orgs", &[A, B])]))), A, Op::Remove).unwrap();
+        assert!(!p.still_off);
+    }
+
+    #[test]
+    fn rows_match_the_key_canonically_and_report_the_stored_spelling() {
+        let rows = [
+            json!({ "key": "callVoicemailEnabled", "value": true }),
+            json!({ "key": "otherFlag", "value": false }),
+        ];
+        for typed in ["callVoicemailEnabled", "CALL_VOICEMAIL_ENABLED", "callvoicemailenabled"] {
+            assert_eq!(
+                match_row(&rows, typed).unwrap(),
+                Some(("callVoicemailEnabled".to_string(), Some(json!(true)))),
+                "{typed}"
+            );
+        }
+        assert_eq!(match_row(&rows, "callDepartmentRoutingEnabled").unwrap(), None);
+        let dup = [
+            json!({ "key": "callVoicemailEnabled", "value": true }),
+            json!({ "key": "CALL_VOICEMAIL_ENABLED", "value": false }),
+        ];
+        assert!(match_row(&dup, "callVoicemailEnabled")
+            .unwrap_err()
+            .to_string()
+            .contains("more than one stored key"));
+    }
+
+    #[test]
+    fn a_new_value_goes_under_the_schema_that_declares_the_flag() {
+        let declares = |id: &str, flags: Value| json!({ "id": id, "jsonSchema": { "properties": { "featureFlagSchema": { "properties": flags } } } });
+        let public = json!({ "id": "pub", "jsonSchema": { "properties": { "publicConfigSchema": { "properties": { "callVoicemailEnabled": {} } } } } });
+        let other = declares("s1", json!({ "otherFlag": {} }));
+        let calls = declares("s2", json!({ "callVoicemailEnabled": {} }));
+        let schemas = [public.clone(), other, calls.clone()];
+        let candidates: Vec<&Value> = schemas.iter().collect();
+        assert_eq!(
+            declaring_schemas(&candidates, "CALL_VOICEMAIL_ENABLED"),
+            vec![("s2".to_string(), "callVoicemailEnabled".to_string())],
+            "only a feature-flag declaration counts, and the declared name wins"
+        );
+        assert!(declaring_schemas(&[&public], "callVoicemailEnabled").is_empty());
+        let twice = declares("s3", json!({ "callVoicemailEnabled": {} }));
+        assert_eq!(declaring_schemas(&[&calls, &twice], "callVoicemailEnabled").len(), 2);
     }
 
     #[test]

@@ -1925,7 +1925,7 @@ impl SchemaDiff {
 /// and the remote JSON-Schema's `anthropicApiKey` both collapse to
 /// `anthropicapikey` — letting the diff see them as the SAME key rather than an
 /// add + remove. Robust to any separator/case convention.
-fn canonical_key(s: &str) -> String {
+pub fn canonical_key(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
@@ -1978,6 +1978,18 @@ fn flatten_schema(schema: &Value) -> std::collections::BTreeMap<String, TieredKe
     }
 
     out
+}
+
+/// The name a schema doc declares a feature-flag key under, matched
+/// canonically ([`canonical_key`]): `CALL_VOICEMAIL_ENABLED` finds the
+/// declared `callVoicemailEnabled`. `None` when the doc does not declare it as
+/// a feature flag.
+#[cfg(feature = "admin")]
+pub fn declared_feature_flag_key(doc: &Value, key: &str) -> Option<String> {
+    flatten_schema(doc)
+        .remove(&canonical_key(key))
+        .filter(|tk| tk.tier == "featureFlag")
+        .map(|tk| tk.key)
 }
 
 /// Map a [`flatten_schema`] tier label (`public`/`secret`/`featureFlag`) to a
