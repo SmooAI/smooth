@@ -141,6 +141,20 @@ impl AdminClient {
         Self::body(resp, "PUT", &url).await
     }
 
+    /// Send a PATCH with a JSON body and return the parsed response.
+    pub async fn patch<B: Serialize>(&self, path: &str, body: &B) -> Result<serde_json::Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .patch(&url)
+            .bearer_auth(&self.bearer)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PATCH {url}"))?;
+        Self::body(resp, "PATCH", &url).await
+    }
+
     async fn body(resp: reqwest::Response, method: &str, url: &str) -> Result<serde_json::Value> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
