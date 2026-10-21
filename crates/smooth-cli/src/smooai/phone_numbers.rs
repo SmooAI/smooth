@@ -11,8 +11,12 @@
 //! `calling.admin`, and must acknowledge Twilio's current monthly price —
 //! without it the route answers 409 with the quote and buys nothing.
 //!
-//! `buy` therefore fetches the quote first, prints it, and refuses unless
-//! `--accept-price` is at least the quote; then it asks for confirmation (a
+//! The quote is for THE number: the route takes the country from the number
+//! (a `--country` that disagrees is refused) and prices the type Twilio sells
+//! it as (local, toll-free, mobile). `buy` therefore asks the route itself for
+//! the quote — a purchase request with no acknowledgement, which buys nothing
+//! and answers 409 with the quote — prints it, and refuses unless
+//! `--accept-price` is at least that quote; then it asks for confirmation (a
 //! TTY prompt, or `--yes` in scripts). `attach` asks too: it re-points the
 //! number's calls and texts at Smoo. A 403 reads as "admin only".
 
@@ -61,7 +65,7 @@ pub enum ProvisionCmd {
         /// The monthly price you agree to pay, e.g. 1.15. Required: run without it to see the quote.
         #[arg(long = "accept-price", value_name = "AMOUNT")]
         accept_price: Option<f64>,
-        /// Two-letter ISO country of the number. Default US.
+        /// Two-letter ISO country of the number, as a cross-check. Taken from the number when omitted.
         #[arg(long)]
         country: Option<String>,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
@@ -83,11 +87,17 @@ pub fn e164(raw: &str) -> Result<String> {
     }
 }
 
-/// Two-letter ISO country, upper-cased; `None` → US.
+/// Two-letter ISO country for the search, upper-cased; `None` → US.
 pub fn country(raw: Option<&str>) -> Result<String> {
+    Ok(country_opt(raw)?.unwrap_or_else(|| "US".into()))
+}
+
+/// Optional two-letter ISO country, upper-cased, with no default — a purchase
+/// never invents one (the route derives it from the number).
+pub fn country_opt(raw: Option<&str>) -> Result<Option<String>> {
     match raw.map(str::trim).filter(|c| !c.is_empty()) {
-        None => Ok("US".into()),
-        Some(c) if c.len() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic()) => Ok(c.to_ascii_uppercase()),
+        None => Ok(None),
+        Some(c) if c.len() == 2 && c.chars().all(|ch| ch.is_ascii_alphabetic()) => Ok(Some(c.to_ascii_uppercase())),
         Some(c) => bail!("country `{c}` must be a two-letter ISO code, e.g. US"),
     }
 }
@@ -126,16 +136,57 @@ pub fn quote(available: &Value) -> Option<(f64, String, String)> {
     Some((price, raw.to_string(), s(available, "priceUnit").to_string()))
 }
 
+/// The route's quote for one number: what buying it costs and why.
+#[derive(Debug, PartialEq)]
+pub struct NumberQuote {
+    pub price: f64,
+    pub raw: String,
+    pub unit: String,
+    /// `local`, `toll free` or `mobile`, as Twilio sells this number.
+    pub number_type: String,
+    pub country: String,
+}
+
+/// The quote out of the route's `409 price_acknowledgement_required` (the
+/// client's error reads "POST … returned HTTP 409 Conflict: {json}"). `None`
+/// for any other refusal.
+#[must_use]
+pub fn quote_from_refusal(err: &str) -> Option<NumberQuote> {
+    let at = err.find("returned HTTP 409")?;
+    let body: Value = serde_json::from_str(&err[at + err[at..].find('{')?..]).ok()?;
+    if s(&body, "error") != "price_acknowledgement_required" {
+        return None;
+    }
+    let q = body.get("quote")?;
+    let raw = s(q, "monthlyPrice");
+    let price = raw.parse::<f64>().ok().filter(|p| p.is_finite())?;
+    Some(NumberQuote {
+        price,
+        raw: raw.to_string(),
+        unit: s(q, "priceUnit").to_string(),
+        number_type: s(q, "numberType").to_string(),
+        country: s(q, "country").to_string(),
+    })
+}
+
 /// Is the acknowledged price enough? Compared in cents, as the route does.
 #[must_use]
 pub fn price_ok(accepted: f64, quoted: f64) -> bool {
     (accepted * 100.0).round() >= (quoted * 100.0).round()
 }
 
-/// The `POST /phone-numbers` body for a purchase.
+/// The `POST /phone-numbers` body for a purchase; `accepted: None` asks for the
+/// quote (the route buys nothing without an acknowledgement).
 #[must_use]
-pub fn purchase_body(phone_number: &str, country_code: &str, accepted: f64) -> Value {
-    json!({ "phoneNumber": phone_number, "intent": "purchase", "country": country_code, "acknowledgedMonthlyPrice": accepted })
+pub fn purchase_body(phone_number: &str, country_code: Option<&str>, accepted: Option<f64>) -> Value {
+    let mut body = json!({ "phoneNumber": phone_number, "intent": "purchase" });
+    if let Some(c) = country_code {
+        body["country"] = json!(c);
+    }
+    if let Some(p) = accepted {
+        body["acknowledgedMonthlyPrice"] = json!(p);
+    }
+    body
 }
 
 /// A 403 from the route reads as "admin only", not an outage.
@@ -258,32 +309,42 @@ pub async fn run(cmd: ProvisionCmd) -> Result<()> {
             confirm,
         } => {
             let number = e164(&phone_number)?;
-            let cc = country(c.as_deref())?;
+            let cc = country_opt(c.as_deref())?;
             let client = require_authed().await?;
             let o = require_active_org(&client, org)?;
             let base = format!("/organizations/{o}/integrations/twilio");
-            let available = client
-                .get(&format!("{base}/available-numbers?country={cc}"))
-                .await
-                .map_err(|e| admin_only(e, true))
-                .context("GET integrations/twilio/available-numbers (price quote)")?;
-            let Some((quoted, raw, unit)) = quote(&available) else {
-                bail!("Twilio gave no monthly price for a {cc} number right now, so nothing can be bought — try again later");
+            // The quote for THIS number, from the route that will enforce it: a purchase
+            // request with no acknowledgement buys nothing and answers 409 with the quote.
+            let probe = client
+                .post(&format!("{base}/phone-numbers"), Some(&purchase_body(&number, cc.as_deref(), None)))
+                .await;
+            let q = match probe {
+                Ok(_) => bail!("the route accepted a purchase with no price acknowledgement — refusing to go on; report this"),
+                Err(e) => match quote_from_refusal(&e.to_string()) {
+                    Some(q) => q,
+                    None => return Err(admin_only(e, true)).context("POST integrations/twilio/phone-numbers (price quote)"),
+                },
             };
-            let label = price_label(&raw, &unit);
+            let label = price_label(&q.raw, &q.unit);
+            let kind = if q.number_type == "toll free" { "toll-free" } else { q.number_type.as_str() };
             println!(
-                "\n  {} buying {} costs {} from Twilio, every month until released",
+                "\n  {} buying {} (a {} {} number) costs {} from Twilio, every month until released",
                 "$".yellow().bold(),
                 number.cyan(),
+                q.country,
+                kind,
                 label.yellow().bold()
             );
             let Some(accepted) = accept_price else {
-                bail!("nothing was bought: re-run with `--accept-price {raw}` to agree to {label}");
+                bail!("nothing was bought: re-run with `--accept-price {}` to agree to {label}", q.raw);
             };
-            if !accepted.is_finite() || accepted < 0.0 || !price_ok(accepted, quoted) {
-                bail!("nothing was bought: --accept-price {accepted} is below Twilio's current {label}; re-run with `--accept-price {raw}`");
+            if !accepted.is_finite() || accepted < 0.0 || !price_ok(accepted, q.price) {
+                bail!(
+                    "nothing was bought: --accept-price {accepted} is below Twilio's current {label}; re-run with `--accept-price {}`",
+                    q.raw
+                );
             }
-            let body = purchase_body(&number, &cc, accepted);
+            let body = purchase_body(&number, cc.as_deref(), Some(accepted));
             if confirm.dry_run {
                 print_json(&body);
             }
@@ -342,11 +403,32 @@ mod tests {
     }
 
     #[test]
-    fn purchase_body_states_the_intent_and_price() {
+    fn purchase_body_states_the_intent_and_price_and_never_invents_a_country() {
         assert_eq!(
-            purchase_body("+14155550100", "US", 1.15),
+            purchase_body("+14155550100", Some("US"), Some(1.15)),
             json!({ "phoneNumber": "+14155550100", "intent": "purchase", "country": "US", "acknowledgedMonthlyPrice": 1.15 })
         );
+        // The quote request: no acknowledgement, so the route buys nothing.
+        assert_eq!(
+            purchase_body("+18335550100", None, None),
+            json!({ "phoneNumber": "+18335550100", "intent": "purchase" })
+        );
+        assert_eq!(country_opt(None).unwrap(), None);
+        assert_eq!(country_opt(Some("au")).unwrap().as_deref(), Some("AU"));
+        assert!(country_opt(Some("AUS")).is_err());
+    }
+
+    #[test]
+    fn the_quote_comes_from_the_routes_refusal_for_this_number() {
+        let err = r#"POST /organizations/o/integrations/twilio/phone-numbers returned HTTP 409 Conflict: {"error":"price_acknowledgement_required","message":"Buying +18335550100 (a US toll-free number) costs $2.15/month","quote":{"country":"US","numberType":"toll free","monthlyPrice":"2.15","priceUnit":"USD"}}"#;
+        let q = quote_from_refusal(err).unwrap();
+        assert_eq!(q.raw, "2.15");
+        assert_eq!(q.number_type, "toll free");
+        assert_eq!(q.country, "US");
+        assert!(!price_ok(1.15, q.price));
+        // Any other 409 (not for sale, already owned) is not a quote.
+        assert!(quote_from_refusal("POST /x returned HTTP 409 Conflict: +1 is not for sale").is_none());
+        assert!(quote_from_refusal("POST /x returned HTTP 403 Forbidden: {}").is_none());
     }
 
     #[test]

@@ -1063,9 +1063,13 @@ smoo calling numbers buy +14155550100 --accept-price 1.15 [--yes|--dry-run] # SP
 
 - `attach` sends `intent: "attach"`: a number the org's Twilio account does not
   own is refused, never bought. It needs `calling.admin`.
-- `buy` reads Twilio's current monthly price first and prints it. Without
-  `--accept-price`, or with an amount below the quote, it stops before buying.
-  It then asks for confirmation (`--yes` in scripts) and sends
+- `buy` first asks the route for the quote for THAT number: a purchase request
+  with no acknowledgement, which buys nothing and answers with the price. The
+  route takes the country from the number and prices the type Twilio sells it
+  as, so a toll-free or foreign number shows its own price ("a US toll-free
+  number … $2.15/month"). `--country` is optional and only cross-checked.
+  Without `--accept-price`, or with an amount below the quote, it stops before
+  buying. It then asks for confirmation (`--yes` in scripts) and sends
   `intent: "purchase"` with the acknowledged price, which the route checks
   again. It needs `calling.admin` and `billing.manage`.
 - A 403 is reported as "admin only", naming the keys.
