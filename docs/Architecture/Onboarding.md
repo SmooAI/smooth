@@ -57,6 +57,8 @@ Both create and rotate are gated (`big-smooth` or `big-smooth-*`, case-insensiti
 
 A brand-new user has no org. Starting the checkout creates a personal one, so the org is re-resolved on every mint attempt. A signed-in user with no org is sent straight to the checkout.
 
+**Top-ups (SMOODEV-3969).** The trial's AI allowance is small on purpose, so every Family plan surface also names prepaid AI credits: `family_plan::top_up_note()` ("Top up $5 or $10 anytime during the trial; auto-reload optional — `smoo credits buy`"), built from `smooth_cast::ai_credits::PACKS_CENTS`. The picker prints it under the checkout link and after the key is saved. The daemon's `options()` description carries it, and `POST /api/llm/provider/family` returns it as `topUp` (on `plan_required` and `saved`), which the first-run card shows under the trial button. When the allowance does run out, the gateway's `Budget has been exceeded` is shown as the top-up link (see `smoo credits` in [[Using-th-CLI]]).
+
 ## Decision: no hot reload (yet)
 
 A provider change takes effect on the **next daemon start**. Every surface says so: the CLI prints `th down && th up`, `GET /api/llm/provider` reports `restart_required`, and both the tool and the web card say a restart is needed.

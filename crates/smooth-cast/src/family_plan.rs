@@ -23,6 +23,14 @@ pub const FAMILY_PLAN_URL: &str = "https://smoo.ai/apps/start/product?plan=Famil
 /// The one-line pitch every surface shows.
 pub const FAMILY_PLAN_PITCH: &str = "Family plan — $9/month, 14-day free trial, hosted models via the Smoo AI gateway";
 
+/// SMOODEV-3969: the trial's AI allowance is small on purpose (bots), so every
+/// Family plan surface also says how to keep going past it: "Top up $5 or $10
+/// anytime during the trial; auto-reload optional — `smoo credits buy`".
+#[must_use]
+pub fn top_up_note() -> String {
+    format!("{} — `smoo credits buy`", crate::ai_credits::top_up_line(" during the trial"))
+}
+
 /// The gateway's coding default (concrete: the legacy `smooth-*` aliases are
 /// gone at the gateway, SMOODEV-1793). Tracks the coding slot so it can't drift.
 pub const SMOO_DEFAULT_MODEL: &str = smooth_policy::smooth_alias::SmoothSlot::Coding.concrete_default();
@@ -229,6 +237,12 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn top_up_note_names_the_packs_and_the_verb() {
+        let note = top_up_note();
+        assert_eq!(note, "Top up $5 or $10 anytime during the trial; auto-reload optional — `smoo credits buy`");
+    }
 
     /// A one-file mock of api.smoo.ai: answers each request with the next
     /// scripted `(status, body)` and records the request line + body.

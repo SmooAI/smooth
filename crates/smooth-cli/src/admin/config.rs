@@ -62,6 +62,14 @@ pub enum ConfigCommands {
         #[command(subcommand)]
         cmd: ValuesCmd,
     },
+    /// Turn a per-org feature flag on/off for ONE org in place
+    /// (SMOODEV-4052): adds/removes the org id in the flag's orgId rule
+    /// and keeps every other rule. `th config set` replaces the whole
+    /// value; this does not. Prints before/after and confirms.
+    FlagOrg {
+        #[command(subcommand)]
+        cmd: super::flag_org::FlagOrgCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -198,11 +206,12 @@ pub enum ValuesCmd {
 /// Bubbles auth + active-org resolution failures and non-2xx API
 /// responses up.
 pub async fn dispatch(cmd: ConfigCommands) -> Result<()> {
-    let client = require_authed().await?;
     match cmd {
-        ConfigCommands::Schemas { cmd } => dispatch_schemas(cmd, &client).await,
-        ConfigCommands::Environments { cmd } => dispatch_environments(cmd, &client).await,
-        ConfigCommands::Values { cmd } => dispatch_values(cmd, &client).await,
+        ConfigCommands::Schemas { cmd } => dispatch_schemas(cmd, &require_authed().await?).await,
+        ConfigCommands::Environments { cmd } => dispatch_environments(cmd, &require_authed().await?).await,
+        ConfigCommands::Values { cmd } => dispatch_values(cmd, &require_authed().await?).await,
+        // flag-org uses the user-session config client, like `th config set`.
+        ConfigCommands::FlagOrg { cmd } => super::flag_org::dispatch(cmd).await,
     }
 }
 

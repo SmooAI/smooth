@@ -882,6 +882,17 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::llm_gateway::Cmd,
     },
+    /// Prepaid AI credits — balance, buy a pack, auto-reload on/off.
+    ///
+    /// A pack lifts the org's LLM gateway ceiling on top of its monthly
+    /// allowance; auto-reload buys one when the balance runs low. Bare
+    /// `smoo credits` shows the balance. Wraps
+    /// `api.smoo.ai/organizations/{org_id}/llm-gateway/credits*`.
+    #[command(visible_alias = "credit")]
+    Credits {
+        #[command(subcommand)]
+        cmd: Option<smooai::credits::Cmd>,
+    },
     /// Ping the human on their own phone.
     ///
     /// Designed to be called BY an agent (Big Smooth / claude-driver) as a
@@ -961,6 +972,13 @@ enum SmooCommands {
     Calling {
         #[command(subcommand)]
         cmd: smooai::calling::Cmd,
+    },
+    /// Enterprise SSO — connections, linking existing accounts, and Require
+    /// SSO (previews the lockout count, confirms first). CLI twin of the hosted
+    /// MCP `sso_*` tools. Needs `org.sso.manage` and the SSO feature.
+    Sso {
+        #[command(subcommand)]
+        cmd: smooai::sso::Cmd,
     },
     /// Support health report — open/solved tickets, CSAT, first response,
     /// SLA breaches. CLI twin of the copilot's `support.report`.
@@ -2039,6 +2057,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
         SmooCommands::Branding { cmd } => smooai::branding::cmd(cmd).await,
         SmooCommands::Llm { cmd } => smooai::llm_gateway::cmd(cmd).await,
+        SmooCommands::Credits { cmd } => smooai::credits::cmd(cmd.unwrap_or_else(smooai::credits::default_cmd)).await,
         SmooCommands::Notify {
             message,
             title,
@@ -2052,6 +2071,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Heypage { cmd } => smooai::heypage::cmd(cmd).await,
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
+        SmooCommands::Sso { cmd } => smooai::sso::cmd(cmd).await,
         SmooCommands::Support { cmd } => smooai::support::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
@@ -2094,8 +2114,28 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     args
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Stack for the thread `th` actually runs on, and for tokio's workers.
+///
+/// th-bd84cf: Windows gives the process main thread 1 MB (Linux and macOS
+/// give 8 MB), and rendering clap's help/version for th's 53-command tree
+/// recurses past that, so `th --version` died with 0xC00000FD. Running on
+/// an explicitly sized thread makes the stack the same on every OS.
+const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runner = std::thread::Builder::new().name("main".into()).stack_size(MAIN_STACK_SIZE).spawn(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(MAIN_STACK_SIZE)
+            .build()?
+            .block_on(run_main())
+    })?;
+    // A panic on the runner already printed its message through the panic
+    // hook; re-raise it here so the process exits 101 exactly as before.
+    runner.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+async fn run_main() -> Result<()> {
     let mut argv = smoo_argv(std::env::args_os().collect());
     // th-f97a27: `th flow hook` runs on every harness lifecycle event, so it
     // skips clap, auth-profile setup and the log file — and a usage error
@@ -8207,6 +8247,60 @@ mod org_cli_tests {
         // `smoo --version` answers as the binary, not as the subcommand.
         let version = smoo_argv(vec!["/usr/local/bin/smoo".into(), "--version".into()]);
         assert_eq!(version.len(), 2);
+    }
+
+    /// SMOODEV-3969: `smoo credits` — bare is the balance, `balance`/`top-up`/`credit`
+    /// aliases parse, and auto-reload's verbs carry their flags.
+    #[test]
+    fn smoo_credits_parses() {
+        use smooai::credits::{AutoReloadCmd, Cmd as CreditsCmd};
+
+        let parse = |args: &[&str]| -> Option<CreditsCmd> {
+            let mut argv = vec!["th", "smoo"];
+            argv.extend_from_slice(args);
+            match Cli::try_parse_from(argv).expect("parses").command {
+                Some(Commands::Smoo {
+                    cmd: SmooCommands::Credits { cmd },
+                }) => cmd,
+                _ => panic!("expected Smoo/Credits for {args:?}"),
+            }
+        };
+
+        assert!(parse(&["credits"]).is_none(), "bare `smoo credits` defaults to show");
+        assert!(matches!(parse(&["credit", "balance", "--json"]), Some(CreditsCmd::Show { json: true, .. })));
+        match parse(&["credits", "top-up", "10", "--org", "org-x", "--no-open"]) {
+            Some(CreditsCmd::Buy { pack, org_id, no_open, .. }) => {
+                assert_eq!(pack, "10");
+                assert_eq!(org_id.as_deref(), Some("org-x"));
+                assert!(no_open);
+            }
+            _ => panic!("expected Buy"),
+        }
+        assert!(matches!(parse(&["credits", "auto-reload"]), Some(CreditsCmd::AutoReload { cmd: None })));
+        match parse(&["credits", "auto-reload", "on", "--below", "2", "--add", "5", "--confirm"]) {
+            Some(CreditsCmd::AutoReload {
+                cmd: Some(AutoReloadCmd::On { below, add, confirm, .. }),
+            }) => {
+                assert_eq!(below.as_deref(), Some("2"));
+                assert_eq!(add.as_deref(), Some("5"));
+                assert!(confirm);
+            }
+            _ => panic!("expected AutoReload/On"),
+        }
+        assert!(matches!(
+            parse(&["credits", "auto-reload", "off"]),
+            Some(CreditsCmd::AutoReload {
+                cmd: Some(AutoReloadCmd::Off { .. })
+            })
+        ));
+        assert!(matches!(
+            parse(&["credits", "auto-reload", "status", "--json"]),
+            Some(CreditsCmd::AutoReload {
+                cmd: Some(AutoReloadCmd::Status { json: true, .. })
+            })
+        ));
+        // `buy` needs the pack.
+        assert!(Cli::try_parse_from(["th", "smoo", "credits", "buy"]).is_err());
     }
 
     /// `th llm` wraps the org llm-gateway API. create-key takes the org

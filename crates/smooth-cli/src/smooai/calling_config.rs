@@ -96,6 +96,9 @@ pub enum NumbersCmd {
         #[command(flatten)]
         confirm: Confirm,
     },
+    /// Attach an owned number or BUY one (SMOODEV-4052) — `available`, `attach`, `buy`.
+    #[command(flatten)]
+    Provision(super::phone_numbers::ProvisionCmd),
 }
 
 #[derive(Subcommand)]
@@ -332,6 +335,7 @@ pub async fn numbers(cmd: NumbersCmd) -> Result<()> {
             )
             .await?;
         }
+        NumbersCmd::Provision(cmd) => return super::phone_numbers::run(cmd).await,
     }
     Ok(())
 }

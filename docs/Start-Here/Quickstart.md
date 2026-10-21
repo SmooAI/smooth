@@ -22,7 +22,7 @@ Big Smooth and `th code` need a model. You have two options.
 
 ### Family plan (hosted models)
 
-$9/month with a 14-day free trial. One key reaches the hosted models through the Smoo AI gateway, so there is nothing to set up per provider. Details: [smoo.ai/big-smooth#plan](https://smoo.ai/big-smooth#plan).
+$9/month with a 14-day free trial. One key reaches the hosted models through the Smoo AI gateway, so there is nothing to set up per provider. Top up $5 or $10 of AI credits anytime during the trial, with optional auto-reload (`smoo credits buy`). Details: [smoo.ai/big-smooth#plan](https://smoo.ai/big-smooth#plan).
 
 ```bash
 th model login smooai-gateway

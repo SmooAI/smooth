@@ -198,6 +198,7 @@ function FamilyDoor({ onDone, onBack }: { onDone: (m: string) => void; onBack: (
                     >
                         Start the 14-day free trial
                     </button>
+                    {step.topUp && <p className="text-xs text-(--color-muted-foreground)">{step.topUp}</p>}
                     {waiting && <p className="text-(--color-muted-foreground)">Waiting for checkout to finish… this card updates on its own.</p>}
                 </div>
             )}

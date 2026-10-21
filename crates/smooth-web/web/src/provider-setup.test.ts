@@ -31,11 +31,14 @@ test('validation names the first bad field', () => {
 
 test('family answers map to the next step', () => {
     assert.deepEqual(familyStepFrom({ status: 'saved', message: 'ok' }), { kind: 'saved', message: 'ok' });
-    assert.deepEqual(familyStepFrom({ status: 'plan_required', upgradeUrl: 'https://smoo.ai/x', message: 'm' }), {
+    assert.deepEqual(familyStepFrom({ status: 'plan_required', upgradeUrl: 'https://smoo.ai/x', message: 'm', topUp: 'Top up' }), {
         kind: 'checkout',
         upgradeUrl: 'https://smoo.ai/x',
         message: 'm',
+        topUp: 'Top up',
     });
+    const older = familyStepFrom({ status: 'plan_required', upgradeUrl: 'https://smoo.ai/x' });
+    assert.ok(older.kind === 'checkout' && older.topUp === '', 'a daemon without the top-up line still renders');
     const unsafe = familyStepFrom({ status: 'plan_required', upgradeUrl: 'javascript:alert(1)' });
     assert.equal(unsafe.kind, 'checkout');
     assert.ok(unsafe.kind === 'checkout' && unsafe.upgradeUrl.startsWith('https://smoo.ai/'), 'never open a non-https URL');

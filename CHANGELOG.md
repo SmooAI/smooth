@@ -1,5 +1,31 @@
 # @smooai/smooth
 
+## 0.84.0
+
+### Minor Changes
+
+- bac5469: Add `th smoo workforce create-account` (SMOODEV-4052): give Workforce directory people a Smoo account and org membership with no email sent, by employee id or `--needs-account`, with an optional `--role-id`. Confirms on a TTY or needs `--yes`; the twin of the hosted MCP `workforce_create_accounts`.
+
+## 0.83.0
+
+### Minor Changes
+
+- 8540cef: `th smoo sso` manages enterprise SSO for the active org: `connections list|show` reads the connections, `link preview|apply` shows which existing accounts in the verified domains are linked and links an explicit list (at most 200), and `require on|off` turns Require SSO on or off. `require on` prints how many unlinked accounts would be locked out and refuses unless `--acknowledge-lockout` matches that count. `th smoo roles default get|set|clear` reads or changes the role new members get. Every write confirms on a terminal or needs `--yes`; all of it needs `org.sso.manage` (plus the SSO product) or `org.roles.manage`.
+- 7f4be02: `smoo calling numbers available|attach|buy` gets a phone number onto the org. `available` lists the numbers the org's Twilio account already owns (attach, no charge) and numbers for sale with Twilio's monthly price. `attach` never buys. `buy` shows the route's price for that exact number (its own country, local / toll-free / mobile), refuses without `--accept-price` at or above it, and asks for confirmation (`--yes` in scripts). Buying needs calling admin and billing management.
+- e9172db: `smoo admin org overrides set` now changes only the flags you pass: it reads the stored override to preview before/after, then PATCHes just those fields (PUT only creates), so `set <org> telephony --seats 10` grants calling seats without wiping the expiry, reason or calling allowance. New flags: `--seats`, `--clear-seats`, `--clear-voice-allowance` (telephony only) and `--permanent`; `--enabled`/`--disabled` and `--reason` are only required when creating an override, and a set that changes nothing sends no write. New `smoo admin config flag-org add|remove <flagKey> <orgId> --environment <env>` adds or removes one org in a feature flag's org allowlist rule in place (creating the rule if missing, leaving other rules untouched), prints before/after, confirms, and re-reads before writing (a best-effort check against a concurrent edit). The key is matched canonically and written under its stored or schema-declared name.
+
+## 0.82.1
+
+### Patch Changes
+
+- 7c7ca31: Fix `th --version` and `th --help` crashing with a stack overflow on Windows. `th` now runs on an 8 MB thread on every OS instead of the 1 MB Windows main thread (th-bd84cf).
+
+## 0.82.0
+
+### Minor Changes
+
+- dd2964e: `smoo credits` manages prepaid AI credits for the active org: bare `smoo credits` (alias `balance`) shows the balance, this month's credit use and auto-reload; `smoo credits buy 5|10` (alias `top-up`) opens a Stripe Checkout for a pack; `smoo credits auto-reload status|on|off` reads or changes auto-reload, and `on` previews until `--confirm`. When a turn runs out of AI budget on the Smoo AI gateway, `th code`, `th harness add --agentic` and the web dashboard now say "Out of AI budget" with the top-up link instead of showing the gateway's raw `Budget has been exceeded` JSON. Big Smooth's Family plan onboarding (`th model setup`, `th doctor --onboard`, the web first-run card) mentions that trial AI usage can be topped up.
+
 ## 0.81.2
 
 ### Patch Changes

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control.ts';
+import { AI_CREDITS_TOP_UP_URL, budgetExceededHint, CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control.ts';
 
 test('Stop sends the engine action `cancel`, never `interrupt` (th-74ba1f)', () => {
     const f = cancelFrame('turn-61', 'sess-1');
@@ -70,4 +70,24 @@ test('a second Steer folds into the waiting one; nothing typed is lost', () => {
 
 test('the cancel fallback is bounded and not instant', () => {
     assert.ok(CANCEL_FALLBACK_MS >= 2_000 && CANCEL_FALLBACK_MS <= 30_000);
+});
+
+test('a gateway budget refusal renders as the AI credits top-up line', () => {
+    const after =
+        'LLM API error 402 Payment Required: {"error":{"message":"Budget has been exceeded! Team=o Out of AI budget — top up AI credits: https://smoo.ai/apps/llm-gateway#ai-credits","type":"budget_exceeded","code":"402"}}';
+    const before = 'LLM API error 429 Too Many Requests: {"error":{"message":"Budget has been exceeded! Team=o","type":"budget_exceeded","code":"429"}}';
+    for (const raw of [after, before]) {
+        const text = errorText({ error: { code: 'INTERNAL_ERROR', message: raw } });
+        assert.ok(text.startsWith('Out of AI budget'), text);
+        assert.ok(text.includes(AI_CREDITS_TOP_UP_URL), text);
+        assert.ok(!text.includes('{'), text);
+        assert.ok(text.includes('$5 or $10'), text);
+    }
+    const staging = after.replace('https://smoo.ai/', 'https://staging.smoo.ai/');
+    assert.ok(budgetExceededHint(staging)?.includes('https://staging.smoo.ai/apps/llm-gateway#ai-credits'));
+});
+
+test('other errors keep their text', () => {
+    assert.equal(budgetExceededHint('LLM API error 429 Too Many Requests: rate limit reached'), null);
+    assert.equal(errorText({ error: { message: 'rate limit reached' } }), 'rate limit reached');
 });
