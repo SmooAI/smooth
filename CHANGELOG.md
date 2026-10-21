@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.82.1
+
+### Patch Changes
+
+- 7c7ca31: Fix `th --version` and `th --help` crashing with a stack overflow on Windows. `th` now runs on an 8 MB thread on every OS instead of the 1 MB Windows main thread (th-bd84cf).
+
 ## 0.82.0
 
 ### Minor Changes
