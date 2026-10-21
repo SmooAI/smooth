@@ -43,6 +43,8 @@ pub mod notification_prefs;
 pub mod notify;
 pub mod observability;
 pub mod org_notifications;
+// SMOODEV-4052: `calling numbers available|attach|buy`.
+pub mod phone_numbers;
 pub mod products;
 pub mod profile;
 pub mod referrals;
@@ -52,6 +54,7 @@ pub mod search_console;
 pub mod sheets;
 pub mod smooth_operator;
 pub mod smooth_operator_ws;
+pub mod sso;
 pub mod support;
 pub mod teams;
 pub mod testing;
