@@ -17,6 +17,7 @@ pub mod audiences;
 pub mod blog;
 pub mod booking;
 pub mod branding;
+pub mod calendar;
 pub mod calling;
 pub mod calling_config;
 pub mod campaigns;

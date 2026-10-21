@@ -979,6 +979,17 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: smooai::support::Cmd,
     },
+    /// Your calendars — events, RSVP, find-time and blocks, as you.
+    ///
+    /// Google, Microsoft 365 and iCloud: your own calendars, org calendars and
+    /// ones shared with you. `list`, `events list|show|create|update|rm|respond`,
+    /// `find-time`, `block`. CLI twin of the hosted MCP `calendar_*` tools;
+    /// anything that reaches attendees or deletes confirms first.
+    #[command(visible_alias = "calendars")]
+    Calendar {
+        #[command(subcommand)]
+        cmd: smooai::calendar::Cmd,
+    },
     /// Your Google Drive — search and read, as you. CLI twin of the hosted MCP
     /// `drive_search` / `drive_read`.
     Drive {
@@ -2065,6 +2076,7 @@ async fn run_smoo(cmd: SmooCommands) -> Result<()> {
         SmooCommands::Blog { cmd } => smooai::blog::cmd(cmd).await,
         SmooCommands::Calling { cmd } => smooai::calling::cmd(cmd).await,
         SmooCommands::Support { cmd } => smooai::support::cmd(cmd).await,
+        SmooCommands::Calendar { cmd } => smooai::calendar::cmd(cmd).await,
         SmooCommands::Drive { cmd } => smooai::drive::cmd(cmd).await,
         SmooCommands::Files { cmd } => smooai::files::cmd(cmd).await,
         SmooCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,

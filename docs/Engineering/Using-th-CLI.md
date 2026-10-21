@@ -51,6 +51,8 @@ explicit in the command tree:
   (the `site_*` tools), `smoo blog list|get|create|update|publish|unpublish|delete|image search|generate|import`
   (the `blog_*` tools; `delete` confirms unless `--yes`),
   `smoo api observability metrics` + `web-vitals`, `smoo integrations`,
+  `smoo calendar list|events|find-time|block` (the `calendar_*` tools, as you;
+  deletes, RSVPs and invitations confirm unless `--yes`),
   `smoo calling list|get|voicemails|usage|place` (the calling tools; `place`
   confirms by typing the number back, then opens your softphone — nothing rings
   until you press Call), `smoo drive search|read` (`drive_search`/`drive_read`,
@@ -1099,6 +1101,45 @@ smoo drive read <file-id> [--json]   # Docs → markdown, Sheets → CSV (first 
 A 409 means Drive is not connected **for you** — the error names the fix,
 `smoo integrations connect google --purpose drive_restricted`. Truncation and
 "first sheet only" notes go to stderr so `drive read` pipes cleanly.
+
+### Calendars (`smoo calendar`) — SMOODEV-3764
+
+CLI twin of the hosted MCP `calendar_*` tools (ADR-147 §2). Runs as **you**:
+your own Google / Microsoft 365 / iCloud calendars, org calendars, and ones a
+teammate shared with you — never anyone else's. User session only (an org API
+key has no calendar).
+
+```bash
+smoo calendar list [--json]                                    # calendar_list_calendars; prints each calendarRef
+smoo calendar events list [--from <rfc3339>] [--to <rfc3339>] [--calendar <ref>…] [--query <q>] [--limit N] [--json]
+smoo calendar events show --calendar <ref> --event <id> [--json]
+smoo calendar events create --title T --start <rfc3339> --end <rfc3339> [--calendar <ref>] [--attendee a@x.com,…] \
+    [--time-zone <iana>] [--all-day] [--location L] [--description D] [--conference] [--free] [--yes|--dry-run]
+smoo calendar events update --calendar <ref> --event <id> [--title …] [--start …] [--end …] [--attendee …] \
+    [--all-day|--not-all-day] [--conference|--no-conference] [--free|--busy] [--yes|--dry-run]
+smoo calendar events rm --calendar <ref> --event <id> [--yes|--dry-run]
+smoo calendar events respond --calendar <ref> --event <id> --response accepted|declined|tentative [--comment C] [--yes|--dry-run]
+smoo calendar find-time --duration 30 [--time-zone <iana>] [--from …] [--to …] [--calendar <ref>…] [--attendee …] \
+    [--workday-start 09:00] [--workday-end 17:00] [--days 1,2,3,4,5] [--max-slots N] [--json]
+smoo calendar block --start <rfc3339> --end <rfc3339> [--title "Focus time"] [--calendar <ref>]
+```
+
+- Calendars are named by the opaque `calendarRef` that `list` prints, events by
+  the id `events list` prints; both travel in the query string.
+- `create` and `block` default to your own default calendar when there is
+  exactly one; with two (say Google and Microsoft) they ask for `--calendar`.
+- **Confirmation** goes through the shared destructive gate (target printed
+  first, `--dry-run` stops there, a terminal is asked, scripts pass `--yes`):
+  `events rm` (attendees get a cancellation), `events respond` (the organizer
+  is told), `events create` with attendees (each gets a real invitation) and
+  `events update` on an event with guests or a new guest list. `block` and an
+  attendee-less `create` reach nobody and run straight away.
+- `update` is a true patch; `--attendee` REPLACES the guest list.
+- `find-time` days are 0 = Sunday … 6 = Saturday (the API's numbering, unlike
+  `booking config set`). It defaults to this machine's time zone. Anyone whose
+  free/busy could not be checked is printed on stderr as unchecked, never as free.
+- A 409 means no usable calendar is connected for you; the error names
+  `smoo integrations connect google --purpose features --tier full_access`.
 
 ### Smooth Operator (org's always-on dashboard agent)
 
