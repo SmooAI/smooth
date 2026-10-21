@@ -97,6 +97,8 @@ pub struct Watch {
     /// The job's ticket: how its stray, re-parented helpers are found (they
     /// inherit `watch::TICKET_ENV`).
     pub ticket: u64,
+    /// Root pids of the OTHER live queue jobs: their trees are never victims.
+    pub others: Option<Box<dyn Fn() -> Vec<u32> + Send>>,
     /// Kill the job as stalled once it has run this long, whatever its CPU.
     pub max_runtime: Option<Duration>,
     /// Told how long the tree has been idle (`None` = busy), for `status` and
@@ -178,7 +180,7 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         .map(|w| super::watch::StallTracker::new(w.window, w.threshold_pct));
     let mut last_idle: Option<Duration> = None;
     let mut next_check = watch.as_ref().map(|w| began + w.every);
-    let mut victims: Vec<u32> = Vec::new();
+    let mut victims: Vec<Victim> = Vec::new();
     let deadline = spec.timeout.map(|t| began + t);
     let mut status = loop {
         let now = std::time::Instant::now();
@@ -197,11 +199,14 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         if let (Some(w), Some(at)) = (watch.as_mut(), next_check) {
             if now >= at {
                 next_check = Some(now + w.every);
-                if let Some(procs) = super::watch::snapshot() {
-                    let me = std::process::id();
-                    let tree = super::watch::tree(&procs, pid, me);
-                    let verdict = tracker.as_mut().map_or(super::watch::Verdict::Busy, |t| t.observe(began.elapsed(), &tree));
-                    let over = w.max_runtime.filter(|m| began.elapsed() >= *m);
+                let procs = super::watch::snapshot();
+                let me = std::process::id();
+                // The cap does not depend on a readable process table.
+                let over = w.max_runtime.filter(|m| began.elapsed() >= *m);
+                let mut verdict = super::watch::Verdict::Busy;
+                if let Some(procs) = &procs {
+                    let tree = super::watch::tree(procs, pid, me);
+                    verdict = tracker.as_mut().map_or(super::watch::Verdict::Busy, |t| t.observe(began.elapsed(), &tree));
                     let idle = match verdict {
                         super::watch::Verdict::Idle(d) => Some(d),
                         super::watch::Verdict::Busy => None,
@@ -213,27 +218,39 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
                         }
                     }
                     last_idle = idle;
-                    if verdict == super::watch::Verdict::Stalled || over.is_some() {
-                        victims = tree.iter().map(|p| p.pid).collect();
-                        victims.extend(super::watch::tagged_hogs(&procs, w.ticket, 50.0, me, &super::watch::env_lines));
-                        let why = over.map_or_else(
-                            || format!("averaged under {}% of one core for {} min", w.threshold_pct, w.window.as_secs() / 60),
-                            |m| format!("ran past its {} min runtime cap", m.as_secs() / 60),
-                        );
-                        eprintln!(
-                            "th ci-queue: STALLED: the job's process tree {why} — killing it and {} process(es) (exit {EXIT_STALLED}, not a test failure)",
-                            victims.len()
-                        );
-                        why_killed = Some(Ended::Stalled);
-                        break None;
+                }
+                if verdict == super::watch::Verdict::Stalled || over.is_some() {
+                    if let Some(procs) = &procs {
+                        let others = w.others.as_ref().map(|f| f()).unwrap_or_default();
+                        let mut pids: Vec<u32> = super::watch::tree(procs, pid, me).iter().map(|p| p.pid).collect();
+                        pids.extend(super::watch::tagged_hogs(procs, w.ticket, 50.0, me, &others, &super::watch::env_lines));
+                        victims = procs
+                            .iter()
+                            .filter(|p| pids.contains(&p.pid))
+                            .map(|p| Victim {
+                                pid: p.pid,
+                                ppid: p.ppid,
+                                command: p.command.clone(),
+                            })
+                            .collect();
                     }
+                    let why = over.map_or_else(
+                        || format!("averaged under {}% of one core for {} min", w.threshold_pct, w.window.as_secs() / 60),
+                        |m| format!("ran past its {} min runtime cap", m.as_secs() / 60),
+                    );
+                    eprintln!(
+                        "th ci-queue: STALLED: the job's process tree {why} — killing it and {} process(es) (exit {EXIT_STALLED}, not a test failure)",
+                        victims.len()
+                    );
+                    why_killed = Some(Ended::Stalled);
+                    break None;
                 }
             }
         }
     };
     if why_killed.is_some() {
         kill_group(pid, false);
-        kill_pids(&victims, false);
+        kill_victims(&victims, false);
         if let Ok(s) = rx.recv_timeout(spec.kill_grace) {
             status = Some(s);
         } else {
@@ -243,7 +260,7 @@ pub fn run_measured<S: FnMut(u64) + Send + 'static>(spec: &Spec<'_>, on_spawn: i
         // The leader is gone; anything it left in the group, or detached from
         // it, goes too.
         kill_group(pid, true);
-        kill_pids(&victims, true);
+        kill_victims(&victims, true);
     }
     let _ = waiter.join();
     let peak = sampler.map(super::sampler::Sampler::stop);
@@ -344,22 +361,45 @@ fn kill_group(pgid: u32, hard: bool) {
     let _ = killpg(Pid::from_raw(raw), if hard { Signal::SIGKILL } else { Signal::SIGTERM });
 }
 
-/// SIGTERM/SIGKILL individual processes (a stalled job's detached helpers).
+/// A process the watchdog means to kill, as it looked when chosen.
+#[derive(Clone, Debug)]
+pub struct Victim {
+    pub pid: u32,
+    pub ppid: u32,
+    pub command: String,
+}
+
+/// SIGTERM/SIGKILL a stalled job's detached helpers. Pids are reused, and the
+/// final SIGKILL comes seconds after the choice, so the process table is read
+/// again and a pid is signalled only if it is still the same command under the
+/// same parent (or re-parented to init because its parent was just killed).
 /// Never pid 0/1 or our own.
 #[cfg(unix)]
-fn kill_pids(pids: &[u32], hard: bool) {
+fn kill_victims(victims: &[Victim], hard: bool) {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
+    if victims.is_empty() {
+        return;
+    }
+    let Some(now) = super::watch::snapshot() else {
+        return;
+    };
     let me = std::process::id();
-    for &p in pids.iter().filter(|p| **p > 1 && **p != me) {
-        if let Ok(raw) = i32::try_from(p) {
+    for v in victims.iter().filter(|v| v.pid > 1 && v.pid != me) {
+        let same = now
+            .iter()
+            .any(|p| p.pid == v.pid && p.command == v.command && (p.ppid == v.ppid || p.ppid == 1));
+        if !same {
+            continue;
+        }
+        if let Ok(raw) = i32::try_from(v.pid) {
             let _ = kill(Pid::from_raw(raw), if hard { Signal::SIGKILL } else { Signal::SIGTERM });
         }
     }
 }
 
 #[cfg(not(unix))]
-fn kill_pids(_pids: &[u32], _hard: bool) {}
+fn kill_victims(_victims: &[Victim], _hard: bool) {}
 
 #[cfg(not(unix))]
 fn kill_group(pid: u32, _hard: bool) {
@@ -616,6 +656,7 @@ mod tests {
             threshold_pct: 5,
             every: Duration::from_millis(100),
             ticket: 1,
+            others: None,
             max_runtime: None,
             on_idle: idle.map(|log| Box::new(move |d: Option<Duration>| log.lock().unwrap().push(d.is_some())) as Box<dyn FnMut(Option<Duration>) + Send>),
         }

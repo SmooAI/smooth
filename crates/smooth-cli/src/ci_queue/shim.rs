@@ -91,7 +91,7 @@ pub fn runs_from_archive(tool: &str, args: &[String]) -> bool {
         return false;
     }
     let has = |w: &str| args.iter().any(|a| a == w);
-    args.iter().any(|a| a == "--archive-file" || a.starts_with("--archive-file=")) && has("run") && !has("archive")
+    args.iter().any(|a| a == "--archive-file" || a.starts_with("--archive-file=")) && has("nextest") && has("run") && !has("archive")
 }
 
 /// A word a tool's own argv starts with before the real subcommand, skipped
@@ -259,15 +259,17 @@ pub fn script(tool: &str, real: &Path, ths: &[PathBuf]) -> Result<String> {
         r#"lock_args='--lock cargo'
 archive_file=''
 has_run=''
+has_nextest=''
 has_archive=''
 for a in "$@"; do
     case "$a" in
         --archive-file | --archive-file=*) archive_file=1 ;;
         run) has_run=1 ;;
+        nextest) has_nextest=1 ;;
         archive) has_archive=1 ;;
     esac
 done
-[ -n "$archive_file" ] && [ -n "$has_run" ] && [ -z "$has_archive" ] && lock_args=''
+[ -n "$archive_file" ] && [ -n "$has_nextest" ] && [ -n "$has_run" ] && [ -z "$has_archive" ] && lock_args=''
 "#
     } else {
         "lock_args=''\n"
@@ -954,6 +956,7 @@ mod tests {
             ("cargo-nextest", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
             ("cargo-nextest", &["nextest", "run", "-p", "x"], true),
             ("cargo", &["nextest", "run", "--archive-file", "a.tar.zst"], false),
+            ("cargo", &["run", "--", "--archive-file", "a.tar.zst"], true),
             ("cargo", &["nextest", "archive", "--archive-file", "a.tar.zst"], true),
             ("cargo", &["test", "-p", "x"], true),
         ];

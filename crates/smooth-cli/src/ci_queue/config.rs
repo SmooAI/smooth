@@ -192,6 +192,10 @@ pub struct Run {
     /// (`stalled`), distinct from 75 (never ran) and 124 (`--timeout`).
     pub stall_minutes: u64,
     pub stall_cpu_pct: u32,
+    /// Labels (substring match, plus every iOS label) whose real work runs
+    /// outside the job's process tree (simulators, the gradle/docker daemons):
+    /// the idle check would kill a healthy job, so they keep only the runtime cap.
+    pub stall_exempt_labels: Vec<String>,
     /// How often the watchdog samples a running job's tree.
     pub watch_every_secs: u64,
     /// Backstop: kill a job that runs longer than this, by class. 0 = no limit.
@@ -221,6 +225,18 @@ pub struct Run {
 }
 
 impl Run {
+    /// The idle window for a job: zero (no idle check) when stalls are off or the
+    /// label is exempt.
+    pub fn stall_window(&self, label: &str) -> std::time::Duration {
+        let l = label.to_lowercase();
+        let exempt = super::budget::is_ios_label(label) || self.stall_exempt_labels.iter().any(|w| !w.is_empty() && l.contains(&w.to_lowercase()));
+        if exempt {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(self.stall_minutes * 60)
+        }
+    }
+
     /// The runtime cap for a job: the longest-matching label cap, else the class's.
     /// 0 / absent = none.
     pub fn max_runtime(&self, label: &str, heavy: bool) -> Option<std::time::Duration> {
@@ -242,6 +258,7 @@ impl Default for Run {
             serialize_ios: true,
             stall_minutes: 20,
             stall_cpu_pct: 5,
+            stall_exempt_labels: vec!["xcodebuild".into(), "gradle".into(), "docker".into()],
             watch_every_secs: 15,
             max_runtime_heavy_secs: 0,
             max_runtime_light_secs: 0,
@@ -373,6 +390,15 @@ mod tests {
         let p = tmp.path().join("ci-queue.toml");
         std::fs::write(&p, "[slots\nheavy = ").unwrap();
         assert_eq!(Config::load(Some(&p)), Config::default());
+    }
+
+    #[test]
+    fn ios_gradle_and_docker_jobs_are_exempt_from_the_idle_check() {
+        let r = Run::default();
+        assert_eq!(r.stall_window("attest rust"), std::time::Duration::from_secs(20 * 60));
+        for l in ["attest ios", "xcodebuild test", "./gradlew build", "docker build ."] {
+            assert!(r.stall_window(l).is_zero(), "{l}");
+        }
     }
 
     #[test]

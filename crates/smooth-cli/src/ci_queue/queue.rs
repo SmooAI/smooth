@@ -807,7 +807,7 @@ impl Queue {
         if !jobs.iter().any(|j| j.idle_since_ms.is_some()) {
             return;
         }
-        let hogs = self.probe.hogs(&Self::job_refs(jobs), HOG_SAMPLE, 5.0, true);
+        let hogs = self.probe.hogs(&Self::job_refs(jobs), HOG_SAMPLE, 5.0, false);
         r.cpu_busy_pct = Some((busy - watch::stalled_machine_pct(&hogs, r.cores)).max(0.0));
     }
 
@@ -1083,6 +1083,29 @@ impl Admission {
     /// [`super::watch::TICKET_ENV`] so its stray helpers can be traced back.
     pub const fn ticket(&self) -> u64 {
         self.info.ticket
+    }
+
+    /// The root pids of every OTHER live job, read when the watchdog is about
+    /// to kill: their process trees are off limits.
+    pub fn other_roots(&self) -> Option<Box<dyn Fn() -> Vec<u32> + Send>> {
+        let q = self.queue.clone()?;
+        let mine = self.info.ticket;
+        Some(Box::new(move || {
+            let Ok(_m) = q.mutex() else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for class in [Class::Heavy, Class::Light] {
+                for s in q.scan_slots(class).unwrap_or_default() {
+                    if let SlotState::Busy(i) = s {
+                        if i.ticket != mine && !is_phantom(&i) {
+                            out.push(i.child_pid.unwrap_or(i.pid));
+                        }
+                    }
+                }
+            }
+            out
+        }))
     }
 
     /// A callback that publishes whether the stall watchdog judges the job idle
@@ -1775,6 +1798,25 @@ mod tests {
         assert!(b.is_ok(), "the idle job's reservation was not released: {:?}", b.err());
         let snap = f.q.snapshot(0, Path::new("/work")).unwrap();
         assert_eq!(snap.budget.mem_committed_kb, 15 * GB, "only the live job is committed");
+        drop(a);
+    }
+
+    /// A job that recovers (the watchdog sees it busy again) gets its
+    /// reservation back.
+    #[test]
+    fn a_job_that_resumes_gets_its_reservation_back() {
+        let f = budget_fx();
+        let a = admit(&f.q, Class::Heavy, "big");
+        let mut idle = a.idle_publisher().unwrap();
+        idle(Some(Duration::from_secs(600)));
+        let b = f.q.admit(&req(Class::Heavy, "big", 2_000));
+        assert!(b.is_ok());
+        drop(b);
+        idle(None);
+        assert!(
+            matches!(f.q.admit(&req(Class::Heavy, "big", 150)), Err(AdmitError::WaitTimeout { .. })),
+            "the resumed job's reservation was not restored"
+        );
         drop(a);
     }
 

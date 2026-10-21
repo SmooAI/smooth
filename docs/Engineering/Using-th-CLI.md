@@ -2107,6 +2107,8 @@ th ci-queue status --json
 | 71        | the queue directory is unusable (EX_OSERR), for example a full disk. Nothing ran. |
 
 **Stalled jobs.** A running job whose process _tree_ used under `run.stall_cpu_pct` (5) percent of one
+**Exempt labels.** iOS, xcodebuild, gradle and docker jobs do their work outside the job's process tree (simulators, daemons), so the idle check would kill healthy runs; they keep only the runtime cap (`run.stall_exempt_labels`). A job is flagged idle (and releases its reservation) after half the window, and gets it back if it resumes.
+
 core for `run.stall_minutes` (20; 0 = off) is killed and recorded as `stalled` (exit 76; the slot is free
 again). The tree is the job's pid, every descendant found by walking parent pids (whatever process group or
 session it moved to) and its process group, so a job whose real work runs in a detached child is never
@@ -2293,6 +2295,7 @@ disk_paths = []
 max_wait_secs = 1800
 stall_minutes = 20   # kill a job whose process tree is idle this long (0 = off)
 stall_cpu_pct = 5    # "idle" = under this percent of one core
+stall_exempt_labels = ["xcodebuild", "gradle", "docker"]  # + iOS labels: work runs outside the tree, so only the runtime cap applies
 watch_every_secs = 15
 max_runtime_heavy_secs = 0 # hard cap per class (0 = none); --timeout wins
 max_runtime_light_secs = 0

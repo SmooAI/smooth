@@ -568,8 +568,10 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
     let progress = admission.progress();
     let run_cfg = &sys.queue.config.run;
     let cap = run_cfg.max_runtime(&format!("attest {check}"), class == ci_queue::Class::Heavy);
-    let watch = (run_cfg.stall_minutes > 0 || cap.is_some()).then(|| ci_queue::exec::Watch {
-        window: Duration::from_secs(run_cfg.stall_minutes * 60),
+    let window = run_cfg.stall_window(&format!("attest {check}"));
+    let watch = (!window.is_zero() || cap.is_some()).then(|| ci_queue::exec::Watch {
+        window,
+        others: admission.other_roots(),
         max_runtime: cap,
         threshold_pct: run_cfg.stall_cpu_pct,
         every: Duration::from_secs(run_cfg.watch_every_secs.max(1)),

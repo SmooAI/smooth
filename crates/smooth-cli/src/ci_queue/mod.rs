@@ -240,8 +240,10 @@ pub fn run(q: &Queue, a: &RunArgs) -> i32 {
     let began = Instant::now();
     let progress = admission.progress();
     let cap = q.config.run.max_runtime(&label, a.class == Class::Heavy).filter(|_| a.timeout.is_none());
-    let watch = (q.config.run.stall_minutes > 0 || cap.is_some()).then(|| exec::Watch {
-        window: Duration::from_secs(q.config.run.stall_minutes * 60),
+    let window = q.config.run.stall_window(&label);
+    let watch = (!window.is_zero() || cap.is_some()).then(|| exec::Watch {
+        window,
+        others: admission.other_roots(),
         max_runtime: cap,
         threshold_pct: q.config.run.stall_cpu_pct,
         every: Duration::from_secs(q.config.run.watch_every_secs.max(1)),

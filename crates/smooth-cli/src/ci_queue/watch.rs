@@ -194,11 +194,12 @@ impl StallTracker {
         }
     }
 
-    /// `Idle(d)` once the tree has averaged under the threshold for at least a
-    /// quarter of the window (so `status` and the gate can see a suspect early).
+    /// `Idle(d)` once the tree has averaged under the threshold for at least
+    /// half the window: late enough that a slow phase (a long link, a test
+    /// waiting on a service) does not give up its reservation.
     fn idle_for(&self, at: Duration, first: Duration) -> Verdict {
         let span = at.saturating_sub(first);
-        if span < self.window / 4 {
+        if span < self.window / 2 {
             return Verdict::Busy;
         }
         let Some(&(t0, c0)) = self.samples.front() else {
@@ -354,7 +355,11 @@ fn short_command(c: &str) -> String {
 /// Percent of the whole machine (all cores) that processes owned by a stalled
 /// job are using: what the CPU gate and the AIMD scale should ignore.
 pub fn stalled_machine_pct(hogs: &[Hog], cores: usize) -> f64 {
-    let sum: f64 = hogs.iter().filter(|h| h.owner.as_ref().is_some_and(|o| o.stalled)).map(|h| h.pcpu).sum();
+    let sum: f64 = hogs
+        .iter()
+        .filter(|h| h.owner.as_ref().is_some_and(|o| o.stalled && o.via != Via::Cwd))
+        .map(|h| h.pcpu)
+        .sum();
     #[allow(clippy::cast_precision_loss, reason = "core counts are tiny")]
     let cores = cores.max(1) as f64;
     sum / cores
@@ -409,8 +414,15 @@ pub fn live_hogs(jobs: &[JobRef], n: usize, min_pcpu: f64) -> Vec<Hog> {
 /// Pids of processes carrying `ticket` in their environment that are using
 /// real CPU right now and are not part of the job's own tree: what a stalled
 /// job left spinning.
-pub fn tagged_hogs(procs: &[Proc], ticket: u64, min_pcpu: f64, me: u32, env_of: &dyn Fn(&[u32]) -> HashMap<u32, String>) -> Vec<u32> {
-    let hungry: Vec<u32> = procs.iter().filter(|p| p.pcpu >= min_pcpu && p.pid != me).map(|p| p.pid).collect();
+pub fn tagged_hogs(procs: &[Proc], ticket: u64, min_pcpu: f64, me: u32, other_roots: &[u32], env_of: &dyn Fn(&[u32]) -> HashMap<u32, String>) -> Vec<u32> {
+    // Whatever runs inside another live job's tree belongs to that job, even if
+    // it inherited this ticket's environment.
+    let foreign: HashSet<u32> = other_roots.iter().flat_map(|r| tree(procs, *r, me)).map(|p| p.pid).collect();
+    let hungry: Vec<u32> = procs
+        .iter()
+        .filter(|p| p.pcpu >= min_pcpu && p.pid != me && !foreign.contains(&p.pid))
+        .map(|p| p.pid)
+        .collect();
     if hungry.is_empty() {
         return Vec::new();
     }
@@ -487,8 +499,8 @@ mod tests {
         let idle = [p(100, 1, 100, 0.0, 500, "job")];
         let tree: Vec<&Proc> = idle.iter().collect();
         assert_eq!(t.observe(mins(0), &tree), Verdict::Busy);
-        assert_eq!(t.observe(mins(4), &tree), Verdict::Busy, "not suspect before a quarter window");
-        assert!(matches!(t.observe(mins(6), &tree), Verdict::Idle(_)), "suspect after a quarter window");
+        assert_eq!(t.observe(mins(9), &tree), Verdict::Busy, "not suspect before half the window");
+        assert!(matches!(t.observe(mins(11), &tree), Verdict::Idle(_)), "suspect after half the window");
         assert!(matches!(t.observe(mins(19), &tree), Verdict::Idle(_)));
         assert_eq!(t.observe(mins(20), &tree), Verdict::Stalled);
     }
@@ -534,10 +546,10 @@ mod tests {
         let idle = [p(100, 1, 100, 0.0, 500, "job")];
         let tree: Vec<&Proc> = idle.iter().collect();
         t.observe(mins(0), &tree);
-        assert!(matches!(t.observe(mins(8), &tree), Verdict::Idle(_)));
-        let busy = [p(100, 1, 100, 100.0, 500 + 8 * 60_000, "job")];
+        assert!(matches!(t.observe(mins(12), &tree), Verdict::Idle(_)));
+        let busy = [p(100, 1, 100, 100.0, 500 + 12 * 60_000, "job")];
         let tree: Vec<&Proc> = busy.iter().collect();
-        assert_eq!(t.observe(mins(9), &tree), Verdict::Busy);
+        assert_eq!(t.observe(mins(13), &tree), Verdict::Busy);
     }
 
     fn jobs() -> Vec<JobRef> {
@@ -611,6 +623,35 @@ mod tests {
     }
 
     #[test]
+    fn tagged_hogs_skip_other_live_jobs_trees() {
+        let procs = vec![
+            p(10, 1, 10, 0.0, 0, "other-job"),
+            p(11, 10, 10, 90.0, 0, "child"),
+            p(200, 1, 200, 90.0, 0, "stray"),
+        ];
+        let env = |pids: &[u32]| pids.iter().map(|x| (*x, format!("cmd {TICKET_ENV}=7"))).collect();
+        assert_eq!(tagged_hogs(&procs, 7, 50.0, 9999, &[10], &env), vec![200]);
+    }
+
+    #[test]
+    fn stalled_cwd_attribution_is_not_discounted() {
+        let hog = |via| Hog {
+            pid: 1,
+            pcpu: 400.0,
+            command: "x".into(),
+            cwd: None,
+            owner: Some(Owner {
+                ticket: 1,
+                label: "l".into(),
+                stalled: true,
+                via,
+            }),
+        };
+        assert!(stalled_machine_pct(&[hog(Via::Cwd)], 4).abs() < f64::EPSILON);
+        assert!(stalled_machine_pct(&[hog(Via::Tree)], 4) > 99.0);
+    }
+
+    #[test]
     fn tagged_hogs_are_only_this_tickets_busy_processes() {
         let procs = [
             p(200, 1, 200, 200.0, 0, "esbuild"),
@@ -618,7 +659,7 @@ mod tests {
             p(202, 1, 202, 99.0, 0, "other job's"),
         ];
         let env = |pids: &[u32]| -> HashMap<u32, String> { pids.iter().map(|p| (*p, format!("c {TICKET_ENV}={}", if *p == 202 { 8 } else { 7 }))).collect() };
-        assert_eq!(tagged_hogs(&procs, 7, 50.0, 9999, &env), vec![200]);
+        assert_eq!(tagged_hogs(&procs, 7, 50.0, 9999, &[], &env), vec![200]);
     }
 
     /// Real processes: the live `ps` parse, the live ppid walk across a
