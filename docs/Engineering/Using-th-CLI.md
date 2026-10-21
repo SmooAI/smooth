@@ -1434,6 +1434,29 @@ Things worth knowing:
   `title` (`{{entity.title}}`). The CLI's starter templates use those names;
   a filter on a field the event doesn't carry is `null` and never matches.
 
+### Workforce: create accounts for directory people (SMOODEV-4052)
+
+CLI twin of the hosted MCP `workforce_create_accounts` and the Workforce page's
+**Create account**: gives directory people a Smoo account and org membership on
+their work email, with no email sent, so they can join ring groups and hold
+calling seats. It calls `POST /organizations/{org}/workforce/employees/accounts`
+with your own sign-in, so the route decides: `org.members.manage`, the
+`workforce` product, work emails on a DNS-verified org domain only, and a
+`--role-id` carrying a permission you don't hold is refused. A 403 reads
+"admin only".
+
+```bash
+th smoo workforce directory --json                       # ids; needsAccount marks who is waiting
+th smoo workforce create-account <employee_id> [<employee_id>…] [--role-id <role_id>]
+th smoo workforce create-account --needs-account --dry-run   # everyone waiting, preview only
+th smoo workforce create-account --needs-account --yes       # scripts / CI
+```
+
+It prints the target and confirms on a TTY (`--yes` otherwise), sends longer
+lists in batches of 50, and prints one line per person: created, added (they
+already had a Smoo account), already member, or failed with the reason. NO ROLE
+means the org has no default member role: run again with `--role-id`.
+
 ### Analytics dashboards, notification prefs, roles (SMOODEV-3610)
 
 CLI twins of the copilot's `dashboards.*`, `notifications.*_preferences` and
