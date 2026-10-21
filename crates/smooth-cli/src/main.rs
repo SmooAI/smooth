@@ -2114,8 +2114,28 @@ fn smoo_argv(mut args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     args
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Stack for the thread `th` actually runs on, and for tokio's workers.
+///
+/// th-bd84cf: Windows gives the process main thread 1 MB (Linux and macOS
+/// give 8 MB), and rendering clap's help/version for th's 53-command tree
+/// recurses past that, so `th --version` died with 0xC00000FD. Running on
+/// an explicitly sized thread makes the stack the same on every OS.
+const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runner = std::thread::Builder::new().name("main".into()).stack_size(MAIN_STACK_SIZE).spawn(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(MAIN_STACK_SIZE)
+            .build()?
+            .block_on(run_main())
+    })?;
+    // A panic on the runner already printed its message through the panic
+    // hook; re-raise it here so the process exits 101 exactly as before.
+    runner.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+async fn run_main() -> Result<()> {
     let mut argv = smoo_argv(std::env::args_os().collect());
     // th-f97a27: `th flow hook` runs on every harness lifecycle event, so it
     // skips clap, auth-profile setup and the log file — and a usage error
