@@ -1,7 +1,8 @@
-//! `th smoo calling ring-groups list|show|set|members` — ring groups (phone
-//! "departments"), the CLI twin of the hosted MCP's `ring_groups_list` /
-//! `ring_groups_get` / `ring_groups_update` / `ring_group_members_set` and the
-//! copilot's `ring_groups.list` / `ring_groups.update` (SMOODEV-3960).
+//! `th smoo calling ring-groups list|show|set|members|create|delete` — ring
+//! groups (phone "departments"), the CLI twin of the hosted MCP's
+//! `ring_groups_list` / `ring_groups_get` / `ring_groups_update` /
+//! `ring_group_members_set` / `ring_groups_create` / `ring_groups_delete` and
+//! the copilot's `ring_groups.*` (SMOODEV-3960, create/delete SMOODEV-4052).
 //!
 //! Every verb calls the same api-prime route the Calling settings page calls
 //! (`/organizations/{org}/calling/ring-groups…`) with your own sign-in, so the
@@ -36,6 +37,8 @@ pub const RING_FIRST_SECONDS: (i64, i64) = (5, 120);
 pub const MAX_NOTIFY_EMAIL: usize = 254;
 /// `MAX_MEMBERS` in api-prime.
 pub const MAX_MEMBERS: usize = 100;
+/// `MAX_NAME` in api-prime `handlers/calling/ring_groups.rs`.
+pub const MAX_NAME: usize = 100;
 
 #[derive(Subcommand)]
 pub enum RingGroupsCmd {
@@ -97,10 +100,37 @@ pub enum RingGroupsCmd {
         #[command(flatten)]
         confirm: Confirm,
     },
+    /// Create a ring group (needs calling admin). It starts with no members and
+    /// no number routes to it: add people with `members`, then point a number at
+    /// it with `calling numbers update <id> --set routeType=ring_group --set routeRingGroupId=<id>`.
+    #[command(visible_alias = "new")]
+    Create {
+        /// The department's name, unique in the org (1-100 characters), e.g. "Billing".
+        name: String,
+        #[command(flatten)]
+        settings: Settings,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
+    /// Delete a ring group and its member list (needs calling admin). Refused
+    /// while a phone number routes to it; reroute that number first.
+    #[command(visible_alias = "rm")]
+    Delete {
+        /// The ring group id (from `calling ring-groups list`).
+        group_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        #[command(flatten)]
+        confirm: Confirm,
+    },
 }
 
 /// The settings `set` can change.
-#[derive(Debug, Clone, Default, clap::Args)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
 pub struct Settings {
     /// simultaneous (everyone at once), sequential (in member order) or `round_robin`.
     #[arg(long)]
@@ -185,6 +215,26 @@ pub fn settings_body(s: &Settings) -> Result<Value> {
     Ok(Value::Object(body))
 }
 
+/// The POST body for `create`: the name plus whichever settings were given.
+pub fn create_body(name: &str, s: &Settings) -> Result<Value> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME {
+        bail!("the name must be 1 to {MAX_NAME} characters");
+    }
+    let mut body = if *s == Settings::default() {
+        Map::new()
+    } else {
+        match settings_body(s)? {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        }
+    };
+    // A null notify email on a new group is just "none".
+    body.retain(|_, v| !v.is_null());
+    body.insert("name".into(), json!(name));
+    Ok(Value::Object(body))
+}
+
 /// `<userId>[:first][:off]` as one member entry.
 pub fn parse_member(spec: &str) -> Result<Value> {
     let mut parts = spec.split(':');
@@ -251,7 +301,7 @@ fn member_list(members: &[String], body: Option<&str>, clear: bool) -> Result<Ve
 }
 
 /// A 403 from the route reads as "admin only", not an outage.
-fn admin_only(err: anyhow::Error, write: bool) -> anyhow::Error {
+pub(super) fn admin_only(err: anyhow::Error, write: bool) -> anyhow::Error {
     if err.to_string().contains("HTTP 403") {
         let need = if write {
             "admin only: changing ring groups needs the calling admin permission (calling.admin)"
@@ -364,6 +414,7 @@ async fn apply(client: &SmoothApiClient, change: Change<'_>, confirm: Confirm) -
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // one flat dispatch arm per verb
 pub async fn ring_groups(cmd: RingGroupsCmd) -> Result<()> {
     match cmd {
         RingGroupsCmd::List { org, json } => {
@@ -444,6 +495,46 @@ pub async fn ring_groups(cmd: RingGroupsCmd) -> Result<()> {
                 org: &o,
             };
             apply(&client, change, confirm).await?;
+        }
+        RingGroupsCmd::Create { name, settings, org, confirm } => {
+            let body = create_body(&name, &settings)?;
+            let client = require_authed().await?;
+            let o = require_active_org(&client, org)?;
+            let path = format!("/organizations/{o}/calling/ring-groups");
+            if confirm.dry_run {
+                println!("\n  {} would POST {path}", "●".dimmed());
+                print_json(&body);
+            }
+            let target = Target {
+                verb: "create",
+                noun: "ring group",
+                id: name.trim(),
+                org: &o,
+                severity: Severity::Standard,
+            };
+            if crate::destructive::gate_with(&target, confirm)? {
+                let created = client
+                    .post(&path, Some(&body))
+                    .await
+                    .map_err(|e| admin_only(e, true))
+                    .with_context(|| format!("POST {path}"))?;
+                println!("\n  {} created — no members yet, and no number routes to it", "✓".green());
+                println!("    {}\n", group_line(&created));
+            }
+        }
+        RingGroupsCmd::Delete { group_id: id, org, confirm } => {
+            let id = group_id(&id)?;
+            let client = require_authed().await?;
+            let o = require_active_org(&client, org)?;
+            if crate::destructive::confirm_delete("ring group", &id, &o, confirm)? {
+                let path = format!("/organizations/{o}/calling/ring-groups/{id}");
+                client
+                    .delete(&path)
+                    .await
+                    .map_err(|e| admin_only(e, true))
+                    .with_context(|| format!("DELETE {path} (refused while a phone number routes to it)"))?;
+                println!("\n  {} deleted ring group {id}\n", "✓".green());
+            }
         }
     }
     Ok(())
@@ -555,6 +646,33 @@ mod tests {
             .map(|i| json!({ "userId": format!("aaaaaaaa-0000-0000-0000-{i:012}") }))
             .collect();
         assert!(members_body(many).is_err());
+    }
+
+    #[test]
+    fn create_body_needs_a_name_and_validates_settings() {
+        assert_eq!(create_body(" Billing ", &Settings::default()).unwrap(), json!({ "name": "Billing" }));
+        assert_eq!(
+            create_body(
+                "Sales",
+                &Settings {
+                    strategy: Some("sequential".into()),
+                    notify_email: Some(String::new()),
+                    ..Settings::default()
+                }
+            )
+            .unwrap(),
+            json!({ "name": "Sales", "strategy": "sequential" })
+        );
+        assert!(create_body("  ", &Settings::default()).is_err());
+        assert!(create_body(&"x".repeat(MAX_NAME + 1), &Settings::default()).is_err());
+        assert!(create_body(
+            "Sales",
+            &Settings {
+                ring_first_seconds: Some(200),
+                ..Settings::default()
+            }
+        )
+        .is_err());
     }
 
     #[test]

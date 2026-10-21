@@ -155,7 +155,8 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: super::calling_config::NumbersCmd,
     },
-    /// Business-hours schedules — list, or change one (SMOODEV-3612).
+    /// Business-hours schedules: list, show, create, update, delete, holidays
+    /// (SMOODEV-3612, SMOODEV-4052).
     #[command(visible_alias = "business-hours")]
     Hours {
         #[command(subcommand)]
@@ -171,6 +172,12 @@ pub enum Cmd {
     RingGroups {
         #[command(subcommand)]
         cmd: super::ring_groups::RingGroupsCmd,
+    },
+    /// Calling seats: who can take and place calls, and the capacity (SMOODEV-4052).
+    #[command(visible_alias = "seat")]
+    Seats {
+        #[command(subcommand)]
+        cmd: super::seats::SeatsCmd,
     },
 }
 
@@ -432,6 +439,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Hours { cmd } => return super::calling_config::hours(cmd).await,
         Cmd::Settings { cmd } => return super::calling_config::settings(cmd).await,
         Cmd::RingGroups { cmd } => return super::ring_groups::ring_groups(cmd).await,
+        Cmd::Seats { cmd } => return super::seats::seats(cmd).await,
         Cmd::List {
             direction,
             status,
@@ -687,6 +695,44 @@ mod tests {
             parse(&["ring-groups", "members", "g1", "--member", "u1:first", "--member", "u2", "--dry-run"]).unwrap(),
             Cmd::RingGroups { .. }
         ));
+    }
+
+    /// SMOODEV-4052 — ring group create/delete, the business-hours family, seats.
+    #[test]
+    fn calling_admin_verbs_parse() {
+        assert!(matches!(
+            parse(&["ring-groups", "create", "Billing", "--strategy", "sequential", "--yes"]).unwrap(),
+            Cmd::RingGroups { .. }
+        ));
+        assert!(matches!(parse(&["ring-groups", "delete", "g1", "--dry-run"]).unwrap(), Cmd::RingGroups { .. }));
+        for args in [
+            &["hours", "show", "h1"][..],
+            &[
+                "hours",
+                "create",
+                "Main",
+                "--timezone",
+                "America/New_York",
+                "--window",
+                "mon-fri:09:00-17:00",
+                "--default",
+                "--yes",
+            ],
+            &["hours", "delete", "h1", "--yes"],
+            &["hours", "holidays", "get", "h1"],
+            &["business-hours", "holidays", "set", "h1", "--us-holidays", "--dry-run"],
+            &["hours", "holidays", "set", "h1", "--body", "-", "--us-holidays"],
+            &["hours", "holidays", "set", "h1", "--clear", "--yes"],
+        ] {
+            assert!(matches!(parse(args).unwrap(), Cmd::Hours { .. }), "{args:?}");
+        }
+        assert!(parse(&["hours", "create", "Main"]).is_err(), "--timezone is required");
+        assert!(parse(&["hours", "holidays", "set", "h1", "--clear", "--us-holidays"]).is_err());
+        assert!(matches!(parse(&["seats", "ls"]).unwrap(), Cmd::Seats { .. }));
+        assert!(matches!(parse(&["seats", "assign", "u1", "--yes"]).unwrap(), Cmd::Seats { .. }));
+        assert!(matches!(parse(&["seats", "unassign", "u1", "--dry-run"]).unwrap(), Cmd::Seats { .. }));
+        assert!(matches!(parse(&["seats", "unassign", "--seat-id", "s1"]).unwrap(), Cmd::Seats { .. }));
+        assert!(parse(&["seats", "unassign"]).is_err(), "needs a user or a seat");
     }
 
     #[test]

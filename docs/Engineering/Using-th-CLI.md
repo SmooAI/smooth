@@ -1126,6 +1126,42 @@ smoo calling ring-groups members <group-id> --member <userId>:first --member <us
 - The org-wide `callDepartmentRoutingEnabled` switch is a config flag. No
   command here can change it.
 
+#### Departments, schedules, holidays and seats — SMOODEV-4052
+
+The rest of the Calling settings page, so a line can be set up without the
+dashboard. CLI twin of the hosted MCP's `ring_groups_create|delete`,
+`business_hours_get|create|delete|holidays_set` and
+`calling_seats_list|assign|unassign` (and the copilot's `ring_groups.*`,
+`business_hours.*`, `calling_seats.*`). Same routes, same rules: reads need
+`calling.use`, writes `calling.admin`, all behind `telephony`; a 403 reads as
+"admin only". Every write confirms on a TTY or needs `--yes` (`--dry-run` prints
+the request).
+
+```bash
+smoo calling ring-groups create Billing [--strategy sequential] [--notify-email ar@acme.com] [--yes]
+smoo calling ring-groups delete <group-id> [--yes]        # 409 while a number routes to it
+smoo calling hours show <hours-id> [--json]               # windows + holidays
+smoo calling hours create "Main office" --timezone America/New_York \
+    --window mon-fri:09:00-17:00 [--window sat:10:00-14:00] [--default] [--yes]
+smoo calling hours delete <hours-id> [--yes]              # 409 while a number uses it
+smoo calling hours holidays get <hours-id> [--json]
+smoo calling hours holidays set <hours-id> --us-holidays [--yes]       # add the US preset to the current list
+smoo calling hours holidays set <hours-id> --body holidays.json [--us-holidays]   # replace (the COMPLETE list)
+smoo calling hours holidays set <hours-id> --clear
+smoo calling seats list [--json]                          # holders + capacity
+smoo calling seats assign <user-id> [--yes]               # 402 when full
+smoo calling seats unassign <user-id> | --seat-id <id> [--yes]
+```
+
+- `--us-holidays` adds the dashboard's "Add US holidays" checklist: the federal
+  holidays plus Christmas Eve, the day after Thanksgiving and New Year's Eve, each
+  at its next date. It skips any the schedule already has (same name, same rule,
+  same yearly date or the same exact date), so running it twice adds nothing.
+- `seats assign` past capacity returns 402 — unless the org turned on auto-expand
+  seats, in which case the paid seat plan grows by one and the org is billed.
+  The command prints that before it asks.
+- `seats unassign` ends the member's phone sessions. The paid seat count does not change.
+
 ### Enterprise SSO (`smoo sso`) — SMOODEV-4052
 
 CLI twin of the hosted MCP's `sso_*` tools and the copilot's `sso.*` tools. All
