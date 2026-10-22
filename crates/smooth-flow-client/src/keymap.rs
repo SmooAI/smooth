@@ -130,8 +130,8 @@ impl Action {
             };
         }
         let (mac, other) = match self {
-            Self::NewSession => ("cmd+n", "ctrl+shift+n"),
-            Self::NewShell => ("cmd+shift+t", "ctrl+shift+alt+t"),
+            Self::NewSession => ("cmd+ctrl+n", "ctrl+shift+n"),
+            Self::NewShell => ("cmd+n", "ctrl+shift+alt+t"),
             Self::FanOut => ("cmd+shift+n", "ctrl+shift+alt+n"),
             Self::SteerFocused => ("cmd+enter", "ctrl+enter"),
             Self::SteerAll => ("cmd+opt+enter", "ctrl+alt+enter"),
@@ -145,8 +145,8 @@ impl Action {
             Self::CloseTab => ("cmd+shift+w", "ctrl+shift+alt+w"),
             Self::PreviousTab => ("cmd+shift+[", "ctrl+pageup"),
             Self::NextTab => ("cmd+shift+]", "ctrl+pagedown"),
-            Self::SplitRight => ("cmd+d", "ctrl+shift+d"),
-            Self::SplitDown => ("cmd+shift+d", "ctrl+shift+alt+d"),
+            Self::SplitRight => ("cmd+shift+right", "ctrl+shift+d"),
+            Self::SplitDown => ("cmd+shift+down", "ctrl+shift+alt+d"),
             Self::SplitLeft => ("cmd+shift+left", "ctrl+shift+left"),
             Self::SplitUp => ("cmd+shift+up", "ctrl+shift+up"),
             Self::FocusPaneLeft => ("cmd+opt+left", "ctrl+alt+left"),

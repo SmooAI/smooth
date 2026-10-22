@@ -58,9 +58,6 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
     private var subscriptions: Set<AnyCancellable> = []
-    /// Sessions the window has already seen, so a newly announced one can be
-    /// told apart from every redraw of the list.
-    private var knownSessionIds: Set<String> = []
 
     static let onboardedKey = "onboarded"
 
@@ -109,11 +106,6 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
         store.$sessions.receive(on: DispatchQueue.main).sink { [weak self] live in
             guard let self else { return }
             self.mainWindow.center.refreshHeaders()
-            // A session this window asked for (⌘⇧T) lands in the tab that asked.
-            for id in live.keys where self.knownSessionIds.insert(id).inserted {
-                self.mainWindow.center.adopt(newSessionId: id)
-            }
-            self.knownSessionIds.formIntersection(live.keys)
             self.pruneCloses(live)
         }.store(in: &subscriptions)
         daemon.onRestart = { [weak self] ep in self?.client.connect(to: ep) }
@@ -240,6 +232,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             self.client.send(.resize(id: id, cols: cols, rows: rows))
         }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
+        v.onPwd = { [weak self] _ in self?.mainWindow?.center.refreshHeaders() }
         surfaces[id] = v
         if store.sessions[id]?.isLive == true {
             let g = v.gridSize
@@ -318,7 +311,34 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     }
 
     func dismissCloseRefusal(_ id: String) { closeRefusals[id] = nil }
-    func newSession(_ n: NewSession) { client.send(.new(n)) }
+    func newSession(_ n: NewSession) {
+        LastDirectory.remember(n.worktree)
+        client.send(.new(n))
+    }
+
+    // MARK: shells (SMOODEV-4111)
+
+    /// Start a plain shell — ⌘N, a split, New Shell in Directory… — and return
+    /// it once the engine has made it, so the caller can put it in the pane
+    /// that asked. `source` is the session whose live cwd it opens in;
+    /// `picked` a directory the user chose. See `ShellLaunch.request`.
+    func openShell(source: Session?, picked: String? = nil) async -> Session? {
+        let req = ShellLaunch.request(source: source, picked: picked, last: LastDirectory.load(),
+                                      home: FileManager.default.homeDirectoryForCurrentUser.path)
+        do {
+            let s = try await client.createSession(req)
+            LastDirectory.remember(s.worktree)
+            // Known now, not one broadcast later: the pane can host it at once.
+            handle(store.apply(.session(s)))
+            return s
+        } catch {
+            thOutput = "new shell: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Where the program in `id`'s terminal says it is (OSC 7), if it said.
+    func reportedPwd(_ id: String) -> String? { surfaces[id]?.reportedPwd }
 
     /// th-c103c1: the context a new session would inherit. Seeded from the
     /// focused session's worktree (you are almost always starting a second
@@ -439,6 +459,17 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func showNewSession() {
         mainWindow.contentViewController?.presentSheet { dismiss in NewSessionSheet(app: self, dismiss: dismiss) }
+    }
+
+    /// ⌘N and the sidebar's + button: a shell in a new tab, no sheet.
+    func newShell() { mainWindow?.center.newShell() }
+
+    /// New Shell in Directory…: the repo search / Browse… field, then a shell
+    /// there in a new tab. The pick becomes the next ⌘N's fallback.
+    func showNewShellInDirectory() {
+        mainWindow.contentViewController?.presentSheet { dismiss in
+            NewShellSheet(app: self, start: { dir in self.mainWindow?.center.newShell(in: dir) }, dismiss: dismiss)
+        }
     }
 
     /// th-fe75ca: close-out, from wherever you are — the sidebar row's context

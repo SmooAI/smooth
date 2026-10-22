@@ -92,6 +92,37 @@ pub fn kill_tree(pid: u32, grace: Duration) {
         .status();
 }
 
+/// The working directory of `pid` right now, via `lsof` (SMOODEV-4111).
+/// The fallback for hosts that cannot ask tmux (`pty`); `None` when the
+/// process is gone or `lsof` has nothing to say.
+#[cfg(unix)]
+#[must_use]
+pub fn cwd(pid: u32) -> Option<std::path::PathBuf> {
+    let out = Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_lsof_cwd(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// See [`cwd`]: no `lsof` here, so no answer — the caller falls back.
+#[cfg(not(unix))]
+#[must_use]
+pub fn cwd(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Parse `lsof -Fn` field output (`p123` / `fcwd` / `n/path`): the first
+/// absolute `n` field.
+#[must_use]
+pub fn parse_lsof_cwd(s: &str) -> Option<std::path::PathBuf> {
+    s.lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .find(|p| p.starts_with('/'))
+        .map(std::path::PathBuf::from)
+}
+
 /// The start time (epoch seconds) of `pid`, or `None` when it is gone.
 ///
 /// Windows has no `ps` (th-64d4ab): shelling out to it failed, so every
@@ -204,6 +235,27 @@ mod tests {
         let mut child = child;
         let _ = child.wait();
         assert!(start_time(pid).is_none() || !is_alive(pid, None));
+    }
+
+    #[test]
+    fn lsof_cwd_parses_the_first_absolute_name() {
+        assert_eq!(parse_lsof_cwd("p123\nfcwd\nn/Users/me/dev\n"), Some(std::path::PathBuf::from("/Users/me/dev")));
+        assert_eq!(parse_lsof_cwd("p1\nfcwd\nn/a b/c"), Some(std::path::PathBuf::from("/a b/c")));
+        assert_eq!(parse_lsof_cwd(""), None, "process gone");
+        assert_eq!(parse_lsof_cwd("p1\nfcwd\nnrelative"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cwd_of_own_process_is_the_current_dir() {
+        if Command::new("lsof").arg("-v").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            eprintln!("skipping: lsof not available");
+            return;
+        }
+        let want = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let got = cwd(std::process::id()).map(|p| p.canonicalize().unwrap_or(p));
+        assert_eq!(got, Some(want));
+        assert_eq!(cwd(4_000_000), None, "no such process");
     }
 
     /// th-64d4ab: on Windows the old `ps` path read every process as dead.

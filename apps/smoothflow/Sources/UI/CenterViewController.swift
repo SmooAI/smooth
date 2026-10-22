@@ -202,7 +202,7 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             if let sid = t.sessions[id], app.store.sessions[sid] != nil {
                 pane.host(app.surface(for: sid), id: sid)
             } else {
-                pane.showEmpty()
+                pane.showEmpty(launching: launching.contains(id))
             }
         }
         tabBar.update(titles: surfaceTabs.map { tab in tab.title { self.app.store.sessions[$0]?.tabTitle(home: self.app.store.home) } }, active: activeTabIndex)
@@ -222,34 +222,67 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     // MARK: tab actions
 
-    func newTab() {
+    /// ⌘T: another view over the fleet, starting on the focused session.
+    /// `empty` leaves its pane for a shell that is on its way (⌘N).
+    func newTab(empty: Bool = false) {
         var t = SurfaceTab(id: nextTabId, pane: PaneID.next())
         nextTabId += 1
-        if let sid = app.store.focusedId { t.sessions[t.focused] = sid }
+        if !empty, let sid = app.store.focusedId { t.sessions[t.focused] = sid }
         surfaceTabs.append(t)
         activeTabIndex = surfaceTabs.count - 1
         renderTabs()
     }
 
-    /// A shell session (`kind=shell`) in the focused session's worktree, in a
-    /// new tab — the "give me a prompt next to the agent" move. The tab shows
-    /// it as soon as the engine announces the session.
-    func newShellHere() {
-        guard let s = app.store.focused else { return }
-        newTab()
-        pendingShellTab = activeTab?.id
-        app.newSession(NewSession(kind: "shell", worktree: s.worktree, project: s.projectName, title: "shell · \(s.projectName)"))
+    /// The session in the focused pane of the active tab, if it still exists —
+    /// what a new shell inherits its directory from.
+    private var focusedPaneSession: Session? {
+        guard let t = activeTab, let sid = t.sessions[t.focused] else { return nil }
+        return app.store.sessions[sid]
     }
 
-    private var pendingShellTab: Int?
+    /// ⌘N (SMOODEV-4111): a plain shell in a new tab, at once — no sheet. It
+    /// opens in the focused pane's current directory, else the last one you
+    /// opened, else `$HOME` (`ShellLaunch.request`).
+    func newShell() {
+        let source = focusedPaneSession
+        newTab(empty: true)
+        guard let t = activeTab else { return }
+        launchShell(tab: t.id, pane: t.focused, source: source, picked: nil)
+    }
 
-    /// A brand-new session claims the tab that asked for it (`newShellHere`),
-    /// else nothing — a session appearing must never steal a pane you are in.
-    func adopt(newSessionId id: String) {
-        guard let tabId = pendingShellTab, let i = surfaceTabs.firstIndex(where: { $0.id == tabId }) else { return }
-        pendingShellTab = nil
-        surfaceTabs[i].sessions[surfaceTabs[i].focused] = id
+    /// New Shell in Directory…: the same, in `directory`.
+    func newShell(in directory: String) {
+        newTab(empty: true)
+        guard let t = activeTab else { return }
+        launchShell(tab: t.id, pane: t.focused, source: nil, picked: directory)
+    }
+
+    /// Panes waiting on a shell the engine is still starting.
+    private var launching: Set<PaneID> = []
+
+    /// Ask the engine for a shell and put it in `pane` of tab `tabId` when it
+    /// arrives — by the id the engine answered with, so another client's new
+    /// session can never land here instead. If the pane was closed, or
+    /// filled from the sidebar meanwhile, the shell just stays in the fleet.
+    private func launchShell(tab tabId: Int, pane: PaneID, source: Session?, picked: String?) {
+        launching.insert(pane)
         renderTabs()
+        Task { [weak self] in
+            guard let self else { return }
+            let made = await self.app.openShell(source: source, picked: picked)
+            self.launching.remove(pane)
+            guard let made, let i = self.surfaceTabs.firstIndex(where: { $0.id == tabId }),
+                  self.surfaceTabs[i].root.contains(pane), self.surfaceTabs[i].sessions[pane] == nil else {
+                self.renderTabs()
+                return
+            }
+            self.surfaceTabs[i].sessions[pane] = made.id
+            self.renderTabs()
+            if i == self.activeTabIndex, self.surfaceTabs[i].focused == pane {
+                self.app.store.focusedId = made.id
+                self.focusActiveSurface()
+            }
+        }
     }
 
     func closeTab(at index: Int? = nil) {
@@ -274,11 +307,18 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
 
     // MARK: split actions
 
+    /// ⌘⇧ + arrow (and ⌘D / ⌘⇧D): split the focused pane that way and open
+    /// a NEW shell in it, in the focused pane's current directory — the
+    /// engine reads it from tmux, so a `cd` in the pane carries over
+    /// (SMOODEV-4111). The pane model still starts the new pane on the old
+    /// session (Client Spec §5); the controller swaps in the shell.
     func split(_ direction: SplitDirection) {
         guard var t = activeTab else { return }
-        _ = t.split(direction)
+        let source = focusedPaneSession
+        let fresh = t.split(direction)
+        t.sessions[fresh] = nil
         replaceActiveTab(t)
-        focusActiveSurface()
+        launchShell(tab: t.id, pane: fresh, source: source, picked: nil)
     }
 
     /// ⌘W. Terminal semantics: the focused pane goes, and the container
@@ -438,7 +478,8 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
             treeView.pane(id).setHeader(s, kindLabel: app.store.displayName(forKind: s.kind))
         }
         // argv changes under a session (`claude --resume …` after a kill/resume).
-        if let s = app.store.focused { pathLabel.stringValue = "\(s.worktree) · \(s.argv.joined(separator: " "))" }
+        // The directory is where the terminal says it is, when it has said.
+        if let s = app.store.focused { pathLabel.stringValue = "\(app.reportedPwd(s.id) ?? s.worktree) · \(s.argv.joined(separator: " "))" }
         refreshTabGate()
     }
 
@@ -523,14 +564,15 @@ final class SessionPane: NSView {
         dot.layer?.backgroundColor = NSColor(Theme.dot(for: s)).cgColor
     }
 
-    /// A pane with nothing in it yet — a fresh split before you pick a session.
-    func showEmpty() {
-        guard sessionId != nil || hosted == nil else { return }
+    /// A pane with nothing in it yet: a shell on its way (`launching`), or
+    /// an emptied pane waiting for you to pick a session.
+    func showEmpty(launching: Bool = false) {
+        header.stringValue = launching ? "starting shell…" : "empty · pick a session in the sidebar"
+        dot.layer?.backgroundColor = Theme.faint.cgColor
+        guard sessionId != nil || hosted != nil else { return }
         sessionId = nil
         hosted?.removeFromSuperview()
         hosted = nil
-        header.stringValue = "empty · pick a session in the sidebar"
-        dot.layer?.backgroundColor = Theme.faint.cgColor
     }
 
     /// Which pane the keyboard is in. A one-pixel teal edge, and only when the
