@@ -194,25 +194,25 @@ Windows the primary modifier is **Ctrl+Shift**, because bare Ctrl+letter
 belongs to the program in the terminal, as in GNOME Terminal, Konsole and
 Windows Terminal. The fleet-action family (`⌘⌥` on the Mac) is **Ctrl+Alt**.
 
-| Action                            | macOS                | Linux / Windows                                               |
-| --------------------------------- | -------------------- | ------------------------------------------------------------- |
-| New Session                       | ⌘N                   | Ctrl+Shift+N                                                  |
-| New Shell Here                    | ⌘⇧T                  | Ctrl+Shift+Alt+T                                              |
-| Fan Out                           | ⌘⇧N                  | Ctrl+Shift+Alt+N                                              |
-| Steer Focused / Steer All Working | ⌘↩ / ⌘⌥↩             | Ctrl+Enter / Ctrl+Alt+Enter                                   |
-| Allow / Deny                      | ⌘⌥Y / ⌘⌥N            | Ctrl+Alt+Y / Ctrl+Alt+N                                       |
-| Kill & Resume / Kill              | ⌘⌥R / ⌘⌥K            | Ctrl+Alt+R / Ctrl+Alt+K                                       |
-| Close Out                         | ⌘⌥W                  | Ctrl+Alt+W                                                    |
-| Focus Session 1–9                 | ⌘1–⌘9                | Alt+1–Alt+9                                                   |
-| New Tab / Close Pane / Close Tab  | ⌘T / ⌘W / ⌘⇧W        | Ctrl+Shift+T / Ctrl+Shift+W / Ctrl+Shift+Alt+W                |
-| Previous / Next Tab               | ⌘⇧[ / ⌘⇧]            | Ctrl+PageUp / Ctrl+PageDown                                   |
-| Split Right / Down / Left / Up    | ⌘D / ⌘⇧D / ⌘⇧← / ⌘⇧↑ | Ctrl+Shift+D / Ctrl+Shift+Alt+D / Ctrl+Shift+← / Ctrl+Shift+↑ |
-| Focus Pane ←→↑↓                   | ⌘⌥ arrows            | Ctrl+Alt arrows                                               |
-| Zoom Pane / Equalize              | ⌘⇧↩ / ⌘⌥=            | Ctrl+Shift+Enter / Ctrl+Alt+=                                 |
-| Inbox                             | ⌘I                   | Ctrl+Shift+I                                                  |
-| Terminal / Diff / PR / Activity   | ⌘⌥1–4                | Ctrl+Alt+1–4                                                  |
-| Toggle Sidebar / Pearl Rail       | ⌃⌘S / ⌃⌘P            | Ctrl+Shift+Alt+S / Ctrl+Shift+Alt+P                           |
-| Settings                          | ⌘,                   | Ctrl+,                                                        |
+| Action                            | macOS                 | Linux / Windows                                               |
+| --------------------------------- | --------------------- | ------------------------------------------------------------- |
+| New Session                       | ⌃⌘N                   | Ctrl+Shift+N                                                  |
+| New Shell Here                    | ⌘N                    | Ctrl+Shift+Alt+T                                              |
+| Fan Out                           | ⌘⇧N                   | Ctrl+Shift+Alt+N                                              |
+| Steer Focused / Steer All Working | ⌘↩ / ⌘⌥↩              | Ctrl+Enter / Ctrl+Alt+Enter                                   |
+| Allow / Deny                      | ⌘⌥Y / ⌘⌥N             | Ctrl+Alt+Y / Ctrl+Alt+N                                       |
+| Kill & Resume / Kill              | ⌘⌥R / ⌘⌥K             | Ctrl+Alt+R / Ctrl+Alt+K                                       |
+| Close Out                         | ⌘⌥W                   | Ctrl+Alt+W                                                    |
+| Focus Session 1–9                 | ⌘1–⌘9                 | Alt+1–Alt+9                                                   |
+| New Tab / Close Pane / Close Tab  | ⌘T / ⌘W / ⌘⇧W         | Ctrl+Shift+T / Ctrl+Shift+W / Ctrl+Shift+Alt+W                |
+| Previous / Next Tab               | ⌘⇧[ / ⌘⇧]             | Ctrl+PageUp / Ctrl+PageDown                                   |
+| Split Right / Down / Left / Up    | ⌘⇧→ / ⌘⇧↓ / ⌘⇧← / ⌘⇧↑ | Ctrl+Shift+D / Ctrl+Shift+Alt+D / Ctrl+Shift+← / Ctrl+Shift+↑ |
+| Focus Pane ←→↑↓                   | ⌘⌥ arrows             | Ctrl+Alt arrows                                               |
+| Zoom Pane / Equalize              | ⌘⇧↩ / ⌘⌥=             | Ctrl+Shift+Enter / Ctrl+Alt+=                                 |
+| Inbox                             | ⌘I                    | Ctrl+Shift+I                                                  |
+| Terminal / Diff / PR / Activity   | ⌘⌥1–4                 | Ctrl+Alt+1–4                                                  |
+| Toggle Sidebar / Pearl Rail       | ⌃⌘S / ⌃⌘P             | Ctrl+Shift+Alt+S / Ctrl+Shift+Alt+P                           |
+| Settings                          | ⌘,                    | Ctrl+,                                                        |
 
 Every action is also reachable from the menus (desktop) or an explicit control
 (phones). Phones have no shortcut layer, so every action must have a visible
@@ -383,6 +383,11 @@ control.
   replay, and phones get it in ≤16 KiB parts that render only once complete.
   New vector file `replay.json`; the others are unchanged. Spec only so far
   (th-c61966, epic th-ce4f88); every client implements it in th-cbb0af.
+- 2026-10-22: §9 Mac defaults are terminal-first (SMOODEV-4111): ⌘N is New
+  Shell, New Session moves to ⌃⌘N, and Split Right / Down are ⌘⇧→ / ⌘⇧↓ (the
+  Mac app keeps ⌘D / ⌘⇧D as extra, Mac-only alias rows). `flow.new` gains the
+  additive `cwd_of`. Only `keymap.json`'s Mac table changes; Linux / Windows
+  defaults are unchanged.
 
 ## 14. Diff
 

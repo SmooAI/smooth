@@ -14,6 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Before any surface or view asks for a font (th-bcd819).
         TerminalFont.registerBundled()
         app.keymap.onChange = { [weak self] in self?.rebuildMenu() }
+        // An app chord that reaches a terminal surface is the app's, never
+        // Ghostty's (SMOODEV-4111): ⌘⇧↑/↓ split, they do not jump to a prompt.
+        TerminalSurfaceView.appShortcut = { [weak self] event in
+            guard let self, let chord = KeyChord.from(event: event), let action = self.app.keymap.appAction(for: chord) else { return false }
+            self.run(action)
+            return true
+        }
         NSApp.mainMenu = buildMenu()
         // Hosting the unit tests: no status item, no window, no daemon, no tmux
         // (th-dccc80). Everything below `start()` is what a test would observe.
@@ -72,6 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bar.addItem(submenu(appMenu, "SmoothFlow"))
 
         let session = NSMenu()
+        session.addItem(item(.newShell))
+        session.addItem(item(.newShellInDirectory))
         session.addItem(item(.newSession))
         session.addItem(item(.fanOut))
         session.addItem(.separator())
@@ -115,7 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // single "Split Surface" item stayed unnoticed.
         let layout = NSMenu()
         layout.addItem(item(.newTab))
-        layout.addItem(item(.newShell))
         layout.addItem(item(.closePane))
         layout.addItem(item(.closeTab))
         layout.addItem(.separator())
@@ -126,6 +134,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         layout.addItem(item(.splitDown))
         layout.addItem(item(.splitLeft))
         layout.addItem(item(.splitUp))
+        // ⌘D / ⌘⇧D: real menu items so AppKit matches their chords, hidden so
+        // the menu lists each split once.
+        for alias in FlowAction.allCases where alias.isAlias {
+            let it = item(alias)
+            it.isHidden = true
+            it.allowsKeyEquivalentWhenHidden = true
+            layout.addItem(it)
+        }
         layout.addItem(.separator())
         layout.addItem(item(.focusPaneLeft))
         layout.addItem(item(.focusPaneRight))
@@ -235,6 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .settings: app.showSettings()
         case .newSession: app.showNewSession()
+        case .newShellInDirectory: app.showNewShellInDirectory()
         case .fanOut: app.showFanOut()
         case .steerAll: center?.steerAll()
         case .steerFocused: center?.focusSteer()
@@ -251,15 +268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .toggleSidebar: app.mainWindow?.toggleSidebar()
         case .togglePearlRail: app.mainWindow?.toggleRail()
         case .newTab: center?.newTab()
-        case .newShell: center?.newShellHere()
+        case .newShell: app.newShell()
         case .closePane: center?.closeFocusedPane()
         case .closeTab: center?.closeTab()
         case .previousTab: center?.cycleTab(by: -1)
         case .nextTab: center?.cycleTab(by: 1)
-        case .splitRight: center?.split(.right)
+        case .splitRight, .splitRightAlias: center?.split(.right)
         case .splitLeft: center?.split(.left)
         case .splitUp: center?.split(.up)
-        case .splitDown: center?.split(.down)
+        case .splitDown, .splitDownAlias: center?.split(.down)
         case .focusPaneLeft: center?.focusPane(.left)
         case .focusPaneRight: center?.focusPane(.right)
         case .focusPaneUp: center?.focusPane(.up)

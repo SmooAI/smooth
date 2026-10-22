@@ -151,6 +151,11 @@ pub struct NewRequest {
     /// The tmux socket to create the session on (default: the host's
     /// [`SessionHost::default_socket`]).
     pub tmux_socket: Option<String>,
+    /// SMOODEV-4111: start in the LIVE working directory of this existing
+    /// session (where its shell has `cd`'d to — see [`Engine::live_cwd`]),
+    /// when `worktree` is not given. How SmoothFlow's split opens a new
+    /// shell beside the pane you are in.
+    pub cwd_of: Option<String>,
 }
 
 /// What `POST /api/flow/hooks` should do after the engine processed a hook.
@@ -1593,8 +1598,8 @@ impl Engine {
     ///
     /// # Errors
     /// When the worktree can't be resolved/created or tmux refuses.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn new_session(&self, req: NewRequest) -> Result<Session> {
+    pub fn new_session(&self, mut req: NewRequest) -> Result<Session> {
+        self.resolve_cwd_of(&mut req)?;
         let project = req
             .project
             .as_deref()
@@ -1686,22 +1691,51 @@ impl Engine {
                 !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
             });
             let now = Instant::now();
-            let pending = if can_see_idle {
-                PendingPaste {
-                    prompt: p.to_string(),
-                    at: now + PASTE_MIN_DELAY,
-                    wait_idle_until: Some(now + PASTE_IDLE_WAIT),
-                }
+            let (at, wait_idle_until) = if can_see_idle {
+                (now + PASTE_MIN_DELAY, Some(now + PASTE_IDLE_WAIT))
             } else {
-                PendingPaste {
-                    prompt: p.to_string(),
-                    at: now + PASTE_DELAY,
-                    wait_idle_until: None,
-                }
+                (now + PASTE_DELAY, None)
+            };
+            let pending = PendingPaste {
+                prompt: p.to_string(),
+                at,
+                wait_idle_until,
             };
             self.rt().paste_at.insert(session.id.clone(), pending);
         }
         Ok(session)
+    }
+
+    /// `cwd_of` becomes the request's worktree. An explicit worktree (or a
+    /// pearl, which makes one) wins over it.
+    fn resolve_cwd_of(&self, req: &mut NewRequest) -> Result<()> {
+        if req.worktree.is_none() && req.pearl_id.is_none() {
+            if let Some(of) = req.cwd_of.as_deref() {
+                req.worktree = Some(self.live_cwd(of)?.to_string_lossy().into_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// The directory session `id`'s process is in right now (SMOODEV-4111):
+    /// the host's live answer (tmux `#{pane_current_path}`, the pid's cwd on
+    /// the `pty` host) when it is a directory that still exists, else the
+    /// row's worktree — a dead session, a host that cannot tell, or a cwd
+    /// removed under the shell all land where the session started.
+    ///
+    /// # Errors
+    /// When there is no such session.
+    pub fn live_cwd(&self, id: &str) -> Result<PathBuf> {
+        let s = self.require(id)?;
+        let live = if s.state.is_terminal() {
+            None
+        } else {
+            self.pane(&s)
+                .ok()
+                .and_then(|r| self.host_for(&s).ok().and_then(|h| h.current_dir(&r)))
+                .filter(|p| p.is_dir())
+        };
+        Ok(live.unwrap_or_else(|| PathBuf::from(&s.worktree)))
     }
 
     /// Launch `argv` in the session's host session (named after the id),
@@ -3072,6 +3106,7 @@ impl Engine {
                 model: c.model.clone(),
                 fan_out_id: Some(fo.id.clone()),
                 tmux_socket: None,
+                cwd_of: None,
             })?;
             sessions.push(s);
         }
@@ -6105,6 +6140,90 @@ quiet_ms = 300
         // A dead row's removal asks the host once more, harmlessly.
         e.remove(&s.id).unwrap();
         assert!(e.get(&s.id).unwrap().is_none());
+    }
+
+    /// SMOODEV-4111: `cwd_of` opens the new session where the source
+    /// session's shell IS (the host's live cwd), not where it launched.
+    #[test]
+    fn cwd_of_starts_in_the_source_sessions_live_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let src = fake_shell(&e, tmp.path(), &["sh"]);
+        let deeper = tmp.path().join("deeper");
+        std::fs::create_dir_all(&deeper).unwrap();
+        host.set_cwd(&host_ref(&src), Some(&deeper));
+        assert_eq!(e.live_cwd(&src.id).unwrap(), deeper);
+
+        let split = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                argv: Some(vec!["sh".into()]),
+                cwd_of: Some(src.id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(split.worktree, deeper.to_string_lossy(), "the row records the live cwd");
+        assert_eq!(host.session(&host_ref(&split)).unwrap().cwd, deeper, "and the process starts there");
+    }
+
+    /// The fallbacks: a host that cannot tell, a cwd deleted under the shell,
+    /// or a finished session all land in the source's worktree.
+    #[test]
+    fn live_cwd_falls_back_to_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let src = fake_shell(&e, tmp.path(), &["sh"]);
+        let r = host_ref(&src);
+
+        host.set_cwd(&r, None);
+        assert_eq!(e.live_cwd(&src.id).unwrap(), tmp.path(), "host cannot tell");
+
+        host.set_cwd(&r, Some(&tmp.path().join("gone")));
+        assert_eq!(e.live_cwd(&src.id).unwrap(), tmp.path(), "cwd no longer exists");
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        host.set_cwd(&r, Some(elsewhere.path()));
+        e.kill(&src.id, false).unwrap();
+        assert_eq!(e.live_cwd(&src.id).unwrap(), tmp.path(), "a finished session is not asked");
+
+        assert!(e.live_cwd("fs-00000000").is_err(), "no such session");
+        let err = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                argv: Some(vec!["sh".into()]),
+                cwd_of: Some("fs-00000000".into()),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("no such session"), "{err}");
+    }
+
+    /// An explicit worktree wins over `cwd_of`, and a request without
+    /// `cwd_of` behaves exactly as before (backward compatible `flow.new`).
+    #[test]
+    fn explicit_worktree_wins_over_cwd_of() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let src = fake_shell(&e, tmp.path(), &["sh"]);
+        let deeper = tmp.path().join("deeper");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&deeper).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        host.set_cwd(&host_ref(&src), Some(&deeper));
+
+        let s = e
+            .new_session(NewRequest {
+                kind: SessionKind::Shell,
+                worktree: Some(other.to_string_lossy().into()),
+                argv: Some(vec!["sh".into()]),
+                cwd_of: Some(src.id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(s.worktree, other.to_string_lossy());
+
+        let plain = fake_shell(&e, &other, &["sh"]);
+        assert_eq!(plain.worktree, other.to_string_lossy());
     }
 
     /// A dead pane's exit status is what the row records: exit 0 is done,

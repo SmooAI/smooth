@@ -158,7 +158,44 @@ struct DirectoryField: View {
     }
 }
 
-/// ⌘N — `flow.new`. Zero friction (th-c103c1): pick a kind, hit Start.
+/// New Shell in Directory… (SMOODEV-4111): the same directory field as the
+/// agent dialog — search your repos, paste a path, or Browse… — and nothing
+/// else. Start opens a shell there in a new tab; the pick is remembered as
+/// the next ⌘N's fallback directory.
+struct NewShellSheet: View {
+    @ObservedObject var app: AppController
+    var start: (String) -> Void
+    var dismiss: () -> Void = {}
+    @State private var directory = ""
+
+    private var current: String {
+        LastDirectory.load().flatMap { ShellLaunch.isDirectory($0) ? $0 : nil } ?? FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("New shell in directory").font(.title3.bold())
+            DirectoryField(app: app, chosen: $directory, current: current) { _ in }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Open Shell") {
+                    let dir = directory.nilIfEmpty ?? current
+                    LastDirectory.remember(dir)
+                    dismiss()
+                    start(dir)
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("newshell.start")
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+}
+
+/// ⌃⌘N / the sidebar's + menu — the agent dialog, `flow.new`. ⌘N is a plain
+/// shell now (SMOODEV-4111); this is the opt-in path. Zero friction (th-c103c1): pick a kind, hit Start.
 /// The pearl, Jira key, worktree and title are INFERRED from where the work
 /// already is — shown, not demanded — and every one of them is overridable
 /// behind the disclosure. Start is never blocked on a missing pearl.

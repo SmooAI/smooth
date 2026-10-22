@@ -19,7 +19,7 @@
 //! host operations too: the host launched the process, and routing them
 //! here keeps an engine under test from ever signalling a real pid.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -293,6 +293,15 @@ pub trait SessionHost: Send + Sync {
     /// When the session is gone.
     fn meta(&self, s: &SessionRef) -> Result<PaneMeta>;
 
+    /// The directory the session's process is in right now (SMOODEV-4111) —
+    /// where a split or a sibling shell should open. `None` when the host
+    /// cannot tell; the engine falls back to the row's worktree. The default
+    /// asks the process table for the session pid's cwd, which is right for
+    /// any host whose pid is the shell itself.
+    fn current_dir(&self, s: &SessionRef) -> Option<PathBuf> {
+        self.pid(s).ok().and_then(proc::cwd)
+    }
+
     /// `Some(death)` once the session's process is dead (the host keeps the
     /// session until the engine has read this), `None` while it runs.
     ///
@@ -431,6 +440,10 @@ impl SessionHost for TmuxHost {
 
     fn meta(&self, s: &SessionRef) -> Result<PaneMeta> {
         tmux::pane_meta(&s.socket, &s.name)
+    }
+
+    fn current_dir(&self, s: &SessionRef) -> Option<PathBuf> {
+        tmux::pane_current_path(&s.socket, &s.name).ok().flatten()
     }
 
     fn exit_status(&self, s: &SessionRef) -> Result<Option<PaneDeath>> {
@@ -626,6 +639,14 @@ pub mod fake {
             self.st().recorded.insert((exit_prefix.to_path_buf(), pid), code);
         }
 
+        /// The session's process `cd`'d to `dir` (or, with `None`, the host
+        /// can no longer tell where it is).
+        pub fn set_cwd(&self, s: &SessionRef, dir: Option<&Path>) {
+            if let Some(f) = self.st().sessions.get_mut(s) {
+                f.cwd = dir.map(Path::to_path_buf).unwrap_or_default();
+            }
+        }
+
         /// What the visible screen reads.
         pub fn set_screen(&self, s: &SessionRef, text: &str) {
             if let Some(f) = self.st().sessions.get_mut(s) {
@@ -690,6 +711,10 @@ pub mod fake {
 
         fn meta(&self, s: &SessionRef) -> Result<PaneMeta> {
             self.with(s, |f| f.meta.clone())
+        }
+
+        fn current_dir(&self, s: &SessionRef) -> Option<PathBuf> {
+            self.with(s, |f| f.cwd.clone()).ok().filter(|p| !p.as_os_str().is_empty())
         }
 
         fn exit_status(&self, s: &SessionRef) -> Result<Option<PaneDeath>> {

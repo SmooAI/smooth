@@ -15,6 +15,18 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     var onResize: ((Int, Int) -> Void)?
     var onTitle: ((String) -> Void)?
     var onFocus: ((Bool) -> Void)?
+    /// The directory the program in the terminal announced (OSC 7 →
+    /// `GHOSTTY_ACTION_PWD`). A hint only: the engine's tmux read is the
+    /// source of truth for where a split opens (SMOODEV-4111).
+    private(set) var reportedPwd: String?
+    var onPwd: ((String) -> Void)?
+
+    /// App shortcuts win over the terminal (SMOODEV-4111). Menu key
+    /// equivalents already run before `keyDown`; this catches a chord that
+    /// reaches the surface anyway (a hidden or rebuilt menu) so it is never
+    /// fed to Ghostty — whose ⌘⇧↑/↓ is jump_to_prompt — instead of splitting.
+    /// Returns true when the app took the key.
+    static var appShortcut: ((NSEvent) -> Bool)?
 
     private var markedText = NSMutableAttributedString()
     private var keyText: [String]?
@@ -161,6 +173,13 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in self?.reportGridIfChanged() }
     }
 
+    /// Ghostty reports the terminal's working directory (OSC 7).
+    func pwdChanged(_ pwd: String) {
+        guard !pwd.isEmpty, pwd != reportedPwd else { return }
+        reportedPwd = pwd
+        onPwd?(pwd)
+    }
+
     /// Ghostty reports a new cell size (font metrics after a scale change):
     /// the grid in cells may have changed even though the view's size did not.
     func cellSizeChanged() {
@@ -212,6 +231,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         guard let surface else { return }
+        if event.modifierFlags.contains(.command), Self.appShortcut?(event) == true { return }
         keyText = []
         // Runs the input method: insertText / setMarkedText land below.
         interpretKeyEvents([event])

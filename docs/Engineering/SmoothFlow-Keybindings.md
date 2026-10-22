@@ -38,9 +38,13 @@ tab 1                      tab 2
   never what you meant. The session keeps running; pick it in the sidebar. ⌘⇧W still closes the whole tab, splits and all. See
   [Closing a pane](#closing-a-pane) for the confirmation, which is the
   interesting half.
-- **A split shows what it was split from.** ⌘D on a pane running `claude` gives
-  you two panes on that same session, which is what "split this" means in every
-  terminal. Point one of them somewhere else from the sidebar.
+- **A split opens a new shell where you are** (SMOODEV-4111). ⌘⇧→ (or ⌘D)
+  on a pane gives you a second pane running a fresh shell in that pane's
+  _current_ directory — the engine asks tmux (`#{pane_current_path}`), so a
+  `cd` carries over. The pane model (`SurfaceTab.split`, Client Spec §5)
+  still starts the new pane on the old session; `CenterViewController.split`
+  swaps in the shell when the engine answers `POST /api/flow/sessions` with
+  its id. Point a pane at an agent from the sidebar.
 - **Panes are identified, not indexed** (`PaneID`, monotonic, never reused).
   Removing a pane therefore cannot silently retarget another pane's surface,
   and a `TerminalSurfaceView` survives a split, a close, a zoom and a tab switch
@@ -175,10 +179,19 @@ terminal is the one that is wrong. ⌘⌥ is already the fleet-action family her
 session is exactly a fleet action. `KeymapTests` pins both halves so nobody
 walks it back by accident.
 
-**⌘D is Split Right and ⌘⇧D is Split Down**, replacing the old untyped "Split
-Surface" that could only ever add another column. ⌘⇧← and ⌘⇧↑ are the other two
-directions; ⌘⇧→ and ⌘⇧↓ are deliberately left free for anyone who wants the
-symmetric four-arrow set instead of ⌘D/⌘⇧D — that is two rows in the pane.
+**⌘N is a plain shell** (SMOODEV-4111). SmoothFlow starts like cmux or
+Ghostty: ⌘N opens a shell in a new tab at once, in the focused pane's current
+directory (else the last directory you opened, else `$HOME`). The agent dialog
+moved to ⌃⌘N — ⌥⌘N is Deny, and ⌘⇧N stays Fan Out. `newShell` is the ⌘N row;
+`newShellInDirectory` (New Shell in Directory…) ships unbound.
+
+**⌘⇧ + arrow splits that way, all four directions**, each with a new shell at
+the focused pane's cwd. ⌘D and ⌘⇧D, the old Split Right / Split Down, stay as
+`splitRightAlias` / `splitDownAlias`: their own rows, so either can be
+rebound or cleared (`splitRightAlias = ""`), and hidden menu items
+(`allowsKeyEquivalentWhenHidden`) so the Layout menu lists each split once.
+They beat Ghostty's ⌘⇧↑/↓ `jump_to_prompt`: menu key equivalents match before
+the surface's `keyDown`, and `keyDown` hands back any app chord that reaches it.
 
 **⌘W is Close Pane, ⌘⇧W is Close Tab.** ⌘W acts on the surface in every
 terminal, so it does here; ⌘⇧W keeps its place as the bigger hammer. There is no
@@ -197,7 +210,11 @@ terminal, so it does here; ⌘⇧W keeps its place as the bigger hammer. There i
   remove, fraction targeting and clamping, frame geometry (including "first is
   the upper pane", which the arrow keys depend on), directional focus with no
   wrap-around, and the `SurfaceTab` operations.
-- `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘D/⌘⇧D
+- `Tests/ShellLaunchTests.swift` — where ⌘N / a split / New Shell in
+  Directory… open a shell (picked, else `cwd_of` the focused session, else the
+  last directory, else `$HOME`), and that `cwd_of` stays off the wire unset.
+- `UITests/LayoutUITests.swift` — the real app against the mock fleet: ⌘⇧
+  arrows split with a new shell, ⌘N opens a shell tab with no sheet, ⌘D/⌘⇧D
   split, ⌘W asks before closing a live agent's pane (Cancel leaves it alone),
   ⌘⇧W takes the whole tab, ⌘⇧↩ zooms, ⌘T/⌘W and ⌘⇧[ / ⌘⇧] move between tabs, splits
   stay in their tab, and the Keyboard pane renders.
