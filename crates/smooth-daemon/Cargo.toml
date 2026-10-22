@@ -105,6 +105,17 @@ tempfile.workspace = true
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
+# Web Push (phone notifications). SMOODEV-4114: `web-push-native` is pure
+# RustCrypto (RFC 8291 aes128gcm + RFC 8292 VAPID via jwt-simple `pure-rust`)
+# and hands back an `http::Request` we send with our own rustls reqwest. The
+# old `web-push` 0.11 pulled isahc -> curl-sys -> openssl-sys and ece ->
+# openssl, so every local build dynamically linked Homebrew's libssl and the
+# daemon dyld-aborted on any Mac without it (CI hid it with OPENSSL_STATIC=1),
+# and Windows had no push at all. Now no OpenSSL anywhere in the daemon.
+web-push-native = "0.5"
+# VAPID keypair generation for Web Push (auto-provisioned on first run when no
+# SMOOTH_VAPID_* env is set). Pure-Rust P-256. Pearl th-c561f1.
+p256 = "0.13"
 
 [features]
 # th-e4aef9 (ADR-011): the `flow-host` subcommand, the SmoothFlow session
@@ -143,16 +154,3 @@ workspace = true
 # daemon only depends on it on macOS. Pearl th-f7cb98.
 smooth-menubar = { workspace = true }
 
-[target.'cfg(not(target_os="windows"))'.dependencies]
-# Web Push. NOT on Windows: web-push -> ece hard-depends on `openssl` (ece 2.x
-# has no pure-Rust backend), and a stock Windows host has no OpenSSL — no vcpkg
-# tree, no OPENSSL_DIR. That single leaf dependency is why this whole crate was
-# `--exclude`d from the Windows CI lane, i.e. why the entire daemon was
-# unbuildable there. Scoping it off Windows costs one feature (phone
-# notifications) and buys the agent engine. `push::PushState::send_to_all` is
-# cfg'd to a no-op and `/push/*` 503s there. Pearl th-a59af5.
-web-push = "0.11"
-# VAPID keypair generation for Web Push (auto-provisioned on first run when no
-# SMOOTH_VAPID_* env is set). Pure-Rust P-256; only used off Windows, where push
-# is disabled anyway. Pearl th-c561f1.
-p256 = "0.13"

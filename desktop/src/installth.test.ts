@@ -313,12 +313,10 @@ test("findBrewTh: only a link into Cellar/th is brew's", () => {
     assert.equal(findBrewTh([join(dir, 'missing')]), undefined);
 });
 
-test("daemonThEnv: the daemon's own th calls use brew's th; an explicit SMOOTH_TH_BIN wins", () => {
+test("daemonThEnv: with no bundled th, the daemon's own th calls use brew's th; an explicit SMOOTH_TH_BIN wins", () => {
     const brew = () => '/opt/homebrew/bin/th';
-    assert.deepEqual(daemonThEnv({}, brew), { SMOOTH_TH_BIN: '/opt/homebrew/bin/th' });
-    assert.deepEqual(daemonThEnv({ SMOOTH_TH_BIN: '/my/th' }, brew), {});
-    assert.deepEqual(
-        daemonThEnv({}, () => undefined),
-        {},
-    );
+    const bundled = () => undefined;
+    assert.deepEqual(daemonThEnv({}, { brew, bundled }), { SMOOTH_TH_BIN: '/opt/homebrew/bin/th' });
+    assert.deepEqual(daemonThEnv({ SMOOTH_TH_BIN: '/my/th' }, { brew, bundled }), {});
+    assert.deepEqual(daemonThEnv({}, { brew: () => undefined, bundled }), {});
 });

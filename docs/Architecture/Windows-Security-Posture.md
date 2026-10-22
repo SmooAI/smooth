@@ -139,10 +139,10 @@ userspace layers are, the kernel layer isn't there yet.
 
 ## Other Windows gaps (not security)
 
-- **Web push is unavailable.** `web-push` → `ece` hard-depends on `openssl`, and
-  a stock Windows host has none. The dependency is declared for non-Windows
-  targets only; `/push/*` routes 503 and `send_to_all` is a no-op. This is what
-  unblocked compiling the daemon on Windows at all.
+- **Web push works** (since SMOODEV-4114). It used to be unavailable: the
+  `web-push` crate reached `ece` → `openssl`, and a stock Windows host has none.
+  The daemon now uses the pure-Rust `web-push-native` (RustCrypto aes128gcm +
+  VAPID) over its own rustls `reqwest`, so `/push/*` behaves as on macOS.
 - **macOS-native tools are absent by design** — `calendar`, `calendar_delete`,
   `reminders`, `imessage` and the menu bar are `#[cfg(target_os = "macos")]`, so
   the Windows tool registry simply doesn't contain them. Windows-native

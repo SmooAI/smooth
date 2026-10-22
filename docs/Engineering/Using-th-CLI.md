@@ -2758,9 +2758,25 @@ th doctor --fix-fda                                # macOS: guide the Full Disk 
 th doctor --setup-calendar                         # macOS: install `ical` + drive the Calendar grant
 th doctor --setup-imessage                         # macOS: set up the `imessage` tool (th-1665ed)
 th doctor --setup-reminders                        # macOS: drive the Reminders grant (th-94cc4a)
+th doctor install [--json]                         # every th / smooth-daemon, versions, who owns daemon.addr (read-only)
 th cache list / prune / clear
 th service install / start / stop / status         # run smooth as a background daemon
 ```
+
+#### `th doctor install` (SMOODEV-4114)
+
+A read-only inventory for "which `th` / daemon am I actually running?". It
+lists every `th` and `smooth-daemon` on `PATH` (in PATH order) and in the known
+installs — `Big Smooth.app`, `SmoothFlow.app`, Homebrew, `~/.smooth/bin`,
+`~/.smooth/chrome/bin`, `~/.cargo/bin` — with each one's version and any
+non-system dylibs it links (a build that links Homebrew's libssl dyld-aborts on
+a Mac without it). It then shows which process holds `~/.smooth/daemon.lock`,
+`daemon.addr` and `flow.addr`, lists stale `smooth.pid` /
+`smoothflow-daemon.pid` files, `*.bak` leftovers and
+`~/Library/LaunchAgents/com.smooai.smooth.plist.bak`, and flags version skew,
+a `th` on PATH older than the newest installed, more than one daemon owning
+the discovery files, and an advertised address nothing listens on. It changes
+nothing; `--json` prints the same report for scripts.
 
 #### What `th doctor` raises (pearl th-ba764e)
 

@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 
 import { daemonLogDir, RotatingLog } from './daemonlog.js';
-import { findBrewTh } from './installth.js';
+import { compareVersions, findBrewTh, thVersion, type VersionOf } from './installth.js';
 import {
     DEFAULT_POLICY,
     initialState,
@@ -318,12 +318,40 @@ function runAction(action: SupervisorAction): void {
  * sqlite migration on first run. */
 const START_DEADLINE_MS = 60_000;
 
-/** `{ SMOOTH_TH_BIN: <brew th> }` when Homebrew's th is installed and the
- * caller hasn't pinned one; `{}` otherwise. */
-export function daemonThEnv(env: NodeJS.ProcessEnv, brew: () => string | undefined = findBrewTh): Record<string, string> {
+export type ThSources = {
+    /** Homebrew's `th` ({@link findBrewTh}). */
+    brew?: () => string | undefined;
+    /** The `th` shipped with this app (bundled resources first, {@link resolveThBin}). */
+    bundled?: () => string | undefined;
+    versionOf?: VersionOf;
+};
+
+/**
+ * `{ SMOOTH_TH_BIN: <th> }` naming the NEWEST `th` among Homebrew's and the
+ * bundled one, unless the caller pinned one; `{}` when there is none.
+ *
+ * Never downgrade (SMOODEV-4114). This used to hand the daemon brew's `th`
+ * unconditionally, so a stale `brew` keg (0.81.1) ran every daemon tool call
+ * while the app bundled 0.84.1 — features the daemon expected were missing. Brew
+ * still wins a tie (it owns `th` on PATH, th-35d0d0), and when a version can't be
+ * read the one we CAN read wins; with neither readable, brew's as before.
+ */
+export function daemonThEnv(env: NodeJS.ProcessEnv, sources: ThSources = {}): Record<string, string> {
     if ((env.SMOOTH_TH_BIN ?? '').trim() !== '') return {};
-    const brewTh = brew();
-    return brewTh ? { SMOOTH_TH_BIN: brewTh } : {};
+    const brewTh = (sources.brew ?? findBrewTh)();
+    const bundledTh = (sources.bundled ?? resolveThBin)();
+    const pick = newestTh(brewTh, bundledTh, sources.versionOf ?? thVersion);
+    return pick ? { SMOOTH_TH_BIN: pick } : {};
+}
+
+/** The newer of two `th`s, preferring `preferred` on a tie or when neither version reads. */
+export function newestTh(preferred: string | undefined, other: string | undefined, versionOf: VersionOf): string | undefined {
+    if (!preferred || !other || preferred === other) return preferred ?? other;
+    const a = versionOf(preferred);
+    const b = versionOf(other);
+    if (!b) return preferred;
+    if (!a) return other;
+    return compareVersions(b, a) > 0 ? other : preferred;
 }
 
 /** Spawn `smooth-daemon run` as our supervised child. Returns false if the
@@ -340,8 +368,8 @@ function spawnChild(): boolean {
     // to its own rotating file; only panics/aborts reach stderr, which we capture
     // here so an exit line can quote them (th-4b189c).
     // SMOOTH_TH_BIN: the daemon's own `th` calls (the `th` tool, web_search, …)
-    // use Homebrew's th when it is installed — brew owns `th` (th-35d0d0) —
-    // rather than the one bundled next to it. An explicit setting wins.
+    // use the newest of Homebrew's th and the bundled one — never an older brew
+    // keg over a newer bundle (SMOODEV-4114). An explicit setting wins.
     const env = {
         ...process.env,
         SMOOTH_ADDR: addr,
