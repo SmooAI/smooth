@@ -63,8 +63,9 @@ impl Interruption {
     }
 }
 
-/// Classify a row whose process is gone. `row_boot` is the boot it was
-/// launched in (`None` on rows from before the column), `current_boot` this
+/// Classify a row whose process is gone.
+///
+/// `row_boot` is the boot it was launched in (`None` on rows from before the column), `current_boot` this
 /// boot (`None` where it cannot be read), `clean_quit` whether its daemon
 /// left a clean-quit marker. `None` means nothing says it was not a crash.
 #[must_use]
@@ -76,9 +77,10 @@ pub fn interruption(row_boot: Option<&str>, current_boot: Option<&str>, clean_qu
     }
 }
 
-/// Whether resuming `session` continues its conversation: its manifest resumes
-/// by a harness session id it has, or continues the latest conversation in
-/// its worktree. Otherwise a resume is a relaunch of the original argv.
+/// Whether resuming `session` continues its conversation.
+///
+/// Its manifest resumes by a harness session id it has, or continues the
+/// latest conversation in its worktree. Otherwise a resume is a relaunch of the original argv.
 #[must_use]
 pub fn resume_continues(session: &Session, registry: &Registry) -> bool {
     registry.get(session.kind.as_str()).is_some_and(|m| match m.resume.mode {
@@ -88,8 +90,9 @@ pub fn resume_continues(session: &Session, registry: &Registry) -> bool {
     })
 }
 
-/// Whether relaunching `session` would send its prompt a second time: the
-/// relaunch is its original argv ([`resume_continues`] is false) and that argv
+/// Whether relaunching `session` would send its prompt a second time.
+///
+/// The relaunch is its original argv ([`resume_continues`] is false) and that argv
 /// is where its manifest puts the prompt. A pasted prompt is pasted once, at
 /// creation, so relaunching a `paste` harness starts it empty instead.
 #[must_use]
@@ -97,8 +100,9 @@ pub fn relaunch_resends_prompt(session: &Session, registry: &Registry) -> bool {
     !resume_continues(session, registry) && registry.get(session.kind.as_str()).is_none_or(|m| m.launch.prompt_as != PromptAs::Paste)
 }
 
-/// This boot of this machine, or `None` where it cannot be read. Read once
-/// per process: macOS's `kern.bootsessionuuid` (a fresh UUID per boot; unlike
+/// This boot of this machine, or `None` where it cannot be read.
+///
+/// Read once per process: macOS's `kern.bootsessionuuid` (a fresh UUID per boot; unlike
 /// `kern.boottime`, a wall-clock change does not move it), else
 /// `kern.boottime`'s seconds; Linux's `/proc/sys/kernel/random/boot_id`.
 #[must_use]
