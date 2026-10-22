@@ -326,8 +326,9 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
     Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
 }
 
-/// The directory the pane's foreground process is in RIGHT NOW (SMOODEV-4111)
-/// — where a user who `cd`'d inside a shell session actually is, which is
+/// The directory the pane's foreground process is in RIGHT NOW (SMOODEV-4111).
+///
+/// That is where a user who `cd`'d inside a shell session actually is, and
 /// what a split or a new shell next to it should open in. tmux reads it from
 /// the process table, so it is live without the shell's cooperation (no
 /// OSC 7 needed). `None` when tmux has nothing usable to say.
@@ -345,9 +346,9 @@ pub fn pane_current_path(socket: &str, session: &str) -> Result<Option<PathBuf>>
 /// prints an empty line when it cannot read the process's cwd).
 #[must_use]
 pub fn parse_pane_current_path(raw: &str) -> Option<PathBuf> {
+    // tmux is unix-only: an absolute path starts with `/` on every host it runs on.
     let t = raw.trim_end_matches(['\n', '\r']);
-    let p = Path::new(t);
-    (!t.is_empty() && p.is_absolute()).then(|| p.to_path_buf())
+    t.starts_with('/').then(|| PathBuf::from(t))
 }
 
 const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";

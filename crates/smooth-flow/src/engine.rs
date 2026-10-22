@@ -1674,18 +1674,15 @@ impl Engine {
                 !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
             });
             let now = Instant::now();
-            let pending = if can_see_idle {
-                PendingPaste {
-                    prompt: p.to_string(),
-                    at: now + PASTE_MIN_DELAY,
-                    wait_idle_until: Some(now + PASTE_IDLE_WAIT),
-                }
+            let (at, wait_idle_until) = if can_see_idle {
+                (now + PASTE_MIN_DELAY, Some(now + PASTE_IDLE_WAIT))
             } else {
-                PendingPaste {
-                    prompt: p.to_string(),
-                    at: now + PASTE_DELAY,
-                    wait_idle_until: None,
-                }
+                (now + PASTE_DELAY, None)
+            };
+            let pending = PendingPaste {
+                prompt: p.to_string(),
+                at,
+                wait_idle_until,
             };
             self.rt().paste_at.insert(session.id.clone(), pending);
         }
@@ -6019,7 +6016,7 @@ quiet_ms = 300
             .new_session(NewRequest {
                 kind: SessionKind::Shell,
                 argv: Some(vec!["sh".into()]),
-                cwd_of: Some(src.id.clone()),
+                cwd_of: Some(src.id),
                 ..Default::default()
             })
             .unwrap();
@@ -6077,7 +6074,7 @@ quiet_ms = 300
                 kind: SessionKind::Shell,
                 worktree: Some(other.to_string_lossy().into()),
                 argv: Some(vec!["sh".into()]),
-                cwd_of: Some(src.id.clone()),
+                cwd_of: Some(src.id),
                 ..Default::default()
             })
             .unwrap();
