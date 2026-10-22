@@ -617,10 +617,16 @@ struct NewSession: Equatable {
     var prompt: String?
     var argv: [String]?
     var title: String?
+    /// SMOODEV-4111: start in this session's LIVE working directory (the
+    /// engine asks tmux) when `worktree` is nil — how a split opens beside you.
+    var cwdOf: String?
 
     var fields: [String: Any] {
-        ["kind": kind, "worktree": worktree as Any, "project": project as Any, "pearl_id": pearlId as Any,
-         "prompt": prompt as Any, "argv": argv as Any, "title": title as Any]
+        var f: [String: Any] = ["kind": kind, "worktree": worktree as Any, "project": project as Any, "pearl_id": pearlId as Any,
+                                "prompt": prompt as Any, "argv": argv as Any, "title": title as Any]
+        // Additive and off the wire when unset, so older engines see the frame unchanged.
+        if let cwdOf { f["cwd_of"] = cwdOf }
+        return f
     }
 }
 

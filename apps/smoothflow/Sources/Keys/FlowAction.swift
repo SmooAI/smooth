@@ -7,8 +7,9 @@ import Foundation
 /// job — nothing else has to be told about it.
 enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     // Session
-    case newSession
     case newShell
+    case newShellInDirectory
+    case newSession
     case fanOut
     case steerFocused
     case steerAll
@@ -32,6 +33,11 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     case splitDown
     case splitLeft
     case splitUp
+    /// ⌘D / ⌘⇧D (SMOODEV-4111): the cmux/Ghostty split chords, kept as
+    /// second bindings of Split Right / Split Down now that the arrows are
+    /// the primary set. Their own rows so either can be rebound or cleared.
+    case splitRightAlias
+    case splitDownAlias
     case focusPaneLeft
     case focusPaneRight
     case focusPaneUp
@@ -80,6 +86,10 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     /// how every review tool works.
     var isViewScoped: Bool { category == .diff }
 
+    /// A second binding of another action: it keeps a (hidden) menu item so
+    /// its chord works, but the menu lists the action once.
+    var isAlias: Bool { self == .splitRightAlias || self == .splitDownAlias }
+
     /// The Client Spec's name for a diff action (`spec/vectors/diff.json`).
     var diffSpecName: String? {
         switch self {
@@ -100,13 +110,13 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
 
     var category: Category {
         switch self {
-        case .newSession, .newShell, .fanOut, .steerFocused, .steerAll, .allow, .deny, .killResume, .kill, .closeOut,
+        case .newSession, .newShell, .newShellInDirectory, .fanOut, .steerFocused, .steerAll, .allow, .deny, .killResume, .kill, .closeOut,
              .focusSession1, .focusSession2, .focusSession3, .focusSession4, .focusSession5,
              .focusSession6, .focusSession7, .focusSession8, .focusSession9:
             .session
         case .newTab, .closePane, .closeTab, .previousTab, .nextTab:
             .tabs
-        case .splitRight, .splitDown, .splitLeft, .splitUp,
+        case .splitRight, .splitDown, .splitLeft, .splitUp, .splitRightAlias, .splitDownAlias,
              .focusPaneLeft, .focusPaneRight, .focusPaneUp, .focusPaneDown,
              .zoomPane, .equalizePanes:
             .splits
@@ -122,8 +132,9 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     /// so the file can rebind any single one of them.
     var title: String {
         switch self {
-        case .newSession: return "New Session…"
-        case .newShell: return "New Shell Here"
+        case .newSession: return "New Agent Session…"
+        case .newShell: return "New Shell"
+        case .newShellInDirectory: return "New Shell in Directory…"
         case .fanOut: return "Fan Out…"
         case .steerFocused: return "Steer Focused…"
         case .steerAll: return "Steer All Working"
@@ -141,6 +152,8 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .splitDown: return "Split Down"
         case .splitLeft: return "Split Left"
         case .splitUp: return "Split Up"
+        case .splitRightAlias: return "Split Right (Alternate)"
+        case .splitDownAlias: return "Split Down (Alternate)"
         case .focusPaneLeft: return "Focus Pane Left"
         case .focusPaneRight: return "Focus Pane Right"
         case .focusPaneUp: return "Focus Pane Up"
@@ -195,14 +208,20 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     ///   empties: last pane closes the tab, and the last pane of the last tab
     ///   empties rather than taking the window (th-96fcb7). ⌘⇧W
     ///   keeps its place as "close the whole tab, splits and all".
-    /// - **⌘D is Split Right and ⌘⇧D is Split Down**, matching cmux/Ghostty,
-    ///   rather than one untyped "Split Surface". The other two directions are
-    ///   ⌘⇧← and ⌘⇧↑; ⌘⇧→ / ⌘⇧↓ are left free for anyone who wants the
-    ///   symmetric four-arrow set instead of ⌘D/⌘⇧D.
+    /// - **⌘N is a plain shell, now** (SMOODEV-4111). SmoothFlow starts like
+    ///   a terminal: ⌘N opens a shell in a new tab at once — no sheet — in the
+    ///   focused pane's current directory. The agent dialog is opt-in, on
+    ///   ⌃⌘N (⌥⌘N is Deny) and the sidebar's + menu.
+    /// - **⌘⇧ + arrow splits that way**, all four directions, and the new
+    ///   pane is a NEW shell in the focused pane's current directory. ⌘D and
+    ///   ⌘⇧D stay as Split Right / Split Down aliases (cmux/Ghostty muscle
+    ///   memory). These beat Ghostty's own ⌘⇧↑/↓ (jump_to_prompt): menu key
+    ///   equivalents are matched before the surface's keyDown ever runs.
     var defaultChord: KeyChord? {
         switch self {
-        case .newSession: return KeyChord("n", command: true)
-        case .newShell: return KeyChord("t", command: true, shift: true)
+        case .newShell: return KeyChord("n", command: true)
+        case .newShellInDirectory: return nil
+        case .newSession: return KeyChord("n", command: true, control: true)
         case .fanOut: return KeyChord("n", command: true, shift: true)
         case .steerFocused: return KeyChord("enter", command: true)
         case .steerAll: return KeyChord("enter", command: true, option: true)
@@ -218,10 +237,12 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
         case .previousTab: return KeyChord("[", command: true, shift: true)
         case .nextTab: return KeyChord("]", command: true, shift: true)
 
-        case .splitRight: return KeyChord("d", command: true)
-        case .splitDown: return KeyChord("d", command: true, shift: true)
+        case .splitRight: return KeyChord("right", command: true, shift: true)
+        case .splitDown: return KeyChord("down", command: true, shift: true)
         case .splitLeft: return KeyChord("left", command: true, shift: true)
         case .splitUp: return KeyChord("up", command: true, shift: true)
+        case .splitRightAlias: return KeyChord("d", command: true)
+        case .splitDownAlias: return KeyChord("d", command: true, shift: true)
         case .focusPaneLeft: return KeyChord("left", command: true, option: true)
         case .focusPaneRight: return KeyChord("right", command: true, option: true)
         case .focusPaneUp: return KeyChord("up", command: true, option: true)
@@ -260,7 +281,11 @@ enum FlowAction: String, CaseIterable, Identifiable, Sendable {
     /// where the title alone is not enough.
     var note: String? {
         switch self {
-        case .newShell: return "A shell session in the focused session's worktree, in a new tab."
+        case .newShell: return "A shell in a new tab, opened at once: in the focused pane's current directory, else the last directory you opened, else your home."
+        case .newShellInDirectory: return "A shell in a new tab, in a directory you pick. The pick is remembered for the next ⌘N."
+        case .newSession: return "The agent dialog: pick a harness, a directory and a prompt."
+        case .splitRight, .splitLeft, .splitUp, .splitDown: return "A new shell beside the focused pane, in that pane's current directory."
+        case .splitRightAlias, .splitDownAlias: return "A second chord for the same split."
         case .newTab: return "Another surface layout over the same fleet — tabs hold panes, not sessions."
         case .closePane: return "Closes the focused pane; the tab collapses when it empties, and the last pane just empties — the window stays. Asks first when a live session is on screen."
         case .closeTab: return "Closes the whole tab, splits and all."

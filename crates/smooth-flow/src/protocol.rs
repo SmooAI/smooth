@@ -71,6 +71,12 @@ pub enum ClientFrame {
         /// owns `tmux -L smoothflow` so TCC attribution holds.
         #[serde(default)]
         tmux_socket: Option<String>,
+        /// Additive (SMOODEV-4111): start in the live working directory of
+        /// this existing session when `worktree` is absent — the macOS
+        /// shell's split / ⌘N "new shell where I am". Omitted from the wire
+        /// when unset, so older engines and clients see the frame unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd_of: Option<String>,
     },
     #[serde(rename = "flow.send")]
     Send { id: String, text: String },
@@ -725,6 +731,18 @@ mod tests {
                 argv: None,
                 title: None,
                 tmux_socket: Some("smoothflow".into()),
+                cwd_of: None,
+            },
+            ClientFrame::New {
+                kind: SessionKind::Shell,
+                worktree: None,
+                project: None,
+                pearl_id: None,
+                prompt: None,
+                argv: None,
+                title: None,
+                tmux_socket: None,
+                cwd_of: Some("fs-0123abcd".into()),
             },
             ClientFrame::Send {
                 id: "a".into(),
@@ -986,6 +1004,23 @@ mod tests {
     fn kill_resume_defaults_false() {
         let f = parse_client_frame(r#"{"type":"flow.kill","id":"x"}"#).unwrap().unwrap();
         assert_eq!(f, ClientFrame::Kill { id: "x".into(), resume: false });
+    }
+
+    /// SMOODEV-4111: `cwd_of` is additive — a `flow.new` from an older
+    /// client (phone, `th flow`, MCP) parses with it unset, and a frame
+    /// without it serializes exactly as before.
+    #[test]
+    fn new_cwd_of_is_additive() {
+        let old = parse_client_frame(r#"{"type":"flow.new","kind":"shell","worktree":"/w"}"#).unwrap().unwrap();
+        let ClientFrame::New { cwd_of, worktree, .. } = &old else { panic!("{old:?}") };
+        assert_eq!((cwd_of.as_deref(), worktree.as_deref()), (None, Some("/w")));
+        assert!(serde_json::to_value(&old).unwrap().get("cwd_of").is_none(), "unset ⇒ off the wire");
+
+        let new = parse_client_frame(r#"{"type":"flow.new","kind":"shell","cwd_of":"fs-0123abcd"}"#)
+            .unwrap()
+            .unwrap();
+        let ClientFrame::New { cwd_of, worktree, .. } = &new else { panic!("{new:?}") };
+        assert_eq!((cwd_of.as_deref(), worktree.as_deref()), (Some("fs-0123abcd"), None));
     }
 
     /// th-89eb13: `home` rides on the hello when known, is omitted when not,

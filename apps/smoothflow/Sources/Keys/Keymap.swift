@@ -69,6 +69,12 @@ struct Keymap: Equatable, Sendable {
         return conflicts(scoped: action.isViewScoped)[c]?.filter { $0 != action } ?? []
     }
 
+    /// The app-wide (menu) action a chord fires, if any — how the terminal
+    /// surface hands an app shortcut back instead of feeding it to Ghostty.
+    func appAction(for chord: KeyChord) -> FlowAction? {
+        FlowAction.allCases.first { !$0.isViewScoped && self.chord(for: $0) == chord }
+    }
+
     /// The view-scoped action a key press fires inside the diff viewer.
     func diffAction(for chord: KeyChord) -> FlowAction? {
         FlowAction.allCases.first { $0.isViewScoped && self.chord(for: $0) == chord }
@@ -209,6 +215,7 @@ final class KeymapStore: ObservableObject {
     }
 
     func chord(for action: FlowAction) -> KeyChord? { map.chord(for: action) }
+    func appAction(for chord: KeyChord) -> FlowAction? { map.appAction(for: chord) }
 
     func set(_ action: FlowAction, to chord: KeyChord?) {
         map.set(action, to: chord)

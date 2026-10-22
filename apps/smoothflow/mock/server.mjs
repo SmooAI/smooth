@@ -332,18 +332,7 @@ function handle(c, m) {
             return;
         }
         case 'flow.new': {
-            const id = newId();
-            const n = mk(id, {
-                kind: m.kind || 'claude',
-                pearl_id: m.pearl_id,
-                title: m.title || m.prompt?.slice(0, 40) || m.kind,
-                state: 'starting',
-                worktree: m.worktree || `${HOME}/dev/smooai/smooth-${m.pearl_id || id}`,
-                argv: m.argv || ['claude', '--session-id', '…', ...(m.prompt ? [m.prompt] : [])],
-            });
-            sessions.set(id, n);
-            sessionChanged(n);
-            setTimeout(() => sessionChanged(n, { state: 'working' }), 1200);
+            newSession(m);
             return;
         }
         case 'flow.fanout.new': {
@@ -499,6 +488,27 @@ setInterval(() => {
         });
 }, 45000);
 
+// flow.new (WS) and POST /api/flow/sessions (HTTP) share this. `cwd_of`
+// (SMOODEV-4111) starts in that session's live cwd — the mock has no tmux,
+// so it is the source session's worktree.
+function newSession(m) {
+    const id = newId();
+    const kind = m.kind || 'claude';
+    const shell = kind === 'shell';
+    const n = mk(id, {
+        kind,
+        pearl_id: m.pearl_id,
+        title: m.title || m.prompt?.slice(0, 40) || kind,
+        state: shell ? 'idle' : 'starting',
+        worktree: m.worktree || (m.cwd_of && sessions.get(m.cwd_of)?.worktree) || `${HOME}/dev/smooai/smooth-${m.pearl_id || id}`,
+        argv: m.argv || (shell ? ['zsh', '-l'] : ['claude', '--session-id', '…', ...(m.prompt ? [m.prompt] : [])]),
+    });
+    sessions.set(id, n);
+    sessionChanged(n);
+    if (!shell) setTimeout(() => sessionChanged(n, { state: 'working' }), 1200);
+    return n;
+}
+
 // ---------- phone pairing state (th-d98fde) ----------
 const pendingPairs = new Map();
 const pairings = new Map([
@@ -527,6 +537,21 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/flow\/sessions\/([^/]+)\/handoff$/))) {
         const s = sessions.get(m[1]);
         return s ? json(200, handoff(s)) : json(404, { code: 'not_found', message: m[1] });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/flow/sessions') {
+        let raw = '';
+        req.on('data', (chunk) => (raw += chunk));
+        req.on('end', () => {
+            let body = {};
+            try {
+                body = raw ? JSON.parse(raw) : {};
+            } catch {
+                return json(400, { error: 'invalid JSON body' });
+            }
+            if (body.cwd_of && !body.worktree && !sessions.has(body.cwd_of)) return json(404, { error: `no such session: ${body.cwd_of}` });
+            json(200, { session: newSession(body) });
+        });
+        return;
     }
     if (req.method === 'POST' && url.pathname === '/api/flow/hooks') return json(200, {});
     // th-e126cc HTTP twin of flow.close: {id, pearl_closed, worktree_removed, branch_deleted}.

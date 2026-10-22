@@ -55,6 +55,30 @@ final class FlowClient {
         return try JSONDecoder().decode(Handoff.self, from: data)
     }
 
+    /// `POST /api/flow/sessions` — `flow.new` over HTTP, for the callers that
+    /// must know WHICH session they made: the reply names it, so ⌘N / a
+    /// split puts it in the pane that asked (SMOODEV-4111). A WebSocket
+    /// `flow.new` only broadcasts, and another client's session can land first.
+    func createSession(_ n: NewSession) async throws -> Session {
+        guard let address else { throw URLError(.cannotConnectToHost) }
+        var req = URLRequest(url: address.httpBase.appendingPathComponent("api/flow/sessions"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let t = address.token { req.setValue(t, forHTTPHeaderField: "X-Smooth-Token") }
+        req.httpBody = try JSONSerialization.data(withJSONObject: n.fields.compactMapValues { v -> Any? in
+            if case Optional<Any>.none = v { return nil }
+            return v
+        })
+        let (data, resp) = try await session.data(for: req)
+        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 {
+            struct Refusal: Decodable { var error: String }
+            if let r = try? JSONDecoder().decode(Refusal.self, from: data) { throw FlowClientError.refused(r.error) }
+            throw URLError(code == 401 ? .userAuthenticationRequired : .badServerResponse)
+        }
+        struct Reply: Decodable { var session: Session }
+        return try JSONDecoder().decode(Reply.self, from: data).session
+    }
+
     /// `GET /api/flow/infer?cwd=…` — the New Session dialog's read-only
     /// context. `nil` infers from the daemon's own workspace (th-c103c1).
     func infer(cwd: String?) async throws -> InferredContext {
@@ -200,5 +224,16 @@ final class FlowClient {
             Task { @MainActor in self?.open() }
         }
         backoff = min(backoff * 2, 15)
+    }
+}
+
+enum FlowClientError: LocalizedError {
+    /// The engine said no, in its own words (`{"error": …}`).
+    case refused(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .refused(msg): msg
+        }
     }
 }

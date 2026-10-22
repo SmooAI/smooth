@@ -152,7 +152,12 @@ final class GhosttyRuntime {
         case GHOSTTY_ACTION_CELL_SIZE:
             DispatchQueue.main.async { view.cellSizeChanged() }
             return true
-        case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY, GHOSTTY_ACTION_PWD,
+        case GHOSTTY_ACTION_PWD:
+            guard let p = action.action.pwd.pwd else { return true }
+            let pwd = String(cString: p)
+            DispatchQueue.main.async { view.pwdChanged(pwd) }
+            return true
+        case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY,
              GHOSTTY_ACTION_MOUSE_OVER_LINK, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
              GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_SELECTION_CHANGED:
             return true
@@ -178,7 +183,10 @@ final class GhosttyRuntime {
         case GHOSTTY_ACTION_CELL_SIZE:
             view.cellSizeChanged()
             return true
-        case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY, GHOSTTY_ACTION_PWD,
+        case GHOSTTY_ACTION_PWD:
+            if let p = action.action.pwd.pwd { view.pwdChanged(String(cString: p)) }
+            return true
+        case GHOSTTY_ACTION_RENDER, GHOSTTY_ACTION_MOUSE_VISIBILITY,
              GHOSTTY_ACTION_MOUSE_OVER_LINK, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_RENDERER_HEALTH,
              GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_SELECTION_CHANGED:
             return true

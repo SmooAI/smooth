@@ -914,6 +914,23 @@ still that pearl's worktree, the title is just unknown.
 without sending them. An explicit value always wins. `th flow new` with no
 arguments starts a session in the CURRENT directory.
 
+### Where a shell opens — `cwd_of` (SMOODEV-4111)
+
+`flow.new` (and `POST /api/flow/sessions`) take an additive `cwd_of: <session
+id>`: with no `worktree` and no `pearl_id`, the new session starts in that
+session's **live** working directory. `Engine::live_cwd` asks the session's
+host — tmux answers `display-message -p '#{pane_current_path}'`, the `pty`
+host the pid's cwd (`lsof`) — and falls back to the row's worktree when the
+host can't tell, the directory no longer exists, or the session has finished.
+An explicit `worktree` (or a pearl) always wins, and an unknown id is a
+`no such session` error. The field is omitted from the wire when unset, so
+older clients and engines see `flow.new` unchanged.
+
+This is how the macOS app is terminal-first: ⌘N and every ⌘⇧-arrow split
+start a plain shell with `cwd_of` the focused pane's session, over HTTP so the
+reply names the session and it lands in the pane that asked. See
+[SmoothFlow-macOS.md § Keyboard](SmoothFlow-macOS.md#keyboard).
+
 ### Where the session runs — the repo index (th-145e6b)
 
 The New Session sheet's **Directory** field searches every git checkout
