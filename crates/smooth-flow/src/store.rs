@@ -513,6 +513,15 @@ impl FlowStore {
         if !has_host {
             conn.execute("ALTER TABLE sessions ADD COLUMN host TEXT", []).context("add host")?;
         }
+        // th-0937a1: the boot a row was launched in; NULL = unknown (rows
+        // from before the column, or a machine whose boot id is unreadable).
+        let has_boot = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'boot_id'")?
+            .exists([])
+            .context("probe boot_id column")?;
+        if !has_boot {
+            conn.execute("ALTER TABLE sessions ADD COLUMN boot_id TEXT", []).context("add boot_id")?;
+        }
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
@@ -1012,6 +1021,44 @@ impl FlowStore {
             .context("get session by hook token")
     }
 
+    /// Record the boot `id` was (re)launched in (th-0937a1). Kept off
+    /// [`Session`]: it is the engine's business, not the wire's.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_boot_id(&self, id: &str, boot_id: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE sessions SET boot_id = ?2 WHERE id = ?1", params![id, boot_id])
+            .context("set boot_id")?;
+        Ok(())
+    }
+
+    /// The boot `id` was last launched in; `None` when unknown.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn boot_id(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT boot_id FROM sessions WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .context("get boot_id")?
+            .flatten())
+    }
+
+    /// Remove a `config` value, returning it (th-0937a1: the clean-quit
+    /// marker is read once).
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn take_config(&self, key: &str) -> Result<Option<String>> {
+        let value = self.get_config(key)?;
+        if value.is_some() {
+            self.conn.execute("DELETE FROM config WHERE key = ?1", params![key]).context("delete config")?;
+        }
+        Ok(value)
+    }
+
     /// Bind a harness session id learned from its first hook to a row that
     /// launched without one (opencode / codex can't pre-assign ids).
     ///
@@ -1218,6 +1265,10 @@ mod tests {
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "inferred", "th-5c5457 column migrated too");
         assert_eq!(st.get("fs-old").unwrap().unwrap().owner, None, "th-4f7866 column migrated too");
         assert_eq!(st.get("fs-old").unwrap().unwrap().host, HostKind::Tmux, "th-dc9822: no host column = tmux");
+        assert_eq!(st.boot_id("fs-old").unwrap(), None, "th-0937a1: no boot recorded = unknown");
+        st.set_boot_id("fs-old", Some("boot-1")).unwrap();
+        assert_eq!(st.boot_id("fs-old").unwrap().as_deref(), Some("boot-1"));
+        assert_eq!(st.boot_id("fs-missing").unwrap(), None);
         st.set_state_source("fs-old", "hooks").unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "hooks");
         let st2 = FlowStore::open(&path).unwrap(); // idempotent
@@ -1352,6 +1403,17 @@ mod tests {
         assert!(!S::Done.can_transition_to(S::Working));
         assert!(!S::Dead.can_transition_to(S::Idle));
         assert!(!S::Dead.can_transition_to(S::Done));
+    }
+
+    /// th-0937a1: a `config` value taken is gone, and taking nothing is fine.
+    #[test]
+    fn take_config_reads_once() {
+        let st = store();
+        assert_eq!(st.take_config("k").unwrap(), None);
+        st.set_config("k", "v").unwrap();
+        assert_eq!(st.take_config("k").unwrap().as_deref(), Some("v"));
+        assert_eq!(st.take_config("k").unwrap(), None);
+        assert_eq!(st.get_config("k").unwrap(), None);
     }
 
     #[test]

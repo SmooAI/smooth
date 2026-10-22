@@ -1374,6 +1374,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // Big Smooth the in-process `flow_*` tools over this same engine.
     let (flow_router, flow_engine) =
         crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
+    // th-0937a1: told at shutdown, so the next start reads the fleet's
+    // missing processes as interrupted rather than crashed.
+    let flow_shutdown = flow_engine.clone();
     // The host hook chain, built ONCE and shared by the server's per-turn
     // registry (`.tool_hooks` below) and every sidekick call (th-8d1951), so a
     // sidekick meets the same gate, the same approver channel and the same
@@ -1611,6 +1614,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 
     shutdown_signal().await;
     tracing::info!("shutdown signal received");
+    match tokio::task::spawn_blocking(move || flow_shutdown.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "flow: could not record the clean shutdown — the next start may read the fleet as crashed"),
+        Err(e) => tracing::warn!(error = %e, "flow: recording the clean shutdown panicked"),
+    }
     if holds_flow_addr {
         if let Some(dir) = &flow_addr_dir {
             if crate::flow_addr::release(dir, &flow_addr) {
