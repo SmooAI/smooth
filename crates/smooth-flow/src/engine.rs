@@ -6484,7 +6484,7 @@ quiet_ms = 300
         cfg.home = tmp.join("home");
         cfg.daemon_url = Some("http://127.0.0.1:1".into());
         cfg.host = tmux.clone();
-        cfg.pty_host = pty.cloned();
+        cfg.pty_host = pty.map(|p| p.clone() as Arc<dyn SessionHost>);
         Engine::open(cfg).unwrap()
     }
 
