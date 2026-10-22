@@ -442,15 +442,16 @@ async fn scrape_harness_state_is_inferred_from_the_pane(host: Host) {
     // row is `restorable`; resuming it is the user's call.
     let (status, _) = d.post(&format!("/api/flow/sessions/{id}/send"), json!({"text":"/crash 4"})).await;
     assert_eq!(status, 200);
-    let dead = d.wait_until(&id, "restorable", WAIT, |s| s["attention"]["reason"] == "restorable").await;
-    assert_eq!(state(&dead), "dead", "{dead}");
-    assert_eq!(dead["exit_code"], 4, "{dead}");
+    let parked = d.wait_until(&id, "restorable", WAIT, |s| s["attention"]["reason"] == "restorable").await;
+    assert_eq!(state(&parked), "needs_you", "{parked}");
+    assert_eq!(parked["exit_code"], 4, "{parked}");
     tokio::time::sleep(FIRST_RESUME + TICK).await;
-    assert_eq!(state(&d.session(&id).await), "dead", "never relaunched on its own");
+    let still = d.session(&id).await;
+    assert_eq!(still["attention"]["reason"], "restorable", "never relaunched on its own: {still}");
     assert_eq!(d.agent_log().matches("cmd /work s1").count(), 1, "the prompt ran once:\n{}", d.agent_log());
     // An explicit resume relaunches the ORIGINAL argv (resume=0).
     d.kill(&id, true).await;
-    let relaunched = d.wait_until(&id, "relaunched", WAIT, |s| state(s) != "dead").await;
+    let relaunched = d.wait_until(&id, "relaunched", WAIT, |s| s["attention"].is_null()).await;
     assert_eq!(relaunched["argv"], s["argv"], "relaunch_command reuses the launch argv: {relaunched}");
     d.wait_screen(&id, "resume=0 mode=scrape", WAIT).await;
     d.kill(&id, false).await;

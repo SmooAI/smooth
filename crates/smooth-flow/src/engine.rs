@@ -2766,7 +2766,7 @@ impl Engine {
         // not in it, and the stale copy sent the row to `on_death` instead.
         let fresh = self.with_store(|st| st.get(&s.id))?;
         let Some(s) = fresh.as_ref() else { return Ok(()) };
-        if s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+        if s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
             return Ok(());
         }
         let Some(t) = s.tmux_session.as_deref() else { return Ok(()) };
@@ -2921,7 +2921,7 @@ impl Engine {
     /// boot or outlived a clean quit, was interrupted. An agent whose
     /// conversation can be resumed is scheduled to resume, [`RESTORE_STAGGER`]
     /// apart, without counting against rule 2's crash budget; one that cannot
-    /// is left `dead` + [`RESTORABLE`]. Shells, and rows nothing says were
+    /// is left `needs_you` + [`RESTORABLE`]. Shells, and rows nothing says were
     /// interrupted, are left to supervision as before. Consumes this daemon's
     /// clean-quit marker.
     fn restore_interrupted(&self) -> Result<()> {
@@ -2930,7 +2930,7 @@ impl Engine {
         let registry = self.registry();
         let mut due = Vec::new();
         for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
-            if s.adopted || !s.kind.is_agent() || s.attention.as_ref().is_some_and(|a| a.reason == "held") {
+            if s.adopted || !s.kind.is_agent() || s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
                 continue;
             }
             let (Some(t), Ok(host)) = (s.tmux_session.as_deref(), self.host_for(&s)) else {
@@ -2949,7 +2949,7 @@ impl Engine {
             if !crate::restore::resume_continues(&s, &registry) {
                 tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session cannot be resumed — restorable");
                 let att = Attention::new(RESTORABLE).with_detail(format!("{}; {NOT_RESENT}", why.describe()));
-                self.set_state(&s.id, SessionState::Dead, Some(att))?;
+                self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
                 continue;
             }
             let at = Instant::now() + RESTORE_STAGGER.saturating_mul(u32::try_from(due.len()).unwrap_or(u32::MAX));
@@ -3017,7 +3017,7 @@ impl Engine {
         if crate::restore::relaunch_resends_prompt(s, &self.registry()) {
             self.rt().relaunch_at.remove(&s.id);
             let att = Attention::new(RESTORABLE).with_detail(format!("{detail_exit}; {NOT_RESENT}"));
-            self.set_state(&s.id, SessionState::Dead, Some(att))?;
+            self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
             return Ok(());
         }
         let attempt = {
@@ -6565,7 +6565,7 @@ quiet_ms = 300
         }
 
         let row = e.get(&idless.id).unwrap().unwrap();
-        assert_eq!(row.state, SessionState::Dead);
+        assert_eq!(row.state, SessionState::NeedsYou, "waiting on the user, not finished");
         let att = row.attention.unwrap();
         assert_eq!(att.reason, RESTORABLE);
         let detail = att.detail.unwrap();
@@ -6671,12 +6671,20 @@ quiet_ms = 300
         host.die(&host_ref(&idless), PaneDeath::Code(1));
         e.supervise_tick().unwrap();
         let row = e.get(&idless.id).unwrap().unwrap();
-        assert_eq!(row.state, SessionState::Dead, "{row:?}");
+        assert_eq!(row.state, SessionState::NeedsYou, "{row:?}");
         let att = row.attention.unwrap();
         assert_eq!(att.reason, RESTORABLE);
         assert!(att.detail.unwrap().starts_with("exit 1; not relaunched"));
         assert!(!e.rt().relaunch_at.contains_key(&idless.id));
+        // Supervision leaves it parked: no relaunch, no second death.
+        e.supervise_tick().unwrap();
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&idless.id).unwrap().unwrap().attention.unwrap().reason, RESTORABLE);
         assert_eq!(host.calls().iter().filter(|c| c.starts_with("launch ")).count(), 1);
+        // The user resumes it: the original argv, and the row is live again.
+        let resumed = e.kill(&idless.id, true).unwrap();
+        assert_eq!((resumed.state, resumed.attention), (SessionState::Starting, None));
+        assert_eq!(host.session(&host_ref(&idless)).unwrap().argv, ["/nonexistent/codex", "write the tests"]);
         // With an id it is a resume, as before.
         let bound = agent(&e, tmp.path(), SessionKind::Codex, &["/nonexistent/codex", "write the tests"]);
         e.with_store(|st| st.set_agent_session(&bound.id, "thread-2")).unwrap();

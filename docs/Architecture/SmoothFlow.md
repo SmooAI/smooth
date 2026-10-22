@@ -1048,7 +1048,7 @@ same brand-new harness session into two rows.
    backoff, then `dead` with attention `crashed`. Shells never resume. An
    agent whose relaunch would be its original argv with the prompt in it (no
    harness session id, and its manifest neither continues the latest
-   conversation nor pastes the prompt) is never relaunched: `dead`, attention
+   conversation nor pastes the prompt) is never relaunched: `needs_you`, attention
    `restorable` (see [Restore](#restore)).
 3. Usage limit ⇒ schedule, not give up: parse the reset time
    (`limit::parse_reset_at` — "resets at 4pm", "in 45 minutes"; fallback 1 h),
@@ -1091,8 +1091,8 @@ manifest with a harness session id, or `continue_latest`) goes `starting` with
 attention `restoring` and is resumed through the manifest's `[resume]` argv,
 300 ms apart, without counting against rule 2's three resumes. This covers
 `pty` rows too, which a lone vanish reads as unknown and never resumes.
-Without a way to continue the conversation the row goes `dead` with attention
-`restorable`: relaunching the original argv would send its prompt again, so
+Without a way to continue the conversation the row goes `needs_you` with
+attention `restorable` (supervision leaves it parked): relaunching the original argv would send its prompt again, so
 that is the user's call (`kill --resume`). Shells are left to supervision
 (they die, as before) until their working directory is restored too (phase 2).
 

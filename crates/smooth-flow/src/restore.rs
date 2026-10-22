@@ -11,7 +11,7 @@
 //! - **crashed** — anything else, as before.
 //!
 //! Either way an agent is never relaunched with its original argv when that
-//! argv carries the prompt: the row is left `dead` with attention
+//! argv carries the prompt: the row is left `needs_you` with attention
 //! [`RESTORABLE`] instead, and resuming it is the user's call.
 
 use std::path::Path;
