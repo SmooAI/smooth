@@ -263,9 +263,13 @@ pub fn tail(s: &str, max: usize) -> String {
 /// children that outlive the `sh` we spawned; killing only `sh` leaves a
 /// server holding the port for the next scenario.
 fn kill_group(pid: Option<u32>) {
+    // `process_group(0)` is unix-only, so there is no group to kill elsewhere.
+    #[cfg(unix)]
     if let Some(pid) = pid {
         let _ = std::process::Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
     }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 fn shell(run: &str, cwd: &Path) -> tokio::process::Command {
@@ -476,6 +480,8 @@ mod tests {
         assert_eq!(tail("abcdef", 3), "…def");
     }
 
+    // Spawns `sh`, which the Windows runner does not have on PATH.
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_check_reports_exit_status_and_output() {
         let d = tempfile::tempdir().unwrap();
@@ -499,6 +505,8 @@ mod tests {
         );
     }
 
+    // Spawns `sh`, which the Windows runner does not have on PATH.
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_check_times_out() {
         let d = tempfile::tempdir().unwrap();
@@ -511,6 +519,8 @@ mod tests {
         assert!(!r.ok && r.detail.contains("timed out"), "{}", r.detail);
     }
 
+    // Spawns `sh`, which the Windows runner does not have on PATH.
+    #[cfg(unix)]
     #[tokio::test]
     async fn serve_check_fails_cleanly_when_nothing_listens() {
         let d = tempfile::tempdir().unwrap();
@@ -525,6 +535,8 @@ mod tests {
         assert!(!r.ok && r.detail.contains("app must boot"), "{}", r.detail);
     }
 
+    // Spawns `sh`, which the Windows runner does not have on PATH.
+    #[cfg(unix)]
     #[tokio::test]
     async fn serve_check_passes_when_the_app_answers_and_tears_it_down() {
         let d = tempfile::tempdir().unwrap();
