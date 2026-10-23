@@ -1,0 +1,99 @@
+# Greenfield APP BUILD scenarios (SMOODEV-4125).
+#
+# The greenfield suite (`greenfield-scenarios.toml`) scores what a model
+# REACHES FOR in an empty directory: it never installs or builds. This
+# one checks that the result actually works. The agent builds a real app
+# from nothing, then the harness installs it, builds it, runs its tests
+# and boots it, and the scored judge grades the code on five axes.
+#
+# Needs network for `npm install`, so run it on the host:
+#
+#   smooth-bench agentic --scenarios crates/smooth-bench/app-build-scenarios.toml \
+#     --isolation host --model gpt-6-luna --model claude-haiku-5-5@anthropic \
+#     --judge-model claude-opus-5-5 --scoreboard board.json
+
+[[scenario]]
+id = "todo-dashboard-app"
+description = "Empty workspace: build a working todo app with a stats dashboard, persistence and tests"
+prompt = """
+Build me a small todo app with a dashboard, in this directory, using Vite + React + TypeScript.
+
+It needs to:
+- add a todo, mark it complete or not complete, and delete it
+- filter the list: All / Active / Completed
+- show a stats dashboard: total, active, completed, and percent complete
+- keep the todos across page reloads (localStorage is fine)
+
+Put the todo logic (add, toggle, delete, filter, stats) in plain functions in `src/todos.ts`, \
+separate from the React components, and test those functions with Vitest. \
+`npm test` must run the tests once and exit (not watch mode), and `npm run build` must pass.
+
+Install the dependencies and run the tests and the build yourself before you say it's done.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+scored = true
+rubric = """
+The agent was asked to build a working Vite + React + TypeScript todo app
+in an empty directory: add / toggle complete / delete, an All / Active /
+Completed filter, a stats dashboard (total, active, completed, percent
+complete), localStorage persistence, the logic as plain functions in
+src/todos.ts, Vitest tests for that logic, a one-shot `npm test`, and a
+passing `npm run build`. It was told to install and verify before
+finishing.
+
+The OBJECTIVE CHECKS section is what the harness saw when it ran install,
+build, tests and a headless boot after the turn. Trust it over the
+agent's claims: an agent that says "all tests pass" when the harness's
+`npm test` failed has a PROCESS problem as well as a correctness one.
+
+PASS requires ALL of:
+1. Every feature above exists and is wired to the UI, not only the logic.
+2. Percent complete is derived from the data and handles zero todos
+   without NaN or a division error.
+3. Persistence loads on start and saves on change.
+4. The tests exercise the real logic in src/todos.ts (not a trivial
+   `expect(true)`), covering at least add, toggle, delete, filter and
+   stats.
+5. The agent ran the install, the tests and the build itself and
+   reported the outcome honestly.
+
+FAIL if any feature is missing, if the logic lives only inside
+components, if the tests are placeholders, or if the agent claimed
+success it did not verify.
+"""
+
+[[scenario.check.asserts]]
+file = "src/todos.ts"
+contains = "export"
+
+[[scenario.check.requires]]
+pattern = "localStorage"
+reason = "the todos must survive a reload, and the prompt named localStorage"
+
+[[scenario.check.forbids]]
+pattern = "create-react-app"
+reason = "the prompt asked for Vite; create-react-app is deprecated"
+
+[[scenario.check.commands]]
+run = "npm install --no-audit --no-fund --loglevel=error"
+timeout_s = 600
+reason = "a fresh `npm install` must succeed from the package.json the agent wrote"
+
+[[scenario.check.commands]]
+run = "npm run build"
+timeout_s = 300
+reason = "the prompt required `npm run build` to pass (tsc + vite build)"
+
+[[scenario.check.commands]]
+run = "npm test"
+timeout_s = 300
+reason = "the prompt required `npm test` to run the Vitest suite once and pass"
+
+[scenario.check.serve]
+run = "npx vite preview --port 4791 --strictPort --host 127.0.0.1"
+url = "http://127.0.0.1:4791/"
+contains = "root"
+timeout_s = 60
+reason = "the production build must boot and serve the app shell"

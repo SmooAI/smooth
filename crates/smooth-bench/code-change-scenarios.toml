@@ -1,0 +1,196 @@
+# CHANGE-EXISTING-CODE scenarios (SMOODEV-4125).
+#
+# Every other suite starts from an empty or near-empty workspace. Most
+# real work does not: it is a small change to code someone else wrote.
+# Each scenario here seeds a small checked-in repo (`fixture`), asks for
+# one change, and then:
+#
+#   - checks the diff stays in scope (`scope`): the files touched,
+#     relative to the seeded repo;
+#   - copies held-out tests over the workspace (`holdout`), including a
+#     pristine copy of the visible tests, so weakening a test cannot help;
+#   - runs `npm test` (`node --test`, zero dependencies, no network);
+#   - asks the scored judge to grade requirements, correctness, code
+#     quality, scope discipline and process, with the diff and the
+#     objective results in front of it.
+#
+#   smooth-bench agentic --scenarios crates/smooth-bench/code-change-scenarios.toml \
+#     --isolation host --model gpt-6-luna --model claude-haiku-5-5@anthropic \
+#     --judge-model claude-opus-5-5 --scoreboard board.json
+#
+# Fixtures live in `fixtures/` (see its README).
+
+# ---------------------------------------------------------------------
+# 1. Add a feature to an existing module, matching its conventions.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "change-add-feature"
+description = "Seeded invoicing lib: add discount codes to the existing module, with tests"
+fixture = "fixtures/invoice-lib"
+holdout = "fixtures/invoice-lib.holdout"
+prompt = """
+This repo is a small invoicing library. Add discount codes to it.
+
+Add a `totalWithDiscount(invoice, code)` function to `src/invoice.js`. It works like `total`, \
+except a discount is taken off the subtotal BEFORE tax:
+- `SAVE10` takes 10% off the subtotal, rounded to the nearest cent
+- `FLAT5` takes $5.00 off the subtotal, but never below zero
+- codes are case-insensitive and ignore surrounding whitespace
+- an unknown code throws an Error whose message contains "unknown discount code"
+- with no code (undefined), it is the same as `total`
+
+Don't change how `total` behaves. Add tests for the new function and make sure `npm test` passes.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+scored = true
+rubric = """
+The agent was asked to add `totalWithDiscount(invoice, code)` to an
+existing invoicing library (money in integer cents): SAVE10 = 10% off the
+subtotal rounded to the nearest cent, FLAT5 = 500 cents off with a floor
+at zero, both BEFORE tax; codes case-insensitive and trimmed; unknown
+codes throw an Error containing "unknown discount code"; no code equals
+`total`. `total` must not change. It was asked to add tests and run them.
+
+The OBJECTIVE CHECKS section includes held-out tests that pin this spec
+exactly. The FILES CHANGED section is the diff against the seeded repo.
+
+PASS requires ALL of:
+1. Every rule above is implemented, including the rounding, the zero
+   floor and the error message.
+2. It reuses the existing helpers (`subtotal`, `taxOn`) instead of
+   duplicating the arithmetic, and matches the repo's style (ESM, cents,
+   JSDoc).
+3. It added real tests for the new function, and `total` is unchanged.
+4. The change is confined to what the task needs (no unrelated rewrites,
+   reformatting or new dependencies).
+
+FAIL if a held-out test failed, if it changed `total`'s behavior, or if
+it claimed tests passed without running them.
+"""
+
+[[scenario.check.asserts]]
+file = "src/invoice.js"
+contains = "totalWithDiscount"
+
+[[scenario.check.commands]]
+run = "npm test"
+timeout_s = 120
+reason = "the held-out discount tests and the original tests must all pass"
+
+[scenario.check.scope]
+allow = ["src/**", "test/**", "README.md"]
+max_changed_files = 5
+
+# ---------------------------------------------------------------------
+# 2. Fix a bug that a visible test already catches.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "change-fix-bug"
+description = "Seeded paginator with an off-by-one: fix it without touching the tests"
+fixture = "fixtures/paginate-bug"
+holdout = "fixtures/paginate-bug.holdout"
+prompt = """
+`npm test` is failing in this repo. Users say page 1 skips the first items, and the last page \
+goes missing when the list doesn't divide evenly into pages. Find the bug and fix it so the \
+tests pass. Don't change the tests.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+scored = true
+rubric = """
+The repo's `paginate(items, page, perPage)` is documented as 1-based. It
+had two bugs: the start index used `page * perPage` instead of
+`(page - 1) * perPage`, and `totalPages` used floor instead of ceil. The
+agent was asked to fix the bug so the tests pass, and not to change the
+tests.
+
+The OBJECTIVE CHECKS section includes held-out edge-case tests (exact
+multiples, a page past the end, an empty list) and a pristine copy of the
+visible tests. The FILES CHANGED section is the diff.
+
+PASS requires ALL of:
+1. Both root causes are fixed in `src/paginate.js` (not patched around
+   with special cases for the visible test inputs).
+2. The fix is minimal: the validation, the return shape and everything
+   else are unchanged.
+3. The visible tests were not edited or deleted. ADDING a regression test
+   is fine and good practice.
+4. The agent ran the tests after the fix and reported the result
+   honestly.
+
+FAIL if any held-out test failed, if a visible test was weakened, or if
+the fix special-cases inputs.
+"""
+
+[[scenario.check.commands]]
+run = "npm test"
+timeout_s = 120
+reason = "the original tests and the held-out edge cases must all pass"
+
+[scenario.check.scope]
+allow = ["src/**", "test/**"]
+max_changed_files = 3
+
+# ---------------------------------------------------------------------
+# 3. Refactor without changing behavior.
+# ---------------------------------------------------------------------
+[[scenario]]
+id = "change-refactor"
+description = "Seeded messy report builder: refactor it with byte-identical output"
+fixture = "fixtures/order-report"
+holdout = "fixtures/order-report.holdout"
+prompt = """
+`src/report.js` works but it's hard to read: `var` everywhere, the order total is computed twice, \
+and the money formatting is copy-pasted three times. Refactor it so it's clean and readable. \
+The output must not change at all, for any input. Keep the same exported function and keep \
+`npm test` passing.\
+"""
+
+[scenario.check]
+kind = "hybrid"
+scored = true
+rubric = """
+The agent was asked to refactor `buildReport(orders)` in
+`src/report.js` for readability (it used `var`, computed each order's
+total twice, and copy-pasted money formatting three times) WITHOUT
+changing its output for any input, keeping the same export.
+
+The OBJECTIVE CHECKS section includes held-out characterization tests
+that pin the original output byte for byte, quirks included: an empty
+list, only cancelled orders, zero-padded cents, an order with no items,
+plain string sort order for regions (uppercase first), exact-match
+`status == 'cancelled'`, large amounts, and no input mutation. The FILES
+CHANGED section is the diff.
+
+PASS requires ALL of:
+1. Every characterization test passes (the behavior is preserved).
+2. It is genuinely cleaner: `const`/`let`, one order-total helper, one
+   money formatter, clear names. Not just `var` swapped for `let`.
+3. It kept the same exported `buildReport` and changed nothing outside
+   the task (no new dependencies, no rewrite of unrelated files).
+4. The agent ran the tests after refactoring.
+
+FAIL if any held-out test failed (it changed behavior, e.g. switched to
+`localeCompare`, `toFixed` or case-insensitive status), or if it is
+barely changed.
+"""
+
+[[scenario.check.asserts]]
+file = "src/report.js"
+contains = "export function buildReport"
+
+[[scenario.check.asserts]]
+file = "src/report.js"
+not_contains = "var "
+
+[[scenario.check.commands]]
+run = "npm test"
+timeout_s = 120
+reason = "the held-out characterization tests pin the original output byte for byte"
+
+[scenario.check.scope]
+allow = ["src/**", "test/**"]
+max_changed_files = 4

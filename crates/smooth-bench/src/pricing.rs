@@ -137,6 +137,31 @@ impl PriceBook {
     }
 }
 
+/// Published list prices for models the bench reaches WITHOUT the gateway
+/// (a `--model id@provider` direct route), so the gateway's price book has
+/// no row for them. USD per token.
+///
+/// Kept deliberately tiny: anything routed through the gateway is priced
+/// by the gateway, which is the source of truth. A model here is one we
+/// call on its vendor's own API with its vendor's own price sheet.
+///
+/// - `claude-haiku-5-5`: $0.10 / $0.50 per MTok for prompts up to 100K
+///   tokens (Anthropic list price; $0.50 / $2.50 above that). Bench turns
+///   stay well under 100K per request, so the base tier applies.
+const DIRECT_LIST_PRICES: &[(&str, f64, f64)] = &[("claude-haiku-5-5", 0.10e-6, 0.50e-6)];
+
+/// List price for a direct-routed model, or `None` when we have none.
+#[must_use]
+pub fn direct_list_price(model: &str) -> Option<ModelPrice> {
+    DIRECT_LIST_PRICES
+        .iter()
+        .find(|(m, _, _)| *m == model)
+        .map(|&(_, input_per_token, output_per_token)| ModelPrice {
+            input_per_token,
+            output_per_token,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +213,14 @@ mod tests {
     fn unknown_model_has_no_price() {
         let b = PriceBook::from_model_info(SAMPLE).unwrap();
         assert_eq!(b.get("nope"), None);
+    }
+
+    #[test]
+    fn haiku_5_5_has_a_direct_list_price() {
+        let p = direct_list_price("claude-haiku-5-5").unwrap();
+        // 1M in + 1M out = $0.10 + $0.50
+        assert!((p.cost(1_000_000, 1_000_000) - 0.60).abs() < 1e-9);
+        assert_eq!(direct_list_price("gpt-6-luna"), None, "gateway models are priced by the gateway");
     }
 
     #[test]
