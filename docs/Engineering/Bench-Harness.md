@@ -341,11 +341,13 @@ Some suites deliberately break the default suite's "reproducible anywhere,
 no real services" rule, so they ship as separate files loaded with
 `--scenarios <path>` rather than in `agentic-scenarios.toml`:
 
-| File                        | What it covers                                                  | Constraints                      |
-| --------------------------- | --------------------------------------------------------------- | -------------------------------- |
-| `frontend-scenarios.toml`   | current-stack React/Next code (`useReactTable` vs stale idioms) | judge/hybrid; pins a library set |
-| `greenfield-scenarios.toml` | build-from-empty steering                                       | judge/hybrid; empty workspace    |
-| `new-tools-scenarios.toml`  | the personal-assistant tools shipped this cycle                 | see below                        |
+| File                         | What it covers                                                  | Constraints                      |
+| ---------------------------- | --------------------------------------------------------------- | -------------------------------- |
+| `frontend-scenarios.toml`    | current-stack React/Next code (`useReactTable` vs stale idioms) | judge/hybrid; pins a library set |
+| `greenfield-scenarios.toml`  | build-from-empty steering                                       | judge/hybrid; empty workspace    |
+| `new-tools-scenarios.toml`   | the personal-assistant tools shipped this cycle                 | see below                        |
+| `app-build-scenarios.toml`   | build a working app from empty; install, build, test, boot it   | scored judge; needs npm network  |
+| `code-change-scenarios.toml` | feature / bug fix / refactor in a seeded repo, held-out tests   | scored judge; Node only          |
 
 **`new-tools-scenarios.toml`** exercises `get_weather`, `get_location`, and
 `present_plan`:
@@ -369,6 +371,75 @@ The bench is single-turn and does not toggle Plan/Auto mode or read the
 `present_plan` **directive**, so the full **Plan → present → accept → execute**
 flow is out of its reach. That flow is covered instead by the daemon WS smoke
 suite — see [[Daemon-WS-Smoke-Test]].
+
+## Building and changing real code (SMOODEV-4125)
+
+The greenfield and frontend suites score what a model _reaches for_ and never
+run the result. These two suites do run it:
+
+```bash
+smooth-bench agentic --isolation host \
+  --scenarios crates/smooth-bench/code-change-scenarios.toml \
+  --model gpt-6-luna --model claude-haiku-5-5@anthropic \
+  --judge-model claude-opus-5-5 --trials 3 --scoreboard board.json
+```
+
+- **`app-build-scenarios.toml`**: `todo-dashboard-app`. The agent builds a Vite +
+  React + TS todo app (add, toggle, delete, an All/Active/Completed filter, a
+  stats dashboard, localStorage) from an empty directory, with the logic in
+  `src/todos.ts` under Vitest. The harness then runs `npm install`, `npm run build`
+  and `npm test`, and boots `vite preview` and polls it.
+- **`code-change-scenarios.toml`** seeds a small repo from `fixtures/<name>/`
+  and asks for one change: `change-add-feature` (discount codes in an invoicing
+  lib), `change-fix-bug` (a paginator off-by-one with a visible failing test)
+  and `change-refactor` (tidy a messy report builder with byte-identical
+  output). After the turn, `fixtures/<name>.holdout/` is copied over the
+  workspace. It holds the held-out tests plus a pristine copy of the visible
+  ones, so weakening a test cannot help. Then `npm test` (`node --test`, no
+  dependencies) runs.
+
+The hybrid check keys these suites add:
+
+| key        | what it does                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------- |
+| `commands` | `sh -c` in the workspace, `CI=1`, own process group, `timeout_s` (default 300); a non-zero exit fails it  |
+| `serve`    | boot `run`, poll `url` (127.0.0.1 only) for a 2xx containing `contains`, then kill the process group      |
+| `scope`    | `allow` globs (`*` within a segment, `**` across segments) plus `max_changed_files`, over the seeded repo |
+| `scored`   | grade with the scored judge, and call it even when an objective check failed                              |
+
+`fixture` and `holdout` are scenario keys, resolved relative to the scenario
+file's directory. `node_modules`, `dist`, `.git` and other tooling output are
+skipped by the diff, the judge's workspace dump and the substring scan.
+
+**The scored judge** gets the transcript, the workspace, the objective-check
+results and the file-level diff against the seeded repo. It returns strict JSON
+with five 1–5 axes (requirements, correctness, code quality, scope
+discipline, process), a PASS/FAIL verdict and a rationale. A trial passes only
+when every objective check passes AND the judge says PASS. Its **quality
+score** is `50 × objective pass share + 50 × (judge mean − 1) / 4`, from 0 to 100. Scoreboards for scored suites carry `quality_score`, `judge_mean` and
+`tokens`; the standard board omits those fields, so the strict decoders in the
+phone apps are unaffected. Use a judge that is not under test
+(`--judge-model claude-opus-5-5`); the judge's own spend is recorded as
+harness spend, not charged to the model under test.
+
+**Routing a model the gateway does not serve.** `--model <model>@<provider>`
+sends that one model through a provider entry in `~/.smooth/providers.json`
+(its URL and key) instead of the LiteLLM gateway. `claude-haiku-5-5@anthropic`
+is the case that motivated it. The model is priced from the gateway when it is
+listed there, otherwise from `pricing::DIRECT_LIST_PRICES`, and is never
+silently priced at $0.
+
+**Adding newly benched models to the published board.** Rendering a two-model
+board directly would replace the whole leaderboard. Merge first:
+
+```bash
+scripts/the-line/merge-model-scores.sh docs/model-leaderboard.json board.json > merged.json
+scripts/the-line/render-model-scores.sh merged.json
+```
+
+The merge refuses boards whose `suite`, `trials` or `scenario_count` differ.
+
+Results: [[../bench-sessions/2026-10-23-luna-haiku-build-and-change]].
 
 ## Related
 
