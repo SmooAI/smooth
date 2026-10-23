@@ -315,11 +315,9 @@ mod tests {
         assert_eq!(priv_bytes.len(), 32);
         // The signer must accept our private key, and derive the same public point.
         let kp = vapid_key_pair(&priv_k).expect("generated private key parses");
-        assert_eq!(
-            kp.public_key().public_key().to_bytes_uncompressed(),
-            pub_bytes,
-            "keypair matches advertised public key"
-        );
+        let derived = web_push_native::p256::PublicKey::from_sec1_bytes(&kp.public_key().to_bytes()).unwrap();
+        let advertised = web_push_native::p256::PublicKey::from_sec1_bytes(&pub_bytes).unwrap();
+        assert_eq!(derived, advertised, "keypair matches advertised public key");
     }
 
     #[test]
