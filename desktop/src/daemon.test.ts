@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { baseUrl, desktopLogPath, isRemote, remoteUrl, resolveAddr, resolveDaemonBin, tccHelperApp, tccOpenArgs } from './daemon.js';
+import { baseUrl, daemonThEnv, desktopLogPath, isRemote, remoteUrl, resolveAddr, newestTh, resolveDaemonBin, tccHelperApp, tccOpenArgs } from './daemon.js';
 
 // A path that does not exist → resolveAddr falls through to its default. Pinning
 // the addrFile keeps these deterministic regardless of any real ~/.smooth/daemon.addr.
@@ -67,4 +67,33 @@ test('tccOpenArgs builds a fresh-instance `open` invocation forwarding the tcc v
 
 test('desktopLogPath lives under ~/.smooth so a Finder-launched daemon logs somewhere findable', () => {
     assert.match(desktopLogPath(), /[/\\]\.smooth[/\\]desktop\.log$/);
+});
+
+// SMOODEV-4114: the daemon's `th` is the newest of brew's and the bundled one.
+const versions: Record<string, string | undefined> = { '/brew/th': '0.81.1', '/app/th': '0.84.1', '/new-brew/th': '0.90.0', '/broken/th': undefined };
+const versionOf = (bin: string) => versions[bin];
+
+test('daemonThEnv never downgrades to an older Homebrew th', () => {
+    const env = daemonThEnv({}, { brew: () => '/brew/th', bundled: () => '/app/th', versionOf });
+    assert.deepEqual(env, { SMOOTH_TH_BIN: '/app/th' });
+});
+
+test('daemonThEnv keeps brew when it is newer or equal', () => {
+    assert.deepEqual(daemonThEnv({}, { brew: () => '/new-brew/th', bundled: () => '/app/th', versionOf }), { SMOOTH_TH_BIN: '/new-brew/th' });
+    const tie = (bin: string) => (bin ? '0.84.1' : undefined);
+    assert.deepEqual(daemonThEnv({}, { brew: () => '/brew/th', bundled: () => '/app/th', versionOf: tie }), { SMOOTH_TH_BIN: '/brew/th' });
+});
+
+test('daemonThEnv: an explicit SMOOTH_TH_BIN wins, and a lone th is used as is', () => {
+    assert.deepEqual(daemonThEnv({ SMOOTH_TH_BIN: '/pinned/th' }, { brew: () => '/brew/th', bundled: () => '/app/th', versionOf }), {});
+    assert.deepEqual(daemonThEnv({}, { brew: () => undefined, bundled: () => '/app/th', versionOf }), { SMOOTH_TH_BIN: '/app/th' });
+    assert.deepEqual(daemonThEnv({}, { brew: () => '/brew/th', bundled: () => undefined, versionOf }), { SMOOTH_TH_BIN: '/brew/th' });
+    assert.deepEqual(daemonThEnv({}, { brew: () => undefined, bundled: () => undefined, versionOf }), {});
+});
+
+test('newestTh prefers the readable version, and the preferred one when neither reads', () => {
+    assert.equal(newestTh('/broken/th', '/app/th', versionOf), '/app/th');
+    assert.equal(newestTh('/brew/th', '/broken/th', versionOf), '/brew/th');
+    assert.equal(newestTh('/broken/th', '/broken/th', versionOf), '/broken/th');
+    assert.equal(newestTh('/broken/th', '/other-broken/th', versionOf), '/broken/th');
 });

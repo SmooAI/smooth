@@ -35,6 +35,8 @@ mod imessage_setup;
 /// SMOODEV-3915: `th install-prompt` — the agent install prompt from the docs.
 mod install_prompt;
 use smooth_tools::mcp_config;
+/// SMOODEV-4114: `th doctor install` — every th / smooth-daemon on the machine.
+mod doctor_install;
 /// th-19dac1: `th harness` — per-provider toolbox setup (EPIC th-1945b9).
 mod harness;
 mod harness_agentic;
@@ -724,6 +726,8 @@ enum Commands {
         /// need a GUI login session.
         #[arg(long)]
         onboard: bool,
+        #[command(subcommand)]
+        cmd: Option<DoctorCommands>,
     },
     /// List skills available in the current workspace.
     ///
@@ -1465,6 +1469,23 @@ enum ApiCommands {
     Observability {
         #[command(subcommand)]
         cmd: smooai::observability::Cmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DoctorCommands {
+    /// Every th / smooth-daemon on this machine, and which daemon runs.
+    ///
+    /// Read-only. Lists each `th` and `smooth-daemon` on PATH and in the known
+    /// installs (Big Smooth.app, SmoothFlow.app, Homebrew, ~/.smooth/bin,
+    /// ~/.smooth/chrome/bin, ~/.cargo/bin) with its version and any non-system
+    /// (Homebrew) dylibs it links; which process holds ~/.smooth/daemon.lock,
+    /// daemon.addr and flow.addr; stale pid files and *.bak leftovers; and flags
+    /// version skew. SMOODEV-4114.
+    Install {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2265,8 +2286,11 @@ async fn run_main() -> Result<()> {
             setup_reminders,
             setup_statusline,
             onboard,
+            cmd,
         }) => {
-            if setup_statusline {
+            if let Some(DoctorCommands::Install { json }) = cmd {
+                doctor_install::run(json)
+            } else if setup_statusline {
                 statusline_setup::run()
             } else if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
