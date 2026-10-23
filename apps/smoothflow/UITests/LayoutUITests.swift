@@ -29,6 +29,32 @@ final class LayoutUITests: FlowUITestCase {
         paneHeaderQuery.allElementsBoundByIndex.map { ($0.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? $0.label }
     }
 
+    /// SMOODEV-4111: ⌘⇧ + arrow splits that way, and the new pane is a NEW
+    /// shell (the mock answers `POST /api/flow/sessions`), not a second view
+    /// of the session it came from.
+    func testCommandShiftArrowsSplitWithANewShell() {
+        selectWorkingSession()
+        XCTAssertEqual(paneCount, 1)
+        app.typeKey(XCUIKeyboardKey.rightArrow, modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil { self.paneCount == 2 }, "⌘⇧→ splits; tree: \(dump())")
+        XCTAssertTrue(waitUntil { self.paneHeaders.contains { $0.lowercased().contains("shell") } }, "a shell in the new pane: \(self.paneHeaders)")
+        app.typeKey(XCUIKeyboardKey.downArrow, modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil { self.paneCount == 3 }, "⌘⇧↓ splits, and beats Ghostty's jump_to_prompt")
+        app.typeKey(XCUIKeyboardKey.upArrow, modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitUntil { self.paneCount == 4 }, "⌘⇧↑ splits")
+    }
+
+    /// ⌘N opens a shell in a new tab at once — no sheet.
+    func testCommandNOpensAShellTabWithNoSheet() {
+        selectWorkingSession()
+        let tabBar = app.windows["SmoothFlow"].descendants(matching: .any)["center.tabbar"]
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(tabBar.waitForExistence(timeout: 10), "⌘N opens a tab; tree: \(dump())")
+        XCTAssertTrue(waitUntil { self.paneHeaders.contains { $0.lowercased().contains("shell") } }, "a shell in it: \(self.paneHeaders)")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "no New Session sheet")
+    }
+
+    /// ⌘D / ⌘⇧D stay as aliases of Split Right / Split Down.
     func testCommandDSplitsRightAndDown() {
         selectWorkingSession()
         XCTAssertEqual(paneCount, 1)
@@ -44,9 +70,9 @@ final class LayoutUITests: FlowUITestCase {
         selectWorkingSession()
         app.typeKey("d", modifierFlags: .command)
         XCTAssertTrue(waitUntil { self.paneCount == 2 })
-        // A split starts on the same session, which is a duplicate view and so
-        // closes silently by design. Point the new pane at a different session
-        // so this is the last view of a live agent — the case that must ask.
+        // A split starts a fresh shell (SMOODEV-4111), which closes silently
+        // at its prompt. Point the new pane at a different session so this is
+        // the last view of a live agent — the case that must ask.
         waitForState("fs-3041bbbb") { $0.hasPrefix("limit") }
         app.staticTexts["sidebar.title.fs-3041bbbb"].click()
         // The header names the session by its PEARL id, not its flow id — so
@@ -132,7 +158,7 @@ final class LayoutUITests: FlowUITestCase {
         filter.typeText("Split Right")
         let chord = settings.descendants(matching: .any)["settings.keyboard.chord.splitRight"]
         XCTAssertTrue(chord.waitForExistence(timeout: 10), "a row for Split Right")
-        XCTAssertEqual(chord.value as? String ?? chord.label, "⌘D")
+        XCTAssertEqual(chord.value as? String ?? chord.label, "⇧⌘→")
         // Reset-all is disabled until something is actually overridden.
         XCTAssertFalse(settings.buttons["settings.keyboard.resetAll"].isEnabled)
     }

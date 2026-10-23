@@ -326,6 +326,31 @@ pub fn pane_meta(socket: &str, session: &str) -> Result<PaneMeta> {
     Ok(parse_pane_meta(&tmux_ok(socket, &["display-message", "-p", "-t", session, META_FORMAT])?))
 }
 
+/// The directory the pane's foreground process is in RIGHT NOW (SMOODEV-4111).
+///
+/// That is where a user who `cd`'d inside a shell session actually is, and
+/// what a split or a new shell next to it should open in. tmux reads it from
+/// the process table, so it is live without the shell's cooperation (no
+/// OSC 7 needed). `None` when tmux has nothing usable to say.
+///
+/// # Errors
+/// When the session is gone or tmux fails.
+pub fn pane_current_path(socket: &str, session: &str) -> Result<Option<PathBuf>> {
+    Ok(parse_pane_current_path(&tmux_ok(
+        socket,
+        &["display-message", "-p", "-t", session, "#{pane_current_path}"],
+    )?))
+}
+
+/// Parse a `#{pane_current_path}` read: an absolute path, else `None` (tmux
+/// prints an empty line when it cannot read the process's cwd).
+#[must_use]
+pub fn parse_pane_current_path(raw: &str) -> Option<PathBuf> {
+    // tmux is unix-only: an absolute path starts with `/` on every host it runs on.
+    let t = raw.trim_end_matches(['\n', '\r']);
+    t.starts_with('/').then(|| PathBuf::from(t))
+}
+
 const DEAD_FORMAT: &str = "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}";
 
 /// `Some(death)` once the pane's process is dead (remain-on-exit keeps the
@@ -862,5 +887,37 @@ mod tests {
         kill_session(&sock, session);
         assert!(!session_alive(&sock, session));
         kill_server(&sock);
+    }
+
+    #[test]
+    fn pane_current_path_parses_only_absolute_paths() {
+        assert_eq!(parse_pane_current_path("/Users/me/dev/x\n"), Some(PathBuf::from("/Users/me/dev/x")));
+        assert_eq!(parse_pane_current_path("/path with spaces"), Some(PathBuf::from("/path with spaces")));
+        assert_eq!(parse_pane_current_path(""), None, "tmux could not read the cwd");
+        assert_eq!(parse_pane_current_path("\n"), None);
+        assert_eq!(parse_pane_current_path("relative/dir"), None);
+    }
+
+    /// SMOODEV-4111: a `cd` inside the pane moves `pane_current_path`, so a
+    /// split opens where the user IS, not where the session launched.
+    #[test]
+    fn live_pane_current_path_follows_cd() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let sock = format!("flow-cwd-{}", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("deeper");
+        std::fs::create_dir_all(&sub).unwrap();
+        let session = "fs-cwdtest";
+        let script = format!("cd '{}' && echo MOVED && sleep 30", sub.display());
+        launch(&sock, session, dir.path(), &["sh".into(), "-c".into(), script]).unwrap();
+        assert!(eventually(|| capture_visible(&sock, session).is_ok_and(|t| t.contains("MOVED"))), "cd ran");
+        let want = sub.canonicalize().unwrap();
+        let got = pane_current_path(&sock, session).unwrap().map(|p| p.canonicalize().unwrap_or(p));
+        kill_session(&sock, session);
+        kill_server(&sock);
+        assert_eq!(got, Some(want));
     }
 }

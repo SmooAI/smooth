@@ -251,6 +251,9 @@ struct NewBody {
     model: Option<String>,
     #[serde(default)]
     tmux_socket: Option<String>,
+    /// SMOODEV-4111: start in this session's live working directory.
+    #[serde(default)]
+    cwd_of: Option<String>,
 }
 
 impl From<NewBody> for NewRequest {
@@ -266,6 +269,7 @@ impl From<NewBody> for NewRequest {
             model: b.model,
             fan_out_id: None,
             tmux_socket: b.tmux_socket,
+            cwd_of: b.cwd_of,
         }
     }
 }
@@ -932,6 +936,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
             argv,
             title,
             tmux_socket,
+            cwd_of,
         } => {
             let req = NewRequest {
                 kind,
@@ -944,6 +949,7 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
                 model: None,
                 fan_out_id: None,
                 tmux_socket,
+                cwd_of,
             };
             let s = run(engine, move |e| e.new_session(req)).await?;
             Ok(vec![ServerFrame::Session { session: s }])

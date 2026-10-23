@@ -36,12 +36,31 @@ struct FleetSidebar: View {
                     }.buttonStyle(.plain).accessibilityIdentifier("sidebar.needsYou")
                 }
             }
-            HStack(spacing: 8) {
-                Button("+ New session") { app.showNewSession() }.keyboardShortcut("n")
-                Button("Fan out") { app.showFanOut() }
-            }.controlSize(.small)
+            newMenu.controlSize(.small)
         }
         .padding(12)
+    }
+
+    /// The + split button (SMOODEV-4111): a click is a plain shell, like ⌘N;
+    /// the arrow holds the opt-in paths. No `.keyboardShortcut` here — the
+    /// menu bar owns every chord, and a second ⌘N binding would fight it.
+    private var newMenu: some View {
+        Menu {
+            Button("New Shell") { app.newShell() }
+            Button("New Shell in Directory…") { app.showNewShellInDirectory() }.accessibilityIdentifier("sidebar.new.directory")
+            Divider()
+            Button("New Agent Session…") { app.showNewSession() }.accessibilityIdentifier("sidebar.new.agent")
+            Button("Fan Out…") { app.showFanOut() }.accessibilityIdentifier("sidebar.new.fanout")
+        } label: {
+            Label("New shell", systemImage: "plus")
+        } primaryAction: {
+            app.newShell()
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .fixedSize()
+        .help("New shell (\(app.keymap.chord(for: .newShell)?.display ?? "⌘N")) — the arrow has agent sessions and fan-out")
+        .accessibilityIdentifier("sidebar.new")
     }
 
     private func row(_ s: Session) -> some View {

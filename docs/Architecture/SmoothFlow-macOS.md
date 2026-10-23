@@ -466,24 +466,40 @@ not a contract. Settings ▸ Keyboard (⌘,) and
 the file format and the two default changes th-27baa4 made are documented in
 [SmoothFlow-Keybindings.md](../Engineering/SmoothFlow-Keybindings.md).
 
-| Keys      | Action                                                         |
-| --------- | -------------------------------------------------------------- |
-| ⌘N / ⌘⇧N  | new session / fan out                                          |
-| ⌘I        | inbox                                                          |
-| ⌘↩ / ⌘⌥↩  | steer focused / steer all working                              |
-| ⌘1…9      | focus session N                                                |
-| ⌘⌥Y / ⌘⌥N | allow / deny the focused session's request                     |
-| ⌘⌥R / ⌘⌥K | kill & resume / kill                                           |
-| ⌘⌥W       | close out the focused session                                  |
-| ⌘⌥1/2/3/4 | terminal / diff / PR / activity tab                            |
-| ⌘T / ⌘⇧T  | new tab / new shell here                                       |
-| ⌘W / ⌘⇧W  | close pane (tab, then window, collapse when empty) / close tab |
-| ⌘⇧[ / ⌘⇧] | previous / next tab                                            |
-| ⌘D / ⌘⇧D  | split right / split down                                       |
-| ⌘⇧← / ⌘⇧↑ | split left / split up                                          |
-| ⌘⌥←↑→↓    | move focus between panes                                       |
-| ⌘⇧↩ / ⌘⌥= | zoom pane / equalize panes                                     |
-| ⌘⌃S / ⌘⌃P | toggle sidebar / pearl rail                                    |
+SmoothFlow starts like a terminal (SMOODEV-4111): **⌘N opens a plain shell
+at once**, in a new tab, with no sheet, and **⌘⇧ + an arrow splits** the
+focused pane that way with a **new shell**. Both open in the focused pane's
+**current** directory, which the engine reads live from tmux
+(`#{pane_current_path}`, via `flow.new`'s `cwd_of`), so a `cd` inside the
+pane carries over and the session's launch worktree is only the fallback.
+With nothing focused, ⌘N uses the last directory you opened (remembered in
+UserDefaults, `lastShellDirectory`), then `$HOME`. The agent dialog is opt-in:
+⌃⌘N, Session ▸ New Agent Session…, or the arrow half of the sidebar's **+**
+split button (which also has New Shell in Directory… and Fan Out…). App
+chords beat Ghostty's own bindings (its ⌘⇧↑/↓ is `jump_to_prompt`): menu key
+equivalents are matched before the surface's `keyDown`, and `keyDown` hands
+any app chord that still reaches it back to the app
+(`TerminalSurfaceView.appShortcut`).
+
+| Keys                  | Action                                                         |
+| --------------------- | -------------------------------------------------------------- |
+| ⌘N                    | new shell, in a new tab, at the focused pane's directory       |
+| ⌃⌘N / ⌘⇧N             | new agent session (the dialog) / fan out                       |
+| ⌘I                    | inbox                                                          |
+| ⌘↩ / ⌘⌥↩              | steer focused / steer all working                              |
+| ⌘1…9                  | focus session N                                                |
+| ⌘⌥Y / ⌘⌥N             | allow / deny the focused session's request                     |
+| ⌘⌥R / ⌘⌥K             | kill & resume / kill                                           |
+| ⌘⌥W                   | close out the focused session                                  |
+| ⌘⌥1/2/3/4             | terminal / diff / PR / activity tab                            |
+| ⌘T                    | new tab (a second view of the focused session)                 |
+| ⌘W / ⌘⇧W              | close pane (tab, then window, collapse when empty) / close tab |
+| ⌘⇧[ / ⌘⇧]             | previous / next tab                                            |
+| ⌘⇧→ / ⌘⇧← / ⌘⇧↑ / ⌘⇧↓ | split right / left / up / down, with a new shell at the cwd    |
+| ⌘D / ⌘⇧D              | aliases of split right / split down                            |
+| ⌘⌥←↑→↓                | move focus between panes                                       |
+| ⌘⇧↩ / ⌘⌥=             | zoom pane / equalize panes                                     |
+| ⌘⌃S / ⌘⌃P             | toggle sidebar / pearl rail                                    |
 
 ![fan-out](assets/smoothflow/fanout.png)
 

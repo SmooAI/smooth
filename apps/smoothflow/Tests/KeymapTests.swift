@@ -118,6 +118,43 @@ final class KeymapTests: XCTestCase {
         XCTAssertEqual(Keymap.default.chord(for: .steerAll), KeyChord("enter", command: true, option: true))
     }
 
+    /// SMOODEV-4111: SmoothFlow starts like a terminal. ⌘N is a plain shell,
+    /// the agent dialog moved to ⌃⌘N (⌥⌘N is Deny), and ⌘⇧N stays Fan Out.
+    func testCommandNIsAPlainShell() {
+        XCTAssertEqual(Keymap.default.chord(for: .newShell), KeyChord("n", command: true))
+        XCTAssertEqual(Keymap.default.chord(for: .newSession), KeyChord("n", command: true, control: true))
+        XCTAssertEqual(Keymap.default.chord(for: .fanOut), KeyChord("n", command: true, shift: true))
+        XCTAssertEqual(Keymap.default.chord(for: .deny), KeyChord("n", command: true, option: true))
+        XCTAssertNil(Keymap.default.chord(for: .newShellInDirectory), "menu-only until someone binds it")
+        XCTAssertEqual(Keymap.default.appAction(for: KeyChord("n", command: true)), .newShell)
+    }
+
+    /// ⌘⇧ + each arrow splits that way; ⌘D / ⌘⇧D stay as Right / Down aliases.
+    func testCommandShiftArrowsSplitAllFourWays() {
+        let map = Keymap.default
+        XCTAssertEqual(map.appAction(for: KeyChord("right", command: true, shift: true)), .splitRight)
+        XCTAssertEqual(map.appAction(for: KeyChord("left", command: true, shift: true)), .splitLeft)
+        XCTAssertEqual(map.appAction(for: KeyChord("up", command: true, shift: true)), .splitUp)
+        XCTAssertEqual(map.appAction(for: KeyChord("down", command: true, shift: true)), .splitDown)
+        XCTAssertEqual(map.appAction(for: KeyChord("d", command: true)), .splitRightAlias)
+        XCTAssertEqual(map.appAction(for: KeyChord("d", command: true, shift: true)), .splitDownAlias)
+        XCTAssertEqual(FlowAction.allCases.filter(\.isAlias), [.splitRightAlias, .splitDownAlias])
+        XCTAssertNil(map.appAction(for: KeyChord("j")), "a diff key is never an app shortcut")
+    }
+
+    /// An alias is its own row: the file can move or clear it like any other.
+    func testAliasesAreRebindableInTheFile() {
+        let map = Keymap.parse("""
+        [keys]
+        splitRightAlias = ""
+        splitDownAlias = "cmd+opt+d"
+        """)
+        XCTAssertNil(map.chord(for: .splitRightAlias))
+        XCTAssertNil(map.appAction(for: KeyChord("d", command: true)), "cleared, ⌘D goes to the terminal")
+        XCTAssertEqual(map.appAction(for: KeyChord("d", command: true, option: true)), .splitDownAlias)
+        XCTAssertEqual(map.chord(for: .splitRight), KeyChord("right", command: true, shift: true), "the primary is untouched")
+    }
+
     func testEveryActionHasATitle() {
         for action in FlowAction.allCases {
             XCTAssertFalse(action.title.isEmpty, action.rawValue)
