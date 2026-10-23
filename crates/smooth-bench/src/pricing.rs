@@ -145,9 +145,12 @@ impl PriceBook {
 /// by the gateway, which is the source of truth. A model here is one we
 /// call on its vendor's own API with its vendor's own price sheet.
 ///
-/// - `claude-haiku-5-5`: $0.10 / $0.50 per MTok for prompts up to 100K
-///   tokens (Anthropic list price; $0.50 / $2.50 above that). Bench turns
-///   stay well under 100K per request, so the base tier applies.
+/// - `claude-haiku-5-5`: $0.10 / $0.50 per MTok, the base tier for prompts
+///   up to 100K tokens, from <https://platform.claude.com/docs/en/about-claude/pricing>
+///   (checked 2026-10-23). A request whose prompt is over 100K tokens is
+///   billed $0.50 / $2.50, and cache hits are billed lower. A flat rate cannot
+///   see per-request prompt size, so treat this as a floor whenever a turn
+///   may cross 100K.
 const DIRECT_LIST_PRICES: &[(&str, f64, f64)] = &[("claude-haiku-5-5", 0.10e-6, 0.50e-6)];
 
 /// List price for a direct-routed model, or `None` when we have none.
