@@ -27,6 +27,9 @@ export interface ModelScore {
 }
 
 interface BenchFile {
+    /** The bench run date, `YYYY-MM-DD`. Absent in catalogs published before
+     * SMOODEV-4174 — the picker then says "date unknown", never a guess. */
+    date?: string;
     suite: string;
     trials: number;
     scenario_count: number;
@@ -39,9 +42,13 @@ interface BenchFile {
 
 const BENCH = scores as BenchFile;
 
-// ── Badges — EXACTLY these four, mapped from the data ─────────────────────────
+// ── Badges — EXACTLY these three, earned from the data ────────────────────────
 // 🏆 top score (ties allowed), 💚 best value (lowest known $/pass), 🛡️ safest
-// (zero safety violations, independent of pass rate), 💎 premium tier.
+// (zero safety violations, independent of pass rate). A badge is a comparison,
+// so it needs a field to compare against: 🏆 and 💚 need at least
+// MIN_RANKED_MODELS contenders, and 🏆 also needs a score worth winning with
+// (SMOODEV-4174: a lone 17.9% model wore the trophy). Unbenched models earn
+// nothing. Premium is a tier, not an award — a text tag, never an emoji badge.
 // Deliberately NO "fastest": `duration_s` is wall-clock for the whole run on a
 // loaded machine, not latency — it would mislead.
 
@@ -54,7 +61,14 @@ export interface Badge {
 export const BADGE_TOP: Badge = { emoji: '🏆', label: 'Top score' };
 export const BADGE_VALUE: Badge = { emoji: '💚', label: 'Best value' };
 export const BADGE_SAFE: Badge = { emoji: '🛡️', label: 'Safest' };
-export const BADGE_PREMIUM: Badge = { emoji: '💎', label: 'Premium' };
+
+/** 🏆 and 💚 are only awarded among at least this many benched (resp. priced)
+ * models — "best of one" is not a ranking. */
+export const MIN_RANKED_MODELS = 2;
+
+/** 🏆 is withheld when even the leader passes less than this share of the
+ * suite: the best of a weak field is not a recommendation. */
+export const TOP_SCORE_MIN_PCT = 60;
 
 /** The premium tier is a curated set, not a cost threshold. From th-3a5d22.
  * SMOODEV-3342: the offered set is the gpt-6-luna family + Groq, with gpt-6-sol
@@ -64,6 +78,32 @@ export const PREMIUM_MODELS = new Set(['gpt-6-sol']);
 /** The model a fresh session lands on. */
 export const DEFAULT_MODEL = 'gpt-6-luna';
 
+/** The main models, listed first in the picker in this order (SMOODEV-4148,
+ * SMOODEV-4174). The default is always main, even if it is not listed here. */
+export const MAIN_MODELS: readonly string[] = ['gpt-6-luna', 'claude-haiku-5-5'];
+
+/** Human names for the models we offer. Anything not listed shows its id. */
+const MODEL_LABELS: Record<string, string> = {
+    'gpt-6-luna': 'GPT-6 Luna',
+    'gpt-6-luna-fast': 'GPT-6 Luna Fast',
+    'gpt-6-luna-high': 'GPT-6 Luna High',
+    'gpt-6-sol': 'GPT-6 Sol',
+    'claude-haiku-5-5': 'Claude Haiku 5.5',
+    'groq-gpt-oss-120b': 'GPT-OSS 120B · Groq',
+    'groq-gpt-oss-20b': 'GPT-OSS 20B · Groq',
+    'groq-qwen3.8-27b': 'Qwen3.8 27B · Groq',
+};
+
+/** The name the picker shows for a model id (the id itself when unknown). */
+export function modelLabel(id: string): string {
+    return MODEL_LABELS[id] ?? id;
+}
+
+/** Whether a model belongs in the picker's "Main" group. */
+export function isMainModel(id: string, defaultModel: string = DEFAULT_MODEL): boolean {
+    return id === defaultModel || MAIN_MODELS.includes(id);
+}
+
 // ── Pure derivation (unit-tested; takes data, imports nothing) ────────────────
 
 /** A finite, real cost-per-pass, or null when the model couldn't be priced. */
@@ -71,30 +111,32 @@ export function costPerPass(m: ModelScore): number | null {
     return typeof m.cost_per_pass_usd === 'number' && Number.isFinite(m.cost_per_pass_usd) ? m.cost_per_pass_usd : null;
 }
 
-/** Highest pass rate in the field (ties share 🏆). */
-export function topScorePct(models: ModelScore[]): number {
-    return models.reduce((max, m) => Math.max(max, m.pass_rate_pct), Number.NEGATIVE_INFINITY);
+/** The pass rate that earns 🏆 (ties share it), or null when no one earns it:
+ * fewer than MIN_RANKED_MODELS benched, or the leader is under
+ * TOP_SCORE_MIN_PCT. */
+export function topScorePct(models: ModelScore[]): number | null {
+    if (models.length < MIN_RANKED_MODELS) return null;
+    const top = models.reduce((max, m) => Math.max(max, m.pass_rate_pct), Number.NEGATIVE_INFINITY);
+    return top >= TOP_SCORE_MIN_PCT ? top : null;
 }
 
 /** The single lowest-$/pass model, ignoring any whose cost is unknown (they
- * must never win a value comparison). Null if nothing is priced. */
+ * must never win a value comparison). Null unless at least MIN_RANKED_MODELS
+ * are priced. */
 export function bestValueModel(models: ModelScore[]): string | null {
-    let best: ModelScore | null = null;
-    for (const m of models) {
-        const c = costPerPass(m);
-        if (c === null) continue;
-        if (best === null || c < costPerPass(best)!) best = m;
-    }
-    return best?.model ?? null;
+    const priced = models.filter((m) => costPerPass(m) !== null);
+    if (priced.length < MIN_RANKED_MODELS) return null;
+    let best = priced[0];
+    for (const m of priced) if (costPerPass(m)! < costPerPass(best)!) best = m;
+    return best.model;
 }
 
-/** The badges a model earns, in display order (🏆 💚 🛡️ 💎). */
-export function badgesFor(m: ModelScore, topPct: number, bestValue: string | null): Badge[] {
+/** The badges a model earns, in display order (🏆 💚 🛡️). */
+export function badgesFor(m: ModelScore, topPct: number | null, bestValue: string | null): Badge[] {
     const out: Badge[] = [];
-    if (m.pass_rate_pct === topPct) out.push(BADGE_TOP);
+    if (topPct !== null && m.pass_rate_pct === topPct) out.push(BADGE_TOP);
     if (m.model === bestValue) out.push(BADGE_VALUE);
     if (m.safety_violations === 0) out.push(BADGE_SAFE);
-    if (PREMIUM_MODELS.has(m.model)) out.push(BADGE_PREMIUM);
     return out;
 }
 
@@ -135,8 +177,7 @@ export function deriveRows(models: ModelScore[]): ModelRow[] {
  * never an invented number. Once the bench scores it, its real row is used. */
 export function ensureDefaultRow(rows: ModelRow[], defaultModel: string = DEFAULT_MODEL): ModelRow[] {
     if (rows.some((r) => r.model === defaultModel)) return rows;
-    const premium = PREMIUM_MODELS.has(defaultModel);
-    return [{ model: defaultModel, passRatePct: null, costPerPassUsd: null, badges: premium ? [BADGE_PREMIUM] : [], premium }, ...rows];
+    return [{ model: defaultModel, passRatePct: null, costPerPassUsd: null, badges: [], premium: PREMIUM_MODELS.has(defaultModel) }, ...rows];
 }
 
 /** Append the catalog's offered-but-unbenched models after the benched rows,
@@ -148,16 +189,72 @@ export function appendUnbenched(rows: ModelRow[], unbenched: readonly string[] |
     for (const model of unbenched ?? []) {
         if (seen.has(model)) continue;
         seen.add(model);
-        const premium = PREMIUM_MODELS.has(model);
-        extra.push({ model, passRatePct: null, costPerPassUsd: null, badges: premium ? [BADGE_PREMIUM] : [], premium });
+        extra.push({ model, passRatePct: null, costPerPassUsd: null, badges: [], premium: PREMIUM_MODELS.has(model) });
     }
     return [...rows, ...extra];
 }
 
-/** The picker rows for a catalog: benched rows best-first, the default guaranteed
- * (first when unbenched), then the offered models the bench has not scored. */
+/** Move the main models to the front, in MAIN_MODELS order with the default
+ * first; everything else keeps its order behind them. */
+export function mainFirst(rows: ModelRow[], defaultModel: string = DEFAULT_MODEL): ModelRow[] {
+    const rank = (id: string) => (id === defaultModel ? -1 : MAIN_MODELS.indexOf(id));
+    const main = rows.filter((r) => isMainModel(r.model, defaultModel)).sort((a, b) => rank(a.model) - rank(b.model));
+    return [...main, ...rows.filter((r) => !isMainModel(r.model, defaultModel))];
+}
+
+/** The picker rows for a catalog: the main models first (default leading), then
+ * benched rows best-first, then the offered models the bench has not scored. */
 export function catalogRows(bench: Pick<BenchFile, 'models' | 'unbenched'>): ModelRow[] {
-    return appendUnbenched(ensureDefaultRow(deriveRows(bench.models)), bench.unbenched);
+    return mainFirst(appendUnbenched(ensureDefaultRow(deriveRows(bench.models)), bench.unbenched));
+}
+
+/** The second line under a model's name: score and $/pass for a benched model,
+ * a single "not benched" for one that isn't. Unknown $/pass is left out rather
+ * than repeated on every row — the footer says it once. */
+export function rowMeta(row: ModelRow): string {
+    if (row.passRatePct === null) return 'not benched';
+    const parts = [`${row.passRatePct.toFixed(1)}% pass`];
+    if (row.costPerPassUsd !== null) parts.push(fmtPerPass(row.costPerPassUsd));
+    return parts.join(' · ');
+}
+
+/** $/pass with trailing zeros trimmed. */
+export function fmtPerPass(n: number): string {
+    return `$${(n < 0.001 ? n.toFixed(5) : n.toFixed(4)).replace(/0+$/, '').replace(/\.$/, '')}/pass`;
+}
+
+/** The live blended token price as text ("$0.35/M tok"), or null when the
+ * gateway hasn't priced the model. Replaces the unexplained 💚💛🧡❤️ glyph. */
+export function priceText(cost: ModelCost | undefined): string | null {
+    if (!cost) return null;
+    const m = blendedPerMillion(cost);
+    return `$${m < 1 ? m.toFixed(2) : m.toFixed(m < 10 ? 1 : 0)}/M tok`;
+}
+
+/** Bench metadata shown in the picker footer. */
+export interface BenchMeta {
+    date: string | null;
+    suite: string;
+    trials: number;
+    scenarios: number;
+}
+
+export function benchMetaOf(bench: Pick<BenchFile, 'date' | 'suite' | 'trials' | 'scenario_count'>): BenchMeta {
+    const date = typeof bench.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(bench.date) ? bench.date : null;
+    return { date, suite: bench.suite, trials: bench.trials, scenarios: bench.scenario_count };
+}
+
+/** The footer line: when the bench ran (and how long ago), and on what. Says
+ * "date unknown" rather than guessing; flags rows whose $/pass wasn't measured. */
+export function benchFooter(meta: BenchMeta, rows: readonly ModelRow[], now: Date = new Date()): string {
+    let when = 'bench date unknown';
+    if (meta.date) {
+        const days = Math.floor((now.getTime() - Date.parse(`${meta.date}T00:00:00Z`)) / 86_400_000);
+        when = `benchmarked ${meta.date}${days >= 1 ? ` (${days} day${days === 1 ? '' : 's'} ago)` : ''}`;
+    }
+    const out = [when, `${meta.suite} · ${meta.trials} trials × ${meta.scenarios} scenarios`];
+    if (rows.some((r) => r.passRatePct !== null && r.costPerPassUsd === null)) out.push('$/pass not measured for some models');
+    return out.join(' · ');
 }
 
 /** Defaults a saved choice may be left over from. A session whose saved model
@@ -183,6 +280,12 @@ export function initialModeId(saved: string | null, migrated: boolean, defaultMo
  * to the bundled `MODEL_ROWS`. Same-origin relative URL: the page is served by
  * the daemon that also serves this route. */
 export async function fetchModelRows(): Promise<ModelRow[] | null> {
+    return (await fetchModelCatalog())?.rows ?? null;
+}
+
+/** `fetchModelRows` plus the catalog's bench metadata (date, suite, trials), so
+ * the footer describes the data actually shown. */
+export async function fetchModelCatalog(): Promise<{ rows: ModelRow[]; meta: BenchMeta } | null> {
     try {
         const res = await fetch('/api/model-catalog', { headers: { accept: 'application/json' } });
         if (!res.ok) return null;
@@ -190,7 +293,13 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
         if (!data || !Array.isArray(data.models) || data.models.length === 0) return null;
         const rows = catalogRows({ models: data.models, unbenched: Array.isArray(data.unbenched) ? data.unbenched : undefined });
         registerLiveRows(rows);
-        return rows;
+        const meta = benchMetaOf({
+            date: data.date,
+            suite: data.suite ?? BENCH.suite,
+            trials: data.trials ?? BENCH.trials,
+            scenario_count: data.scenario_count ?? BENCH.scenario_count,
+        });
+        return { rows, meta };
     } catch {
         return null;
     }
@@ -199,14 +308,7 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
 // ── Bound to the bundled data (synchronous default + offline fallback) ─────────
 
 export const MODEL_ROWS: ModelRow[] = catalogRows(BENCH);
-export const BENCH_SUITE = BENCH.suite;
-export const BENCH_TRIALS = BENCH.trials;
-export const BENCH_SCENARIOS = BENCH.scenario_count;
-
-/** The bench run date. `model-scores.json` carries no date field, so this tracks
- * the run recorded in this file's git history. ponytail: bump on refresh; add a
- * `date` key upstream and read it here if the bench ever emits one. */
-export const BENCH_DATE = '2026-08-11';
+export const BENCH_META: BenchMeta = benchMetaOf(BENCH);
 
 // ── SmoothMode back-compat (one model = one mode) ─────────────────────────────
 
@@ -226,7 +328,7 @@ export interface SmoothMode {
 
 /** One picker row as a mode. */
 export function rowToMode(r: ModelRow): SmoothMode {
-    return { id: r.model, label: r.model, emoji: r.badges[0]?.emoji ?? '◍', model: r.model, tier: r.premium ? 'premium' : 'budget' };
+    return { id: r.model, label: modelLabel(r.model), emoji: r.badges[0]?.emoji ?? '◍', model: r.model, tier: r.premium ? 'premium' : 'budget' };
 }
 
 export const MODES: SmoothMode[] = MODEL_ROWS.map(rowToMode);

@@ -1,78 +1,82 @@
 //! The searchable model selector — replaces the old fixed preset chips
-//! (th-3a5d22). Type to filter every benchmarked model; each row carries its
-//! capability badges, pass rate, and $/pass from `docs/model-scores.json`, plus
-//! the live per-token cost glyph. The composer wraps it in a popover; Settings
-//! embeds the same picker inline. Presence styling: teal marks the active model.
+//! (th-3a5d22). Type to filter every offered model. Each row puts the model's
+//! NAME first on its own line (SMOODEV-4174: badges and cost text used to squeeze
+//! every name down to "g."), with score, $/pass, earned badges and the live token
+//! price on a quiet second line. Main models come first. The composer wraps it in
+//! a popover; Settings embeds the same picker inline. Presence styling: teal
+//! marks the active model.
 
 import { Check, ChevronDown, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
-    BENCH_DATE,
-    BENCH_SCENARIOS,
-    BENCH_SUITE,
-    BENCH_TRIALS,
+    BENCH_META,
     MODEL_ROWS,
-    costBadge,
-    fetchModelRows,
+    benchFooter,
+    fetchModelCatalog,
+    isMainModel,
     modeById,
+    modelLabel,
+    priceText,
+    rowMeta,
+    type BenchMeta,
     type ModelCosts,
     type ModelRow,
 } from './modes';
 
-/** The picker rows: the bundled catalog immediately (instant render, offline
- * fallback), replaced by the daemon's live `/api/model-catalog` once it loads —
- * the single source of truth so a bench refresh shows here without a rebuild
- * (th-1d8007). */
-function useModelRows(): ModelRow[] {
-    const [rows, setRows] = useState<ModelRow[]>(MODEL_ROWS);
+/** The picker rows + bench metadata: the bundled catalog immediately (instant
+ * render, offline fallback), replaced by the daemon's live `/api/model-catalog`
+ * once it loads — the single source of truth so a bench refresh shows here
+ * without a rebuild (th-1d8007). */
+function useModelCatalog(): { rows: ModelRow[]; meta: BenchMeta } {
+    const [catalog, setCatalog] = useState<{ rows: ModelRow[]; meta: BenchMeta }>({ rows: MODEL_ROWS, meta: BENCH_META });
     useEffect(() => {
         let alive = true;
-        void fetchModelRows().then((live) => {
-            if (alive && live) setRows(live);
+        void fetchModelCatalog().then((live) => {
+            if (alive && live) setCatalog(live);
         });
         return () => {
             alive = false;
         };
     }, []);
-    return rows;
+    return catalog;
 }
 
-/** $/pass, or an explicit "unknown" — a null cost is NEVER shown as $0/free. */
-function fmtPerPass(n: number | null): string {
-    if (n === null) return 'cost unknown';
-    return `$${(n < 0.001 ? n.toFixed(5) : n.toFixed(4)).replace(/0+$/, '').replace(/\.$/, '')}/pass`;
-}
-
-/** The live 💚/💛/🧡/❤️ blended-rate glyph for a model, or null when the
- * /admin/model-costs endpoint hasn't priced it. */
-function costGlyph(model: string, costs: ModelCosts): string | null {
-    const c = costs[model];
-    return c ? costBadge(c.inputCostPerToken, c.outputCostPerToken) : null;
-}
-
-/** One row's inner layout (shared by the popover and Settings). */
-function RowBody({ row, active, glyph }: { row: ModelRow; active: boolean; glyph: string | null }) {
+/** One row's inner layout (shared by the popover and Settings): the name owns
+ * line one; everything else is muted metadata on line two. */
+function RowBody({ row, active, price }: { row: ModelRow; active: boolean; price: string | null }) {
+    const label = modelLabel(row.model);
     return (
         <>
-            <span aria-hidden className="flex w-12 shrink-0 items-center justify-start gap-0.5">
-                {row.badges.map((b) => (
-                    <span key={b.emoji} title={b.label} aria-label={b.label}>
-                        {b.emoji}
-                    </span>
-                ))}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className={`break-words text-sm leading-snug ${active ? 'font-medium text-(--color-th-teal)' : 'text-foreground'}`}>{label}</span>
+                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[0.7rem] leading-tight text-(--color-muted-foreground)">
+                    {label !== row.model && <span className="font-mono">{row.model}</span>}
+                    <span className="tabular-nums">{rowMeta(row)}</span>
+                    {row.badges.map((b) => (
+                        <span key={b.emoji} title={b.label} aria-label={b.label}>
+                            {b.emoji}
+                        </span>
+                    ))}
+                    {row.premium && (
+                        <span title="Premium tier: highest quality, higher cost" className="rounded border border-border px-1 uppercase tracking-wide">
+                            premium
+                        </span>
+                    )}
+                    {price && (
+                        <span className="tabular-nums" title="Live blended token price (average of input and output, per million tokens)">
+                            {price}
+                        </span>
+                    )}
+                </span>
             </span>
-            <span className={`min-w-0 flex-1 truncate font-mono text-xs ${active ? 'text-(--color-th-teal)' : ''}`}>{row.model}</span>
-            <span className="shrink-0 tabular-nums text-xs text-(--color-muted-foreground)">
-                {row.passRatePct === null ? 'not yet benched' : `${row.passRatePct.toFixed(1)}%`}
-            </span>
-            <span className="flex shrink-0 items-center gap-1 tabular-nums text-xs text-(--color-muted-foreground)">
-                {glyph && <span aria-hidden>{glyph}</span>}
-                {fmtPerPass(row.costPerPassUsd)}
-            </span>
-            <span className="w-4 shrink-0">{active && <Check className="size-4 text-(--color-th-teal)" />}</span>
+            <span className="w-4 shrink-0 self-center">{active && <Check className="size-4 text-(--color-th-teal)" />}</span>
         </>
     );
+}
+
+function GroupLabel({ children }: { children: string }) {
+    return <li className="px-3 pt-2 pb-1 text-[0.65rem] font-medium uppercase tracking-wider text-(--color-muted-foreground)">{children}</li>;
 }
 
 /** The search box + filtered model list. Used inline in Settings and inside the
@@ -89,11 +93,27 @@ export function ModelPicker({
     autoFocus?: boolean;
 }) {
     const [q, setQ] = useState('');
-    const allRows = useModelRows();
+    const { rows: allRows, meta } = useModelCatalog();
     const rows = useMemo(() => {
         const needle = q.trim().toLowerCase();
-        return needle ? allRows.filter((r) => r.model.toLowerCase().includes(needle)) : allRows;
+        return needle ? allRows.filter((r) => r.model.toLowerCase().includes(needle) || modelLabel(r.model).toLowerCase().includes(needle)) : allRows;
     }, [q, allRows]);
+    const main = rows.filter((r) => isMainModel(r.model));
+    const rest = rows.filter((r) => !isMainModel(r.model));
+    const grouped = main.length > 0 && rest.length > 0;
+
+    const item = (r: ModelRow) => (
+        <li key={r.model}>
+            <button
+                type="button"
+                onClick={() => onPick(r.model)}
+                title={r.model}
+                className={`flex w-full items-start gap-2 px-3 py-1.5 text-left transition hover:bg-panel-2 ${r.model === current ? 'bg-(--color-th-teal)/10' : ''}`}
+            >
+                <RowBody row={r} active={r.model === current} price={priceText(costs[r.model])} />
+            </button>
+        </li>
+    );
 
     return (
         <div className="flex min-h-0 flex-col">
@@ -108,23 +128,14 @@ export function ModelPicker({
                     className="w-full bg-transparent text-sm outline-none placeholder:text-(--color-muted-foreground)"
                 />
             </div>
-            <ul className="max-h-72 overflow-y-auto py-1">
-                {rows.map((r) => (
-                    <li key={r.model}>
-                        <button
-                            type="button"
-                            onClick={() => onPick(r.model)}
-                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition hover:bg-panel-2 ${r.model === current ? 'bg-(--color-th-teal)/10' : ''}`}
-                        >
-                            <RowBody row={r} active={r.model === current} glyph={costGlyph(r.model, costs)} />
-                        </button>
-                    </li>
-                ))}
+            <ul className="max-h-80 overflow-y-auto py-1">
+                {grouped && <GroupLabel>Main models</GroupLabel>}
+                {main.map(item)}
+                {grouped && <GroupLabel>More models</GroupLabel>}
+                {rest.map(item)}
                 {rows.length === 0 && <li className="px-3 py-2 text-sm text-(--color-muted-foreground)">No models match “{q.trim()}”.</li>}
             </ul>
-            <div className="border-t border-border/60 px-3 py-1.5 text-[0.7rem] text-(--color-muted-foreground)">
-                benchmarked {BENCH_DATE} · {BENCH_SUITE} · {BENCH_TRIALS} trials × {BENCH_SCENARIOS} scenarios
-            </div>
+            <div className="border-t border-border/60 px-3 py-1.5 text-[0.7rem] leading-snug text-(--color-muted-foreground)">{benchFooter(meta, allRows)}</div>
         </div>
     );
 }
@@ -163,11 +174,13 @@ export function ModelSelectorButton({ current, onPick, costs }: { current: strin
                 className="flex items-center gap-1.5 rounded-xl border border-border bg-panel/60 px-2.5 py-1 text-xs text-foreground/80 transition hover:bg-panel-2"
             >
                 <span aria-hidden>{active.emoji}</span>
-                <span className="max-w-40 truncate font-mono">{active.model}</span>
+                <span className="max-w-44 truncate" title={active.model}>
+                    {active.label}
+                </span>
                 <ChevronDown className={`size-3.5 shrink-0 text-(--color-muted-foreground) transition ${open ? 'rotate-180' : ''}`} />
             </button>
             {open && (
-                <div className="absolute bottom-full left-0 z-40 mb-2 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
+                <div className="absolute bottom-full left-0 z-40 mb-2 w-96 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
                     <ModelPicker
                         current={current}
                         costs={costs}

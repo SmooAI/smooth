@@ -55,6 +55,12 @@ check "catalog drops an unknown model" "" "$(jq -r '[.models[].model] | index("u
 # ...and lists the offered ones the run did not score, never inventing a score.
 check "unbenched lists offered-but-unscored" "" "$(jq -r '.unbenched | join(",")' "$work/docs/model-scores.json")" 'gpt-6-sol'
 check "a benched model is not also unbenched" "" "$(jq -r '.unbenched | index("gpt-6-luna") | tostring' "$work/docs/model-scores.json")" 'null'
+# SMOODEV-4174: the catalog is dated, so pickers stop hardcoding a date.
+check "catalog carries a YYYY-MM-DD date" "" "$(jq -r '.date' "$work/docs/model-scores.json")" "$(date -u +%Y-)"
+BENCH_DATE=2026-08-11 bash "$render" "$work/board.json" "$work/docs" >/dev/null
+check "BENCH_DATE overrides the date" "" "$(jq -r '.date' "$work/docs/model-scores.json")" '2026-08-11'
+bad=$(BENCH_DATE=yesterday bash "$render" "$work/board.json" "$work/docs" 2>&1 >/dev/null)
+check "a malformed BENCH_DATE is refused" "" "$bad" 'must be YYYY-MM-DD'
 # The table still reports everything the run scored.
 check "table keeps non-offered models" "" "$(cat "$work/docs/Model-Leaderboard.md")" 'unpriced'
 

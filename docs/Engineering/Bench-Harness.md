@@ -270,6 +270,25 @@ the offered set (the `gpt-6-luna` family, Groq, and `gpt-6-sol`), listed in
 write a catalog with no benched rows: shipped phone apps treat an empty
 `models` array as a failed fetch and fall back to their bundled list.
 
+Since SMOODEV-4174 the catalog also carries a top-level `date` (the publish
+date, UTC `YYYY-MM-DD`; set `BENCH_DATE=YYYY-MM-DD` to backfill an older run),
+which the web picker shows with its age. A catalog without it reads "bench date
+unknown". Rendering into the repo's own `docs/` also copies the catalog to the
+SPA's bundled fallback, `crates/smooth-web/web/src/model-scores.json`.
+
+How the web picker reads the catalog (`crates/smooth-web/web/src/modes.ts`):
+
+- **Order:** the main models first (`MAIN_MODELS`: `gpt-6-luna`, then
+  `claude-haiku-5-5`; the default always leads), then benched models best-first,
+  then unbenched ones.
+- **Badges** are comparisons, so they need a field: 🏆 top score needs at least
+  two benched models and a leader at or above 60%; 💚 best value needs at least
+  two priced models; 🛡️ safest is zero safety violations. Unbenched models earn
+  none. Premium (`gpt-6-sol`) is a text tag, not a badge.
+- **Cost:** an unmeasured $/pass is left off the row and noted once in the
+  footer, never shown as $0. The live token price from `/admin/model-costs` is
+  shown as text (`$0.30/M tok`).
+
 Tests: `bash scripts/the-line/test-model-scores.sh`.
 
 Two things the renderer deliberately refuses to do:
