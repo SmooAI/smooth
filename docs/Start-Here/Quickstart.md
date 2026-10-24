@@ -51,6 +51,8 @@ th up        # start Big Smooth on this machine
 
 Then open the chat at <http://localhost:4400> (`th web` prints the address), or stay in the terminal with `th code`. On a Mac you can also use the desktop app (beta): [download Big Smooth for Mac](https://downloads.smoo.ai/bigsmooth/latest-arm64.dmg) (Apple Silicon).
 
+In both chats, Enter sends and Shift+Enter or Alt/Option+Enter starts a new line. In `th code`, Ctrl+J also starts a new line, which helps in terminals that send Shift+Enter as a plain Enter (tmux, or any terminal without the kitty keyboard protocol).
+
 Ask it something that needs a tool, such as "what's on my calendar tomorrow?", "remind me to call Mom at 6" or "what's the weather this weekend?". On macOS, the Calendar, Reminders and Messages tools each need a one-time permission grant:
 
 ```bash
