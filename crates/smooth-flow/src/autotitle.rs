@@ -153,10 +153,17 @@ impl Titler {
     }
 }
 
-/// A new shell's first name, before any read: its directory's.
+/// A new shell's first name, before any read: its directory's. A local
+/// path, so it is split the platform's way (`\` on Windows).
 #[must_use]
 pub fn initial(dir: &Path, home: &str) -> String {
-    dir_name(&dir.to_string_lossy(), home).unwrap_or_else(|| "shell".into())
+    if !home.is_empty() && dir == Path::new(home) {
+        return "~".into();
+    }
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .or_else(|| dir_name(&dir.to_string_lossy(), home))
+        .unwrap_or_else(|| "shell".into())
 }
 
 #[cfg(test)]
@@ -265,6 +272,9 @@ mod tests {
     fn initial_name_is_the_directory() {
         assert_eq!(initial(Path::new("/Users/me/dev/smooth"), HOME), "smooth");
         assert_eq!(initial(Path::new("/Users/me"), HOME), "~");
+        assert_eq!(initial(Path::new("/Users/me/"), HOME), "~");
         assert_eq!(initial(Path::new(""), HOME), "shell");
+        let nested = std::env::temp_dir().join("a").join("smooth");
+        assert_eq!(initial(&nested, HOME), "smooth", "split the platform's way");
     }
 }
