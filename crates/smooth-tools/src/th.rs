@@ -71,7 +71,7 @@ impl Tool for ThTool {
         ToolSchema {
             name: "th".into(),
             description: "Run the `th` CLI with an argv array (no shell). Prefer this over `bash th …`. \
-                The user's Smoo AI business lives under [\"smoo\", …] and acts on their ACTIVE org, already signed in. \
+                The user's Smoo AI business lives under [\"smoo\", …] and acts on their ACTIVE org when they are signed in. \
                 Go straight to the recipe below instead of exploring; only if none fits, run [\"smoo\", \"<area>\", \"ai\"] ONCE \
                 (any command path + \"ai\" prints a full markdown guide: every subcommand and flag) rather than probing --help level by level. \
                 Add \"--json\" when you need to compute over the result.\n\
@@ -259,6 +259,16 @@ mod tests {
         ThTool {
             workspace: std::env::temp_dir(),
         }
+    }
+
+    /// SMOODEV-4158: the description is static, so it must not assert a sign-in
+    /// state it cannot know — a signed-out daemon read "already signed in" and
+    /// the persona's "No Smoo AI session" side by side.
+    #[test]
+    fn description_does_not_assert_sign_in_state() {
+        let d = tool().schema().description;
+        assert!(!d.contains("already signed in"), "{d}");
+        assert!(d.contains("smoo auth login"), "the sign-in fix is still named");
     }
 
     #[test]
