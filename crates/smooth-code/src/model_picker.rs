@@ -210,8 +210,9 @@ pub struct ModelPickerState {
     /// provider is configured or the endpoint is unreachable, in which
     /// case the offline catalog is used. Pearl th-7ee88e (SMOODEV-1793).
     pub gateway_models: Vec<ModelEntry>,
-    /// Main models the gateway does not serve but the daemon routes straight
-    /// to the user's own provider (Claude Haiku 5.5 on an Anthropic key),
+    /// Main models the daemon routes straight to the user's own provider.
+    ///
+    /// Claude Haiku 5.5 on an Anthropic key, which the gateway does not serve;
     /// re-read from `providers.json` with the slots. Empty when no such
     /// provider is configured, so the picker never offers a model that would
     /// fail. SMOODEV-4148.
@@ -386,8 +387,9 @@ impl ModelPickerState {
         true
     }
 
-    /// [`Self::apply_selected_model`], returning the model the session should
-    /// switch to NOW: `Some` when the applied slot is the main one (Coding, or
+    /// [`Self::apply_selected_model`], returning the model to switch to now.
+    ///
+    /// `Some` when the applied slot is the main one (Coding, or
     /// its wire-compat Default). The routing change persists for the next
     /// daemon start; the caller also puts the model on the live session's
     /// `send_message`, so the switch takes effect on the very next turn.
@@ -430,8 +432,10 @@ impl ModelPickerState {
     }
 }
 
-/// The direct-route main models ([`smooth_policy::direct_models`]) the user can
-/// run, each on the provider id `providers.json` gives it. Pure so the
+/// The direct-route main models the user can run.
+///
+/// Each is on the provider id `providers.json` gives it
+/// ([`smooth_policy::direct_models`]). Pure so the
 /// offered/hidden rule is testable without a file.
 pub fn direct_model_entries(providers: &serde_json::Value) -> Vec<ModelEntry> {
     smooth_policy::direct_models::DIRECT_MODELS
@@ -447,8 +451,9 @@ pub fn direct_model_entries(providers: &serde_json::Value) -> Vec<ModelEntry> {
         .collect()
 }
 
-/// Whether th code should put the persisted main (Coding) model on every turn
-/// at startup: only when `--model` did not pick one and no daemon-wide pin
+/// The persisted main (Coding) model th code should put on every turn at startup.
+///
+/// Only when `--model` did not pick one and no daemon-wide pin
 /// (`th settings set model …`) is set, which must keep winning.
 pub fn startup_main_model(cli_model: Option<&str>, daemon_pin: Option<&str>, coding_slot_model: Option<&str>) -> Option<String> {
     if cli_model.is_some() || daemon_pin.is_some_and(|m| !m.trim().is_empty()) {

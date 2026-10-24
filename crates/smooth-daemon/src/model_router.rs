@@ -81,7 +81,9 @@ pub struct Forward {
     pub body: Bytes,
 }
 
-/// Decide where a request goes. `path_and_query` is what the `LocalServer`
+/// Decide where a request goes.
+///
+/// `path_and_query` is what the `LocalServer`
 /// requested of the router (`/v1/chat/completions`); it is re-rooted on the
 /// destination's base url. Only a parseable `chat/completions` body naming a
 /// direct-route model leaves the gateway — anything else, including a body the
@@ -199,9 +201,8 @@ async fn forward(State(state): State<Arc<RouterState>>, method: Method, uri: Uri
     if !authorized(&headers, &state.secret) {
         return error(StatusCode::UNAUTHORIZED, "model router: bad or missing bearer");
     }
-    let body = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(b) => b,
-        Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "model router: request body too large"),
+    let Ok(body) = axum::body::to_bytes(body, MAX_BODY_BYTES).await else {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "model router: request body too large");
     };
     let path = uri.path_and_query().map_or_else(|| uri.path().to_owned(), ToString::to_string);
     let fwd = plan(&state.table, &path, body);

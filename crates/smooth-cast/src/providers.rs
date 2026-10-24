@@ -303,11 +303,12 @@ pub fn route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     route_from_value(&v, route)
 }
 
-/// The configured provider a direct-route model
-/// ([`smooth_policy::direct_models`]) runs on: the provider whose id is the
-/// model's `provider_id`, else the first whose `api_format` matches — in both
-/// cases only one with a url and a non-empty key. `None` means the model cannot
-/// run here and is not offered.
+/// The configured provider a direct-route model runs on.
+///
+/// That is the provider whose id is the model's `provider_id`, else the first
+/// whose `api_format` matches — in both cases only one with a url and a
+/// non-empty key ([`smooth_policy::direct_models`]). `None` means the model
+/// cannot run here and is not offered.
 #[must_use]
 pub fn direct_provider<'a>(v: &'a Value, model: &smooth_policy::direct_models::DirectModel) -> Option<&'a Value> {
     let providers = v.get("providers")?.as_array()?;
@@ -332,8 +333,9 @@ pub fn direct_provider_from_value(v: &Value, model: &smooth_policy::direct_model
     Some((p.get("api_url")?.as_str()?.to_owned(), p.get("api_key")?.as_str()?.to_owned()))
 }
 
-/// [`route_from_value`] for the daemon's upstream GATEWAY. When the slot is
-/// pinned to a direct-route model on its own provider (the `th code` picker
+/// [`route_from_value`] for the daemon's upstream GATEWAY.
+///
+/// When the slot is pinned to a direct-route model on its own provider (the `th code` picker
 /// writes `{provider: "anthropic", model: "claude-haiku-5-5"}`), the model is
 /// kept but the url/key come from the gateway provider — a non-Anthropic
 /// provider, preferring the ids `smooth` and `smooai-gateway` — because every
