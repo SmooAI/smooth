@@ -662,6 +662,18 @@ mod tests {
         }
     }
 
+    /// Kills the pid written to a file when dropped, panic or not.
+    struct KillOnDrop(std::path::PathBuf);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let pid = std::fs::read_to_string(&self.0).ok().and_then(|t| t.trim().parse::<i32>().ok());
+            if let Some(pid) = pid.filter(|p| *p > 1) {
+                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+            }
+        }
+    }
+
     #[test]
     fn an_idle_job_is_killed_as_stalled_with_its_own_exit_code() {
         let tmp = tempfile::tempdir().unwrap();
@@ -680,7 +692,15 @@ mod tests {
     #[test]
     fn a_busy_detached_descendant_is_not_a_stall() {
         let tmp = tempfile::tempdir().unwrap();
-        let argv = sh("perl -MPOSIX -e 'POSIX::setsid(); 1 while 1' & wait");
+        // The spinner leaves the job's group, so the watchdog's group kill cannot
+        // reach it: the guard kills it on every exit path, and `alarm` ends it even
+        // if the test process itself is killed.
+        let pidfile = tmp.path().join("spinner.pid");
+        let _guard = KillOnDrop(pidfile.clone());
+        let argv = sh(&format!(
+            "perl -MPOSIX -e 'POSIX::setsid(); alarm 30; 1 while 1' & echo $! > {}; wait",
+            pidfile.display()
+        ));
         let (ended, _) = run_measured(&spec(&argv, tmp.path(), Some(4000)), |_| {}, None::<fn(u64)>, Some(watch(1500, None)));
         assert_eq!(ended, Ended::TimedOut, "ran until the timeout; the watchdog saw the descendant's CPU");
     }

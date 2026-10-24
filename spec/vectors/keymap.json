@@ -202,13 +202,13 @@
         "bindings": [
           {
             "action": "newSession",
-            "wire": "cmd+n",
-            "display": "⌘N"
+            "wire": "ctrl+cmd+n",
+            "display": "⌃⌘N"
           },
           {
             "action": "newShell",
-            "wire": "shift+cmd+t",
-            "display": "⇧⌘T"
+            "wire": "cmd+n",
+            "display": "⌘N"
           },
           {
             "action": "fanOut",
@@ -322,13 +322,13 @@
           },
           {
             "action": "splitRight",
-            "wire": "cmd+d",
-            "display": "⌘D"
+            "wire": "shift+cmd+right",
+            "display": "⇧⌘→"
           },
           {
             "action": "splitDown",
-            "wire": "shift+cmd+d",
-            "display": "⇧⌘D"
+            "wire": "shift+cmd+down",
+            "display": "⇧⌘↓"
           },
           {
             "action": "splitLeft",

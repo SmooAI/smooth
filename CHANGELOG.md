@@ -1,5 +1,23 @@
 # @smooai/smooth
 
+## 0.86.0
+
+### Minor Changes
+
+- 22db8ce: SMOODEV-4111: SmoothFlow starts like a terminal. ⌘N opens a plain shell in a new tab at once (no sheet), in the focused pane's live directory, else the last directory you opened, else `$HOME`. ⌘⇧ + an arrow splits the focused pane that way with a new shell in that pane's current directory (⌘D / ⌘⇧D stay as aliases), beating Ghostty's own ⌘⇧↑/↓. The agent dialog is opt-in: ⌃⌘N, or the sidebar's new + split button, which also offers New Shell in Directory… and Fan Out…. The engine's `flow.new` gains an additive `cwd_of` that starts a session in another session's live cwd (tmux `#{pane_current_path}`, falling back to its worktree).
+
+## 0.85.1
+
+### Patch Changes
+
+- 377c3b7: Fix a leak in the ci-queue stall-watchdog test: its CPU-spinner left the job's process group and survived the test, so every run left a busy `perl` behind. The test now kills it on every exit path and the spinner times itself out.
+
+## 0.85.0
+
+### Minor Changes
+
+- e5543a9: SMOODEV-4052: `th smoo calling` can now stand up a phone line end to end. `ring-groups create|delete`; `hours show|create|delete` and `hours holidays get|set` (with `--us-holidays`, the dashboard's 14-entry US preset, which skips holidays already on the schedule); `seats list|assign|unassign`. Every write confirms on a TTY or needs `--yes`, and a 403 reads as "admin only".
+
 ## 0.84.1
 
 ### Patch Changes
