@@ -1845,8 +1845,13 @@ mod tests {
         // Default = no filter. Should match the catalog size minus any
         // dedup'd slot entry (the only slot entry already lives in the
         // catalog so the total equals catalog size).
-        let catalog_n = fallback_catalog().len();
-        assert_eq!(models.len(), catalog_n, "default slot should show every catalog model");
+        // Direct-route models (Haiku 5.5) are offered only on their own
+        // provider, never on the slot's gateway (SMOODEV-4148).
+        let catalog_n = fallback_catalog()
+            .iter()
+            .filter(|(m, _)| smooth_policy::direct_models::direct_model(m).is_none())
+            .count();
+        assert_eq!(models.len(), catalog_n, "default slot should show every gateway catalog model");
     }
 
     #[test]
