@@ -766,7 +766,14 @@ fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, local: &[
         // Offline catalog. Pick the provider from the focused slot so a
         // freshly-installed gateway user gets `smooai-gateway`-routed
         // entries and a direct user keeps their own provider id.
-        let provider = focused.current_provider.clone();
+        //
+        // A slot on a direct-route model (Haiku on `anthropic`) is not on the
+        // gateway, so borrow the provider of a slot that is (SMOODEV-4148).
+        let on_gateway = |s: &&SlotEntry| smooth_policy::direct_models::direct_model(&s.current_model).is_none();
+        let provider = std::iter::once(focused)
+            .chain(slots)
+            .find(on_gateway)
+            .map_or_else(|| focused.current_provider.clone(), |s| s.current_provider.clone());
         for (model_name, info) in fallback_catalog() {
             // A direct-route model runs on its own provider, never the slot's
             // gateway; it is offered via `local` only when that provider exists.
