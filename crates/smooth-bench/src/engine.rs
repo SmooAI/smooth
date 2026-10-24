@@ -210,6 +210,11 @@ pub struct EngineEnv {
     pub gateway_url: Option<String>,
     pub gateway_key: Option<String>,
     pub persona: Option<String>,
+    /// Endpoint for the daemon's Narc judge when it must differ from the
+    /// agent's — a `model@provider` direct route points the agent at a vendor
+    /// API that does not serve Narc's Groq model, so the judge stays on the
+    /// gateway. Exported as `SMOOTH_NARC_JUDGE_URL`/`_KEY` (SMOODEV-4125).
+    pub narc_judge: Option<(String, String)>,
 }
 
 /// A booted engine: a [`TaskRunner`] pointed at it, its base URL, and a
@@ -373,6 +378,10 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
     }
     if let Some(p) = &env.persona {
         command.env("SMOOTH_PERSONA", p);
+    }
+    if let Some((url, key)) = &env.narc_judge {
+        command.env("SMOOTH_NARC_JUDGE_URL", url);
+        command.env("SMOOTH_NARC_JUDGE_KEY", key);
     }
 }
 
@@ -1453,6 +1462,7 @@ mod tests {
                 gateway_url: Some("https://llm.smoo.ai/v1".into()),
                 gateway_key: Some("k".into()),
                 persona: None,
+                narc_judge: None,
             },
         );
         let envs: Vec<(String, Option<String>)> = c
@@ -1476,6 +1486,44 @@ mod tests {
             "every host confines its coding tools to SMOOTH_WORKSPACE and falls back to cwd; \
              `dotnet run --project` makes cwd the engine checkout, not the scenario workspace (th-93112a)"
         );
+    }
+
+    /// A direct route moves the agent off the gateway; Narc's judge must not
+    /// follow it (the vendor API does not serve the judge model), and without
+    /// a route nothing is exported so the daemon shares one endpoint as in
+    /// production.
+    #[test]
+    fn host_spawn_exports_a_separate_narc_judge_endpoint_only_when_set() {
+        let envs_of = |narc_judge: Option<(String, String)>| -> Vec<(String, Option<String>)> {
+            let mut c = Command::new("true");
+            let env = EngineEnv {
+                gateway_url: Some("https://api.anthropic.com/v1".into()),
+                gateway_key: Some("ak".into()),
+                persona: None,
+                narc_judge,
+            };
+            apply_engine_env(&mut c, "claude-haiku-5-5", Path::new("/w"), &env);
+            c.get_envs()
+                .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+                .collect()
+        };
+        let get = |envs: &[(String, Option<String>)], name: &str| envs.iter().find(|(k, _)| k == name).and_then(|(_, v)| v.clone());
+
+        let routed = envs_of(Some(("https://llm.smoo.ai/v1".into(), "gk".into())));
+        assert_eq!(
+            get(&routed, "SMOOTH_API_URL").as_deref(),
+            Some("https://api.anthropic.com/v1"),
+            "the agent takes the route"
+        );
+        assert_eq!(
+            get(&routed, "SMOOTH_NARC_JUDGE_URL").as_deref(),
+            Some("https://llm.smoo.ai/v1"),
+            "the judge stays on the gateway"
+        );
+        assert_eq!(get(&routed, "SMOOTH_NARC_JUDGE_KEY").as_deref(), Some("gk"));
+
+        let plain = envs_of(None);
+        assert!(get(&plain, "SMOOTH_NARC_JUDGE_URL").is_none() && get(&plain, "SMOOTH_NARC_JUDGE_KEY").is_none());
     }
 
     #[test]

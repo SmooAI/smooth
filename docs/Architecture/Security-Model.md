@@ -14,7 +14,7 @@ Every tool call the operative makes passes two in-process hooks on its `ToolRegi
     - **Secret detection** — 10 patterns (API keys, tokens, private-key headers, …). A tool call or result carrying a secret is flagged/blocked.
     - **Prompt-injection guard** — 6 patterns over incoming content.
     - **Write guard** — optional (`SMOOTH_NARC_WRITE_GUARD=1`); off by default because the workspace is expected to be written.
-    - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict.
+    - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict. The daemon's judge runs `groq-gpt-oss-120b` on the agent's gateway endpoint, or on its own endpoint when both `SMOOTH_NARC_JUDGE_URL` and `SMOOTH_NARC_JUDGE_KEY` are set. That split is needed when the agent is pointed at a vendor API that does not serve the judge model; with the shared endpoint, Narc fails closed.
 
 `smooth-policy` TOML is still parsed by the operative, but only to log the intended network allowlist and phase and to feed Narc's surveillance context. **It no longer enforces anything** — the Wonk rule engine and the Goalie iptables/FUSE proxy that turned that policy into a kernel boundary were removed.
 

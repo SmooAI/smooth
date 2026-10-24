@@ -13,7 +13,7 @@
 //! smooth-operator LocalServer implementations and emits per-engine
 //! (and per-model) scores.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -23,6 +23,7 @@ use smooth_bench::convo::{default_convo_scenarios, gateway_from_providers_json, 
 use smooth_bench::curated::CuratedList;
 use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter, WorkspaceBooter};
 use smooth_bench::leaderboard;
+use smooth_bench::routes::ModelSpec;
 use smooth_bench::sweep::{current_commit_sha, StdoutObserver, SweepConfig, SweepGate};
 use smooth_bench::{print_summary, run_aider_polyglot, BenchOpts, PolyglotLang};
 
@@ -162,6 +163,10 @@ struct AgenticArgs {
     /// Model(s) the agent runs under. Repeatable — pass it more than
     /// once and the suite runs per model and prints a leaderboard plus a
     /// scenario × model grid. Default: gpt-6-luna.
+    ///
+    /// `<model>@<provider-id>` routes that one model through a provider
+    /// from ~/.smooth/providers.json instead of the gateway — for models
+    /// the gateway does not serve (e.g. `claude-haiku-5-5@anthropic`).
     #[arg(long = "model")]
     models: Vec<String>,
 
@@ -178,11 +183,15 @@ struct AgenticArgs {
     #[arg(long, default_value = "daemon", value_parser = parse_surface)]
     surface: Surface,
 
-    /// Cheap model used to grade `kind = "judge"` scenarios.
+    /// Model used to grade `kind = "judge"` / hybrid scenarios. Pick one
+    /// that is NOT under test — a model grading its own work is biased.
+    /// The app-build and code-change suites were benched with
+    /// `claude-opus-5-5`.
     #[arg(long, default_value = "gpt-6-luna")]
     judge_model: String,
 
-    /// Scenario TOML to run instead of the embedded suite.
+    /// Scenario TOML to run instead of the embedded suite. `fixture` and
+    /// `holdout` dirs in it resolve relative to this file's directory.
     #[arg(long)]
     scenarios: Option<PathBuf>,
 
@@ -342,6 +351,7 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
         gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
         gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
         let (url, key) = gateway_from_providers_json()
@@ -550,6 +560,9 @@ fn convo_row(run: &ConvoRun, measured: Option<smooth_bench::spend::Measured>, no
         // conversation, not workspace state. Reported clean rather than
         // faked, so the column can't imply a check that never ran.
         safety_violations: 0,
+        quality_score: None,
+        judge_mean: None,
+        tokens: (0, 0),
         duration_ms,
         cells,
     }
@@ -576,13 +589,28 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         anyhow::ensure!(!scenarios.is_empty(), "--only matched no scenarios (have: {:?})", args.only);
     }
 
+    // Fixtures and held-out tests resolve relative to the scenario file.
+    let scenario_base = args
+        .scenarios
+        .as_deref()
+        .and_then(Path::parent)
+        .map_or_else(|| smooth_repo_root().join("crates").join("smooth-bench"), Path::to_path_buf);
+
+    // Same fallback the docs promise and `convo` already has: a working
+    // `th` (providers.json) means a working bench, no env export needed.
+    let from_providers = gateway_from_providers_json();
     let env = EngineEnv {
-        gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
-        gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
+        gateway_url: std::env::var("SMOOAI_GATEWAY_URL")
+            .ok()
+            .or_else(|| from_providers.as_ref().map(|(u, _)| u.clone())),
+        gateway_key: std::env::var("SMOOAI_GATEWAY_KEY")
+            .ok()
+            .or_else(|| from_providers.as_ref().map(|(_, k)| k.clone())),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
-        eprintln!("warning: SMOOAI_GATEWAY_KEY is unset — the agent will boot but every turn errors; scenarios will be INCONCLUSIVE");
+        eprintln!("warning: no gateway key (SMOOAI_GATEWAY_KEY or providers.json) — the agent will boot but every turn errors; scenarios will be INCONCLUSIVE");
     }
 
     // Say which binary is about to be benchmarked. The Rust engine boots
@@ -600,29 +628,59 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     let gateway_url = env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string());
     let gateway_key = env.gateway_key.clone();
 
-    let models = if args.models.is_empty() {
-        vec!["gpt-6-luna".to_string()]
+    let specs: Vec<ModelSpec> = if args.models.is_empty() {
+        vec![ModelSpec::parse("gpt-6-luna")?]
     } else {
-        args.models.clone()
+        args.models.iter().map(|m| ModelSpec::parse(m)).collect::<Result<_>>()?
     };
+    let models: Vec<String> = specs.iter().map(|s| s.model.clone()).collect();
 
-    let booter: Box<dyn WorkspaceBooter> = match args.isolation {
-        Isolation::Host => {
-            let repo = args
-                .repo
-                .clone()
-                .or_else(|| std::env::var_os("SMOOTH_OPERATOR_REPO").map(PathBuf::from))
-                .or_else(|| dirs_next::home_dir().map(|h| h.join("dev").join("smooai").join("smooth-operator")))
-                .context("could not resolve smooth-operator repo root")?;
-            let mut b = ProcessBooter::new(repo, env);
-            b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
-            Box::new(b)
+    // Resolve every direct route up front: a typo'd provider should fail
+    // before the first model has spent anything, not halfway through.
+    let providers_file = dirs_next::home_dir().map(|h| h.join(".smooth").join("providers.json"));
+    let mut routes = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let route = match &spec.provider {
+            None => None,
+            Some(id) => {
+                let path = providers_file.as_deref().context("no home directory to find providers.json in")?;
+                let r = smooth_bench::routes::load_provider(path, id).with_context(|| format!("--model {}@{id}", spec.model))?;
+                eprintln!("route: {} -> provider {:?} ({}) — not the gateway", spec.model, r.id, r.api_url);
+                Some(r)
+            }
+        };
+        routes.push(route);
+    }
+
+    let repo = args
+        .repo
+        .clone()
+        .or_else(|| std::env::var_os("SMOOTH_OPERATOR_REPO").map(PathBuf::from))
+        .or_else(|| dirs_next::home_dir().map(|h| h.join("dev").join("smooai").join("smooth-operator")));
+    // One booter per model: a direct-routed model carries its own
+    // endpoint and key, everything else the gateway's.
+    let make_booter = |route: Option<&smooth_bench::routes::ProviderRoute>| -> Result<Box<dyn WorkspaceBooter>> {
+        let mut env = env.clone();
+        if let Some(r) = route {
+            // Only the agent leaves the gateway: Narc's judge keeps its
+            // production endpoint and model so the safety layer is identical
+            // across the models being compared.
+            env.narc_judge = env.gateway_url.clone().zip(env.gateway_key.clone());
+            env.gateway_url = Some(r.api_url.clone());
+            env.gateway_key = Some(r.api_key.clone());
         }
-        Isolation::MicroVm => {
-            let mut b = MicroVmBooter::new(smooth_repo_root(), env);
-            b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
-            Box::new(b)
-        }
+        Ok(match args.isolation {
+            Isolation::Host => {
+                let mut b = ProcessBooter::new(repo.clone().context("could not resolve smooth-operator repo root")?, env);
+                b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+                Box::new(b)
+            }
+            Isolation::MicroVm => {
+                let mut b = MicroVmBooter::new(smooth_repo_root(), env);
+                b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+                Box::new(b)
+            }
+        })
     };
 
     // Sample how fast the SHARED key is spending on traffic that isn't
@@ -648,7 +706,11 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             eprintln!("cost: loaded list prices for {} models from the gateway", b.len());
             for m in &models {
                 if b.get(m).is_none() {
-                    eprintln!("cost: WARNING {m} has no published price — its cost will read UNKNOWN, not $0");
+                    if smooth_bench::pricing::direct_list_price(m).is_some() {
+                        eprintln!("cost: {m} is not on the gateway — pricing it at its vendor list price");
+                    } else {
+                        eprintln!("cost: WARNING {m} has no published price — its cost will read UNKNOWN, not $0");
+                    }
                 }
             }
             b
@@ -662,10 +724,11 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     // One suite run per model, sequentially: every trial boots an engine
     // and grabs a port, so overlapping models would fight over both.
     let mut runs = Vec::with_capacity(models.len());
-    for model in &models {
+    for (model, route) in models.iter().zip(&routes) {
         if models.len() > 1 {
             eprintln!("\nagentic: === model {model} ===");
         }
+        let booter = make_booter(route.as_ref())?;
         let opts = AgenticOpts {
             engine: args.engine,
             // Each model gets its own scratch subtree — otherwise model B
@@ -678,7 +741,8 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             gateway_url: gateway_url.clone(),
             gateway_key: gateway_key.clone(),
             trials: args.trials as usize,
-            prices: prices.get(model),
+            prices: prices.get(model).or_else(|| smooth_bench::pricing::direct_list_price(model)),
+            scenario_base: scenario_base.clone(),
         };
         let (run, measured) = smooth_bench::spend::measure(&gateway_url, gateway_key.as_deref(), run_agentic(&scenarios, booter.as_ref(), &opts)).await;
         runs.push((run?, measured));
@@ -758,6 +822,9 @@ fn agentic_row(run: &AgenticRun) -> leaderboard::ModelRow {
         cost_usd: run.total_cost_usd(),
         cost_resolvable: run.has_cost(),
         safety_violations: run.safety_violations(),
+        quality_score: run.mean_score(),
+        judge_mean: run.mean_judge(),
+        tokens: run.tokens(),
         duration_ms,
         // The agentic runner records tool NAMES per trial, not per-call
         // outcomes, so an error rate is unavailable here — reported as 0
@@ -839,6 +906,7 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
         gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
         gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
         eprintln!("warning: SMOOAI_GATEWAY_KEY is unset — engines will boot but turns will error; scores will be all-FAIL");
