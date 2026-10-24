@@ -188,7 +188,9 @@ export async function fetchModelRows(): Promise<ModelRow[] | null> {
         if (!res.ok) return null;
         const data = (await res.json()) as Partial<BenchFile>;
         if (!data || !Array.isArray(data.models) || data.models.length === 0) return null;
-        return catalogRows({ models: data.models, unbenched: Array.isArray(data.unbenched) ? data.unbenched : undefined });
+        const rows = catalogRows({ models: data.models, unbenched: Array.isArray(data.unbenched) ? data.unbenched : undefined });
+        registerLiveRows(rows);
+        return rows;
     } catch {
         return null;
     }
@@ -222,23 +224,32 @@ export interface SmoothMode {
     tier: ModeTier;
 }
 
-export const MODES: SmoothMode[] = MODEL_ROWS.map((r) => ({
-    id: r.model,
-    label: r.model,
-    emoji: r.badges[0]?.emoji ?? '◍',
-    model: r.model,
-    tier: r.premium ? 'premium' : 'budget',
-}));
+/** One picker row as a mode. */
+export function rowToMode(r: ModelRow): SmoothMode {
+    return { id: r.model, label: r.model, emoji: r.badges[0]?.emoji ?? '◍', model: r.model, tier: r.premium ? 'premium' : 'budget' };
+}
+
+export const MODES: SmoothMode[] = MODEL_ROWS.map(rowToMode);
 
 /** The mode a fresh session lands on. */
 export const DEFAULT_MODE_ID = DEFAULT_MODEL;
 
 const MODE_BY_ID = new Map(MODES.map((m) => [m.id, m]));
 
+/** Models only the daemon's live catalog offers (SMOODEV-4148: Claude Haiku 5.5
+ * when the user has an Anthropic key). Without these, picking one fell back to
+ * luna in `modeById` and the turn silently ran on the wrong model. */
+const LIVE_MODE_BY_ID = new Map<string, SmoothMode>();
+
+/** Make the live catalog's rows resolvable by `modeById`. */
+export function registerLiveRows(rows: readonly ModelRow[]): void {
+    for (const r of rows) if (!MODE_BY_ID.has(r.model)) LIVE_MODE_BY_ID.set(r.model, rowToMode(r));
+}
+
 /** Look a mode up by id (model string), falling back to the default (luna) when
  * unknown — a saved preference pointing at a retired preset lands on luna. */
 export function modeById(id: string | null | undefined): SmoothMode {
-    return (id && MODE_BY_ID.get(id)) || MODE_BY_ID.get(DEFAULT_MODE_ID)!;
+    return (id && (MODE_BY_ID.get(id) ?? LIVE_MODE_BY_ID.get(id))) || MODE_BY_ID.get(DEFAULT_MODE_ID)!;
 }
 
 // ── Live per-token cost (unchanged — the /admin/model-costs path) ─────────────

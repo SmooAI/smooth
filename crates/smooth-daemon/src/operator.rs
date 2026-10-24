@@ -872,7 +872,42 @@ fn gateway_from_providers(route: &str) -> Option<(String, String, String)> {
 /// The rule lives in `smooth_cast::providers::route_at` so `th up`'s
 /// first-run gate and this daemon agree on what "configured" means.
 pub(crate) fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
-    smooth_cast::providers::route_at(path, route)
+    smooth_cast::providers::upstream_route_at(path, route)
+}
+
+/// The gateway the `LocalServer` should talk to: the loopback model router
+/// ([`crate::model_router`]) in front of `(url, key)` when `providers.json`
+/// configures a provider for a direct-route model, else `(url, key)` itself.
+/// The router is started once per process; later calls reuse it.
+fn routed_gateway(url: String, key: String) -> (String, String) {
+    static ROUTER: std::sync::OnceLock<Option<crate::model_router::RouterHandle>> = std::sync::OnceLock::new();
+    let handle = ROUTER.get_or_init(|| {
+        let path = dirs_next::home_dir()?.join(".smooth").join("providers.json");
+        let providers: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let upstream = crate::model_router::Endpoint {
+            api_url: url.clone(),
+            api_key: key.clone(),
+        };
+        let table = crate::model_router::RouteTable::from_providers(&providers, upstream);
+        if !table.has_direct() {
+            return None;
+        }
+        let direct: Vec<&str> = table.direct.iter().map(|(d, _)| d.model).collect();
+        match crate::model_router::spawn(table) {
+            Ok(h) => {
+                tracing::info!(router = %h.base_url, ?direct, "model router up: direct-route models leave the gateway");
+                Some(h)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "model router failed to start; direct-route models will not work");
+                None
+            }
+        }
+    });
+    match handle {
+        Some(h) => (h.base_url.clone(), h.secret.clone()),
+        None => (url, key),
+    }
 }
 
 /// Tools the daemon ALWAYS routes through the engine's write-confirmation HITL,
@@ -940,6 +975,10 @@ fn resolve_gateway_config() -> ServerConfig {
     let fast = fast_mode_enabled();
     if !env_has_key {
         if let Some((url, key, coding_model)) = gateway_from_providers("coding") {
+            // SMOODEV-4148: with a provider for a direct-route model (Haiku 5.5
+            // on the user's Anthropic key), turns go through the loopback model
+            // router so a per-turn switch to that model leaves the gateway.
+            let (url, key) = routed_gateway(url, key);
             config.gateway_url = url;
             config.gateway_key = Some(key);
             // Fast mode pins a current Groq model (the gateway's own `fast` slot is

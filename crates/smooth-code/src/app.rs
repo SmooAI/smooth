@@ -388,6 +388,17 @@ pub async fn run_with_session(
     // every TaskStart so bench harnesses (and any user who passes
     // --model) actually get the requested model instead of silently
     // falling back to smooth-coding's default alias.
+    // SMOODEV-4148: otherwise run the persisted main model — the Coding slot
+    // the `/model` picker writes — so a switch survives a restart of th code
+    // even while the long-lived daemon still holds its boot-time default. A
+    // daemon-wide `th settings set model …` pin keeps winning.
+    let model = model.or_else(|| {
+        let coding = crate::model_picker::ModelPickerState::new()
+            .providers_path
+            .and_then(|p| smooth_cast::provider_migration::load_providers_with_migration(&p).ok())
+            .map(|r| r.routing.coding.model);
+        crate::model_picker::startup_main_model(None, smooth_policy::settings::raw("model").as_deref(), coding.as_deref())
+    });
     if let Some(m) = model {
         // Keep the displayed name in lockstep with the value actually put on
         // the wire — the status bar has no other way to know (th-d49538).
@@ -1370,16 +1381,12 @@ fn handle_input_mode(
                     // apply_selected_model returns to Slots on success;
                     // on failure it leaves the error stashed and keeps
                     // the user in Models view so they can retry.
-                    let _ = state.model_picker.apply_selected_model();
-                    // When the user applied the Default slot, keep the
-                    // displayed model name in the status bar consistent.
-                    if let Some(def_entry) = state
-                        .model_picker
-                        .slots
-                        .iter()
-                        .find(|e| matches!(e.slot, crate::model_picker::PickerSlot::Default))
-                    {
-                        state.model_name = def_entry.current_model.clone();
+                    // SMOODEV-4148: picking the main (Coding/Default) model
+                    // switches the live session on its next turn, not just the
+                    // on-disk routing the daemon reads at its next start.
+                    if let Some(model) = state.model_picker.apply_selected_main_model() {
+                        state.model_name.clone_from(&model);
+                        state.model_override = Some(model);
                     }
                 }
             },
