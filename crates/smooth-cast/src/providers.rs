@@ -303,9 +303,154 @@ pub fn route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     route_from_value(&v, route)
 }
 
+/// The configured provider a direct-route model runs on.
+///
+/// That is the provider whose id is the model's `provider_id`, else the first
+/// whose `api_format` matches — in both cases only one with a url and a
+/// non-empty key ([`smooth_policy::direct_models`]). `None` means the model
+/// cannot run here and is not offered.
+#[must_use]
+pub fn direct_provider<'a>(v: &'a Value, model: &smooth_policy::direct_models::DirectModel) -> Option<&'a Value> {
+    let providers = v.get("providers")?.as_array()?;
+    let usable =
+        |p: &&Value| p.get("api_url").and_then(Value::as_str).is_some() && p.get("api_key").and_then(Value::as_str).is_some_and(|k| !k.trim().is_empty());
+    providers
+        .iter()
+        .filter(usable)
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(model.provider_id))
+        .or_else(|| {
+            providers
+                .iter()
+                .filter(usable)
+                .find(|p| normalize_format(p.get("api_format").and_then(Value::as_str)) == model.api_format)
+        })
+}
+
+/// [`direct_provider`]'s `(api_url, api_key)`.
+#[must_use]
+pub fn direct_provider_from_value(v: &Value, model: &smooth_policy::direct_models::DirectModel) -> Option<(String, String)> {
+    let p = direct_provider(v, model)?;
+    Some((p.get("api_url")?.as_str()?.to_owned(), p.get("api_key")?.as_str()?.to_owned()))
+}
+
+/// [`route_from_value`] for the daemon's upstream GATEWAY.
+///
+/// When the slot is pinned to a direct-route model on its own provider (the `th code` picker
+/// writes `{provider: "anthropic", model: "claude-haiku-5-5"}`), the model is
+/// kept but the url/key come from the gateway provider — a non-Anthropic
+/// provider, preferring the ids `smooth` and `smooai-gateway` — because every
+/// other model the user switches to still runs there; the daemon's model router
+/// sends the direct model to its provider. With no such gateway, this is
+/// exactly [`route_from_value`].
+#[must_use]
+pub fn upstream_route_from_value(v: &Value, route: &str) -> Option<(String, String, String)> {
+    let (url, key, model) = route_from_value(v, route)?;
+    if smooth_policy::direct_models::direct_model(&model).is_none() {
+        return Some((url, key, model));
+    }
+    let providers = v.get("providers").and_then(Value::as_array);
+    let gateway = providers.and_then(|ps| {
+        let usable = |p: &&Value| {
+            normalize_format(p.get("api_format").and_then(Value::as_str)) != "Anthropic"
+                && p.get("api_key").and_then(Value::as_str).is_some_and(|k| !k.trim().is_empty())
+                && p.get("api_url").and_then(Value::as_str).is_some()
+        };
+        ["smooth", "smooai-gateway"]
+            .iter()
+            .find_map(|id| ps.iter().filter(usable).find(|p| p.get("id").and_then(Value::as_str) == Some(id)))
+            .or_else(|| ps.iter().find(usable))
+    });
+    match gateway {
+        Some(g) => Some((
+            g.get("api_url").and_then(Value::as_str)?.to_owned(),
+            g.get("api_key").and_then(Value::as_str)?.to_owned(),
+            model,
+        )),
+        None => Some((url, key, model)),
+    }
+}
+
+/// [`upstream_route_from_value`] against a file. `None` when it is missing or
+/// unparseable.
+#[must_use]
+pub fn upstream_route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    upstream_route_from_value(&v, route)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_anthropic() -> Value {
+        json!({
+            "providers": [
+                { "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw", "api_format": "OpenAiCompat" },
+                { "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant", "api_format": "Anthropic" }
+            ],
+            "routing": { "coding": { "provider": "smooth", "model": "gpt-6-luna" } }
+        })
+    }
+
+    #[test]
+    fn direct_provider_prefers_the_named_id() {
+        let haiku = smooth_policy::direct_models::direct_model("claude-haiku-5-5").unwrap();
+        assert_eq!(
+            direct_provider_from_value(&with_anthropic(), haiku),
+            Some(("https://api.anthropic.com/v1".into(), "sk-ant".into()))
+        );
+    }
+
+    #[test]
+    fn direct_provider_falls_back_to_the_api_format() {
+        let haiku = smooth_policy::direct_models::direct_model("claude-haiku-5-5").unwrap();
+        let v = json!({ "providers": [
+            { "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw" },
+            { "id": "my-claude", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-mine", "api_format": "anthropic" }
+        ]});
+        assert_eq!(
+            direct_provider_from_value(&v, haiku),
+            Some(("https://api.anthropic.com/v1".into(), "sk-mine".into()))
+        );
+    }
+
+    #[test]
+    fn direct_provider_needs_a_key() {
+        let haiku = smooth_policy::direct_models::direct_model("claude-haiku-5-5").unwrap();
+        let v = json!({ "providers": [
+            { "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "  ", "api_format": "Anthropic" }
+        ]});
+        assert_eq!(direct_provider_from_value(&v, haiku), None);
+        assert_eq!(direct_provider_from_value(&sample(), haiku), None, "no Anthropic provider at all");
+    }
+
+    #[test]
+    fn upstream_route_is_route_from_value_for_gateway_models() {
+        let v = with_anthropic();
+        assert_eq!(upstream_route_from_value(&v, "coding"), route_from_value(&v, "coding"));
+    }
+
+    #[test]
+    fn upstream_route_keeps_the_gateway_for_a_direct_slot() {
+        let mut v = with_anthropic();
+        set_routing_slot(&mut v, "coding", "anthropic", "claude-haiku-5-5");
+        assert_eq!(
+            upstream_route_from_value(&v, "coding"),
+            Some(("https://llm.smoo.ai/v1".into(), "sk-gw".into(), "claude-haiku-5-5".into()))
+        );
+    }
+
+    #[test]
+    fn upstream_route_without_a_gateway_uses_the_slot_provider() {
+        let v = json!({
+            "providers": [{ "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant", "api_format": "Anthropic" }],
+            "routing": { "coding": { "provider": "anthropic", "model": "claude-haiku-5-5" } }
+        });
+        assert_eq!(
+            upstream_route_from_value(&v, "coding"),
+            Some(("https://api.anthropic.com/v1".into(), "sk-ant".into(), "claude-haiku-5-5".into()))
+        );
+    }
 
     fn sample() -> Value {
         json!({

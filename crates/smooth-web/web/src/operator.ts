@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { historyImages, historyText, type HistoryMessage } from './history';
-import { DEFAULT_MIGRATION_KEY, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
+import { DEFAULT_MIGRATION_KEY, fetchModelRows, initialModeId, modeById, type ModelCosts, type SmoothMode } from './modes';
 import { displayText, outgoingText, sessionOpenFrame } from './session';
 import { normalizeTodos, type TodoItem } from './todos';
 import { CANCEL_FALLBACK_MS, cancelFrame, endsTurn, errorText, isStaleFrame, mergeSteer } from './turn-control';
@@ -315,7 +315,19 @@ export function useOperator(): OperatorApi {
     // a session that isn't there yet (SMOODEV-3708).
     const bindingRef = useRef(false);
 
-    const mode = useMemo(() => modeById(modeId), [modeId]);
+    // A saved model only the live catalog offers (Haiku 5.5, SMOODEV-4148)
+    // resolves once that catalog is fetched; bump to re-resolve it then.
+    const [catalogTick, setCatalogTick] = useState(0);
+    useEffect(() => {
+        let alive = true;
+        void fetchModelRows().then((rows) => {
+            if (alive && rows) setCatalogTick((t) => t + 1);
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
+    const mode = useMemo(() => modeById(modeId), [modeId, catalogTick]);
     // Keep a ref so `sendMessage` always reads the live model without re-binding.
     const modeRef = useRef(mode);
     modeRef.current = mode;

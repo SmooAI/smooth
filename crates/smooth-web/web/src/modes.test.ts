@@ -272,3 +272,18 @@ test('fetchModelRows appends the catalog unbenched list', async () => {
     );
     assert.equal(rows![rows!.length - 1].model, 'groq-gpt-oss-120b');
 });
+
+test('a model only the live catalog offers is pickable once fetched (Haiku 5.5, SMOODEV-4148)', async () => {
+    assert.equal(modeById('claude-haiku-5-5').model, DEFAULT_MODEL, 'unknown before the live catalog loads');
+    const payload = { suite: 'agentic', trials: 3, scenario_count: 28, models: fixture, unbenched: ['gpt-6-luna', 'claude-haiku-5-5'] };
+    const rows = await withFetch(
+        (async () => new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch,
+        () => fetchModelRows(),
+    );
+    const haiku = rows!.find((r) => r.model === 'claude-haiku-5-5');
+    assert.ok(haiku, 'offered');
+    assert.equal(haiku!.passRatePct, null, 'not yet benched, never an invented score');
+    assert.equal(modeById('claude-haiku-5-5').model, 'claude-haiku-5-5', 'picking it sends it, not luna');
+    assert.equal(modeById('gpt-6-luna').model, 'gpt-6-luna');
+    assert.deepEqual(initialModeId('claude-haiku-5-5', false), { id: 'claude-haiku-5-5', markMigrated: false }, 'a saved pick survives reload');
+});
