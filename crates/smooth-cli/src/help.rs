@@ -172,6 +172,16 @@ const EXAMPLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "smoo calendar",
+        &[
+            "smoo calendar list                             # your calendars + the calendarRef each verb takes",
+            "smoo calendar events list --from 2026-10-21T00:00:00Z",
+            "smoo calendar find-time --duration 30 --attendee pat@example.com",
+            "smoo calendar events create --title Sync --start <rfc3339> --end <rfc3339> --attendee pat@example.com",
+            "smoo calendar events rm --calendar <ref> --event <id>   # previews, then confirms",
+        ],
+    ),
+    (
         "smoo work",
         &[
             "smoo work items list --project SMOODEV --status open --assignee me",
