@@ -87,7 +87,7 @@ When given a task, drive it to completion before yielding. Don't stop at the fir
 - `web_search`/`crawl` for current or external facts; `knowledge_search` only when the user asks about org/SmooAI knowledge; the `th` tool for the user's Smoo AI business, pearls, and agent mail.
 
 ## The user's business — the `th` tool
-The user runs their company on Smoo AI, and you are already signed in to their active org. Their CRM, pipeline, deals, contacts, tasks, campaigns and analytics are one `th` call away under `["smoo", …]` — use the recipes in the `th` tool's description directly instead of discovering commands. "Biggest deals" / "what's in the pipeline" → `["smoo","crm","pipeline"]` or `["smoo","crm","deals","list","--json"]` and rank by value; a person or company → `["smoo","crm","contacts","list","--search","<name>"]`. If no recipe fits, run the area's guide once (`["smoo","<area>","ai"]`) rather than walking `--help` level by level. A sign-in error means the user must run `smoo auth login` — tell them; don't retry.
+The user runs their company on Smoo AI; the Smoo AI account section below says whether this session is signed in and to which org. Their CRM, pipeline, deals, contacts, tasks, campaigns and analytics are one `th` call away under `["smoo", …]` — use the recipes in the `th` tool's description directly instead of discovering commands. "Biggest deals" / "what's in the pipeline" → `["smoo","crm","pipeline"]` or `["smoo","crm","deals","list","--json"]` and rank by value; a person or company → `["smoo","crm","contacts","list","--search","<name>"]`. If no recipe fits, run the area's guide once (`["smoo","<area>","ai"]`) rather than walking `--help` level by level. A sign-in error means the user must run `smoo auth login` — tell them; don't retry. Records the user names are not always in Smoo: when Smoo can't serve the request (signed out, or nothing matches) and the workspace holds data that fits it, work from the workspace (`list_files`, `grep`) instead of stopping at the sign-in hint.
 - DELIVERING FILES: when the user asks you to MAKE something — a document, report, spreadsheet, chart, image, or web page — writing it to disk is NOT handing it over. After you create it (`write_file` for raw files, `create_artifact` for a self-contained HTML page, or `bash`), call `send_file` with its path so it arrives in the chat as a download they can open on their phone or laptop. A `file://` path or a location on this machine is not delivery. If a file they want already exists, `send_file` it. For something visual or shareable, prefer `create_artifact` (rich HTML) then `send_file`; for raw data, `write_file` then `send_file`; otherwise just answer inline.
 - You also have, for the right request: `create_artifact` (build a self-contained HTML page/report), `calendar` + `reminders` + `imessage` (their Mac — schedule events, set reminders, read/send texts), `get_current_datetime` (you have no internal clock — call it before anything that depends on "now"), `get_weather` (current conditions + short forecast for any place, or their area if none given), and `get_location` (where they actually are, from macOS Location Services). They won't always be listed above, so reach for them when the intent matches.
 - `notify` pushes a notification to the user's devices even when the chat is closed. Use it sparingly and only when it earns the interruption: a reminder they asked for coming due, a long-running job finishing, or a genuinely useful proactive heads-up. NEVER use it for a chatty update, to acknowledge a message, or to restate something you already answered inline.
@@ -833,7 +833,7 @@ fn smoo_identity_section(user: Option<&str>, org: Option<&str>) -> String {
         (None, Some(org)) => format!(
             "\n\n## Smoo AI account\nYou are signed in to Smoo AI, acting on org `{org}`. Use that org id directly for org-scoped work instead of asking for it. `th auth whoami` for the full picture."
         ),
-        _ => "\n\n## Smoo AI account\nNo Smoo AI session was readable when this session started. Before telling the user they are signed out — which is wrong often enough to be worth the check — run `th auth whoami`; they may have signed in since. If it confirms no session, `th auth login` is the fix.".to_owned(),
+        _ => "\n\n## Smoo AI account\nNo Smoo AI session was readable when this session started. Before telling the user they are signed out — which is wrong often enough to be worth the check — run `th auth whoami`; they may have signed in since. If it confirms no session, `th auth login` is the fix for Smoo data — but first check whether the workspace already holds what the request is about, and if it does, do the work from there.".to_owned(),
     }
 }
 
@@ -2660,6 +2660,11 @@ mod tests {
         // a turn walking --help to find the pipeline.
         assert!(p.contains(r#"["smoo","crm","pipeline"]"#), "pipeline recipe up front");
         assert!(p.contains("smoo auth login"), "sign-in errors are handed to the user, not retried");
+        // SMOODEV-4158: the persona used to assert "you are already signed in"
+        // unconditionally, contradicting the identity section on a signed-out
+        // daemon. Sign-in state is the identity section's to state.
+        assert!(!p.contains("already signed in"), "sign-in state must not be asserted unconditionally");
+        assert!(p.contains("work from the workspace"), "a signed-out request falls back to workspace data");
     }
 
     // ── deny policy + permission gate ─────────────────────────────────────
@@ -2843,6 +2848,10 @@ mod tests {
         assert!(s.contains("th auth whoami"), "signed-out branch must send the agent to re-check: {s}");
         let claims_signed_out = s.contains("You are not signed in") || s.contains("you are signed out");
         assert!(!claims_signed_out, "must not state signed-out as fact: {s}");
+        // SMOODEV-4158: signed out is not a dead end — both models answered
+        // "sign in first" while the records they were asked about sat in the
+        // workspace.
+        assert!(s.contains("workspace"), "signed-out branch must point at workspace data: {s}");
     }
 
     /// Blank strings in the credentials file are absence, not a user named "".

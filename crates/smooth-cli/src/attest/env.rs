@@ -30,6 +30,8 @@ pub struct Sys {
     /// Container-runtime starters, tried in order. Only ever STARTED, never stopped.
     pub starters: Vec<OsString>,
     pub pnpm: OsString,
+    /// Runs a repo's `_<check>-untouched.mjs` path filter (see `preflight_skip`).
+    pub node: OsString,
     pub cores: usize,
     pub docker_wait: Duration,
     pub docker_poll: Duration,
@@ -56,6 +58,7 @@ impl Default for Sys {
             docker: "docker".into(),
             starters: vec!["orbctl".into(), "colima".into()],
             pnpm: "pnpm".into(),
+            node: "node".into(),
             cores: core_count(),
             docker_wait: Duration::from_secs(env_u64("DOCKER_WAIT").unwrap_or(120)),
             docker_poll: Duration::from_secs(2),

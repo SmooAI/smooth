@@ -402,7 +402,13 @@ fn welcome_banner_tail_into(lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(Span::styled("Big Smooth — your always-on personal agent", theme::muted())).alignment(Alignment::Center));
     lines.push(Line::from(Span::styled("smoo.ai", Style::default().fg(theme::SMOO_GRAY_500))).alignment(Alignment::Center));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Type a message to get started. /help for commands.", theme::muted())).alignment(Alignment::Center));
+    lines.push(
+        Line::from(Span::styled(
+            "Type a message to get started. Shift/Alt+Enter for a new line · /help for commands.",
+            theme::muted(),
+        ))
+        .alignment(Alignment::Center),
+    );
     lines.push(
         Line::from(Span::styled(
             "@ mentions files & pearls · Ctrl+B your conversations · paste images · /skill catalog",
