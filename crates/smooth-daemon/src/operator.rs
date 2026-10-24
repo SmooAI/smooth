@@ -1374,6 +1374,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // Big Smooth the in-process `flow_*` tools over this same engine.
     let (flow_router, flow_engine) =
         crate::flow_route::install(workspace.clone(), token.clone(), Some(loopback_url(addr))).context("opening the SmoothFlow engine")?;
+    // SMOODEV-4127: its pre-warmed shells go when the daemon does.
+    let flow_spares = flow_engine.clone();
     // The host hook chain, built ONCE and shared by the server's per-turn
     // registry (`.tool_hooks` below) and every sidekick call (th-8d1951), so a
     // sidekick meets the same gate, the same approver channel and the same
@@ -1611,6 +1613,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 
     shutdown_signal().await;
     tracing::info!("shutdown signal received");
+    flow_spares.drop_spares();
     if holds_flow_addr {
         if let Some(dir) = &flow_addr_dir {
             if crate::flow_addr::release(dir, &flow_addr) {

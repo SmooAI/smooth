@@ -21,6 +21,83 @@
       }
     },
     {
+      "name": "a given name beats the pearl",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": "deploys",
+          "project": "",
+          "worktree": "/w/x",
+          "pearl_id": "th-1",
+          "state": "idle",
+          "unread": false,
+          "title_pinned": true
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "deploys"
+      }
+    },
+    {
+      "name": "a blank given name is no name",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "claude",
+          "title": " ",
+          "project": "",
+          "worktree": "/w/x",
+          "pearl_id": "th-1",
+          "state": "idle",
+          "unread": false,
+          "title_pinned": true
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "th-1"
+      }
+    },
+    {
+      "name": "a shell's live name beats the pearl",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "shell",
+          "title": "cargo",
+          "project": "",
+          "worktree": "/w/x",
+          "pearl_id": "th-1",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "cargo"
+      }
+    },
+    {
+      "name": "a shell at home is ~",
+      "input": {
+        "session": {
+          "id": "fs-1",
+          "kind": "shell",
+          "title": "~",
+          "project": "",
+          "worktree": "/Users/me",
+          "state": "idle",
+          "unread": false
+        },
+        "home": "/Users/me"
+      },
+      "expected": {
+        "title": "~"
+      }
+    },
+    {
       "name": "a blank pearl is none",
       "input": {
         "session": {

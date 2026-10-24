@@ -101,12 +101,20 @@ Normative words: **must**, **should**, **may**.
   panes or tabs may show the same one. Closing a view never ends a session.
 - **New tab** opens on the focused session. **New Shell Here** opens a tab
   holding a new shell in the focused session's worktree.
-- **Tab titles** come from `Session.tabTitle`: the pearl id, else the title,
-  else the worktree's folder name (`~` for home). "Home" is the daemon's:
-  `flow.hello`'s `daemon.home` when present, else the client's own. A phone or
-  a client of a remote daemon has no other way to know it (th-89eb13). A path-shaped title is
-  shortened to its last component, so a tab is never titled with a whole path
-  or a bare `/`. The tab strip shows only when there are two or more tabs.
+- **Tab titles** come from `Session.tabTitle`, taking the first that applies:
+    1. A name someone gave the session (`title_pinned`, set by Rename Tab).
+    2. For an agent, the pearl id. A shell's `title` is a live name the
+       engine keeps current (the running program, else the folder), so a
+       pearl never replaces it.
+    3. The title.
+    4. The worktree's folder name (`~` for home).
+
+    "Home" is the daemon's:
+    `flow.hello`'s `daemon.home` when present, else the client's own. A phone or
+    a client of a remote daemon has no other way to know it (th-89eb13). A path-shaped title is
+    shortened to its last component, so a tab is never titled with a whole path
+    or a bare `/`. The tab strip shows only when there are two or more tabs.
+
 - **Splits.** Right, down, left and up split the focused pane. The new pane
   shows the session it was split from. There are directional focus moves (only a pane lying beyond the focused pane's edge counts as "that way"; the nearest edge wins, then the nearest centerline, then the lower pane id),
   zoom (the focused pane fills the tab, and again restores it) and equalize.
@@ -205,6 +213,7 @@ Windows Terminal. The fleet-action family (`⌘⌥` on the Mac) is **Ctrl+Alt**.
 | Close Out                         | ⌘⌥W                   | Ctrl+Alt+W                                                    |
 | Focus Session 1–9                 | ⌘1–⌘9                 | Alt+1–Alt+9                                                   |
 | New Tab / Close Pane / Close Tab  | ⌘T / ⌘W / ⌘⇧W         | Ctrl+Shift+T / Ctrl+Shift+W / Ctrl+Shift+Alt+W                |
+| Rename Tab                        | ⌘⇧R                   | Ctrl+Shift+Alt+R                                              |
 | Previous / Next Tab               | ⌘⇧[ / ⌘⇧]             | Ctrl+PageUp / Ctrl+PageDown                                   |
 | Split Right / Down / Left / Up    | ⌘⇧→ / ⌘⇧↓ / ⌘⇧← / ⌘⇧↑ | Ctrl+Shift+D / Ctrl+Shift+Alt+D / Ctrl+Shift+← / Ctrl+Shift+↑ |
 | Focus Pane ←→↑↓                   | ⌘⌥ arrows             | Ctrl+Alt arrows                                               |
@@ -388,6 +397,12 @@ control.
   Mac app keeps ⌘D / ⌘⇧D as extra, Mac-only alias rows). `flow.new` gains the
   additive `cwd_of`. Only `keymap.json`'s Mac table changes; Linux / Windows
   defaults are unchanged.
+- 2026-10-23: Rename Tab (SMOODEV-4127) is ⌘⇧R on the Mac and Ctrl+Shift+Alt+R
+  elsewhere. Its wire frame is `flow.rename {id, title?}`, where a blank title
+  resets the name. Rows carry an additive `title_pinned`. §5 tab titles now
+  put a pinned title first and never let a pearl replace a shell's live name.
+  `title.json` and `keymap.json` gain cases, and the existing cases are
+  unchanged.
 
 ## 14. Diff
 
