@@ -1,5 +1,11 @@
 # @smooai/smooth
 
+## 0.87.1
+
+### Patch Changes
+
+- b42dd5c: `th attest` asks the repo's `scripts/ci/_<check>-untouched.mjs` path filter (exit 0 = nothing to check) before queueing, and credits the row as passed without taking a heavy slot or the cargo lock. A web-only branch no longer waits tens of minutes in the queue for `attest rust` to skip itself.
+
 ## 0.87.0
 
 ### Minor Changes
