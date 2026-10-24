@@ -47,6 +47,9 @@ pub struct Sys {
     /// The machine-wide `th ci-queue` every local check runs through
     /// (SMOODEV-3355). Tests point it at a temp dir.
     pub queue: crate::ci_queue::Queue,
+    /// Where passes are recorded for reuse (SMOODEV-4160). `None` turns reuse
+    /// off (`SMOOAI_CI_NO_REUSE=1`); tests point it at a temp dir.
+    pub ledger: Option<super::reuse::Ledger>,
 }
 
 impl Default for Sys {
@@ -68,6 +71,10 @@ impl Default for Sys {
             overload_retry_wait: Duration::from_secs(env_u64("OVERLOAD_RETRY_WAIT").unwrap_or(600)),
             overload_poll: Duration::from_secs(env_u64("OVERLOAD_POLL").unwrap_or(15)),
             queue: crate::ci_queue::Queue::from_env(),
+            ledger: (!env_flag("NO_REUSE")).then(|| {
+                let hours = env_u64("REUSE_MAX_HOURS").unwrap_or(72);
+                super::reuse::Ledger::new(super::reuse::Ledger::default_path(), Duration::from_secs(hours * 3600))
+            }),
         }
     }
 }
