@@ -1,5 +1,19 @@
 # @smooai/smooth
 
+## 0.87.2
+
+### Patch Changes
+
+- 68a1dc8: Shift+Enter and Alt/Option+Enter start a new line in both the Big Smooth chat and `th code` (SMOODEV-4147). The web composer used to send on Alt+Enter. `th code` had no newline key at all: it now turns on the kitty keyboard protocol where the terminal supports it, so Shift+Enter is distinguishable from Enter, and it also accepts Alt+Enter and Ctrl+J everywhere.
+- 9441df2: Narc's shell detector no longer flags `2>&1`, `>&2`, `/dev/` targets or a quoted `>` (such as `node -e "x => x"`) as a file truncation, so ordinary build and test commands skip the judge. It now checks every redirect in the line, not only the first, so `cmd 2>&1 > out.txt` is still caught.
+- 9441df2: Big Smooth no longer tells the model "you are already signed in" when no Smoo session exists. The persona and the `th` tool description used to assert that unconditionally, which contradicted the signed-out account section. Signed out, the agent now works from data in the workspace that fits the request instead of stopping at "run `smoo auth login`".
+
+## 0.87.1
+
+### Patch Changes
+
+- b42dd5c: `th attest` asks the repo's `scripts/ci/_<check>-untouched.mjs` path filter (exit 0 = nothing to check) before queueing, and credits the row as passed without taking a heavy slot or the cargo lock. A web-only branch no longer waits tens of minutes in the queue for `attest rust` to skip itself.
+
 ## 0.87.0
 
 ### Minor Changes

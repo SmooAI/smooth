@@ -335,6 +335,70 @@ fn detect_destructive_with(call: &ToolCall, existing_len: impl Fn(&str) -> Optio
     None
 }
 
+/// Whether `command` redirects output over a file with `>` (or `&>`, `>|`),
+/// which empties that file before anything is written to it.
+///
+/// What is NOT a truncation: `>>` (append), `>&1` / `2>&1` (descriptor
+/// duplication, no file involved), a redirect into `/dev/null` or another
+/// `/dev/` stream, and a `>` inside quotes (`node -e "x => x"`, `grep '->'`).
+///
+/// SMOODEV-4158: this used to look at the FIRST `>` only and treat whatever
+/// followed as a file, so `npm install 2>&1 | tail` "truncated" `&1 | tail`.
+/// With the judge unreachable that failed closed and blocked every build and
+/// test command claude-haiku-5-5 ran on the bench; with the judge up it still
+/// cost a judge round trip per ordinary command. Every `>` is checked, so a
+/// real truncation later in the line (`cmd 2>&1 > out.txt`) is still caught.
+fn has_truncating_redirect(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if c == b'\\' && q == b'"' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\\' => i += 1,
+                b'\'' | b'"' => quote = Some(c),
+                b'>' => {
+                    let mut j = i + 1;
+                    match bytes.get(j) {
+                        // `>>` appends.
+                        Some(b'>') => {
+                            i += 2;
+                            continue;
+                        }
+                        // `>&1`, `>&-`: descriptor duplication / close.
+                        Some(b'&') => {
+                            i += 2;
+                            continue;
+                        }
+                        // `>|` forces the truncation past noclobber.
+                        Some(b'|') => j += 1,
+                        _ => {}
+                    }
+                    let rest = command[j..].trim_start();
+                    let target = rest
+                        .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | ')'))
+                        .next()
+                        .unwrap_or("");
+                    if !target.is_empty() && !target.starts_with("/dev/") {
+                        return true;
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Recognise a destructive shell command STRUCTURALLY rather than by literal
 /// match, so flag order and spelling don't decide whether data survives.
 ///
@@ -369,15 +433,8 @@ pub fn detect_destructive_shell(command: &str) -> Option<&'static str> {
         return Some("shell-shred");
     }
     // `> file` / `cat /dev/null > file` — redirection that empties a real file.
-    // `>>` (append) is explicitly not this, and `>/dev/null` discards output
-    // rather than destroying a file.
-    if let Some(idx) = lower.find('>') {
-        let is_append = lower[idx..].starts_with(">>");
-        let target = lower[idx + 1..].trim_start_matches('>').trim();
-        let discards_output = target.starts_with("/dev/null");
-        if !is_append && !discards_output && !target.is_empty() {
-            return Some("shell-redirect-truncate");
-        }
+    if has_truncating_redirect(&lower) {
+        return Some("shell-redirect-truncate");
     }
     // Version-control destruction of uncommitted work.
     if lower.contains("git clean") && (lower.contains("-fd") || lower.contains("-df") || lower.contains("-fx")) {
@@ -1088,6 +1145,10 @@ mod tests {
             "truncate -s 0 customers.json",
             "> customers.json",
             "cat /dev/null > customers.json",
+            "npm test 2>&1 > out.txt", // a real truncation after a descriptor dup
+            "echo '' >| customers.json",
+            "node build.js &> build.log",
+            "sort data.txt>data.txt",
             "shred -u secrets.json",
             "git clean -fdx",
             "git reset --hard HEAD~5",
@@ -1114,6 +1175,14 @@ mod tests {
             "python3 -c 'print(1)'",
             "mkdir -p build",
             "rsync -a src/ dst/", // no --delete
+            // SMOODEV-4158: descriptor duplication and quoted `>` are not files.
+            "npm install 2>&1 | tail -20",
+            "npm test 2>&1",
+            "cargo build >&2",
+            "npx vitest run 2>/dev/null",
+            "node -e \"const f = (x) => x * 2; console.log(f(2))\"",
+            "grep -n '=>' src/app.ts",
+            "echo \"a > b\" >> notes.md",
         ] {
             assert!(detect_destructive_shell(cmd).is_none(), "false positive on: {cmd}");
         }

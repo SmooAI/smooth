@@ -39,6 +39,7 @@ import remarkGfm from 'remark-gfm';
 
 import CiQueuePage from './CiQueuePage';
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
+import { enterAction, insertNewline } from './composer-keys';
 import { FirstRunCard } from './FirstRunCard';
 import { dequeue, enqueue, queuedLabel, removeAt, submitAction, takeAt, type QueuedMessage } from './message-queue';
 import { ModelSelectorButton } from './ModelSelector';
@@ -1487,7 +1488,7 @@ function Composer({
                                     setSel((s) => (s - 1 + mentionResults.length) % mentionResults.length);
                                     return;
                                 }
-                                if (e.key === 'Enter' || e.key === 'Tab') {
+                                if ((e.key === 'Enter' && enterAction(e.nativeEvent) !== 'newline') || e.key === 'Tab') {
                                     e.preventDefault();
                                     insertMention(mentionResults[mentionSel]);
                                     return;
@@ -1519,10 +1520,21 @@ function Composer({
                                     return;
                                 }
                             }
-                            if (e.key === 'Enter' && !e.shiftKey) {
+                            const action = enterAction(e.nativeEvent);
+                            if (action === 'newline') {
+                                // Shift+Enter breaks the line natively; Alt/Option+Enter
+                                // doesn't everywhere, so insert it ourselves.
+                                if (e.shiftKey) return;
+                                e.preventDefault();
+                                const ta = e.currentTarget;
+                                const { text: next, caret: pos } = insertNewline(text, ta.selectionStart, ta.selectionEnd);
+                                update(next);
+                                setCaret(pos);
+                                requestAnimationFrame(() => taRef.current?.setSelectionRange(pos, pos));
+                            } else if (action) {
                                 e.preventDefault();
                                 // ⌘/Ctrl+Enter mid-turn steers; plain Enter queues.
-                                submit(e.metaKey || e.ctrlKey);
+                                submit(action === 'steer');
                             }
                         }}
                         rows={1}
@@ -1530,8 +1542,8 @@ function Composer({
                             disabled
                                 ? 'Waiting for your operator…'
                                 : turnActive
-                                  ? 'Big Smooth is working — Enter to queue · ⌘/Ctrl+Enter to steer'
-                                  : 'Talk to Big Smooth…  (/ for commands · @ to mention)'
+                                  ? 'Big Smooth is working — Enter to queue · ⌘/Ctrl+Enter to steer · Shift/Alt+Enter for a new line'
+                                  : 'Talk to Big Smooth…  (/ for commands · @ to mention · Shift/Alt+Enter for a new line)'
                         }
                         disabled={disabled}
                         // `field-sizing-content` grows the box with what you type; `max-h-40`

@@ -326,6 +326,11 @@ pub async fn run_with_session(
     // some terminals don't support bracketed paste; the enable call
     // emits ESC sequences they ignore harmlessly.
     let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+    // Kitty keyboard protocol (SMOODEV-4147): without it Shift+Enter arrives
+    // as a bare CR, indistinguishable from Enter. Only DISAMBIGUATE — no
+    // release/repeat events — so every other key reads exactly as before. The
+    // guard pops it on every exit, early return and panic alike.
+    let _keyboard = KeyboardEnhancement::push();
 
     // Pick a viewport height that fits the input/status plus a
     // reasonable streaming-preview region. 14 rows (3 input + 1
@@ -593,6 +598,39 @@ pub async fn run_with_session(
 /// The main event loop — draws the UI and handles input events.
 ///
 /// Processes both terminal key events and agent streaming events via the channel.
+/// Holds the kitty keyboard enhancement while `th code` owns the terminal.
+struct KeyboardEnhancement(bool);
+
+impl KeyboardEnhancement {
+    fn push() -> Self {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        let supported = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+        let pushed = supported && crossterm::execute!(io::stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)).is_ok();
+        tui_debug(format!("keyboard enhancement: supported={supported} pushed={pushed}"));
+        Self(pushed)
+    }
+}
+
+impl Drop for KeyboardEnhancement {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = crossterm::execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+        }
+    }
+}
+
+/// Keys that break the line in the composer instead of sending
+/// (SMOODEV-4147): Shift+Enter (kitty-protocol terminals), Alt/Option+Enter
+/// (ESC CR, which every terminal can send) and Ctrl+J (a raw LF — what
+/// terminals without the protocol often emit for Shift+Enter).
+fn is_newline_key(key: &event::KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT),
+        KeyCode::Char('j') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &Arc<Mutex<AppState>>,
@@ -773,7 +811,9 @@ fn event_loop(
                     }
                     // Ctrl-chorded keys are commands, not text — don't let
                     // them fall through to the input handler as characters.
-                    if !matches!(key.code, KeyCode::Char('c') | KeyCode::Enter) {
+                    // Ctrl+J is the composer's always-works newline.
+                    let composer_newline = s.mode == Mode::Input && is_newline_key(&key);
+                    if !matches!(key.code, KeyCode::Char('c') | KeyCode::Enter) && !composer_newline {
                         continue;
                     }
                 }
@@ -1396,6 +1436,14 @@ fn handle_input_mode(
             },
             _ => {}
         }
+        return;
+    }
+
+    // A line break never sends, steers or accepts a suggestion — it ends any
+    // open `@`/`/` query and lands in the draft.
+    if is_newline_key(&key) {
+        state.autocomplete.deactivate();
+        state.input_insert('\n');
         return;
     }
 
@@ -2597,7 +2645,7 @@ mod slash_popup_argument_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
 
-    use super::{accept_autocomplete, command_trigger_allowed, handle_input_mode};
+    use super::{accept_autocomplete, command_trigger_allowed, handle_input_mode, is_newline_key};
     use crate::commands::{CommandOutput, CommandRegistry};
     use crate::state::AppState;
 
@@ -2663,5 +2711,57 @@ mod slash_popup_argument_tests {
         assert!(state.autocomplete.active);
         accept_autocomplete(&mut state);
         assert_eq!(state.input, "/smooth-operator");
+    }
+
+    fn press(state: &mut AppState, registry: &CommandRegistry, code: KeyCode, modifiers: KeyModifiers) {
+        let arc = Arc::new(Mutex::new(AppState::new(std::env::temp_dir())));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handle_input_mode(KeyEvent::new(code, modifiers), state, arc, tx, registry);
+    }
+
+    /// SMOODEV-4147: Shift+Enter, Alt+Enter and Ctrl+J break the line; Enter
+    /// (sends) and Ctrl+Enter (steers) do not.
+    #[test]
+    fn newline_keys_are_shift_or_alt_enter_and_ctrl_j() {
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert!(is_newline_key(&key(KeyCode::Enter, KeyModifiers::SHIFT)));
+        assert!(is_newline_key(&key(KeyCode::Enter, KeyModifiers::ALT)));
+        assert!(is_newline_key(&key(KeyCode::Enter, KeyModifiers::ALT | KeyModifiers::SHIFT)));
+        assert!(is_newline_key(&key(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        assert!(!is_newline_key(&key(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!is_newline_key(&key(KeyCode::Enter, KeyModifiers::CONTROL)));
+        assert!(!is_newline_key(&key(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert!(!is_newline_key(&key(KeyCode::Char('j'), KeyModifiers::ALT)));
+        assert!(!is_newline_key(&key(KeyCode::Char('j'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+    }
+
+    #[test]
+    fn every_newline_key_lands_in_the_draft_without_sending() {
+        let registry = CommandRegistry::new();
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ] {
+            let mut state = AppState::new(std::env::temp_dir());
+            let before = state.messages.len();
+            type_text(&mut state, &registry, "one");
+            press(&mut state, &registry, code, modifiers);
+            type_text(&mut state, &registry, "two");
+            assert_eq!(state.input, "one\ntwo", "{code:?} {modifiers:?}");
+            assert_eq!(state.messages.len(), before, "{code:?} {modifiers:?} sent the draft");
+            assert!(!state.thinking);
+        }
+    }
+
+    #[test]
+    fn a_newline_closes_the_popup_instead_of_accepting_it() {
+        let registry = registry_with_smooth_operator();
+        let mut state = AppState::new(std::env::temp_dir());
+        type_text(&mut state, &registry, "/smo");
+        assert!(state.autocomplete.active);
+        press(&mut state, &registry, KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(state.input, "/smo\n");
+        assert!(!state.autocomplete.active);
     }
 }
