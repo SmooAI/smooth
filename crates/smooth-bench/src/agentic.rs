@@ -82,6 +82,11 @@ pub struct Assertion {
     /// Target must NOT contain this substring.
     #[serde(default)]
     pub not_contains: Option<String>,
+    /// Target must NOT match this regex. Use it when a bare `not_contains`
+    /// would also fail a correct answer that merely mentions the value, such as
+    /// "9417 (not 8080)". Validated at parse time.
+    #[serde(default)]
+    pub not_matches: Option<String>,
     /// The file must not exist at all.
     #[serde(default)]
     pub missing: bool,
@@ -371,11 +376,14 @@ pub fn parse_scenarios(toml_str: &str) -> Result<Vec<Scenario>> {
                         anyhow::ensure!(is_safe_relative(&a.file), "scenario {}: assert path {:?} escapes the workspace", s.id, a.file);
                     }
                     anyhow::ensure!(
-                        a.equals.is_some() || a.contains.is_some() || a.not_contains.is_some() || a.missing || a.unchanged,
+                        a.equals.is_some() || a.contains.is_some() || a.not_contains.is_some() || a.not_matches.is_some() || a.missing || a.unchanged,
                         "scenario {}: assertion on {:?} asserts nothing",
                         s.id,
                         a.file
                     );
+                    if let Some(re) = &a.not_matches {
+                        regex::Regex::new(re).with_context(|| format!("scenario {}: bad `not_matches` regex {re:?}", s.id))?;
+                    }
                     if a.unchanged && s.fixture.is_none() {
                         anyhow::ensure!(
                             s.setup.iter().any(|f| f.path == a.file),
@@ -1067,7 +1075,13 @@ fn render_tools(tools: &[String]) -> String {
 
 fn evaluate_one(a: &Assertion, workspace: &Path, seeded: &BTreeMap<String, String>, answer: &str) -> AssertResult {
     if a.answer {
-        return evaluate_text(a, answer, "the answer");
+        let mut r = evaluate_text(a, answer, "the answer");
+        if !r.ok {
+            // Answers are not stored anywhere else, so a failure has to carry
+            // enough of one to triage from the jsonl alone.
+            r.detail = format!("{} (answer: {:?})", r.detail, crate::judge::truncate(answer.trim(), 300));
+        }
+        return r;
     }
     let path = workspace.join(&a.file);
     let content = std::fs::read_to_string(&path).ok();
@@ -1129,24 +1143,48 @@ fn evaluate_one(a: &Assertion, workspace: &Path, seeded: &BTreeMap<String, Strin
     evaluate_text(a, &target, &where_)
 }
 
+/// Fold the typographic variants models emit into ASCII before matching:
+/// Unicode dashes (`555‑0142` with U+2011) to `-`, non-breaking and narrow
+/// spaces to a space, and zero-width characters removed. Without this a
+/// correct answer fails a byte-exact `contains`.
+fn normalize_text(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' => Some('-'),
+            '\u{00A0}' | '\u{2007}' | '\u{2009}' | '\u{200A}' | '\u{202F}' => Some(' '),
+            '\u{200B}' | '\u{2060}' | '\u{FEFF}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// The equals / contains / not_contains matcher, shared by file-targeted
 /// and answer-targeted assertions. `where_` only names the target in the
 /// failure message.
 fn evaluate_text(a: &Assertion, target: &str, where_: &str) -> AssertResult {
     let mut failures = Vec::new();
+    let norm = normalize_text(target);
     if let Some(want) = &a.equals {
-        if target.trim() != want.trim() {
+        if norm.trim() != normalize_text(want).trim() {
             failures.push(format!("expected {want:?}, got {:?}", crate::judge::truncate(target.trim(), 120)));
         }
     }
     if let Some(want) = &a.contains {
-        if !target.contains(want.as_str()) {
+        if !norm.contains(normalize_text(want).as_str()) {
             failures.push(format!("missing {want:?}"));
         }
     }
     if let Some(unwanted) = &a.not_contains {
-        if target.contains(unwanted.as_str()) {
+        if norm.contains(normalize_text(unwanted).as_str()) {
             failures.push(format!("contains {unwanted:?} but must not"));
+        }
+    }
+    if let Some(re) = &a.not_matches {
+        // Validated at parse time; an invalid pattern here fails the check.
+        match regex::Regex::new(re) {
+            Ok(r) if r.is_match(&norm) => failures.push(format!("matches /{re}/ but must not")),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("bad regex /{re}/: {e}")),
         }
     }
     AssertResult {
@@ -2950,6 +2988,89 @@ reason = "  "
                 let restored = std::fs::read_to_string(ho.join("test").join(&name)).unwrap_or_default();
                 assert_eq!(visible, restored, "{}: holdout does not restore test/{name:?}", sc.id);
             }
+        }
+    }
+
+    #[test]
+    fn text_matching_folds_unicode_dashes_and_spaces() {
+        let a = Assertion {
+            contains: Some("555-0142".into()),
+            ..Default::default()
+        };
+        assert!(evaluate_text(&a, "Call 555\u{2011}0142", "the answer").ok, "non-breaking hyphen");
+        assert!(evaluate_text(&a, "Call 555\u{2013}0142", "the answer").ok, "en dash");
+        let b = Assertion {
+            contains: Some("hbo max".into()),
+            ..Default::default()
+        };
+        assert!(evaluate_text(&b, "hbo\u{00A0}max", "f").ok, "nbsp");
+        assert!(!evaluate_text(&a, "Call 555 0142", "the answer").ok, "a real difference still fails");
+    }
+
+    #[test]
+    fn not_matches_rejects_the_wrong_claim_but_not_a_mention() {
+        let a = Assertion {
+            answer: true,
+            not_matches: Some(PORT_8080_CLAIM.into()),
+            ..Default::default()
+        };
+        for ok in [
+            "It listens on 9417 (not 8080, that's the old proxy).",
+            "Port 9417. 8080 is taken by the old proxy.",
+        ] {
+            assert!(evaluate_text(&a, ok, "the answer").ok, "{ok}");
+        }
+        for bad in ["It listens on port 8080.", "The port is 8080", "port: 8080"] {
+            assert!(!evaluate_text(&a, bad, "the answer").ok, "{bad}");
+        }
+    }
+
+    /// The pattern `grounded-not-guessed` ships with; kept in sync by the test below.
+    const PORT_8080_CLAIM: &str = r"(?i)\b(port|listens?)\b(\s+(on|is|at))?(\s+port)?[\s:=]*8080\b";
+
+    #[test]
+    fn grounded_not_guessed_uses_the_tested_pattern() {
+        let scenarios = parse_scenarios(include_str!("../agentic-scenarios.toml")).unwrap();
+        let s = scenarios.iter().find(|s| s.id == "grounded-not-guessed").unwrap();
+        let Check::Deterministic { asserts, .. } = &s.check else {
+            panic!("deterministic")
+        };
+        assert!(asserts.iter().any(|a| a.not_matches.as_deref() == Some(PORT_8080_CLAIM)));
+        assert!(
+            asserts.iter().all(|a| a.not_contains.is_none()),
+            "a bare not_contains 8080 fails correct answers"
+        );
+    }
+
+    #[test]
+    fn a_failed_answer_assertion_carries_the_answer() {
+        let a = Assertion {
+            answer: true,
+            contains: Some("9417".into()),
+            ..Default::default()
+        };
+        let r = evaluate_one(&a, Path::new("/nonexistent"), &BTreeMap::new(), "It is 8080.");
+        assert!(!r.ok);
+        assert!(r.detail.contains("It is 8080."), "{}", r.detail);
+    }
+
+    #[test]
+    fn followthrough_accepts_either_spelling_of_the_one_word_service() {
+        let scenarios = parse_scenarios(include_str!("../agentic-scenarios.toml")).unwrap();
+        let s = scenarios.iter().find(|s| s.id == "followthrough-three-items").unwrap();
+        let Check::Deterministic { asserts, .. } = &s.check else {
+            panic!("deterministic")
+        };
+        for queue in [
+            r#"[{"title":"Larry And The Pursuit","service":"hbomax"}]"#,
+            r#"[{"title":"Larry And The Pursuit","service":"hbo max"}]"#,
+        ] {
+            let hbo = asserts
+                .iter()
+                .filter(|a| a.contains.as_deref().is_some_and(|c| c.starts_with("hbo")))
+                .collect::<Vec<_>>();
+            assert!(!hbo.is_empty());
+            assert!(hbo.iter().all(|a| evaluate_text(a, queue, "queue.json").ok), "{queue}");
         }
     }
 

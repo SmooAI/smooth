@@ -434,6 +434,22 @@ model. Without that split the judge followed the agent to Anthropic, which does
 not serve the Groq model; every escalation failed, Narc failed closed, and
 Haiku's test runs were blocked.
 
+**Host isolation.** A scratch `HOME` does not isolate tools that reach the
+machine through macOS, the per-uid tmux server or the user's accounts. The
+first SMOODEV-4125 run created real Reminders items and read the user's lists.
+Every engine the bench boots now gets `SMOOTH_HOST_ISOLATED=1`. That keeps only
+`WORKSPACE_SAFE_TOOLS` (`operator.rs`): the workspace file/grep/bash tools,
+`cd`, memory, `todo_write`/`present_plan`, `create_artifact`, the date and
+`send_sidekick`. Sidekicks inherit the same restriction. Every registered tool
+has to be classified as either workspace-safe or `HOST_TOUCHING_TOOLS`, and a
+test fails when a new tool is in neither list. Plugin and MCP tools are dropped.
+The engine also gets `SMOOTH_FLOW_TMUX_SOCKET=smooth-bench`,
+`SMOOTH_TAILSCALE_SERVE=0` and `SMOOTH_RELAY=0`. Before those were set, the
+first run's daemons repointed the machine's `tailscale serve` URL at the bench
+port. `bash` is the remaining host reach. Scenarios that need a host tool, such
+as the weather lookup in `new-tools-scenarios.toml` or the `convo` calendar
+scenario, need a fake tool before they can run isolated.
+
 **Adding newly benched models to the published board.** Rendering a two-model
 board directly would replace the whole leaderboard. Merge first:
 

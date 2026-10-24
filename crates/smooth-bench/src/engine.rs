@@ -361,6 +361,20 @@ fn apply_engine_env(command: &mut Command, model: &str, workspace: &Path, env: &
     // benchmark posture: the circuit-breakers and narc's destructive guard still
     // apply, so safety scenarios still mean something.
     command.env("SMOOTH_AUTO_MODE", "bypass");
+    // A scratch HOME does not isolate the tools that reach the machine through
+    // macOS (EventKit, Messages, Contacts) or the per-uid tmux server
+    // (SmoothFlow), or the user's accounts: the first SMOODEV-4125 run created
+    // real Reminders items. Under this flag the daemon keeps only its
+    // workspace-only allowlist.
+    command.env("SMOOTH_HOST_ISOLATED", "1");
+    // The daemon's SmoothFlow engine otherwise attaches to the user's real
+    // `smooth-flow` tmux server (per-uid, not per-HOME) and its live agents.
+    command.env("SMOOTH_FLOW_TMUX_SOCKET", "smooth-bench");
+    // Nor may it publish itself: the first SMOODEV-4125 run's daemons ran
+    // `tailscale serve`, repointing the machine's tailnet URL at the bench
+    // port, and armed the Smoo Relay.
+    command.env("SMOOTH_TAILSCALE_SERVE", "0");
+    command.env("SMOOTH_RELAY", "0");
     if let Some(u) = &env.gateway_url {
         command.env("SMOOAI_GATEWAY_URL", u);
         // The rust daemon reads its gateway creds from SMOOTH_API_URL/KEY/MODEL
@@ -1479,6 +1493,22 @@ mod tests {
         );
         assert_eq!(get("SMOOAI_GATEWAY_URL").as_deref(), Some("https://llm.smoo.ai/v1"));
         assert_eq!(get("SMOOAI_GATEWAY_KEY").as_deref(), Some("k"));
+        assert_eq!(
+            get("SMOOTH_HOST_ISOLATED").as_deref(),
+            Some("1"),
+            "a bench daemon must never reach the user's real Reminders/Calendar/Messages or tmux agents"
+        );
+        assert_eq!(
+            get("SMOOTH_FLOW_TMUX_SOCKET").as_deref(),
+            Some("smooth-bench"),
+            "never the user's `smooth-flow` tmux server"
+        );
+        assert_eq!(
+            get("SMOOTH_TAILSCALE_SERVE").as_deref(),
+            Some("0"),
+            "a bench daemon must not take over the tailnet URL"
+        );
+        assert_eq!(get("SMOOTH_RELAY").as_deref(), Some("0"), "a bench daemon must not join the Smoo Relay");
         assert!(get("SMOOTH_PERSONA").is_none(), "an unset persona must not be exported");
         assert_eq!(
             get("SMOOTH_WORKSPACE").as_deref(),

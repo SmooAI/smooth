@@ -176,6 +176,11 @@ struct SandboxedToolProvider {
     /// per-conversation and toggleable from the phone — neither can be trusted
     /// when the demo creds ship in the App Store review notes.
     demo: bool,
+    /// Headless host isolation (`SMOOTH_HOST_ISOLATED`, SMOODEV-4125). When
+    /// true, `tools_for` clamps the set to [`WORKSPACE_SAFE_TOOLS`] before the
+    /// sidekick snapshot, so neither the agent nor a sidekick can reach the
+    /// user's devices, personal data or accounts. Set by smooth-bench.
+    host_isolated: bool,
     /// The SmoothFlow engine (th-8b3918): backs the `flow_*` tools and
     /// `project_setup`, so Big Smooth can set up projects, start and steer
     /// coding agents, and watch the fleet — engine-direct, in-process. `None`
@@ -214,6 +219,83 @@ const DEMO_SAFE_TOOLS: &[&str] = &[
     "present_plan",
     "todo_write",
 ];
+
+/// Every tool the daemon registers is in exactly one of [`WORKSPACE_SAFE_TOOLS`]
+/// and [`HOST_TOUCHING_TOOLS`]. `every_registered_tool_is_classified` fails on a
+/// tool that is in neither list, so a new tool cannot ship unclassified. A
+/// host-isolated turn (`SMOOTH_HOST_ISOLATED`, smooth-bench) keeps ONLY the
+/// workspace-safe set, which also drops anything unclassified at runtime
+/// (plugins, MCP). The first SMOODEV-4125 run created real Reminders items
+/// before this existed.
+///
+/// Workspace-safe means the tool only touches the workspace, the daemon's own
+/// state under `HOME` (scratch in the bench), or the turn's directive channel
+/// back to the connected client. `bash` is the exception the coding suites
+/// need: it can still reach the host, and only the kernel sandbox
+/// (`SMOOTH_SANDBOX`) confines it.
+const WORKSPACE_SAFE_TOOLS: &[&str] = &[
+    "read_file",
+    "list_files",
+    "grep",
+    "write_file",
+    "edit_file",
+    "bash",
+    "cd",
+    "remember",
+    "recall",
+    "todo_write",
+    "present_plan",
+    "create_artifact",
+    "get_current_datetime",
+    // Pushed after the clamp; its sidekicks get only the clamped tools above.
+    "send_sidekick",
+];
+
+/// Tools that reach the user's machine, devices, personal data or accounts,
+/// none of which a scratch `HOME` confines: EventKit, Messages, Contacts,
+/// location (and `get_weather`, which falls back to it), `notify` and
+/// `send_file` (the user's devices), SmoothFlow (the per-uid tmux server), `th`,
+/// `knowledge_search` and `web_search` (the user's Smoo account when signed
+/// in), `crawl` (arbitrary egress), and the writers of skills, harnesses and
+/// provider credentials.
+const HOST_TOUCHING_TOOLS: &[&str] = &[
+    "calendar",
+    "calendar_delete",
+    "reminders",
+    "imessage",
+    "contacts",
+    "get_location",
+    "get_weather",
+    "notify",
+    "send_file",
+    "th",
+    "knowledge_search",
+    "web_search",
+    "crawl",
+    "create_skill",
+    "add_harness",
+    "configure_provider",
+    "flow_list",
+    "flow_snapshot",
+    "flow_handoff",
+    "flow_harnesses",
+    "flow_repos",
+    "flow_infer",
+    "flow_new",
+    "flow_send",
+    "flow_prompt_wait",
+    "flow_fanout_new",
+    "project_setup",
+    "flow_kill",
+    "flow_close",
+    "flow_fanout_pick",
+    "flow_approve",
+];
+
+/// True when `SMOOTH_HOST_ISOLATED` is truthy (same grammar as `SMOOTH_DEMO`).
+fn host_isolated_mode() -> bool {
+    matches!(std::env::var("SMOOTH_HOST_ISOLATED"), Ok(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+}
 
 /// True when `SMOOTH_DEMO` is set to a truthy value (App Store reviewer demo).
 /// Same truthy grammar as `fast_mode` — unset / `0` / `false` / `no` / `off` /
@@ -445,6 +527,17 @@ impl ToolProvider for SandboxedToolProvider {
             tools.retain(|t| family.tool_allowed(role, &t.schema().name));
             tracing::debug!(role, kept = tools.len(), dropped = before - tools.len(), "family: narrowed tool set");
         }
+        // Host isolation (SMOODEV-4125): deny-by-default, and BEFORE the sidekick
+        // snapshot below so a dispatched sidekick inherits the clamped set.
+        if self.host_isolated {
+            let before = tools.len();
+            tools.retain(|t| WORKSPACE_SAFE_TOOLS.contains(&t.schema().name.as_str()));
+            tracing::info!(
+                kept = tools.len(),
+                dropped = before - tools.len(),
+                "SMOOTH_HOST_ISOLATED: clamped to workspace-only tools"
+            );
+        }
         // Whether this turn may delegate to a sidekick. A family role that isn't
         // allowed `send_sidekick` (Smoo Jr) never gets the dispatch tool — closing
         // the "delegate to a full-clearance runner" escape. Owner/no-family: yes.
@@ -580,6 +673,7 @@ pub fn local_tool_provider_with_flow(
         modes,
         notify_sink,
         demo: demo_mode(),
+        host_isolated: host_isolated_mode(),
         flow,
         sidekick_hooks,
     })
@@ -2384,6 +2478,7 @@ mod tests {
             modes: crate::session_mode::SessionModes::new(),
             notify_sink: None,
             demo: true,
+            host_isolated: false,
             flow: None,
             sidekick_hooks: default_sidekick_hooks(),
         };
@@ -2420,6 +2515,116 @@ mod tests {
             names.iter().all(|n| DEMO_SAFE_TOOLS.contains(&n.as_str())),
             "demo mode leaves only allowlisted tools: {names:?}"
         );
+    }
+
+    #[test]
+    fn tool_classes_are_disjoint_and_cover_every_flow_tool() {
+        use crate::flow_tools::{FLOW_APPROVE_TOOL, FLOW_DESTRUCTIVE_TOOLS, FLOW_READ_TOOLS, FLOW_WRITE_TOOLS};
+        for t in WORKSPACE_SAFE_TOOLS {
+            assert!(!HOST_TOUCHING_TOOLS.contains(t), "{t} is classified both ways");
+        }
+        // The flow tools need an engine to register, so the registration test
+        // below cannot see them; pin them here instead.
+        for t in FLOW_READ_TOOLS
+            .iter()
+            .chain(FLOW_WRITE_TOOLS)
+            .chain(FLOW_DESTRUCTIVE_TOOLS)
+            .chain([&FLOW_APPROVE_TOOL])
+        {
+            assert!(
+                HOST_TOUCHING_TOOLS.contains(t),
+                "{t} drives the shared tmux server and must be classified host-touching"
+            );
+        }
+    }
+
+    /// Fail-closed classification: a tool the daemon registers that is in
+    /// NEITHER list fails here, so whoever adds it must decide whether a
+    /// host-isolated (benchmark) turn may have it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn every_registered_tool_is_classified() {
+        use smooth_operator_svc::access_control::AccessContext;
+        struct NoopSink;
+        #[async_trait::async_trait]
+        impl smooth_tools::NotifySink for NoopSink {
+            async fn deliver(&self, _t: &str, _b: &str, _d: Option<&str>) -> usize {
+                0
+            }
+        }
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = std::env::temp_dir();
+        let provider = local_tool_provider_full(
+            SessionCwd::new(dir.clone()),
+            None,
+            Arc::new(smooth_operator::InMemoryMemory::new()),
+            None,
+            None,
+            crate::session_mode::SessionModes::new(),
+            Some(Arc::new(NoopSink)),
+        );
+        // A directive sink, so the directive tools (send_file, …) register too.
+        let mut ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("classify");
+        ctx.directive_sink = Some(Arc::new(std::sync::Mutex::new(serde_json::Value::Null)));
+        // Plugins come from manifests on disk; they are unclassifiable by name
+        // and are dropped under isolation because they are not workspace-safe.
+        let plugins: Vec<String> = smooth_tools::plugin_tools(&dir, None).iter().map(|t| t.schema().name).collect();
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(
+            names.iter().any(|n| n == "notify"),
+            "the sink must register notify so it gets classified: {names:?}"
+        );
+        let unclassified: Vec<&String> = names
+            .iter()
+            .filter(|n| !plugins.contains(n))
+            .filter(|n| !WORKSPACE_SAFE_TOOLS.contains(&n.as_str()) && !HOST_TOUCHING_TOOLS.contains(&n.as_str()))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "classify {unclassified:?} in WORKSPACE_SAFE_TOOLS or HOST_TOUCHING_TOOLS (operator.rs): a benchmark turn keeps only the workspace-safe ones"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_isolation_leaves_only_allowlisted_tools() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let provider = SandboxedToolProvider {
+            cwd: SessionCwd::new(std::env::temp_dir()),
+            proxy: None,
+            memory: Arc::new(smooth_operator::InMemoryMemory::new()),
+            mcp: None,
+            family: None,
+            modes: crate::session_mode::SessionModes::new(),
+            notify_sink: None,
+            demo: false,
+            host_isolated: true,
+            flow: None,
+            sidekick_hooks: default_sidekick_hooks(),
+        };
+        // A directive sink, so `send_file` is offered and has to be filtered.
+        let mut ctx = ToolProviderContext::new(Some("org".into()), AccessContext::new(Some("owner".into()), vec![])).with_conversation_id("bench-conv");
+        ctx.directive_sink = Some(Arc::new(std::sync::Mutex::new(serde_json::Value::Null)));
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(
+            names.iter().all(|n| WORKSPACE_SAFE_TOOLS.contains(&n.as_str())),
+            "host isolation leaves only allowlisted tools: {names:?}"
+        );
+        for banned in [
+            "send_file",
+            "reminders",
+            "calendar",
+            "imessage",
+            "contacts",
+            "th",
+            "get_weather",
+            "knowledge_search",
+            "web_search",
+        ] {
+            assert!(!names.iter().any(|n| n == banned), "host isolation must DROP {banned}: {names:?}");
+        }
+        for keep in ["read_file", "write_file", "edit_file", "bash", "list_files", "grep"] {
+            assert!(names.iter().any(|n| n == keep), "host isolation keeps workspace tool {keep}: {names:?}");
+        }
     }
 
     #[test]

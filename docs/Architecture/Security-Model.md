@@ -18,6 +18,21 @@ Every tool call the operative makes passes two in-process hooks on its `ToolRegi
 
 `smooth-policy` TOML is still parsed by the operative, but only to log the intended network allowlist and phase and to feed Narc's surveillance context. **It no longer enforces anything** — the Wonk rule engine and the Goalie iptables/FUSE proxy that turned that policy into a kernel boundary were removed.
 
+## Host isolation for headless runs
+
+Every tool the daemon registers is classified in `operator.rs` as either
+`WORKSPACE_SAFE_TOOLS` or `HOST_TOUCHING_TOOLS`. A test fails on a tool that is
+in neither list. Under `SMOOTH_HOST_ISOLATED=1`, a turn keeps only the
+workspace-safe set. That set covers the workspace file tools and `bash`, memory,
+plan/todo directives, `create_artifact`, the date and `send_sidekick`. The
+filter runs before the sidekick snapshot, so sidekicks inherit it. Anything
+unclassified, such as plugins or MCP, is dropped. A scratch `HOME` confines none
+of the host-touching tools: EventKit, Messages, Contacts, location/weather,
+`notify`, `send_file`, SmoothFlow, `th`, `knowledge_search`, `web_search`,
+`crawl`, and the skill/harness/provider writers. smooth-bench sets the flag on
+every daemon it boots. `bash` is still the remaining host reach; the kernel
+sandbox is what confines it.
+
 ## What was removed (July 2026, `th-f4a801`)
 
 - Per-task **microsandbox microVM** — hardware isolation around the agent.
