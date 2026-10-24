@@ -140,6 +140,7 @@ final class FlowFrameTests: XCTestCase {
             .fanoutNew(prompt: "p", pearlId: nil, candidates: [FanOutCandidate(kind: "claude", model: "opus", label: "A")]),
             .fanoutPick(fanOutId: "fo", winnerSessionId: "a"), .markRead(id: "a"),
             .close(id: "a", closePearl: true, removeWorktree: true, force: false),
+            .rename(id: "a", title: "x"), .prewarm(worktree: "/w", cwdOf: nil),
         ]
         let types = try all.map { f -> String in
             let o = try fields(f)
@@ -147,7 +148,33 @@ final class FlowFrameTests: XCTestCase {
             return try XCTUnwrap(o["type"] as? String)
         }
         XCTAssertEqual(types, ["flow.attach", "flow.detach", "flow.input", "flow.resize", "flow.snapshot", "flow.new", "flow.send", "flow.approve",
-                               "flow.kill", "flow.fanout.new", "flow.fanout.pick", "flow.mark_read", "flow.close"])
+                               "flow.kill", "flow.fanout.new", "flow.fanout.pick", "flow.mark_read", "flow.close", "flow.rename", "flow.prewarm"])
+    }
+
+    /// SMOODEV-4127: a rename with no title resets (JSON null, which the
+    /// engine reads as none); a prewarm names a directory or a session.
+    func testRenameAndPrewarmShapes() throws {
+        let named = try fields(.rename(id: "fs-1", title: "deploys"))
+        XCTAssertEqual(named["id"] as? String, "fs-1")
+        XCTAssertEqual(named["title"] as? String, "deploys")
+        let reset = try fields(.rename(id: "fs-1", title: nil))
+        XCTAssertTrue(reset["title"] is NSNull)
+        let warm = try fields(.prewarm(worktree: nil, cwdOf: "fs-2"))
+        XCTAssertEqual(warm["cwd_of"] as? String, "fs-2")
+        XCTAssertTrue(warm["worktree"] is NSNull)
+    }
+
+    /// SMOODEV-4127: `title_pinned` decodes (absent ⇒ false), and a given name
+    /// beats the pearl; a shell's live title beats it too.
+    func testTitlePinnedAndShellNames() throws {
+        let data = Data(#"{"id":"fs-1","kind":"claude","title":"deploys","pearl_id":"th-1","state":"idle","title_pinned":true}"#.utf8)
+        let pinned = try JSONDecoder().decode(Session.self, from: data)
+        XCTAssertTrue(pinned.titlePinned)
+        XCTAssertEqual(pinned.tabTitle(home: "/Users/me"), "deploys")
+        let old = try JSONDecoder().decode(Session.self, from: Data(#"{"id":"fs-1","title":"x"}"#.utf8))
+        XCTAssertFalse(old.titlePinned)
+        XCTAssertEqual(Session(id: "a", kind: "shell", title: "cargo", pearlId: "th-1").tabTitle(home: "/Users/me"), "cargo")
+        XCTAssertEqual(Session(id: "a", kind: "claude", title: "fix it", pearlId: "th-1").tabTitle(home: "/Users/me"), "th-1")
     }
 
     /// th-883ce9: `flow.close {id, close_pearl, remove_worktree, force}` — the

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os
 import UserNotifications
 
 /// One `flow.close` the shell sent (th-883ce9).
@@ -58,6 +59,10 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     private var inboxWindow: InboxWindowController?
     private var settingsWindow: SettingsWindowController?
     private var subscriptions: Set<AnyCancellable> = []
+    /// SMOODEV-4127: ⌘N → first byte on screen, per stage, for shells this
+    /// app asked for (`log stream --predicate 'category == "latency"'`).
+    private let latency = Logger(subsystem: "ai.smoo.smoothflow", category: "latency")
+    private var shellStarted: [String: ContinuousClock.Instant] = [:]
 
     static let onboardedKey = "onboarded"
 
@@ -97,6 +102,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             guard let self, let id else { return }
             self.mainWindow.center.showSession(id)
             self.mainWindow.center.refreshHeaders()
+            self.prewarmNextShell()
             // The packet's HEAD/branch decide Diff and PR for this session (th-68d10a).
             Task { await self.loadHandoff(for: id) }
         }.store(in: &subscriptions)
@@ -160,6 +166,9 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             switch e {
             case let .output(id, data):
                 surfaces[id]?.feed(data)
+                if let t0 = shellStarted.removeValue(forKey: id) {
+                    latency.info("shell \(id, privacy: .public): first output on screen \(Self.ms(since: t0), privacy: .public) ms after ⌘N")
+                }
             case let .attention(s):
                 if let n = AttentionNotifier.notification(for: s, settings: notifySettings) {
                     AttentionNotifier.post(n, requestId: s.attention?.requestId, sound: notifySettings.sound)
@@ -174,6 +183,7 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
                 break
             case .connected:
                 reattachSurfaces()
+                prewarmNextShell()
             case let .relaunched(id):
                 if let v = surfaces[id] { client.send(.attach(id: id, cols: v.gridSize.cols, rows: v.gridSize.rows)) }
             case let .handoff(id, h):
@@ -232,11 +242,17 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             self.client.send(.resize(id: id, cols: cols, rows: rows))
         }
         v.onFocus = { [weak self] focused in if focused { self?.markRead(id) } }
-        v.onPwd = { [weak self] _ in self?.mainWindow?.center.refreshHeaders() }
+        v.onPwd = { [weak self] _ in
+            self?.mainWindow?.center.refreshHeaders()
+            if self?.store.focusedId == id { self?.prewarmNextShell() }
+        }
         surfaces[id] = v
         if store.sessions[id]?.isLive == true {
             let g = v.gridSize
             client.send(.attach(id: id, cols: g.cols, rows: g.rows))
+            if let t0 = shellStarted[id] {
+                latency.info("shell \(id, privacy: .public): surface up, attach sent \(Self.ms(since: t0), privacy: .public) ms after ⌘N")
+            }
         }
         return v
     }
@@ -288,6 +304,19 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
 
     func kill(_ s: Session, resume: Bool) { client.send(.kill(id: s.id, resume: resume)) }
 
+    /// ⌘⇧R (SMOODEV-4127): `nil` goes back to the automatic name. The engine
+    /// broadcasts the renamed row, which retitles the tab.
+    func rename(_ id: String, to name: String?) { client.send(.rename(id: id, title: name)) }
+
+    /// SMOODEV-4127: tell the engine where the next ⌘N would open, so a shell
+    /// is already sitting at a prompt there. Cheap and idempotent: the engine
+    /// keeps one spare per directory.
+    func prewarmNextShell() {
+        let source = store.focused.flatMap { $0.isLive ? $0 : nil }
+        client.send(ShellLaunch.prewarm(source: source, last: LastDirectory.load(),
+                                        home: FileManager.default.homeDirectoryForCurrentUser.path))
+    }
+
     /// th-883ce9: `flow.close` for a session — finished or live (the engine
     /// kills a running one first). Tagged with a `seq` so the engine's refusal
     /// (`flow.error.ref`) lands on THIS session as a "Force close" offer
@@ -325,8 +354,11 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
     func openShell(source: Session?, picked: String? = nil) async -> Session? {
         let req = ShellLaunch.request(source: source, picked: picked, last: LastDirectory.load(),
                                       home: FileManager.default.homeDirectoryForCurrentUser.path)
+        let t0 = ContinuousClock.now
         do {
             let s = try await client.createSession(req)
+            latency.info("shell \(s.id, privacy: .public): engine answered \(Self.ms(since: t0), privacy: .public) ms after ⌘N")
+            shellStarted[s.id] = t0
             LastDirectory.remember(s.worktree)
             // Known now, not one broadcast later: the pane can host it at once.
             handle(store.apply(.session(s)))
@@ -335,6 +367,11 @@ final class AppController: NSObject, ObservableObject, UNUserNotificationCenterD
             thOutput = "new shell: \(error.localizedDescription)"
             return nil
         }
+    }
+
+    private static func ms(since t0: ContinuousClock.Instant) -> Int {
+        let d = ContinuousClock.now - t0
+        return Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
     }
 
     /// Where the program in `id`'s terminal says it is (OSC 7), if it said.

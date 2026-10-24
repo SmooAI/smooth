@@ -113,6 +113,14 @@ pub enum FlowCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Name a session (pinned: a shell's live name no longer replaces it).
+    /// No name goes back to the automatic one.
+    Rename {
+        id: String,
+        title: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Close a finished session out: close its pearl and remove its worktree
     /// (+ branch) once merged, then drop it. Refuses a dirty or unmerged
     /// worktree unless --force. A live session is killed first.
@@ -549,6 +557,24 @@ pub async fn cmd_flow(cmd: FlowCommands) -> Result<()> {
             emit(json, &v, |v| {
                 let state = v.pointer("/session/state").and_then(Value::as_str).unwrap_or("?");
                 println!("{} {id} → {}", paint("●", |g| g.green().to_string()), state_cell(state).0);
+            })
+        }
+        FlowCommands::Rename { id, title, json } => {
+            let title = title.join(" ");
+            let v = call(
+                reqwest::Method::POST,
+                &format!("/api/flow/sessions/{id}/rename"),
+                Some(json!({ "title": title })),
+            )
+            .await?;
+            emit(json, &v, |v| {
+                let name = v.pointer("/session/title").and_then(Value::as_str).unwrap_or("?");
+                let how = if v.pointer("/session/title_pinned").and_then(Value::as_bool) == Some(true) {
+                    ""
+                } else {
+                    " (automatic)"
+                };
+                println!("{} {id} → {name}{how}", paint("●", |g| g.green().to_string()));
             })
         }
         FlowCommands::Close {
@@ -1059,6 +1085,21 @@ mod tests {
         for t in tools {
             assert!(skill.contains(t.name.as_ref()), "SKILL.md never mentions {}", t.name);
         }
+    }
+
+    /// SMOODEV-4127: `th flow rename <id> words…`; no words resets.
+    #[test]
+    fn rename_takes_the_rest_of_the_line_as_the_name() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: FlowCommands,
+        }
+        use clap::Parser as _;
+        let Cli { cmd } = Cli::try_parse_from(["th", "rename", "fs-1", "build", "box"]).unwrap();
+        assert!(matches!(cmd, FlowCommands::Rename { id, title, json: false } if id == "fs-1" && title == ["build", "box"]));
+        let Cli { cmd } = Cli::try_parse_from(["th", "rename", "fs-1"]).unwrap();
+        assert!(matches!(cmd, FlowCommands::Rename { title, .. } if title.is_empty()));
     }
 
     /// th-1efb59: the SmoothFlow app's daemon advertises only flow.addr.
