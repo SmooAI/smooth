@@ -74,8 +74,8 @@ fn leaderboard_row(leaderboard: &serde_json::Value, model: &str) -> Option<serde
 }
 
 fn catalog_json_from(board: &str, leaderboard: &str, providers: Option<&serde_json::Value>) -> String {
-    let leaderboard: serde_json::Value = serde_json::from_str(leaderboard).unwrap_or(serde_json::Value::Null);
     use smooth_policy::direct_models::DIRECT_MODELS;
+    let leaderboard: serde_json::Value = serde_json::from_str(leaderboard).unwrap_or(serde_json::Value::Null);
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(board) else {
         return board.to_owned();
     };
@@ -212,12 +212,7 @@ mod tests {
     fn a_benched_direct_model_carries_its_leaderboard_score() {
         let json = catalog_json_from(MODEL_SCORES, &haiku_board(), Some(&with_anthropic()));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let row = v["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["model"] == "claude-haiku-5-5")
-            .expect("haiku row from the leaderboard, under its plain id");
+        let row = v["models"].as_array().unwrap().iter().find(|m| m["model"] == "claude-haiku-5-5").unwrap(); // the haiku row from the leaderboard, under its plain id
         assert!((row["pass_rate_pct"].as_f64().unwrap() - 82.1).abs() < 1e-9);
         assert!(!offered(&json).iter().any(|m| m == "claude-haiku-5-5@anthropic"), "routed spelling never leaks");
         assert_eq!(offered(&json).iter().filter(|m| *m == "claude-haiku-5-5").count(), 1, "not also unbenched");
