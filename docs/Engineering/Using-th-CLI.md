@@ -2130,6 +2130,14 @@ takes the queue's cargo lock and **stays heavy even when marked**, because a
 cargo build is never light. With no marker the row runs heavy, as before
 (SMOODEV-4018).
 
+**Skip before queueing.** If the repo has `scripts/ci/_<check>-untouched.mjs`,
+`th attest` runs `node <script> <repo root>` (20 s limit) before asking for a slot.
+Exit 0 means the change touches nothing the check reads (stdout says why): the
+row is credited as passed at once, with no heavy slot, no cargo lock and no
+history row. Any other result (exit 1, a hang, no `node`, no script) runs the check
+as usual. smooai ships `_rust-untouched.mjs`, so a web-only branch no longer waits
+in the queue for `attest rust` to skip itself.
+
 Each passing check posts a `ci-attest/<name>` commit status on HEAD, which the
 workflow reads to skip that row. Freshness is free: the status is bound to a
 SHA, so pushing a new commit un-credits everything.

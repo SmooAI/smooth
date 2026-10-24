@@ -498,8 +498,66 @@ fn row_class(script_text: &str, takes_cargo_lock: bool) -> ci_queue::Class {
     }
 }
 
+/// Ask the repo whether `check` has anything to do, BEFORE it queues for a slot.
+/// `scripts/ci/_<check>-untouched.mjs <root>` is the repo's own path filter: exit
+/// 0 = nothing this change can affect (stdout says why), anything else, a missing
+/// script or a hang = run the check. A web-only branch used to wait 45-50 minutes
+/// for a heavy slot and the cargo lock to learn that `rust.sh` skips itself.
+/// Bounded at 20s and never fatal: the filter must not become a reason not to run.
+fn preflight_skip(sys: &Sys, root: &Path, check: &str) -> Option<String> {
+    let filter = root.join(format!("scripts/ci/_{check}-untouched.mjs"));
+    if !filter.is_file() {
+        return None;
+    }
+    let mut child = Command::new(&sys.node)
+        .arg(&filter)
+        .arg(root)
+        .current_dir(root)
+        .env("CI_REPO_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut out, &mut s);
+        s
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                drop(child.kill());
+                drop(child.wait());
+                return None;
+            }
+        }
+    };
+    let reason = reader.join().unwrap_or_default();
+    status.success().then(|| reason.trim().to_string())
+}
+
 /// One queued run of `check`, and whether its failure was distrusted for load.
 fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
+    if let Some(reason) = preflight_skip(sys, root, check) {
+        // Credited like the script's own early `exit 0`, but without a slot, the
+        // cargo lock or a history row.
+        eprintln!("· {check}: skipped before queueing — {reason}");
+        return (
+            CheckResult {
+                name: check.to_string(),
+                outcome: Outcome::Pass,
+                secs: 0,
+                location: "locally".into(),
+                note: Some(format!("skipped before queueing: {reason}")),
+            },
+            false,
+        );
+    }
     // SMOODEV-3355: every local check takes a slot in the machine-wide
     // `th ci-queue` first, so thirty agents attesting at once run two at a time
     // instead of thirty. Inside an already-queued job this admits instantly.
@@ -1049,6 +1107,36 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
     }
 
     // ── SMOODEV-3355: local checks go through the machine-wide ci-queue ─────
+
+    /// A repo's `_<check>-untouched.mjs` filter says "nothing to do": the row is
+    /// credited without ever queueing, so it never waits for a slot or the lock.
+    #[test]
+    fn an_untouched_row_is_credited_without_queueing() {
+        let mut f = fixture();
+        let bin = f._tmp.path().join("bin");
+        f.sys.node = test_script(
+            &bin,
+            "node-stub",
+            "[ \"$(basename \"$1\")\" = _passing-untouched.mjs ] && { echo 'no paths'; exit 0; }\nexit 1",
+        )
+        .into();
+        fs::write(f.root.join("scripts/ci/_passing-untouched.mjs"), "//\n").unwrap();
+        assert_eq!(f.attest(&["passing"]), 0);
+        assert_eq!(f.posted_state("passing").as_deref(), Some("state=success"));
+        assert!(f.sys.queue.history(10).is_empty(), "it must not have taken a queue slot");
+    }
+
+    /// Touched (filter exits 1), a hung or missing filter: the check runs.
+    #[test]
+    fn a_touched_row_or_no_filter_still_runs_queued() {
+        let mut f = fixture();
+        let bin = f._tmp.path().join("bin");
+        f.sys.node = test_script(&bin, "node-stub", "exit 1").into();
+        fs::write(f.root.join("scripts/ci/_passing-untouched.mjs"), "//\n").unwrap();
+        assert_eq!(f.attest(&["passing"]), 0);
+        assert_eq!(f.sys.queue.history(10).len(), 1, "a touched row queues");
+        assert_eq!(f.attest(&["failing"]), 1, "no filter script, the check runs");
+    }
 
     #[test]
     fn a_local_check_runs_in_a_heavy_queue_slot() {
