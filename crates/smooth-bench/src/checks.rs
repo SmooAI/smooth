@@ -266,7 +266,9 @@ fn kill_group(pid: Option<u32>) {
     // `process_group(0)` is unix-only, so there is no group to kill elsewhere.
     #[cfg(unix)]
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+        // `-s KILL --` is the POSIX spelling; procps and BSD `kill` both
+        // read `-<pid>` after `--` as a process group, not an option.
+        let _ = std::process::Command::new("kill").args(["-s", "KILL", "--", &format!("-{pid}")]).status();
     }
     #[cfg(not(unix))]
     let _ = pid;
@@ -348,7 +350,7 @@ pub async fn run_serve(check: &ServeCheck, work: &Path, log: Option<PathBuf>) ->
             cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         }
     }
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return AssertResult {
@@ -383,8 +385,10 @@ pub async fn run_serve(check: &ServeCheck, work: &Path, log: Option<PathBuf>) ->
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    drop(child);
+    // Kill the group BEFORE dropping the handle: dropping kills and reaps
+    // `sh` first, and a server it forked can then outlive the check.
     kill_group(pid);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     result.unwrap_or_else(|| AssertResult {
         ok: false,
         detail: format!("serve: {} {last} within {}s — {}", check.url, check.timeout_s, check.reason),
@@ -552,7 +556,14 @@ mod tests {
         let r = run_serve(&s, d.path(), None).await;
         assert!(r.ok, "{}", r.detail);
         // The server's process group is killed once the check returns.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "serve process outlived the check");
+        let mut closed = false;
+        for _ in 0..50 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(closed, "serve process outlived the check");
     }
 }

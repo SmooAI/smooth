@@ -981,11 +981,23 @@ fn resolve_gateway_config() -> ServerConfig {
 /// Returns `None` when no gateway key is available — narc then degrades to a
 /// regex-only hook (detectors + redaction, no LLM escalation) instead of
 /// crashing the daemon.
+///
+/// `SMOOTH_NARC_JUDGE_URL` + `SMOOTH_NARC_JUDGE_KEY` (both set) give the judge
+/// its own OpenAI-compatible endpoint, independent of the agent's. Without them
+/// the judge shares the agent's endpoint — which breaks when the agent is
+/// pointed straight at a vendor API (Anthropic) that does not serve
+/// [`FAST_MODEL`]: every escalation 404s and Narc fails closed. The bench needs
+/// the judge identical across models it compares (SMOODEV-4125).
 fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
     let cfg = resolve_gateway_config();
-    let key = cfg.gateway_key.filter(|k| !k.trim().is_empty())?;
+    let (api_url, key) = narc_judge_endpoint(
+        std::env::var("SMOOTH_NARC_JUDGE_URL").ok(),
+        std::env::var("SMOOTH_NARC_JUDGE_KEY").ok(),
+        cfg.gateway_url,
+        cfg.gateway_key,
+    )?;
     Some(smooth_operator::llm::LlmConfig {
-        api_url: cfg.gateway_url,
+        api_url,
         api_key: key,
         // The judge is a cheap classifier — the snappy fast model, not the
         // coding-route default. Small token budget: it returns one JSON line.
@@ -995,6 +1007,23 @@ fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
     })
+}
+
+/// The Narc judge's `(url, key)`: the explicit override when BOTH halves are
+/// non-blank, else the agent's gateway, else `None` (regex-only Narc). A
+/// half-set override is ignored rather than mixing one endpoint's URL with
+/// another's key.
+fn narc_judge_endpoint(
+    override_url: Option<String>,
+    override_key: Option<String>,
+    gateway_url: String,
+    gateway_key: Option<String>,
+) -> Option<(String, String)> {
+    let nonblank = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    if let (Some(url), Some(key)) = (nonblank(override_url), nonblank(override_key)) {
+        return Some((url, key));
+    }
+    nonblank(gateway_key).map(|key| (gateway_url, key))
 }
 
 /// The daemon's own model as an [`LlmConfig`](smooth_operator::llm::LlmConfig)
@@ -2821,6 +2850,44 @@ mod tests {
             assert_eq!(fast_mode_from(Some(val)), want, "SMOOTH_FAST_MODE={val:?}");
         }
         assert!(!fast_mode_from(None), "unset is disabled");
+    }
+
+    #[test]
+    fn narc_judge_endpoint_prefers_a_complete_override() {
+        let gw = || "https://llm.smoo.ai/v1".to_owned();
+        assert_eq!(
+            narc_judge_endpoint(
+                Some("https://judge/v1".into()),
+                Some("jk".into()),
+                "https://api.anthropic.com/v1".into(),
+                Some("ak".into())
+            ),
+            Some(("https://judge/v1".to_owned(), "jk".to_owned())),
+            "a direct-routed agent keeps the judge on its own endpoint"
+        );
+        assert_eq!(
+            narc_judge_endpoint(None, None, gw(), Some("k".into())),
+            Some((gw(), "k".to_owned())),
+            "no override shares the agent's gateway"
+        );
+        assert_eq!(
+            narc_judge_endpoint(Some("https://judge/v1".into()), None, gw(), Some("k".into())),
+            Some((gw(), "k".to_owned())),
+            "a half-set override never pairs one endpoint's URL with another's key"
+        );
+        assert_eq!(
+            narc_judge_endpoint(Some("  ".into()), Some("jk".into()), gw(), Some("k".into())),
+            Some((gw(), "k".to_owned()))
+        );
+        assert_eq!(
+            narc_judge_endpoint(None, None, gw(), Some("  ".into())),
+            None,
+            "no key at all ⇒ regex-only Narc"
+        );
+        assert_eq!(
+            narc_judge_endpoint(Some("https://judge/v1".into()), Some("jk".into()), gw(), None),
+            Some(("https://judge/v1".to_owned(), "jk".to_owned()))
+        );
     }
 
     #[test]

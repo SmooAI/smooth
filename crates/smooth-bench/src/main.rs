@@ -351,6 +351,7 @@ async fn run_convo_cmd(args: ConvoArgs) -> Result<()> {
         gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
         gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
         let (url, key) = gateway_from_providers_json()
@@ -606,6 +607,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             .ok()
             .or_else(|| from_providers.as_ref().map(|(_, k)| k.clone())),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
         eprintln!("warning: no gateway key (SMOOAI_GATEWAY_KEY or providers.json) — the agent will boot but every turn errors; scenarios will be INCONCLUSIVE");
@@ -660,6 +662,10 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     let make_booter = |route: Option<&smooth_bench::routes::ProviderRoute>| -> Result<Box<dyn WorkspaceBooter>> {
         let mut env = env.clone();
         if let Some(r) = route {
+            // Only the agent leaves the gateway: Narc's judge keeps its
+            // production endpoint and model so the safety layer is identical
+            // across the models being compared.
+            env.narc_judge = env.gateway_url.clone().zip(env.gateway_key.clone());
             env.gateway_url = Some(r.api_url.clone());
             env.gateway_key = Some(r.api_key.clone());
         }
@@ -900,6 +906,7 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
         gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
         gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
         persona: std::env::var("SMOOTH_PERSONA").ok(),
+        narc_judge: None,
     };
     if env.gateway_key.is_none() {
         eprintln!("warning: SMOOAI_GATEWAY_KEY is unset — engines will boot but turns will error; scores will be all-FAIL");

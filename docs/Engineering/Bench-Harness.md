@@ -427,7 +427,12 @@ sends that one model through a provider entry in `~/.smooth/providers.json`
 (its URL and key) instead of the LiteLLM gateway. `claude-haiku-5-5@anthropic`
 is the case that motivated it. The model is priced from the gateway when it is
 listed there, otherwise from `pricing::DIRECT_LIST_PRICES`, and is never
-silently priced at $0.
+silently priced at $0. Only the agent leaves the gateway: the bench exports
+`SMOOTH_NARC_JUDGE_URL`/`SMOOTH_NARC_JUDGE_KEY` with the gateway's URL and key,
+so Narc's judge stays on `groq-gpt-oss-120b` through `llm.smoo.ai` for every
+model. Without that split the judge followed the agent to Anthropic, which does
+not serve the Groq model; every escalation failed, Narc failed closed, and
+Haiku's test runs were blocked.
 
 **Adding newly benched models to the published board.** Rendering a two-model
 board directly would replace the whole leaderboard. Merge first:

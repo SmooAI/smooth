@@ -1446,6 +1446,12 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
             if let Some(rule) = scope {
                 results.extend(crate::checks::evaluate_scope(rule, &changes));
             }
+            // The judge grades what the AGENT left. The holdout restores the
+            // pristine visible tests over the agent's copies, so dumping the
+            // workspace after it hid every test the agent added to an
+            // existing file — and the judge then failed it for "claiming
+            // tests it never wrote".
+            let agent_workspace = dump_workspace(&work);
             if let Some(h) = &s.holdout {
                 if let Err(e) = crate::checks::copy_tree(&opts.scenario_base.join(h), &work) {
                     results.push(AssertResult {
@@ -1472,7 +1478,7 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
                     prompt: s.prompt.clone(),
                     transcript: render_transcript(&turn),
                     final_response: turn.text.clone(),
-                    workspace: dump_workspace(&work),
+                    workspace: agent_workspace,
                     objective: results
                         .iter()
                         .map(|r| format!("{} {}", if r.ok { "PASS" } else { "FAIL" }, r.detail))
@@ -1506,7 +1512,7 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
                     prompt: s.prompt.clone(),
                     transcript: render_transcript(&turn),
                     final_response: turn.text.clone(),
-                    workspace: dump_workspace(&work),
+                    workspace: agent_workspace,
                     ..Default::default()
                 };
                 match judge(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, &evidence).await {
