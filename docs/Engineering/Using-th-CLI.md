@@ -2145,6 +2145,7 @@ th attest --no-push lint        # never push; fail if HEAD is local-only
 th attest --remote smoo-hub rust   # delegate to a build box
 th attest --local --all         # ignore any remote routing
 th attest --all --json          # machine-readable summary
+th attest --no-reuse rust       # run even if an earlier pass carries over
 ```
 
 **Checks are the repo's, not `th`'s.** An executable `scripts/ci/<name>.sh` in
@@ -2180,8 +2181,37 @@ as usual. smooai ships `_rust-untouched.mjs`, so a web-only branch no longer wai
 in the queue for `attest rust` to skip itself.
 
 Each passing check posts a `ci-attest/<name>` commit status on HEAD, which the
-workflow reads to skip that row. Freshness is free: the status is bound to a
-SHA, so pushing a new commit un-credits everything.
+workflow reads to skip that row. The status is bound to a SHA, so a new commit
+starts uncredited.
+
+#### A pass carries over unchanged inputs (SMOODEV-4160)
+
+Re-crediting a new commit is often free. `th attest` records every pass in
+`~/.smooth/attest/credits.db` as `(repo, check, sha, merge-base)`. Before running
+a check it looks for a recent pass that still applies, and if it finds one it
+posts the credit without running anything:
+
+```text
+✓ rust reused from 3f2a91c — no input changed since it passed (912s saved)
+```
+
+The status reads `passed locally in 912s (reused from 3f2a91c: no input
+changed)`. This is the dagger idea: a check's verdict is a fact about the content
+it reads, not about the commit that carried it. A pass carries over when:
+
+1. it is younger than 72h (`SMOOAI_CI_REUSE_MAX_HOURS`);
+2. no path under `scripts/ci/` differs, between the two heads or between the two
+   merge-bases;
+3. the repo's `scripts/ci/_rows-touched.sh` says every other changed path (head vs
+   head, plus base vs base) is `untouched` for that check.
+
+The hook is the repo's answer to "what does this check read": changed paths on
+stdin, one `<check> touched|untouched` line out per check. No hook, a failing or
+slow (>10s) hook, or a check it does not name means the check runs. Every doubt
+resolves to running. The same commit, or an identical tree, needs no hook. A dirty
+tree neither reuses a pass nor records one. `--no-reuse` (or `SMOOAI_CI_NO_REUSE=1`)
+forces the run. smooai's hook is built on its attest gate's path rules
+(`scripts/ci/_rows-touched.mjs`).
 
 #### Three outcomes, not two
 
