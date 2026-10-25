@@ -1,5 +1,16 @@
 # @smooai/smooth
 
+## 0.88.0
+
+### Minor Changes
+
+- 480e25c: `th attest` reuses a pass when nothing the check reads has changed. Each pass is recorded locally, and a later commit whose diff (and merge-base move) the repo's `scripts/ci/_rows-touched.sh` calls `untouched` for a check is credited without re-running it. Any `scripts/ci/` change, a missing or failing hook, a dirty tree or a pass older than 72h still runs the check. `--no-reuse` forces a run.
+- aed580d: Claude Haiku 5.5 and GPT-6 Luna are now both main models in Big Smooth and `th code`, and you can switch between them per turn (SMOODEV-4148). Haiku is not on the Smoo gateway. When you have an Anthropic key in `providers.json`, the daemon's new loopback model router sends Haiku turns to Anthropic and everything else to the gateway. The pickers offer Haiku only when it can run. A `th code` `/model` pick of the main slot now switches the live session immediately and is used again the next time you start `th code`.
+
+### Patch Changes
+
+- 8c5e68b: Big Smooth's model picker is readable again (SMOODEV-4174). Each model's name gets its own line instead of being squeezed to "g." by the score and cost text, and the full id sits underneath. The main models (GPT-6 Luna, then Claude Haiku 5.5) are listed first. 🏆 now needs at least two benched models and a leader at 60% or better, so a lone 17.9% model no longer wears it. Premium is a text tag rather than a 💎. Unbenched rows say "not benched" once, an unmeasured $/pass is noted once in the footer, and the unexplained heart glyphs are replaced by the token price as text. The bench catalog now carries its run date, which the footer shows with its age, and the daemon serves Haiku's bench score from the full leaderboard.
+
 ## 0.87.2
 
 ### Patch Changes
