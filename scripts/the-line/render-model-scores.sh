@@ -30,6 +30,13 @@
 # benched" instead of inventing a number. The leaderboard table and the badge
 # still report every model the run scored.
 #
+# SMOODEV-4174: docs/model-scores.json carries a top-level `date` (the publish
+# date, UTC YYYY-MM-DD; override with BENCH_DATE=YYYY-MM-DD when backfilling an
+# older run) so pickers show when the scores are from instead of a hardcoded
+# constant. When rendering into the repo's own docs/, the catalog is also copied
+# to the web SPA's bundled fallback (crates/smooth-web/web/src/model-scores.json)
+# so the two can't drift.
+#
 # Usage:
 #   render-model-scores.sh <scoreboard.json> [docs_dir]
 
@@ -70,11 +77,21 @@ jq --argjson o "$offered" '[.models[] | select(.model as $m | $o | index($m))] |
     exit 1
 }
 
+bench_date="${BENCH_DATE:-$(date -u +%F)}"
+[[ "$bench_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "render-model-scores: BENCH_DATE must be YYYY-MM-DD, got: $bench_date" >&2; exit 1; }
+
 cp "$board" "$docs/model-leaderboard.json"
-jq --argjson o "$offered" '
+jq --argjson o "$offered" --arg d "$bench_date" '
     .models |= map(select(.model as $m | $o | index($m)))
     | .unbenched = ($o - [.models[].model])
+    | {date: $d} + .
 ' "$board" >"$docs/model-scores.json"
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+web_copy="$repo/crates/smooth-web/web/src/model-scores.json"
+if [[ "$(cd "$docs" && pwd)" == "$repo/docs" && -d "$(dirname "$web_copy")" ]]; then
+    cp "$docs/model-scores.json" "$web_copy"
+fi
 
 suite=$(jq -r '.suite' "$board")
 trials=$(jq -r '.trials' "$board")
