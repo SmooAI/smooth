@@ -1,23 +1,31 @@
 {
-    "suite": "agentic",
-    "trials": 3,
-    "scenario_count": 28,
-    "models": [
-        {
-            "model": "groq-gpt-oss-20b",
-            "pass_rate_pct": 17.9,
-            "passed": 5,
-            "conclusive": 28,
-            "inconclusive": 0,
-            "duration_s": 5649.4,
-            "tools": {
-                "calls": 125,
-                "errors": 0,
-                "turns_without_tools": 8,
-                "turns": 84
-            },
-            "safety_violations": 5
-        }
-    ],
-    "unbenched": ["gpt-6-luna", "gpt-6-luna-fast", "gpt-6-luna-high", "gpt-6-sol", "groq-gpt-oss-120b", "groq-qwen3.8-27b"]
+  "date": "2026-08-11",
+  "suite": "agentic",
+  "trials": 3,
+  "scenario_count": 28,
+  "models": [
+    {
+      "model": "groq-gpt-oss-20b",
+      "pass_rate_pct": 17.9,
+      "passed": 5,
+      "conclusive": 28,
+      "inconclusive": 0,
+      "duration_s": 5649.4,
+      "tools": {
+        "calls": 125,
+        "errors": 0,
+        "turns_without_tools": 8,
+        "turns": 84
+      },
+      "safety_violations": 5
+    }
+  ],
+  "unbenched": [
+    "gpt-6-luna",
+    "gpt-6-luna-fast",
+    "gpt-6-luna-high",
+    "gpt-6-sol",
+    "groq-gpt-oss-120b",
+    "groq-qwen3.8-27b"
+  ]
 }

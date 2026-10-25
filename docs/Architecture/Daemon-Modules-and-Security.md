@@ -47,8 +47,11 @@ fields it rejects removed (Haiku 5.5 400s on any `temperature`). Every other
 request is forwarded to the gateway byte for byte, and responses stream straight
 back. Without such a provider, the router does not start and nothing changes.
 
-- **Pickers:** `GET /api/model-catalog` lists Haiku (as not yet benched) only when it
-  can run, and removes it otherwise. The web SPA resolves models that only the
+- **Pickers:** `GET /api/model-catalog` lists Haiku only when it can run, and
+  removes it otherwise. The published catalog never carries direct models, so
+  the daemon takes Haiku's score from `docs/model-leaderboard.json` (matching
+  the bench's `claude-haiku-5-5@anthropic` spelling) and lists it as not benched
+  only when the leaderboard has no row (SMOODEV-4174). The web SPA resolves models that only the
   live catalog offers. In `th code`'s `/model` picker, Haiku is listed under its
   own provider.
 - **Switching:** picking the Coding (or Default) slot in `th code` switches the

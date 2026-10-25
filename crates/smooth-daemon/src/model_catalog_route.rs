@@ -24,6 +24,11 @@ use axum::Router;
 /// so the served bytes and the checked-in source of truth can never disagree.
 const MODEL_SCORES: &str = include_str!("../../../docs/model-scores.json");
 
+/// The full scoreboard (every model the bench scored, not just the offered set).
+/// Direct-provider models such as Claude Haiku 5.5 are offered per machine, not
+/// in the published catalog, so their scores live only here (SMOODEV-4174).
+const MODEL_LEADERBOARD: &str = include_str!("../../../docs/model-leaderboard.json");
+
 /// Build the `/api/model-catalog` router.
 pub fn model_catalog_router() -> Router {
     Router::new().route("/api/model-catalog", get(catalog_handler))
@@ -50,11 +55,27 @@ fn read_providers() -> Option<serde_json::Value> {
 /// whose every turn would fail. Without direct-route models in play this is the
 /// embedded file byte for byte.
 fn catalog_json(providers: Option<&serde_json::Value>) -> String {
-    catalog_json_from(MODEL_SCORES, providers)
+    catalog_json_from(MODEL_SCORES, MODEL_LEADERBOARD, providers)
 }
 
-fn catalog_json_from(board: &str, providers: Option<&serde_json::Value>) -> String {
+/// The leaderboard row for a direct model, matched by id or by the bench's
+/// routed spelling (`claude-haiku-5-5@anthropic`), with its `model` normalised
+/// to the plain id the picker sends.
+fn leaderboard_row(leaderboard: &serde_json::Value, model: &str) -> Option<serde_json::Value> {
+    let matches = |m: &str| m.eq_ignore_ascii_case(model) || m.split_once('@').is_some_and(|(id, _)| id.eq_ignore_ascii_case(model));
+    let row = leaderboard
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|r| r.get("model").and_then(serde_json::Value::as_str).is_some_and(matches))?;
+    let mut row = row.clone();
+    row["model"] = serde_json::Value::String(model.to_owned());
+    Some(row)
+}
+
+fn catalog_json_from(board: &str, leaderboard: &str, providers: Option<&serde_json::Value>) -> String {
     use smooth_policy::direct_models::DIRECT_MODELS;
+    let leaderboard: serde_json::Value = serde_json::from_str(leaderboard).unwrap_or(serde_json::Value::Null);
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(board) else {
         return board.to_owned();
     };
@@ -70,6 +91,13 @@ fn catalog_json_from(board: &str, providers: Option<&serde_json::Value>) -> Stri
         if available(d) {
             if benched {
                 continue;
+            }
+            if let Some(row) = leaderboard_row(&leaderboard, d.model) {
+                if let Some(ms) = v.get_mut("models").and_then(serde_json::Value::as_array_mut) {
+                    ms.push(row);
+                    changed = true;
+                    continue;
+                }
             }
             let unbenched = v.as_object_mut().map(|o| o.entry("unbenched").or_insert_with(|| serde_json::json!([])));
             if let Some(list) = unbenched.and_then(serde_json::Value::as_array_mut) {
@@ -170,7 +198,43 @@ mod tests {
     /// [`catalog_json`] over an arbitrary scoreboard (the embedded one is fixed
     /// at compile time).
     fn strip_with(board: &serde_json::Value, providers: Option<&serde_json::Value>) -> Vec<String> {
-        offered(&catalog_json_from(&board.to_string(), providers))
+        offered(&catalog_json_from(&board.to_string(), MODEL_LEADERBOARD, providers))
+    }
+
+    fn haiku_board() -> String {
+        serde_json::json!({ "models": [
+            { "model": "claude-haiku-5-5@anthropic", "pass_rate_pct": 82.1, "passed": 23, "conclusive": 28, "inconclusive": 0, "duration_s": 985.0, "safety_violations": 1 }
+        ]})
+        .to_string()
+    }
+
+    #[test]
+    fn a_benched_direct_model_carries_its_leaderboard_score() {
+        let json = catalog_json_from(MODEL_SCORES, &haiku_board(), Some(&with_anthropic()));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let row = v["models"].as_array().unwrap().iter().find(|m| m["model"] == "claude-haiku-5-5").unwrap(); // the haiku row from the leaderboard, under its plain id
+        assert!((row["pass_rate_pct"].as_f64().unwrap() - 82.1).abs() < 1e-9);
+        assert!(!offered(&json).iter().any(|m| m == "claude-haiku-5-5@anthropic"), "routed spelling never leaks");
+        assert_eq!(offered(&json).iter().filter(|m| *m == "claude-haiku-5-5").count(), 1, "not also unbenched");
+    }
+
+    #[test]
+    fn a_leaderboard_score_is_not_offered_without_the_provider() {
+        let json = catalog_json_from(MODEL_SCORES, &haiku_board(), None);
+        assert!(!offered(&json).iter().any(|m| m.starts_with("claude-haiku-5-5")));
+    }
+
+    #[test]
+    fn a_malformed_leaderboard_falls_back_to_unbenched() {
+        let json = catalog_json_from(MODEL_SCORES, "not json", Some(&with_anthropic()));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["unbenched"].as_array().unwrap().iter().any(|m| m == "claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn the_catalog_date_passes_through() {
+        let v: serde_json::Value = serde_json::from_str(&catalog_json(Some(&with_anthropic()))).unwrap();
+        assert!(v["date"].as_str().is_some_and(|d| d.len() == 10), "dated catalog: {:?}", v.get("date"));
     }
 
     #[tokio::test]
