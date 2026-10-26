@@ -335,7 +335,8 @@ async fn run(cmd: Cmd) -> Result<()> {
                     &build_disable_body(reason.as_deref()),
                 )
                 .await
-                .context("POST auth-client disable")?;
+                .context("POST auth-client disable")
+                .map_err(|e| not_supported_yet(e, "disable", Some(&client_id)))?;
             if json {
                 print_json(&resp);
             } else {
@@ -350,7 +351,8 @@ async fn run(cmd: Cmd) -> Result<()> {
             let resp = client
                 .post(&format!("/organizations/{org}/auth-clients/{client_id}/enable"), &json!({}))
                 .await
-                .context("POST auth-client enable")?;
+                .context("POST auth-client enable")
+                .map_err(|e| not_supported_yet(e, "enable", Some(&client_id)))?;
             if json {
                 print_json(&resp);
             } else {
@@ -417,7 +419,8 @@ async fn run(cmd: Cmd) -> Result<()> {
                         &build_rotate_body(overlap_hours),
                     )
                     .await
-                    .context("POST auth-client rotate")?;
+                    .context("POST auth-client rotate")
+                    .map_err(|e| not_supported_yet(e, "rotate", Some(&client_id)))?;
                 if json {
                     print_json(&resp);
                 } else {
@@ -433,7 +436,8 @@ async fn run(cmd: Cmd) -> Result<()> {
                 let resp = client
                     .post(&format!("/organizations/{org}/auth-clients/disable-all"), &json!({}))
                     .await
-                    .context("POST auth-clients disable-all")?;
+                    .context("POST auth-clients disable-all")
+                    .map_err(|e| not_supported_yet(e, "disable-all", None))?;
                 if json {
                     print_json(&resp);
                 } else {
@@ -450,7 +454,8 @@ async fn run(cmd: Cmd) -> Result<()> {
             let resp = client
                 .post(&format!("/organizations/{org}/auth-clients/enable-all"), &json!({}))
                 .await
-                .context("POST auth-clients enable-all")?;
+                .context("POST auth-clients enable-all")
+                .map_err(|e| not_supported_yet(e, "enable-all", None))?;
             if json {
                 print_json(&resp);
             } else {
@@ -474,6 +479,21 @@ fn explain_forbidden(err: anyhow::Error) -> anyhow::Error {
     } else {
         err
     }
+}
+
+/// The lifecycle routes (ADR-162 phase 1) are newer than the CLI may be: a
+/// release that lands before the backend deploys gets a 404 from them. Say
+/// that instead of dumping the raw HTTP error. On a per-key route a 404 can
+/// also mean the id doesn't exist, so name that possibility too.
+fn not_supported_yet(err: anyhow::Error, command: &str, client_id: Option<&str>) -> anyhow::Error {
+    if !format!("{err:#}").contains("returned HTTP 404") {
+        return err;
+    }
+    let msg = client_id.map_or_else(
+        || format!("this server doesn't support `keys {command}` yet (ADR-162)"),
+        |id| format!("this server doesn't support `keys {command}` yet (ADR-162) — or no key `{id}` exists in this org (check `th api keys list`)"),
+    );
+    err.context(msg)
 }
 
 fn list_path(org: &str, include_revoked: bool) -> String {
@@ -1040,6 +1060,19 @@ mod tests {
         assert_eq!(org_name_and_slug(&body, "o2"), (Some("Other".into()), None), "blank slug falls back to the id");
         assert_eq!(org_name_and_slug(&json!([{ "id": "o3", "slug": "three" }]), "o3"), (None, Some("three".into())));
         assert_eq!(org_name_and_slug(&body, "missing"), (None, None));
+    }
+
+    #[test]
+    fn not_found_on_new_routes_says_unsupported() {
+        let raw = || anyhow::anyhow!("POST https://api.smoo.ai/x/rotate returned HTTP 404 Not Found: 404 Not Found");
+        let msg = format!("{:#}", not_supported_yet(raw(), "rotate", Some("cid-1")));
+        assert!(msg.starts_with("this server doesn't support `keys rotate` yet (ADR-162)"), "{msg}");
+        assert!(msg.contains("no key `cid-1` exists"), "per-key routes name the missing-id case: {msg}");
+        assert!(msg.contains("returned HTTP 404"), "the raw error is kept: {msg}");
+        let all = format!("{:#}", not_supported_yet(raw(), "disable-all", None));
+        assert!(all.starts_with("this server doesn't support `keys disable-all` yet (ADR-162):"), "{all}");
+        let other = format!("{:#}", not_supported_yet(anyhow::anyhow!("returned HTTP 500: boom"), "enable", Some("x")));
+        assert_eq!(other, "returned HTTP 500: boom", "non-404 errors pass through untouched");
     }
 
     #[test]
