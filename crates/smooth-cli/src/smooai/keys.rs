@@ -61,6 +61,25 @@ impl ClientType {
     }
 }
 
+/// Why a key was disabled — the API accepts exactly these two values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DisableReason {
+    /// Paused by hand (the API's default).
+    Manual,
+    /// The secret was exposed (a log, a repo, a screenshot).
+    #[value(name = "secret-leaked", alias = "secret_leaked", alias = "leaked")]
+    SecretLeaked,
+}
+
+impl DisableReason {
+    const fn api_value(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::SecretLeaked => "secret_leaked",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Cmd {
     /// List the org's auth clients — both M2M and B2M — as a table of
@@ -148,9 +167,10 @@ pub enum Cmd {
     Disable {
         /// The client id from `th api keys list`.
         client_id: String,
-        /// Why — recorded on the key and in the audit log.
-        #[arg(long)]
-        reason: Option<String>,
+        /// Why — recorded on the key and in the audit log: `manual`
+        /// (the default) or `secret-leaked`.
+        #[arg(long, value_enum)]
+        reason: Option<DisableReason>,
         /// Override the active org (see `list` for the fallback chain).
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
@@ -196,8 +216,9 @@ pub enum Cmd {
     Rotate {
         /// The client id to rotate, from `th api keys list`.
         client_id: String,
-        /// Hours the old secret keeps working (1–168). The API defaults to 24.
-        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=168))]
+        /// Hours the old secret keeps working (0–168; 0 cuts it off now).
+        /// The API defaults to 24.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(0..=168))]
         overlap_hours: Option<u16>,
         /// Override the active org (see `list` for the fallback chain).
         #[arg(long, visible_alias = "org")]
@@ -212,10 +233,15 @@ pub enum Cmd {
         confirm: crate::destructive::Confirm,
     },
     /// Kill switch: disable EVERY active user-created key in the org at
-    /// once (the product's own internal keys are untouched). Interactive
+    /// once (the product's own internal keys are untouched, and website chat
+    /// widget keys are skipped unless `--include-widget-keys`). Interactive
     /// runs make you type the org's slug; scripts need `--yes`. Undo with
     /// `enable-all`.
     DisableAll {
+        /// Also disable website chat widget keys — this takes the chat on
+        /// customer websites offline until `enable-all`.
+        #[arg(long)]
+        include_widget_keys: bool,
         /// Override the active org (see `list` for the fallback chain).
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
@@ -330,10 +356,7 @@ async fn run(cmd: Cmd) -> Result<()> {
         } => {
             let org = crate::active_org::resolve(org_id)?;
             let resp = client
-                .post(
-                    &format!("/organizations/{org}/auth-clients/{client_id}/disable"),
-                    &build_disable_body(reason.as_deref()),
-                )
+                .post(&format!("/organizations/{org}/auth-clients/{client_id}/disable"), &build_disable_body(reason))
                 .await
                 .context("POST auth-client disable")
                 .map_err(|e| not_supported_yet(e, "disable", Some(&client_id)))?;
@@ -430,22 +453,29 @@ async fn run(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-        Cmd::DisableAll { org_id, json, dry_run, yes } => {
+        Cmd::DisableAll {
+            include_widget_keys,
+            org_id,
+            json,
+            dry_run,
+            yes,
+        } => {
             let org = crate::active_org::resolve(org_id)?;
-            if kill_switch_gate(&client, &org, dry_run, yes).await? {
+            if kill_switch_gate(&client, &org, include_widget_keys, dry_run, yes).await? {
                 let resp = client
-                    .post(&format!("/organizations/{org}/auth-clients/disable-all"), &json!({}))
+                    .post(
+                        &format!("/organizations/{org}/auth-clients/disable-all"),
+                        &build_disable_all_body(include_widget_keys),
+                    )
                     .await
                     .context("POST auth-clients disable-all")
                     .map_err(|e| not_supported_yet(e, "disable-all", None))?;
                 if json {
                     print_json(&resp);
                 } else {
-                    let n = resp.get("disabled").and_then(Value::as_u64).unwrap_or(0);
-                    println!();
-                    println!("  {} disabled {n} key{} in org {org}", "✓".green().bold(), plural(n));
-                    println!("  {} undo with `th api keys enable-all`", "→".dimmed());
-                    println!();
+                    for line in disable_all_lines(&resp, &org) {
+                        println!("{line}");
+                    }
                 }
             }
         }
@@ -546,11 +576,39 @@ fn build_update_body(name: Option<&str>, origins: &[String]) -> Result<Value> {
     Ok(Value::Object(body))
 }
 
-fn build_disable_body(reason: Option<&str>) -> Value {
-    reason
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .map_or_else(|| json!({}), |r| json!({ "reason": r }))
+fn build_disable_body(reason: Option<DisableReason>) -> Value {
+    reason.map_or_else(|| json!({}), |r| json!({ "reason": r.api_value() }))
+}
+
+/// Widget keys are skipped by the API unless asked for, so only send the
+/// flag when it's set.
+fn build_disable_all_body(include_widget_keys: bool) -> Value {
+    if include_widget_keys {
+        json!({ "includeWidgetKeys": true })
+    } else {
+        json!({})
+    }
+}
+
+/// The `disable-all` result: how many went off, and how many website chat
+/// widget keys the API left on.
+fn disable_all_lines(resp: &Value, org: &str) -> Vec<String> {
+    let n = resp.get("disabled").and_then(Value::as_u64).unwrap_or(0);
+    let mut out = vec![String::new(), format!("  {} disabled {n} key{} in org {org}", "✓".green().bold(), plural(n))];
+    if let Some(skipped) = resp.get("skippedWidgetKeys").and_then(Value::as_u64) {
+        if skipped > 0 {
+            out.push(format!(
+                "  {} skipped {skipped} website chat widget key{} — they stay on (`--include-widget-keys` disables them too)",
+                "●".dimmed(),
+                plural(skipped)
+            ));
+        } else {
+            out.push(format!("  {} skipped 0 website chat widget keys", "●".dimmed()));
+        }
+    }
+    out.push(format!("  {} undo with `th api keys enable-all`", "→".dimmed()));
+    out.push(String::new());
+    out
 }
 
 fn build_rotate_body(overlap_hours: Option<u16>) -> Value {
@@ -569,7 +627,7 @@ const fn plural(n: u64) -> &'static str {
 /// (banner always, `--dry-run` stops, non-interactive needs `--yes`), but the
 /// interactive confirmation is the org's slug rather than a key id — the
 /// mistake worth catching here is being pointed at the wrong org.
-async fn kill_switch_gate(client: &UserClient, org: &str, dry_run: bool, yes: bool) -> Result<bool> {
+async fn kill_switch_gate(client: &UserClient, org: &str, include_widget_keys: bool, dry_run: bool, yes: bool) -> Result<bool> {
     use crate::destructive::{decide, Decision};
     use std::io::IsTerminal;
 
@@ -591,6 +649,19 @@ async fn kill_switch_gate(client: &UserClient, org: &str, dry_run: bool, yes: bo
         "note".dimmed(),
         "integrations using these keys stop working until `enable-all`".yellow()
     );
+    if include_widget_keys {
+        println!(
+            "    {}  {}",
+            "also".red().bold(),
+            "website chat widget keys — the chat on customer websites goes OFFLINE".red().bold()
+        );
+    } else {
+        println!(
+            "    {}  {}",
+            "skip".dimmed(),
+            "website chat widget keys stay on (`--include-widget-keys` to include them)".dimmed()
+        );
+    }
     println!();
 
     match decide(dry_run, yes, std::io::stdin().is_terminal()) {
@@ -750,12 +821,15 @@ fn is_legacy(c: &Value) -> bool {
     c.get("name").and_then(Value::as_str).is_none_or(str::is_empty)
 }
 
-/// The one-line nudge under the table, when live legacy keys exist. Revoked
-/// keys can't be rotated, so they don't count.
+/// The one-line nudge under the table, when live legacy M2M keys exist.
+/// Rotating is what upgrades an `sk_` secret to `smoo_sk_`, so revoked keys
+/// (can't rotate) and B2M keys (publishable key, no secret) don't count.
 fn legacy_hint(items: &[Value]) -> Option<String> {
     let n = items
         .iter()
-        .filter(|c| is_legacy(c) && c.get("status").and_then(Value::as_str) != Some("revoked"))
+        .filter(|c| {
+            is_legacy(c) && c.get("status").and_then(Value::as_str) != Some("revoked") && c.get("type").and_then(Value::as_str) != Some("browser-to-machine")
+        })
         .count();
     match n {
         0 => None,
@@ -896,9 +970,11 @@ mod tests {
 
     #[test]
     fn disable_and_rotate_bodies() {
-        assert_eq!(build_disable_body(Some(" leaked in a log ")), json!({ "reason": "leaked in a log" }));
-        assert_eq!(build_disable_body(Some("")), json!({}));
+        assert_eq!(build_disable_body(Some(DisableReason::SecretLeaked)), json!({ "reason": "secret_leaked" }));
+        assert_eq!(build_disable_body(Some(DisableReason::Manual)), json!({ "reason": "manual" }));
         assert_eq!(build_disable_body(None), json!({}));
+        assert_eq!(build_disable_all_body(false), json!({}), "widget keys are skipped by default server-side");
+        assert_eq!(build_disable_all_body(true), json!({ "includeWidgetKeys": true }));
         assert_eq!(build_rotate_body(Some(48)), json!({ "overlapHours": 48 }));
         assert_eq!(build_rotate_body(None), json!({}), "omitted so the API's 24 h default applies");
     }
@@ -969,13 +1045,34 @@ mod tests {
             }
             _ => panic!("expected Rename"),
         }
-        match parse(&["disable", "cid-1", "--reason", "leaked"]) {
+        match parse(&["disable", "cid-1", "--reason", "secret-leaked"]) {
             Cmd::Disable { client_id, reason, .. } => {
                 assert_eq!(client_id, "cid-1");
-                assert_eq!(reason.as_deref(), Some("leaked"));
+                assert_eq!(reason, Some(DisableReason::SecretLeaked));
             }
             _ => panic!("expected Disable"),
         }
+        for spelling in ["secret_leaked", "leaked"] {
+            assert!(matches!(
+                parse(&["disable", "x", "--reason", spelling]),
+                Cmd::Disable {
+                    reason: Some(DisableReason::SecretLeaked),
+                    ..
+                }
+            ));
+        }
+        assert!(parse_err(&["disable", "x", "--reason", "because"]), "the API only takes manual|secret_leaked");
+        assert!(matches!(
+            parse(&["disable-all", "--include-widget-keys", "--yes"]),
+            Cmd::DisableAll { include_widget_keys: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["disable-all"]),
+            Cmd::DisableAll {
+                include_widget_keys: false,
+                ..
+            }
+        ));
         assert!(matches!(parse(&["enable", "cid-1", "--org", "o1"]), Cmd::Enable { .. }));
         assert!(matches!(parse(&["enable-all"]), Cmd::EnableAll { .. }));
         assert!(matches!(parse(&["disable-all", "--yes"]), Cmd::DisableAll { yes: true, dry_run: false, .. }));
@@ -998,7 +1095,10 @@ mod tests {
             _ => panic!("expected Rotate"),
         }
         assert!(parse_err(&["rotate", "cid-1", "--overlap-hours", "169"]));
-        assert!(parse_err(&["rotate", "cid-1", "--overlap-hours", "0"]));
+        assert!(
+            matches!(parse(&["rotate", "cid-1", "--overlap-hours", "0"]), Cmd::Rotate { overlap_hours: Some(0), .. }),
+            "0 = cut the old secret off now"
+        );
         assert!(matches!(parse(&["rotate", "cid-1"]), Cmd::Rotate { overlap_hours: None, .. }));
     }
 
@@ -1087,10 +1187,26 @@ mod tests {
             legacy_hint(&two).as_deref(),
             Some("2 legacy keys: `th api keys rotate <id>` upgrades one to the new smoo_sk_ format")
         );
+        // B2M keys have no secret to upgrade: tagged, but not in the hint.
+        assert_eq!(legacy_hint(&[json!({ "clientId": "w", "type": "browser-to-machine", "legacy": true })]), None);
         // Old server, all keys named: no hint.
         assert_eq!(legacy_hint(&[json!({ "clientId": "o", "name": "ci" })]), None);
         let table = render_clients(&one);
         assert!(table.contains("1 legacy key:"), "the hint follows the table: {table}");
+    }
+
+    #[test]
+    fn disable_all_output_reports_skipped_widget_keys() {
+        let out = disable_all_lines(&json!({ "disabled": 3, "skippedWidgetKeys": 2 }), "o1").join("\n");
+        assert!(out.contains("disabled 3 keys in org o1"), "{out}");
+        assert!(out.contains("skipped 2 website chat widget keys"), "{out}");
+        assert!(out.contains("--include-widget-keys"), "{out}");
+        let one = disable_all_lines(&json!({ "disabled": 1, "skippedWidgetKeys": 0 }), "o1").join("\n");
+        assert!(one.contains("disabled 1 key in org"), "{one}");
+        assert!(one.contains("skipped 0 website chat widget keys"), "{one}");
+        // An older server that doesn't report the count: no skipped line.
+        let old = disable_all_lines(&json!({ "disabled": 2 }), "o1").join("\n");
+        assert!(!old.contains("skipped"), "{old}");
     }
 
     #[test]

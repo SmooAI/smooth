@@ -864,13 +864,13 @@ smoo api keys create --name ci --expires-in-days 30  # 1–365, API default 90
 smoo api keys rename <client_id> "Prod deploy"
 smoo api keys update <client_id> [--name …] [--origin …]   # origins replace a B2M client's list
 
-smoo api keys disable <client_id> [--reason "leaked in a log"]   # stops authenticating now, reversible
+smoo api keys disable <client_id> [--reason manual|secret-leaked]   # stops authenticating now, reversible
 smoo api keys enable <client_id>
 
-smoo api keys rotate <client_id> [--overlap-hours N] [--dry-run|--yes]   # new secret once; old works N h (default 24, max 168)
+smoo api keys rotate <client_id> [--overlap-hours N] [--dry-run|--yes]   # new secret once; old works N h (default 24, 0–168)
 smoo api keys revoke <client_id> [--dry-run|--yes]   # permanent (alias: delete); type the id to confirm
 
-smoo api keys disable-all [--dry-run|--yes]          # kill switch: every user-created key; type the org slug to confirm
+smoo api keys disable-all [--include-widget-keys] [--dry-run|--yes]   # kill switch; type the org slug to confirm
 smoo api keys enable-all                              # re-enable only keys the kill switch disabled
 
 smoo api keys create --type b2m --origin … --org-id <child>   # master admin, child org
@@ -882,7 +882,8 @@ accepts the short `m2m`/`b2m` or the long `machine-to-machine`/
 `rotate` swaps the secret **in place**: the client id is unchanged and the
 old secret keeps working until the overlap ends, so consumers can switch
 over without downtime. `disable-all` leaves the product's own internal
-keys alone. `list` tags keys minted before the `smoo_sk_` format as
+keys alone and skips website chat widget keys unless `--include-widget-keys`
+(which takes the chat on customer websites offline). `list` tags keys minted before the `smoo_sk_` format as
 `legacy` and ends with a hint when any are live; `rotate` upgrades one. A raw `--body '<json>'` escape hatch is still accepted on
 `create`.
 
