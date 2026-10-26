@@ -9,8 +9,13 @@
 //! `config set` is a merge, not a replace: it GETs the current config,
 //! overlays only the flags you passed, and PUTs the result — so an
 //! unset flag never clobbers an existing value.
+//!
+//! SMOODEV-4188 (ADR-147 §5): a booking page starts unpublished, and nobody
+//! can book it until it is published. `config publish` / `config unpublish`
+//! flip the caller's own page; `link` and `types create` warn when the link
+//! would answer "not available".
 
-use anstream::println;
+use anstream::{eprintln, println};
 use anyhow::{bail, Context, Result};
 use chrono::DateTime;
 use chrono_tz::Tz;
@@ -94,6 +99,18 @@ pub enum Cmd {
 pub enum ConfigCmd {
     /// Show the current booking config.
     Get {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Publish your booking page so people can book it (a new page starts unpublished).
+    Publish {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Unpublish your booking page: its links answer "not available" until you publish it again.
+    Unpublish {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -356,6 +373,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             print_json(&client.get(&format!("/booking/config/{o}")).await.context("GET booking config")?);
         }
         Cmd::Config {
+            cmd: ConfigCmd::Publish { org },
+        } => set_published(&client, org, true).await?,
+        Cmd::Config {
+            cmd: ConfigCmd::Unpublish { org },
+        } => set_published(&client, org, false).await?,
+        Cmd::Config {
             cmd:
                 ConfigCmd::Set {
                     org,
@@ -443,7 +466,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 one_time,
                 org_shared,
             });
-            print_json(&client.post(&format!("/booking/types/{o}"), Some(&payload)).await.context("POST booking type")?);
+            let created = client.post(&format!("/booking/types/{o}"), Some(&payload)).await.context("POST booking type")?;
+            print_json(&created);
+            if let Some(warning) = unpublished_warning(&created, "hostBookable") {
+                eprintln!("{} {warning}", "⚠".yellow());
+            }
         }
         Cmd::Types {
             cmd:
@@ -680,11 +707,35 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             println!("  {} {}", "→".cyan(), url.bold());
             if config.get("connected").and_then(serde_json::Value::as_bool) == Some(false) {
                 println!("  {} calendar not connected — the link won't work until it is", "⚠".yellow());
+            } else if let Some(warning) = unpublished_warning(&config, "published") {
+                println!("  {} {warning}", "⚠".yellow());
             }
             println!();
         }
     }
     Ok(())
+}
+
+/// SMOODEV-4188 — `PUT /booking/config/{org}/published` on the caller's own page.
+/// The server refuses a legacy org's shared page without `bookings.write`, and a
+/// page that was never set up (open Booking once first).
+async fn set_published(client: &smooth_api_client::SmoothApiClient, org: Option<String>, published: bool) -> Result<()> {
+    let o = require_active_org(client, org)?;
+    let body = client
+        .put(&format!("/booking/config/{o}/published"), &json!({ "published": published }))
+        .await
+        .context("PUT booking page published")?;
+    print_json(&body);
+    Ok(())
+}
+
+/// SMOODEV-4188 — the warning for a link that answers "not available" because its
+/// booking page isn't published: `field` (`published` on the config,
+/// `hostBookable` on a saved type) is explicitly `false`. A missing field (an older
+/// server) never warns.
+fn unpublished_warning(body: &Value, field: &str) -> Option<&'static str> {
+    (body.get(field).and_then(Value::as_bool) == Some(false))
+        .then_some("booking page not published — the link answers \"not available\" until you run `th smoo booking config publish`")
 }
 
 /// Resolve a "day start/end" from the mutually-exclusive `--x-minute N`
@@ -1186,6 +1237,41 @@ mod tests {
             c.cmd,
             Cmd::Calendars {
                 cmd: CalendarsCmd::List { json: false, .. }
+            }
+        ));
+    }
+
+    /// SMOODEV-4188 — only an explicit `false` warns; an older server that omits
+    /// the field stays quiet.
+    #[test]
+    fn unpublished_page_warns_only_when_the_server_says_so() {
+        assert!(unpublished_warning(&json!({ "published": false }), "published").is_some_and(|w| w.contains("config publish")));
+        assert!(unpublished_warning(&json!({ "published": true }), "published").is_none());
+        assert!(unpublished_warning(&json!({ "hostBookable": false }), "hostBookable").is_some());
+        assert!(unpublished_warning(&json!({ "slug": "intro" }), "hostBookable").is_none());
+    }
+
+    #[test]
+    fn config_publish_and_unpublish_parse() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Wrap {
+            #[command(subcommand)]
+            cmd: Cmd,
+        }
+        let p = Wrap::try_parse_from(["t", "config", "publish", "--org", "o1"]).expect("config publish must parse");
+        assert!(matches!(
+            p.cmd,
+            Cmd::Config {
+                cmd: ConfigCmd::Publish { org: Some(ref o) }
+            } if o == "o1"
+        ));
+        let u = Wrap::try_parse_from(["t", "config", "unpublish"]).expect("config unpublish must parse");
+        assert!(matches!(
+            u.cmd,
+            Cmd::Config {
+                cmd: ConfigCmd::Unpublish { org: None }
             }
         ));
     }
