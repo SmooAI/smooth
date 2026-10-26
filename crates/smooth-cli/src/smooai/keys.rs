@@ -838,6 +838,22 @@ fn legacy_hint(items: &[Value]) -> Option<String> {
     }
 }
 
+/// Legacy B2M keys can't be upgraded by `rotate` (phase 1 rotation is
+/// M2M-only), so they get their own line rather than a wrong suggestion.
+fn legacy_browser_hint(items: &[Value]) -> Option<String> {
+    let n = items
+        .iter()
+        .filter(|c| {
+            is_legacy(c) && c.get("status").and_then(Value::as_str) != Some("revoked") && c.get("type").and_then(Value::as_str) == Some("browser-to-machine")
+        })
+        .count();
+    match n {
+        0 => None,
+        1 => Some("1 legacy browser key: upgrade path coming with ADR-162 browser-key work".to_string()),
+        n => Some(format!("{n} legacy browser keys: upgrade path coming with ADR-162 browser-key work")),
+    }
+}
+
 /// `2026-10-26T14:03:11.123Z` → `2026-10-26 14:03`. Anything that isn't an
 /// ISO timestamp is shown as-is.
 fn short_ts(s: &str) -> String {
@@ -878,8 +894,12 @@ fn render_clients(items: &[Value]) -> String {
             let _ = write!(out, "\n  {id} origins: {}", origins.join(", "));
         }
     }
-    if let Some(hint) = legacy_hint(items) {
-        let _ = write!(out, "\n\n  {} {hint}", "→".dimmed());
+    let hints: Vec<String> = legacy_hint(items).into_iter().chain(legacy_browser_hint(items)).collect();
+    if !hints.is_empty() {
+        out.push('\n');
+    }
+    for hint in hints {
+        let _ = write!(out, "\n  {} {hint}", "→".dimmed());
     }
     out
 }
@@ -1193,6 +1213,33 @@ mod tests {
         assert_eq!(legacy_hint(&[json!({ "clientId": "o", "name": "ci" })]), None);
         let table = render_clients(&one);
         assert!(table.contains("1 legacy key:"), "the hint follows the table: {table}");
+    }
+
+    #[test]
+    fn legacy_browser_keys_get_their_own_line() {
+        let b2m = |id: &str, status: &str| json!({ "clientId": id, "type": "browser-to-machine", "legacy": true, "status": status });
+        assert_eq!(
+            legacy_browser_hint(&[json!({ "clientId": "m", "type": "machine-to-machine", "legacy": true })]),
+            None,
+            "M2M keys belong to the rotate hint"
+        );
+        assert_eq!(
+            legacy_browser_hint(&[b2m("w1", "active")]).as_deref(),
+            Some("1 legacy browser key: upgrade path coming with ADR-162 browser-key work")
+        );
+        assert_eq!(
+            legacy_browser_hint(&[b2m("w1", "active"), b2m("w2", "disabled"), b2m("w3", "revoked")]).as_deref(),
+            Some("2 legacy browser keys: upgrade path coming with ADR-162 browser-key work")
+        );
+        // Both lines under one table, B2M row still tagged.
+        let items = vec![
+            json!({ "clientId": "m1", "type": "machine-to-machine", "legacy": true, "status": "active" }),
+            b2m("w1", "active"),
+        ];
+        let out = render_clients(&items);
+        assert!(out.contains("1 legacy key: `th api keys rotate <id>`"), "{out}");
+        assert!(out.contains("1 legacy browser key: upgrade path coming"), "{out}");
+        assert_eq!(client_row(&items[1])[3], "active · legacy");
     }
 
     #[test]
