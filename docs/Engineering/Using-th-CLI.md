@@ -882,7 +882,8 @@ accepts the short `m2m`/`b2m` or the long `machine-to-machine`/
 `rotate` swaps the secret **in place**: the client id is unchanged and the
 old secret keeps working until the overlap ends, so consumers can switch
 over without downtime. `disable-all` leaves the product's own internal
-keys alone. A raw `--body '<json>'` escape hatch is still accepted on
+keys alone. `list` tags keys minted before the `smoo_sk_` format as
+`legacy` and ends with a hint when any are live; `rotate` upgrades one. A raw `--body '<json>'` escape hatch is still accepted on
 `create`.
 
 ### LLM gateway keys (`smoo llm`)

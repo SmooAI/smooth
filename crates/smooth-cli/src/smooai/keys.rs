@@ -716,14 +716,52 @@ fn client_row(c: &Value) -> [String; 6] {
         // Pre-lifecycle API responses carry no status: every listed key was live.
         (None, _) => "active".to_string(),
     };
+    let legacy = is_legacy(c);
+    let status = if legacy { format!("{status} · legacy") } else { status };
+    let name = match (s("name").filter(|n| !n.is_empty()), legacy) {
+        (Some(n), _) => n.to_string(),
+        (None, true) => s("createdAt").map_or_else(
+            || "Legacy key".to_string(),
+            |at| format!("Legacy key · created {}", at.chars().take(10).collect::<String>()),
+        ),
+        (None, false) => "—".to_string(),
+    };
     [
-        s("name").filter(|n| !n.is_empty()).unwrap_or("—").to_string(),
+        name,
         s("clientId").unwrap_or("?").to_string(),
         ty,
         status,
         s("lastUsedAt").map_or_else(|| "never".to_string(), short_ts),
         s("expiresAt").map_or_else(|| "—".to_string(), short_ts),
     ]
+}
+
+/// A key minted before the `smoo_sk_` format (ADR-162). Newer servers say so
+/// with `legacy` (or `keyVersion: 1`). An older server sends neither, and
+/// there only an unnamed key is flagged: every pre-lifecycle key was unnamed,
+/// while flagging all of them would cry wolf on a server that can't upgrade.
+fn is_legacy(c: &Value) -> bool {
+    if let Some(l) = c.get("legacy").and_then(Value::as_bool) {
+        return l;
+    }
+    if let Some(v) = c.get("keyVersion").and_then(Value::as_u64) {
+        return v < 2;
+    }
+    c.get("name").and_then(Value::as_str).is_none_or(str::is_empty)
+}
+
+/// The one-line nudge under the table, when live legacy keys exist. Revoked
+/// keys can't be rotated, so they don't count.
+fn legacy_hint(items: &[Value]) -> Option<String> {
+    let n = items
+        .iter()
+        .filter(|c| is_legacy(c) && c.get("status").and_then(Value::as_str) != Some("revoked"))
+        .count();
+    match n {
+        0 => None,
+        1 => Some("1 legacy key: `th api keys rotate <id>` upgrades it to the new smoo_sk_ format".to_string()),
+        n => Some(format!("{n} legacy keys: `th api keys rotate <id>` upgrades one to the new smoo_sk_ format")),
+    }
 }
 
 /// `2026-10-26T14:03:11.123Z` → `2026-10-26 14:03`. Anything that isn't an
@@ -765,6 +803,9 @@ fn render_clients(items: &[Value]) -> String {
             let id = c.get("clientId").and_then(Value::as_str).unwrap_or("?");
             let _ = write!(out, "\n  {id} origins: {}", origins.join(", "));
         }
+    }
+    if let Some(hint) = legacy_hint(items) {
+        let _ = write!(out, "\n\n  {} {hint}", "→".dimmed());
     }
     out
 }
@@ -993,10 +1034,63 @@ mod tests {
     #[test]
     fn row_defaults_for_legacy_and_sparse_clients() {
         let row = client_row(&json!({ "clientId": "old", "type": "browser-to-machine", "name": null }));
-        assert_eq!(row, ["—", "old", "b2m", "active", "never", "—"].map(String::from));
+        assert_eq!(row, ["Legacy key", "old", "b2m", "active · legacy", "never", "—"].map(String::from));
         // An active key's reason is noise; only show it for non-active states.
-        let active = client_row(&json!({ "clientId": "x", "type": "machine-to-machine", "status": "active", "statusReason": "manual" }));
+        let active = client_row(&json!({ "clientId": "x", "type": "machine-to-machine", "name": "ci", "status": "active", "statusReason": "manual" }));
         assert_eq!(active[3], "active");
+    }
+
+    #[test]
+    fn legacy_detection_trusts_the_server_then_falls_back_to_unnamed() {
+        // New server: the flag wins, either way.
+        assert!(is_legacy(&json!({ "name": "ci", "legacy": true, "keyVersion": 1 })));
+        assert!(!is_legacy(&json!({ "name": null, "legacy": false, "keyVersion": 2 })));
+        assert!(is_legacy(&json!({ "name": "ci", "keyVersion": 1 })));
+        assert!(!is_legacy(&json!({ "keyVersion": 2 })));
+        // Old server (no fields): only unnamed keys are flagged, not every key.
+        assert!(!is_legacy(&json!({ "name": "ci" })));
+        assert!(is_legacy(&json!({ "name": null })));
+        assert!(is_legacy(&json!({ "name": "" })));
+        assert!(is_legacy(&json!({})));
+    }
+
+    #[test]
+    fn legacy_rows_are_tagged_and_unnamed_ones_get_a_label() {
+        let unnamed = client_row(
+            &json!({ "clientId": "a", "type": "machine-to-machine", "name": null, "status": "active", "legacy": true, "createdAt": "2025-03-04T10:00:00Z" }),
+        );
+        assert_eq!(unnamed[0], "Legacy key · created 2025-03-04");
+        assert_eq!(unnamed[3], "active · legacy");
+        let named =
+            client_row(&json!({ "clientId": "b", "type": "machine-to-machine", "name": "ci", "status": "disabled", "statusReason": "manual", "legacy": true }));
+        assert_eq!(named[0], "ci");
+        assert_eq!(named[3], "disabled (manual) · legacy");
+        let modern = client_row(&json!({ "clientId": "c", "type": "machine-to-machine", "name": "ci", "status": "active", "legacy": false, "keyVersion": 2 }));
+        assert_eq!(modern[3], "active");
+    }
+
+    #[test]
+    fn legacy_hint_counts_live_legacy_keys_only() {
+        let modern = json!({ "clientId": "m", "name": "new", "legacy": false });
+        assert_eq!(legacy_hint(std::slice::from_ref(&modern)), None);
+        let one = vec![modern, json!({ "clientId": "l1", "name": null, "legacy": true })];
+        assert_eq!(
+            legacy_hint(&one).as_deref(),
+            Some("1 legacy key: `th api keys rotate <id>` upgrades it to the new smoo_sk_ format")
+        );
+        let two = vec![
+            json!({ "clientId": "l1", "legacy": true }),
+            json!({ "clientId": "l2", "keyVersion": 1, "name": "x" }),
+            json!({ "clientId": "l3", "legacy": true, "status": "revoked" }),
+        ];
+        assert_eq!(
+            legacy_hint(&two).as_deref(),
+            Some("2 legacy keys: `th api keys rotate <id>` upgrades one to the new smoo_sk_ format")
+        );
+        // Old server, all keys named: no hint.
+        assert_eq!(legacy_hint(&[json!({ "clientId": "o", "name": "ci" })]), None);
+        let table = render_clients(&one);
+        assert!(table.contains("1 legacy key:"), "the hint follows the table: {table}");
     }
 
     #[test]
