@@ -61,7 +61,7 @@ Reply with EXACTLY two lines and nothing else:\nVERDICT: PASS\nREASON: <one sent
 /// must map every one of those to `INCONCLUSIVE`, never to PASS.
 pub async fn judge(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev: &JudgeEvidence) -> Result<JudgeVerdict> {
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "temperature": smooth_policy::llm_params::AGENT_TEMPERATURE,
         "messages": [
@@ -69,6 +69,9 @@ pub async fn judge(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev
             {"role": "user", "content": render_evidence(ev)},
         ],
     });
+    // The bench's own calls must be answered by the model named, too: a
+    // judge the gateway quietly swapped for a fallback is no judge.
+    crate::served::pin_request(&mut body);
 
     let client = reqwest::Client::new();
     let mut req = client.post(&url).json(&body);
@@ -81,10 +84,12 @@ pub async fn judge(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev
     // leaderboard can subtract it (pearl th-adf614) — otherwise a cheap
     // agent graded by an expensive judge reads as expensive.
     crate::spend::record_harness_response(resp.headers());
+    let headers = resp.headers().clone();
     let text = resp.text().await.context("reading judge response body")?;
     anyhow::ensure!(status.is_success(), "judge gateway returned {status}: {}", truncate(&text, 400));
 
     let v: Value = serde_json::from_str(&text).with_context(|| format!("judge response was not JSON: {}", truncate(&text, 400)))?;
+    crate::served::ensure_served(model, &headers, crate::served::body_model(&v))?;
     let content = v
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -263,7 +268,7 @@ pub fn scored_schema() -> Value {
 /// map to INCONCLUSIVE — never to a pass, and never to a made-up score.
 pub async fn judge_scored(gateway_url: &str, gateway_key: Option<&str>, model: &str, ev: &JudgeEvidence) -> Result<ScoredVerdict> {
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "temperature": smooth_policy::llm_params::AGENT_TEMPERATURE,
         "response_format": {
@@ -275,6 +280,9 @@ pub async fn judge_scored(gateway_url: &str, gateway_key: Option<&str>, model: &
             {"role": "user", "content": render_evidence(ev)},
         ],
     });
+    // The bench's own calls must be answered by the model named, too: a
+    // judge the gateway quietly swapped for a fallback is no judge.
+    crate::served::pin_request(&mut body);
     let mut req = reqwest::Client::new().post(&url).json(&body);
     if let Some(k) = gateway_key {
         req = req.bearer_auth(k);
@@ -282,9 +290,11 @@ pub async fn judge_scored(gateway_url: &str, gateway_key: Option<&str>, model: &
     let resp = req.send().await.with_context(|| format!("judge request to {url}"))?;
     let status = resp.status();
     crate::spend::record_harness_response(resp.headers());
+    let headers = resp.headers().clone();
     let text = resp.text().await.context("reading judge response body")?;
     anyhow::ensure!(status.is_success(), "judge gateway returned {status}: {}", truncate(&text, 400));
     let v: Value = serde_json::from_str(&text).with_context(|| format!("judge response was not JSON: {}", truncate(&text, 400)))?;
+    crate::served::ensure_served(model, &headers, crate::served::body_model(&v))?;
     let content = v
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)

@@ -657,6 +657,27 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         .clone()
         .or_else(|| std::env::var_os("SMOOTH_OPERATOR_REPO").map(PathBuf::from))
         .or_else(|| dirs_next::home_dir().map(|h| h.join("dev").join("smooai").join("smooth-operator")));
+
+    // The daemon's gateway traffic goes through the served-model guard, so
+    // a trial the gateway answered with a fallback model is INVALID rather
+    // than scored under the wrong name. A microVM cannot reach the host's
+    // loopback, so it talks to the gateway directly, unguarded.
+    let guard = match args.isolation {
+        Isolation::Host => {
+            let g = smooth_bench::served::ServedGuard::start(&gateway_url).await?;
+            eprintln!("served-model guard: {} -> {gateway_url} (no fallbacks, no cache)", g.url);
+            Some(g)
+        }
+        Isolation::MicroVm => {
+            eprintln!("served-model guard: OFF under microvm isolation — a gateway fallback would go unnoticed");
+            None
+        }
+    };
+    let mut env = env;
+    if let Some(g) = &guard {
+        env.gateway_url = Some(g.url.clone());
+    }
+
     // One booter per model: a direct-routed model carries its own
     // endpoint and key, everything else the gateway's.
     let make_booter = |route: Option<&smooth_bench::routes::ProviderRoute>| -> Result<Box<dyn WorkspaceBooter>> {
@@ -743,6 +764,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
             trials: args.trials as usize,
             prices: prices.get(model).or_else(|| smooth_bench::pricing::direct_list_price(model)),
             scenario_base: scenario_base.clone(),
+            served: guard.as_ref().map(|g| g.ledger.clone()),
         };
         let (run, measured) = smooth_bench::spend::measure(&gateway_url, gateway_key.as_deref(), run_agentic(&scenarios, booter.as_ref(), &opts)).await;
         runs.push((run?, measured));
@@ -766,7 +788,20 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     if runs.len() > 1 {
         print!("{}", leaderboard::render("agentic", &rows));
     }
-    write_scoreboard(args.scoreboard.as_deref(), "agentic", args.trials as usize, &rows)?;
+    // A model the gateway served with a fallback has no score to publish.
+    let mut publishable = Vec::with_capacity(rows.len());
+    for ((run, _), row) in runs.iter().zip(rows) {
+        if run.invalid() > 0 {
+            eprintln!(
+                "\nINVALID: {} — {} scenario(s) were served (in part) by another model. Left OUT of the scoreboard; see the INVALID rationales.",
+                run.model,
+                run.invalid()
+            );
+        } else {
+            publishable.push(row);
+        }
+    }
+    write_scoreboard(args.scoreboard.as_deref(), "agentic", args.trials as usize, &publishable)?;
     print_cost_note(&runs.iter().map(|(_, m)| *m).collect::<Vec<_>>(), noise);
 
     // Non-zero when any scenario didn't pass every conclusive trial — CI
@@ -802,7 +837,7 @@ fn agentic_row(run: &AgenticRun) -> leaderboard::ModelRow {
             let cell = match a.verdict {
                 Verdict::Pass => leaderboard::Cell::Pass,
                 Verdict::Fail => leaderboard::Cell::Fail,
-                Verdict::Inconclusive => leaderboard::Cell::Inconclusive,
+                Verdict::Inconclusive | Verdict::Invalid => leaderboard::Cell::Inconclusive,
             };
             (a.id.clone(), cell)
         })

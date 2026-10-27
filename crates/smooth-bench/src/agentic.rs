@@ -474,16 +474,19 @@ fn is_safe_relative(p: &str) -> bool {
     !p.is_empty() && path.is_relative() && path.components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
-/// The three outcomes a scenario can have.
+/// The outcomes a scenario can have.
 ///
 /// `Inconclusive` exists so a judge failure (transport error, garbage
-/// verdict) can never be recorded as a pass.
+/// verdict) can never be recorded as a pass. `Invalid` means the trial ran
+/// but not on the model under test — the gateway served some of it with a
+/// fallback ([`crate::served`]) — so its result belongs to nobody.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Verdict {
     Pass,
     Fail,
     Inconclusive,
+    Invalid,
 }
 
 impl Verdict {
@@ -493,7 +496,14 @@ impl Verdict {
             Self::Pass => "PASS",
             Self::Fail => "FAIL",
             Self::Inconclusive => "INCONCLUSIVE",
+            Self::Invalid => "INVALID",
         }
+    }
+
+    /// A real verdict on the model under test — the pass-rate denominator.
+    #[must_use]
+    pub fn is_conclusive(self) -> bool {
+        matches!(self, Self::Pass | Self::Fail)
     }
 }
 
@@ -575,12 +585,15 @@ pub struct ScenarioAggregate {
     pub passed: usize,
     pub failed: usize,
     pub inconclusive: usize,
+    /// Trials served (in part) by a model other than the one under test.
+    pub invalid: usize,
     /// Trials that returned a real verdict — the denominator.
     pub conclusive: usize,
     /// `passed / conclusive`; 0.0 when nothing was conclusive.
     pub pass_rate: f64,
     /// PASS only when every conclusive trial passed. All-inconclusive is
-    /// INCONCLUSIVE, never 0%.
+    /// INCONCLUSIVE, never 0%. Any INVALID trial makes the scenario INVALID:
+    /// a gateway that fell back once may have done so unnoticed elsewhere.
     pub verdict: Verdict,
     /// Trials disagreed — the interesting signal, so it gets its own bit
     /// rather than being averaged away.
@@ -622,10 +635,13 @@ pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
     let passed = trials.iter().filter(|t| t.verdict == Verdict::Pass).count();
     let failed = trials.iter().filter(|t| t.verdict == Verdict::Fail).count();
     let inconclusive = trials.iter().filter(|t| t.verdict == Verdict::Inconclusive).count();
+    let invalid = trials.iter().filter(|t| t.verdict == Verdict::Invalid).count();
     let conclusive = passed + failed;
 
     // All-inconclusive is missing data, not a 0% score.
-    let verdict = if conclusive == 0 {
+    let verdict = if invalid > 0 {
+        Verdict::Invalid
+    } else if conclusive == 0 {
         Verdict::Inconclusive
     } else if passed == conclusive {
         Verdict::Pass
@@ -643,6 +659,7 @@ pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
         passed,
         failed,
         inconclusive,
+        invalid,
         conclusive,
         pass_rate: if conclusive == 0 { 0.0 } else { passed as f64 / conclusive as f64 },
         verdict,
@@ -705,7 +722,7 @@ impl AgenticRun {
     /// Scenarios (not trials) that returned a real verdict.
     #[must_use]
     pub fn conclusive(&self) -> usize {
-        self.aggregates().iter().filter(|a| a.verdict != Verdict::Inconclusive).count()
+        self.aggregates().iter().filter(|a| a.verdict.is_conclusive()).count()
     }
 
     #[must_use]
@@ -716,6 +733,13 @@ impl AgenticRun {
     #[must_use]
     pub fn inconclusive(&self) -> usize {
         self.aggregates().iter().filter(|a| a.verdict == Verdict::Inconclusive).count()
+    }
+
+    /// Scenarios with at least one trial the gateway served with another
+    /// model. Non-zero means this run must not be published.
+    #[must_use]
+    pub fn invalid(&self) -> usize {
+        self.aggregates().iter().filter(|a| a.verdict == Verdict::Invalid).count()
     }
 
     /// Scenarios whose trials disagreed.
@@ -781,7 +805,7 @@ impl AgenticRun {
     /// render UNKNOWN instead (th-adf614).
     #[must_use]
     pub fn has_cost(&self) -> bool {
-        let conclusive: Vec<_> = self.results.iter().filter(|r| r.verdict != Verdict::Inconclusive).collect();
+        let conclusive: Vec<_> = self.results.iter().filter(|r| r.verdict.is_conclusive()).collect();
         !conclusive.is_empty() && conclusive.iter().all(|r| r.has_cost)
     }
 
@@ -848,6 +872,13 @@ impl AgenticRun {
             if a.inconclusive > 0 {
                 let _ = writeln!(out, "      ↳ {} of {} trial(s) INCONCLUSIVE, excluded from the rate", a.inconclusive, a.trials);
             }
+            if a.invalid > 0 {
+                let _ = writeln!(
+                    out,
+                    "      ↳ {} of {} trial(s) INVALID — served by another model, excluded",
+                    a.invalid, a.trials
+                );
+            }
             if let (Some(sc), Some(j)) = (a.score, a.judge_mean) {
                 let _ = writeln!(out, "      ↳ quality score {sc:.1}/100 (judge mean {j:.2}/5)");
             }
@@ -868,6 +899,14 @@ impl AgenticRun {
                 String::new()
             }
         );
+        if self.invalid() > 0 {
+            let _ = writeln!(
+                out,
+                "  ✗ {} INVALID scenario(s) — the gateway served {} with another model; this run is not a score for it",
+                self.invalid(),
+                self.model
+            );
+        }
         if self.flaky() > 0 {
             let _ = writeln!(
                 out,
@@ -1299,6 +1338,9 @@ pub struct AgenticOpts {
     /// Directory scenario `fixture`/`holdout` paths resolve against — the
     /// scenario file's own directory.
     pub scenario_base: PathBuf,
+    /// What the served-model guard saw of the agent's gateway calls. When
+    /// set, a trial with any call served by another model is INVALID.
+    pub served: Option<crate::served::ServedLedger>,
 }
 
 /// Run every scenario `opts.trials` times: seed a fresh workspace, boot
@@ -1324,7 +1366,12 @@ pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], bo
             } else {
                 eprintln!("agentic: {} (trial {}/{}) …", s.id, trial + 1, trials);
             }
-            results.push(run_one(s, trial, booter, opts).await);
+            let mark = opts.served.as_ref().map(crate::served::ServedLedger::len);
+            let mut outcome = run_one(s, trial, booter, opts).await;
+            if let (Some(ledger), Some(mark)) = (&opts.served, mark) {
+                invalidate_if_misserved(&mut outcome, &ledger.mismatch_since(mark));
+            }
+            results.push(outcome);
         }
     }
     Ok(AgenticRun {
@@ -1337,6 +1384,21 @@ pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], bo
         ran_at: chrono::Utc::now(),
         results,
     })
+}
+
+/// Mark a trial INVALID when the gateway served any of its calls with a
+/// model other than the one asked for. Whatever it scored is kept in the
+/// rationale for diagnosis, but it is not a result for the model.
+fn invalidate_if_misserved(outcome: &mut ScenarioOutcome, mismatches: &[String]) {
+    if mismatches.is_empty() {
+        return;
+    }
+    let was = outcome.verdict.as_str();
+    outcome.verdict = Verdict::Invalid;
+    outcome.safety_violation = false;
+    outcome.score = None;
+    outcome.judge_scores = None;
+    outcome.rationale = format!("INVALID — {} (would have been {was}: {})", mismatches.join("; "), outcome.rationale);
 }
 
 /// Run + score one trial of one scenario. Never returns `Err` — every
@@ -2578,6 +2640,41 @@ rubric = "r"
         assert_eq!((run.passed(), run.conclusive(), run.inconclusive()), (1, 1, 1));
         assert_eq!(run.pass_rate(), 1.0);
         assert_eq!(run.scenario_count(), 2);
+    }
+
+    #[test]
+    fn a_misserved_trial_is_invalid_and_keeps_what_it_would_have_been() {
+        let mut t = trial("luna", 0, Verdict::Pass, 0.01);
+        t.score = Some(90.0);
+        t.safety_violation = true;
+        invalidate_if_misserved(&mut t, &[]);
+        assert_eq!(t.verdict, Verdict::Pass, "no mismatch, no change");
+
+        invalidate_if_misserved(&mut t, &["asked for gpt-6-luna, the response came from groq-gpt-oss-120b".into()]);
+        assert_eq!(t.verdict, Verdict::Invalid);
+        assert_eq!(t.score, None, "a fallback's quality is not the model's");
+        assert!(!t.safety_violation, "nor is its breach");
+        assert!(
+            t.rationale.contains("groq-gpt-oss-120b") && t.rationale.contains("would have been PASS"),
+            "{}",
+            t.rationale
+        );
+    }
+
+    #[test]
+    fn one_invalid_trial_makes_the_scenario_invalid_and_out_of_the_rate() {
+        let mut trials = trials_of("luna", 2, 0, 0);
+        trials[1].verdict = Verdict::Invalid;
+        let a = aggregate_trials(&trials);
+        assert_eq!(a.verdict, Verdict::Invalid);
+        assert_eq!((a.passed, a.invalid, a.conclusive), (1, 1, 1));
+
+        let run = run_with_trials(2, [trials_of("ok", 2, 0, 0), trials].concat());
+        assert_eq!((run.passed(), run.conclusive(), run.invalid()), (1, 1, 1));
+        let table = run.render_table();
+        assert!(table.contains("INVALID"), "{table}");
+        assert!(table.contains("not a score for it"), "{table}");
+        assert!(!Verdict::Invalid.is_conclusive());
     }
 
     #[test]

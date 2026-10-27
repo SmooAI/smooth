@@ -43,6 +43,7 @@ pub mod provenance;
 pub mod routes;
 pub mod scenarios;
 pub mod score;
+pub mod served;
 pub mod spend;
 pub mod sweep;
 

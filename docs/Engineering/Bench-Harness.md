@@ -450,6 +450,26 @@ port. `bash` is the remaining host reach. Scenarios that need a host tool, such
 as the weather lookup in `new-tools-scenarios.toml` or the `convo` calendar
 scenario, need a fake tool before they can run isolated.
 
+**Served-model guard.** llm.smoo.ai is a LiteLLM proxy with fallbacks. When
+the OpenAI account ran out of credits, `gpt-6-luna` calls were answered by
+`groq-gpt-oss-120b` and still returned 200. On a stream the fallback happens
+mid-stream: the headers name the requested model with 0 fallbacks, and only
+each chunk's `model` field shows who answered. Under host isolation the bench
+starts a loopback proxy (`crates/smooth-bench/src/served.rs`) and points the
+daemon's gateway URL at it, which covers Narc's judge as well. Every model call
+gets `disable_fallbacks: true` and `cache: {"no-cache": true}`. For each call
+the proxy records the `x-litellm-model-group` and
+`x-litellm-attempted-fallbacks` headers and every `model` named in the response
+body. A trial with any call served by another model is `INVALID`: excluded from
+the rate, with the rationale saying who served it and what it would have
+scored. Any `INVALID` trial makes its scenario `INVALID`, and a model with an
+`INVALID` scenario is left out of `--scoreboard`. The bench's own judge and
+driver calls get the same request fields, and a mismatch there is an error
+(`INCONCLUSIVE`). Spellings of the same model match: a dated snapshot, a
+`provider/` prefix, or an alias such as `groq-gpt-oss-120b` for
+`openai/gpt-oss-120b`. A microVM cannot reach the host's loopback, so the guard
+is off there.
+
 **Adding newly benched models to the published board.** Rendering a two-model
 board directly would replace the whole leaderboard. Merge first:
 
