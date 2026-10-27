@@ -137,6 +137,8 @@ seq, data_b64}`, then `flow.output{id, seq, data_b64}` frames with
       of the app-started daemon, so TCC attribution follows them the same way
       (see [SmoothFlow TCC](../Architecture/SmoothFlow.md#tmux-socket-tcc)), and
       quitting the app ends them, as `kill-server` does today.
+      _Superseded by [[ADR-014-smoothflow-pty-default-and-cmux-restore]]:
+      quitting the app keeps `pty` sessions running._
 
 ## Reasoning
 

@@ -36,8 +36,14 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
     /// Screen-change observers for the current window (th-b9e6df).
     private var screenObservers: [NSObjectProtocol] = []
 
-    init(sessionId: String) {
+    /// The session's host answers terminal queries itself (a `pty` session),
+    /// so this surface only mirrors: libghostty's own answers to DA, DSR and
+    /// the like are suppressed instead of being typed back as `flow.input`.
+    let mirrorsReplies: Bool
+
+    init(sessionId: String, mirrorsReplies: Bool = false) {
         self.sessionId = sessionId
+        self.mirrorsReplies = mirrorsReplies
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         wantsLayer = true
         layerContentsRedrawPolicy = .duringViewResize
@@ -68,7 +74,7 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
         cfg.userdata = Unmanaged.passUnretained(self).toOpaque()
         cfg.scale_factor = Double(window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
         cfg.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-        cfg.io_mode = GHOSTTY_SURFACE_IO_MANUAL
+        cfg.io_mode = Self.ioMode(mirrorsReplies: mirrorsReplies)
         cfg.io_write_userdata = Unmanaged.passUnretained(self).toOpaque()
         cfg.io_write_cb = { userdata, bytes, len in
             guard let userdata, let bytes, len > 0 else { return }
@@ -78,6 +84,12 @@ final class TerminalSurfaceView: NSView, NSTextInputClient {
             DispatchQueue.main.async { view.onInput?(data) }
         }
         surface = ghostty_surface_new(app, &cfg)
+    }
+
+    /// MANUAL: this surface is the session's only terminal and answers its
+    /// queries. MANUAL_MIRROR: the engine's session host already did.
+    static func ioMode(mirrorsReplies: Bool) -> ghostty_surface_io_mode_e {
+        mirrorsReplies ? GHOSTTY_SURFACE_IO_MANUAL_MIRROR : GHOSTTY_SURFACE_IO_MANUAL
     }
 
     // MARK: output in

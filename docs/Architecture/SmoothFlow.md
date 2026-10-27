@@ -5,8 +5,9 @@
 > against; change it only by agreement with the engine lane.
 
 SmoothFlow is Big Smooth's session manager: agents (Claude Code, Codex,
-OpenCode) and plain shells run under one long-lived tmux server (or, with
-`SMOOTH_FLOW_HOST=pty`, each under its own session host process; see
+OpenCode) and plain shells each run under their own session host process
+(the `pty` host, the default since SMOODEV-4238 / ADR-014; older rows, and
+`SMOOTH_FLOW_HOST=tmux`, run under one long-lived tmux server; see
 [Process model](#process-model)), their PTY bytes stream to whichever surface is looking (desktop, `th flow attach`, a
 phone), harness hooks drive their state, and a supervision tick keeps them
 alive across crashes and usage limits. The engine — the `smooth-flow` crate,
@@ -138,8 +139,9 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine ─
                            └── zsh -l
 ```
 
-- **Selection.** `SMOOTH_FLOW_HOST=pty|tmux` (default `tmux`) picks the host
-  for NEW sessions; `EngineConfig::new_host` is the same knob in code. The
+- **Selection.** `SMOOTH_FLOW_HOST=pty|tmux` picks the host for NEW
+  sessions. Unset, empty or unknown means `pty` (`HostKind::NEW_SESSION_DEFAULT`,
+  ADR-014); a row with no `host` column still reads as tmux; `EngineConfig::new_host` is the same knob in code. The
   row's `host` column records where it runs, and a row is always driven by
   the host it was launched on: live tmux sessions finish on tmux after the
   env flips, and a resume relaunches on the row's host. A daemon without the
@@ -186,6 +188,14 @@ Big Smooth.app / th up ──► smooth-daemon ──► smooth_flow::Engine ─
   (SIGTERM to the child's process group, SIGKILL after the grace) and waits
   for its `exit`.
 - **Replays** are what this host adds to attach: see [Replay](#replay).
+- **Quitting the app keeps the session (ADR-014).** A host is its own
+  `setsid` process, so the app's process-group kill on quit doesn't reach it,
+  and the engine never stops a `pty` host on shutdown. The relaunched daemon
+  re-adopts it. The app's `kill-server` on quit applies only to its tmux
+  server, which holds rows from before the default flipped. A host that
+  outlives the app loses the app's TCC attribution
+  ([SmoothFlow macOS § TCC](SmoothFlow-macOS.md#tcc-matrix-measured-2026-09-07-macos-264-developer-id-signed-ad-hoc-equivalent-build));
+  restarting the session from the app gives it back.
 
 ### The session host seam (th-64d4ab) {#session-host}
 
@@ -442,7 +452,14 @@ the bridge:
 7. **Terminal queries are answered by the host.** On the `pty` host the
    session's headless VT answers device-attribute and status queries (DA,
    DSR, …): the host writes `Vt::take_replies` back to the PTY. Clients
-   therefore must not answer them too (see Client rules).
+   therefore must not answer them too (see Client rules). Clients in the
+   field still do, so `Engine::input` drops a `pty` session's `flow.input`
+   frame when the whole frame is replies (`replies::is_reply_only`,
+   SMOODEV-4238). A terminal writes each answer as its own write, so typed
+   bytes never share a frame with one. Only sequences a keyboard, mouse or
+   paste never produce count; a cursor report on row 1, columns 2–16, is a
+   modified F3 too and passes. The Mac app mirrors instead
+   (`GHOSTTY_SURFACE_IO_MANUAL_MIRROR` on a `pty` surface).
 
 ### Client rules
 

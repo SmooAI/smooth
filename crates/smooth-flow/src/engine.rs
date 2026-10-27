@@ -107,7 +107,8 @@ pub struct EngineConfig {
     /// daemon have one. Rows on `pty` are driven by it.
     pub pty_host: Option<Arc<dyn SessionHost>>,
     /// The host NEW sessions launch on: `$SMOOTH_FLOW_HOST` by default
-    /// (tmux). A kind no configured host provides falls back to `host`.
+    /// (`pty` unless it says `tmux`, SMOODEV-4238). A kind no configured host
+    /// provides falls back to `host`.
     pub new_host: HostKind,
 }
 
@@ -1992,6 +1993,12 @@ impl Engine {
     /// When the session is unknown/not running or the PTY is closed.
     pub fn input(&self, id: &str, data: &[u8]) -> Result<()> {
         let s = self.require(id)?;
+        // Replay rule 7: the host's VT already answered the program's query,
+        // and a client's second answer would reach it as stray input.
+        if s.host == HostKind::Pty && crate::replies::is_reply_only(data) {
+            tracing::trace!(session = %id, len = data.len(), "flow: dropped a client's terminal reply on a pty session");
+            return Ok(());
+        }
         let (cols, rows) = self
             .pane(&s)
             .ok()
@@ -6275,6 +6282,39 @@ quiet_ms = 300
         let dead = e.get(&on_pty.id).unwrap().unwrap();
         assert_eq!((dead.state, dead.exit_code), (SessionState::Dead, Some(4)));
         assert!(pty.calls().contains(&format!("kill_session {}", on_pty.id)), "{:?}", pty.calls());
+    }
+
+    /// SMOODEV-4238: a client's answer to a terminal query never reaches a
+    /// `pty` session (its host answered already); typed bytes always do, and
+    /// a tmux session keeps getting both (tmux answers nothing for it).
+    #[test]
+    fn a_clients_terminal_reply_is_dropped_on_a_pty_session_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pty = FakeHost::with_kind(HostKind::Pty);
+        let (e, tmux) = two_host_engine(tmp.path(), HostKind::Tmux, &pty);
+        let on_tmux = fake_shell(&e, tmp.path(), &["sh"]);
+        drop(e);
+        let mut cfg = EngineConfig::new(tmp.path().to_path_buf());
+        cfg.db_path = tmp.path().join("flow.db");
+        cfg.home = tmp.path().join("home");
+        cfg.host = tmux.clone();
+        cfg.pty_host = Some(pty.clone());
+        cfg.new_host = HostKind::Pty;
+        let e = Engine::open(cfg).unwrap();
+        let on_pty = fake_shell(&e, tmp.path(), &["sh"]);
+        for s in [&on_tmux, &on_pty] {
+            e.attach(&s.id, 80, 24).unwrap();
+            e.input(&s.id, b"\x1b[?62;22c").unwrap();
+            e.input(&s.id, b"ls\r").unwrap();
+            e.input(&s.id, b"\x1b[?0u\x1b[0n").unwrap();
+            e.input(&s.id, b"\x1b[13;2u").unwrap();
+        }
+        assert_eq!(pty.typed(&host_ref(&on_pty)), b"ls\r\x1b[13;2u", "replies dropped, keys kept");
+        assert_eq!(
+            tmux.typed(&host_ref(&on_tmux)),
+            b"\x1b[?62;22cls\r\x1b[?0u\x1b[0n\x1b[13;2u",
+            "tmux gets everything"
+        );
     }
 
     /// A build without a pty host still opens, launches new sessions on

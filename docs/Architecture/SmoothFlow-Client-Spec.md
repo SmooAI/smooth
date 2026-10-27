@@ -264,7 +264,9 @@ control.
       DSR and similar queries, and never send them as `flow.input`: the
       session host already answered, and a second answer reaches the program
       as stray input. SmoothFlow Desktop and the phones answer them today;
-      they must stop for `pty` sessions. `tmux` sessions, and rows with no
+      they must stop for `pty` sessions. Until they do, the engine drops an
+      input frame that is nothing but replies on a `pty` session, so keep
+      each reply in its own `flow.input`, never batched with typed bytes. `tmux` sessions, and rows with no
       `host`, keep today's behaviour.
     - Against an engine without the capability, expect no replay: apply
       output in arrival order, as before. A `flow.replay` that arrives anyway
