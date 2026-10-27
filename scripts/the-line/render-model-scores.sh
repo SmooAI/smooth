@@ -64,7 +64,7 @@ conclusive=$(jq -r '[.models[].conclusive] | add // 0' "$board")
     exit 1
 }
 
-offered='["gpt-6-luna","gpt-6-luna-fast","gpt-6-luna-high","gpt-6-sol","groq-gpt-oss-120b","groq-gpt-oss-20b","groq-qwen3.8-27b"]'
+offered='["claude-haiku-5-5","gpt-6-luna","gpt-6-luna-fast","gpt-6-luna-high","gpt-6-sol","groq-gpt-oss-120b","groq-gpt-oss-20b","groq-qwen3.8-27b"]'
 
 # Shipped mobile builds decode `models` strictly (a numeric pass_rate_pct on
 # every entry) and fall back to their BUNDLED list — which predates the policy
