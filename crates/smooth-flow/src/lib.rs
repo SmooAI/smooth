@@ -26,6 +26,7 @@ pub mod pty;
 pub mod pty_host;
 pub mod replies;
 pub mod repos;
+pub mod restore;
 pub mod scrape;
 #[cfg(feature = "pty-host")]
 pub mod session_host;

@@ -437,21 +437,23 @@ async fn scrape_harness_state_is_inferred_from_the_pane(host: Host) {
     let limited = d.wait_state(&id, "limited", WAIT).await;
     assert_eq!(limited["attention"]["reason"], "usage_limit");
 
-    // relaunch_command: a crash relaunches the ORIGINAL argv (resume=0, the
-    // prompt runs again).
+    // relaunch_command with the prompt in the argv: a crash is NOT
+    // relaunched, because that would run the prompt again (th-0937a1). The
+    // row is `restorable`; resuming it is the user's call.
     let (status, _) = d.post(&format!("/api/flow/sessions/{id}/send"), json!({"text":"/crash 4"})).await;
     assert_eq!(status, 200);
-    d.wait_until(&id, "crashed", WAIT, |s| s["attention"]["reason"] == "crashed").await;
-    let relaunched = d
-        .wait_until(&id, "relaunched", FIRST_RESUME + WAIT, |s| s["attention"].is_null() && state(s) != "limited")
-        .await;
+    let parked = d.wait_until(&id, "restorable", WAIT, |s| s["attention"]["reason"] == "restorable").await;
+    assert_eq!(state(&parked), "needs_you", "{parked}");
+    assert_eq!(parked["exit_code"], 4, "{parked}");
+    tokio::time::sleep(FIRST_RESUME + TICK).await;
+    let still = d.session(&id).await;
+    assert_eq!(still["attention"]["reason"], "restorable", "never relaunched on its own: {still}");
+    assert_eq!(d.agent_log().matches("cmd /work s1").count(), 1, "the prompt ran once:\n{}", d.agent_log());
+    // An explicit resume relaunches the ORIGINAL argv (resume=0).
+    d.kill(&id, true).await;
+    let relaunched = d.wait_until(&id, "relaunched", WAIT, |s| s["attention"].is_null()).await;
     assert_eq!(relaunched["argv"], s["argv"], "relaunch_command reuses the launch argv: {relaunched}");
-    let screen = d.wait_screen(&id, "resume=0 mode=scrape", WAIT).await;
-    assert!(
-        d.agent_log().matches("cmd /work s1").count() >= 2,
-        "the prompt ran again: {screen}\n{}",
-        d.agent_log()
-    );
+    d.wait_screen(&id, "resume=0 mode=scrape", WAIT).await;
     d.kill(&id, false).await;
 }
 
