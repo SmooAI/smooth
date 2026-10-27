@@ -43,6 +43,10 @@ pub struct Session {
     pub state: SessionState,
     #[serde(default)]
     pub unread: bool,
+    /// SMOODEV-4127: `title` is a name someone gave the session, so it is
+    /// the tab's name whatever else the row says.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_pinned: bool,
 }
 
 impl Session {
@@ -59,6 +63,7 @@ impl Session {
             pearl_id: None,
             state,
             unread: false,
+            title_pinned: false,
         }
     }
 

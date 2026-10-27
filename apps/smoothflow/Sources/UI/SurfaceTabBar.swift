@@ -50,6 +50,12 @@ final class SurfaceTabBar: NSView {
         row.addArrangedSubview(plus)
     }
 
+    /// Tab `index`'s cell, while the strip shows — where ⌘⇧R's popover points.
+    func cell(at index: Int) -> NSView? {
+        guard !isHidden, row.arrangedSubviews.indices.contains(index), index < row.arrangedSubviews.count - 1 else { return nil }
+        return row.arrangedSubviews[index]
+    }
+
     private func tab(_ title: String, index: Int, active: Bool) -> NSView {
         let button = NSButton(title: title, target: self, action: #selector(select(_:)))
         button.tag = index

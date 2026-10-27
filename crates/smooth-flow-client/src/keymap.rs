@@ -89,6 +89,7 @@ actions! {
     NewTab => "newTab", "New Tab";
     ClosePane => "closePane", "Close Pane";
     CloseTab => "closeTab", "Close Tab";
+    RenameTab => "renameTab", "Rename Tab…";
     PreviousTab => "previousTab", "Previous Tab";
     NextTab => "nextTab", "Next Tab";
     SplitRight => "splitRight", "Split Right";
@@ -143,6 +144,7 @@ impl Action {
             Self::NewTab => ("cmd+t", "ctrl+shift+t"),
             Self::ClosePane => ("cmd+w", "ctrl+shift+w"),
             Self::CloseTab => ("cmd+shift+w", "ctrl+shift+alt+w"),
+            Self::RenameTab => ("cmd+shift+r", "ctrl+shift+alt+r"),
             Self::PreviousTab => ("cmd+shift+[", "ctrl+pageup"),
             Self::NextTab => ("cmd+shift+]", "ctrl+pagedown"),
             Self::SplitRight => ("cmd+shift+right", "ctrl+shift+d"),
