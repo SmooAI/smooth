@@ -967,12 +967,16 @@ the row is re-broadcast if a pearl turns up.
 **Pre-warmed shells** (`smooth_flow::prewarm`). A login shell takes 0.4–0.7 s
 to reach its first prompt, and nothing in the engine can shorten that. So the
 engine keeps up to three spare shells already sitting at a prompt, one per
-directory, under tmux sessions named `flowspare-<id>`. A spare has no row, so
-it never shows up in `flow.hello`, `th flow ls` or on a phone.
+directory, on the host new sessions launch on. A spare has no row, so it
+never shows up in `flow.hello`, `th flow ls` or on a phone.
 
-- **Claiming.** A new shell in a directory that has a spare claims it. tmux
-  renames the spare to the id it was launched with, and the row is created
-  under that id. The id matters because the exit wrapper already knows it.
+- **Claiming.** A new shell in a directory that has a spare claims it, and
+  the row is created under the id the spare was launched with (the exit
+  wrapper and the `pty` host's record already know it).
+    - On tmux the spare waits as `flowspare-<id>` and is renamed to `<id>`.
+    - A `pty` host can't be renamed (its socket and record are named by the
+      id), so its spare is launched under `<id>` itself and the claim renames
+      nothing (`SessionHost::spare_name`, SMOODEV-4238).
 - **When a spare starts:**
     - after every new shell, for its directory;
     - on `flow.prewarm {worktree? | cwd_of?}`, a hint with no reply. SmoothFlow
@@ -981,7 +985,10 @@ it never shows up in `flow.hello`, `th flow ls` or on a phone.
 - **Discarded instead of claimed:** a spare that died, or one older than 30
   minutes.
 - **Cleanup.** The daemon kills its spares on shutdown and reaps any that an
-  earlier daemon left behind when it starts.
+  earlier daemon left behind when it starts. tmux spares are found by their
+  prefix. A `pty` spare looks like any session, so waiting spare ids are
+  recorded in `flow.db` (`config` key `prewarm_spares:<owner>`), and a start
+  reaps the recorded ids that have no row.
 - **Turning it off.** `SMOOTH_FLOW_PREWARM=0` disables it. Tests and scratch
   engines never pre-warm, since only `flow_route::install` calls
   `Engine::enable_prewarm`.
@@ -996,7 +1003,10 @@ zsh + starship, this repo):
 | ⌘N → prompt on screen     | 657–824 ms      | **50–92 ms**       | 563–618 ms      |
 
 **Live tab names** (`smooth_flow::autotitle`). A shell's `title` follows what
-is happening in it, the way cmux and Ghostty name a tab:
+is happening in it, the way cmux and Ghostty name a tab. tmux reads the facts
+off the pane. On the `pty` host (SMOODEV-4238) they come from the terminal's
+foreground job (`ps -o tpgid=`), the shell's directory (the process table, no
+fork) and the VT's OSC title. The rules:
 
 1. At the prompt, the name is the directory: its folder name, `~` for home,
    `/` for the root.
@@ -1193,8 +1203,20 @@ attention `restoring` and is resumed through the manifest's `[resume]` argv,
 `pty` rows too, which a lone vanish reads as unknown and never resumes.
 Without a way to continue the conversation the row goes `needs_you` with
 attention `restorable` (supervision leaves it parked): relaunching the original argv would send its prompt again, so
-that is the user's call (`kill --resume`). Shells are left to supervision
-(they die, as before) until their working directory is restored too (phase 2).
+that is the user's call (`kill --resume`).
+
+An interrupted **shell** is reopened the same way, staggered with the agents,
+in the directory it was last in (SMOODEV-4238, attention detail "reopening in
+<dir>"). The engine samples every live shell's directory every 15 s
+(`SHELL_CWD_EVERY`) and once more in `Engine::shutdown`, into the row's
+`last_cwd` column (off the wire, like `boot_id`). tmux rows use
+`pane_current_path`; `pty` rows use one read of the process table for all of
+them. A directory that no longer exists falls back to the worktree. A shell
+that died with nothing saying it was interrupted still dies, as before.
+
+On the `pty` host, quitting the app leaves the sessions running (ADR-014), so
+after a quit they are re-adopted live and none of this runs. It is what brings
+them back after a reboot, and what brings tmux rows back after a quit.
 
 ## Fan-out
 
