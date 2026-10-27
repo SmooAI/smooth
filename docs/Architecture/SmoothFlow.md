@@ -844,6 +844,12 @@ is a **per-launch hook token** (`smooth_flow::hook_auth`):
   session.
 - A token dies with its launch. A relaunch rotates it, and `kill`, death and
   `close` revoke it (clearing the hash and deleting the file).
+- `/clear` (and `/new`) start a new harness session in the same process: a
+  token-authenticated `SessionStart` whose payload `source` is `clear` or `new`,
+  from the row's own harness kind, rebinds the row's `agent_session_id` to the
+  new id (th-0937a1), so a resume reopens the conversation the user is in. Any
+  other `SessionStart` with a new id (`startup` from a nested harness, `resume`,
+  `compact`) is refused as before.
 
 **Why per-session and not one daemon-wide token.** A daemon-wide secret in
 every agent's environment would let any agent speak for every other
@@ -1056,7 +1062,11 @@ same brand-new harness session into two rows.
    start time.
 2. Unexpected death (non-zero exit, or the tmux session gone while state ≠
    done) ⇒ relaunch with `claude --resume <id>` up to 3 times with 5 s · 2ⁿ
-   backoff, then `dead` with attention `crashed`. Shells never resume.
+   backoff, then `dead` with attention `crashed`. Shells never resume. An
+   agent whose relaunch would be its original argv with the prompt in it (no
+   harness session id, and its manifest neither continues the latest
+   conversation nor pastes the prompt) is never relaunched: `needs_you`, attention
+   `restorable` (see [Restore](#restore)).
 3. Usage limit ⇒ schedule, not give up: parse the reset time
    (`limit::parse_reset_at` — "resets at 4pm", "in 45 minutes"; fallback 1 h),
    set `limited` + `resume_at`, and when the tick passes it send Enter (or
@@ -1071,6 +1081,37 @@ same brand-new harness session into two rows.
 6. Engine, tmux server and agents are spawned by the app (or its LaunchAgent)
    so TCC grants attribute to it. `th flow` connects; it never launches the
    daemon.
+7. Interrupted is not crashed: see [Restore](#restore).
+
+### Restore after an interruption (th-0937a1) {#restore}
+
+Quitting the SmoothFlow app kills its tmux server (`tmuxOwnedByApp`, the
+default), and a reboot kills everything, so a live row can come back with no
+process behind it for a reason that is not a crash. The engine tells the two
+apart on its **first supervision pass** (`smooth_flow::restore`):
+
+- Every launch records the machine's boot in the row's `boot_id` column
+  (macOS `kern.bootsessionuuid`, else `kern.boottime`; Linux
+  `/proc/sys/kernel/random/boot_id`). It stays off the wire.
+- `Engine::shutdown` (the daemon calls it on SIGTERM/Ctrl-C) writes a
+  clean-quit marker, `config` key `clean_quit:<owner socket>`. Two daemons
+  share one `flow.db`, so each reads only its own. The app stops its daemon
+  before it kills the tmux server, so the marker is written while the fleet is
+  still up. The first pass consumes it.
+- A live row of ours whose host session is gone is **interrupted** when its
+  `boot_id` is not this boot, or when the marker was there. Anything else
+  (same boot, no marker, or a row from before `boot_id`) is a crash, as
+  before.
+
+An interrupted agent whose conversation can be resumed (a `resume_session`
+manifest with a harness session id, or `continue_latest`) goes `starting` with
+attention `restoring` and is resumed through the manifest's `[resume]` argv,
+300 ms apart, without counting against rule 2's three resumes. This covers
+`pty` rows too, which a lone vanish reads as unknown and never resumes.
+Without a way to continue the conversation the row goes `needs_you` with
+attention `restorable` (supervision leaves it parked): relaunching the original argv would send its prompt again, so
+that is the user's call (`kill --resume`). Shells are left to supervision
+(they die, as before) until their working directory is restored too (phase 2).
 
 ## Fan-out
 
