@@ -414,6 +414,40 @@ pub trait SessionHost: Send + Sync {
     /// daemon's (no row in its store), so it is left running for whoever
     /// owns it.
     fn forget(&self, _s: &SessionRef) {}
+
+    /// Whether this host can keep pre-warmed shells (SMOODEV-4127): it can
+    /// [`Self::rename`] a session and [`Self::list`] a namespace.
+    fn can_prewarm(&self) -> bool {
+        false
+    }
+
+    /// Rename session `s` to `to` — a pre-warmed shell becomes the
+    /// session that claimed it.
+    ///
+    /// # Errors
+    /// When the host cannot rename (the default) or `s` is gone.
+    fn rename(&self, s: &SessionRef, _to: &str) -> Result<()> {
+        anyhow::bail!("this host cannot rename {}", s.name)
+    }
+
+    /// The name a spare for session `id` waits under. tmux's carries
+    /// [`crate::prewarm::SPARE_PREFIX`] (reaped by [`Self::list`]) and is
+    /// renamed on claim; a host that cannot rename launches it under `id`
+    /// itself, so a claim renames nothing (SMOODEV-4238).
+    fn spare_name(&self, id: &str) -> String {
+        crate::prewarm::spare_name(id)
+    }
+
+    /// Every session name in namespace `socket` (none when it can't tell).
+    fn list(&self, _socket: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// What names a shell's tab (SMOODEV-4127, [`crate::autotitle`]);
+    /// `None` when this host cannot tell — the row keeps its name.
+    fn shell_facts(&self, _s: &SessionRef) -> Option<crate::autotitle::PaneFacts> {
+        None
+    }
 }
 
 impl std::fmt::Debug for dyn SessionHost {
@@ -460,6 +494,22 @@ impl SessionHost for TmuxHost {
 
     fn current_dir(&self, s: &SessionRef) -> Option<PathBuf> {
         tmux::pane_current_path(&s.socket, &s.name).ok().flatten()
+    }
+
+    fn can_prewarm(&self) -> bool {
+        true
+    }
+
+    fn rename(&self, s: &SessionRef, to: &str) -> Result<()> {
+        tmux::rename_session(&s.socket, &s.name, to)
+    }
+
+    fn list(&self, socket: &str) -> Vec<String> {
+        tmux::list_sessions(socket)
+    }
+
+    fn shell_facts(&self, s: &SessionRef) -> Option<crate::autotitle::PaneFacts> {
+        tmux::pane_facts(&s.socket, &s.name).ok()
     }
 
     fn exit_status(&self, s: &SessionRef) -> Result<Option<PaneDeath>> {
@@ -594,6 +644,8 @@ pub mod fake {
         snapshots: u64,
         /// The latest attach stream per session, for [`FakeHost::typed`].
         attaches: HashMap<SessionRef, Arc<FakeAttach>>,
+        /// What [`SessionHost::shell_facts`] answers, per session.
+        facts: HashMap<SessionRef, crate::autotitle::PaneFacts>,
     }
 
     /// The fake's one namespace.
@@ -675,6 +727,11 @@ pub mod fake {
             }
         }
 
+        /// What the pane says names it (SMOODEV-4127).
+        pub fn set_facts(&self, s: &SessionRef, facts: crate::autotitle::PaneFacts) {
+            self.st().facts.insert(s.clone(), facts);
+        }
+
         /// What the visible screen reads.
         pub fn set_screen(&self, s: &SessionRef, text: &str) {
             if let Some(f) = self.st().sessions.get_mut(s) {
@@ -743,6 +800,44 @@ pub mod fake {
 
         fn current_dir(&self, s: &SessionRef) -> Option<PathBuf> {
             self.with(s, |f| f.cwd.clone()).ok().filter(|p| !p.as_os_str().is_empty())
+        }
+
+        fn can_prewarm(&self) -> bool {
+            true
+        }
+
+        /// Like the real hosts: a `pty` spare waits under its own id.
+        fn spare_name(&self, id: &str) -> String {
+            if self.kind == HostKind::Pty {
+                id.to_string()
+            } else {
+                crate::prewarm::spare_name(id)
+            }
+        }
+
+        fn rename(&self, s: &SessionRef, to: &str) -> Result<()> {
+            if s.name == to {
+                return Ok(());
+            }
+            self.log(format!("rename {} {to}", s.name));
+            let mut st = self.st();
+            let to = SessionRef::new(s.socket.clone(), to.to_string());
+            if st.sessions.contains_key(&to) {
+                bail!("fake host: duplicate session {}", to.name);
+            }
+            let f = st.sessions.remove(s).ok_or_else(|| anyhow!("fake host: no session {}", s.name))?;
+            st.sessions.insert(to, f);
+            Ok(())
+        }
+
+        fn list(&self, socket: &str) -> Vec<String> {
+            let mut names: Vec<String> = self.st().sessions.keys().filter(|r| r.socket == socket).map(|r| r.name.clone()).collect();
+            names.sort();
+            names
+        }
+
+        fn shell_facts(&self, s: &SessionRef) -> Option<crate::autotitle::PaneFacts> {
+            self.st().facts.get(s).cloned()
         }
 
         fn exit_status(&self, s: &SessionRef) -> Result<Option<PaneDeath>> {

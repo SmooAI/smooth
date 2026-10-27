@@ -76,9 +76,13 @@ struct Session: Codable, Equatable, Identifiable {
     /// Where the session runs: `pty` (the engine-owned session host) or
     /// `tmux`. Absent from older engines, which means tmux.
     var host: String?
+    /// SMOODEV-4127: `title` is a name someone gave the session (⌘⇧R), so it
+    /// is the tab's name whatever else the row says.
+    var titlePinned: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, kind, title, project, worktree, branch, argv, pid, state, attention, unread, host
+        case titlePinned = "title_pinned"
         case pearlId = "pearl_id", agentSessionId = "agent_session_id", tmuxSession = "tmux_session"
         case fanOutId = "fan_out_id", createdAt = "created_at", updatedAt = "updated_at", endedAt = "ended_at", exitCode = "exit_code"
     }
@@ -86,11 +90,11 @@ struct Session: Codable, Equatable, Identifiable {
     init(id: String, kind: String = "claude", title: String = "", project: String = "", worktree: String = "", branch: String? = nil,
          pearlId: String? = nil, agentSessionId: String? = nil, argv: [String] = [], tmuxSession: String? = nil, pid: Int? = nil,
          state: SessionState = .idle, attention: Attention? = nil, fanOutId: String? = nil, createdAt: String = "", updatedAt: String = "",
-         endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, host: String? = nil) {
+         endedAt: String? = nil, exitCode: Int? = nil, unread: Bool = false, host: String? = nil, titlePinned: Bool = false) {
         self.id = id; self.kind = kind; self.title = title; self.project = project; self.worktree = worktree; self.branch = branch
         self.pearlId = pearlId; self.agentSessionId = agentSessionId; self.argv = argv; self.tmuxSession = tmuxSession; self.pid = pid
         self.state = state; self.attention = attention; self.fanOutId = fanOutId; self.createdAt = createdAt; self.updatedAt = updatedAt
-        self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.host = host
+        self.endedAt = endedAt; self.exitCode = exitCode; self.unread = unread; self.host = host; self.titlePinned = titlePinned
     }
 
     init(from decoder: Decoder) throws {
@@ -123,6 +127,7 @@ struct Session: Codable, Equatable, Identifiable {
         exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
         unread = try c.decodeIfPresent(Bool.self, forKey: .unread) ?? false
         host = try c.decodeIfPresent(String.self, forKey: .host)
+        titlePinned = try c.decodeIfPresent(Bool.self, forKey: .titlePinned) ?? false
     }
 
     /// The session host answers the program's terminal queries itself
@@ -134,15 +139,18 @@ struct Session: Codable, Equatable, Identifiable {
     var label: String { pearlId.map { "\($0) \(title)" } ?? title }
     var projectName: String { (project as NSString).lastPathComponent.isEmpty ? project : (project as NSString).lastPathComponent }
 
-    /// What a surface tab calls this session (th-96fcb7): the pearl, else the
-    /// title, else the directory. A title that is only a path (inference
-    /// titles a session by its directory) is shortened to its last folder, so
-    /// a tab never reads "/" or a whole path.
+    /// What a surface tab calls this session (th-96fcb7): a name someone gave
+    /// it (SMOODEV-4127), else — for an agent — the pearl, else the title,
+    /// else the directory. A shell's title is its live name (the program in
+    /// it, or its folder), so a pearl never replaces it. A title that is only
+    /// a path is shortened to its last folder, so a tab never reads "/" or a
+    /// whole path.
     var tabTitle: String { tabTitle(home: NSHomeDirectory()) }
 
     func tabTitle(home: String) -> String {
-        if let p = pearlId?.trimmingCharacters(in: .whitespaces), !p.isEmpty { return p }
         let t = title.trimmingCharacters(in: .whitespaces)
+        if titlePinned, !t.isEmpty { return t }
+        if kind != "shell", let p = pearlId?.trimmingCharacters(in: .whitespaces), !p.isEmpty { return p }
         if !t.isEmpty, !Session.looksLikePath(t) { return t }
         let dir = !t.isEmpty ? t : (worktree.isEmpty ? project : worktree)
         return Session.folderName(dir, home: home) ?? kind
@@ -474,6 +482,12 @@ enum ClientFrame: Equatable {
     case diffStage(id: String, hunkId: String)
     case diffUnstage(id: String, hunkId: String)
     case diffReview(id: String, base: DiffBase, comments: [DiffComment])
+    /// SMOODEV-4127: name a session (pinned); nil or blank goes back to the
+    /// automatic name.
+    case rename(id: String, title: String?)
+    /// SMOODEV-4127: a shell is likely soon — keep one ready in `worktree`,
+    /// else where session `cwdOf` is now. No reply.
+    case prewarm(worktree: String?, cwdOf: String?)
 
     var type: String {
         switch self {
@@ -496,6 +510,8 @@ enum ClientFrame: Equatable {
         case .diffStage: "flow.diff.stage"
         case .diffUnstage: "flow.diff.unstage"
         case .diffReview: "flow.diff.review"
+        case .rename: "flow.rename"
+        case .prewarm: "flow.prewarm"
         }
     }
 
@@ -522,6 +538,8 @@ enum ClientFrame: Equatable {
         case let .diffStage(id, hunkId): ["id": id, "hunk_id": hunkId, "base": DiffBase.uncommitted.rawValue]
         case let .diffUnstage(id, hunkId): ["id": id, "hunk_id": hunkId, "base": DiffBase.uncommitted.rawValue]
         case let .diffReview(id, base, comments): ["id": id, "base": base.rawValue, "comments": comments.map(\.fields)]
+        case let .rename(id, title): ["id": id, "title": title as Any]
+        case let .prewarm(worktree, cwdOf): ["worktree": worktree as Any, "cwd_of": cwdOf as Any]
         }
     }
 

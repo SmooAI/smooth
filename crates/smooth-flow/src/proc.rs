@@ -94,81 +94,84 @@ pub fn kill_tree(pid: u32, grace: Duration) {
         .status();
 }
 
-/// The working directory of `pid` right now, via `lsof` (SMOODEV-4111).
-/// The fallback for hosts that cannot ask tmux (`pty`); `None` when the
-/// process is gone or `lsof` has nothing to say.
-#[cfg(unix)]
+/// The working directory of `pid` right now (SMOODEV-4111): the fallback
+/// for hosts that cannot ask tmux (`pty`). `None` when the process is gone
+/// or its directory can't be read.
 #[must_use]
-pub fn cwd(pid: u32) -> Option<std::path::PathBuf> {
-    let out = Command::new("lsof")
-        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    parse_lsof_cwd(&String::from_utf8_lossy(&out.stdout))
+pub fn cwd(pid: u32) -> Option<PathBuf> {
+    cwds(&[pid]).remove(&pid)
 }
 
-/// See [`cwd`]: no `lsof` here, so no answer — the caller falls back.
-#[cfg(not(unix))]
-#[must_use]
-pub fn cwd(_pid: u32) -> Option<std::path::PathBuf> {
-    None
-}
-
-/// The working directories of `pids` right now, from ONE `lsof` (SMOODEV-4238).
-/// Every shell's directory is sampled every few seconds, and an `lsof` per
-/// shell (~60 ms each) would hold up supervision. A pid that is gone is
-/// simply missing from the answer.
-#[cfg(unix)]
+/// The working directories of `pids` right now (SMOODEV-4238), read from
+/// the process table in one pass. Every shell's directory is sampled, and its
+/// tab named from it, every few seconds; an `lsof` per shell (~60 ms, a fork)
+/// would hold up supervision. A pid that is gone, or whose directory can't
+/// be read, is missing from the answer.
 #[must_use]
 pub fn cwds(pids: &[u32]) -> HashMap<u32, PathBuf> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if pids.is_empty() {
         return HashMap::new();
     }
-    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let Ok(out) = Command::new("lsof")
-        .args(["-a", "-p", &list, "-d", "cwd", "-Fn"])
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return HashMap::new();
-    };
-    parse_lsof_cwds(&String::from_utf8_lossy(&out.stdout))
+    let wanted: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&wanted),
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+    pids.iter()
+        .filter_map(|p| {
+            let dir = sys.process(Pid::from_u32(*p))?.cwd()?;
+            (!dir.as_os_str().is_empty()).then(|| (*p, dir.to_path_buf()))
+        })
+        .collect()
 }
 
-/// See [`cwds`]: no `lsof` here, so no answers.
+/// The name of what runs in the foreground of `pid`'s terminal (SMOODEV-4238:
+/// tmux's `#{pane_current_command}` for a `pty` session, whose `pid` is the
+/// shell). `None` when `ps` has no answer.
+#[cfg(unix)]
+#[must_use]
+pub fn foreground_command(pid: u32) -> Option<String> {
+    let ps = |args: &[&str]| -> Option<String> {
+        let out = Command::new("ps").args(args).stderr(Stdio::null()).output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let (tpgid, comm) = parse_ps_tpgid_comm(&ps(&["-o", "tpgid=,comm=", "-p", &pid.to_string()])?)?;
+    // The shell is a session leader, so its own group is its pid: anything
+    // else in the foreground is a job it started.
+    if tpgid == 0 || tpgid == pid {
+        return Some(comm);
+    }
+    let job = command_name(&ps(&["-o", "comm=", "-p", &tpgid.to_string()])?);
+    Some(if job.is_empty() { comm } else { job })
+}
+
+/// See [`foreground_command`]: no `ps` here.
 #[cfg(not(unix))]
 #[must_use]
-pub fn cwds(_pids: &[u32]) -> HashMap<u32, PathBuf> {
-    HashMap::new()
+pub fn foreground_command(_pid: u32) -> Option<String> {
+    None
 }
 
-/// Parse multi-process `lsof -Fn` output: each `p<pid>` block's first
-/// absolute `n` field.
+/// Parse `ps -o tpgid=,comm=`: the terminal's foreground group and the
+/// process's name.
 #[must_use]
-pub fn parse_lsof_cwds(s: &str) -> HashMap<u32, PathBuf> {
-    let mut out = HashMap::new();
-    let mut pid = None;
-    for line in s.lines() {
-        if let Some(p) = line.strip_prefix('p') {
-            pid = p.parse().ok();
-        } else if let (Some(p), Some(name)) = (pid, line.strip_prefix('n')) {
-            if name.starts_with('/') {
-                out.entry(p).or_insert_with(|| PathBuf::from(name));
-            }
-        }
-    }
-    out
+pub fn parse_ps_tpgid_comm(s: &str) -> Option<(u32, String)> {
+    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let (tpgid, comm) = line.split_once(char::is_whitespace)?;
+    let comm = command_name(comm);
+    (!comm.is_empty()).then_some((tpgid.trim().parse().ok()?, comm))
 }
 
-/// Parse `lsof -Fn` field output (`p123` / `fcwd` / `n/path`): the first
-/// absolute `n` field.
+/// A `ps -o comm` value as tmux names a command: macOS prints the
+/// executable's path, so keep the last component (and a login shell's `-`).
 #[must_use]
-pub fn parse_lsof_cwd(s: &str) -> Option<std::path::PathBuf> {
-    s.lines()
-        .filter_map(|l| l.strip_prefix('n'))
-        .find(|p| p.starts_with('/'))
-        .map(std::path::PathBuf::from)
+pub fn command_name(comm: &str) -> String {
+    let comm = comm.trim();
+    let (dash, rest) = comm.strip_prefix('-').map_or(("", comm), |r| ("-", r));
+    format!("{dash}{}", rest.rsplit('/').next().unwrap_or(rest)).trim_end_matches('-').to_string()
 }
 
 /// The start time (epoch seconds) of `pid`, or `None` when it is gone.
@@ -286,23 +289,38 @@ mod tests {
     }
 
     #[test]
-    fn lsof_cwds_parses_one_directory_per_process() {
-        let out = parse_lsof_cwds("p10\nfcwd\nn/a/b\np20\nfcwd\nn/c d\np30\nfcwd\nnrelative\np40\n");
-        assert_eq!(out.len(), 2, "{out:?}");
-        assert_eq!(out[&10], PathBuf::from("/a/b"));
-        assert_eq!(out[&20], PathBuf::from("/c d"));
-        assert!(parse_lsof_cwds("").is_empty());
-        assert!(parse_lsof_cwds("nstray/before/a/pid\nn/x").is_empty(), "a name before any pid is nobody's");
-        assert!(parse_lsof_cwds("pnotapid\nn/x").is_empty());
+    fn ps_foreground_output_parses() {
+        assert_eq!(parse_ps_tpgid_comm("  4242 -zsh\n"), Some((4242, "-zsh".into())));
+        assert_eq!(parse_ps_tpgid_comm("4242 /usr/bin/vim\n"), Some((4242, "vim".into())));
+        assert_eq!(
+            parse_ps_tpgid_comm("0 /Applications/My App.app/Contents/MacOS/my app"),
+            Some((0, "my app".into()))
+        );
+        assert_eq!(parse_ps_tpgid_comm(""), None, "process gone");
+        assert_eq!(parse_ps_tpgid_comm("x zsh"), None);
+        assert_eq!(parse_ps_tpgid_comm("12"), None);
+        assert_eq!(command_name("-/bin/zsh"), "-zsh");
+        assert_eq!(command_name("node"), "node");
+        assert_eq!(command_name("-"), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_foreground_command_of_a_process_without_a_terminal_is_itself() {
+        let mut child = Command::new("sleep").arg("30").stdin(Stdio::null()).spawn().unwrap();
+        let got = foreground_command(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        // No controlling terminal of its own here (or the test runner's):
+        // either way the answer is a command name, never a path.
+        let got = got.expect("ps answers for a live process");
+        assert!(!got.contains('/') && !got.is_empty(), "{got}");
+        assert_eq!(foreground_command(999_999_999), None);
     }
 
     #[test]
     #[cfg(unix)]
     fn cwds_answers_for_live_processes_and_skips_gone_ones() {
-        if Command::new("lsof").arg("-v").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
-            eprintln!("skipping: lsof not available");
-            return;
-        }
         assert!(cwds(&[]).is_empty());
         let dir = tempfile::tempdir().unwrap();
         let mut child = Command::new("sleep").arg("30").current_dir(dir.path()).spawn().unwrap();
@@ -310,7 +328,10 @@ mod tests {
         let got = cwds(&[me, child.id(), 999_999]);
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(got.get(&me), Some(&std::env::current_dir().unwrap()));
+        assert_eq!(
+            got.get(&me).map(|p| p.canonicalize().unwrap()),
+            Some(std::env::current_dir().unwrap().canonicalize().unwrap())
+        );
         assert_eq!(
             got.get(&child.id()).map(|p| p.canonicalize().unwrap()),
             Some(dir.path().canonicalize().unwrap())
@@ -319,20 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn lsof_cwd_parses_the_first_absolute_name() {
-        assert_eq!(parse_lsof_cwd("p123\nfcwd\nn/Users/me/dev\n"), Some(std::path::PathBuf::from("/Users/me/dev")));
-        assert_eq!(parse_lsof_cwd("p1\nfcwd\nn/a b/c"), Some(std::path::PathBuf::from("/a b/c")));
-        assert_eq!(parse_lsof_cwd(""), None, "process gone");
-        assert_eq!(parse_lsof_cwd("p1\nfcwd\nnrelative"), None);
-    }
-
-    #[test]
     #[cfg(unix)]
     fn cwd_of_own_process_is_the_current_dir() {
-        if Command::new("lsof").arg("-v").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
-            eprintln!("skipping: lsof not available");
-            return;
-        }
         let want = std::env::current_dir().unwrap().canonicalize().unwrap();
         let got = cwd(std::process::id()).map(|p| p.canonicalize().unwrap_or(p));
         assert_eq!(got, Some(want));

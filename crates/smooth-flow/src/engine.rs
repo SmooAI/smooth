@@ -210,6 +210,10 @@ struct Runtime {
     unhosted: HashSet<String>,
     /// When shells' working directories were last sampled (SMOODEV-4238).
     cwd_sampled_at: Option<Instant>,
+    /// Shells' live names (SMOODEV-4127).
+    titler: crate::autotitle::Titler,
+    /// Pre-warmed shells waiting to be claimed (SMOODEV-4127).
+    spares: crate::prewarm::Pool,
 }
 
 /// A prompt waiting to be pasted into a harness's composer.
@@ -387,6 +391,8 @@ struct Inner {
     boot_id: Option<String>,
     /// Set once the first supervision pass has restored interrupted rows.
     restored: std::sync::OnceLock<()>,
+    /// Keep pre-warmed shells ([`Engine::enable_prewarm`]).
+    prewarm: std::sync::atomic::AtomicBool,
 }
 
 /// The repo index's scan state (th-145e6b). The rows live in flow.db, so a
@@ -872,6 +878,7 @@ impl Engine {
                 }),
                 boot_id: crate::restore::current_boot_id(),
                 restored: std::sync::OnceLock::new(),
+                prewarm: std::sync::atomic::AtomicBool::new(false),
             }),
         };
         engine.wire_hosts();
@@ -1624,6 +1631,9 @@ impl Engine {
         if !worktree.is_dir() {
             bail!("worktree does not exist: {}", worktree.display());
         }
+        if !req.kind.is_agent() {
+            return self.new_shell(&req, &project, &worktree);
+        }
         let registry = self.registry();
         let manifest = if req.kind.is_agent() {
             Some(manifest_for(&registry, &req.kind)?)
@@ -1686,10 +1696,6 @@ impl Engine {
         })?;
         let env = self.launch_env(manifest, &session);
         let session = self.launch(&session, &argv, &env)?;
-        // A shell has no hooks and nothing to scrape — it is simply ready.
-        if !session.kind.is_agent() {
-            return Ok(self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session));
-        }
         if let (true, Some(p)) = (paste, prompt) {
             // Wait for the composer only when this manifest can tell us it is up.
             let can_see_idle = manifest.is_some_and(|m| {
@@ -1710,6 +1716,305 @@ impl Engine {
             self.rt().paste_at.insert(session.id.clone(), pending);
         }
         Ok(session)
+    }
+
+    /// `flow.new {kind: shell}` (SMOODEV-4127): as fast as a terminal. A
+    /// pre-warmed spare in this directory is claimed when there is one; the
+    /// pearl is inferred off the request path (a `th` call is ~100 ms); the
+    /// tab's name is the directory's until the supervision tick names it
+    /// from the pane ([`crate::autotitle`]). A `title` in the request is a
+    /// name someone chose, so it pins.
+    fn new_shell(&self, req: &NewRequest, project: &Path, worktree: &Path) -> Result<Session> {
+        let socket = req.tmux_socket.clone().unwrap_or_else(|| self.default_socket());
+        let branch = git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
+        let home = self.inner.home.to_string_lossy().into_owned();
+        let row = |argv: Vec<String>| NewSession {
+            kind: Some(req.kind.clone()),
+            title: crate::autotitle::initial(worktree, &home),
+            project: project.to_string_lossy().into_owned(),
+            worktree: worktree.to_string_lossy().into_owned(),
+            branch: branch.clone(),
+            pearl_id: req.pearl_id.clone(),
+            agent_session_id: None,
+            argv,
+            tmux_session: None,
+            tmux_socket: Some(socket.clone()),
+            owner: Some(self.default_socket()),
+            fan_out_id: req.fan_out_id.clone(),
+            adopted: false,
+            host: Some(self.inner.new_host),
+        };
+        let claimable = req.argv.is_none() && req.fan_out_id.is_none();
+        let spare = if claimable { self.claim_spare(worktree, &socket) } else { None };
+        let session = if let Some(sp) = spare {
+            let s = self.with_store(|st| st.create_with_id(&sp.id, row(sp.argv.clone())))?;
+            self.with_store(|st| st.set_process(&s.id, Some(&s.id), Some(sp.pid), sp.pid_start, &sp.argv))?;
+            tracing::info!(session = %s.id, dir = %worktree.display(), "flow: new shell claimed a pre-warmed spare");
+            self.require(&s.id)?
+        } else {
+            let argv = req.argv.clone().filter(|a| !a.is_empty()).unwrap_or_else(shell_argv);
+            let s = self.with_store(|st| st.create(row(argv.clone())))?;
+            self.launch(&s, &argv, &[])?
+        };
+        if let Some(t) = req.title.as_deref() {
+            self.with_store(|st| st.rename(&session.id, Some(t)))?;
+        }
+        // A shell has no hooks and nothing to scrape — it is simply ready.
+        let session = self.set_state(&session.id, SessionState::Idle, None)?.unwrap_or(session);
+        if session.pearl_id.is_none() {
+            self.infer_pearl_later(&session);
+        }
+        // The next ⌘N here is the likeliest one.
+        self.warm(worktree, &socket);
+        Ok(session)
+    }
+
+    /// Fill in a shell's pearl from its worktree, off the caller's path.
+    fn infer_pearl_later(&self, s: &Session) {
+        let e = self.clone();
+        let id = s.id.clone();
+        let dir = PathBuf::from(&s.worktree);
+        let _ = std::thread::Builder::new().name("flow-infer".into()).spawn(move || {
+            let Some(pearl) = crate::infer::gather(&dir).pearl_id else { return };
+            if e.with_store(|st| st.set_meta(&id, None, None, Some(&pearl))).is_ok() {
+                if let Ok(s) = e.require(&id) {
+                    e.emit_session(&s);
+                }
+            }
+        });
+    }
+
+    /// Keep pre-warmed shells from now on (SMOODEV-4127, [`crate::prewarm`]),
+    /// first reaping the spares a previous daemon left on this engine's
+    /// socket. Off until called: tests and scratch engines keep no shells up.
+    pub fn enable_prewarm(&self) {
+        let Some(host) = self.spare_host() else { return };
+        let socket = self.default_socket();
+        for name in host.list(&socket) {
+            let Some(id) = name.strip_prefix(crate::prewarm::SPARE_PREFIX) else {
+                continue;
+            };
+            tracing::info!(spare = %name, "flow: reaping a pre-warmed shell an earlier daemon left");
+            host.kill_session(&SessionRef::new(socket.clone(), name.clone()));
+            host.clear_recorded_exits(&self.exit_prefix(id));
+        }
+        // A `pty` spare runs under its final session id, so its name says
+        // nothing: the ids recorded while it waited do (SMOODEV-4238). One
+        // that has a row was claimed; the rest are an earlier daemon's.
+        let recorded = self.with_store(|st| st.take_config(&self.spares_key())).ok().flatten().unwrap_or_default();
+        for id in serde_json::from_str::<Vec<String>>(&recorded).unwrap_or_default() {
+            if matches!(self.get(&id), Ok(None)) {
+                tracing::info!(spare = %id, "flow: reaping a pre-warmed shell an earlier daemon left");
+                host.kill_session(&SessionRef::new(socket.clone(), host.spare_name(&id)));
+                host.clear_recorded_exits(&self.exit_prefix(&id));
+            }
+        }
+        self.inner.prewarm.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The host spares run on: the one new sessions launch on, when it can
+    /// keep them (SMOODEV-4238: `pty` as well as tmux).
+    fn spare_host(&self) -> Option<&dyn SessionHost> {
+        self.host_of(self.inner.new_host).ok().filter(|h| h.can_prewarm())
+    }
+
+    /// The `config` key listing this daemon's waiting spares.
+    fn spares_key(&self) -> String {
+        format!("prewarm_spares:{}", self.default_socket())
+    }
+
+    /// Add spare `id` to, or drop it from, the recorded list, so a daemon
+    /// that dies with spares up can reap them on its next start.
+    fn note_spare(&self, id: &str, waiting: bool) {
+        let key = self.spares_key();
+        let noted = self.with_store(|st| {
+            let mut ids: Vec<String> = st.get_config(&key)?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+            ids.retain(|x| x != id);
+            if waiting {
+                ids.push(id.to_string());
+            }
+            if ids.is_empty() {
+                st.take_config(&key).map(drop)
+            } else {
+                st.set_config(&key, &serde_json::to_string(&ids)?)
+            }
+        });
+        if let Err(e) = noted {
+            tracing::debug!(spare = %id, error = %e, "flow: recording a pre-warmed shell");
+        }
+    }
+
+    /// Whether spares are kept: switched on, and new shells run on the
+    /// default host, which can keep them.
+    fn prewarming(&self) -> bool {
+        self.inner.prewarm.load(std::sync::atomic::Ordering::Relaxed) && self.spare_host().is_some()
+    }
+
+    /// `flow.prewarm`: a client expects a new shell soon — in `worktree`, or
+    /// where session `cwd_of` is now, or the default project. Returns at
+    /// once; the shell starts in the background. A no-op when pre-warming
+    /// is off.
+    ///
+    /// # Errors
+    /// When `cwd_of` names no session.
+    pub fn prewarm(&self, worktree: Option<&str>, cwd_of: Option<&str>) -> Result<()> {
+        if !self.prewarming() {
+            return Ok(());
+        }
+        let dir = match (worktree, cwd_of) {
+            (Some(w), _) => PathBuf::from(w),
+            (None, Some(id)) => self.live_cwd(id)?,
+            (None, None) => self.inner.default_project.clone(),
+        };
+        self.warm(&dir, &self.default_socket());
+        Ok(())
+    }
+
+    /// Start a spare for `dir` in the background unless one is there or on
+    /// its way. Only on this engine's own socket, the one reaped at start.
+    fn warm(&self, dir: &Path, socket: &str) {
+        if !self.prewarming() || socket != self.default_socket() || !dir.is_dir() || !self.rt().spares.want(dir, socket) {
+            return;
+        }
+        let e = self.clone();
+        let (d, sock) = (dir.to_path_buf(), socket.to_string());
+        let spawned = std::thread::Builder::new().name("flow-prewarm".into()).spawn(move || e.warm_now(&d, &sock));
+        if spawned.is_err() {
+            self.rt().spares.abandon(dir);
+        }
+    }
+
+    /// Launch one spare and keep it (the pool's [`crate::prewarm::Pool::want`]
+    /// already reserved `dir`).
+    fn warm_now(&self, dir: &Path, socket: &str) {
+        let id = crate::store::new_session_id();
+        let argv = shell_argv();
+        let Some(host) = self.spare_host() else {
+            self.rt().spares.abandon(dir);
+            return;
+        };
+        let target = SessionRef::new(socket, host.spare_name(&id));
+        self.clear_exit_files(&id);
+        let _ = std::fs::create_dir_all(&self.inner.exit_dir);
+        let env = [("PATH".to_string(), crate::pane_path::pane_path().to_string_lossy().into_owned())];
+        let prefix = self.exit_prefix(&id);
+        let launched = host.launch(
+            &target,
+            &Launch {
+                cwd: dir,
+                argv: &argv,
+                env: &env,
+                exit_prefix: Some(&prefix),
+            },
+        );
+        match launched {
+            Ok(pid) => {
+                let spare = crate::prewarm::Spare {
+                    id,
+                    dir: dir.to_path_buf(),
+                    socket: socket.to_string(),
+                    pid,
+                    pid_start: host.process_start(pid),
+                    argv,
+                    born: Instant::now(),
+                };
+                tracing::debug!(spare = %target.name, dir = %dir.display(), "flow: pre-warmed a shell");
+                self.note_spare(&spare.id, true);
+                let evicted = self.rt().spares.insert(spare);
+                for s in &evicted {
+                    self.drop_spare(s);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %format!("{e:#}"), "flow: could not pre-warm a shell");
+                self.rt().spares.abandon(dir);
+            }
+        }
+    }
+
+    /// The live spare for `dir`, renamed to its session id — or `None` (no
+    /// spare, a stale one, or one that died while waiting).
+    fn claim_spare(&self, dir: &Path, socket: &str) -> Option<crate::prewarm::Spare> {
+        if !self.prewarming() {
+            return None;
+        }
+        let (got, stale) = self.rt().spares.take(dir, socket, Instant::now());
+        if let Some(s) = &stale {
+            self.drop_spare(s);
+        }
+        let spare = got?;
+        let host = self.spare_host()?;
+        let from = SessionRef::new(spare.socket.clone(), host.spare_name(&spare.id));
+        self.note_spare(&spare.id, false);
+        let ready = host.alive(&from) && matches!(host.exit_status(&from), Ok(None)) && host.rename(&from, &spare.id).is_ok();
+        if !ready {
+            self.drop_spare(&spare);
+            return None;
+        }
+        Some(spare)
+    }
+
+    /// Kill an unclaimed spare and its exit record.
+    fn drop_spare(&self, s: &crate::prewarm::Spare) {
+        self.note_spare(&s.id, false);
+        let Some(host) = self.spare_host() else { return };
+        let r = SessionRef::new(s.socket.clone(), host.spare_name(&s.id));
+        if host.alive(&r) {
+            host.kill_session(&r);
+        }
+        host.clear_recorded_exits(&self.exit_prefix(&s.id));
+    }
+
+    /// Every spare killed: the daemon is going away (or pre-warming was
+    /// switched off).
+    pub fn drop_spares(&self) {
+        self.inner.prewarm.store(false, std::sync::atomic::Ordering::Relaxed);
+        let spares = self.rt().spares.drain();
+        for s in &spares {
+            self.drop_spare(s);
+        }
+    }
+
+    /// `flow.rename` (SMOODEV-4127): name session `id`, pinning the name —
+    /// nothing automatic changes it after. `None` or a blank name goes back
+    /// to the automatic one (for a shell, recomputed from its pane now).
+    ///
+    /// # Errors
+    /// When there is no such session, or on a store failure.
+    pub fn rename(&self, id: &str, title: Option<&str>) -> Result<Session> {
+        if !self.with_store(|st| st.rename(id, title))? {
+            bail!("no such session: {id}");
+        }
+        let s = self.require(id)?;
+        if !s.title_pinned && !s.kind.is_agent() {
+            self.refresh_shell_title(&s);
+        }
+        let s = self.require(id)?;
+        self.emit_session(&s);
+        Ok(s)
+    }
+
+    /// Name a shell from its pane (SMOODEV-4127, [`crate::autotitle`]),
+    /// broadcasting when the name changed. Pinned titles are left alone.
+    fn refresh_shell_title(&self, s: &Session) {
+        if s.state.is_terminal() {
+            self.rt().titler.forget(&s.id);
+            return;
+        }
+        if s.title_pinned {
+            return;
+        }
+        let Ok(target) = self.pane(s) else { return };
+        let Some(facts) = self.host_for(s).ok().and_then(|h| h.shell_facts(&target)) else {
+            return;
+        };
+        let home = self.inner.home.to_string_lossy().into_owned();
+        let Some(name) = self.rt().titler.name(&s.id, &facts, &home) else { return };
+        if matches!(self.with_store(|st| st.set_auto_title(&s.id, &name)), Ok(true)) {
+            if let Ok(s) = self.require(&s.id) {
+                self.emit_session(&s);
+            }
+        }
     }
 
     /// `cwd_of` becomes the request's worktree. An explicit worktree (or a
@@ -2909,6 +3214,7 @@ impl Engine {
             return self.on_death(s, exit);
         }
         if !s.kind.is_agent() {
+            self.refresh_shell_title(s);
             return Ok(());
         }
         // Usage-limit resume due?
@@ -7065,5 +7371,280 @@ quiet_ms = 300
                 .is_some(),
             "not ours to consume"
         );
+    }
+
+    // ── SMOODEV-4127: fast shells, pre-warming, tab names ─────────────
+
+    fn new_default_shell(e: &Engine, dir: &Path) -> Session {
+        e.new_session(NewRequest {
+            kind: SessionKind::Shell,
+            worktree: Some(dir.to_string_lossy().into()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Wait (bounded) for the background warm-up to leave `n` spares.
+    fn await_spares(e: &Engine, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while e.rt().spares.len() != n {
+            assert!(Instant::now() < deadline, "expected {n} spares, have {}", e.rt().spares.len());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_new_shell_is_named_after_its_directory_and_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("smooth");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let s = new_default_shell(&e, &dir);
+        assert_eq!(s.title, "smooth");
+        assert!(!s.title_pinned);
+        assert_eq!(s.state, SessionState::Idle);
+        // A title in the request is a chosen name: it pins.
+        let t = fake_shell(&e, &dir, &["sh"]);
+        assert_eq!((t.title.as_str(), t.title_pinned), ("t", true));
+    }
+
+    #[test]
+    fn prewarm_is_off_until_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        new_default_shell(&e, tmp.path());
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        assert!(e.rt().spares.is_empty());
+        assert!(!host.calls().iter().any(|c| c.contains(crate::prewarm::SPARE_PREFIX)), "{:?}", host.calls());
+    }
+
+    #[test]
+    fn enabling_prewarm_reaps_spares_an_earlier_daemon_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let sock = crate::host::fake::FAKE_SOCKET;
+        let launch = |name: &str| {
+            let argv = vec!["zsh".to_string()];
+            host.launch(
+                &SessionRef::new(sock, name),
+                &Launch {
+                    cwd: tmp.path(),
+                    argv: &argv,
+                    env: &[],
+                    exit_prefix: None,
+                },
+            )
+            .unwrap();
+        };
+        launch("flowspare-fs-old");
+        launch("someone-else");
+        e.enable_prewarm();
+        assert!(!host.alive(&SessionRef::new(sock, "flowspare-fs-old")));
+        assert!(host.alive(&SessionRef::new(sock, "someone-else")), "only spares are reaped");
+    }
+
+    #[test]
+    fn a_new_shell_claims_the_spare_for_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        e.enable_prewarm();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        e.prewarm(Some(&dir), None).unwrap();
+        await_spares(&e, 1);
+        let spare_id = host
+            .list(crate::host::fake::FAKE_SOCKET)
+            .iter()
+            .find_map(|n| n.strip_prefix(crate::prewarm::SPARE_PREFIX).map(str::to_string))
+            .unwrap();
+        let s = new_default_shell(&e, tmp.path());
+        assert_eq!(s.id, spare_id, "the row takes the spare's id");
+        assert_eq!(s.tmux_session.as_deref(), Some(spare_id.as_str()));
+        assert!(host.calls().contains(&format!("rename flowspare-{spare_id} {spare_id}")), "{:?}", host.calls());
+        let r = host_ref(&s);
+        assert!(host.alive(&r));
+        assert_eq!(s.pid, Some(host.session(&r).unwrap().pid));
+        assert_eq!(
+            host.session(&r).unwrap().exit_prefix.as_deref(),
+            Some(e.exit_prefix(&s.id).as_path()),
+            "the spare's exit wrapper already knew the id"
+        );
+        assert_eq!(s.state, SessionState::Idle);
+        // …and the next one is warmed in its place.
+        await_spares(&e, 1);
+        let launches = host.calls().iter().filter(|c| c.starts_with("launch ")).count();
+        assert_eq!(launches, 2, "no launch on the claim itself: {:?}", host.calls());
+    }
+
+    #[test]
+    fn a_dead_spare_is_never_handed_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        let name = host
+            .list(crate::host::fake::FAKE_SOCKET)
+            .into_iter()
+            .find(|n| crate::prewarm::is_spare(n))
+            .unwrap();
+        let spare = SessionRef::new(crate::host::fake::FAKE_SOCKET, name.clone());
+        host.die(&spare, PaneDeath::Code(1));
+        let s = new_default_shell(&e, tmp.path());
+        assert_ne!(format!("{}{}", crate::prewarm::SPARE_PREFIX, s.id), name);
+        assert!(!host.alive(&spare), "the dead spare was cleaned up");
+        assert!(host.alive(&host_ref(&s)), "a fresh shell launched instead");
+    }
+
+    #[test]
+    fn explicit_argv_never_takes_a_spare() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        let s = fake_shell(&e, tmp.path(), &["sh", "-c", "cat"]);
+        assert_eq!(host.session(&host_ref(&s)).unwrap().argv, ["sh", "-c", "cat"]);
+        assert!(!host.calls().iter().any(|c| c.starts_with("rename ")));
+    }
+
+    #[test]
+    fn drop_spares_kills_them_and_stops_warming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        e.drop_spares();
+        assert!(e.rt().spares.is_empty());
+        assert!(!host.list(crate::host::fake::FAKE_SOCKET).iter().any(|n| crate::prewarm::is_spare(n)));
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        assert!(e.rt().spares.is_empty(), "off after a drop");
+    }
+
+    /// The ids of the spares this engine has recorded as waiting.
+    fn recorded_spares(e: &Engine) -> Vec<String> {
+        e.with_store(|st| st.get_config(&e.spares_key()))
+            .unwrap()
+            .map(|v| serde_json::from_str(&v).unwrap())
+            .unwrap_or_default()
+    }
+
+    /// SMOODEV-4238: with `pty` the default, ⌘N still takes a spare. A host
+    /// can't be renamed, so the spare waits under the id its row gets.
+    #[test]
+    fn a_pty_shell_claims_a_spare_launched_under_its_own_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pty = FakeHost::with_kind(HostKind::Pty);
+        let (e, tmux) = two_host_engine(tmp.path(), HostKind::Pty, &pty);
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        let waiting = recorded_spares(&e);
+        assert_eq!(waiting.len(), 1);
+        let spare_id = waiting[0].clone();
+        assert!(
+            pty.alive(&SessionRef::new(FAKE_SOCKET, spare_id.as_str())),
+            "named by its id: {:?}",
+            pty.calls()
+        );
+        let s = new_default_shell(&e, tmp.path());
+        assert_eq!(s.id, spare_id, "the row takes the spare's id");
+        assert_eq!(s.host, HostKind::Pty);
+        assert!(pty.alive(&host_ref(&s)));
+        assert_eq!(s.pid, Some(pty.session(&host_ref(&s)).unwrap().pid));
+        assert!(!pty.calls().iter().any(|c| c.starts_with("rename ")), "{:?}", pty.calls());
+        assert!(tmux.calls().is_empty(), "nothing on tmux: {:?}", tmux.calls());
+        await_spares(&e, 1);
+        let launches = pty.calls().iter().filter(|c| c.starts_with("launch ")).count();
+        assert_eq!(launches, 2, "no launch on the claim itself: {:?}", pty.calls());
+        let waiting = recorded_spares(&e);
+        assert_eq!(waiting.len(), 1);
+        assert_ne!(waiting[0], s.id, "a claimed spare is no longer recorded");
+    }
+
+    /// SMOODEV-4238: a daemon that dies with `pty` spares up leaves hosts
+    /// that look like any session's. The next start reaps exactly the ones
+    /// it recorded and nothing with a row.
+    #[test]
+    fn a_pty_spare_an_earlier_daemon_left_is_reaped_by_its_recorded_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pty = FakeHost::with_kind(HostKind::Pty);
+        let (e, tmux) = two_host_engine(tmp.path(), HostKind::Pty, &pty);
+        let kept = new_default_shell(&e, tmp.path());
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().join("..").to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        let spare = SessionRef::new(FAKE_SOCKET, recorded_spares(&e)[0].as_str());
+        drop(e); // no drop_spares: the daemon died
+        assert!(pty.alive(&spare));
+        let e = reopen(tmp.path(), &tmux, Some(&pty));
+        assert_eq!(e.new_session_host(), HostKind::Pty);
+        e.enable_prewarm();
+        assert!(!pty.alive(&spare), "reaped: {:?}", pty.calls());
+        assert!(pty.alive(&host_ref(&kept)), "a session with a row is never a spare");
+        assert!(recorded_spares(&e).is_empty());
+    }
+
+    /// The spare list is kept exact through drops and evictions.
+    #[test]
+    fn dropped_spares_are_no_longer_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        e.enable_prewarm();
+        e.prewarm(Some(&tmp.path().to_string_lossy()), None).unwrap();
+        await_spares(&e, 1);
+        assert_eq!(recorded_spares(&e).len(), 1);
+        e.drop_spares();
+        assert!(recorded_spares(&e).is_empty());
+        assert!(
+            e.with_store(|st| st.get_config(&e.spares_key())).unwrap().is_none(),
+            "an empty list leaves no key"
+        );
+    }
+
+    #[test]
+    fn supervision_names_a_shell_from_its_pane_until_renamed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = new_default_shell(&e, tmp.path());
+        let r = host_ref(&s);
+        let facts = |command: &str, title: &str| crate::autotitle::PaneFacts {
+            command: command.into(),
+            path: Some("/work/api".into()),
+            title: title.into(),
+            hosts: vec!["mac".into()],
+        };
+        host.set_facts(&r, facts("zsh", "mac"));
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().title, "api");
+        host.set_facts(&r, facts("nvim", "notes.md"));
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().title, "notes.md");
+        // A rename pins: the pane no longer names it.
+        let renamed = e.rename(&s.id, Some("deploys")).unwrap();
+        assert!(renamed.title_pinned);
+        host.set_facts(&r, facts("zsh", "mac"));
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().title, "deploys");
+        // Clearing it goes straight back to the live name.
+        let back = e.rename(&s.id, Some("  ")).unwrap();
+        assert_eq!((back.title.as_str(), back.title_pinned), ("api", false));
+        assert!(e.rename("fs-nope", Some("x")).is_err());
+    }
+
+    #[test]
+    fn a_shell_named_at_creation_keeps_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = fake_shell(&e, tmp.path(), &["sh"]);
+        host.set_facts(
+            &host_ref(&s),
+            crate::autotitle::PaneFacts {
+                command: "vim".into(),
+                ..Default::default()
+            },
+        );
+        e.supervise_tick().unwrap();
+        assert_eq!(e.get(&s.id).unwrap().unwrap().title, "t");
     }
 }

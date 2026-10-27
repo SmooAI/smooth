@@ -64,6 +64,7 @@ pub fn flow_router(engine: Engine, token: Option<String>) -> Router {
         .route("/api/flow/sessions/{id}/resize", post(resize))
         .route("/api/flow/sessions/{id}/approve", post(approve))
         .route("/api/flow/sessions/{id}/kill", post(kill))
+        .route("/api/flow/sessions/{id}/rename", post(rename))
         .route("/api/flow/sessions/{id}/close", post(close))
         .route("/api/flow/sessions/{id}/send", post(send_text))
         .route("/api/flow/sessions/{id}/snapshot", get(snapshot))
@@ -111,6 +112,10 @@ pub fn install(workspace: std::path::PathBuf, token: String, daemon_url: Option<
     match smooth_flow::tmux::tmux_path() {
         Ok(p) => tracing::info!(tmux = %p.display(), "flow: tmux resolved"),
         Err(e) => tracing::warn!(error = %e, "flow: no tmux; every SmoothFlow session will fail to launch"),
+    }
+    // SMOODEV-4127: keep a shell at a prompt for the next ⌘N.
+    if smooth_flow::prewarm::enabled(std::env::var(smooth_flow::prewarm::ENV).ok().as_deref()) {
+        engine.enable_prewarm();
     }
     // Index now, so the first New Session dialog has rows to offer.
     engine.rescan_repos(false);
@@ -366,6 +371,28 @@ async fn kill(
     let resume = body.is_some_and(|b| b.0.resume);
     let e = st.engine.clone();
     let s = blocking(move || e.kill(&id, resume)).await?;
+    Ok(Json(json!({ "session": s })))
+}
+
+#[derive(Deserialize, Default)]
+struct RenameBody {
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// SMOODEV-4127: twin of `flow.rename` — a blank or missing title goes back
+/// to the automatic name.
+async fn rename(
+    State(st): State<FlowState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Path(id): Path<String>,
+    body: Option<Json<RenameBody>>,
+) -> Result<Json<Value>, ApiErr> {
+    gate(&st, &headers, &q)?;
+    let title = body.and_then(|b| b.0.title);
+    let e = st.engine.clone();
+    let s = blocking(move || e.rename(&id, title.as_deref())).await?;
     Ok(Json(json!({ "session": s })))
 }
 
@@ -989,6 +1016,15 @@ async fn dispatch(engine: &Engine, frame: ClientFrame, attached: &mut Attachment
         }
         ClientFrame::MarkRead { id } => {
             run(engine, move |e| e.mark_read(&id)).await?;
+            Ok(vec![])
+        }
+        // SMOODEV-4127: the engine broadcasts the renamed row itself.
+        ClientFrame::Rename { id, title } => {
+            run(engine, move |e| e.rename(&id, title.as_deref())).await?;
+            Ok(vec![])
+        }
+        ClientFrame::Prewarm { worktree, cwd_of } => {
+            run(engine, move |e| e.prewarm(worktree.as_deref(), cwd_of.as_deref())).await?;
             Ok(vec![])
         }
         // th-e126cc: the engine broadcasts `flow.session.removed` itself.

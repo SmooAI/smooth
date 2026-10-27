@@ -326,6 +326,21 @@ final class CenterViewController: NSViewController, NSTextFieldDelegate {
         }
     }
 
+    private let renamer = TabRenamePopover()
+
+    /// ⌘⇧R (SMOODEV-4127): name the focused pane's session — the tab shows
+    /// the focused pane's session, so this is the tab's name. Beeps on an
+    /// empty pane.
+    func renameTab() {
+        guard let t = activeTab, let s = focusedPaneSession else { NSSound.beep(); return }
+        guard !renamer.isShown else { return }
+        let anchor = tabBar.cell(at: activeTabIndex) ?? treeView.pane(t.focused).headerView
+        renamer.show(current: s.tabTitle(home: app.store.home), over: anchor) { [weak self] name in
+            self?.app.rename(s.id, to: name)
+            self?.focusActiveSurface()
+        }
+    }
+
     func closeTab(at index: Int? = nil) {
         let i = index ?? activeTabIndex
         guard surfaceTabs.indices.contains(i), surfaceTabs.count > 1 else { return }
@@ -552,6 +567,8 @@ final class SessionPane: NSView {
     private(set) var sessionId: String?
     var onActivate: (() -> Void)?
     private let header = NSTextField(labelWithString: "")
+    /// Where ⌘⇧R's popover points when the tab strip is hidden.
+    var headerView: NSView { header }
     private let dot = NSView()
     private var hosted: NSView?
 
@@ -601,7 +618,7 @@ final class SessionPane: NSView {
     }
 
     func setHeader(_ s: Session, kindLabel: String) {
-        header.stringValue = "\(s.pearlId ?? s.title) · \(kindLabel) · \(Theme.stateLabel(s))"
+        header.stringValue = "\(s.tabTitle) · \(kindLabel) · \(Theme.stateLabel(s))"
         dot.layer?.backgroundColor = NSColor(Theme.dot(for: s)).cgColor
     }
 

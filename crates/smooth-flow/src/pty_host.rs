@@ -533,7 +533,41 @@ impl SessionHost for PtyHost {
         self.shared.owner.clone()
     }
 
-    /// One `lsof` for every session: the default spawns one per session.
+    /// Spares (SMOODEV-4238): a host can't be renamed (its socket and
+    /// record are named by the session id), so a spare is launched under
+    /// the id its row will get, and the claim's rename is a no-op.
+    fn can_prewarm(&self) -> bool {
+        true
+    }
+
+    fn spare_name(&self, id: &str) -> String {
+        id.to_string()
+    }
+
+    fn rename(&self, s: &SessionRef, to: &str) -> Result<()> {
+        if s.name == to {
+            Ok(())
+        } else {
+            bail!("a pty session host cannot be renamed ({} to {to})", s.name)
+        }
+    }
+
+    /// What tmux's pane facts say, from the host and the process table
+    /// (SMOODEV-4238): the foreground job on the session's terminal, the
+    /// shell's directory, and the title the program set (empty when none,
+    /// so there is no default to tell apart: `hosts` stays empty).
+    fn shell_facts(&self, s: &SessionRef) -> Option<crate::autotitle::PaneFacts> {
+        let pid = self.pid(s).ok()?;
+        let command = crate::proc::foreground_command(pid)?;
+        Some(crate::autotitle::PaneFacts {
+            command,
+            path: crate::proc::cwd(pid).map(|p| p.to_string_lossy().into_owned()),
+            title: self.meta(s).map(|m| m.title).unwrap_or_default(),
+            hosts: Vec::new(),
+        })
+    }
+
+    /// One read of the process table for every session.
     fn current_dirs(&self, sessions: &[SessionRef]) -> Vec<(SessionRef, PathBuf)> {
         let pids: Vec<(SessionRef, u32)> = sessions.iter().filter_map(|s| self.pid(s).ok().map(|p| (s.clone(), p))).collect();
         let dirs = crate::proc::cwds(&pids.iter().map(|(_, p)| *p).collect::<Vec<_>>());
