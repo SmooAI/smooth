@@ -1,6 +1,8 @@
 //! Process liveness — `pid` + start time, so a recycled pid can't pass for
 //! the agent that died (supervision rules 2 and 4).
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -111,6 +113,52 @@ pub fn cwd(pid: u32) -> Option<std::path::PathBuf> {
 #[must_use]
 pub fn cwd(_pid: u32) -> Option<std::path::PathBuf> {
     None
+}
+
+/// The working directories of `pids` right now, from ONE `lsof` (SMOODEV-4238).
+/// Every shell's directory is sampled every few seconds, and an `lsof` per
+/// shell (~60 ms each) would hold up supervision. A pid that is gone is
+/// simply missing from the answer.
+#[cfg(unix)]
+#[must_use]
+pub fn cwds(pids: &[u32]) -> HashMap<u32, PathBuf> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(out) = Command::new("lsof")
+        .args(["-a", "-p", &list, "-d", "cwd", "-Fn"])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return HashMap::new();
+    };
+    parse_lsof_cwds(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// See [`cwds`]: no `lsof` here, so no answers.
+#[cfg(not(unix))]
+#[must_use]
+pub fn cwds(_pids: &[u32]) -> HashMap<u32, PathBuf> {
+    HashMap::new()
+}
+
+/// Parse multi-process `lsof -Fn` output: each `p<pid>` block's first
+/// absolute `n` field.
+#[must_use]
+pub fn parse_lsof_cwds(s: &str) -> HashMap<u32, PathBuf> {
+    let mut out = HashMap::new();
+    let mut pid = None;
+    for line in s.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().ok();
+        } else if let (Some(p), Some(name)) = (pid, line.strip_prefix('n')) {
+            if name.starts_with('/') {
+                out.entry(p).or_insert_with(|| PathBuf::from(name));
+            }
+        }
+    }
+    out
 }
 
 /// Parse `lsof -Fn` field output (`p123` / `fcwd` / `n/path`): the first
@@ -235,6 +283,39 @@ mod tests {
         let mut child = child;
         let _ = child.wait();
         assert!(start_time(pid).is_none() || !is_alive(pid, None));
+    }
+
+    #[test]
+    fn lsof_cwds_parses_one_directory_per_process() {
+        let out = parse_lsof_cwds("p10\nfcwd\nn/a/b\np20\nfcwd\nn/c d\np30\nfcwd\nnrelative\np40\n");
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[&10], PathBuf::from("/a/b"));
+        assert_eq!(out[&20], PathBuf::from("/c d"));
+        assert!(parse_lsof_cwds("").is_empty());
+        assert!(parse_lsof_cwds("nstray/before/a/pid\nn/x").is_empty(), "a name before any pid is nobody's");
+        assert!(parse_lsof_cwds("pnotapid\nn/x").is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cwds_answers_for_live_processes_and_skips_gone_ones() {
+        if Command::new("lsof").arg("-v").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            eprintln!("skipping: lsof not available");
+            return;
+        }
+        assert!(cwds(&[]).is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = Command::new("sleep").arg("30").current_dir(dir.path()).spawn().unwrap();
+        let me = std::process::id();
+        let got = cwds(&[me, child.id(), 999_999]);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(got.get(&me), Some(&std::env::current_dir().unwrap()));
+        assert_eq!(
+            got.get(&child.id()).map(|p| p.canonicalize().unwrap()),
+            Some(dir.path().canonicalize().unwrap())
+        );
+        assert!(!got.contains_key(&999_999));
     }
 
     #[test]

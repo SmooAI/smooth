@@ -68,6 +68,9 @@ const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
 const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
+/// How often each shell's working directory is sampled, so a restore can
+/// reopen it there (SMOODEV-4238). A clean shutdown samples once more.
+const SHELL_CWD_EVERY: Duration = Duration::from_secs(15);
 /// The pane env var naming the flow session row (th-b00115); hooks post it
 /// back as `flow_id`.
 pub const FLOW_ID_ENV: &str = "SMOOTH_FLOW_ID";
@@ -205,6 +208,8 @@ struct Runtime {
     seen_changes_at: Option<DateTime<Utc>>,
     /// Rows on a host this engine doesn't have, already warned about once.
     unhosted: HashSet<String>,
+    /// When shells' working directories were last sampled (SMOODEV-4238).
+    cwd_sampled_at: Option<Instant>,
 }
 
 /// A prompt waiting to be pasted into a harness's composer.
@@ -1769,10 +1774,11 @@ impl Engine {
             env.insert(0, ("PATH".to_string(), crate::pane_path::pane_path().to_string_lossy().into_owned()));
         }
         let prefix = self.exit_prefix(&session.id);
+        let cwd = self.launch_dir(session);
         let launched = host.launch(
             &target,
             &Launch {
-                cwd: Path::new(&session.worktree),
+                cwd: &cwd,
                 argv,
                 env: &env,
                 exit_prefix: Some(&prefix),
@@ -2721,7 +2727,56 @@ impl Engine {
             }
         }
         self.rebroadcast_external_changes(now)?;
+        self.sample_shell_cwds(false);
         Ok(())
+    }
+
+    /// Record where every live shell of ours is working (SMOODEV-4238), at
+    /// most every [`SHELL_CWD_EVERY`] unless `force`d (a clean shutdown), so
+    /// a restore reopens it there. One batched ask per host, outside any
+    /// session lock; a shell the host can't answer for keeps its last value.
+    fn sample_shell_cwds(&self, force: bool) {
+        {
+            let mut rt = self.rt();
+            if !force && rt.cwd_sampled_at.is_some_and(|at| at.elapsed() < SHELL_CWD_EVERY) {
+                return;
+            }
+            rt.cwd_sampled_at = Some(Instant::now());
+        }
+        let mine = self.default_socket();
+        let Ok(rows) = self.with_store(FlowStore::list_live) else { return };
+        let mut by_host: HashMap<HostKind, Vec<(String, SessionRef)>> = HashMap::new();
+        for s in rows.iter().filter(|s| !s.kind.is_agent() && !s.adopted && owned_here(s, &mine)) {
+            if let Some(t) = s.tmux_session.as_deref() {
+                by_host.entry(s.host).or_default().push((s.id.clone(), SessionRef::new(socket_of(s, &mine), t)));
+            }
+        }
+        for (kind, shells) in by_host {
+            let Ok(host) = self.host_of(kind) else { continue };
+            let refs: Vec<SessionRef> = shells.iter().map(|(_, r)| r.clone()).collect();
+            for (r, dir) in host.current_dirs(&refs) {
+                let Some((id, _)) = shells.iter().find(|(_, x)| *x == r) else { continue };
+                let dir = dir.to_string_lossy();
+                if let Err(e) = self.with_store(|st| st.set_last_cwd(id, &dir)) {
+                    tracing::debug!(session = %id, error = %e, "flow: recording a shell's directory");
+                }
+            }
+        }
+    }
+
+    /// Where a launch of `s` starts: a shell reopens in the directory it was
+    /// last seen in when that still exists (SMOODEV-4238), anything else in
+    /// its worktree.
+    fn launch_dir(&self, s: &Session) -> PathBuf {
+        if !s.kind.is_agent() {
+            if let Ok(Some(dir)) = self.with_store(|st| st.last_cwd(&s.id)) {
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() {
+                    return dir;
+                }
+            }
+        }
+        PathBuf::from(&s.worktree)
     }
 
     /// Re-broadcast rows another daemon changed in the shared `flow.db`
@@ -2940,6 +2995,9 @@ impl Engine {
     /// # Errors
     /// On a store failure.
     pub fn shutdown(&self) -> Result<()> {
+        // A shell reopens where it was at the quit, not where the last
+        // periodic sample happened to see it.
+        self.sample_shell_cwds(true);
         let key = crate::restore::clean_quit_key(&self.default_socket());
         self.with_store(|st| st.set_config(&key, &Utc::now().to_rfc3339()))?;
         tracing::info!(marker = %key, "flow: clean shutdown recorded");
@@ -2962,16 +3020,17 @@ impl Engine {
     /// boot or outlived a clean quit, was interrupted. An agent whose
     /// conversation can be resumed is scheduled to resume, [`RESTORE_STAGGER`]
     /// apart, without counting against rule 2's crash budget; one that cannot
-    /// is left `needs_you` + [`RESTORABLE`]. Shells, and rows nothing says were
-    /// interrupted, are left to supervision as before. Consumes this daemon's
-    /// clean-quit marker.
+    /// is left `needs_you` + [`RESTORABLE`]. A shell reopens the same way, in
+    /// the directory it was last seen in (SMOODEV-4238). Rows nothing says
+    /// were interrupted are left to supervision as before. Consumes this
+    /// daemon's clean-quit marker.
     fn restore_interrupted(&self) -> Result<()> {
         let mine = self.default_socket();
         let clean_quit = self.with_store(|st| st.take_config(&crate::restore::clean_quit_key(&mine)))?.is_some();
         let registry = self.registry();
         let mut due = Vec::new();
         for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
-            if s.adopted || !s.kind.is_agent() || s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
+            if s.adopted || s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
                 continue;
             }
             let (Some(t), Ok(host)) = (s.tmux_session.as_deref(), self.host_for(&s)) else {
@@ -2987,7 +3046,7 @@ impl Engine {
             self.drop_pty(&s.id);
             self.revoke_hook_token(&s.id);
             self.clear_exit_files(&s.id);
-            if !crate::restore::resume_continues(&s, &registry) {
+            if s.kind.is_agent() && !crate::restore::resume_continues(&s, &registry) {
                 tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session cannot be resumed — restorable");
                 let att = Attention::new(RESTORABLE).with_detail(format!("{}; {NOT_RESENT}", why.describe()));
                 self.set_state(&s.id, SessionState::NeedsYou, Some(att))?;
@@ -2995,13 +3054,19 @@ impl Engine {
             }
             let at = Instant::now() + RESTORE_STAGGER.saturating_mul(u32::try_from(due.len()).unwrap_or(u32::MAX));
             tracing::info!(session = %s.id, cause = ?why, "flow: interrupted session — resuming");
+            // A shell has no conversation: it reopens in its last directory.
+            let what = if s.kind.is_agent() {
+                "resuming its conversation".to_string()
+            } else {
+                format!("reopening in {}", self.launch_dir(&s).display())
+            };
             {
                 let mut rt = self.rt();
                 rt.relaunch_at.insert(s.id.clone(), at);
                 // A resume after an interruption is not a crash.
                 rt.resume_attempts.remove(&s.id);
             }
-            let att = Attention::new(RESTORING).with_detail(format!("{}; resuming its conversation", why.describe()));
+            let att = Attention::new(RESTORING).with_detail(format!("{}; {what}", why.describe()));
             self.set_state(&s.id, SessionState::Starting, Some(att))?;
             due.push((s.id, at));
         }
@@ -6733,9 +6798,87 @@ quiet_ms = 300
         let launches = host.calls().iter().filter(|c| c.starts_with(&format!("launch {} ", idless.id))).count();
         assert_eq!(launches, 1, "the prompt went out once: {:?}", host.calls());
 
-        let row = e.get(&shell.id).unwrap().unwrap();
-        assert_eq!(row.state, SessionState::Dead, "shells are phase 2: {row:?}");
-        assert!(row.attention.unwrap().detail.unwrap().contains("process vanished"));
+        // SMOODEV-4238: the shell reopens too, in the same row.
+        eventually(|| relaunched(&shell));
+        assert_eq!(host.session(&host_ref(&shell)).unwrap().argv, ["sh"]);
+        assert_eq!(e.get(&shell.id).unwrap().unwrap().state, SessionState::Starting);
+    }
+
+    /// SMOODEV-4238: a shell reopens in the directory it was last in, sampled
+    /// periodically and once more at the clean shutdown, and falls back to
+    /// its worktree when that directory is gone.
+    #[test]
+    fn an_interrupted_shell_reopens_in_its_last_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let moved = tmp.path().join("moved");
+        let gone = tmp.path().join("gone");
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        let a = fake_shell(&e, tmp.path(), &["sh"]);
+        let b = fake_shell(&e, tmp.path(), &["sh"]);
+        let never = fake_shell(&e, tmp.path(), &["sh"]);
+        host.set_cwd(&host_ref(&a), Some(&gone));
+        host.set_cwd(&host_ref(&never), None);
+        e.supervise_tick().unwrap();
+        assert_eq!(
+            e.with_store(|st| st.last_cwd(&a.id)).unwrap(),
+            Some(gone.to_string_lossy().into_owned()),
+            "sampled on a tick"
+        );
+        // Moved since the last sample: the shutdown sample catches it.
+        host.set_cwd(&host_ref(&a), Some(&moved));
+        host.set_cwd(&host_ref(&b), Some(&gone));
+        e.supervise_tick().unwrap();
+        assert_eq!(
+            e.with_store(|st| st.last_cwd(&a.id)).unwrap(),
+            Some(gone.to_string_lossy().into_owned()),
+            "rate-limited between shutdowns"
+        );
+        e.shutdown().unwrap();
+        assert_eq!(e.with_store(|st| st.last_cwd(&a.id)).unwrap(), Some(moved.to_string_lossy().into_owned()));
+        assert_eq!(
+            e.with_store(|st| st.last_cwd(&never.id)).unwrap(),
+            None,
+            "a host with no answer records nothing"
+        );
+        drop(e);
+        std::fs::remove_dir(&gone).unwrap();
+        for s in [&a, &b, &never] {
+            host.vanish(&host_ref(s));
+        }
+        let e = reopen(tmp.path(), &host, None);
+        e.ensure_restored();
+        let detail = e.get(&a.id).unwrap().unwrap().attention.unwrap().detail.unwrap();
+        assert!(
+            detail.contains("SmoothFlow quit") && detail.contains(&format!("reopening in {}", moved.display())),
+            "{detail}"
+        );
+        for s in [&a, &b, &never] {
+            eventually(|| host.session(&host_ref(s)).is_some());
+        }
+        assert_eq!(host.session(&host_ref(&a)).unwrap().cwd, moved);
+        assert_eq!(host.session(&host_ref(&b)).unwrap().cwd, tmp.path(), "its directory is gone: the worktree");
+        assert_eq!(host.session(&host_ref(&never)).unwrap().cwd, tmp.path());
+        for s in [&a, &b, &never] {
+            assert!(!e.rt().resume_attempts.contains_key(&s.id), "a reopen is not a crash");
+        }
+    }
+
+    /// A shell the user closed, and a shell that crashed with no
+    /// interruption, are not reopened: only an interruption brings one back.
+    #[test]
+    fn a_shell_that_simply_died_is_not_reopened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = fake_shell(&e, tmp.path(), &["sh"]);
+        drop(e);
+        host.vanish(&host_ref(&s));
+        let e = reopen(tmp.path(), &host, None);
+        e.supervise_tick().unwrap();
+        let row = e.get(&s.id).unwrap().unwrap();
+        assert_eq!(row.state, SessionState::Dead, "{row:?}");
+        assert!(host.session(&host_ref(&s)).is_none());
     }
 
     /// While a restore is pending the row says so; supervision does not read

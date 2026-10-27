@@ -310,6 +310,14 @@ pub trait SessionHost: Send + Sync {
         self.pid(s).ok().and_then(proc::cwd)
     }
 
+    /// [`Self::current_dir`] for many sessions at once (SMOODEV-4238: the
+    /// engine samples every shell's directory so a restore can reopen it
+    /// there). Sessions the host can't answer for are left out. The default
+    /// asks one at a time; a host whose answer costs a process spawn batches.
+    fn current_dirs(&self, sessions: &[SessionRef]) -> Vec<(SessionRef, PathBuf)> {
+        sessions.iter().filter_map(|s| self.current_dir(s).map(|d| (s.clone(), d))).collect()
+    }
+
     /// `Some(death)` once the session's process is dead (the host keeps the
     /// session until the engine has read this), `None` while it runs.
     ///

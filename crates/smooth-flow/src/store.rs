@@ -522,6 +522,15 @@ impl FlowStore {
         if !has_boot {
             conn.execute("ALTER TABLE sessions ADD COLUMN boot_id TEXT", []).context("add boot_id")?;
         }
+        // SMOODEV-4238: a shell's working directory as last sampled, so a
+        // restore reopens it there; NULL = never sampled.
+        let has_last_cwd = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'last_cwd'")?
+            .exists([])
+            .context("probe last_cwd column")?;
+        if !has_last_cwd {
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_cwd TEXT", []).context("add last_cwd")?;
+        }
         conn.execute("CREATE INDEX IF NOT EXISTS sessions_hook_token_idx ON sessions(hook_token_hash)", [])
             .context("index hook_token_hash")?;
         Ok(Self { conn })
@@ -1046,6 +1055,32 @@ impl FlowStore {
             .flatten())
     }
 
+    /// Record where `id`'s process was last seen working (SMOODEV-4238).
+    /// Kept off [`Session`] like the boot id. Returns whether it changed.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn set_last_cwd(&self, id: &str, cwd: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("UPDATE sessions SET last_cwd = ?2 WHERE id = ?1 AND last_cwd IS NOT ?2", params![id, cwd])
+            .context("set last_cwd")?;
+        Ok(n > 0)
+    }
+
+    /// Where `id`'s process was last seen working; `None` when never sampled.
+    ///
+    /// # Errors
+    /// On a database failure.
+    pub fn last_cwd(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT last_cwd FROM sessions WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .context("get last_cwd")?
+            .flatten())
+    }
+
     /// Remove a `config` value, returning it (th-0937a1: the clean-quit
     /// marker is read once).
     ///
@@ -1269,6 +1304,13 @@ mod tests {
         st.set_boot_id("fs-old", Some("boot-1")).unwrap();
         assert_eq!(st.boot_id("fs-old").unwrap().as_deref(), Some("boot-1"));
         assert_eq!(st.boot_id("fs-missing").unwrap(), None);
+        assert_eq!(st.last_cwd("fs-old").unwrap(), None, "SMOODEV-4238: never sampled");
+        assert!(st.set_last_cwd("fs-old", "/tmp/a").unwrap());
+        assert!(!st.set_last_cwd("fs-old", "/tmp/a").unwrap(), "the same directory is not a change");
+        assert!(st.set_last_cwd("fs-old", "/tmp/b").unwrap());
+        assert_eq!(st.last_cwd("fs-old").unwrap().as_deref(), Some("/tmp/b"));
+        assert!(!st.set_last_cwd("fs-missing", "/tmp/a").unwrap());
+        assert_eq!(st.last_cwd("fs-missing").unwrap(), None);
         st.set_state_source("fs-old", "hooks").unwrap();
         assert_eq!(st.get("fs-old").unwrap().unwrap().state_source, "hooks");
         let st2 = FlowStore::open(&path).unwrap(); // idempotent

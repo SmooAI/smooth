@@ -533,6 +533,13 @@ impl SessionHost for PtyHost {
         self.shared.owner.clone()
     }
 
+    /// One `lsof` for every session: the default spawns one per session.
+    fn current_dirs(&self, sessions: &[SessionRef]) -> Vec<(SessionRef, PathBuf)> {
+        let pids: Vec<(SessionRef, u32)> = sessions.iter().filter_map(|s| self.pid(s).ok().map(|p| (s.clone(), p))).collect();
+        let dirs = crate::proc::cwds(&pids.iter().map(|(_, p)| *p).collect::<Vec<_>>());
+        pids.into_iter().filter_map(|(s, p)| dirs.get(&p).map(|d| (s, d.clone()))).collect()
+    }
+
     fn launch(&self, s: &SessionRef, spec: &Launch<'_>) -> Result<u32> {
         if spec.argv.is_empty() {
             bail!("cannot launch an empty argv");
