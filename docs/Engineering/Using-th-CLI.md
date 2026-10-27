@@ -846,32 +846,46 @@ Mint and manage an org's API auth clients. Two types, both first-class:
   page, so the origin pin is the security boundary — at least one
   `--allowed-origin` is required.
 
-These routes require a dashboard **user** session (`smoo auth login`) and
-403 under M2M. A master admin can target a child org with `--org-id`.
+These routes require a dashboard **user** session (`smoo auth login`) that
+holds the `api_keys.manage` permission, and 403 under M2M (a key can't
+manage keys). A master admin can target a child org with `--org-id`.
+
+Keys follow the ADR-162 lifecycle: `active ⇄ disabled → revoked`.
 
 ```bash
-smoo api keys list                                  # M2M + B2M, with origins (--json for raw)
+smoo api keys list [--all] [--json]                 # name, client id, type, status, last used, expires; --all adds revoked
 
-smoo api keys create                                # M2M (default) — prints secret key ONCE
-smoo api keys create --type b2m \
-  --allowed-origin https://app.example.com \
-  --allowed-origin https://example.com            # B2M — prints publishable key ONCE
+smoo api keys create --name ci-deploy               # M2M (default) — prints secret key ONCE (smoo_sk_…)
+smoo api keys create --name widget --type b2m \
+  --origin https://app.example.com \
+  --origin https://example.com                    # B2M — prints publishable key ONCE
+smoo api keys create --name ci --expires-in-days 30  # 1–365, API default 90
 
-smoo api keys update <client_id> \
-  --allowed-origin https://new.example.com        # replace a B2M client's origins (B2M only)
+smoo api keys rename <client_id> "Prod deploy"
+smoo api keys update <client_id> [--name …] [--origin …]   # origins replace a B2M client's list
 
-smoo api keys rotate <client_id> [--dry-run|--yes]   # mint replacement (same type/origins), revoke old
-smoo api keys revoke <client_id>                     # delete a client
+smoo api keys disable <client_id> [--reason manual|secret-leaked]   # stops authenticating now, reversible
+smoo api keys enable <client_id>
 
-smoo api keys create --type b2m --allowed-origin … --org-id <child>   # master admin, child org
+smoo api keys rotate <client_id> [--overlap-hours N] [--dry-run|--yes]   # new secret once; old works N h (default 24, 0–168)
+smoo api keys revoke <client_id> [--dry-run|--yes]   # permanent (alias: delete); type the id to confirm
+
+smoo api keys disable-all [--include-widget-keys] [--dry-run|--yes]   # kill switch; type the org slug to confirm
+smoo api keys enable-all                              # re-enable only keys the kill switch disabled
+
+smoo api keys create --type b2m --origin … --org-id <child>   # master admin, child org
 ```
 
 The key value is shown exactly once — store it immediately. `--type`
 accepts the short `m2m`/`b2m` or the long `machine-to-machine`/
-`browser-to-machine`. `rotate` exists because the API has **no in-place
-rotation**: it creates a fresh client (new `client_id` + key) of the
-same type/origins, then revokes the old one — so update every consumer.
-A raw `--body '<json>'` escape hatch is still accepted.
+`browser-to-machine`; `--origin` is an alias of `--allowed-origin`.
+`rotate` swaps the secret **in place**: the client id is unchanged and the
+old secret keeps working until the overlap ends, so consumers can switch
+over without downtime. `disable-all` leaves the product's own internal
+keys alone and skips website chat widget keys unless `--include-widget-keys`
+(which takes the chat on customer websites offline). `list` tags keys minted before the `smoo_sk_` format as
+`legacy` and ends with a hint when any are live; `rotate` upgrades one. A raw `--body '<json>'` escape hatch is still accepted on
+`create`.
 
 ### LLM gateway keys (`smoo llm`)
 
@@ -952,7 +966,7 @@ pass `--yes`.
 
 | Area         | Gated verbs                                                                                                               |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| Credentials  | `api keys rotate`, `llm rotate-key`, `llm keys rotate`                                                                    |
+| Credentials  | `api keys rotate` / `revoke` / `disable-all`, `llm rotate-key`, `llm keys rotate`                                         |
 | Access       | `roles grant` / `set-permissions` / `assign` / `unassign` (and `revoke`, `delete`), `api teams set-members` / `set-roles` |
 | AI behaviour | `api smooth-operator tools enable` / `disable` (org-wide), `agents tools enable` / `disable`                              |
 | Sends        | `drip enroll` (names the contact count)                                                                                   |
@@ -1300,10 +1314,12 @@ audit-logged against the logged-in user.
 ### Keys (M2M auth clients)
 
 ```bash
-smoo api keys list                                   # 403 today unless dashboard-user token
-smoo api keys create '{"name":"…","scopes":[…]}'    # secret returned ONCE
-smoo api keys rotate <id>
+smoo api keys list [--all]                           # dashboard-user token with api_keys.manage
+smoo api keys create --name … [--expires-in-days N]  # secret returned ONCE
+smoo api keys disable|enable <id>
+smoo api keys rotate <id> [--overlap-hours N]
 smoo api keys revoke <id>
+smoo api keys disable-all | enable-all               # org kill switch
 ```
 
 ### Observability (logs, traces, errors, LLM telemetry, source maps)
@@ -2549,38 +2565,38 @@ disk_paths = []
 
 [run]
 max_wait_secs = 1800
-stall_minutes = 20   # kill a job whose process tree is idle this long (0 = off)
-stall_cpu_pct = 5    # "idle" = under this percent of one core
-stall_exempt_labels = ["xcodebuild", "gradle", "docker"]  # + iOS labels: work runs outside the tree, so only the runtime cap applies
+stall_minutes = 20 # kill a job whose process tree is idle this long (0 = off)
+stall_cpu_pct = 5 # "idle" = under this percent of one core
+stall_exempt_labels = ["xcodebuild", "gradle", "docker"] # + iOS labels: work runs outside the tree, so only the runtime cap applies
 watch_every_secs = 15
 max_runtime_heavy_secs = 0 # hard cap per class (0 = none); --timeout wins
 max_runtime_light_secs = 0
 max_runtime_by_label_secs = { "attest rust" = 7200 } # label prefix -> cap; 0 = off
 serialize_ios = true # one iOS job (`attest ios`, `xcodebuild`) at a time: the machine-wide `ios` lock
-qos = "nice"         # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
+qos = "nice" # or "background" (opt-in; can starve) / "normal"; a --lock job is capped at nice
 kill_grace_secs = 10
 history_keep = 500
-poll_ms = 1000       # how often a waiter re-checks
+poll_ms = 1000 # how often a waiter re-checks
 note_every_secs = 30 # how often it prints its waiting line
 
 [budget]
 enabled = true
 cpu_factor = 1.5
-mem_reserve_gb = 6       # kept free for the UI, browsers and agent sessions
-heavy_rss_gb = 4         # estimates for a label with no history yet
+mem_reserve_gb = 6 # kept free for the UI, browsers and agent sessions
+heavy_rss_gb = 4 # estimates for a label with no history yet
 heavy_cores = 4
 light_rss_gb = 0.5
 light_cores = 1
-ios_rss_gb = 6           # floor on an iOS job's estimate (its simulators run outside the measured process group)
+ios_rss_gb = 6 # floor on an iOS job's estimate (its simulators run outside the measured process group)
 ios_cores = 4
-window = 20              # runs an estimate is drawn from
-max_passes = 3           # passes before a big waiter gets a reservation
+window = 20 # runs an estimate is drawn from
+max_passes = 3 # passes before a big waiter gets a reservation
 aimd_step = 0.1
 aimd_clean_samples = 5
 aimd_min = 0.25
 aimd_max = 2.0
-mem_scale_max = 1.0      # memory never overcommits past (available − reserve)
-sample_ms = 2000         # process-group memory sample interval
+mem_scale_max = 1.0 # memory never overcommits past (available − reserve)
+sample_ms = 2000 # process-group memory sample interval
 ```
 
 **PATH shims: `th ci-queue shim install | uninstall | status`.** These queue
