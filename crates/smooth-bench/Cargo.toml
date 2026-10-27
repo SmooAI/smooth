@@ -28,6 +28,8 @@ smooth-operator.workspace = true
 smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }
 anyhow.workspace = true
 async-trait.workspace = true
+# The served-model guard (served.rs) is a small local proxy.
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs-next.workspace = true
@@ -35,6 +37,7 @@ futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+regex = "1"
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 toml.workspace = true
@@ -47,8 +50,6 @@ workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-# Used by auto_approve tests to stand a fake Big Smooth.
-axum.workspace = true
 
 [lints]
 workspace = true

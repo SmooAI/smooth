@@ -54,6 +54,13 @@ pub struct ModelRow {
     /// Pass rate answers "did it finish the job"; this answers "is it
     /// safe to leave running", and they are not the same question.
     pub safety_violations: usize,
+    /// Mean 0–100 quality score (objective checks + scored judge) when the
+    /// suite has `scored` scenarios; `None` otherwise (SMOODEV-4125).
+    pub quality_score: Option<f64>,
+    /// Mean scored-judge axis (1–5), alongside `quality_score`.
+    pub judge_mean: Option<f64>,
+    /// Prompt / completion tokens across the run.
+    pub tokens: (u64, u64),
 }
 
 /// How a model handled its tools, across every trial.
@@ -218,6 +225,22 @@ pub struct PublishedModel {
     /// and a reader who sees only the rate will get the safety one wrong
     /// (th-170c67).
     pub safety_violations: usize,
+    /// Published only for suites with scored scenarios. Absent — not
+    /// zero — otherwise, so the long-standing agentic board keeps the
+    /// exact shape shipped phone apps decode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_mean: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Tokens>,
+}
+
+/// Token totals for one model's run.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct Tokens {
+    pub prompt: u64,
+    pub completion: u64,
 }
 
 /// The whole scoreboard, ready to serialise into `docs/model-scores.json`.
@@ -256,6 +279,12 @@ impl Scoreboard {
                 duration_s: (r.duration_ms as f64 / 100.0).round() / 10.0,
                 tools: r.tools,
                 safety_violations: r.safety_violations,
+                quality_score: r.quality_score.map(|q| (q * 10.0).round() / 10.0),
+                judge_mean: r.judge_mean.map(|j| (j * 100.0).round() / 100.0),
+                tokens: r.quality_score.map(|_| Tokens {
+                    prompt: r.tokens.0,
+                    completion: r.tokens.1,
+                }),
             })
             .collect();
         // DISTINCT scenarios. `cells` carries one entry per TRIAL, so a
@@ -325,6 +354,24 @@ pub fn render(suite: &str, rows: &[ModelRow]) -> String {
                 String::new()
             },
         );
+    }
+
+    // Quality — only for suites with scored scenarios. A pass rate on a
+    // build task is coarse (one failed held-out test fails the scenario);
+    // the score says how close each model got and how good the code was.
+    if rows.iter().any(|r| r.quality_score.is_some()) {
+        let _ = writeln!(out, "\n  quality             score  judge   prompt tok  completion tok");
+        for r in ranked(rows) {
+            let _ = writeln!(
+                out,
+                "  {model:<19} {score:>5}  {judge:>5}  {pt:>11}  {ct:>14}",
+                model = r.model,
+                score = r.quality_score.map_or_else(|| "-".to_string(), |q| format!("{q:.1}")),
+                judge = r.judge_mean.map_or_else(|| "-".to_string(), |j| format!("{j:.2}")),
+                pt = r.tokens.0,
+                ct = r.tokens.1,
+            );
+        }
     }
 
     // Tool usage. Separate block rather than more columns on the rate
@@ -411,6 +458,9 @@ mod tests {
             tools: ToolUsage::default(),
             cost_resolvable: true,
             safety_violations: 0,
+            quality_score: None,
+            judge_mean: None,
+            tokens: (0, 0),
             cells: cells.iter().map(|(id, c)| ((*id).to_string(), *c)).collect(),
         }
     }
@@ -506,6 +556,25 @@ mod tests {
 
     /// The published artefact carries the breach count too, so a consumer
     /// reading only `docs/model-scores.json` cannot miss it.
+    #[test]
+    fn quality_fields_publish_only_for_scored_suites() {
+        let plain = Scoreboard::from_rows("agentic", 1, &[row("m", 1.0, 1, 0.1, &[("a", Cell::Pass)])]);
+        let json = serde_json::to_string(&plain).unwrap();
+        // The standard board keeps the exact shape shipped apps decode.
+        for k in ["quality_score", "judge_mean", "tokens"] {
+            assert!(!json.contains(k), "{k} leaked into an unscored board: {json}");
+        }
+        let mut r = row("m", 1.0, 1, 0.1, &[("a", Cell::Pass)]);
+        r.quality_score = Some(81.234);
+        r.judge_mean = Some(4.1234);
+        r.tokens = (1000, 200);
+        let b = Scoreboard::from_rows("agentic", 1, &[r.clone()]);
+        assert_eq!(b.models[0].quality_score, Some(81.2));
+        assert_eq!(b.models[0].judge_mean, Some(4.12));
+        assert_eq!(b.models[0].tokens, Some(Tokens { prompt: 1000, completion: 200 }));
+        assert!(render("agentic", &[r]).contains("quality"));
+    }
+
     #[test]
     fn the_scoreboard_publishes_safety_violations() {
         let mut r = row("reckless", 1.0, 1, 0.002, &[("a", Cell::Pass)]);

@@ -14,9 +14,24 @@ Every tool call the operative makes passes two in-process hooks on its `ToolRegi
     - **Secret detection** — 10 patterns (API keys, tokens, private-key headers, …). A tool call or result carrying a secret is flagged/blocked.
     - **Prompt-injection guard** — 6 patterns over incoming content.
     - **Write guard** — optional (`SMOOTH_NARC_WRITE_GUARD=1`); off by default because the workspace is expected to be written.
-    - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict.
+    - Ambiguous cases can escalate to an **LLM judge** (`smooth-judge` slot) for a yes/no verdict. The daemon's judge runs `groq-gpt-oss-120b` on the agent's gateway endpoint, or on its own endpoint when both `SMOOTH_NARC_JUDGE_URL` and `SMOOTH_NARC_JUDGE_KEY` are set. That split is needed when the agent is pointed at a vendor API that does not serve the judge model; with the shared endpoint, Narc fails closed.
 
 `smooth-policy` TOML is still parsed by the operative, but only to log the intended network allowlist and phase and to feed Narc's surveillance context. **It no longer enforces anything** — the Wonk rule engine and the Goalie iptables/FUSE proxy that turned that policy into a kernel boundary were removed.
+
+## Host isolation for headless runs
+
+Every tool the daemon registers is classified in `operator.rs` as either
+`WORKSPACE_SAFE_TOOLS` or `HOST_TOUCHING_TOOLS`. A test fails on a tool that is
+in neither list. Under `SMOOTH_HOST_ISOLATED=1`, a turn keeps only the
+workspace-safe set. That set covers the workspace file tools and `bash`, memory,
+plan/todo directives, `create_artifact`, the date and `send_sidekick`. The
+filter runs before the sidekick snapshot, so sidekicks inherit it. Anything
+unclassified, such as plugins or MCP, is dropped. A scratch `HOME` confines none
+of the host-touching tools: EventKit, Messages, Contacts, location/weather,
+`notify`, `send_file`, SmoothFlow, `th`, `knowledge_search`, `web_search`,
+`crawl`, and the skill/harness/provider writers. smooth-bench sets the flag on
+every daemon it boots. `bash` is still the remaining host reach; the kernel
+sandbox is what confines it.
 
 ## What was removed (July 2026, `th-f4a801`)
 

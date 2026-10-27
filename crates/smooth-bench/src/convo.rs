@@ -377,7 +377,7 @@ pub fn gateway_from_providers_json() -> Option<(String, String)> {
 /// the assistant message content.
 async fn chat(gateway_url: &str, gateway_key: Option<&str>, model: &str, system: &str, user: &str, temperature: f32) -> Result<String> {
     let url = format!("{}/chat/completions", gateway_url.trim_end_matches('/'));
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "temperature": temperature,
         "messages": [
@@ -385,6 +385,9 @@ async fn chat(gateway_url: &str, gateway_key: Option<&str>, model: &str, system:
             {"role": "user", "content": user},
         ],
     });
+    // The bench's own calls must be answered by the model named, too: a
+    // judge the gateway quietly swapped for a fallback is no judge.
+    crate::served::pin_request(&mut body);
     let mut req = reqwest::Client::new().post(&url).json(&body);
     if let Some(k) = gateway_key {
         req = req.bearer_auth(k);
@@ -395,9 +398,11 @@ async fn chat(gateway_url: &str, gateway_key: Option<&str>, model: &str, system:
     // leaderboard can subtract it (pearl th-adf614) — otherwise a cheap
     // agent graded by an expensive judge reads as expensive.
     crate::spend::record_harness_response(resp.headers());
+    let headers = resp.headers().clone();
     let text = resp.text().await.context("reading gateway response body")?;
     anyhow::ensure!(status.is_success(), "gateway returned {status}: {}", truncate(&text, 400));
     let v: Value = serde_json::from_str(&text).with_context(|| format!("gateway response was not JSON: {}", truncate(&text, 400)))?;
+    crate::served::ensure_served(model, &headers, crate::served::body_model(&v))?;
     v.pointer("/choices/0/message/content")
         .and_then(Value::as_str)
         .map(ToString::to_string)

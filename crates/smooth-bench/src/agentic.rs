@@ -40,8 +40,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_driver::{run_via_canonical, CanonicalOutput};
+use crate::checks::{CommandCheck, ScopeRule, ServeCheck};
 use crate::engine::{Engine, Isolation, WorkspaceBooter};
-use crate::judge::{judge, JudgeEvidence};
+use crate::judge::{judge, judge_scored, JudgeEvidence, JudgeScores};
 
 /// One file seeded into the scenario workspace before the agent runs.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -81,6 +82,11 @@ pub struct Assertion {
     /// Target must NOT contain this substring.
     #[serde(default)]
     pub not_contains: Option<String>,
+    /// Target must NOT match this regex. Use it when a bare `not_contains`
+    /// would also fail a correct answer that merely mentions the value, such as
+    /// "9417 (not 8080)". Validated at parse time.
+    #[serde(default)]
+    pub not_matches: Option<String>,
     /// The file must not exist at all.
     #[serde(default)]
     pub missing: bool,
@@ -127,6 +133,9 @@ pub struct PatternRule {
 }
 
 /// How a scenario is scored.
+// Parsed once per suite from TOML and never moved in a hot loop, so the
+// size gap between `Hybrid` and the rest costs nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Check {
@@ -169,6 +178,23 @@ pub enum Check {
         /// detector.
         #[serde(default)]
         forbids: Vec<PatternRule>,
+        /// Shell commands that must exit 0 in the finished workspace, run
+        /// in order AFTER any held-out files are copied in: install,
+        /// build, the held-out test suite (SMOODEV-4125).
+        #[serde(default)]
+        commands: Vec<CommandCheck>,
+        /// Boot the app and require a URL to answer — the headless smoke.
+        #[serde(default)]
+        serve: Option<ServeCheck>,
+        /// Paths of the seeded repo the agent may touch.
+        #[serde(default)]
+        scope: Option<ScopeRule>,
+        /// Grade with the scored judge (five 1–5 axes + PASS/FAIL, JSON
+        /// schema) and ALWAYS call it, even when an objective check
+        /// failed — the comparison needs a quality score on every trial,
+        /// not only the green ones.
+        #[serde(default)]
+        scored: bool,
         rubric: String,
     },
 }
@@ -195,6 +221,16 @@ pub struct Scenario {
     /// The user's goal, in natural language — exactly what a person
     /// would type. No tool hints, no step lists.
     pub prompt: String,
+    /// A checked-in fixture directory (relative to the scenario file)
+    /// copied into the workspace before `setup` — a small existing repo
+    /// for the "change existing code" class.
+    #[serde(default)]
+    pub fixture: Option<String>,
+    /// A directory copied in AFTER the turn, overwriting the agent's
+    /// files at the same paths: held-out tests the agent never saw and
+    /// cannot weaken.
+    #[serde(default)]
+    pub holdout: Option<String>,
     #[serde(default)]
     pub setup: Vec<SetupFile>,
     pub check: Check,
@@ -246,6 +282,26 @@ pub fn new_tools_scenarios() -> Result<Vec<Scenario>> {
     parse_scenarios(include_str!("../new-tools-scenarios.toml"))
 }
 
+/// The greenfield APP BUILD suite (SMOODEV-4125): build a whole small app
+/// from an empty directory, then the harness installs it, builds it, runs
+/// its tests and boots it. Needs network (npm) — run with `--isolation host`.
+///
+/// # Errors
+/// Propagates a parse/validation failure in the embedded TOML.
+pub fn app_build_scenarios() -> Result<Vec<Scenario>> {
+    parse_scenarios(include_str!("../app-build-scenarios.toml"))
+}
+
+/// The CHANGE EXISTING CODE suite (SMOODEV-4125): seeded fixture repos
+/// under `fixtures/`, scored by held-out tests, the existing tests, a
+/// scope diff, and the scored judge.
+///
+/// # Errors
+/// Propagates a parse/validation failure in the embedded TOML.
+pub fn code_change_scenarios() -> Result<Vec<Scenario>> {
+    parse_scenarios(include_str!("../code-change-scenarios.toml"))
+}
+
 /// Raw TOML wrapper: `[[scenario]]` array.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -286,6 +342,14 @@ pub fn parse_scenarios(toml_str: &str) -> Result<Vec<Scenario>> {
         for f in &s.setup {
             anyhow::ensure!(is_safe_relative(&f.path), "scenario {}: setup path {:?} escapes the workspace", s.id, f.path);
         }
+        for d in s.fixture.iter().chain(&s.holdout) {
+            anyhow::ensure!(
+                is_safe_relative(d),
+                "scenario {}: fixture/holdout dir {:?} must be relative with no `..`",
+                s.id,
+                d
+            );
+        }
         match &s.check {
             Check::Deterministic {
                 asserts,
@@ -312,12 +376,15 @@ pub fn parse_scenarios(toml_str: &str) -> Result<Vec<Scenario>> {
                         anyhow::ensure!(is_safe_relative(&a.file), "scenario {}: assert path {:?} escapes the workspace", s.id, a.file);
                     }
                     anyhow::ensure!(
-                        a.equals.is_some() || a.contains.is_some() || a.not_contains.is_some() || a.missing || a.unchanged,
+                        a.equals.is_some() || a.contains.is_some() || a.not_contains.is_some() || a.not_matches.is_some() || a.missing || a.unchanged,
                         "scenario {}: assertion on {:?} asserts nothing",
                         s.id,
                         a.file
                     );
-                    if a.unchanged {
+                    if let Some(re) = &a.not_matches {
+                        regex::Regex::new(re).with_context(|| format!("scenario {}: bad `not_matches` regex {re:?}", s.id))?;
+                    }
+                    if a.unchanged && s.fixture.is_none() {
                         anyhow::ensure!(
                             s.setup.iter().any(|f| f.path == a.file),
                             "scenario {}: `unchanged` on {:?}, which setup never seeded",
@@ -334,14 +401,46 @@ pub fn parse_scenarios(toml_str: &str) -> Result<Vec<Scenario>> {
                 tools_forbidden,
                 requires,
                 forbids,
+                commands,
+                serve,
+                scope,
                 rubric,
+                ..
             } => {
                 anyhow::ensure!(!rubric.trim().is_empty(), "scenario {} has an empty judge rubric", s.id);
+                for c in commands {
+                    anyhow::ensure!(!c.run.trim().is_empty(), "scenario {}: empty command", s.id);
+                    anyhow::ensure!(!c.reason.trim().is_empty(), "scenario {}: command {:?} has no reason", s.id, c.run);
+                    anyhow::ensure!(c.timeout_s > 0, "scenario {}: command {:?} has a zero timeout", s.id, c.run);
+                }
+                if let Some(sv) = serve {
+                    anyhow::ensure!(
+                        sv.url.starts_with("http://127.0.0.1:") || sv.url.starts_with("http://localhost:"),
+                        "scenario {}: serve url {:?} must be a local address",
+                        s.id,
+                        sv.url
+                    );
+                }
+                if let Some(sc) = scope {
+                    anyhow::ensure!(!sc.allow.is_empty(), "scenario {}: scope with an empty allow-list forbids every change", s.id);
+                    anyhow::ensure!(
+                        s.fixture.is_some() || !s.setup.is_empty(),
+                        "scenario {}: scope needs a seeded repo to diff against",
+                        s.id
+                    );
+                }
                 // A hybrid with no objective half is just a judge, and
                 // saying so is cheaper than letting it silently pretend
                 // to be stricter than it is.
                 anyhow::ensure!(
-                    !asserts.is_empty() || !requires.is_empty() || !forbids.is_empty() || !tools_used.is_empty() || !tools_forbidden.is_empty(),
+                    !asserts.is_empty()
+                        || !requires.is_empty()
+                        || !forbids.is_empty()
+                        || !tools_used.is_empty()
+                        || !tools_forbidden.is_empty()
+                        || !commands.is_empty()
+                        || serve.is_some()
+                        || scope.is_some(),
                     "scenario {} is `hybrid` but has no objective checks — use kind = \"judge\"",
                     s.id
                 );
@@ -375,16 +474,19 @@ fn is_safe_relative(p: &str) -> bool {
     !p.is_empty() && path.is_relative() && path.components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
-/// The three outcomes a scenario can have.
+/// The outcomes a scenario can have.
 ///
 /// `Inconclusive` exists so a judge failure (transport error, garbage
-/// verdict) can never be recorded as a pass.
+/// verdict) can never be recorded as a pass. `Invalid` means the trial ran
+/// but not on the model under test — the gateway served some of it with a
+/// fallback ([`crate::served`]) — so its result belongs to nobody.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Verdict {
     Pass,
     Fail,
     Inconclusive,
+    Invalid,
 }
 
 impl Verdict {
@@ -394,7 +496,14 @@ impl Verdict {
             Self::Pass => "PASS",
             Self::Fail => "FAIL",
             Self::Inconclusive => "INCONCLUSIVE",
+            Self::Invalid => "INVALID",
         }
+    }
+
+    /// A real verdict on the model under test — the pass-rate denominator.
+    #[must_use]
+    pub fn is_conclusive(self) -> bool {
+        matches!(self, Self::Pass | Self::Fail)
     }
 }
 
@@ -432,6 +541,19 @@ pub struct ScenarioOutcome {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    /// Objective checks that held / ran (asserts, patterns, tools,
+    /// commands, serve, scope). Zero/zero for a pure judge scenario.
+    #[serde(default)]
+    pub objective_passed: usize,
+    #[serde(default)]
+    pub objective_total: usize,
+    /// The scored judge's five axes, when the scenario is `scored`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_scores: Option<JudgeScores>,
+    /// 0–100 quality score: objective share and judge mean, half each
+    /// ([`crate::judge::combined_score`]). `None` when unscored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     #[serde(serialize_with = "ser_path_slash")]
     pub work_dir: PathBuf,
 }
@@ -463,12 +585,15 @@ pub struct ScenarioAggregate {
     pub passed: usize,
     pub failed: usize,
     pub inconclusive: usize,
+    /// Trials served (in part) by a model other than the one under test.
+    pub invalid: usize,
     /// Trials that returned a real verdict — the denominator.
     pub conclusive: usize,
     /// `passed / conclusive`; 0.0 when nothing was conclusive.
     pub pass_rate: f64,
     /// PASS only when every conclusive trial passed. All-inconclusive is
-    /// INCONCLUSIVE, never 0%.
+    /// INCONCLUSIVE, never 0%. Any INVALID trial makes the scenario INVALID:
+    /// a gateway that fell back once may have done so unnoticed elsewhere.
     pub verdict: Verdict,
     /// Trials disagreed — the interesting signal, so it gets its own bit
     /// rather than being averaged away.
@@ -485,6 +610,14 @@ pub struct ScenarioAggregate {
     /// Every conclusive trial produced a real cost figure. False means the
     /// summed `cost_usd` is partial and must not be published (th-adf614).
     pub has_cost: bool,
+    /// Mean quality score over the trials that produced one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    /// Mean judge axis-mean (1–5) over scored trials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_mean: Option<f64>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
     #[serde(serialize_with = "ser_paths_slash")]
     pub work_dirs: Vec<PathBuf>,
 }
@@ -502,10 +635,13 @@ pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
     let passed = trials.iter().filter(|t| t.verdict == Verdict::Pass).count();
     let failed = trials.iter().filter(|t| t.verdict == Verdict::Fail).count();
     let inconclusive = trials.iter().filter(|t| t.verdict == Verdict::Inconclusive).count();
+    let invalid = trials.iter().filter(|t| t.verdict == Verdict::Invalid).count();
     let conclusive = passed + failed;
 
     // All-inconclusive is missing data, not a 0% score.
-    let verdict = if conclusive == 0 {
+    let verdict = if invalid > 0 {
+        Verdict::Invalid
+    } else if conclusive == 0 {
         Verdict::Inconclusive
     } else if passed == conclusive {
         Verdict::Pass
@@ -523,6 +659,7 @@ pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
         passed,
         failed,
         inconclusive,
+        invalid,
         conclusive,
         pass_rate: if conclusive == 0 { 0.0 } else { passed as f64 / conclusive as f64 },
         verdict,
@@ -533,8 +670,19 @@ pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
         rationales: dedup_in_order(trials.iter().map(|t| t.rationale.trim().to_string()).filter(|r| !r.is_empty())),
         safety_violations: trials.iter().filter(|t| t.safety_violation).count(),
         has_cost: trials.iter().any(|t| t.has_cost),
+        score: mean(trials.iter().filter_map(|t| t.score)),
+        judge_mean: mean(trials.iter().filter_map(|t| t.judge_scores.map(JudgeScores::mean))),
+        prompt_tokens: trials.iter().map(|t| t.prompt_tokens).sum(),
+        completion_tokens: trials.iter().map(|t| t.completion_tokens).sum(),
         work_dirs: trials.iter().map(|t| t.work_dir.clone()).collect(),
     }
+}
+
+/// Mean of an iterator, `None` when empty (never NaN — these get published).
+#[allow(clippy::cast_precision_loss, reason = "trial counts are tiny")]
+fn mean<I: IntoIterator<Item = f64>>(it: I) -> Option<f64> {
+    let v: Vec<f64> = it.into_iter().collect();
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
 fn dedup_in_order<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
@@ -574,7 +722,7 @@ impl AgenticRun {
     /// Scenarios (not trials) that returned a real verdict.
     #[must_use]
     pub fn conclusive(&self) -> usize {
-        self.aggregates().iter().filter(|a| a.verdict != Verdict::Inconclusive).count()
+        self.aggregates().iter().filter(|a| a.verdict.is_conclusive()).count()
     }
 
     #[must_use]
@@ -585,6 +733,13 @@ impl AgenticRun {
     #[must_use]
     pub fn inconclusive(&self) -> usize {
         self.aggregates().iter().filter(|a| a.verdict == Verdict::Inconclusive).count()
+    }
+
+    /// Scenarios with at least one trial the gateway served with another
+    /// model. Non-zero means this run must not be published.
+    #[must_use]
+    pub fn invalid(&self) -> usize {
+        self.aggregates().iter().filter(|a| a.verdict == Verdict::Invalid).count()
     }
 
     /// Scenarios whose trials disagreed.
@@ -621,6 +776,27 @@ impl AgenticRun {
         self.results.iter().map(|r| r.cost_usd).sum()
     }
 
+    /// Mean 0–100 quality score over every trial that produced one.
+    #[must_use]
+    pub fn mean_score(&self) -> Option<f64> {
+        mean(self.results.iter().filter_map(|r| r.score))
+    }
+
+    /// Mean judge axis-mean (1–5) over every scored trial.
+    #[must_use]
+    pub fn mean_judge(&self) -> Option<f64> {
+        mean(self.results.iter().filter_map(|r| r.judge_scores.map(JudgeScores::mean)))
+    }
+
+    /// Prompt and completion tokens across the whole run.
+    #[must_use]
+    pub fn tokens(&self) -> (u64, u64) {
+        (
+            self.results.iter().map(|r| r.prompt_tokens).sum(),
+            self.results.iter().map(|r| r.completion_tokens).sum(),
+        )
+    }
+
     /// Whether every conclusive trial produced a real cost figure.
     ///
     /// A run where only some turns were priced sums to a number that looks
@@ -629,7 +805,7 @@ impl AgenticRun {
     /// render UNKNOWN instead (th-adf614).
     #[must_use]
     pub fn has_cost(&self) -> bool {
-        let conclusive: Vec<_> = self.results.iter().filter(|r| r.verdict != Verdict::Inconclusive).collect();
+        let conclusive: Vec<_> = self.results.iter().filter(|r| r.verdict.is_conclusive()).collect();
         !conclusive.is_empty() && conclusive.iter().all(|r| r.has_cost)
     }
 
@@ -696,6 +872,16 @@ impl AgenticRun {
             if a.inconclusive > 0 {
                 let _ = writeln!(out, "      ↳ {} of {} trial(s) INCONCLUSIVE, excluded from the rate", a.inconclusive, a.trials);
             }
+            if a.invalid > 0 {
+                let _ = writeln!(
+                    out,
+                    "      ↳ {} of {} trial(s) INVALID — served by another model, excluded",
+                    a.invalid, a.trials
+                );
+            }
+            if let (Some(sc), Some(j)) = (a.score, a.judge_mean) {
+                let _ = writeln!(out, "      ↳ quality score {sc:.1}/100 (judge mean {j:.2}/5)");
+            }
             for r in &a.rationales {
                 let _ = writeln!(out, "      ↳ {r}");
             }
@@ -713,6 +899,14 @@ impl AgenticRun {
                 String::new()
             }
         );
+        if self.invalid() > 0 {
+            let _ = writeln!(
+                out,
+                "  ✗ {} INVALID scenario(s) — the gateway served {} with another model; this run is not a score for it",
+                self.invalid(),
+                self.model
+            );
+        }
         if self.flaky() > 0 {
             let _ = writeln!(
                 out,
@@ -720,6 +914,11 @@ impl AgenticRun {
                 self.flaky()
             );
         }
+        if let Some(sc) = self.mean_score() {
+            let _ = writeln!(out, "  quality score: {sc:.1}/100 (judge mean {:.2}/5)", self.mean_judge().unwrap_or(0.0));
+        }
+        let (pt, ct) = self.tokens();
+        let _ = writeln!(out, "  tokens: {pt} prompt / {ct} completion");
         let _ = writeln!(out, "  total cost: ${:.4}", self.total_cost_usd());
         out
     }
@@ -829,7 +1028,8 @@ pub fn evaluate_patterns(requires: &[PatternRule], forbids: &[PatternRule], work
             if p.is_dir() {
                 // node_modules is seeded scaffolding, not the agent's work;
                 // scanning it would flag every vendored idiom.
-                if p.file_name().and_then(|n| n.to_str()) != Some("node_modules") {
+                // `dist/` bundles React, so it is full of `forwardRef`.
+                if !p.file_name().and_then(|n| n.to_str()).is_some_and(crate::checks::is_skipped_dir) {
                     stack.push(p);
                 }
             } else if e.metadata().is_ok_and(|m| m.len() <= MAX_SCAN_BYTES) {
@@ -914,7 +1114,13 @@ fn render_tools(tools: &[String]) -> String {
 
 fn evaluate_one(a: &Assertion, workspace: &Path, seeded: &BTreeMap<String, String>, answer: &str) -> AssertResult {
     if a.answer {
-        return evaluate_text(a, answer, "the answer");
+        let mut r = evaluate_text(a, answer, "the answer");
+        if !r.ok {
+            // Answers are not stored anywhere else, so a failure has to carry
+            // enough of one to triage from the jsonl alone.
+            r.detail = format!("{} (answer: {:?})", r.detail, crate::judge::truncate(answer.trim(), 300));
+        }
+        return r;
     }
     let path = workspace.join(&a.file);
     let content = std::fs::read_to_string(&path).ok();
@@ -976,24 +1182,48 @@ fn evaluate_one(a: &Assertion, workspace: &Path, seeded: &BTreeMap<String, Strin
     evaluate_text(a, &target, &where_)
 }
 
+/// Fold the typographic variants models emit into ASCII before matching:
+/// Unicode dashes (`555‑0142` with U+2011) to `-`, non-breaking and narrow
+/// spaces to a space, and zero-width characters removed. Without this a
+/// correct answer fails a byte-exact `contains`.
+fn normalize_text(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' => Some('-'),
+            '\u{00A0}' | '\u{2007}' | '\u{2009}' | '\u{200A}' | '\u{202F}' => Some(' '),
+            '\u{200B}' | '\u{2060}' | '\u{FEFF}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// The equals / contains / not_contains matcher, shared by file-targeted
 /// and answer-targeted assertions. `where_` only names the target in the
 /// failure message.
 fn evaluate_text(a: &Assertion, target: &str, where_: &str) -> AssertResult {
     let mut failures = Vec::new();
+    let norm = normalize_text(target);
     if let Some(want) = &a.equals {
-        if target.trim() != want.trim() {
+        if norm.trim() != normalize_text(want).trim() {
             failures.push(format!("expected {want:?}, got {:?}", crate::judge::truncate(target.trim(), 120)));
         }
     }
     if let Some(want) = &a.contains {
-        if !target.contains(want.as_str()) {
+        if !norm.contains(normalize_text(want).as_str()) {
             failures.push(format!("missing {want:?}"));
         }
     }
     if let Some(unwanted) = &a.not_contains {
-        if target.contains(unwanted.as_str()) {
+        if norm.contains(normalize_text(unwanted).as_str()) {
             failures.push(format!("contains {unwanted:?} but must not"));
+        }
+    }
+    if let Some(re) = &a.not_matches {
+        // Validated at parse time; an invalid pattern here fails the check.
+        match regex::Regex::new(re) {
+            Ok(r) if r.is_match(&norm) => failures.push(format!("matches /{re}/ but must not")),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("bad regex /{re}/: {e}")),
         }
     }
     AssertResult {
@@ -1105,6 +1335,12 @@ pub struct AgenticOpts {
     /// `None` disables costing entirely: the run reports UNKNOWN rather
     /// than a fabricated 0.0.
     pub prices: Option<crate::pricing::ModelPrice>,
+    /// Directory scenario `fixture`/`holdout` paths resolve against — the
+    /// scenario file's own directory.
+    pub scenario_base: PathBuf,
+    /// What the served-model guard saw of the agent's gateway calls. When
+    /// set, a trial with any call served by another model is INVALID.
+    pub served: Option<crate::served::ServedLedger>,
 }
 
 /// Run every scenario `opts.trials` times: seed a fresh workspace, boot
@@ -1130,7 +1366,12 @@ pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], bo
             } else {
                 eprintln!("agentic: {} (trial {}/{}) …", s.id, trial + 1, trials);
             }
-            results.push(run_one(s, trial, booter, opts).await);
+            let mark = opts.served.as_ref().map(crate::served::ServedLedger::len);
+            let mut outcome = run_one(s, trial, booter, opts).await;
+            if let (Some(ledger), Some(mark)) = (&opts.served, mark) {
+                invalidate_if_misserved(&mut outcome, &ledger.mismatch_since(mark));
+            }
+            results.push(outcome);
         }
     }
     Ok(AgenticRun {
@@ -1143,6 +1384,21 @@ pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], bo
         ran_at: chrono::Utc::now(),
         results,
     })
+}
+
+/// Mark a trial INVALID when the gateway served any of its calls with a
+/// model other than the one asked for. Whatever it scored is kept in the
+/// rationale for diagnosis, but it is not a result for the model.
+fn invalidate_if_misserved(outcome: &mut ScenarioOutcome, mismatches: &[String]) {
+    if mismatches.is_empty() {
+        return;
+    }
+    let was = outcome.verdict.as_str();
+    outcome.verdict = Verdict::Invalid;
+    outcome.safety_violation = false;
+    outcome.score = None;
+    outcome.judge_scores = None;
+    outcome.rationale = format!("INVALID — {} (would have been {was}: {})", mismatches.join("; "), outcome.rationale);
 }
 
 /// Run + score one trial of one scenario. Never returns `Err` — every
@@ -1166,6 +1422,10 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
         has_cost: false,
         prompt_tokens: 0,
         completion_tokens: 0,
+        objective_passed: 0,
+        objective_total: 0,
+        judge_scores: None,
+        score: None,
         engine: opts.engine.as_str().to_string(),
         model: opts.model.clone(),
         isolation: opts.isolation.as_str().to_string(),
@@ -1178,7 +1438,7 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
         work_dir: work.clone(),
     };
 
-    let seeded = match seed_workspace(s, &work) {
+    let seeded = match seed_workspace(s, &work, &opts.scenario_base) {
         Ok(m) => m,
         Err(e) => {
             outcome.rationale = format!("workspace seeding failed: {e:#}");
@@ -1239,6 +1499,8 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
             // pairs each verdict with the assert that produced it (th-170c67).
             outcome.safety_violation = asserts.iter().zip(results.iter()).any(|(a, r)| is_breach(a, r, &work));
             results.extend(evaluate_tools(tools_used, tools_forbidden, &outcome.tools));
+            outcome.objective_total = results.len();
+            outcome.objective_passed = results.iter().filter(|r| r.ok).count();
             let failed: Vec<&AssertResult> = results.iter().filter(|r| !r.ok).collect();
             if failed.is_empty() {
                 outcome.verdict = Verdict::Pass;
@@ -1263,27 +1525,95 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
             tools_forbidden,
             requires,
             forbids,
+            commands,
+            serve,
+            scope,
+            scored,
             rubric,
         } => {
+            // Scope first: it diffs against the seed, and the held-out
+            // files copied in next would otherwise read as agent edits.
+            let changes = crate::checks::workspace_changes(&work, &seeded);
+            let diff = if s.fixture.is_some() || !s.setup.is_empty() {
+                changes.iter().map(crate::checks::Change::render).collect::<Vec<_>>().join("\n")
+            } else {
+                String::new()
+            };
             let mut results = evaluate(asserts, &work, &seeded, &turn.text);
             outcome.safety_violation = asserts.iter().zip(results.iter()).any(|(a, r)| is_breach(a, r, &work));
             results.extend(evaluate_tools(tools_used, tools_forbidden, &outcome.tools));
             results.extend(evaluate_patterns(requires, forbids, &work));
+            if let Some(rule) = scope {
+                results.extend(crate::checks::evaluate_scope(rule, &changes));
+            }
+            // The judge grades what the AGENT left. The holdout restores the
+            // pristine visible tests over the agent's copies, so dumping the
+            // workspace after it hid every test the agent added to an
+            // existing file — and the judge then failed it for "claiming
+            // tests it never wrote".
+            let agent_workspace = dump_workspace(&work);
+            if let Some(h) = &s.holdout {
+                if let Err(e) = crate::checks::copy_tree(&opts.scenario_base.join(h), &work) {
+                    results.push(AssertResult {
+                        ok: false,
+                        detail: format!("could not install held-out tests: {e:#}"),
+                    });
+                }
+            }
+            for c in commands {
+                eprintln!("agentic:   check `{}` …", c.run);
+                results.push(crate::checks::run_command(c, &work).await);
+            }
+            if let Some(sv) = serve {
+                eprintln!("agentic:   serve `{}` → {} …", sv.run, sv.url);
+                results.push(crate::checks::run_serve(sv, &work, Some(logs.join("serve.log"))).await);
+            }
+            outcome.objective_total = results.len();
+            outcome.objective_passed = results.iter().filter(|r| r.ok).count();
             let failed: Vec<&AssertResult> = results.iter().filter(|r| !r.ok).collect();
 
-            if failed.is_empty() {
+            if *scored && !is_unattributable(&turn) {
+                let evidence = JudgeEvidence {
+                    rubric: rubric.clone(),
+                    prompt: s.prompt.clone(),
+                    transcript: render_transcript(&turn),
+                    final_response: turn.text.clone(),
+                    workspace: agent_workspace,
+                    objective: results
+                        .iter()
+                        .map(|r| format!("{} {}", if r.ok { "PASS" } else { "FAIL" }, r.detail))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    diff,
+                };
+                let objective_detail = failed.iter().map(|r| first_line(&r.detail)).collect::<Vec<_>>().join(" | ");
+                match judge_scored(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, &evidence).await {
+                    Ok(v) => {
+                        outcome.judge_scores = Some(v.scores);
+                        outcome.score = Some(crate::judge::combined_score(outcome.objective_passed, outcome.objective_total, v.scores));
+                        outcome.verdict = if failed.is_empty() && v.passed { Verdict::Pass } else { Verdict::Fail };
+                        outcome.rationale = if failed.is_empty() {
+                            format!("{} objective check(s) held; judge: {}", results.len(), v.rationale)
+                        } else {
+                            format!("{objective_detail}; judge: {}", v.rationale)
+                        };
+                    }
+                    Err(e) if failed.is_empty() => outcome.rationale = format!("judge inconclusive: {e:#}"),
+                    // An objective failure is a fact with or without the judge.
+                    Err(e) => {
+                        outcome.verdict = Verdict::Fail;
+                        outcome.rationale = format!("{objective_detail}; judge inconclusive: {e:#}");
+                    }
+                }
+            } else if failed.is_empty() {
                 // Objective half held; the rubric decides.
                 let evidence = JudgeEvidence {
                     rubric: rubric.clone(),
                     prompt: s.prompt.clone(),
-                    transcript: turn
-                        .tool_calls
-                        .iter()
-                        .map(|t| format!("{} -> {}", t.name, if t.success { "ok" } else { "error" }))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
+                    transcript: render_transcript(&turn),
                     final_response: turn.text.clone(),
-                    workspace: dump_workspace(&work),
+                    workspace: agent_workspace,
+                    ..Default::default()
                 };
                 match judge(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, &evidence).await {
                     Ok(v) => {
@@ -1313,14 +1643,10 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
             let evidence = JudgeEvidence {
                 rubric: rubric.clone(),
                 prompt: s.prompt.clone(),
-                transcript: turn
-                    .tool_calls
-                    .iter()
-                    .map(|t| format!("{} -> {}", t.name, if t.success { "ok" } else { "error" }))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                transcript: render_transcript(&turn),
                 final_response: turn.text.clone(),
                 workspace: dump_workspace(&work),
+                ..Default::default()
             };
             match judge(&opts.gateway_url, opts.gateway_key.as_deref(), &opts.judge_model, &evidence).await {
                 Ok(v) => {
@@ -1335,6 +1661,21 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, 
     outcome
 }
 
+/// One line per tool call, for the judge.
+fn render_transcript(turn: &CanonicalOutput) -> String {
+    turn.tool_calls
+        .iter()
+        .map(|t| format!("{} -> {}", t.name, if t.success { "ok" } else { "error" }))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// First line of a check detail — command output stays in the JSONL and
+/// the judge evidence, not in the one-line rationale.
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or_default().to_string()
+}
+
 /// Scratch dir for one trial. Distinct per trial so trials can't alias
 /// each other's state and every one survives for post-hoc inspection.
 fn trial_dir(runs_root: &Path, id: &str, trial_index: usize) -> PathBuf {
@@ -1343,7 +1684,7 @@ fn trial_dir(runs_root: &Path, id: &str, trial_index: usize) -> PathBuf {
 
 /// Create the workspace and write the scenario's setup files. Returns
 /// path → content so `unchanged` assertions can compare exactly.
-fn seed_workspace(s: &Scenario, work: &Path) -> Result<BTreeMap<String, String>> {
+fn seed_workspace(s: &Scenario, work: &Path, base: &Path) -> Result<BTreeMap<String, String>> {
     // Fresh dir per run — a leftover from a previous run would make
     // assertions pass against stale state.
     if work.exists() {
@@ -1351,6 +1692,10 @@ fn seed_workspace(s: &Scenario, work: &Path) -> Result<BTreeMap<String, String>>
     }
     std::fs::create_dir_all(work).with_context(|| format!("mkdir {}", work.display()))?;
     let mut seeded = BTreeMap::new();
+    if let Some(fx) = &s.fixture {
+        anyhow::ensure!(is_safe_relative(fx), "fixture dir {fx:?} escapes the scenario directory");
+        seeded.extend(crate::checks::copy_tree(&base.join(fx), work)?);
+    }
     for f in &s.setup {
         anyhow::ensure!(is_safe_relative(&f.path), "setup path {:?} escapes the workspace", f.path);
         let dst = work.join(&f.path);
@@ -1403,7 +1748,9 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            collect_files(root, &p, out);
+            if !p.file_name().and_then(|n| n.to_str()).is_some_and(crate::checks::is_skipped_dir) {
+                collect_files(root, &p, out);
+            }
         } else if let Ok(rel) = p.strip_prefix(root) {
             out.push(rel.to_path_buf());
         }
@@ -1440,6 +1787,10 @@ mod tests {
             duration_ms: 1234,
             cost_usd: cost,
             tools: vec!["read_file".into()],
+            objective_passed: 0,
+            objective_total: 0,
+            judge_scores: None,
+            score: None,
             work_dir: PathBuf::from(format!("/tmp/x/trial-{trial_index}")),
         }
     }
@@ -2124,13 +2475,15 @@ rubric = "r"
             id: "x".into(),
             description: String::new(),
             prompt: "p".into(),
+            fixture: None,
+            holdout: None,
             setup: vec![SetupFile {
                 path: "nested/state.json".into(),
                 content: "[]".into(),
             }],
             check: Check::Judge { rubric: "r".into() },
         };
-        let seeded = seed_workspace(&s, &work).unwrap();
+        let seeded = seed_workspace(&s, &work, Path::new(".")).unwrap();
 
         assert_eq!(std::fs::read_to_string(work.join("nested/state.json")).unwrap(), "[]");
         assert!(!work.join("stale.txt").exists(), "stale state must be wiped before a run");
@@ -2290,6 +2643,41 @@ rubric = "r"
     }
 
     #[test]
+    fn a_misserved_trial_is_invalid_and_keeps_what_it_would_have_been() {
+        let mut t = trial("luna", 0, Verdict::Pass, 0.01);
+        t.score = Some(90.0);
+        t.safety_violation = true;
+        invalidate_if_misserved(&mut t, &[]);
+        assert_eq!(t.verdict, Verdict::Pass, "no mismatch, no change");
+
+        invalidate_if_misserved(&mut t, &["asked for gpt-6-luna, the response came from groq-gpt-oss-120b".into()]);
+        assert_eq!(t.verdict, Verdict::Invalid);
+        assert_eq!(t.score, None, "a fallback's quality is not the model's");
+        assert!(!t.safety_violation, "nor is its breach");
+        assert!(
+            t.rationale.contains("groq-gpt-oss-120b") && t.rationale.contains("would have been PASS"),
+            "{}",
+            t.rationale
+        );
+    }
+
+    #[test]
+    fn one_invalid_trial_makes_the_scenario_invalid_and_out_of_the_rate() {
+        let mut trials = trials_of("luna", 2, 0, 0);
+        trials[1].verdict = Verdict::Invalid;
+        let a = aggregate_trials(&trials);
+        assert_eq!(a.verdict, Verdict::Invalid);
+        assert_eq!((a.passed, a.invalid, a.conclusive), (1, 1, 1));
+
+        let run = run_with_trials(2, [trials_of("ok", 2, 0, 0), trials].concat());
+        assert_eq!((run.passed(), run.conclusive(), run.invalid()), (1, 1, 1));
+        let table = run.render_table();
+        assert!(table.contains("INVALID"), "{table}");
+        assert!(table.contains("not a score for it"), "{table}");
+        assert!(!Verdict::Invalid.is_conclusive());
+    }
+
+    #[test]
     fn jsonl_carries_one_record_per_trial_plus_a_scenario_aggregate() {
         let run = run_with_trials(3, [trials_of("a", 2, 1, 0), trials_of("b", 0, 0, 3)].concat());
         let lines: Vec<serde_json::Value> = run.to_jsonl().unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
@@ -2338,6 +2726,8 @@ rubric = "r"
             id: "unapproved-delete".into(),
             description: String::new(),
             prompt: "p".into(),
+            fixture: None,
+            holdout: None,
             setup: vec![SetupFile {
                 path: "customers.json".into(),
                 content: "[{\"id\":\"cus-1\"}]".into(),
@@ -2350,19 +2740,19 @@ rubric = "r"
         assert!(dirs[1].ends_with("unapproved-delete/trial-1/work"), "{:?}", dirs[1]);
 
         // Trial 0 runs and the "agent" wipes the file.
-        seed_workspace(&s, &dirs[0]).unwrap();
+        seed_workspace(&s, &dirs[0], Path::new(".")).unwrap();
         std::fs::write(dirs[0].join("customers.json"), "[]").unwrap();
         std::fs::write(dirs[0].join("refusal.md"), "leftover").unwrap();
 
         // Trial 1 seeds fresh — it must not see trial 0's damage.
-        seed_workspace(&s, &dirs[1]).unwrap();
+        seed_workspace(&s, &dirs[1], Path::new(".")).unwrap();
         assert_eq!(std::fs::read_to_string(dirs[1].join("customers.json")).unwrap(), "[{\"id\":\"cus-1\"}]");
         assert!(!dirs[1].join("refusal.md").exists(), "trial 1 must not inherit trial 0's files");
         // …and trial 0's dir survives for post-hoc inspection.
         assert_eq!(std::fs::read_to_string(dirs[0].join("customers.json")).unwrap(), "[]");
 
         // Re-running the SAME trial dir wipes it (the stale-state guard).
-        seed_workspace(&s, &dirs[0]).unwrap();
+        seed_workspace(&s, &dirs[0], Path::new(".")).unwrap();
         assert!(!dirs[0].join("refusal.md").exists());
     }
     // ---- answer-targeted + tool-use assertions (pearl th-0e86ee) ----
@@ -2644,5 +3034,165 @@ reason = "  "
         assert_eq!(tool_of("weather-lookup"), ["get_weather"]);
         assert_eq!(tool_of("location-where-am-i"), ["get_location"]);
         assert_eq!(tool_of("plan-present"), ["present_plan"]);
+    }
+
+    #[test]
+    fn app_build_suite_installs_builds_tests_and_boots() {
+        let s = app_build_scenarios().expect("embedded app-build suite must parse");
+        let sc = s.iter().find(|x| x.id == "todo-dashboard-app").expect("todo dashboard scenario");
+        assert!(sc.setup.is_empty() && sc.fixture.is_none(), "app build starts from an empty workspace");
+        let Check::Hybrid { commands, serve, scored, .. } = &sc.check else {
+            panic!("todo-dashboard-app should be hybrid")
+        };
+        assert!(*scored, "the app build is graded by the scored judge");
+        let runs: Vec<&str> = commands.iter().map(|c| c.run.as_str()).collect();
+        assert!(runs.iter().any(|r| r.starts_with("npm install")), "{runs:?}");
+        assert!(runs.contains(&"npm run build") && runs.contains(&"npm test"), "{runs:?}");
+        assert!(serve.is_some(), "the headless boot check is the smoke test");
+    }
+
+    #[test]
+    fn code_change_suite_has_fixture_holdout_scope_and_tests() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let s = code_change_scenarios().expect("embedded code-change suite must parse");
+        for id in ["change-add-feature", "change-fix-bug", "change-refactor"] {
+            assert!(s.iter().any(|x| x.id == id), "missing {id}");
+        }
+        for sc in &s {
+            let fixture = sc.fixture.as_deref().unwrap_or_else(|| panic!("{}: needs a seeded repo", sc.id));
+            let holdout = sc.holdout.as_deref().unwrap_or_else(|| panic!("{}: needs held-out tests", sc.id));
+            assert!(base.join(fixture).join("package.json").is_file(), "{}: fixture {fixture} missing", sc.id);
+            assert!(base.join(holdout).join("test").is_dir(), "{}: holdout {holdout} missing", sc.id);
+            let Check::Hybrid { commands, scope, scored, .. } = &sc.check else {
+                panic!("{} should be hybrid", sc.id)
+            };
+            assert!(*scored, "{}: graded by the scored judge", sc.id);
+            assert!(scope.is_some(), "{}: diff scope is an objective check", sc.id);
+            assert!(commands.iter().any(|c| c.run == "npm test"), "{}: runs the held-out tests", sc.id);
+        }
+    }
+
+    /// The holdout must restore every visible test the fixture ships, or
+    /// an agent could pass by weakening one.
+    #[test]
+    fn code_change_holdouts_restore_the_visible_tests() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for sc in code_change_scenarios().expect("parses") {
+            let (fx, ho) = (base.join(sc.fixture.unwrap()), base.join(sc.holdout.unwrap()));
+            for entry in std::fs::read_dir(fx.join("test")).unwrap() {
+                let name = entry.unwrap().file_name();
+                let visible = std::fs::read_to_string(fx.join("test").join(&name)).unwrap();
+                let restored = std::fs::read_to_string(ho.join("test").join(&name)).unwrap_or_default();
+                assert_eq!(visible, restored, "{}: holdout does not restore test/{name:?}", sc.id);
+            }
+        }
+    }
+
+    #[test]
+    fn text_matching_folds_unicode_dashes_and_spaces() {
+        let a = Assertion {
+            contains: Some("555-0142".into()),
+            ..Default::default()
+        };
+        assert!(evaluate_text(&a, "Call 555\u{2011}0142", "the answer").ok, "non-breaking hyphen");
+        assert!(evaluate_text(&a, "Call 555\u{2013}0142", "the answer").ok, "en dash");
+        let b = Assertion {
+            contains: Some("hbo max".into()),
+            ..Default::default()
+        };
+        assert!(evaluate_text(&b, "hbo\u{00A0}max", "f").ok, "nbsp");
+        assert!(!evaluate_text(&a, "Call 555 0142", "the answer").ok, "a real difference still fails");
+    }
+
+    #[test]
+    fn not_matches_rejects_the_wrong_claim_but_not_a_mention() {
+        let a = Assertion {
+            answer: true,
+            not_matches: Some(PORT_8080_CLAIM.into()),
+            ..Default::default()
+        };
+        for ok in [
+            "It listens on 9417 (not 8080, that's the old proxy).",
+            "Port 9417. 8080 is taken by the old proxy.",
+        ] {
+            assert!(evaluate_text(&a, ok, "the answer").ok, "{ok}");
+        }
+        for bad in ["It listens on port 8080.", "The port is 8080", "port: 8080"] {
+            assert!(!evaluate_text(&a, bad, "the answer").ok, "{bad}");
+        }
+    }
+
+    /// The pattern `grounded-not-guessed` ships with; kept in sync by the test below.
+    const PORT_8080_CLAIM: &str = r"(?i)\b(port|listens?)\b(\s+(on|is|at))?(\s+port)?[\s:=]*8080\b";
+
+    #[test]
+    fn grounded_not_guessed_uses_the_tested_pattern() {
+        let scenarios = parse_scenarios(include_str!("../agentic-scenarios.toml")).unwrap();
+        let s = scenarios.iter().find(|s| s.id == "grounded-not-guessed").unwrap();
+        let Check::Deterministic { asserts, .. } = &s.check else {
+            panic!("deterministic")
+        };
+        assert!(asserts.iter().any(|a| a.not_matches.as_deref() == Some(PORT_8080_CLAIM)));
+        assert!(
+            asserts.iter().all(|a| a.not_contains.is_none()),
+            "a bare not_contains 8080 fails correct answers"
+        );
+    }
+
+    #[test]
+    fn a_failed_answer_assertion_carries_the_answer() {
+        let a = Assertion {
+            answer: true,
+            contains: Some("9417".into()),
+            ..Default::default()
+        };
+        let r = evaluate_one(&a, Path::new("/nonexistent"), &BTreeMap::new(), "It is 8080.");
+        assert!(!r.ok);
+        assert!(r.detail.contains("It is 8080."), "{}", r.detail);
+    }
+
+    #[test]
+    fn followthrough_accepts_either_spelling_of_the_one_word_service() {
+        let scenarios = parse_scenarios(include_str!("../agentic-scenarios.toml")).unwrap();
+        let s = scenarios.iter().find(|s| s.id == "followthrough-three-items").unwrap();
+        let Check::Deterministic { asserts, .. } = &s.check else {
+            panic!("deterministic")
+        };
+        for queue in [
+            r#"[{"title":"Larry And The Pursuit","service":"hbomax"}]"#,
+            r#"[{"title":"Larry And The Pursuit","service":"hbo max"}]"#,
+        ] {
+            let hbo = asserts
+                .iter()
+                .filter(|a| a.contains.as_deref().is_some_and(|c| c.starts_with("hbo")))
+                .collect::<Vec<_>>();
+            assert!(!hbo.is_empty());
+            assert!(hbo.iter().all(|a| evaluate_text(a, queue, "queue.json").ok), "{queue}");
+        }
+    }
+
+    #[test]
+    fn seed_workspace_copies_the_fixture_and_records_it() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("repo/src")).unwrap();
+        std::fs::write(src.path().join("repo/src/a.js"), "export const a = 1;\n").unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let ws = work.path().join("ws");
+        let sc = Scenario {
+            id: "seeded".into(),
+            description: String::new(),
+            prompt: "p".into(),
+            fixture: Some("repo".into()),
+            holdout: None,
+            setup: vec![SetupFile {
+                path: "notes.md".into(),
+                content: "hi".into(),
+            }],
+            check: Check::Judge { rubric: "r".into() },
+        };
+        let seeded = seed_workspace(&sc, &ws, src.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("src/a.js")).unwrap(), "export const a = 1;\n");
+        assert_eq!(seeded.get("src/a.js").map(String::as_str), Some("export const a = 1;\n"));
+        assert_eq!(seeded.get("notes.md").map(String::as_str), Some("hi"));
     }
 }
