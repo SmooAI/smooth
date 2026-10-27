@@ -51,6 +51,22 @@ mod tests {
         assert!(first.get("pass_rate_pct").is_some(), "each entry has a `pass_rate_pct`");
     }
 
+    #[test]
+    fn haiku_is_offered_from_the_gateway() {
+        // Claude Haiku 5.5 runs through the gateway like every other model
+        // (SMOODEV-4148), so it is in the published catalog for every client.
+        let v: serde_json::Value = serde_json::from_str(MODEL_SCORES).unwrap();
+        let benched = v["models"].as_array().unwrap().iter().filter_map(|m| m["model"].as_str());
+        let unbenched = v["unbenched"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str);
+        assert!(benched.chain(unbenched).any(|m| m == "claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn the_catalog_date_passes_through() {
+        let v: serde_json::Value = serde_json::from_str(MODEL_SCORES).unwrap();
+        assert!(v["date"].as_str().is_some_and(|d| d.len() == 10), "dated catalog: {:?}", v.get("date"));
+    }
+
     #[tokio::test]
     async fn handler_serves_json_content_type() {
         use axum::body::to_bytes;

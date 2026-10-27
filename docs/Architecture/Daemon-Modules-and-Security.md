@@ -29,6 +29,32 @@ own routes through the engine's `serve_routes` seam. Entry point:
 | `push.rs`                      | Web Push — VAPID-signed notifications to the installed PWA                                                                                                                                                        |
 | `tailscale.rs`                 | Best-effort `tailscale serve` exposure of the loopback listener                                                                                                                                                   |
 
+### Main models (SMOODEV-4148)
+
+Big Smooth and `th code` offer two main models and switch between them per turn:
+**`gpt-6-luna`** (the default) and **`claude-haiku-5-5`** (Claude Haiku 5.5).
+Both run through the `llm.smoo.ai` gateway, so the `LocalServer` applies a
+per-turn `send_message.model` by swapping only the model id, and the gateway's
+metering, fallback policy and cost tracking cover Haiku like every other model.
+
+An earlier in-daemon router sent Haiku straight to the user's Anthropic key
+while the gateway did not serve it. The gateway serves it now, so the router is
+gone. A `providers.json` that the old picker wrote with the Coding slot on
+`{anthropic, claude-haiku-5-5}` still works: `upstream_route_at` sends that slot
+to the gateway provider (`FORMER_DIRECT_MODELS` in `smooth-cast`'s
+`providers.rs`). Any other model on an Anthropic slot stays on its own provider.
+
+- **Pickers:** Haiku is in the offered set in `render-model-scores.sh`, so the
+  published catalog (`GET /api/model-catalog`, the SPA's bundled copy and the
+  phone apps) lists it, under `unbenched` until a bench run scores it. `th code`'s
+  `/model` picker lists it on the gateway provider from the live
+  `/v1/model/info` catalog.
+- **Switching:** picking the Coding (or Default) slot in `th code` switches the
+  live session on its next turn and persists to `providers.json`. At startup,
+  `th code` runs the persisted Coding model unless `--model` or a daemon-wide
+  `th settings set model …` pin is set. The SPA keeps its pick in `localStorage`
+  (`smooth.mode`).
+
 ### Dispatch
 
 There is no per-task worker process. A message arrives on the operator's

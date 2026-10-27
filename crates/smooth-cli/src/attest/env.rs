@@ -30,6 +30,8 @@ pub struct Sys {
     /// Container-runtime starters, tried in order. Only ever STARTED, never stopped.
     pub starters: Vec<OsString>,
     pub pnpm: OsString,
+    /// Runs a repo's `_<check>-untouched.mjs` path filter (see `preflight_skip`).
+    pub node: OsString,
     pub cores: usize,
     pub docker_wait: Duration,
     pub docker_poll: Duration,
@@ -45,6 +47,9 @@ pub struct Sys {
     /// The machine-wide `th ci-queue` every local check runs through
     /// (SMOODEV-3355). Tests point it at a temp dir.
     pub queue: crate::ci_queue::Queue,
+    /// Where passes are recorded for reuse (SMOODEV-4160). `None` turns reuse
+    /// off (`SMOOAI_CI_NO_REUSE=1`); tests point it at a temp dir.
+    pub ledger: Option<super::reuse::Ledger>,
 }
 
 impl Default for Sys {
@@ -56,6 +61,7 @@ impl Default for Sys {
             docker: "docker".into(),
             starters: vec!["orbctl".into(), "colima".into()],
             pnpm: "pnpm".into(),
+            node: "node".into(),
             cores: core_count(),
             docker_wait: Duration::from_secs(env_u64("DOCKER_WAIT").unwrap_or(120)),
             docker_poll: Duration::from_secs(2),
@@ -65,6 +71,10 @@ impl Default for Sys {
             overload_retry_wait: Duration::from_secs(env_u64("OVERLOAD_RETRY_WAIT").unwrap_or(600)),
             overload_poll: Duration::from_secs(env_u64("OVERLOAD_POLL").unwrap_or(15)),
             queue: crate::ci_queue::Queue::from_env(),
+            ledger: (!env_flag("NO_REUSE")).then(|| {
+                let hours = env_u64("REUSE_MAX_HOURS").unwrap_or(72);
+                super::reuse::Ledger::new(super::reuse::Ledger::default_path(), Duration::from_secs(hours * 3600))
+            }),
         }
     }
 }

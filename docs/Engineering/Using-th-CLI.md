@@ -51,6 +51,8 @@ explicit in the command tree:
   (the `site_*` tools), `smoo blog list|get|create|update|publish|unpublish|delete|image search|generate|import`
   (the `blog_*` tools; `delete` confirms unless `--yes`),
   `smoo api observability metrics` + `web-vitals`, `smoo integrations`,
+  `smoo calendar list|events|find-time|block` (the `calendar_*` tools, as you;
+  deletes, RSVPs and invitations confirm unless `--yes`),
   `smoo calling list|get|voicemails|usage|place` (the calling tools; `place`
   confirms by typing the number back, then opens your softphone — nothing rings
   until you press Call), `smoo drive search|read` (`drive_search`/`drive_read`,
@@ -1217,6 +1219,45 @@ A 409 means Drive is not connected **for you** — the error names the fix,
 `smoo integrations connect google --purpose drive_restricted`. Truncation and
 "first sheet only" notes go to stderr so `drive read` pipes cleanly.
 
+### Calendars (`smoo calendar`) — SMOODEV-3764
+
+CLI twin of the hosted MCP `calendar_*` tools (ADR-147 §2). Runs as **you**:
+your own Google / Microsoft 365 / iCloud calendars, org calendars, and ones a
+teammate shared with you — never anyone else's. User session only (an org API
+key has no calendar).
+
+```bash
+smoo calendar list [--json]                                    # calendar_list_calendars; prints each calendarRef
+smoo calendar events list [--from <rfc3339>] [--to <rfc3339>] [--calendar <ref>…] [--query <q>] [--limit N] [--json]
+smoo calendar events show --calendar <ref> --event <id> [--json]
+smoo calendar events create --title T --start <rfc3339> --end <rfc3339> [--calendar <ref>] [--attendee a@x.com,…] \
+    [--time-zone <iana>] [--all-day] [--location L] [--description D] [--conference] [--free] [--yes|--dry-run]
+smoo calendar events update --calendar <ref> --event <id> [--title …] [--start …] [--end …] [--attendee …] \
+    [--all-day|--not-all-day] [--conference|--no-conference] [--free|--busy] [--yes|--dry-run]
+smoo calendar events rm --calendar <ref> --event <id> [--yes|--dry-run]
+smoo calendar events respond --calendar <ref> --event <id> --response accepted|declined|tentative [--comment C] [--yes|--dry-run]
+smoo calendar find-time --duration 30 [--time-zone <iana>] [--from …] [--to …] [--calendar <ref>…] [--attendee …] \
+    [--workday-start 09:00] [--workday-end 17:00] [--days 1,2,3,4,5] [--max-slots N] [--json]
+smoo calendar block --start <rfc3339> --end <rfc3339> [--title "Focus time"] [--calendar <ref>]
+```
+
+- Calendars are named by the opaque `calendarRef` that `list` prints, events by
+  the id `events list` prints; both travel in the query string.
+- `create` and `block` default to your own default calendar when there is
+  exactly one; with two (say Google and Microsoft) they ask for `--calendar`.
+- **Confirmation** goes through the shared destructive gate (target printed
+  first, `--dry-run` stops there, a terminal is asked, scripts pass `--yes`):
+  `events rm` (attendees get a cancellation), `events respond` (the organizer
+  is told), `events create` with attendees (each gets a real invitation) and
+  `events update` on an event with guests or a new guest list. `block` and an
+  attendee-less `create` reach nobody and run straight away.
+- `update` is a true patch; `--attendee` REPLACES the guest list.
+- `find-time` days are 0 = Sunday … 6 = Saturday (the API's numbering, unlike
+  `booking config set`). It defaults to this machine's time zone. Anyone whose
+  free/busy could not be checked is printed on stderr as unchecked, never as free.
+- A 409 means no usable calendar is connected for you; the error names
+  `smoo integrations connect google --purpose features --tier full_access`.
+
 ### Smooth Operator (org's always-on dashboard agent)
 
 Drive the org's [Smooth Operator](../Product/Features/Org-Copilot.md) from the CLI —
@@ -2105,6 +2146,7 @@ th attest --no-push lint        # never push; fail if HEAD is local-only
 th attest --remote smoo-hub rust   # delegate to a build box
 th attest --local --all         # ignore any remote routing
 th attest --all --json          # machine-readable summary
+th attest --no-reuse rust       # run even if an earlier pass carries over
 ```
 
 **Checks are the repo's, not `th`'s.** An executable `scripts/ci/<name>.sh` in
@@ -2131,9 +2173,46 @@ takes the queue's cargo lock and **stays heavy even when marked**, because a
 cargo build is never light. With no marker the row runs heavy, as before
 (SMOODEV-4018).
 
+**Skip before queueing.** If the repo has `scripts/ci/_<check>-untouched.mjs`,
+`th attest` runs `node <script> <repo root>` (20 s limit) before asking for a slot.
+Exit 0 means the change touches nothing the check reads (stdout says why): the
+row is credited as passed at once, with no heavy slot, no cargo lock and no
+history row. Any other result (exit 1, a hang, no `node`, no script) runs the check
+as usual. smooai ships `_rust-untouched.mjs`, so a web-only branch no longer waits
+in the queue for `attest rust` to skip itself.
+
 Each passing check posts a `ci-attest/<name>` commit status on HEAD, which the
-workflow reads to skip that row. Freshness is free: the status is bound to a
-SHA, so pushing a new commit un-credits everything.
+workflow reads to skip that row. The status is bound to a SHA, so a new commit
+starts uncredited.
+
+#### A pass carries over unchanged inputs (SMOODEV-4160)
+
+Re-crediting a new commit is often free. `th attest` records every pass in
+`~/.smooth/attest/credits.db` as `(repo, check, sha, merge-base)`. Before running
+a check it looks for a recent pass that still applies, and if it finds one it
+posts the credit without running anything:
+
+```text
+✓ rust reused from 3f2a91c — no input changed since it passed (912s saved)
+```
+
+The status reads `passed locally in 912s (reused from 3f2a91c: no input
+changed)`. This is the dagger idea: a check's verdict is a fact about the content
+it reads, not about the commit that carried it. A pass carries over when:
+
+1. it is younger than 72h (`SMOOAI_CI_REUSE_MAX_HOURS`);
+2. no path under `scripts/ci/` differs, between the two heads or between the two
+   merge-bases;
+3. the repo's `scripts/ci/_rows-touched.sh` says every other changed path (head vs
+   head, plus base vs base) is `untouched` for that check.
+
+The hook is the repo's answer to "what does this check read": changed paths on
+stdin, one `<check> touched|untouched` line out per check. No hook, a failing or
+slow (>10s) hook, or a check it does not name means the check runs. Every doubt
+resolves to running. The same commit, or an identical tree, needs no hook. A dirty
+tree neither reuses a pass nor records one. `--no-reuse` (or `SMOOAI_CI_NO_REUSE=1`)
+forces the run. smooai's hook is built on its attest gate's path rules
+(`scripts/ci/_rows-touched.mjs`).
 
 #### Three outcomes, not two
 

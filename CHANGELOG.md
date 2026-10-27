@@ -1,5 +1,42 @@
 # @smooai/smooth
 
+## 0.89.0
+
+### Minor Changes
+
+- cfd88b6: SMOODEV-4188: `th smoo booking config publish` and `unpublish` publish or take down your booking page. A new page starts unpublished, and nobody can book it until it is published. `booking link` and `booking types create` now warn when the page isn't published, because the link answers "not available" until it is.
+
+## 0.88.0
+
+### Minor Changes
+
+- 480e25c: `th attest` reuses a pass when nothing the check reads has changed. Each pass is recorded locally, and a later commit whose diff (and merge-base move) the repo's `scripts/ci/_rows-touched.sh` calls `untouched` for a check is credited without re-running it. Any `scripts/ci/` change, a missing or failing hook, a dirty tree or a pass older than 72h still runs the check. `--no-reuse` forces a run.
+- aed580d: Claude Haiku 5.5 and GPT-6 Luna are now both main models in Big Smooth and `th code`, and you can switch between them per turn (SMOODEV-4148). Haiku is not on the Smoo gateway. When you have an Anthropic key in `providers.json`, the daemon's new loopback model router sends Haiku turns to Anthropic and everything else to the gateway. The pickers offer Haiku only when it can run. A `th code` `/model` pick of the main slot now switches the live session immediately and is used again the next time you start `th code`.
+
+### Patch Changes
+
+- 8c5e68b: Big Smooth's model picker is readable again (SMOODEV-4174). Each model's name gets its own line instead of being squeezed to "g." by the score and cost text, and the full id sits underneath. The main models (GPT-6 Luna, then Claude Haiku 5.5) are listed first. 🏆 now needs at least two benched models and a leader at 60% or better, so a lone 17.9% model no longer wears it. Premium is a text tag rather than a 💎. Unbenched rows say "not benched" once, an unmeasured $/pass is noted once in the footer, and the unexplained heart glyphs are replaced by the token price as text. The bench catalog now carries its run date, which the footer shows with its age, and the daemon serves Haiku's bench score from the full leaderboard.
+
+## 0.87.2
+
+### Patch Changes
+
+- 68a1dc8: Shift+Enter and Alt/Option+Enter start a new line in both the Big Smooth chat and `th code` (SMOODEV-4147). The web composer used to send on Alt+Enter. `th code` had no newline key at all: it now turns on the kitty keyboard protocol where the terminal supports it, so Shift+Enter is distinguishable from Enter, and it also accepts Alt+Enter and Ctrl+J everywhere.
+- 9441df2: Narc's shell detector no longer flags `2>&1`, `>&2`, `/dev/` targets or a quoted `>` (such as `node -e "x => x"`) as a file truncation, so ordinary build and test commands skip the judge. It now checks every redirect in the line, not only the first, so `cmd 2>&1 > out.txt` is still caught.
+- 9441df2: Big Smooth no longer tells the model "you are already signed in" when no Smoo session exists. The persona and the `th` tool description used to assert that unconditionally, which contradicted the signed-out account section. Signed out, the agent now works from data in the workspace that fits the request instead of stopping at "run `smoo auth login`".
+
+## 0.87.1
+
+### Patch Changes
+
+- b42dd5c: `th attest` asks the repo's `scripts/ci/_<check>-untouched.mjs` path filter (exit 0 = nothing to check) before queueing, and credits the row as passed without taking a heavy slot or the cargo lock. A web-only branch no longer waits tens of minutes in the queue for `attest rust` to skip itself.
+
+## 0.87.0
+
+### Minor Changes
+
+- e43c91e: `th smoo calendar list | events list | show | create | update | rm | respond | find-time | block` — the CLI twin of the hosted MCP `calendar_*` tools (SMOODEV-3764, ADR-147 §2). It runs as you, on your own, org and shared Google / Microsoft 365 / iCloud calendars. Deleting an event, answering an invitation, inviting attendees and changing an event that has guests all confirm first (`--yes` / `--dry-run`).
+
 ## 0.86.0
 
 ### Minor Changes

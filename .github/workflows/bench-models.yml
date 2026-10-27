@@ -114,7 +114,7 @@ jobs:
               run: |
                   git config user.name  "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  git add docs/model-scores.json docs/model-badge.json docs/Model-Leaderboard.md
+                  git add docs/model-scores.json docs/model-leaderboard.json docs/model-badge.json docs/Model-Leaderboard.md crates/smooth-web/web/src/model-scores.json
                   if git diff --cached --quiet; then
                       echo "leaderboard unchanged"
                   else

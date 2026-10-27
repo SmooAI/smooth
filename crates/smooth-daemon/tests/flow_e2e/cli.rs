@@ -125,6 +125,13 @@ async fn th_without_a_daemon_says_so_in_two_lines(host: Host) {
     // A HOME with no advertisement at all: boot a rig, then delete both
     // files `th flow` reads — flow.addr first, then daemon.addr (th-1efb59).
     let d = Daemon::boot(host).await;
+    // The daemon claims flow.addr AFTER the "listening" line the rig boots on;
+    // deleting it before that claim lands lets it reappear mid-test.
+    let flow_addr = d.home.join(".smooth").join("flow.addr");
+    let deadline = std::time::Instant::now() + WAIT;
+    while !flow_addr.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     for f in ["flow.addr", "daemon.addr"] {
         let _ = std::fs::remove_file(d.home.join(".smooth").join(f));
     }

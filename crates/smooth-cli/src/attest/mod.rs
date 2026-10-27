@@ -32,6 +32,7 @@
 mod env;
 mod gh;
 mod remote;
+mod reuse;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -94,6 +95,12 @@ pub struct AttestArgs {
     #[arg(long)]
     pub allow_dirty: bool,
 
+    /// Run every check even when an earlier pass of it carries over. By default
+    /// a check whose inputs are unchanged since it last passed on this machine is
+    /// credited without re-running (SMOODEV-4160); this forces the run.
+    #[arg(long)]
+    pub no_reuse: bool,
+
     /// Machine-readable summary on stdout.
     #[arg(long)]
     pub json: bool,
@@ -134,6 +141,9 @@ struct CheckResult {
     /// Where it ran, phrased for a status description: `locally` or a hostname.
     location: String,
     note: Option<String>,
+    /// The commit whose pass this credit carries over from, when the check was
+    /// not re-run because none of its inputs changed (SMOODEV-4160).
+    reused_from: Option<String>,
 }
 
 impl CheckResult {
@@ -144,7 +154,10 @@ impl CheckResult {
             format!("on {}", self.location)
         };
         match self.outcome {
-            Outcome::Pass => format!("passed {place} in {}s", self.secs),
+            Outcome::Pass => match &self.reused_from {
+                Some(from) => format!("passed {place} in {}s (reused from {}: no input changed)", self.secs, short(from)),
+                None => format!("passed {place} in {}s", self.secs),
+            },
             _ => format!("failed {place} after {}s", self.secs),
         }
     }
@@ -213,11 +226,40 @@ fn run(args: &AttestArgs, sys: &Sys, root: &Path) -> Result<i32> {
         return Ok(EXIT_DIRTY);
     }
 
-    let (local_checks, remote_plan) = route(args, root, &requested)?;
+    let (mut local_checks, mut remote_plan) = route(args, root, &requested)?;
+
+    // SMOODEV-4160: a check whose inputs did not change since it last passed is
+    // credited from that pass instead of re-running. Only for a clean tree: a
+    // dirty one means the run would not have been about the commit's content.
+    let ledger = sys.ledger.as_ref().filter(|_| !args.no_reuse && dirty_before.is_empty());
+    let repo_key = reuse::repo_key(root);
+    let base = reuse::merge_base(root, &sha, &default_branch);
+    let mut reused = Vec::new();
+    if let (Some(ledger), Some(repo), Some(base)) = (ledger, &repo_key, &base) {
+        let finder = reuse::Finder::new(ledger, root, repo, &sha, base);
+        for check in &requested {
+            if let Some(r) = finder.find(check) {
+                reused.push(CheckResult {
+                    name: check.clone(),
+                    outcome: Outcome::Pass,
+                    secs: r.secs,
+                    location: "locally".into(),
+                    note: None,
+                    reused_from: Some(r.sha),
+                });
+            }
+        }
+        local_checks.retain(|c| !reused.iter().any(|r| &r.name == c));
+        if let Some((_, checks)) = remote_plan.as_mut() {
+            checks.retain(|c| !reused.iter().any(|r| &r.name == c));
+        }
+    }
 
     env::apply_path(sys);
 
-    let (results, published_attest_ref) = execute_all(sys, root, &sha, &local_checks, remote_plan.as_ref())?;
+    let (ran, published_attest_ref) = execute_all(sys, root, &sha, &local_checks, remote_plan.as_ref())?;
+    let mut results = reused;
+    results.extend(ran);
 
     for r in &results {
         report(r);
@@ -252,6 +294,27 @@ fn run(args: &AttestArgs, sys: &Sys, root: &Path) -> Result<i32> {
     for r in &results {
         if let Some(state) = r.outcome.state() {
             gh.post_status(&sha, &r.name, state, &r.description())?;
+        }
+    }
+
+    // Recorded only after the credit is posted, so the ledger never holds a pass
+    // GitHub does not. A reused pass is recorded too: the newer commit is the
+    // closer candidate next time.
+    if let (Some(ledger), Some(repo), Some(base)) = (ledger, &repo_key, &base) {
+        let at_ms = reuse::now_ms();
+        for r in results.iter().filter(|r| r.outcome == Outcome::Pass) {
+            let pass = reuse::Pass {
+                sha: sha.clone(),
+                base: base.clone(),
+                secs: r.secs,
+                at_ms,
+            };
+            if let Err(e) = ledger.record(repo, &r.name, &pass) {
+                eprintln!(
+                    "· could not record {} in the credit ledger ({e:#}) — the next run of it will not be reused",
+                    r.name
+                );
+            }
         }
     }
 
@@ -345,6 +408,7 @@ fn execute_all(
                 secs: 0,
                 location: "locally".into(),
                 note: Some(reason.clone()),
+                reused_from: None,
             },
         ));
     }
@@ -498,8 +562,67 @@ fn row_class(script_text: &str, takes_cargo_lock: bool) -> ci_queue::Class {
     }
 }
 
+/// Ask the repo whether `check` has anything to do, BEFORE it queues for a slot.
+/// `scripts/ci/_<check>-untouched.mjs <root>` is the repo's own path filter: exit
+/// 0 = nothing this change can affect (stdout says why), anything else, a missing
+/// script or a hang = run the check. A web-only branch used to wait 45-50 minutes
+/// for a heavy slot and the cargo lock to learn that `rust.sh` skips itself.
+/// Bounded at 20s and never fatal: the filter must not become a reason not to run.
+fn preflight_skip(sys: &Sys, root: &Path, check: &str) -> Option<String> {
+    let filter = root.join(format!("scripts/ci/_{check}-untouched.mjs"));
+    if !filter.is_file() {
+        return None;
+    }
+    let mut child = Command::new(&sys.node)
+        .arg(&filter)
+        .arg(root)
+        .current_dir(root)
+        .env("CI_REPO_ROOT", root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut out, &mut s);
+        s
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                drop(child.kill());
+                drop(child.wait());
+                return None;
+            }
+        }
+    };
+    let reason = reader.join().unwrap_or_default();
+    status.success().then(|| reason.trim().to_string())
+}
+
 /// One queued run of `check`, and whether its failure was distrusted for load.
 fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
+    if let Some(reason) = preflight_skip(sys, root, check) {
+        // Credited like the script's own early `exit 0`, but without a slot, the
+        // cargo lock or a history row.
+        eprintln!("· {check}: skipped before queueing — {reason}");
+        return (
+            CheckResult {
+                name: check.to_string(),
+                outcome: Outcome::Pass,
+                secs: 0,
+                location: "locally".into(),
+                note: Some(format!("skipped before queueing: {reason}")),
+                reused_from: None,
+            },
+            false,
+        );
+    }
     // SMOODEV-3355: every local check takes a slot in the machine-wide
     // `th ci-queue` first, so thirty agents attesting at once run two at a time
     // instead of thirty. Inside an already-queued job this admits instantly.
@@ -511,6 +634,7 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
         secs,
         location: "locally".into(),
         note: Some(note),
+        reused_from: None,
     };
     let script = root.join(format!("scripts/ci/{check}.sh"));
     // A check that drives cargo holds the shared target's lock, so it takes
@@ -623,6 +747,7 @@ fn run_local_once(sys: &Sys, root: &Path, check: &str) -> (CheckResult, bool) {
             secs,
             location: "locally".into(),
             note,
+            reused_from: None,
         },
         distrusted,
     )
@@ -641,6 +766,7 @@ fn run_remote(sys: &Sys, root: &Path, cfg: &remote::Remote, check: &str, origin:
                 secs: began.elapsed().as_secs(),
                 location: cfg.host.clone(),
                 note,
+                reused_from: None,
             }
         }
         // The box is unreachable or unusable — infrastructure, never a verdict on the
@@ -668,6 +794,7 @@ fn run_remote(sys: &Sys, root: &Path, cfg: &remote::Remote, check: &str, origin:
                     secs: began.elapsed().as_secs(),
                     location: "locally".into(),
                     note: Some(format!("{} unusable ({reason}) and this machine is at {load} — left to CI", cfg.host)),
+                    reused_from: None,
                 };
             }
             eprintln!("  → running {check} locally instead — slower, no warm cache on this machine.");
@@ -697,7 +824,15 @@ fn classify(code: Option<i32>, was_overloaded: bool, load: impl Fn() -> String) 
 
 fn report(r: &CheckResult) {
     match r.outcome {
-        Outcome::Pass => println!("✓ {} passed on {} ({}s)", r.name, r.location, r.secs),
+        Outcome::Pass => match &r.reused_from {
+            Some(from) => println!(
+                "✓ {} reused from {} — no input changed since it passed ({}s saved)",
+                r.name,
+                short(from),
+                r.secs
+            ),
+            None => println!("✓ {} passed on {} ({}s)", r.name, r.location, r.secs),
+        },
         Outcome::Fail => eprintln!("✗ {} FAILED on {} ({}s)", r.name, r.location, r.secs),
         Outcome::Blocked => {
             eprintln!("⊘ {} could not run ({}s) — nothing checked, nothing credited", r.name, r.secs);
@@ -733,6 +868,7 @@ fn summarise(results: &[CheckResult], json: bool, sha: &str) {
                     "location": r.location,
                     "posted": r.outcome.state(),
                     "note": r.note,
+                    "reused_from": r.reused_from,
                 })
             })
             .collect();
@@ -841,6 +977,10 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 fn on_remote(root: &Path, sha: &str) -> bool {
@@ -963,6 +1103,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             overload_retry_wait: Duration::ZERO,
             overload_poll: Duration::from_millis(50),
             queue: test_queue(tmp.path()),
+            ledger: Some(reuse::Ledger::new(tmp.path().join("credits.db"), Duration::from_secs(3600))),
             ..Sys::default()
         };
 
@@ -1049,6 +1190,36 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
     }
 
     // ── SMOODEV-3355: local checks go through the machine-wide ci-queue ─────
+
+    /// A repo's `_<check>-untouched.mjs` filter says "nothing to do": the row is
+    /// credited without ever queueing, so it never waits for a slot or the lock.
+    #[test]
+    fn an_untouched_row_is_credited_without_queueing() {
+        let mut f = fixture();
+        let bin = f._tmp.path().join("bin");
+        f.sys.node = test_script(
+            &bin,
+            "node-stub",
+            "[ \"$(basename \"$1\")\" = _passing-untouched.mjs ] && { echo 'no paths'; exit 0; }\nexit 1",
+        )
+        .into();
+        fs::write(f.root.join("scripts/ci/_passing-untouched.mjs"), "//\n").unwrap();
+        assert_eq!(f.attest(&["passing"]), 0);
+        assert_eq!(f.posted_state("passing").as_deref(), Some("state=success"));
+        assert!(f.sys.queue.history(10).is_empty(), "it must not have taken a queue slot");
+    }
+
+    /// Touched (filter exits 1), a hung or missing filter: the check runs.
+    #[test]
+    fn a_touched_row_or_no_filter_still_runs_queued() {
+        let mut f = fixture();
+        let bin = f._tmp.path().join("bin");
+        f.sys.node = test_script(&bin, "node-stub", "exit 1").into();
+        fs::write(f.root.join("scripts/ci/_passing-untouched.mjs"), "//\n").unwrap();
+        assert_eq!(f.attest(&["passing"]), 0);
+        assert_eq!(f.sys.queue.history(10).len(), 1, "a touched row queues");
+        assert_eq!(f.attest(&["failing"]), 1, "no filter script, the check runs");
+    }
 
     #[test]
     fn a_local_check_runs_in_a_heavy_queue_slot() {
@@ -1560,6 +1731,152 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
         assert!(note.unwrap().contains("precondition"), "the real reason beats the guess");
     }
 
+    // ── SMOODEV-4160: a pass carries over while its inputs are unchanged ────
+
+    impl Fixture {
+        /// A check that counts its own runs, so a test can tell reuse from a re-run.
+        fn counting(&self, name: &str) -> PathBuf {
+            let runs = self.root.join(format!("{name}.runs"));
+            check(&self.root, name, &format!("echo x >> '{}'", runs.display()));
+            runs
+        }
+
+        fn runs(path: &Path) -> usize {
+            fs::read_to_string(path).map_or(0, |s| s.lines().count())
+        }
+
+        /// The repo's `_rows-touched.sh`: answers `verdict` for `row`, whatever changed.
+        fn hook(&self, row: &str, verdict: &str) {
+            check(&self.root, "_rows-touched", &format!("cat >/dev/null; echo '{row} {verdict}'"));
+        }
+
+        /// Commit a change to `path` and push it, as a new HEAD on the feature branch.
+        fn commit(&self, path: &str) {
+            let p = self.root.join(path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, format!("{}\n", reuse::now_ms())).unwrap();
+            run_git(&self.root, &["add", path]);
+            run_git(&self.root, &["commit", "-qm", "change"]);
+            run_git(&self.root, &["push", "-q", "origin", "feature"]);
+        }
+
+        fn posted_description(&self, check: &str) -> String {
+            self.calls()
+                .lines()
+                .find(|l| l.contains("statuses/") && l.contains(&format!("ci-attest/{check}")))
+                .unwrap_or_default()
+                .to_string()
+        }
+    }
+
+    #[test]
+    fn re_attesting_the_same_commit_reuses_the_pass() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 1, "the second attest of an unchanged commit must not re-run");
+        assert_eq!(f.posted_state("counted").as_deref(), Some("state=success"));
+        assert!(f.posted_description("counted").contains("reused from"), "{}", f.calls());
+    }
+
+    #[test]
+    fn a_change_the_hook_calls_untouched_reuses_the_pass() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        f.hook("counted", "untouched");
+        assert_eq!(f.attest(&["counted"]), 0);
+        f.commit("docs/readme.md");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 1);
+        assert_eq!(f.posted_state("counted").as_deref(), Some("state=success"));
+    }
+
+    #[test]
+    fn a_change_the_hook_calls_touched_runs_the_check() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        f.hook("counted", "touched");
+        assert_eq!(f.attest(&["counted"]), 0);
+        f.commit("src/lib.ts");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 2);
+        assert!(!f.posted_description("counted").contains("reused"));
+    }
+
+    #[test]
+    fn a_change_with_no_hook_runs_the_check() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        assert_eq!(f.attest(&["counted"]), 0);
+        f.commit("docs/readme.md");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 2);
+    }
+
+    #[test]
+    fn a_change_to_the_checks_runs_the_check_whatever_the_hook_says() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        f.hook("counted", "untouched");
+        assert_eq!(f.attest(&["counted"]), 0);
+        f.commit("scripts/ci/_helper.mjs");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 2);
+    }
+
+    #[test]
+    fn no_reuse_forces_the_run() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert_eq!(f.attest(&["--no-reuse", "counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 2);
+    }
+
+    #[test]
+    fn a_failure_is_never_reused() {
+        let f = fixture();
+        assert_eq!(f.attest(&["failing"]), 1);
+        assert_eq!(f.attest(&["failing"]), 1);
+        assert_eq!(f.posted_state("failing").as_deref(), Some("state=failure"));
+    }
+
+    #[test]
+    fn a_dirty_run_is_neither_reused_nor_recorded() {
+        let f = fixture();
+        let runs = f.counting("counted");
+        assert_eq!(f.attest(&["counted"]), 0);
+        fs::write(f.root.join("f"), "dirty\n").unwrap();
+        assert_eq!(f.attest(&["--allow-dirty", "counted"]), 0);
+        assert_eq!(Fixture::runs(&runs), 2, "a dirty tree runs the check");
+    }
+
+    #[test]
+    fn a_reused_status_names_the_commit_it_came_from() {
+        let f = fixture();
+        f.counting("counted");
+        f.hook("counted", "untouched");
+        assert_eq!(f.attest(&["counted"]), 0);
+        let first = git(&f.root, &["rev-parse", "HEAD"]).unwrap();
+        f.commit("docs/readme.md");
+        assert_eq!(f.attest(&["counted"]), 0);
+        assert!(f.posted_description("counted").contains(short(&first)), "{}", f.calls());
+    }
+
+    #[test]
+    fn a_reused_description_names_the_source_commit() {
+        let r = CheckResult {
+            name: "rust".into(),
+            outcome: Outcome::Pass,
+            secs: 900,
+            location: "locally".into(),
+            note: None,
+            reused_from: Some("0123456789abcdef".into()),
+        };
+        assert_eq!(r.description(), "passed locally in 900s (reused from 0123456: no input changed)");
+    }
+
     // ── descriptions + exit codes ───────────────────────────────────────────
 
     #[test]
@@ -1570,6 +1887,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             secs: 12,
             location: "locally".into(),
             note: None,
+            reused_from: None,
         };
         assert_eq!(local.description(), "passed locally in 12s");
 
@@ -1579,6 +1897,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             secs: 214,
             location: "smoo-hub".into(),
             note: None,
+            reused_from: None,
         };
         assert_eq!(delegated.description(), "passed on smoo-hub in 214s");
 
@@ -1604,6 +1923,7 @@ echo "21:30  up 49 mins, 17 users, load averages: $l 1.00 1.00"
             secs: 0,
             location: "locally".into(),
             note: None,
+            reused_from: None,
         };
         assert_eq!(exit_code(&[r(Outcome::Pass)]), 0);
         assert_eq!(exit_code(&[r(Outcome::Pass), r(Outcome::Blocked)]), EXIT_PRECONDITION);

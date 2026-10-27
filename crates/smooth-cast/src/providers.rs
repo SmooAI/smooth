@@ -303,9 +303,120 @@ pub fn route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     route_from_value(&v, route)
 }
 
+/// Models the SMOODEV-4148 `th code` picker pinned to the user's own Anthropic
+/// provider (`{provider: "anthropic", model: "claude-haiku-5-5"}`) while the
+/// gateway did not serve them. The gateway serves them now (SMOODEV-4155), so a
+/// slot left pinned that way still runs through the gateway.
+const FORMER_DIRECT_MODELS: &[&str] = &["claude-haiku-5-5"];
+
+/// [`route_from_value`] for the daemon's upstream GATEWAY.
+///
+/// When the slot is one of the [`FORMER_DIRECT_MODELS`] pinned to an
+/// Anthropic-format provider, the model is kept but the url/key come from the
+/// gateway provider — a non-Anthropic provider, preferring the ids `smooth` and
+/// `smooai-gateway` — because the gateway serves that model and every other
+/// model the user switches to. With no such gateway, this is exactly
+/// [`route_from_value`].
+#[must_use]
+pub fn upstream_route_from_value(v: &Value, route: &str) -> Option<(String, String, String)> {
+    let (url, key, model) = route_from_value(v, route)?;
+    let providers = v.get("providers").and_then(Value::as_array);
+    let slot_is_anthropic = v
+        .pointer(&format!("/routing/{route}/provider"))
+        .and_then(Value::as_str)
+        .and_then(|id| providers.and_then(|ps| ps.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(id))))
+        .is_some_and(|p| normalize_format(p.get("api_format").and_then(Value::as_str)) == "Anthropic");
+    if !slot_is_anthropic || !FORMER_DIRECT_MODELS.iter().any(|m| m.eq_ignore_ascii_case(&model)) {
+        return Some((url, key, model));
+    }
+    let gateway = providers.and_then(|ps| {
+        let usable = |p: &&Value| {
+            normalize_format(p.get("api_format").and_then(Value::as_str)) != "Anthropic"
+                && p.get("api_key").and_then(Value::as_str).is_some_and(|k| !k.trim().is_empty())
+                && p.get("api_url").and_then(Value::as_str).is_some()
+        };
+        ["smooth", "smooai-gateway"]
+            .iter()
+            .find_map(|id| ps.iter().filter(usable).find(|p| p.get("id").and_then(Value::as_str) == Some(id)))
+            .or_else(|| ps.iter().find(usable))
+    });
+    match gateway {
+        Some(g) => Some((
+            g.get("api_url").and_then(Value::as_str)?.to_owned(),
+            g.get("api_key").and_then(Value::as_str)?.to_owned(),
+            model,
+        )),
+        None => Some((url, key, model)),
+    }
+}
+
+/// [`upstream_route_from_value`] against a file. `None` when it is missing or
+/// unparseable.
+#[must_use]
+pub fn upstream_route_at(path: &Path, route: &str) -> Option<(String, String, String)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    upstream_route_from_value(&v, route)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_anthropic() -> Value {
+        json!({
+            "providers": [
+                { "id": "smooth", "api_url": "https://llm.smoo.ai/v1", "api_key": "sk-gw", "api_format": "OpenAiCompat" },
+                { "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant", "api_format": "Anthropic" }
+            ],
+            "routing": { "coding": { "provider": "smooth", "model": "gpt-6-luna" } }
+        })
+    }
+
+    #[test]
+    fn upstream_route_is_route_from_value_for_gateway_models() {
+        let v = with_anthropic();
+        assert_eq!(upstream_route_from_value(&v, "coding"), route_from_value(&v, "coding"));
+    }
+
+    #[test]
+    fn upstream_route_keeps_the_gateway_for_a_direct_slot() {
+        let mut v = with_anthropic();
+        set_routing_slot(&mut v, "coding", "anthropic", "claude-haiku-5-5");
+        assert_eq!(
+            upstream_route_from_value(&v, "coding"),
+            Some(("https://llm.smoo.ai/v1".into(), "sk-gw".into(), "claude-haiku-5-5".into()))
+        );
+    }
+
+    #[test]
+    fn upstream_route_leaves_other_models_on_an_anthropic_slot_alone() {
+        // A user who routes Coding to their own Anthropic key on purpose keeps it.
+        let mut v = with_anthropic();
+        set_routing_slot(&mut v, "coding", "anthropic", "claude-sonnet-5-5");
+        assert_eq!(
+            upstream_route_from_value(&v, "coding"),
+            Some(("https://api.anthropic.com/v1".into(), "sk-ant".into(), "claude-sonnet-5-5".into()))
+        );
+    }
+
+    #[test]
+    fn upstream_route_leaves_haiku_on_the_gateway_slot_alone() {
+        let mut v = with_anthropic();
+        set_routing_slot(&mut v, "coding", "smooth", "claude-haiku-5-5");
+        assert_eq!(upstream_route_from_value(&v, "coding"), route_from_value(&v, "coding"));
+    }
+
+    #[test]
+    fn upstream_route_without_a_gateway_uses_the_slot_provider() {
+        let v = json!({
+            "providers": [{ "id": "anthropic", "api_url": "https://api.anthropic.com/v1", "api_key": "sk-ant", "api_format": "Anthropic" }],
+            "routing": { "coding": { "provider": "anthropic", "model": "claude-haiku-5-5" } }
+        });
+        assert_eq!(
+            upstream_route_from_value(&v, "coding"),
+            Some(("https://api.anthropic.com/v1".into(), "sk-ant".into(), "claude-haiku-5-5".into()))
+        );
+    }
 
     fn sample() -> Value {
         json!({
