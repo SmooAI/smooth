@@ -4,6 +4,7 @@
 //! Unix socket. The ops here back both the CLI and the MCP tools (`mcp_chrome.rs`).
 
 pub mod client;
+pub mod groups;
 pub mod history;
 pub mod host;
 pub mod install;
@@ -214,6 +215,14 @@ pub enum HistoryCommands {
 pub enum BrowseCommands {
     /// List open tabs
     Tabs,
+    /// Tab groups in every window (Claude in Chrome's too); close/ungroup them by id, --title or --idle
+    Groups {
+        /// Print the list as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        cmd: Option<groups::GroupCommands>,
+    },
     /// Open a URL in a new tab and wait for it to load
     Open { url: String },
     /// Point a tab at a URL
@@ -470,6 +479,7 @@ fn browse_cli(inst: Option<&str>, cmd: BrowseCommands) -> Result<String> {
     let pretty = |v: Value| serde_json::to_string_pretty(&v).unwrap_or_default();
     match cmd {
         BrowseCommands::Tabs => tabs(inst),
+        BrowseCommands::Groups { json, cmd } => groups::cli(inst, cmd, json),
         BrowseCommands::Open { url } => browse(inst, "tabs.open", json!({"url": url})).map(pretty),
         BrowseCommands::Navigate { tab, url } => browse(inst, "tabs.navigate", json!({"tabId": tab, "url": url})).map(pretty),
         BrowseCommands::Back { tab } => nav(inst, tab, "back"),

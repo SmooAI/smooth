@@ -114,6 +114,10 @@
             "description": "Fill a form in one call: text inputs, selects (by option text) and checkboxes/radios (true/false). Prefer this over several browse_type calls."
         },
         {
+            "name": "browse_groups",
+            "description": "Chrome tab groups in every window, Claude in Chrome's included: list them (id, title, color, tabs, last used, whether in use), or close/ungroup them by ids, title glob, idle time (\"2h\") or all. Groups holding a window's active tab are never touched, and idle spares recently used ones. close/ungroup return a dry run unless confirm=true; confirm only after the user agreed."
+        },
+        {
             "name": "browse_hover",
             "description": "Hover an element by ref, e.g. to open a hover menu or tooltip. trusted=true (or x/y) moves the real mouse there."
         },
