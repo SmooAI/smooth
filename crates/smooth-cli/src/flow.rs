@@ -391,6 +391,36 @@ fn state_cell(state: &str) -> (String, usize) {
     (format!("{glyph} {label}"), label.chars().count() + 2)
 }
 
+/// The state cell of a row, saying so when the engine can no longer vouch for
+/// it (`status.rs`, SMOODEV-4268): the state it last knew, dimmed, with a `?`.
+fn row_state_cell(state: &str, confidence: &str) -> (String, usize) {
+    if confidence != "stale" && confidence != "unknown" {
+        return state_cell(state);
+    }
+    let label = format!("{}?", state.replace('_', " "));
+    let width = label.chars().count() + 2;
+    (
+        format!("{} {}", paint("◌", |g| g.dimmed().to_string()), paint(&label, |l| l.dimmed().to_string())),
+        width,
+    )
+}
+
+/// How long an ask has waited: `3m`, `2h`, `4d`. Empty for an unreadable stamp
+/// or a clock that disagrees.
+fn waited(since: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Ok(since) = chrono::DateTime::parse_from_rfc3339(since) else {
+        return String::new();
+    };
+    let secs = now.signed_duration_since(since).num_seconds();
+    match secs {
+        i64::MIN..=-1 => String::new(),
+        0..=59 => format!("{secs}s"),
+        60..=3_599 => format!("{}m", secs / 60),
+        3_600..=86_399 => format!("{}h", secs / 3_600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
 /// `[reason]` tag: amber only when the reason means Big Smooth needs you;
 /// a crash is an error; a scheduled usage-limit resume is quiet.
 fn attention_tag(reason: &str) -> String {
@@ -428,7 +458,7 @@ fn print_sessions(sessions: &[Value]) {
     println!("{}", paint(&header, |h| h.bold().to_string()));
     for s in sessions {
         let g = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let (mut state, mut width) = state_cell(&g("state"));
+        let (mut state, mut width) = row_state_cell(&g("state"), &g("confidence"));
         if s.get("unread").and_then(Value::as_bool).unwrap_or(false) {
             state.push_str(" ✦");
             width += 2;
@@ -438,6 +468,16 @@ fn print_sessions(sessions: &[Value]) {
             .and_then(Value::as_str)
             .map(|r| format!(" {}", attention_tag(r)))
             .unwrap_or_default();
+        // How long it has been waiting on a person.
+        let waiting = s
+            .pointer("/attention/since")
+            .and_then(Value::as_str)
+            .map_or_else(String::new, |since| waited(since, chrono::Utc::now()));
+        let att = if waiting.is_empty() {
+            att
+        } else {
+            format!("{att} {}", paint(&format!("waiting {waiting}"), |w| w.dimmed().to_string()))
+        };
         // VIA: how the engine knows the state — `hooks` (the harness told it)
         // or `inferred` (pane scraping) — th-5c5457.
         let via = match g("state_source").as_str() {
@@ -1159,6 +1199,31 @@ mod tests {
         assert_eq!(parse_candidate("e:th-code").unwrap()["kind"], "th-code");
         assert_eq!(parse_candidate("f:aider").unwrap()["kind"], "aider");
         assert!(parse_candidate("x:Bad Kind").is_err());
+    }
+
+    #[test]
+    fn a_row_the_engine_cannot_vouch_for_says_so() {
+        let (cell, width) = row_state_cell("working", "stale");
+        assert!(cell.contains("working?") && cell.contains('◌'), "{cell}");
+        assert_eq!(width, "working?".len() + 2);
+        assert!(row_state_cell("starting", "unknown").0.contains("starting?"));
+        assert!(row_state_cell("needs_you", "stale").0.contains("needs you?"));
+        for confidence in ["confirmed", ""] {
+            assert_eq!(row_state_cell("working", confidence), state_cell("working"), "older daemons send no confidence");
+        }
+    }
+
+    #[test]
+    fn waited_reads_in_the_largest_whole_unit() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-04T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(waited("2026-11-04T11:59:30Z", now), "30s");
+        assert_eq!(waited("2026-11-04T11:57:00Z", now), "3m");
+        assert_eq!(waited("2026-11-04T10:00:00Z", now), "2h");
+        assert_eq!(waited("2026-11-01T12:00:00Z", now), "3d");
+        assert_eq!(waited("2026-11-04T12:00:05Z", now), "", "a clock that disagrees says nothing");
+        assert_eq!(waited("soon", now), "");
     }
 
     #[test]

@@ -670,6 +670,7 @@ pub fn draft_manifest(sk: &Skeleton) -> Manifest {
             hooks: HooksSpec {
                 install: sk.hooks_install.clone(),
                 event_map: BTreeMap::new(),
+                ..HooksSpec::default()
             },
             scrape: sk.scrape.clone(),
         },

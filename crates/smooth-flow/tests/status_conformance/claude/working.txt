@@ -1,0 +1,39 @@
+⏺ Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+  a while. Sure. Here is a deliberately slow answer so the terminal stays busy for a while.
+
+✻ Baked for 5s · done 10:50 PM
+
+❯ rig-tool please run the thing
+
+  Ran 1 shell command
+
+⏺ Done.
+
+✻ Brewed for 4s · done 10:50 PM
+
+❯ rig-tool please run it again
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 2s · done 10:51 PM
+
+❯ rig-question ask me something
+
+⏺ Done.
+
+✻ Baked for 2s · done 10:51 PM
+
+❯ rig-slow tell me a long one
+
+⏺ Sure. Here is a deliberately slow answer so the terminal stays busy for a while. Sure. Here is a deliberately slow
+  answer so the terminal stays busy for a while. Sure. Here is a deliberately slow answer so the terminal stays busy for
+
+✽ Elucidating… (17s · ↓ 61 tokens)
+  ⎿  Tip: Use /statusline to set up a custom status line that will display beneath the input box
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt
