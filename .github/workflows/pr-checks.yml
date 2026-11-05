@@ -274,10 +274,11 @@ jobs:
               if: steps.gate.outputs.run == 'true' && runner.os == 'Linux'
               # ci_queue copies the th binary into the temp dir when it cannot
               # hard-link across filesystems, and that copy hit "Disk quota
-              # exceeded" in /tmp on main. A temp dir beside target/ can link.
+              # exceeded" in /tmp on main. RUNNER_TEMP is on target/'s filesystem, so it
+              # can link, and is outside the repo, which some tests rely on.
               run: |
                   du -sh /tmp 2>/dev/null || true
-                  export TMPDIR="$PWD/target/tmp-admin"
+                  export TMPDIR="$RUNNER_TEMP/admin-tests"
                   mkdir -p "$TMPDIR"
                   cargo nextest run -p smooai-smooth-cli --features admin
               env:
