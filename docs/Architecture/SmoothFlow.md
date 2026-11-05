@@ -655,7 +655,7 @@ Phones and `th flow pair --qr` show it, `GET /api/flow/pair/{id}` polls it):
    public keys but cannot substitute its own.
 4. The daemon derives the same key, opens the hello, writes the pairing to
    `flow.db` (`pairings(device PK, label, platform, public_key, key_hex,
-   created_at, last_seen_at)`, keyed by the phone's relay device id) and
+created_at, last_seen_at)`, keyed by the phone's relay device id) and
    answers `{channel:"flow", v:1, type:"flow.pair", n:1, ct}` sealing
    `{"type":"flow.pair.ok", device, label, protocol:1}` (direction 1, n = 1). The
    phone stores the pairing key in the Keychain / its Tink-encrypted store.
