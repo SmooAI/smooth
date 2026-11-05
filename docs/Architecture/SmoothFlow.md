@@ -966,7 +966,14 @@ mid-launch fails with `launch_failed` at the next start.
 `flow.resize` and `flow.replay` are remembered and applied when the process
 exists. `flow.input` is queued up to 64 KiB, and input past that limit is
 dropped with a warning. `flow.send` and sending a key must reach a process, so
-they wait for the launch, up to two minutes.
+they wait for the launch, up to two minutes. What was typed is delivered before
+the waiting attaches are applied, so a key pressed after the launch lands behind
+it, apart from a window of a few milliseconds while the terminal bridge starts.
+
+A client must not read a row's first `pid` as a relaunch. The attach it sent
+during the launch is still counted, so a second one counts that client twice
+and repaints its terminal. Attach again only when a live row's non-null `pid`
+changes, or when a row comes back from `done` or `dead`.
 
 **Callers that need the process** pass `wait: true` on
 `POST /api/flow/sessions`: the reply then comes after the launch, carries the

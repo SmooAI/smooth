@@ -1911,6 +1911,13 @@ impl Engine {
 
     /// What clients did while `id` was launching, now that it is running.
     fn apply_pending(&self, id: &str, pending: &PendingOpen) {
+        // Input first: a key pressed now goes straight to the process, so what
+        // was typed before it must already be there.
+        if !pending.input.is_empty() {
+            if let Err(e) = self.input(id, &pending.input) {
+                tracing::warn!(session = %id, error = %e, bytes = pending.input.len(), "flow: could not deliver what was typed during the launch");
+            }
+        }
         if let Some((cols, rows)) = pending.size.filter(|_| pending.clients > 0) {
             for _ in 0..pending.clients {
                 if let Err(e) = self.attach(id, cols, rows) {
@@ -1919,11 +1926,6 @@ impl Engine {
             }
             // They were told nothing at their attach: there was no terminal.
             self.schedule_replay(id, ReplayReason::Attach);
-        }
-        if !pending.input.is_empty() {
-            if let Err(e) = self.input(id, &pending.input) {
-                tracing::debug!(session = %id, error = %e, "flow: typing what was typed during the launch");
-            }
         }
     }
 

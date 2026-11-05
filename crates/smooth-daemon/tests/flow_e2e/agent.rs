@@ -196,6 +196,42 @@ async fn agent_usage_limit_resume_fires_when_the_window_passes(host: Host) {
     d.kill(&id, false).await;
 }
 
+/// SMOODEV-4267: a client opens a session and at once attaches and types,
+/// while a pearl worktree still holds up the launch. The keystrokes arrive, and
+/// the client gets one replay, not one per thing that happened to the row.
+async fn typing_during_a_launch_reaches_the_agent_after_one_attach(host: Host) {
+    if !prereqs(host) {
+        return;
+    }
+    let d = Daemon::boot(host).await;
+    let mut ws = d.ws().await;
+    let (status, v) = d
+        .post(
+            "/api/flow/sessions",
+            json!({ "kind": "fake-agent", "pearl_id": "th-e2e111", "project": d.ws, "title": "typed" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{v}");
+    let s = &v["session"];
+    assert!(s["pid"].is_null(), "the reply comes before the process: {s}");
+    let id = s["id"].as_str().unwrap().to_string();
+    ws.send(json!({"type":"flow.attach","id":id,"cols":100,"rows":30,"replay":true})).await;
+    ws.input(&id, "typed-early\r").await;
+    d.wait_screen(&id, "echo: typed-early", WAIT).await;
+    let mut replays = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let Some(f) = ws.next(Duration::from_millis(250)).await else { continue };
+        if f["type"] == "flow.replay" && f["id"] == id && f["reason"] == "attach" && f["part"].as_u64().unwrap_or(0) == 0 {
+            replays += 1;
+        }
+    }
+    if host == Host::Pty {
+        assert_eq!(replays, 1, "one attach, one replay");
+    }
+    d.kill(&id, false).await;
+}
+
 async fn agent_that_dies_is_resumed_with_its_session_id(host: Host) {
     if !prereqs(host) {
         return;
@@ -465,6 +501,7 @@ crate::on_both_hosts!(
     agent_usage_limit_is_scheduled_from_the_banner,
     agent_usage_limit_resume_fires_when_the_window_passes,
     agent_that_dies_is_resumed_with_its_session_id,
+    typing_during_a_launch_reaches_the_agent_after_one_attach,
     agent_that_keeps_crashing_is_dead_after_three_resumes,
     learned_session_id_binds_from_the_first_hook_and_kill_resume_relaunches,
     duplicate_resume_guard_holds_when_a_live_pid_owns_the_session,
