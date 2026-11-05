@@ -98,6 +98,44 @@ await w.chrome.storage.local.set({ trusted: false });
 await new Promise((r) => setTimeout(r, 0));
 checks['turning it off detaches every session'] = w.detached.includes(7) && w.run('dbg.size') === 0 && (await status()) === false;
 
+// Tab groups: the handlers act on the live plan, and only on what it selected.
+const now = Date.now();
+const removed = [];
+const ungrouped = [];
+Object.assign(w.chrome.tabs, {
+    query: async () => [
+        { id: 1, groupId: 10, windowId: 1, active: false, lastAccessed: now - 3 * 3600e3 },
+        { id: 2, groupId: 11, windowId: 1, active: true, lastAccessed: now },
+        { id: 3, groupId: 12, windowId: 1, active: false, lastAccessed: now - 60e3 },
+    ],
+    remove: async (ids) => removed.push(...ids),
+    ungroup: async (ids) => ungrouped.push(...ids),
+});
+w.chrome.tabGroups = {
+    query: async () => [10, 11, 12].map((id) => ({ id, title: 'Claude', color: 'orange', collapsed: false, windowId: 1 })),
+    update: async (id, p) => ({ id, title: 'Claude', color: 'orange', collapsed: false, windowId: 1, ...p }),
+};
+w.chrome.windows = { getAll: async () => [{ id: 1, focused: true }] };
+const listed = await w.run("METHODS['groups.list']()");
+checks['groups.list summarizes every group'] = listed.length === 3 && listed[1].focused === true && listed[0].tabs === 1;
+const dry = await w.run("METHODS['groups.apply']({ action: 'close', title: 'claude', idleMs: 3600e3, dryRun: true })");
+checks['a dry run changes nothing'] = dry.dryRun && dry.selected.map((g) => g.id).join() === '10' && removed.length === 0;
+const closed = await w.run("METHODS['groups.apply']({ action: 'close', title: 'Claude', idleMs: 3600e3 })");
+checks['close removes only the idle, inactive group’s tabs'] =
+    closed.selected.length === 1 && removed.join() === '1' && closed.skipped.map((s) => `${s.group.id}:${s.reason}`).join() === '11:active,12:recent';
+await w.run("METHODS['groups.apply']({ action: 'ungroup', ids: [12, 11] })");
+checks['ungroup keeps the tabs and spares the active group'] = ungrouped.join() === '3' && removed.join() === '1';
+w.chrome.tabs.remove = async () => {
+    throw new Error('No tab with id: 1.');
+};
+const broken = await w.run("METHODS['groups.apply']({ action: 'close', ids: [10] })");
+checks['a failed close is reported, not counted done'] = broken.selected.length === 0 && broken.failed[0]?.error === 'No tab with id: 1.';
+checks['groups.apply rejects other actions'] = await w.run("METHODS['groups.apply']({ action: 'delete', all: true })").then(
+    () => false,
+    (e) => /close or ungroup/.test(e.message),
+);
+checks['groups.update recolors'] = (await w.run("METHODS['groups.update']({ groupId: 10, color: 'cyan' })")).color === 'cyan';
+
 const failed = Object.entries(checks).filter(([, ok]) => !ok);
 for (const [name, ok] of Object.entries(checks)) console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}`);
 if (failed.length) process.exit(1);

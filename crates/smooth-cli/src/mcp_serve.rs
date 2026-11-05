@@ -1447,6 +1447,8 @@ impl ServerHandler for SmoothMcp {
                  `bookmarks_restore` return a dry run unless confirm=true — show it and confirm only with the user's say-so. \
                  `browse_*` drive tabs only after the user enables browsing in the extension popup; they act in the user's \
                  signed-in browser, so don't submit forms, buy, send or delete anything without explicit approval. \
+                 `browse_groups` lists every tab group (Claude in Chrome's too) and closes or ungroups them by id, title or \
+                 idle time; close/ungroup dry-run unless confirm=true. \
                  `trusted: true`, x/y clicks, `browse_eval`, `browse_console`, `browse_network`, `browse_dialog` and \
                  `browse_upload` also need the popup's \"Trusted input\" switch (chrome.debugger).\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `smoo auth login` — don't retry blindly."
@@ -1812,6 +1814,7 @@ mod tests {
             "browse_eval",
             "browse_dialog",
             "browse_upload",
+            "browse_groups",
         ] {
             assert!(!names.contains(&write_tool), "{write_tool} is a write and must be gated");
         }
