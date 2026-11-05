@@ -365,6 +365,7 @@ impl World {
             home: self.home.clone(),
             daemon_url: None,
             harness_doctor: false,
+            boot_watch: false,
             repo_root: None,
             host: smooth_flow::host::default_host(),
             pty_host: Some(Arc::new(PtyHost::new(OWNER, &self.hosts, cmd()))),

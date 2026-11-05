@@ -898,6 +898,10 @@ pub struct Registry {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+/// See [`Registry::fingerprint`]: each file `load` would read, with its size
+/// and mtime.
+pub type RegistryFingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+
 impl Registry {
     /// Only the embedded built-ins.
     ///
@@ -935,6 +939,40 @@ impl Registry {
             }
         }
         r
+    }
+
+    /// What [`Self::load`] would read, as it stands on disk: every manifest
+    /// file and the package index, with size and mtime. Equal fingerprints
+    /// load equal registries (the built-ins are compiled in), and taking one
+    /// is a handful of `stat`s.
+    #[must_use]
+    pub fn fingerprint(home: &Path, project: Option<&Path>) -> RegistryFingerprint {
+        let smooth = home.join(".smooth");
+        let mut files: Vec<PathBuf> = Vec::new();
+        let tomls = |dir: &Path, files: &mut Vec<PathBuf>| {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                files.extend(entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "toml")));
+            }
+        };
+        tomls(&smooth.join("harnesses"), &mut files);
+        if let Some(p) = project {
+            tomls(&p.join(".smooth").join("harnesses"), &mut files);
+        }
+        let index = smooth.join("pkg").join("index.toml");
+        for root in package_roots(&index) {
+            if let Ok(entries) = std::fs::read_dir(root.join("harness")) {
+                files.extend(entries.flatten().map(|e| e.path().join("harness.toml")));
+            }
+        }
+        files.push(index);
+        files.sort();
+        files
+            .into_iter()
+            .filter_map(|f| {
+                let meta = std::fs::metadata(&f).ok()?;
+                Some((f, meta.len(), meta.modified().ok()))
+            })
+            .collect()
     }
 
     fn load_dir(&mut self, dir: &Path, origin: fn(PathBuf) -> Origin) {
@@ -1660,6 +1698,33 @@ mod tests {
         for name in ["gemini", "cursor-agent", "copilot", "droid", "amp", "pi"] {
             assert!(!r.get(name).unwrap().state.hooks.event_map.is_empty(), "{name} maps its own event names");
         }
+    }
+
+    /// SMOODEV-4267: the fingerprint moves when, and only when, what `load`
+    /// reads changes, which is what lets the engine keep a registry.
+    #[test]
+    fn the_fingerprint_follows_every_manifest_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, project) = (tmp.path().join("home"), tmp.path().join("proj"));
+        let print = || Registry::fingerprint(&home, Some(&project));
+        assert!(print().is_empty(), "no files, nothing to fingerprint");
+        let user = home.join(".smooth/harnesses");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(user.join("notes.md"), "not a manifest").unwrap();
+        assert!(print().is_empty(), "only what load reads counts");
+        std::fs::write(user.join("a.toml"), "x").unwrap();
+        let one = print();
+        assert_eq!(one.len(), 1);
+        assert_eq!(print(), one, "unchanged reads the same");
+        std::fs::write(user.join("a.toml"), "xy").unwrap();
+        assert_ne!(print(), one, "an edit moves it");
+        let edited = print();
+        let proj = project.join(".smooth/harnesses");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("b.toml"), "x").unwrap();
+        assert_eq!(print().len(), 2, "the project's manifests count");
+        std::fs::remove_file(proj.join("b.toml")).unwrap();
+        assert_eq!(print(), edited, "a removal moves it back");
     }
 
     #[test]

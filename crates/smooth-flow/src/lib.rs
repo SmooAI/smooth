@@ -34,6 +34,7 @@ pub mod scrape;
 pub mod session_host;
 pub mod status;
 pub mod store;
+pub mod timing;
 pub mod tmux;
 pub mod vocab;
 

@@ -66,6 +66,16 @@ const PASTE_MIN_DELAY: Duration = Duration::from_secs(1);
 /// …at most this long (a pane that never reads idle or needs-you gets the
 /// paste anyway, as before). A pending needs-you is never pasted into.
 const PASTE_IDLE_WAIT: Duration = Duration::from_secs(90);
+/// How often a just-launched agent is supervised (SMOODEV-4267), so its row
+/// reads ready, and a waiting paste lands, without waiting for the 2 s tick…
+const BOOT_WATCH_EVERY: Duration = Duration::from_millis(200);
+/// …for at most this long; the supervision tick takes over after it.
+const BOOT_WATCH_MAX: Duration = Duration::from_secs(30);
+/// Keystrokes kept for a session still being launched.
+const PENDING_INPUT_MAX: usize = 64 * 1024;
+/// How long `flow.send` waits for a session still being launched: a
+/// worktree of a large checkout takes ~10 s.
+const LAUNCH_WAIT: Duration = Duration::from_mins(2);
 /// The `config` key harness prefs are stored under.
 const HARNESS_PREFS_KEY: &str = "harness_prefs";
 /// How often each shell's working directory is sampled, so a restore can
@@ -106,6 +116,10 @@ pub struct EngineConfig {
     /// directory picker (th-145e6b). `None` (the default) indexes nothing:
     /// tests and scratch engines must not walk a real `$HOME`.
     pub repo_root: Option<PathBuf>,
+    /// Supervise a just-launched agent every [`BOOT_WATCH_EVERY`] until it
+    /// reads ready (SMOODEV-4267). Off by default: tests and scratch engines
+    /// drive supervision themselves.
+    pub boot_watch: bool,
     /// What runs the sessions (th-64d4ab). [`crate::host::TmuxHost`] by
     /// default; tests inject an in-memory host. Its `default_socket` is the
     /// identity this engine supervises under, whichever host a row runs on.
@@ -134,6 +148,7 @@ impl EngineConfig {
             home: dirs_next::home_dir().unwrap_or_default(),
             daemon_url: None,
             harness_doctor: false,
+            boot_watch: false,
             repo_root: None,
             host: crate::host::default_host(),
             pty_host: None,
@@ -194,6 +209,12 @@ struct Runtime {
     limit_resumed_at: HashMap<String, Instant>,
     /// Session id → pending `prompt_as = "paste"` prompt.
     paste_at: HashMap<String, PendingPaste>,
+    /// Session id → when this launch's host was asked to start it, until the
+    /// harness first reads ready ([`crate::timing`]).
+    booting: HashMap<String, Instant>,
+    /// Session id → what clients asked of an agent whose row exists but whose
+    /// process doesn't yet (SMOODEV-4267).
+    launching: HashMap<String, PendingOpen>,
     /// Session id → (hash of the last captured pane text, when it last
     /// changed): the `quiet_ms` / `changed_within_ms` clock (th-e77603).
     pane_seen: HashMap<String, (u64, Instant)>,
@@ -229,6 +250,8 @@ struct PendingPaste {
     /// `Some(deadline)`: wait for a scraped idle until then (th-d2a1e4).
     /// `None`: paste at `at`, whatever the pane shows.
     wait_idle_until: Option<Instant>,
+    /// When the session launched.
+    asked: Instant,
 }
 
 impl PendingPaste {
@@ -246,6 +269,37 @@ impl PendingPaste {
             Some(deadline) => now >= deadline,
         }
     }
+}
+
+/// What clients did to an agent's row before its process existed
+/// (SMOODEV-4267), applied once it does.
+#[derive(Debug, Default)]
+struct PendingOpen {
+    /// The size the clients want.
+    size: Option<(u16, u16)>,
+    /// Clients attached so far.
+    clients: u32,
+    /// What they typed.
+    input: Vec<u8>,
+}
+
+/// The part of `flow.new` that can wait: everything [`Engine::plan_agent`]
+/// decided that takes a subprocess to carry out.
+struct Opening {
+    session: Session,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    /// The pearl worktree to create first; `(project, pearl, slug)`.
+    make_worktree: Option<(PathBuf, String, String)>,
+    /// The prompt to paste, and whether the pane can say its composer is up.
+    paste: Option<(String, bool)>,
+    /// What the row is named until inference says better; `None` when it
+    /// was named in the request.
+    provisional_title: Option<String>,
+    kind: SessionKind,
+    prompt: Option<String>,
+    /// The request named the pearl, so inference doesn't get a say.
+    pearl_given: bool,
 }
 
 /// How a supervised session's process ended, as far as SmoothFlow knows
@@ -352,6 +406,10 @@ fn observe_quiet(seen: &mut HashMap<String, (u64, Instant)>, id: &str, text: &st
 }
 
 struct Inner {
+    /// The loaded manifests, and what they were loaded from (SMOODEV-4267).
+    registry: Mutex<Option<(crate::harness::RegistryFingerprint, Arc<Registry>)>>,
+    /// [`EngineConfig::boot_watch`].
+    boot_watch: bool,
     store: Mutex<FlowStore>,
     tx: broadcast::Sender<ServerFrame>,
     /// One PTY bridge per attached session (th-6d8f84: see `pty_for`).
@@ -672,6 +730,25 @@ pub fn default_title(kind: &SessionKind, prompt: Option<&str>, pearl_id: Option<
     format!("{kind} · {dir}")
 }
 
+/// The main checkout a `flow.new` request is for.
+fn request_project(req: &NewRequest, default_project: &Path) -> PathBuf {
+    req.project
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| req.worktree.as_deref().map(|w| project_root(Path::new(w))))
+        .unwrap_or_else(|| default_project.to_path_buf())
+}
+
+/// The slug naming a pearl worktree a `flow.new` request would create.
+fn worktree_slug(req: &NewRequest) -> String {
+    let slug = slugify(req.title.as_deref().or(req.prompt.as_deref()).unwrap_or("work"), 24);
+    if slug.is_empty() {
+        "work".to_string()
+    } else {
+        slug
+    }
+}
+
 /// Rule 4, pure: is `agent_session_id` currently claimed by a live pid?
 /// `claims` is (pid, claimed_at) per id; `alive` decides liveness.
 #[must_use]
@@ -876,6 +953,8 @@ impl Engine {
                 resolve_env: Mutex::new(None),
                 hook_tokens,
                 exit_dir,
+                registry: Mutex::new(None),
+                boot_watch: cfg.boot_watch,
                 health: cfg.harness_doctor.then(|| Mutex::new(HealthCache::default())),
                 repo_index: cfg.repo_root.map(|root| {
                     Mutex::new(RepoIndex {
@@ -1006,12 +1085,23 @@ impl Engine {
     // ── harnesses (th-0f6126) ─────────────────────────────────────────────
 
     /// Every manifest this engine knows: built-ins, `~/.smooth/harnesses/`,
-    /// the project's `.smooth/harnesses/`, `th pkg` packages. Loaded fresh
-    /// each call so `th harness add` needs no daemon restart.
-    // ponytail: a few small files per call; cache when a profile says so.
+    /// the project's `.smooth/harnesses/`, `th pkg` packages. Parsing them
+    /// costs ~26 ms and the engine asks on every hook and every supervised
+    /// session, so they are kept until a manifest file changes on disk
+    /// (SMOODEV-4267). `th harness add` still needs no daemon restart.
     #[must_use]
-    pub fn registry(&self) -> Registry {
-        Registry::load(&self.inner.home, Some(&self.inner.default_project))
+    pub fn registry(&self) -> Arc<Registry> {
+        let (home, project) = (&self.inner.home, &self.inner.default_project);
+        let seen = Registry::fingerprint(home, Some(project));
+        let mut cached = self.inner.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((fingerprint, registry)) = cached.as_ref() {
+            if *fingerprint == seen {
+                return registry.clone();
+            }
+        }
+        let registry = Arc::new(Registry::load(home, Some(project)));
+        *cached = Some((seen, registry.clone()));
+        registry
     }
 
     /// The stored sort/hide prefs.
@@ -1618,15 +1708,22 @@ impl Engine {
     /// # Errors
     /// When git refuses.
     pub fn create_worktree(project: &Path, pearl_id: &str, slug: &str, base: &str) -> Result<PathBuf> {
-        let repo = project.file_name().map_or_else(|| "repo".into(), |f| f.to_string_lossy().into_owned());
         let branch = format!("{pearl_id}-{slug}");
-        let path = project.parent().unwrap_or(project).join(format!("{repo}-{branch}"));
+        let path = Self::pearl_worktree_path(project, pearl_id, slug);
         if path.exists() {
             return Ok(path);
         }
         let path_s = path.to_string_lossy().into_owned();
         git(project, &["worktree", "add", &path_s, "-b", &branch, base])?;
         Ok(path)
+    }
+
+    /// Where [`Self::create_worktree`] puts `pearl_id`'s worktree: decided
+    /// without touching git, so a row can name it before it exists.
+    #[must_use]
+    pub fn pearl_worktree_path(project: &Path, pearl_id: &str, slug: &str) -> PathBuf {
+        let repo = project.file_name().map_or_else(|| "repo".into(), |f| f.to_string_lossy().into_owned());
+        project.parent().unwrap_or(project).join(format!("{repo}-{pearl_id}-{slug}"))
     }
 
     /// Create a worktree `../<repo>-<slug(branch)>` checked out on exactly
@@ -1675,23 +1772,65 @@ impl Engine {
         &self.inner.default_project
     }
 
-    /// `flow.new`: resolve the worktree, launch under tmux, persist, broadcast.
+    /// `flow.new`, all of it before returning: create the worktree, launch,
+    /// infer. For a caller that acts on the session next (a fan-out, an MCP
+    /// tool, `th flow new`) and wants a failure as an error.
     ///
     /// # Errors
     /// When the worktree can't be resolved/created or tmux refuses.
     pub fn new_session(&self, mut req: NewRequest) -> Result<Session> {
+        let opened = Instant::now();
+        if !req.kind.is_agent() {
+            return self.open_shell(req);
+        }
+        let opening = self.plan_agent(&mut req)?;
+        let id = opening.session.id.clone();
+        self.open_agent(&opening)?;
+        crate::timing::stage(&id, "new_total", opened);
+        self.require(&id)
+    }
+
+    /// `flow.new` for a client with a person waiting on it (SMOODEV-4267):
+    /// the row, `starting`, is broadcast and returned at once, and the slow
+    /// part runs on its own thread. In the order launching needs: worktree,
+    /// then launch, then inference, which took ~1 s in a real checkout and
+    /// ~10 s for a large worktree when they ran on the request path. A
+    /// failure from here on lands on the row (`dead` + [`LAUNCH_FAILED`]),
+    /// not in this reply. Clients can attach and type meanwhile; see
+    /// [`Self::attach`].
+    ///
+    /// A shell is already fast ([`Self::open_shell`]) and goes the one way.
+    ///
+    /// # Errors
+    /// What can be refused without a subprocess: an unknown kind, a directory
+    /// that isn't there, a store failure.
+    pub fn begin_session(&self, mut req: NewRequest) -> Result<Session> {
+        if !req.kind.is_agent() {
+            return self.new_session(req);
+        }
+        let opening = self.plan_agent(&mut req)?;
+        let session = opening.session.clone();
+        let e = self.clone();
+        let spawned = std::thread::Builder::new().name("flow-open".into()).spawn(move || {
+            if let Err(err) = e.open_agent(&opening) {
+                tracing::debug!(error = %format!("{err:#}"), "flow: session did not open (recorded on its row)");
+            }
+        });
+        if let Err(err) = spawned {
+            self.rt().launching.remove(&session.id);
+            return Err(self.launch_failed(&session.id, None, anyhow!(err).context("start the launch thread")));
+        }
+        Ok(session)
+    }
+
+    /// `flow.new {kind: shell}`: resolve the worktree, then [`Self::new_shell`].
+    fn open_shell(&self, mut req: NewRequest) -> Result<Session> {
         self.resolve_cwd_of(&mut req)?;
-        let project = req
-            .project
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| req.worktree.as_deref().map(|w| project_root(Path::new(w))))
-            .unwrap_or_else(|| self.inner.default_project.clone());
+        let project = request_project(&req, &self.inner.default_project);
         let worktree = match (&req.worktree, &req.pearl_id) {
             (Some(w), _) => PathBuf::from(w),
             (None, Some(pearl)) => {
-                let slug = slugify(req.title.as_deref().or(req.prompt.as_deref()).unwrap_or("work"), 24);
-                let slug = if slug.is_empty() { "work".to_string() } else { slug };
+                let slug = worktree_slug(&req);
                 Self::create_worktree(&project, pearl, &slug, "HEAD")?
             }
             (None, None) => project.clone(),
@@ -1699,20 +1838,37 @@ impl Engine {
         if !worktree.is_dir() {
             bail!("worktree does not exist: {}", worktree.display());
         }
-        if !req.kind.is_agent() {
-            return self.new_shell(&req, &project, &worktree);
+        self.new_shell(&req, &project, &worktree)
+    }
+
+    /// Decide everything about a new agent that takes no subprocess beyond
+    /// finding the project, create its row, and tell every client. Nothing
+    /// here waits on `git worktree add`, `th pearls` or the host.
+    fn plan_agent(&self, req: &mut NewRequest) -> Result<Opening> {
+        let opened = Instant::now();
+        self.resolve_cwd_of(req)?;
+        let project = request_project(req, &self.inner.default_project);
+        let t = crate::timing::stage("-", "resolve_project", opened);
+        let mut make_worktree = None;
+        let worktree = match (&req.worktree, &req.pearl_id) {
+            (Some(w), _) => PathBuf::from(w),
+            (None, Some(pearl)) => {
+                let slug = worktree_slug(req);
+                let path = Self::pearl_worktree_path(&project, pearl, &slug);
+                make_worktree = Some((project.clone(), pearl.clone(), slug));
+                path
+            }
+            (None, None) => project.clone(),
+        };
+        if make_worktree.is_none() && !worktree.is_dir() {
+            bail!("worktree does not exist: {}", worktree.display());
         }
         let registry = self.registry();
-        let manifest = if req.kind.is_agent() {
-            Some(manifest_for(&registry, &req.kind)?)
-        } else {
-            None
-        };
-        let agent_session_id = manifest
-            .filter(|m| m.launch.session_id == SessionIdMode::Preassigned)
-            .map(|_| uuid::Uuid::new_v4().to_string());
+        let t = crate::timing::stage("-", "manifests", t);
+        let manifest = manifest_for(&registry, &req.kind)?;
+        let agent_session_id = (manifest.launch.session_id == SessionIdMode::Preassigned).then(|| uuid::Uuid::new_v4().to_string());
         let prompt = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty());
-        let paste = manifest.is_some_and(|m| m.launch.prompt_as == PromptAs::Paste);
+        let paste = manifest.launch.prompt_as == PromptAs::Paste;
         let worktree_s = worktree.to_string_lossy().into_owned();
         let vars = Vars {
             prompt: if paste { None } else { prompt },
@@ -1729,29 +1885,29 @@ impl Engine {
         };
         // An explicit bare `claude`/`codex`/`opencode` gets the same shim-safe
         // resolution as the default argv.
-        if let Some(m) = manifest {
-            if defaulted || argv.first().is_some_and(|a| m.is_bare_name(a)) {
-                argv[0] = self.resolve_bin(m);
-            }
+        if defaulted || argv.first().is_some_and(|a| manifest.is_bare_name(a)) {
+            argv[0] = self.resolve_bin(manifest);
         }
+        let t = crate::timing::stage("-", "argv", t);
         // th-c103c1: nothing here is demanded of the caller — the pearl, the
         // branch and the title are inferred from the worktree when they were
-        // not given. An explicit value always wins.
-        let inferred = crate::infer::gather(&worktree);
-        let branch = inferred.branch.clone().or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
-        let pearl_id = req.pearl_id.clone().or_else(|| inferred.pearl_id.clone());
-        let title = req
+        // not given. An explicit value always wins. Inference takes a
+        // subprocess, so the row starts with what is known and
+        // `Self::infer_row` fills in the rest.
+        let provisional_title = req
             .title
-            .clone()
-            .unwrap_or_else(|| default_title(&req.kind, req.prompt.as_deref(), pearl_id.as_deref(), Some(&inferred.title), &worktree));
+            .is_none()
+            .then(|| default_title(&req.kind, req.prompt.as_deref(), req.pearl_id.as_deref(), None, &worktree));
+        let title = req.title.clone().or_else(|| provisional_title.clone()).unwrap_or_default();
+        let branch = make_worktree.as_ref().map(|(_, pearl, slug)| format!("{pearl}-{slug}"));
         let session = self.with_store(|st| {
             st.create(NewSession {
                 kind: Some(req.kind.clone()),
                 title,
                 project: project.to_string_lossy().into_owned(),
-                worktree: worktree.to_string_lossy().into_owned(),
+                worktree: worktree_s.clone(),
                 branch,
-                pearl_id: pearl_id.clone(),
+                pearl_id: req.pearl_id.clone(),
                 agent_session_id: agent_session_id.clone(),
                 argv: argv.clone(),
                 tmux_session: None,
@@ -1762,28 +1918,162 @@ impl Engine {
                 host: Some(self.inner.new_host),
             })
         })?;
-        let env = self.launch_env(manifest, &session);
-        let session = self.launch(&session, &argv, &env)?;
-        if let (true, Some(p)) = (paste, prompt) {
-            // Wait for the composer only when this manifest can tell us it is up.
-            let can_see_idle = manifest.is_some_and(|m| {
-                let sc = &m.state.scrape;
-                !sc.idle.is_empty() || sc.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle)
-            });
-            let now = Instant::now();
-            let (at, wait_idle_until) = if can_see_idle {
-                (now + PASTE_MIN_DELAY, Some(now + PASTE_IDLE_WAIT))
-            } else {
-                (now + PASTE_DELAY, None)
-            };
-            let pending = PendingPaste {
-                prompt: p.to_string(),
-                at,
-                wait_idle_until,
-            };
-            self.rt().paste_at.insert(session.id.clone(), pending);
+        self.rt().launching.insert(session.id.clone(), PendingOpen::default());
+        self.emit_session(&session);
+        crate::timing::stage(&session.id, "row", t);
+        let env = self.launch_env(Some(manifest), &session);
+        // Wait for the composer only when this manifest can tell us it is up.
+        let can_see_idle = !manifest.state.scrape.idle.is_empty() || manifest.state.scrape.rules.iter().any(|r| r.state == crate::scrape::Verdict::Idle);
+        Ok(Opening {
+            kind: req.kind.clone(),
+            prompt: req.prompt.clone(),
+            pearl_given: req.pearl_id.is_some(),
+            paste: paste.then_some(prompt).flatten().map(|p| (p.to_string(), can_see_idle)),
+            session,
+            argv,
+            env,
+            make_worktree,
+            provisional_title,
+        })
+    }
+
+    /// The slow half of `flow.new`: worktree, launch, then inference.
+    fn open_agent(&self, opening: &Opening) -> Result<()> {
+        let launched = self.launch_opening(opening);
+        let id = &opening.session.id;
+        let pending = self.rt().launching.remove(id);
+        let session = launched?;
+        if let Some(pending) = pending {
+            self.apply_pending(id, &pending);
         }
-        Ok(session)
+        if let (Some(s), Some((prompt, can_see_idle))) = (&session, opening.paste.clone()) {
+            self.schedule_paste(&s.id, prompt, can_see_idle);
+        }
+        if session.is_some() {
+            self.watch_boot(id);
+            self.infer_row(opening);
+        }
+        Ok(())
+    }
+
+    /// Create the worktree and launch, holding the session's lock: a `kill`
+    /// or `close` meanwhile waits and then acts on a real process, or, if it
+    /// got there first, this launches nothing (`Ok(None)`).
+    fn launch_opening(&self, o: &Opening) -> Result<Option<Session>> {
+        let id = &o.session.id;
+        let lock = self.session_lock(id);
+        let _held = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.get(id)?.is_none_or(|s| s.state.is_terminal()) {
+            tracing::info!(session = %id, "flow: closed before it launched");
+            return Ok(None);
+        }
+        if let Some((project, pearl, slug)) = &o.make_worktree {
+            let started = Instant::now();
+            if let Err(err) = Self::create_worktree(project, pearl, slug, "HEAD") {
+                return Err(self.launch_failed(id, None, anyhow!("creating the worktree: {err:#}")));
+            }
+            crate::timing::stage(id, "worktree", started);
+        }
+        self.launch(&o.session, &o.argv, &o.env).map(Some)
+    }
+
+    /// What clients did while `id` was launching, now that it is running.
+    fn apply_pending(&self, id: &str, pending: &PendingOpen) {
+        // Input first: a key pressed now goes straight to the process, so what
+        // was typed before it must already be there.
+        if !pending.input.is_empty() {
+            if let Err(e) = self.input(id, &pending.input) {
+                tracing::warn!(session = %id, error = %e, bytes = pending.input.len(), "flow: could not deliver what was typed during the launch");
+            }
+        }
+        if let Some((cols, rows)) = pending.size.filter(|_| pending.clients > 0) {
+            for _ in 0..pending.clients {
+                if let Err(e) = self.attach(id, cols, rows) {
+                    tracing::debug!(session = %id, error = %e, "flow: attaching a client that was waiting on the launch");
+                }
+            }
+            // They were told nothing at their attach: there was no terminal.
+            self.schedule_replay(id, ReplayReason::Attach);
+        }
+    }
+
+    /// `prompt_as = "paste"`: queue the prompt for the supervisor to paste.
+    fn schedule_paste(&self, id: &str, prompt: String, can_see_idle: bool) {
+        let now = Instant::now();
+        let (at, wait_idle_until) = if can_see_idle {
+            (now + PASTE_MIN_DELAY, Some(now + PASTE_IDLE_WAIT))
+        } else {
+            (now + PASTE_DELAY, None)
+        };
+        let pending = PendingPaste {
+            prompt,
+            at,
+            wait_idle_until,
+            asked: now,
+        };
+        self.rt().paste_at.insert(id.to_string(), pending);
+    }
+
+    /// Supervise a just-launched agent often, until it reads ready and any
+    /// paste is in: the 2 s tick would otherwise add a second on average to
+    /// every harness whose ready state is scraped.
+    fn watch_boot(&self, id: &str) {
+        if !self.inner.boot_watch {
+            return;
+        }
+        let e = self.clone();
+        let id = id.to_string();
+        let spawned = std::thread::Builder::new().name("flow-boot".into()).spawn(move || {
+            let until = Instant::now() + BOOT_WATCH_MAX;
+            while Instant::now() < until {
+                std::thread::sleep(BOOT_WATCH_EVERY);
+                let Ok(Some(s)) = e.get(&id) else { return };
+                if s.state.is_terminal() || (s.state != SessionState::Starting && !e.rt().paste_at.contains_key(&id)) {
+                    return;
+                }
+                e.supervise_id(&id);
+            }
+        });
+        if let Err(err) = spawned {
+            tracing::debug!(error = %err, "flow: no boot watcher; the supervision tick still runs");
+        }
+    }
+
+    /// Fill in what [`Self::plan_agent`] left for inference: the branch, the
+    /// pearl and a better title, unless they were given or the row has been
+    /// renamed since.
+    fn infer_row(&self, o: &Opening) {
+        let id = &o.session.id;
+        let started = Instant::now();
+        let worktree = PathBuf::from(&o.session.worktree);
+        let inferred = crate::infer::gather(&worktree);
+        crate::timing::stage(id, "infer", started);
+        let branch = inferred.branch.clone().or_else(|| git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok());
+        let pearl = if o.pearl_given { None } else { inferred.pearl_id.clone() };
+        let named = o.session.pearl_id.as_deref().or(pearl.as_deref());
+        let title = o
+            .provisional_title
+            .as_deref()
+            .filter(|provisional| self.get(id).ok().flatten().is_some_and(|s| s.title == *provisional))
+            .map(|_| default_title(&o.kind, o.prompt.as_deref(), named, Some(&inferred.title), &worktree));
+        let wrote = self.with_store(|st| st.set_meta(id, title.as_deref(), branch.as_deref(), pearl.as_deref()));
+        match wrote {
+            Ok(()) => {
+                if let Ok(Some(s)) = self.get(id) {
+                    self.emit_session(&s);
+                }
+            }
+            Err(e) => tracing::warn!(session = %id, error = %e, "flow: recording what was inferred"),
+        }
+    }
+
+    /// `id` has a row but no process yet: wait until that is settled, for a
+    /// caller with nowhere to put its request meanwhile.
+    fn await_launch(&self, id: &str) {
+        let until = Instant::now() + LAUNCH_WAIT;
+        while self.rt().launching.contains_key(id) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// `flow.new {kind: shell}` (SMOODEV-4127): as fast as a terminal. A
@@ -2148,6 +2438,7 @@ impl Engine {
         }
         let prefix = self.exit_prefix(&session.id);
         let cwd = self.launch_dir(session);
+        let host_asked = Instant::now();
         let launched = host.launch(
             &target,
             &Launch {
@@ -2161,6 +2452,10 @@ impl Engine {
             Ok(pid) => pid,
             Err(err) => return Err(self.launch_failed(&session.id, Some((host, &target)), err)),
         };
+        crate::timing::stage(&session.id, "host_launch", host_asked);
+        if session.kind.is_agent() {
+            self.rt().booting.insert(session.id.clone(), host_asked);
+        }
         let start = host.process_start(pid);
         self.with_store(|st| {
             st.set_process(&session.id, Some(&tmux_name), Some(pid), start, argv)?;
@@ -2172,6 +2467,14 @@ impl Engine {
         let s = self.require(&session.id)?;
         self.emit_session(&s);
         Ok(s)
+    }
+
+    /// The harness of `id` first read ready: log how long its boot took.
+    fn boot_done(&self, id: &str, stage: &str) {
+        let since = self.rt().booting.remove(id);
+        if let Some(since) = since {
+            crate::timing::stage(id, stage, since);
+        }
     }
 
     /// A launch failed (no tmux, tmux refused, the harness binary missing):
@@ -2281,6 +2584,14 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or not running.
     pub fn attach(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
+        let asked = Instant::now();
+        // SMOODEV-4267: there is no terminal to attach to yet. The client is
+        // counted in, and gets a replay when there is.
+        if let Some(pending) = self.rt().launching.get_mut(id) {
+            pending.size = Some((cols, rows));
+            pending.clients += 1;
+            return Ok(());
+        }
         let before = self.replay_size(id);
         let resized = self.pty_for(id, cols, rows, true)?.resize(cols, rows);
         if resized.is_err() {
@@ -2290,6 +2601,7 @@ impl Engine {
         }
         resized?;
         self.resized(id, before, (cols, rows));
+        crate::timing::stage(id, "attach", asked);
         Ok(())
     }
 
@@ -2317,6 +2629,9 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or its host can't be reached.
     pub fn replay(&self, id: &str, max_bytes: Option<usize>, reason: ReplayReason) -> Result<Option<ServerFrame>> {
+        if self.rt().launching.contains_key(id) {
+            return Ok(None);
+        }
         let s = self.require(id)?;
         let host = self.host_for(&s)?;
         let Some(snap) = host.snapshot(&self.pane(&s)?, replay_budget(max_bytes))? else {
@@ -2375,6 +2690,10 @@ impl Engine {
 
     /// `flow.detach`: drop the PTY client when the last flow client leaves.
     pub fn detach(&self, id: &str) {
+        if let Some(pending) = self.rt().launching.get_mut(id) {
+            pending.clients = pending.clients.saturating_sub(1);
+            return;
+        }
         let mut ptys = self.lock_ptys();
         if let Some(b) = ptys.get(id) {
             let left = b.pty.clients().fetch_sub(1, std::sync::atomic::Ordering::Relaxed).saturating_sub(1);
@@ -2398,6 +2717,14 @@ impl Engine {
             tracing::trace!(session = %id, len = data.len(), "flow: dropped a client's terminal reply on a pty session");
             return Ok(());
         }
+        if let Some(pending) = self.rt().launching.get_mut(id) {
+            let room = PENDING_INPUT_MAX.saturating_sub(pending.input.len());
+            if data.len() > room {
+                tracing::warn!(session = %id, dropped = data.len() - room, "flow: input during a launch went past its limit");
+            }
+            pending.input.extend_from_slice(&data[..data.len().min(room)]);
+            return Ok(());
+        }
         let (cols, rows) = self
             .pane(&s)
             .ok()
@@ -2411,6 +2738,10 @@ impl Engine {
     /// # Errors
     /// When the session is unknown/not running.
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
+        if let Some(pending) = self.rt().launching.get_mut(id) {
+            pending.size = Some((cols, rows));
+            return Ok(());
+        }
         let before = self.replay_size(id);
         self.pty_for(id, cols, rows, false)?.resize(cols, rows)?;
         self.resized(id, before, (cols, rows));
@@ -2422,6 +2753,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or tmux refuses.
     pub fn send(&self, id: &str, text: &str) -> Result<()> {
+        self.await_launch(id);
         let s = self.require(id)?;
         let p = self.pane(&s)?;
         let host = self.host_for(&s)?;
@@ -2449,6 +2781,7 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or tmux refuses.
     pub fn send_key(&self, id: &str, key: &str) -> Result<()> {
+        self.await_launch(id);
         let s = self.require(id)?;
         self.host_for(&s)?.send_key(&self.pane(&s)?, key)
     }
@@ -2458,6 +2791,15 @@ impl Engine {
     /// # Errors
     /// When the session is unknown or tmux refuses.
     pub fn snapshot(&self, id: &str) -> Result<ServerFrame> {
+        if let Some(size) = self.rt().launching.get(id).map(|p| p.size) {
+            let (cols, rows) = size.unwrap_or((tmux::DEFAULT_COLS, tmux::DEFAULT_ROWS));
+            return Ok(ServerFrame::Screen {
+                id: id.to_string(),
+                cols,
+                rows,
+                text: String::new(),
+            });
+        }
         let s = self.require(id)?;
         let p = self.pane(&s)?;
         let host = self.host_for(&s)?;
@@ -2856,6 +3198,7 @@ impl Engine {
                 }
             }
             HookOutcome::Started => {
+                self.boot_done(&s.id, "ready_hook");
                 if s.state == SessionState::Starting {
                     self.set_state(&s.id, SessionState::Idle, None)?;
                 }
@@ -3377,6 +3720,7 @@ impl Engine {
                 if s.state == SessionState::Working {
                     self.with_store(|st| st.set_unread(&s.id, true))?;
                 }
+                self.boot_done(&s.id, "ready_scrape");
                 self.set_state(&s.id, SessionState::Idle, None)?;
             }
             _ => {}
@@ -3388,6 +3732,9 @@ impl Engine {
             rt.paste_at.get(&s.id).filter(|p| p.due(Instant::now(), scrape.state)).map(|p| p.prompt.clone())
         };
         if let Some(p) = paste {
+            if let Some(asked) = self.rt().paste_at.get(&s.id).map(|q| q.asked) {
+                crate::timing::stage(&s.id, "paste_wait", asked);
+            }
             self.rt().paste_at.remove(&s.id);
             self.send(&s.id, &p)?;
         }
@@ -3474,6 +3821,14 @@ impl Engine {
         let mut due = Vec::new();
         for s in self.with_store(FlowStore::list_live)?.into_iter().filter(|s| owned_here(s, &mine)) {
             if s.adopted || s.attention.as_ref().is_some_and(|a| a.reason == "held" || a.reason == RESTORABLE) {
+                continue;
+            }
+            // SMOODEV-4267: an agent's row exists before its process does. A
+            // daemon that died in between left one that nothing would ever
+            // launch, and that would read `starting` forever.
+            if s.tmux_session.is_none() && s.kind.is_agent() && !self.rt().launching.contains_key(&s.id) {
+                let att = Attention::new(LAUNCH_FAILED).with_detail("the daemon stopped before this session launched");
+                self.set_state(&s.id, SessionState::Dead, Some(att))?;
                 continue;
             }
             let (Some(t), Ok(host)) = (s.tmux_session.as_deref(), self.host_for(&s)) else {
@@ -4058,6 +4413,7 @@ mod tests {
             home: tmp.join("home"),
             daemon_url: Some("http://127.0.0.1:1".into()),
             harness_doctor: false,
+            boot_watch: false,
             repo_root: None,
             host: crate::host::default_host(),
             pty_host: None,
@@ -5894,6 +6250,7 @@ mod tests {
             prompt: "p".into(),
             at: now + Duration::from_secs(1),
             wait_idle_until: Some(now + Duration::from_secs(90)),
+            asked: now,
         };
         assert!(!gated.due(now, PaneState::Idle), "not before `at`");
         let later = now + Duration::from_secs(2);
@@ -5908,6 +6265,7 @@ mod tests {
             prompt: "p".into(),
             at: now + PASTE_DELAY,
             wait_idle_until: None,
+            asked: now,
         };
         assert!(!timed.due(now, PaneState::Idle));
         assert!(
@@ -6881,6 +7239,318 @@ quiet_ms = 300
     }
 
     // ── two hosts (th-dc9822) ─────────────────────────────────────────────
+
+    // ── opening an agent (SMOODEV-4267) ──────────────────────────────────
+
+    fn agent_request(worktree: &Path) -> NewRequest {
+        NewRequest {
+            kind: SessionKind::Claude,
+            worktree: Some(worktree.to_string_lossy().into()),
+            ..Default::default()
+        }
+    }
+
+    /// Poll until `f` holds; generous, because it waits on `git` and `th`.
+    fn soon(what: &str, f: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !f() {
+            assert!(Instant::now() < until, "never happened: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn row(e: &Engine, id: &str) -> Session {
+        e.get(id).unwrap().unwrap()
+    }
+
+    fn launched(e: &Engine, id: &str) -> bool {
+        row(e, id).tmux_session.is_some() && !e.rt().launching.contains_key(id)
+    }
+
+    /// A git repo with one commit, on `branch`.
+    fn repo_on(dir: &Path, branch: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", branch],
+            vec!["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+        ] {
+            git(dir, &args).unwrap();
+        }
+    }
+
+    /// The row and its tab are there before anything slow has happened, and
+    /// everything a client does to it meanwhile is kept for the process.
+    #[test]
+    fn a_new_agent_answers_before_it_launches_and_clients_can_already_use_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let mut rx = e.subscribe();
+        let release = host.hold_next_launch();
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        assert_eq!(s.state, SessionState::Starting);
+        assert_eq!(s.tmux_session, None);
+        let frame = rx.try_recv().unwrap();
+        assert!(
+            matches!(&frame, ServerFrame::Session { session } if session.id == s.id),
+            "every client hears of the row at once: {frame:?}"
+        );
+
+        // Nothing that a client does right away is an error.
+        e.attach(&s.id, 100, 30).unwrap();
+        e.attach(&s.id, 100, 30).unwrap();
+        e.detach(&s.id);
+        e.resize(&s.id, 90, 25).unwrap();
+        e.input(&s.id, b"hello").unwrap();
+        assert!(e.replay(&s.id, None, ReplayReason::Attach).unwrap().is_none(), "no terminal yet");
+        match e.snapshot(&s.id).unwrap() {
+            ServerFrame::Screen { cols, rows, text, .. } => assert_eq!((cols, rows, text.as_str()), (90, 25, "")),
+            other => panic!("{other:?}"),
+        }
+        assert!(host.calls().iter().all(|c| !c.starts_with("launch ")));
+
+        release.send(()).unwrap();
+        soon("the launch", || launched(&e, &s.id));
+        let target = e.pane(&row(&e, &s.id)).unwrap();
+        soon("what was typed arrives", || host.typed(&target) == b"hello");
+        let clients = e.lock_ptys().get(&s.id).map(|b| b.pty.clients().load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(clients, Some(1), "two attached, one left");
+        assert_eq!(row(&e, &s.id).state, SessionState::Starting, "launched is not ready");
+    }
+
+    /// Keystrokes past the budget are dropped rather than held without limit.
+    #[test]
+    fn input_during_a_launch_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let release = host.hold_next_launch();
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        e.input(&s.id, &vec![b'x'; PENDING_INPUT_MAX + 10]).unwrap();
+        e.input(&s.id, b"more").unwrap();
+        assert_eq!(e.rt().launching.get(&s.id).unwrap().input.len(), PENDING_INPUT_MAX);
+        drop(release);
+        soon("the launch", || launched(&e, &s.id));
+    }
+
+    /// `flow.send` has nowhere to keep its text, so it waits for the process.
+    #[test]
+    fn a_send_during_a_launch_waits_for_the_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let release = host.hold_next_launch();
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        let (sender, id) = (e.clone(), s.id.clone());
+        let sending = std::thread::spawn(move || sender.send(&id, "go"));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!sending.is_finished(), "still waiting on the launch");
+        release.send(()).unwrap();
+        sending.join().unwrap().unwrap();
+        assert!(host.calls().iter().any(|c| c.starts_with("launch ")));
+    }
+
+    /// The row names the worktree before it exists, and the launch still
+    /// comes after it does.
+    #[test]
+    fn a_pearl_worktree_is_made_off_the_request_path_and_before_the_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        repo_on(&project, "main");
+        let (e, host) = fake_engine(tmp.path());
+        let release = host.hold_next_launch();
+        let s = e
+            .begin_session(NewRequest {
+                kind: SessionKind::Claude,
+                project: Some(project.to_string_lossy().into()),
+                pearl_id: Some("th-abc123".into()),
+                title: Some("Fix It".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let wt = tmp.path().join("proj-th-abc123-fix-it");
+        assert_eq!(s.worktree, wt.to_string_lossy());
+        assert_eq!(s.branch.as_deref(), Some("th-abc123-fix-it"));
+        assert_eq!(s.pearl_id.as_deref(), Some("th-abc123"));
+        soon("the worktree", || wt.join(".git").exists());
+        assert!(
+            host.calls().iter().all(|c| !c.starts_with("launch ")),
+            "it held at the launch, after the worktree"
+        );
+        release.send(()).unwrap();
+        soon("the launch", || launched(&e, &s.id));
+        let target = e.pane(&row(&e, &s.id)).unwrap();
+        assert_eq!(host.session(&target).unwrap().cwd, wt);
+    }
+
+    /// A failure after the reply lands on the row; nothing stays `starting`.
+    #[test]
+    fn a_worktree_that_cannot_be_made_fails_on_the_row_and_launches_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("not-a-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let req = NewRequest {
+            kind: SessionKind::Claude,
+            project: Some(project.to_string_lossy().into()),
+            pearl_id: Some("th-abc123".into()),
+            ..Default::default()
+        };
+        let s = e.begin_session(req.clone()).unwrap();
+        assert_eq!(s.state, SessionState::Starting);
+        soon("the failure", || row(&e, &s.id).state == SessionState::Dead);
+        let att = row(&e, &s.id).attention.unwrap();
+        assert_eq!(att.reason, LAUNCH_FAILED);
+        assert!(att.detail.unwrap().contains("creating the worktree"));
+        assert!(e.rt().launching.is_empty());
+        assert!(host.calls().iter().all(|c| !c.starts_with("launch ")));
+
+        // The one that waits says so to its caller as well.
+        let err = e.new_session(req).unwrap_err();
+        assert!(format!("{err:#}").contains("creating the worktree"), "{err:#}");
+    }
+
+    /// What can be refused without a subprocess is refused in the reply.
+    #[test]
+    fn begin_refuses_what_it_can_tell_is_wrong_without_making_a_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let unknown = NewRequest {
+            kind: SessionKind::Other("no-such-harness".into()),
+            worktree: Some(tmp.path().to_string_lossy().into()),
+            ..Default::default()
+        };
+        assert!(e.begin_session(unknown).is_err());
+        assert!(e.begin_session(agent_request(&tmp.path().join("gone"))).is_err());
+        assert!(e.list().unwrap().is_empty());
+        assert!(e.rt().launching.is_empty());
+    }
+
+    /// A kill during the launch waits, and then there is a process to kill:
+    /// nothing is left running behind a `done` row.
+    #[test]
+    fn killing_during_a_launch_leaves_no_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let release = host.hold_next_launch();
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        soon("the launch to hold the session", || e.session_lock(&s.id).try_lock().is_err());
+        let (killer, id) = (e.clone(), s.id.clone());
+        let killing = std::thread::spawn(move || killer.kill(&id, false));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!killing.is_finished(), "waits for the launch");
+        release.send(()).unwrap();
+        let done = killing.join().unwrap().unwrap();
+        assert_eq!(done.state, SessionState::Done);
+        assert!(!host.alive(&SessionRef::new(FAKE_SOCKET, s.id.clone())));
+    }
+
+    /// A kill that gets in before the launch thread: nothing launches at all.
+    #[test]
+    fn a_session_killed_before_its_launch_never_launches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let opening = e.plan_agent(&mut agent_request(tmp.path())).unwrap();
+        let id = opening.session.id.clone();
+        assert_eq!(e.kill(&id, false).unwrap().state, SessionState::Done);
+        e.open_agent(&opening).unwrap();
+        assert_eq!(row(&e, &id).state, SessionState::Done);
+        assert!(host.calls().iter().all(|c| !c.starts_with("launch ")));
+        assert!(e.rt().launching.is_empty());
+    }
+
+    /// Inference still happens, after the launch, and never over a name
+    /// someone gave the row meanwhile.
+    #[test]
+    fn inference_fills_in_the_row_later_without_clobbering_a_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proj");
+        repo_on(&dir, "th-abc123-some-work");
+        let (e, host) = fake_engine(tmp.path());
+
+        let s = e.begin_session(agent_request(&dir)).unwrap();
+        assert_eq!((s.branch.as_deref(), s.pearl_id.as_deref()), (None, None), "nothing inferred yet");
+        soon("the branch", || row(&e, &s.id).branch.is_some());
+        let inferred = row(&e, &s.id);
+        assert_eq!(inferred.branch.as_deref(), Some("th-abc123-some-work"));
+        assert_eq!(inferred.pearl_id.as_deref(), Some("th-abc123"));
+
+        let release = host.hold_next_launch();
+        let renamed = e.begin_session(agent_request(&dir)).unwrap();
+        e.rename(&renamed.id, Some("mine")).unwrap();
+        release.send(()).unwrap();
+        soon("the branch", || row(&e, &renamed.id).branch.is_some());
+        assert_eq!(row(&e, &renamed.id).title, "mine");
+    }
+
+    /// The daemon died between the row and the launch: not `starting` forever.
+    #[test]
+    fn a_row_whose_launch_was_lost_with_the_daemon_fails_at_the_next_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let lost = e.plan_agent(&mut agent_request(tmp.path())).unwrap();
+        let live = e.plan_agent(&mut agent_request(tmp.path())).unwrap();
+        e.rt().launching.remove(&lost.session.id);
+        e.supervise_tick().unwrap();
+        let att = row(&e, &lost.session.id).attention.unwrap();
+        assert_eq!(att.reason, LAUNCH_FAILED);
+        assert_eq!(row(&e, &lost.session.id).state, SessionState::Dead);
+        assert_eq!(
+            row(&e, &live.session.id).state,
+            SessionState::Starting,
+            "one still on its way to the host is left alone"
+        );
+    }
+
+    /// The manifests are kept until a file changes, and a new one is seen
+    /// without a restart.
+    #[test]
+    fn the_registry_is_kept_until_a_manifest_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _host) = fake_engine(tmp.path());
+        let first = e.registry();
+        assert!(Arc::ptr_eq(&first, &e.registry()), "nothing changed");
+        let dir = tmp.path().join("home/.smooth/harnesses");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = include_str!("../harnesses/claude.toml").replace("name = \"claude\"", "name = \"mine\"");
+        std::fs::write(dir.join("mine.toml"), manifest).unwrap();
+        let added = e.registry();
+        assert!(!Arc::ptr_eq(&first, &added));
+        assert!(added.get("mine").is_some(), "`th harness add` needs no restart");
+        std::fs::remove_file(dir.join("mine.toml")).unwrap();
+        assert!(e.registry().get("mine").is_none());
+    }
+
+    /// A scraped harness reads ready within the watch's cadence, not the 2 s
+    /// tick: no `supervise_tick` runs here.
+    #[test]
+    fn a_booting_agent_reads_ready_without_waiting_for_the_tick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = FakeHost::new();
+        let mut cfg = EngineConfig::new(tmp.path().to_path_buf());
+        cfg.db_path = tmp.path().join("flow.db");
+        cfg.home = tmp.path().join("home");
+        cfg.host = host.clone();
+        cfg.boot_watch = true;
+        let e = Engine::open(cfg).unwrap();
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        soon("the launch", || launched(&e, &s.id));
+        host.set_screen(&e.pane(&row(&e, &s.id)).unwrap(), "? for shortcuts");
+        let seen = Instant::now();
+        soon("idle", || row(&e, &s.id).state == SessionState::Idle);
+        assert!(seen.elapsed() < Duration::from_secs(2), "took {:?}", seen.elapsed());
+    }
+
+    /// Off by default: a test or scratch engine is only supervised on request.
+    #[test]
+    fn without_the_boot_watch_only_the_tick_supervises() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, host) = fake_engine(tmp.path());
+        let s = e.begin_session(agent_request(tmp.path())).unwrap();
+        soon("the launch", || launched(&e, &s.id));
+        host.set_screen(&e.pane(&row(&e, &s.id)).unwrap(), "? for shortcuts");
+        std::thread::sleep(BOOT_WATCH_EVERY * 2);
+        assert_eq!(row(&e, &s.id).state, SessionState::Starting);
+        e.supervise_tick().unwrap();
+        assert_eq!(row(&e, &s.id).state, SessionState::Idle);
+    }
 
     /// An engine with a tmux-kind fake as its default host and a pty-kind
     /// fake as its pty host; new sessions go to `new_host`.
